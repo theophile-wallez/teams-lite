@@ -1,0 +1,4 @@
+/target
+
+# tooling artifacts (skill-registry cache), not part of the app
+.atl/

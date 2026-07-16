@@ -1,0 +1,20 @@
+[package]
+name = "teams-lite"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# rustls-tls => pas de dépendance système openssl, binaire statique portable
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+# D-Bus client to talk to the Microsoft Identity Broker
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+urlencoding = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
