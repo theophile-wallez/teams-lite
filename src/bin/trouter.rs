@@ -16,7 +16,7 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
-use teams_lite::{auth, teams};
+use teams_lite::{auth, store::Store, teams, trouter_events};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -61,6 +61,21 @@ fn after_third_colon(s: &str) -> Option<&str> {
     None
 }
 
+/// One-line, HTML-stripped preview of message content for the console.
+fn snippet(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.chars().take(60).collect::<String>().replace('\n', " ")
+}
+
 fn now_hms() -> String {
     let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -103,6 +118,11 @@ async fn main() -> Result<()> {
     let sess = teams::connect(&http).await?;
     println!("[ok] region={} | tokens ok", sess.region);
     let epid = Uuid::new_v4().to_string();
+
+    // Slice 2: live events land in the same local-first store as history.
+    let db_path = std::env::temp_dir().join("teams-lite-live.sqlite");
+    let store = Store::open(db_path.to_str().unwrap())?;
+    println!("[ok] store: {}", db_path.display());
 
     // 1. trouter connect
     let begin_url = format!("{TROUTER_BEGIN}?epid={}", urlencoding::encode(&epid));
@@ -204,6 +224,28 @@ async fn main() -> Result<()> {
                                         .map(|s| format!(", +{} ms depuis la connexion", s.elapsed().as_millis()))
                                         .unwrap_or_default();
                                     println!("📩 [{}] MESSAGE reçu EN TEMPS RÉEL{when}", now_hms());
+
+                                    // Slice 2: decode the push and persist into the store.
+                                    match trouter_events::messages_from_request(&reqv) {
+                                        Ok(msgs) => {
+                                            for m in &msgs {
+                                                // ensure the conversation row exists, then dedup-insert
+                                                store.upsert_conversation(&m.conversation_id, "", m.compose_time).ok();
+                                                match store.insert_message(m) {
+                                                    Ok(true) => println!(
+                                                        "   💾 stored [seq {}] {}: {}",
+                                                        m.seq, m.sender, snippet(&m.content)
+                                                    ),
+                                                    Ok(false) => println!("   ↳ already in store (dedup) [seq {}]", m.seq),
+                                                    Err(e) => println!("   ⚠️ store error: {e}"),
+                                                }
+                                            }
+                                            if msgs.is_empty() {
+                                                println!("   (event carried no chat message — e.g. edit/reaction/system)");
+                                            }
+                                        }
+                                        Err(e) => println!("   ⚠️ decode error: {e}"),
+                                    }
                                 } else if url.contains("Presence") || url.ends_with("/unifiedPresenceService") {
                                     println!("·  [{}] push présence (le socket est VIVANT ✓)", now_hms());
                                 } else {

@@ -41,6 +41,14 @@ pub struct Message {
     pub content: String,
 }
 
+/// A conversation row for the list pane, most-recent first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationRow {
+    pub id: String,
+    pub display_name: String,
+    pub last_message_time: i64,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -61,6 +69,10 @@ const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, conte
 impl Store {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // WAL lets a reader (UI thread) and a writer (network thread) use separate
+        // connections to the same file concurrently without blocking each other.
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
     }
@@ -76,7 +88,10 @@ impl Store {
             "INSERT INTO conversations (id, display_name, last_message_time)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET
-                display_name = excluded.display_name,
+                -- never clobber a known title with an empty one (live events carry no title)
+                display_name = CASE
+                    WHEN excluded.display_name IS NOT NULL AND excluded.display_name <> ''
+                    THEN excluded.display_name ELSE conversations.display_name END,
                 last_message_time = MAX(conversations.last_message_time, excluded.last_message_time)",
             params![id, display_name, last_message_time],
         )?;
@@ -91,6 +106,57 @@ impl Store {
             params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.content],
         )?;
         Ok(n == 1)
+    }
+
+    /// All conversations, most-recently-active first, for the list pane.
+    ///
+    /// Conversations with an empty stored title (1:1 chats) get their name derived
+    /// from the most recent message sender that is not `self_name`. `self_name`
+    /// may be empty (then no derivation happens).
+    pub fn conversations(&self, self_name: &str) -> Result<Vec<ConversationRow>> {
+        // Correlated subquery fills the blank 1:1 titles in a single pass.
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id,
+                    CASE
+                        WHEN c.display_name IS NOT NULL AND c.display_name <> ''
+                        THEN c.display_name
+                        ELSE COALESCE((
+                            SELECT m.sender FROM messages m
+                            WHERE m.conversation_id = c.id
+                              AND m.sender <> '' AND m.sender <> ?1
+                            ORDER BY m.seq DESC LIMIT 1
+                        ), '')
+                    END AS name,
+                    c.last_message_time
+             FROM conversations c
+             ORDER BY c.last_message_time DESC, c.id ASC",
+        )?;
+        let rows = stmt.query_map(params![self_name], |r| {
+            Ok(ConversationRow {
+                id: r.get(0)?,
+                display_name: r.get(1)?,
+                last_message_time: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Derive a display name for a conversation whose stored title is empty
+    /// (typically a 1:1 chat, whose CSA `title` is blank and whose `members`
+    /// carry no names). Heuristic: the most recent message sender that is NOT us.
+    /// Returns None when we hold no message from the other party yet.
+    pub fn other_party_name(&self, conversation_id: &str, self_name: &str) -> Result<Option<String>> {
+        let name: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT sender FROM messages
+                 WHERE conversation_id = ?1 AND sender <> '' AND sender <> ?2
+                 ORDER BY seq DESC LIMIT 1",
+                params![conversation_id, self_name],
+                |r| r.get(0),
+            )
+            .ok();
+        Ok(name)
     }
 
     /// The newest `limit` messages of a conversation, ordered oldest -> newest (for display).
@@ -195,5 +261,65 @@ mod tests {
         assert_eq!(s.oldest_cursor("c1").unwrap(), (None, true));
         s.set_oldest_cursor("c1", Some("cursor-xyz"), false).unwrap();
         assert_eq!(s.oldest_cursor("c1").unwrap(), (Some("cursor-xyz".to_string()), false));
+    }
+
+    #[test]
+    fn conversations_listed_recent_first() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("a", "Alpha", 100).unwrap();
+        s.upsert_conversation("b", "Bravo", 300).unwrap();
+        s.upsert_conversation("c", "Charlie", 200).unwrap();
+        let convs = s.conversations("").unwrap();
+        let names: Vec<_> = convs.iter().map(|c| c.display_name.as_str()).collect();
+        assert_eq!(names, ["Bravo", "Charlie", "Alpha"]); // by last_message_time desc
+    }
+
+    #[test]
+    fn live_event_does_not_clobber_known_title() {
+        let s = Store::open_in_memory().unwrap();
+        // history sync sets a real title
+        s.upsert_conversation("c1", "Team Chat", 100).unwrap();
+        // a live trouter event upserts with no title (empty) but a newer time
+        s.upsert_conversation("c1", "", 200).unwrap();
+        let c = s.conversations("").unwrap();
+        assert_eq!(c[0].display_name, "Team Chat"); // title preserved
+        assert_eq!(c[0].last_message_time, 200); // time advanced
+    }
+
+    #[test]
+    fn one_to_one_name_derived_from_other_party() {
+        let s = Store::open_in_memory().unwrap();
+        // a 1:1 conversation has no title
+        s.upsert_conversation("dm", "", 500).unwrap();
+        // messages from me and from the other person
+        let me = "Théophile WALLEZ";
+        s.insert_message(&Message {
+            id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
+            sender: me.into(), content: "salut".into(),
+        }).unwrap();
+        s.insert_message(&Message {
+            id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
+            sender: "Leonor GROELL".into(), content: "hello".into(),
+        }).unwrap();
+
+        // direct derivation
+        assert_eq!(s.other_party_name("dm", me).unwrap(), Some("Leonor GROELL".into()));
+        // and the list fills the blank title with the other party's name
+        let convs = s.conversations(me).unwrap();
+        assert_eq!(convs[0].display_name, "Leonor GROELL");
+    }
+
+    #[test]
+    fn one_to_one_without_other_message_stays_blank() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("dm", "", 500).unwrap();
+        let me = "Moi";
+        // only my own message present -> cannot derive the other name yet
+        s.insert_message(&Message {
+            id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
+            sender: me.into(), content: "coucou".into(),
+        }).unwrap();
+        assert_eq!(s.other_party_name("dm", me).unwrap(), None);
+        assert_eq!(s.conversations(me).unwrap()[0].display_name, "");
     }
 }
