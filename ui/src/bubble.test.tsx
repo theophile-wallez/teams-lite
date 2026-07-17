@@ -83,6 +83,76 @@ const WIDTH = 60;
   report("1:1 chat", checks, frame);
 }
 
+// --- reply: the quoted message renders as a nested block above the reply body ---
+{
+  const reply = msg({
+    sender: "Alice",
+    is_self: false,
+    content:
+      `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="1">` +
+      `<strong itemprop="mri" itemid="8:orgid:x">Bob</strong>` +
+      `<span itemprop="time" itemid="1"></span>` +
+      `<p itemprop="preview">QUOTEDTEXT</p></blockquote><p>REPLYBODY</p>`,
+  });
+  const { renderOnce, captureCharFrame } = await testRender(
+    () => (
+      <box style={{ width: WIDTH, flexDirection: "column" }}>
+        <MessageBubble message={reply} showSenderName={true} />
+      </box>
+    ),
+    { width: WIDTH, height: 20 },
+  );
+  await renderOnce();
+  const frame = captureCharFrame().replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+  const rowOf = (needle: string) => frame.split("\n").findIndex((l) => l.includes(needle));
+
+  const checks: [string, boolean][] = [
+    ["reply: quoted author shown", frame.includes("Bob")],
+    ["reply: quoted text shown", frame.includes("QUOTEDTEXT")],
+    ["reply: reply body shown", frame.includes("REPLYBODY")],
+    ["reply: half-block top spacer present", frame.includes("▀")],
+    ["reply: half-block bottom spacer present", frame.includes("▄")],
+    [
+      "reply: quote appears above the body",
+      rowOf("QUOTEDTEXT") >= 0 && rowOf("QUOTEDTEXT") < rowOf("REPLYBODY"),
+    ],
+  ];
+  report("reply quote", checks, frame);
+}
+
+// --- reply without a sender name: the quote must not stack a second top gap ---
+// When no name sits above the quote (1:1, or my own message), the bubble's own ▀
+// top already provides the gap, so the quote starts on the very next row instead of
+// after a second ▀ inset row.
+{
+  const content =
+    `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="1">` +
+    `<strong itemprop="mri" itemid="8:orgid:x">Bob</strong>` +
+    `<span itemprop="time" itemid="1"></span>` +
+    `<p itemprop="preview">NONAMEQUOTE</p></blockquote><p>NONAMEBODY</p>`;
+  const { renderOnce, captureCharFrame } = await testRender(
+    () => (
+      <box style={{ width: WIDTH, flexDirection: "column" }}>
+        <MessageBubble message={msg({ content, is_self: false })} showSenderName={false} />
+      </box>
+    ),
+    { width: WIDTH, height: 20 },
+  );
+  await renderOnce();
+  const frame = captureCharFrame().replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+  const rows = frame.split("\n");
+  const quoteRow = rows.findIndex((l) => l.includes("NONAMEQUOTE"));
+  // Rows strictly above the quote content that are a half-block gap. Exactly one
+  // (the bubble's ▀ top) is expected; two would be the regression we are fixing.
+  const gapRowsAbove = rows.slice(0, quoteRow).filter((l) => /▀/.test(l)).length;
+
+  const checks: [string, boolean][] = [
+    ["no-name reply: quoted text shown", frame.includes("NONAMEQUOTE")],
+    ["no-name reply: single top gap above the quote", gapRowsAbove === 1],
+  ];
+  report("reply quote (no name)", checks, frame);
+}
+
 console.log("\nOK MessageBubble alignment + sender-name rules hold (headless).");
 process.exit(0);
 

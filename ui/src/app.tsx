@@ -10,13 +10,15 @@
 // The UI holds no business logic: it renders backend state and sends commands.
 
 import { useKeyboard, useRenderer } from "@opentui/solid";
-import { createSignal, createMemo, For, Show, onMount } from "solid-js";
+import { createSignal, createMemo, For, Show, onMount, type Accessor } from "solid-js";
 import { Backend, type Conversation, type ChatMessage } from "./client";
+import { parseMessageContent, type MessageQuote } from "./message-content";
 import { ensureServer } from "./server";
 import { notifyMessage, shouldNotify } from "./notify";
 import { coalesce } from "./singleflight";
 import { Splash } from "./splash";
 import { Spinner } from "./spinner";
+import { Border } from "./border";
 
 const backend = new Backend();
 
@@ -45,10 +47,12 @@ const [draft, setDraft] = createSignal("");
 // is also up to date. Bounded to conversations actually opened this session.
 const messageCache = new Map<string, ChatMessage[]>();
 
-// Composer auto-grow: starts at 3 rows, grows with newlines up to 23, then the
-// textarea scrolls internally.
-const COMPOSER_MIN_ROWS = 3;
-const COMPOSER_MAX_ROWS = 23;
+// Composer auto-grow: the textarea starts at 2 text rows and grows with newlines
+// up to 21, then scrolls internally. The composer wraps it with 1 blank row of
+// padding above and below (see Border usage below), so the input box reads as
+// 4 rows tall at rest with the text sitting between the first and last row.
+const COMPOSER_MIN_ROWS = 2;
+const COMPOSER_MAX_ROWS = 21;
 const [composerRows, setComposerRows] = createSignal(COMPOSER_MIN_ROWS);
 
 /// Coerce whatever the textarea's onContentChange hands us into a plain string.
@@ -69,19 +73,6 @@ function asText(value: unknown): string {
 function recomputeComposerRows(value: string) {
   const lines = value.length === 0 ? 1 : value.split("\n").length;
   setComposerRows(Math.max(COMPOSER_MIN_ROWS, Math.min(COMPOSER_MAX_ROWS, lines)));
-}
-
-// strip HTML for terminal display
-function plain(html: string): string {
-  return html
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, '"')
-    .trim();
 }
 
 function convLabel(c: Conversation): string {
@@ -286,29 +277,138 @@ function ConversationList() {
   );
 }
 
+// A top border made of the upper-half-block glyph (▀), used to give a box a
+// half-cell of breathing room above it. The glyph's foreground (borderColor) is
+// painted with the color BEHIND the box and its background is the box's own fill,
+// so the border row shows the outer color on its top half and the box color on its
+// bottom half — the finest vertical gap a terminal cell can express. Used both to
+// separate stacked message bubbles (outer = the pane) and to inset a quoted reply
+// inside its bubble (outer = the bubble). A terminal box shares one `horizontal`
+// glyph across top and bottom, so this only ever decorates the top edge.
+const TOP_HALF_GAP_BORDER = {
+  topLeft: "",
+  topRight: "",
+  bottomLeft: "",
+  bottomRight: "",
+  horizontal: "▀",
+  vertical: "",
+  topT: "",
+  bottomT: "",
+  leftT: "",
+  rightT: "",
+  cross: "",
+};
+
+// The mirror of TOP_HALF_GAP_BORDER for the bottom edge, using the lower-half-block
+// glyph (▄): with borderColor = the color behind the box and background = the box's
+// own fill, the bottom border row shows the box color on its top half and the outer
+// color on its bottom half — a half-cell gap below the box. A box can only carry one
+// horizontal glyph (shared by its top and bottom edges), so a bubble that wants BOTH
+// a top and a bottom half-gap nests two boxes: the outer draws the top ▀, the inner
+// draws the bottom ▄.
+const BOTTOM_HALF_GAP_BORDER = {
+  topLeft: "",
+  topRight: "",
+  bottomLeft: "",
+  bottomRight: "",
+  horizontal: "▄",
+  vertical: "",
+  topT: "",
+  bottomT: "",
+  leftT: "",
+  rightT: "",
+  cross: "",
+};
+
 // A single chat message, rendered as a bubble. Mine align right with an accent
 // background; everyone else's align left in a neutral grey. The sender name only
 // appears on incoming bubbles, and only in group chats (in a 1:1 or the Notes
 // chat the other party is implicit). My own messages never show a name — their
 // right alignment already says they're mine.
+//
+// Each bubble carries a half-cell gap above AND below it, so stacked messages float
+// with breathing room instead of touching. A box can only carry one horizontal
+// border glyph (shared by top and bottom), so the bubble nests two boxes: the outer
+// draws the ▀ top gap, the inner draws the ▄ bottom gap. Both are painted with the
+// pane background, so each half-row reads as empty space. When the message is a
+// reply, the quoted message is drawn as a nested box with the same half-cell inset —
+// a shade lighter than the bubble on incoming messages, a shade darker on my own, so
+// the quote reads as recessed either way.
 export function MessageBubble(props: { message: ChatMessage; showSenderName: boolean }) {
   const mine = () => props.message.is_self === true;
+  const parsed = createMemo(() => parseMessageContent(props.message.content));
+  const bubbleBg = () => (mine() ? "#2b5278" : "#1e1e1e");
+  const quoteBg = () => (mine() ? "#1e3a54" : "#2f2f2f");
+  // The sender name only renders on incoming bubbles in group chats. It matters for
+  // the quote's top gap below: when a name sits above the quote it gets its own ▀
+  // inset, but when the message opens straight with a quote the bubble's own ▀ top
+  // already provides the gap, so a second one would stack into a full cell of dead
+  // bubble color above the quote.
+  const nameShown = () => !mine() && props.showSenderName;
   return (
     <box
+      border={["top"]}
+      borderColor="#0A0A0A"
+      customBorderChars={TOP_HALF_GAP_BORDER}
       style={{
         flexDirection: "column",
         alignSelf: mine() ? "flex-end" : "flex-start",
         maxWidth: "72%",
-        marginBottom: 1,
-        paddingLeft: 1,
-        paddingRight: 1,
-        backgroundColor: mine() ? "#2b5278" : "#1e1e1e",
+        marginBottom: 0,
+        backgroundColor: bubbleBg(),
       }}
     >
-      <Show when={!mine() && props.showSenderName}>
-        <text content={props.message.sender} style={{ fg: "#7fb0e0" }} />
-      </Show>
-      <text content={plain(props.message.content)} style={{ fg: "#e8e8e8" }} />
+      <box
+        border={["bottom"]}
+        borderColor="#0A0A0A"
+        customBorderChars={BOTTOM_HALF_GAP_BORDER}
+        style={{
+          flexDirection: "column",
+          width: "100%",
+          paddingLeft: 1,
+          paddingRight: 1,
+          backgroundColor: bubbleBg(),
+        }}
+      >
+        <Show when={nameShown()}>
+          <text content={props.message.sender} style={{ fg: "#7fb0e0" }} />
+        </Show>
+        <Show when={parsed().quote}>
+          {(quote: Accessor<MessageQuote>) => (
+            <box
+              border={nameShown() ? ["top"] : []}
+              borderColor={bubbleBg()}
+              customBorderChars={TOP_HALF_GAP_BORDER}
+              style={{
+                flexDirection: "column",
+                marginBottom: 0,
+                backgroundColor: quoteBg(),
+              }}
+            >
+              <box
+                border={["bottom"]}
+                borderColor={bubbleBg()}
+                customBorderChars={BOTTOM_HALF_GAP_BORDER}
+                style={{
+                  flexDirection: "column",
+                  width: "100%",
+                  paddingLeft: 1,
+                  paddingRight: 1,
+                  backgroundColor: quoteBg(),
+                }}
+              >
+                <Show when={quote().sender.length > 0}>
+                  <text content={quote().sender} style={{ fg: mine() ? "#a9c2dd" : "#7fb0e0" }} />
+                </Show>
+                <text content={quote().text} style={{ fg: mine() ? "#c3d3e3" : "#b6b6b6" }} />
+              </box>
+            </box>
+          )}
+        </Show>
+        <Show when={parsed().body.length > 0}>
+          <text content={parsed().body} style={{ fg: "#e8e8e8" }} />
+        </Show>
+      </box>
     </box>
   );
 }
@@ -362,7 +462,9 @@ function MessagePane() {
       <Show when={openId()}>
         <text content={title().trim()} style={{ fg: "#808080" }} />
       </Show>
-      <scrollbox style={{ flexGrow: 1 }} stickyScroll stickyStart="bottom">
+      {/* paddingRight keeps message bubbles from butting against the scrollbar
+          on the right; the left gap already comes from the pane's paddingLeft. */}
+      <scrollbox style={{ flexGrow: 1, paddingRight: 1 }} stickyScroll stickyStart="bottom">
         <Show
           when={openId()}
           fallback={<text content="Select a conversation (↑/↓, Enter, or click)." style={{ fg: "gray" }} />}
@@ -403,30 +505,47 @@ function MessagePane() {
         </box>
       </Show>
       <Show when={openId()}>
-        <box style={{ flexDirection: "column", marginTop: 1 }}>
-          <textarea
-            style={{ height: composerRows(), backgroundColor: "#1E1E1E" }}
-            focused={!paletteOpen()}
-            placeholder="Write a message… (Enter to send, Shift+Enter for a new line)"
-            value={draft()}
-            keyBindings={[
-              { name: "return", action: "submit" },
-              { name: "return", shift: true, action: "newline" },
-            ]}
-            onContentChange={(v: unknown) => {
-              const text = asText(v);
-              setDraft(text);
-              recomputeComposerRows(text);
-            }}
-            onSubmit={() => {
-              sendDraft();
-              setComposerRows(COMPOSER_MIN_ROWS);
-            }}
-          />
-          <box style={{ flexDirection: "row", height: 1 }}>
-            <text content=" Send " style={{ fg: "#0A0A0A", bg: "#808080" }} />
-            <text content="  Enter to send · Shift+Enter new line" style={{ fg: "#5b5b5b" }} />
-          </box>
+        {/* flexShrink:0 protects the composer's full height: without it the
+            scrollbox (flexGrow:1) squeezes the composer and its bottom rows get
+            clipped, so the 4-row input renders as only 2. */}
+        <box style={{ flexDirection: "column", marginTop: 1, flexShrink: 0 }}>
+          {/* Blue accent bar drawn as the box's native left border (┃), so it
+              spans the composer's full height automatically. The inner box adds
+              one blank row above and below the textarea so the text sits between
+              the first and last row of the 4-row input. */}
+          <Border>
+            <box style={{ width: "100%", paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1, backgroundColor: "#1E1E1E" }}>
+              <textarea
+                style={{
+                  // Pin focused/unfocused backgrounds to the same color so the
+                  // composer never flashes a different shade when it takes focus.
+                  // (The Solid reconciler constructs the textarea with only {id},
+                  // leaving focusedBackgroundColor at its "transparent" default
+                  // unless we set it explicitly.)
+                  width: "100%",
+                  height: composerRows(),
+                  backgroundColor: "#1E1E1E",
+                  focusedBackgroundColor: "#1E1E1E",
+                }}
+                focused={!paletteOpen()}
+                placeholder="Write a message… (Enter to send, Shift+Enter for a new line)"
+                value={draft()}
+                keyBindings={[
+                  { name: "return", action: "submit" },
+                  { name: "return", shift: true, action: "newline" },
+                ]}
+                onContentChange={(v: unknown) => {
+                  const text = asText(v);
+                  setDraft(text);
+                  recomputeComposerRows(text);
+                }}
+                onSubmit={() => {
+                  sendDraft();
+                  setComposerRows(COMPOSER_MIN_ROWS);
+                }}
+              />
+            </box>
+          </Border>
         </box>
       </Show>
     </box>
