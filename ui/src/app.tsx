@@ -9,7 +9,7 @@
 //
 // The UI holds no business logic: it renders backend state and sends commands.
 
-import { useKeyboard } from "@opentui/solid";
+import { useKeyboard, useRenderer } from "@opentui/solid";
 import { createSignal, createMemo, For, Show, onMount } from "solid-js";
 import { Backend, type Conversation, type ChatMessage } from "./client";
 import { ensureServer } from "./server";
@@ -18,6 +18,10 @@ import { Splash } from "./splash";
 import { Spinner } from "./spinner";
 
 const backend = new Backend();
+
+// The live renderer, captured in App() so event handlers can tear it down. We
+// only need destroy(); typed loosely to avoid importing the core renderer type.
+let appRenderer: { destroy: () => void } | null = null;
 
 // ---- reactive state --------------------------------------------------------
 const [conversations, setConversations] = createSignal<Conversation[]>([]);
@@ -151,6 +155,15 @@ function wireEvents() {
   backend.on("conversations_changed", () => refreshConversations());
   backend.on("realtime_status", (s: string) => setLive(s as any));
   backend.on("disconnected", () => setLive("disconnected"));
+  // The client exhausted its reconnect retries: the backend is gone for good.
+  backend.on("backend_lost", () => {
+    setLive("disconnected");
+    setStatus("backend lost — retries exhausted. Press Ctrl+C to quit.");
+    // If the terminal is gone (e.g. the window was closed), there's no one to
+    // press Ctrl+C. Tear the renderer down so index.tsx's onDestroy exits the
+    // process instead of leaving it to linger as a background CPU spinner.
+    if (!process.stdout.isTTY) appRenderer?.destroy();
+  });
 }
 
 // ---- palette (cmd+K) fuzzy filtering ---------------------------------------
@@ -448,6 +461,11 @@ function StatusBar() {
 }
 
 export function App() {
+  // Capture the renderer so a fatal "backend lost" can tear it down (which, via
+  // index.tsx's onDestroy, exits the process) when there's no terminal left to
+  // quit from.
+  appRenderer = useRenderer();
+
   const [ready, setReady] = createSignal(false);
   const [splashMsg, setSplashMsg] = createSignal("starting backend");
 
