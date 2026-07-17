@@ -11,7 +11,6 @@
 
 import { useKeyboard } from "@opentui/solid";
 import { createSignal, createMemo, For, Show, onMount } from "solid-js";
-import type { SelectOption } from "@opentui/core";
 import { Backend, type Conversation, type ChatMessage } from "./client";
 import { ensureServer } from "./server";
 import { Splash } from "./splash";
@@ -21,6 +20,8 @@ const backend = new Backend();
 // ---- reactive state --------------------------------------------------------
 const [conversations, setConversations] = createSignal<Conversation[]>([]);
 const [openId, setOpenId] = createSignal<string | null>(null);
+const [selectedIndex, setSelectedIndex] = createSignal(0);
+const [hoveredId, setHoveredId] = createSignal<string | null>(null);
 const [messages, setMessages] = createSignal<ChatMessage[]>([]);
 const [loadingMessages, setLoadingMessages] = createSignal(false);
 const [status, setStatus] = createSignal("connecting…");
@@ -167,31 +168,54 @@ const paletteMatches = createMemo(() => {
 
 // ---- components ------------------------------------------------------------
 function ConversationList() {
-  const options = createMemo<SelectOption[]>(() =>
-    conversations().map((c) => ({
-      name: convLabel(c),
-      value: c.id,
-      description: "",
-    })),
-  );
+  const openConv = (id: string, index: number) => {
+    setSelectedIndex(index);
+    openConversation(id);
+  };
   return (
     <box
       style={{
         width: 34,
         backgroundColor: "#141414",
+        flexDirection: "column",
         paddingTop: 1,
         paddingLeft: 1,
         paddingRight: 1,
       }}
     >
-      <select
-        style={{ height: "100%", backgroundColor: "#141414" }}
-        focused={!paletteOpen()}
-        options={options()}
-        onSelect={(_i, opt) => {
-          if (opt?.value) openConversation(String(opt.value));
+      <scrollbox
+        style={{
+          flexGrow: 1,
+          backgroundColor: "#141414",
+          verticalScrollbarOptions: {
+            showArrows: false,
+            // track blends into the sidebar so only the thumb (handle) shows
+            trackOptions: { backgroundColor: "#141414", foregroundColor: "#3a3a3a" },
+          },
         }}
-      />
+        stickyScroll={false}
+      >
+        <For each={conversations()}>
+          {(c, i) => {
+            const isOpen = () => openId() === c.id;
+            const isHovered = () => hoveredId() === c.id;
+            const isSelected = () => selectedIndex() === i();
+            const bg = () =>
+              isOpen() ? "#2a2a2a" : isHovered() ? "#242424" : isSelected() ? "#1e1e1e" : "#141414";
+            const fg = () => (isOpen() ? "#ffffff" : "#c0c0c0");
+            return (
+              <box
+                style={{ width: "100%", height: 1, backgroundColor: bg() }}
+                onMouseDown={() => openConv(c.id, i())}
+                onMouseOver={() => setHoveredId(c.id)}
+                onMouseOut={() => setHoveredId((h) => (h === c.id ? null : h))}
+              >
+                <text content={` ${convLabel(c)}`} style={{ fg: fg() }} />
+              </box>
+            );
+          }}
+        </For>
+      </scrollbox>
     </box>
   );
 }
@@ -364,6 +388,21 @@ export function App() {
       return;
     }
     if (e.ctrl && e.name === "c") process.exit(0);
+
+    // conversation-list navigation (only when not typing in the palette or an
+    // open conversation's composer)
+    const typing = paletteOpen() || openId() !== null;
+    if (!typing) {
+      const list = conversations();
+      if (e.name === "down" || e.name === "j") {
+        setSelectedIndex((i) => Math.min(i + 1, list.length - 1));
+      } else if (e.name === "up" || e.name === "k") {
+        setSelectedIndex((i) => Math.max(i - 1, 0));
+      } else if (e.name === "return") {
+        const c = list[selectedIndex()];
+        if (c) openConversation(c.id);
+      }
+    }
   });
 
   return (
