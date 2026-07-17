@@ -68,10 +68,19 @@ export async function ensureServer(): Promise<ServerHandle> {
           proc.kill(9);
         } catch {}
       };
-      // also kill the child if the UI process dies unexpectedly
+      // Kill the backend whenever this process exits, for any reason. We only
+      // hook "exit" — a synchronous, last-gasp callback that Bun/Node fires no
+      // matter how we got here (normal return, uncaught error, or a signal that
+      // OpenTUI's own handler turned into an exit). We deliberately do NOT add
+      // our own SIGINT/SIGTERM handlers that call process.exit(): OpenTUI's
+      // renderer already registers signal handlers that run destroy() to leave
+      // raw mode, exit the alternate screen, and — crucially — disable mouse
+      // tracking. Racing it with an eager process.exit(0) kills the process
+      // before those terminal-restore escape sequences are flushed, which is
+      // exactly what leaves the terminal spewing "35;56;51M"-style SGR mouse
+      // reports after Ctrl+C. Letting "exit" do the child cleanup keeps our
+      // teardown ordered strictly after the terminal has been restored.
       process.on("exit", stop);
-      process.on("SIGINT", () => { stop(); process.exit(0); });
-      process.on("SIGTERM", () => { stop(); process.exit(0); });
       return { stop };
     }
     await Bun.sleep(300);

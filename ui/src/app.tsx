@@ -375,7 +375,14 @@ export function App() {
     }
   });
 
-  // global keys: Ctrl+K palette, Escape closes it / leaves conversation, Ctrl+C quits
+  // global keys: Ctrl+K palette, Escape closes it / leaves conversation.
+  // We intentionally do NOT handle Ctrl+C here. OpenTUI's renderer owns Ctrl+C
+  // by default (exitOnCtrlC: true) and runs destroy() on it, which restores the
+  // terminal, exits the alternate screen, and — critically — disables mouse
+  // tracking before the process ends. Calling process.exit(0) ourselves raced
+  // that teardown and killed the process before the mouse-disable escape
+  // sequence was flushed, which is what left the terminal emitting stray
+  // "35;56;51M" SGR mouse reports on every mouse move after Ctrl+C.
   useKeyboard((e) => {
     if (e.ctrl && e.name === "k") {
       setPaletteOpen((v) => !v);
@@ -387,7 +394,6 @@ export function App() {
       else setOpenId(null);
       return;
     }
-    if (e.ctrl && e.name === "c") process.exit(0);
 
     // conversation-list navigation (only when not typing in the palette or an
     // open conversation's composer)
