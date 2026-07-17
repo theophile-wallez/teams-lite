@@ -30,6 +30,17 @@ const CSA_URL: &str =
     "https://teams.microsoft.com/api/csa/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true";
 const DEFAULT_PAGE_SIZE: u32 = 30;
 
+/// True when an error from this module was caused by an expired/rejected
+/// credential (HTTP 401). Callers use this to force-refresh tokens and retry
+/// once, since broker tokens can die before their nominal TTL (device sleep,
+/// conditional-access re-evaluation, clock skew).
+pub fn is_unauthorized(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let s = cause.to_string();
+        s.contains("401") || s.contains("Unauthorized")
+    })
+}
+
 /// A conversation summary as surfaced by the CSA aggregator. This is what the
 /// conversation list (and cmd+K palette, later) is built from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,6 +255,10 @@ pub fn persist_page(store: &Store, conversation_id: &str, page: &MessagePage) ->
     for m in &page.messages {
         if store.insert_message(m)? {
             inserted += 1;
+        } else {
+            // Existing row (INSERT OR IGNORE skipped it): heal a legacy row that
+            // was stored before we captured the sender MRI.
+            store.backfill_sender_mri(&m.conversation_id, &m.id, &m.sender_mri)?;
         }
     }
 
@@ -363,14 +378,28 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         .or_else(|| m.get("from").and_then(|x| x.as_str()))
         .unwrap_or("")
         .to_string();
+    let sender_mri = m
+        .get("from")
+        .and_then(|x| x.as_str())
+        .map(normalize_mri)
+        .unwrap_or_default();
     Some(Message {
         id,
         conversation_id: conversation_id.to_string(),
         seq,
         compose_time,
         sender,
+        sender_mri,
         content,
     })
+}
+
+/// Extract a bare MRI ("8:orgid:<guid>", "8:<skypename>", ...) from a message's
+/// `from` field, which Teams delivers either as a bare MRI or as a contacts URL
+/// like ".../v1/users/ME/contacts/8:orgid:<guid>". We keep the last path segment
+/// so a URL and a bare MRI for the same user compare equal.
+pub(crate) fn normalize_mri(from: &str) -> String {
+    from.rsplit('/').next().unwrap_or(from).to_string()
 }
 
 /// Parse an ISO-8601 UTC timestamp ("2026-07-16T16:05:26.7670000Z") to epoch millis.
@@ -518,6 +547,24 @@ mod tests {
     }
 
     #[test]
+    fn extracts_sender_mri_from_from_field() {
+        // `from` as a contacts URL -> bare MRI; imdisplayname stays the sender name.
+        let m = json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-16T16:05:26.767Z",
+            "content": "hi", "imdisplayname": "Théophile WALLEZ",
+            "from": "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:abc-123"
+        });
+        let parsed = parse_message(&m, "c1").unwrap();
+        assert_eq!(parsed.sender, "Théophile WALLEZ");
+        assert_eq!(parsed.sender_mri, "8:orgid:abc-123");
+
+        // a bare MRI in `from` is kept as-is
+        assert_eq!(normalize_mri("8:orgid:abc-123"), "8:orgid:abc-123");
+        // a URL is reduced to its last segment
+        assert_eq!(normalize_mri(".../contacts/8:orgid:xyz"), "8:orgid:xyz");
+    }
+
+    #[test]
     fn parses_message_page_oldest_first_with_cursor() {
         // API returns newest-first; two messages, page_size 30 => short page => top reached.
         let v = json!({
@@ -580,6 +627,7 @@ mod tests {
                 // oldest message carries oldest_ms; others just need to be >= it
                 compose_time: oldest_ms + i as i64,
                 sender: "s".into(),
+                sender_mri: String::new(),
                 content: "c".into(),
             })
             .collect();

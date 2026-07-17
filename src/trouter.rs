@@ -42,8 +42,34 @@ pub enum Status {
     Disconnected { retry_in_secs: u64 },
 }
 
+/// A fresh set of credentials for one trouter connection attempt.
+pub struct Credentials {
+    /// The Teams session (carries the skypetoken + region endpoints).
+    pub session: Session,
+    /// A Bearer token for the ic3 audience (socket authenticate + registrar).
+    pub ic3: String,
+}
+
+/// Supplies fresh credentials on demand. The trouter calls this before EVERY
+/// connection attempt, so a reconnection after a long-lived socket dropped gets
+/// a freshly-minted skypetoken and ic3 token instead of the boot-time ones —
+/// which is what keeps the real-time feed alive past the ~1h token lifetime.
+///
+/// This is a dependency-inversion boundary: the trouter states what it needs
+/// (fresh credentials) without knowing HOW they are obtained (broker, cache,
+/// TTL, session rebuild — all owned by the caller).
+pub trait CredentialProvider: Send + Sync {
+    /// Return freshly-valid credentials, refreshing through whatever backing
+    /// mechanism the implementor owns. Errors abort this attempt; the caller
+    /// backs off and asks again.
+    fn credentials(&self)
+        -> impl std::future::Future<Output = Result<Credentials>> + Send;
+}
+
 /// Run the real-time client forever, reconnecting with capped exponential backoff.
 ///
+/// - `creds` supplies fresh credentials before every connection attempt (so a
+///   reconnection past the ~1h token lifetime re-mints the skypetoken + ic3).
 /// - `events` receives batches of parsed chat messages as they arrive.
 /// - `status` receives lifecycle transitions (Connecting/Connected/Disconnected).
 /// - `epid` is the stable endpoint id; persist it across runs so the server keeps
@@ -51,8 +77,7 @@ pub enum Status {
 ///
 /// Returns only if the channels close (i.e. the UI is gone).
 pub async fn run(
-    session: Session,
-    ic3: String,
+    creds: impl CredentialProvider,
     epid: String,
     events: mpsc::UnboundedSender<Vec<Message>>,
     status: mpsc::UnboundedSender<Status>,
@@ -64,9 +89,11 @@ pub async fn run(
     let mut backoff = 1u64;
     loop {
         let _ = status.send(Status::Connecting);
-        match connect_once(&http, &session, &ic3, &epid, &events, &status).await {
-            // connect_once only returns on disconnect/error
-            Ok(()) | Err(_) => {}
+        // Fresh credentials for THIS attempt. If minting fails (broker down,
+        // etc.) treat it like a disconnect and back off. connect_once only
+        // returns on disconnect/error, so we ignore its result either way.
+        if let Ok(Credentials { session, ic3 }) = creds.credentials().await {
+            let _ = connect_once(&http, &session, &ic3, &epid, &events, &status).await;
         }
         // If the consumer is gone, stop.
         if events.is_closed() || status.is_closed() {
@@ -302,5 +329,55 @@ mod tests {
         assert_eq!(a, b, "epid must be stable once written");
         assert!(!a.is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The core of the token-refresh fix: `run` must ask the provider for fresh
+    /// credentials on EVERY connection attempt, not once at startup. We make the
+    /// provider fail every time (so no real network happens) and count its calls;
+    /// after it has been asked twice — i.e. it was re-asked on the reconnect — we
+    /// close the channels to end the loop and assert the re-invocation happened.
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_asks_provider_for_fresh_credentials_each_attempt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CountingProvider {
+            calls: Arc<AtomicUsize>,
+        }
+        impl CredentialProvider for CountingProvider {
+            async fn credentials(&self) -> Result<Credentials> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                // Never hand back real creds: fail so `run` treats it as a failed
+                // attempt and loops into its backoff → reconnect path.
+                Err(anyhow!("test: no credentials"))
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = CountingProvider { calls: calls.clone() };
+        let (ev_tx, ev_rx) = mpsc::unbounded_channel::<Vec<Message>>();
+        let (st_tx, mut st_rx) = mpsc::unbounded_channel::<Status>();
+
+        let handle = tokio::spawn(async move {
+            run(provider, "epid-test".to_string(), ev_tx, st_tx).await;
+        });
+
+        // Wait until the provider has been asked at least twice (proves it was
+        // re-invoked on the reconnect, not reused from a first attempt). The
+        // backoff after the first failure is 1s, so allow a little headroom.
+        let mut saw_reconnect = false;
+        for _ in 0..40 {
+            if calls.load(Ordering::SeqCst) >= 2 {
+                saw_reconnect = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(saw_reconnect, "provider must be asked again on reconnect");
+
+        // Close the consumer side so `run` observes it and returns.
+        drop(ev_rx);
+        st_rx.close();
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
     }
 }

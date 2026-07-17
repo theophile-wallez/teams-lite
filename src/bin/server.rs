@@ -24,7 +24,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
-use teams_lite::{auth, teams, teams_profiles, teams_read, teams_send, trouter};
+use teams_lite::{auth, retry, teams, teams_profiles, teams_read, teams_send, trouter};
 
 const ADDR: &str = "127.0.0.1:8420";
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
@@ -83,6 +83,56 @@ impl Ctx {
         cell.minted = std::time::Instant::now();
         Ok(fresh)
     }
+
+    /// Force-refresh every credential the read/send paths depend on: the CSA and
+    /// profile broker tokens, and the Teams session (skypetoken). Called after an
+    /// unexpected 401, whose cause may be either the bearer token or the
+    /// skypetoken, so we refresh both rather than guess.
+    async fn force_refresh_auth(&self) -> Result<Session> {
+        let _ = self.tokens.refresh(teams_read::CSA_SCOPE).await;
+        let _ = self.tokens.refresh(teams_profiles::PROFILE_SCOPE).await;
+        let fresh = teams::connect(&self.http).await?;
+        let mut cell = self.session.lock().await;
+        cell.session = fresh.clone();
+        cell.minted = std::time::Instant::now();
+        Ok(fresh)
+    }
+
+    /// Run a network operation under the shared retry policy (see `retry`).
+    ///
+    /// `op` receives a fresh session + csa token on each attempt (re-read from
+    /// the cache, so a refresh between attempts is picked up). The policy:
+    ///   - 401  -> force-refresh every credential, then retry (once);
+    ///   - 429/5xx/timeout/dropped connection -> back off and retry;
+    ///   - 400/403/404/parse/etc. -> fail fast (retrying can't help).
+    /// This is the single reactive safety net over the time-based token cache.
+    async fn retry_on_auth<T, F, Fut>(&self, op: F) -> Result<T>
+    where
+        F: Fn(Session, String) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let attempt = || async {
+            let session = self.session().await?;
+            let csa = self.csa().await?;
+            op(session, csa).await
+        };
+        let on_auth = || async {
+            eprintln!("[auth] 401 — refreshing credentials before retry");
+            self.force_refresh_auth().await.map(|_| ())
+        };
+        retry::with_retry(retry::RetryPolicy::default(), Some(on_auth), attempt).await
+    }
+}
+
+/// The trouter's credential source: hands it a freshly-valid session (rebuilt if
+/// stale) and ic3 token (auto-refreshed via the cache) before every reconnection,
+/// so the real-time feed keeps working past the ~1h broker-token lifetime.
+impl trouter::CredentialProvider for Ctx {
+    async fn credentials(&self) -> Result<trouter::Credentials> {
+        let session = self.session().await?;
+        let ic3 = self.tokens.get(IC3_SCOPE).await?;
+        Ok(trouter::Credentials { session, ic3 })
+    }
 }
 
 #[tokio::main]
@@ -91,7 +141,7 @@ async fn main() -> Result<()> {
     let http = reqwest::Client::builder().user_agent(UA).http1_only().build()?;
     let tokens = auth::TokenCache::new();
     // warm the caches used at boot (also validates the broker is reachable)
-    let ic3 = tokens.get(IC3_SCOPE).await.context("ic3 token")?;
+    tokens.get(IC3_SCOPE).await.context("ic3 token")?;
     tokens.get(teams_read::CSA_SCOPE).await.context("csa token")?;
     tokens.get(teams_profiles::PROFILE_SCOPE).await.context("profile token")?;
     let session = teams::connect(&http).await?;
@@ -114,7 +164,7 @@ async fn main() -> Result<()> {
     };
 
     // real-time: run the trouter, persist each live message, broadcast an event.
-    spawn_realtime(ctx.clone(), session, ic3, db_path);
+    spawn_realtime(ctx.clone(), session, db_path);
 
     let listener = TcpListener::bind(ADDR).await.with_context(|| format!("bind {ADDR}"))?;
     eprintln!("[ok] server ws://{ADDR} — ready");
@@ -202,11 +252,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // background and emit `messages_updated` if anything new arrived.
         "open" => {
             let conv = param_str(params, "conversation")?;
-            // self_name comes from the cached session (a lock + clone, no network
-            // in the common case) so we can tag each cached message with is_self.
-            let self_name = {
+            // self identity comes from the cached session (a lock + clone, no
+            // network in the common case) so we can tag each cached message with
+            // is_self. The MRI is the reliable signal; the name is the fallback.
+            let (self_name, self_mri) = {
                 let session = ctx.session().await?;
-                session.self_name.to_string()
+                (session.self_name.to_string(), session.self_mri.to_string())
             };
             let cached = {
                 let store = ctx.store()?;
@@ -216,10 +267,19 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let ctx_bg = ctx.clone();
             let conv_bg = conv.clone();
             let self_name_bg = self_name.clone();
+            let self_mri_bg = self_mri.clone();
             let had = cached.len();
             tokio::spawn(async move {
-                let session = match ctx_bg.session().await { Ok(s) => s, Err(_) => return };
-                if let Ok(page) = teams_read::fetch_newest(&ctx_bg.http, &session, &conv_bg).await {
+                let http = ctx_bg.http.clone();
+                let conv_op = conv_bg.clone();
+                let page = ctx_bg
+                    .retry_on_auth(move |session, _csa| {
+                        let http = http.clone();
+                        let conv = conv_op.clone();
+                        async move { teams_read::fetch_newest(&http, &session, &conv).await }
+                    })
+                    .await;
+                if let Ok(page) = page {
                     let after = {
                         if let Ok(store) = ctx_bg.store() {
                             let inserted = teams_read::persist_page(&store, &conv_bg, &page).unwrap_or(0);
@@ -231,11 +291,19 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     if let Some(msgs) = after {
                         // something changed vs the cache we already returned
                         let _ = had;
-                        ctx_bg.emit("messages_updated", json!({ "conversation": conv_bg, "messages": messages_value(&msgs, &self_name_bg) }));
+                        ctx_bg.emit("messages_updated", json!({ "conversation": conv_bg, "messages": messages_value(&msgs, &self_name_bg, &self_mri_bg) }));
                     }
+                } else if let Err(e) = page {
+                    // The background network refresh failed (e.g. auth couldn't be
+                    // recovered). Tell the UI so it can show a real error instead
+                    // of the misleading "No messages yet." empty state.
+                    ctx_bg.emit(
+                        "messages_error",
+                        json!({ "conversation": conv_bg, "error": e.to_string() }),
+                    );
                 }
             });
-            Ok(messages_json(&cached, &self_name))
+            Ok(messages_json(&cached, &self_name, &self_mri))
         }
 
         // older page for scroll-up
@@ -250,21 +318,38 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             };
             let session = ctx.session().await?;
             let self_name = session.self_name.to_string();
-            let page = teams_read::fetch_messages_page(&ctx.http, &session, &conv, before_ms, 30).await?;
+            let self_mri = session.self_mri.to_string();
+            let http = ctx.http.clone();
+            let conv_op = conv.clone();
+            let page = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let conv = conv_op.clone();
+                    async move {
+                        teams_read::fetch_messages_page(&http, &session, &conv, before_ms, 30).await
+                    }
+                })
+                .await?;
             let msgs = {
                 let store = ctx.store()?;
                 teams_read::persist_page(&store, &conv, &page)?;
                 store.newest_messages(&conv, 500)?
             };
-            Ok(messages_json(&msgs, &self_name))
+            Ok(messages_json(&msgs, &self_name, &self_mri))
         }
 
         // send a message
         "send" => {
             let conv = param_str(params, "conversation")?;
             let text = param_str(params, "text")?;
-            let session = ctx.session().await?;
-            teams_send::send_message(&ctx.http, &session, &conv, &text).await?;
+            let http = ctx.http.clone();
+            ctx.retry_on_auth(move |session, _csa| {
+                let http = http.clone();
+                let conv = conv.clone();
+                let text = text.clone();
+                async move { teams_send::send_message(&http, &session, &conv, &text).await }
+            })
+            .await?;
             Ok(json!({ "sent": true }))
         }
 
@@ -292,26 +377,37 @@ fn conversations_json(rows: &[teams_lite::store::ConversationRow]) -> Value {
         .collect::<Vec<_>>())
 }
 
-fn messages_value(msgs: &[Message], self_name: &str) -> Value {
+/// Decide whether a message is ours. We match on the sender's MRI (reliable —
+/// it's a stable per-user identifier) whenever both sides have one. We fall back
+/// to comparing display names only for legacy rows stored before we captured the
+/// MRI, where `sender_mri` is empty.
+fn is_self(m: &Message, self_name: &str, self_mri: &str) -> bool {
+    if !self_mri.is_empty() && !m.sender_mri.is_empty() {
+        return m.sender_mri == self_mri;
+    }
+    !self_name.is_empty() && m.sender == self_name
+}
+
+fn messages_value(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
     json!(msgs
         .iter()
         .map(|m| json!({
             "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
             "compose_time": m.compose_time, "sender": m.sender, "content": m.content,
-            "is_self": !self_name.is_empty() && m.sender == *self_name
+            "is_self": is_self(m, self_name, self_mri)
         }))
         .collect::<Vec<_>>())
 }
 
-fn messages_json(msgs: &[Message], self_name: &str) -> Value {
-    json!({ "messages": messages_value(msgs, self_name) })
+fn messages_json(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
+    json!({ "messages": messages_value(msgs, self_name, self_mri) })
 }
 
-fn message_json(m: &Message, self_name: &str) -> Value {
+fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
     json!({
         "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
         "compose_time": m.compose_time, "sender": m.sender, "content": m.content,
-        "is_self": !self_name.is_empty() && m.sender == self_name
+        "is_self": is_self(m, self_name, self_mri)
     })
 }
 
@@ -320,9 +416,14 @@ fn message_json(m: &Message, self_name: &str) -> Value {
 /// keeps the `conversations` request off the network path (local-first startup).
 fn sync_conversations_bg(ctx: Ctx) {
     tokio::spawn(async move {
-        let session = match ctx.session().await { Ok(s) => s, Err(_) => return };
-        let csa = match ctx.csa().await { Ok(t) => t, Err(_) => return };
-        let convs = match teams_read::fetch_conversations(&ctx.http, &session, &csa).await {
+        let http = ctx.http.clone();
+        let convs = match ctx
+            .retry_on_auth(|session, csa| {
+                let http = http.clone();
+                async move { teams_read::fetch_conversations(&http, &session, &csa).await }
+            })
+            .await
+        {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -374,23 +475,28 @@ fn resolve_names_bg(ctx: Ctx, convs: Vec<teams_read::Conversation>) {
 }
 
 /// Start the trouter; persist each live message and broadcast it as an event.
-fn spawn_realtime(ctx: Ctx, session: Session, ic3: String, db_path: String) {
+///
+/// The trouter re-acquires fresh credentials before every (re)connection via the
+/// `Ctx` credential provider, so the real-time feed survives token expiry.
+fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     let epid_path = std::path::Path::new(&db_path).with_extension("epid");
     let epid = trouter::load_or_create_epid(&epid_path);
 
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Message>>();
     let (st_tx, mut st_rx) = tokio::sync::mpsc::unbounded_channel::<trouter::Status>();
 
-    // consume trouter messages: persist + broadcast
+    // consume trouter messages: persist + broadcast. self identity is stable
+    // across token refreshes, so capturing it once at boot is fine.
     let ctx_msgs = ctx.clone();
     let self_name = session.self_name.to_string();
+    let self_mri = session.self_mri.to_string();
     tokio::spawn(async move {
         while let Some(msgs) = ev_rx.recv().await {
             if let Ok(store) = ctx_msgs.store() {
                 for m in &msgs {
                     store.upsert_conversation(&m.conversation_id, "", m.compose_time).ok();
                     if store.insert_message(m).unwrap_or(false) {
-                        ctx_msgs.emit("message", message_json(m, &self_name));
+                        ctx_msgs.emit("message", message_json(m, &self_name, &self_mri));
                     }
                 }
             }
@@ -410,6 +516,6 @@ fn spawn_realtime(ctx: Ctx, session: Session, ic3: String, db_path: String) {
     });
 
     tokio::spawn(async move {
-        trouter::run(session, ic3, epid, ev_tx, st_tx).await;
+        trouter::run(ctx, epid, ev_tx, st_tx).await;
     });
 }

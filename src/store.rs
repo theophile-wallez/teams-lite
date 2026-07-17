@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS messages (
     seq             INTEGER NOT NULL DEFAULT 0,
     compose_time    INTEGER NOT NULL DEFAULT 0,
     sender          TEXT,
+    sender_mri      TEXT,
     content         TEXT,
     PRIMARY KEY (conversation_id, id)
 );
@@ -39,6 +40,11 @@ pub struct Message {
     pub seq: i64,
     pub compose_time: i64,
     pub sender: String,
+    /// The sender's MRI (e.g. "8:orgid:<guid>"), extracted from the message's
+    /// `from` field. The reliable way to tell whose message this is — matching on
+    /// `sender` (a display name) is fragile. May be empty for legacy rows stored
+    /// before this column existed, or for system frames without a `from`.
+    pub sender_mri: String,
     pub content: String,
 }
 
@@ -98,11 +104,12 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
         seq: row.get(2)?,
         compose_time: row.get(3)?,
         sender: row.get(4)?,
-        content: row.get(5)?,
+        sender_mri: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        content: row.get(6)?,
     })
 }
 
-const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, content";
+const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content";
 
 /// Idempotent, additive migrations for databases created before a column existed.
 /// `CREATE TABLE IF NOT EXISTS` never alters an existing table, so older stores
@@ -117,6 +124,14 @@ fn migrate(conn: &Connection) -> Result<()> {
     ) {
         Ok(_) => {}
         // rusqlite surfaces "duplicate column name" when the column already exists
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column") => {}
+        Err(e) => return Err(e.into()),
+    }
+    // sender_mri: the sender's MRI, used to reliably tag a message as ours
+    // (sender_mri == our own MRI). Legacy rows get NULL; the next network sync
+    // backfills it for messages that come through again.
+    match conn.execute("ALTER TABLE messages ADD COLUMN sender_mri TEXT", []) {
+        Ok(_) => {}
         Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column") => {}
         Err(e) => return Err(e.into()),
     }
@@ -188,11 +203,29 @@ impl Store {
     /// Insert a message, deduplicated by id. Returns true if it was newly inserted.
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
         let n = self.conn.execute(
-            "INSERT OR IGNORE INTO messages (id, conversation_id, seq, compose_time, sender, content)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.content],
+            "INSERT OR IGNORE INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content],
         )?;
         Ok(n == 1)
+    }
+
+    /// Backfill `sender_mri` on an existing row that predates the column (its MRI
+    /// is NULL or empty). `insert_message` uses INSERT OR IGNORE, so a re-fetched
+    /// message never overwrites the stored row — this heals legacy history so our
+    /// own old messages get tagged as ours. No-op when the MRI is already set or
+    /// the incoming MRI is empty.
+    pub fn backfill_sender_mri(&self, conversation_id: &str, id: &str, sender_mri: &str) -> Result<()> {
+        if sender_mri.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "UPDATE messages SET sender_mri = ?3
+             WHERE conversation_id = ?1 AND id = ?2
+               AND (sender_mri IS NULL OR sender_mri = '')",
+            params![conversation_id, id, sender_mri],
+        )?;
+        Ok(())
     }
 
     /// All conversations, most-recently-active first, for the list pane.
@@ -310,6 +343,7 @@ mod tests {
             seq,
             compose_time: seq,
             sender: "alice".into(),
+            sender_mri: String::new(),
             content: format!("message {seq}"),
         }
     }
@@ -416,11 +450,11 @@ mod tests {
         let me = "Théophile WALLEZ";
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
-            sender: me.into(), content: "salut".into(),
+            sender: me.into(), sender_mri: String::new(), content: "salut".into(),
         }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
-            sender: "Leonor GROELL".into(), content: "hello".into(),
+            sender: "Leonor GROELL".into(), sender_mri: String::new(), content: "hello".into(),
         }).unwrap();
 
         // direct derivation
@@ -438,9 +472,32 @@ mod tests {
         // only my own message present -> cannot derive the other name yet
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
-            sender: me.into(), content: "coucou".into(),
+            sender: me.into(), sender_mri: String::new(), content: "coucou".into(),
         }).unwrap();
         assert_eq!(s.other_party_name("dm", me).unwrap(), None);
         assert_eq!(s.conversations(me).unwrap()[0].display_name, "");
+    }
+
+    #[test]
+    fn backfill_sender_mri_heals_legacy_rows_only() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        // legacy row: no MRI captured
+        s.insert_message(&Message {
+            id: "m1".into(), conversation_id: "c1".into(), seq: 1, compose_time: 1,
+            sender: "Me".into(), sender_mri: String::new(), content: "hi".into(),
+        }).unwrap();
+
+        // backfill fills the empty MRI
+        s.backfill_sender_mri("c1", "m1", "8:orgid:me").unwrap();
+        assert_eq!(s.newest_messages("c1", 1).unwrap()[0].sender_mri, "8:orgid:me");
+
+        // it never overwrites an already-set MRI
+        s.backfill_sender_mri("c1", "m1", "8:orgid:someone-else").unwrap();
+        assert_eq!(s.newest_messages("c1", 1).unwrap()[0].sender_mri, "8:orgid:me");
+
+        // empty incoming MRI is a no-op
+        s.backfill_sender_mri("c1", "m1", "").unwrap();
+        assert_eq!(s.newest_messages("c1", 1).unwrap()[0].sender_mri, "8:orgid:me");
     }
 }
