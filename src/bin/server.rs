@@ -496,7 +496,11 @@ fn resolve_names_bg(ctx: Ctx, convs: Vec<teams_read::Conversation>) {
                 let mut changed = false;
                 for (conv_id, mri) in &to_resolve {
                     if let Some(name) = names.get(mri) {
-                        if store.upsert_conversation(conv_id, name, 0).is_ok() {
+                        // Only a real name change counts: re-resolving to the
+                        // same name must not emit `conversations_changed`, or the
+                        // UI's refresh loop would run forever (a 1:1's network
+                        // title stays blank, so it is "resolvable" on every sync).
+                        if store.upsert_conversation(conv_id, name, 0).unwrap_or(false) {
                             changed = true;
                         }
                     }

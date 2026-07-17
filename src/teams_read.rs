@@ -191,19 +191,23 @@ pub async fn sync_conversation_list(
 /// Persist a fetched conversation list into the store (pure/sync, no `.await`).
 /// Empty threads are skipped. Returns how many were written.
 pub fn persist_conversations(store: &Store, convs: &[Conversation]) -> usize {
-    let mut written = 0;
+    let mut changed = 0;
     for c in convs {
         if c.is_empty {
             continue;
         }
+        // Count only conversations that were actually inserted or modified, so
+        // the caller emits `conversations_changed` ONLY on a real change. A
+        // blanket "upsert succeeded" count would report a change on every sync
+        // of identical data and spin the UI's refresh->sync->event loop.
         if store
             .upsert_conversation_full(&c.id, &c.title, c.last_message_time, c.kind())
-            .is_ok()
+            .unwrap_or(false)
         {
-            written += 1;
+            changed += 1;
         }
     }
-    written
+    changed
 }
 
 /// Load the newest page of a conversation into the store (initial open) and record
@@ -643,6 +647,38 @@ mod tests {
         assert_eq!(persist_page(&store, "c1", &p1).unwrap(), 3);
         // re-persisting the same page inserts nothing (dedup by id in SQLite)
         assert_eq!(persist_page(&store, "c1", &p1).unwrap(), 0);
+    }
+
+    fn conv(id: &str, title: &str, last_message_time: i64) -> Conversation {
+        Conversation {
+            id: id.into(),
+            title: title.into(),
+            chat_type: "group".into(),
+            is_one_on_one: false,
+            last_message_time,
+            is_empty: false,
+            other_member_mri: String::new(),
+        }
+    }
+
+    // Regression for the conversation-list freeze: syncing the SAME conversations
+    // twice must report 0 changes the second time. persist_conversations is what
+    // gates the `conversations_changed` event; if it counted every upsert (not
+    // just real changes), the event would fire on every sync and the UI's
+    // refresh -> sync -> event -> refresh loop would amplify until the TUI froze.
+    #[test]
+    fn persist_conversations_counts_only_real_changes() {
+        let store = Store::open_in_memory().unwrap();
+        let convs = vec![conv("a", "Alpha", 100), conv("b", "Bravo", 200)];
+
+        // first sync inserts both -> two changes
+        assert_eq!(persist_conversations(&store, &convs), 2);
+        // an identical re-sync changes nothing -> no `conversations_changed`
+        assert_eq!(persist_conversations(&store, &convs), 0);
+        // only a genuinely newer conversation counts
+        let bumped = vec![conv("a", "Alpha", 100), conv("b", "Bravo", 300)];
+        assert_eq!(persist_conversations(&store, &bumped), 1);
+        assert_eq!(persist_conversations(&store, &bumped), 0);
     }
 
     #[test]

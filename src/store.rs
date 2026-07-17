@@ -157,8 +157,13 @@ impl Store {
         Ok(Self { conn })
     }
 
-    pub fn upsert_conversation(&self, id: &str, display_name: &str, last_message_time: i64) -> Result<()> {
-        self.conn.execute(
+    /// Returns true when the row was newly inserted or an existing row actually
+    /// changed. The guarded `DO UPDATE ... WHERE` makes a no-op upsert modify 0
+    /// rows, so callers can emit a `conversations_changed` event ONLY on a real
+    /// change. Without this, a repeated sync of unchanged data reports a change
+    /// every time and drives an endless refresh->sync->event->refresh loop.
+    pub fn upsert_conversation(&self, id: &str, display_name: &str, last_message_time: i64) -> Result<bool> {
+        let changed = self.conn.execute(
             "INSERT INTO conversations (id, display_name, last_message_time)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET
@@ -166,24 +171,32 @@ impl Store {
                 display_name = CASE
                     WHEN excluded.display_name IS NOT NULL AND excluded.display_name <> ''
                     THEN excluded.display_name ELSE conversations.display_name END,
-                last_message_time = MAX(conversations.last_message_time, excluded.last_message_time)",
+                last_message_time = MAX(conversations.last_message_time, excluded.last_message_time)
+             WHERE
+                -- only write (and thus report a change) when a column would move
+                (excluded.display_name IS NOT NULL AND excluded.display_name <> ''
+                    AND excluded.display_name <> conversations.display_name)
+                OR excluded.last_message_time > conversations.last_message_time",
             params![id, display_name, last_message_time],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// Upsert a conversation carrying its `kind`. Only the network sync
     /// (`persist_conversations`) knows this; blind upserts (live events, name
     /// resolution) use `upsert_conversation`, which leaves the kind untouched.
     /// A known kind is never downgraded to `unknown` by a later blank sync.
+    ///
+    /// Returns true when the row was newly inserted or an existing row actually
+    /// changed (see `upsert_conversation` for why the `WHERE` guard matters).
     pub fn upsert_conversation_full(
         &self,
         id: &str,
         display_name: &str,
         last_message_time: i64,
         kind: ConversationKind,
-    ) -> Result<()> {
-        self.conn.execute(
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
             "INSERT INTO conversations (id, display_name, last_message_time, kind)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET
@@ -194,10 +207,16 @@ impl Store {
                 -- keep a known kind; only overwrite when the new value is meaningful
                 kind = CASE
                     WHEN excluded.kind <> 'unknown' THEN excluded.kind
-                    ELSE conversations.kind END",
+                    ELSE conversations.kind END
+             WHERE
+                -- only write (and thus report a change) when a column would move
+                (excluded.display_name IS NOT NULL AND excluded.display_name <> ''
+                    AND excluded.display_name <> conversations.display_name)
+                OR excluded.last_message_time > conversations.last_message_time
+                OR (excluded.kind <> 'unknown' AND excluded.kind <> conversations.kind)",
             params![id, display_name, last_message_time, kind.as_str()],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// Insert a message, deduplicated by id. Returns true if it was newly inserted.
@@ -430,6 +449,43 @@ mod tests {
         s.upsert_conversation_full("c1", "", 250, ConversationKind::Group)
             .unwrap();
         assert_eq!(s.conversations("").unwrap()[0].kind, ConversationKind::Group);
+    }
+
+    // Regression: the upsert must report a change ONLY when a column actually
+    // moves. If it reported a change on every identical sync, the server would
+    // emit `conversations_changed` endlessly and the UI's
+    // refresh -> sync -> event -> refresh loop would never settle (the freeze).
+    #[test]
+    fn upsert_conversation_reports_change_only_on_real_change() {
+        let s = Store::open_in_memory().unwrap();
+        // first insert is a change
+        assert!(s.upsert_conversation("c1", "Chat", 100).unwrap());
+        // an identical upsert changes nothing
+        assert!(!s.upsert_conversation("c1", "Chat", 100).unwrap());
+        // a newer last_message_time is a change
+        assert!(s.upsert_conversation("c1", "Chat", 200).unwrap());
+        // an older time with an empty title moves nothing
+        assert!(!s.upsert_conversation("c1", "", 150).unwrap());
+        // same time again: still nothing
+        assert!(!s.upsert_conversation("c1", "Chat", 200).unwrap());
+        // a new, differing, non-empty name is a change; repeating it is not
+        assert!(s.upsert_conversation("c1", "Renamed", 200).unwrap());
+        assert!(!s.upsert_conversation("c1", "Renamed", 200).unwrap());
+    }
+
+    // Regression: same invariant for the kind-carrying upsert used by the network
+    // conversation sync — the origin of the `conversations_changed` storm.
+    #[test]
+    fn upsert_conversation_full_reports_change_only_on_real_change() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.upsert_conversation_full("c1", "Chat", 100, ConversationKind::Group).unwrap());
+        // identical sync: no change
+        assert!(!s.upsert_conversation_full("c1", "Chat", 100, ConversationKind::Group).unwrap());
+        // blank title + unknown kind + same time: nothing moves
+        assert!(!s.upsert_conversation_full("c1", "", 100, ConversationKind::Unknown).unwrap());
+        // a meaningful kind change is a change; repeating it is not
+        assert!(s.upsert_conversation_full("c1", "", 100, ConversationKind::OneOnOne).unwrap());
+        assert!(!s.upsert_conversation_full("c1", "", 100, ConversationKind::OneOnOne).unwrap());
     }
 
     #[test]

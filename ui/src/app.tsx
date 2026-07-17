@@ -14,6 +14,7 @@ import { createSignal, createMemo, For, Show, onMount } from "solid-js";
 import { Backend, type Conversation, type ChatMessage } from "./client";
 import { ensureServer } from "./server";
 import { notifyMessage, shouldNotify } from "./notify";
+import { coalesce } from "./singleflight";
 import { Splash } from "./splash";
 import { Spinner } from "./spinner";
 
@@ -90,7 +91,7 @@ function convLabel(c: Conversation): string {
 }
 
 // ---- backend wiring --------------------------------------------------------
-async function refreshConversations() {
+async function loadConversations() {
   try {
     const convs = await backend.conversations();
     setConversations(convs);
@@ -99,6 +100,15 @@ async function refreshConversations() {
     setStatus(`error: ${e.message ?? e}`);
   }
 }
+
+// Every `message` and `conversations_changed` event asks for a conversation-list
+// refresh. Coalesce them: the `conversations` request kicks a background sync
+// that can itself emit `conversations_changed`, so a naive 1:1 mapping amplifies
+// into a refresh -> sync -> event -> refresh storm that freezes the TUI. A
+// single-flight refresh collapses any burst into one in-flight fetch plus one
+// trailing pass, which — together with the backend only emitting the event on a
+// real change — makes the loop settle instead of exploding.
+const refreshConversations = coalesce(loadConversations);
 
 async function openConversation(id: string) {
   setOpenId(id);
