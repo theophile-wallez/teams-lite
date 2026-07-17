@@ -15,6 +15,7 @@ import { Backend, type Conversation, type ChatMessage } from "./client";
 import { ensureServer } from "./server";
 import { notifyMessage, shouldNotify } from "./notify";
 import { Splash } from "./splash";
+import { Spinner } from "./spinner";
 
 const backend = new Backend();
 
@@ -25,6 +26,7 @@ const [selectedIndex, setSelectedIndex] = createSignal(0);
 const [hoveredId, setHoveredId] = createSignal<string | null>(null);
 const [messages, setMessages] = createSignal<ChatMessage[]>([]);
 const [loadingMessages, setLoadingMessages] = createSignal(false);
+const [messagesError, setMessagesError] = createSignal<string | null>(null);
 const [status, setStatus] = createSignal("connecting…");
 const [live, setLive] = createSignal<"connecting" | "connected" | "disconnected">("connecting");
 const [paletteOpen, setPaletteOpen] = createSignal(false);
@@ -90,14 +92,16 @@ async function refreshConversations() {
 async function openConversation(id: string) {
   setOpenId(id);
   setMessages([]);
+  setMessagesError(null);
   setLoadingMessages(true);
   try {
     // returns instantly from the SQLite cache; the network refresh (if any)
-    // arrives later as a `messages_updated` event.
+    // arrives later as a `messages_updated` (or `messages_error`) event.
     const res = await backend.open(id);
     // guard against a slower response for a conversation we've since left
     if (openId() === id) setMessages(res.messages);
   } catch (e: any) {
+    if (openId() === id) setMessagesError(e?.message ?? String(e));
     setStatus(`open error: ${e.message ?? e}`);
   } finally {
     if (openId() === id) setLoadingMessages(false);
@@ -133,6 +137,14 @@ function wireEvents() {
   backend.on("messages_updated", (d: { conversation: string; messages: ChatMessage[] }) => {
     if (d.conversation === openId()) {
       setMessages(d.messages);
+      setMessagesError(null);
+      setLoadingMessages(false);
+    }
+  });
+  // background network refresh failed (e.g. auth could not be recovered)
+  backend.on("messages_error", (d: { conversation: string; error: string }) => {
+    if (d.conversation === openId()) {
+      setMessagesError(d.error || "Couldn't load messages");
       setLoadingMessages(false);
     }
   });
@@ -249,6 +261,34 @@ export function MessageBubble(props: { message: ChatMessage; showSenderName: boo
   );
 }
 
+// A medium ASCII illustration shown above a load error. A "no signal" motif —
+// enough presence to read as a real error state, not a stray line.
+const ERROR_ART = [
+  "     .------------------.     ",
+  "     |  x            x  |     ",
+  "     |                  |     ",
+  "     |    /\\  /\\  /\\    |     ",
+  "     |   /  \\/  \\/  \\   |     ",
+  "     |                  |     ",
+  "     '------------------'     ",
+  "        \\____________/        ",
+  "         (  no signal )       ",
+].join("\n");
+
+// A centered load-error block: a medium ASCII illustration on top, the error
+// message underneath. Used both as the full-screen empty-conversation state and
+// as the sticky banner above the composer when messages already exist.
+function MessagesError(props: { message: string }) {
+  return (
+    <box style={{ flexDirection: "column", alignItems: "center" }}>
+      <text content={ERROR_ART} style={{ fg: "#5b5b5b" }} />
+      <box style={{ height: 1 }} />
+      <text content="Couldn't load messages" style={{ fg: "#d08770" }} />
+      <text content={props.message} style={{ fg: "#7a5a4a" }} />
+    </box>
+  );
+}
+
 function MessagePane() {
   const openConv = createMemo(() => {
     const id = openId();
@@ -278,10 +318,23 @@ function MessagePane() {
           <Show
             when={messages().length > 0}
             fallback={
-              <text
-                content={loadingMessages() ? "loading messages…" : "No messages yet."}
-                style={{ fg: "gray" }}
-              />
+              // Empty conversation: an error (when the load failed) is centered
+              // in the whole pane; otherwise the loading / "no messages" hint.
+              <Show
+                when={messagesError()}
+                fallback={
+                  <Show
+                    when={loadingMessages()}
+                    fallback={<text content="No messages yet." style={{ fg: "gray" }} />}
+                  >
+                    <Spinner label="loading messages…" color="gray" />
+                  </Show>
+                }
+              >
+                <box style={{ flexGrow: 1, justifyContent: "center", alignItems: "center" }}>
+                  <MessagesError message={messagesError()!} />
+                </box>
+              </Show>
             }
           >
             <For each={messages()}>
@@ -290,6 +343,13 @@ function MessagePane() {
           </Show>
         </Show>
       </scrollbox>
+      {/* When messages already exist but the refresh failed, keep the error
+          pinned above the composer so it stays visible while scrolling. */}
+      <Show when={openId() && messages().length > 0 && messagesError()}>
+        <box style={{ flexDirection: "column", alignItems: "center", marginTop: 1 }}>
+          <MessagesError message={messagesError()!} />
+        </box>
+      </Show>
       <Show when={openId()}>
         <box style={{ flexDirection: "column", marginTop: 1 }}>
           <textarea
@@ -373,12 +433,16 @@ function Palette() {
 }
 
 function StatusBar() {
-  const dot = createMemo(() =>
-    live() === "connected" ? "🟢" : live() === "connecting" ? "⏳" : "🔴",
-  );
   return (
     <box style={{ height: 1, flexDirection: "row", backgroundColor: "#0A0A0A", paddingLeft: 1 }}>
-      <text content={`${dot()} ${status()}`} style={{ fg: "gray" }} />
+      <Show when={live() === "connecting"}>
+        <Spinner color="gray" />
+        <text content=" " />
+      </Show>
+      <Show when={live() !== "connecting"}>
+        <text content={live() === "connected" ? "🟢 " : "🔴 "} />
+      </Show>
+      <text content={status()} style={{ fg: "gray" }} />
     </box>
   );
 }
