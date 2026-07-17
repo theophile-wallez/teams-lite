@@ -28,3 +28,14 @@
 - Conventional commits. No AI attribution / Co-Authored-By lines.
 - De-risk before building: prove the risky piece with a spike, then implement.
 - Verify against the real tenant when possible; don't over-promise.
+
+## Working style (MANDATORY)
+
+- **Act autonomously.** For every prompt, drive the task to completion without
+  waiting for hand-holding. Investigate, decide, implement, and verify on your own.
+- **Always write clean code.** Favor clear naming, small focused units, and proper
+  separation of concerns over quick hacks.
+- **Choose the professional solution.** When you spot a problem, fix it properly.
+  Never take a shortcut just because it is easier or faster.
+- **Address root causes, not symptoms.** If a proper fix requires more work, do the
+  work rather than patching around the issue.
