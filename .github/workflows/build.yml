@@ -1,0 +1,71 @@
+name: build
+
+# Build the single `teams` binary on every push to master and publish it as a
+# rolling "latest" GitHub release, so `install.sh` can always fetch the newest
+# build. Tests run first as a hard gate — a red suite blocks the release.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-latest
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: bun install --frozen-lockfile
+
+      # --- gate: backend tests must pass before we publish anything ---
+      # We gate on `cargo test` (deterministic, no external services). The UI
+      # test suite is intentionally not run here: several of its tests are
+      # live-tenant integration tests that spawn the backend and sign in through
+      # the Microsoft Identity Broker over D-Bus, which does not exist on a CI
+      # runner. Run `bun test` locally against a real tenant for those.
+      - name: Backend tests
+        run: cargo test
+
+      # --- build the single self-contained binary ---
+      - name: Build backend (release)
+        run: cargo build --release --bin server
+
+      - name: Compile single `teams` binary
+        working-directory: ui
+        run: bun run build.ts
+
+      - name: Stage release asset
+        run: |
+          mkdir -p out
+          cp ui/dist/teams out/teams-linux-x64
+
+      - name: Publish rolling "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Recreate the rolling tag so `latest` always points at this commit.
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest out/teams-linux-x64 \
+            --title "teams-lite (latest)" \
+            --notes "Rolling build from ${GITHUB_SHA} — $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
+            --latest

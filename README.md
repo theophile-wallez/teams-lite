@@ -79,32 +79,53 @@ Linux machine — through the **Microsoft Identity Broker** — so it needs:
   (`com.microsoft.identity.broker1`). This ships with the Intune / Microsoft
   Entra sign-in components (e.g. the Intune Company Portal). Your work account
   must already be signed in on the device.
-- **[Rust](https://rustup.rs/)** (stable toolchain) to build the backend.
-- **[Bun](https://bun.sh/)** to run the terminal UI.
 - **`notify-send`** (from `libnotify`) for desktop notifications — optional, but
   recommended.
 
+Building from source additionally needs [Rust](https://rustup.rs/) and
+[Bun](https://bun.sh/); the prebuilt binary needs neither.
+
 ## Getting started
+
+Install the latest build and run it — that's the whole setup:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/theophile-wallez/teams-lite/master/install.sh | sh
+teams
+```
+
+`teams` is a single, self-contained binary: it bundles the terminal UI, the
+OpenTUI native library, **and** the Rust backend. On first launch it unpacks the
+backend to `~/.cache/teams-lite`, starts it, connects, and shuts it down cleanly
+on exit. If a server is already running, it simply attaches to it.
+
+The installer drops the binary in `~/.teams-lite/bin` (override with
+`TEAMS_LITE_HOME`) and links it onto your `PATH` when it can.
+
+## Build from source
+
+For development, or to build the binary yourself:
 
 ```bash
 # 1. Clone
 git clone https://github.com/theophile-wallez/teams-lite.git
 cd teams-lite
 
-# 2. Build the backend (produces target/release/server)
+# 2. Install the UI dependencies
+cd ui && bun install && cd ..
+
+# 3a. Run straight from source (spawns the debug/release backend it finds)
 cargo build --release --bin server
+cd ui && bun run start
 
-# 3. Install the UI dependencies
-cd ui
-bun install
-
-# 4. Launch — one command starts everything
-bun run src/index.tsx
+# 3b. …or produce the single `teams` binary (backend embedded)
+cargo build --release --bin server
+cd ui && bun run build   # -> ui/dist/teams
 ```
 
-The UI owns the backend: it spawns the Rust server, waits for it to come up,
-connects, and shuts it down cleanly on exit. If a server is already running,
-teams-lite simply attaches to it.
+Every push to `master` builds this binary in CI and publishes it as the rolling
+`latest` release that `install.sh` downloads.
+
 
 ## Keyboard shortcuts
 

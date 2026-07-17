@@ -6,6 +6,10 @@ out
 dist
 *.tgz
 
+# single-binary build artifacts (see build.ts)
+server.embed
+bunfig.toml.building
+
 # code coverage
 coverage
 *.lcov

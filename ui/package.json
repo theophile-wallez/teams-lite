@@ -3,6 +3,12 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "start": "bun run src/index.tsx",
+    "dev": "bun --watch run src/index.tsx",
+    "test": "bun test",
+    "build": "bun run build.ts"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },

@@ -3,14 +3,55 @@
 // One command (`teams`) starts everything.
 
 import { spawn, type Subprocess } from "bun";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 const PORT = 8420;
 const HOST = "127.0.0.1";
 
-/// Locate the backend binary (prefer release, fall back to debug).
-function serverBinary(): string {
+/// Are we running as a `bun build --compile` standalone binary? In that mode the
+/// backend is embedded inside this executable (see embedded-server.ts) rather
+/// than sitting next to a source tree. Bun.embeddedFiles is populated only in a
+/// compiled binary; under `bun run` it is empty.
+function isCompiledBinary(): boolean {
+  const embedded = (globalThis as unknown as { Bun?: { embeddedFiles?: unknown[] } }).Bun
+    ?.embeddedFiles;
+  return Array.isArray(embedded) && embedded.length > 0;
+}
+
+/// Extract the embedded backend to a stable cache path and return it. We only
+/// rewrite the file when it is missing or its size differs from the embedded
+/// copy, so upgrades (a newer `teams` binary) transparently refresh it while
+/// normal launches are a cheap stat().
+async function extractEmbeddedServer(): Promise<string> {
+  const { default: bunfsPath } = await import("./embedded-server");
+  const bytes = new Uint8Array(await Bun.file(bunfsPath).arrayBuffer());
+
+  const dir = join(homedir(), ".cache", "teams-lite");
+  mkdirSync(dir, { recursive: true });
+  const dest = join(dir, "server");
+
+  let upToDate = false;
+  try {
+    upToDate = statSync(dest).size === bytes.byteLength;
+  } catch {
+    upToDate = false;
+  }
+  if (!upToDate) {
+    writeFileSync(dest, bytes);
+  }
+  chmodSync(dest, 0o755);
+  return dest;
+}
+
+/// Locate the backend binary. Compiled binary → extract the embedded copy.
+/// Dev (`bun run`) → prefer release, fall back to debug in the source tree.
+async function serverBinary(): Promise<string> {
+  if (isCompiledBinary()) {
+    return extractEmbeddedServer();
+  }
+
   // ui/src -> project root is two levels up
   const root = join(import.meta.dir, "..", "..");
   const release = join(root, "target", "release", "server");
@@ -47,7 +88,7 @@ export async function ensureServer(): Promise<ServerHandle> {
     return { stop: () => {} }; // someone else owns it
   }
 
-  const bin = serverBinary();
+  const bin = await serverBinary();
   const proc: Subprocess = spawn([bin], {
     stdout: Bun.file("/tmp/teams-lite-server.log"),
     stderr: Bun.file("/tmp/teams-lite-server.log"),
