@@ -3,3 +3,6 @@
 # tooling artifacts (skill-registry cache), not part of the app
 .atl/
 
+# git worktree copies created for parallel sessions
+.worktrees/
+
