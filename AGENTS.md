@@ -29,6 +29,16 @@
 - De-risk before building: prove the risky piece with a spike, then implement.
 - Verify against the real tenant when possible; don't over-promise.
 
+## Git workflow
+
+- Do task work on a dedicated branch off `master`, never directly on `master`,
+  so an in-progress session can't leave `master` in a broken state.
+- Before treating a task as done, run the test suite (`cargo test`) on the
+  branch as a hard gate: only merge into `master` when it is green.
+- If tests fail, do not merge. Leave the branch intact and report what failed.
+- This is a convention the agent follows, not an enforced guarantee — the
+  authoritative check that keeps `master` green belongs in CI or a pre-push hook.
+
 ## Working style (MANDATORY)
 
 - **Act autonomously.** For every prompt, drive the task to completion without

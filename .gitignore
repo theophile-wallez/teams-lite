@@ -3,5 +3,3 @@
 # tooling artifacts (skill-registry cache), not part of the app
 .atl/
 
-# per-session git worktrees created by .opencode/plugin/session-worktree.ts
-.worktrees/
