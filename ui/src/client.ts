@@ -8,10 +8,15 @@
 // The UI only talks to the backend through this — it never touches the network
 // or the SQLite store directly (local-first is enforced server-side).
 
+// Mirrors the Rust `ConversationKind` (see src/store.rs). "unknown" is the safe
+// fallback for legacy rows or a chat type the backend doesn't map yet.
+export type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
+
 export type Conversation = {
   id: string;
   name: string;
   last_message_time: number;
+  kind: ConversationKind;
 };
 
 export type ChatMessage = {
@@ -21,6 +26,7 @@ export type ChatMessage = {
   compose_time: number;
   sender: string;
   content: string;
+  is_self?: boolean;
 };
 
 type Pending = { resolve: (v: any) => void; reject: (e: any) => void };

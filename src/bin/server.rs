@@ -180,20 +180,20 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
     match method {
         "ping" => Ok(json!("pong")),
 
-        // full conversation list (from the store; triggers a background sync too)
+        // full conversation list — LOCAL-FIRST: answer instantly from the SQLite
+        // cache (0 network round-trips), then sync from the network in the
+        // background and emit `conversations_changed` if anything new arrived.
         "conversations" => {
-            // fetch fresh from the network, persist, then read back
-            let session = ctx.session().await?;
-            let csa = ctx.csa().await?;
-            let convs = teams_read::fetch_conversations(&ctx.http, &session, &csa).await?;
-            let self_name = session.self_name.to_string();
+            let self_name = {
+                let session = ctx.session().await?;
+                session.self_name.to_string()
+            };
             let rows = {
                 let store = ctx.store()?;
-                teams_read::persist_conversations(&store, &convs);
                 store.conversations(&self_name)?
             };
-            // resolve 1:1 names in the background (fire and forget)
-            resolve_names_bg(ctx.clone(), convs);
+            // background sync (does not block the response = instant startup)
+            sync_conversations_bg(ctx.clone());
             Ok(conversations_json(&rows))
         }
 
@@ -202,6 +202,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // background and emit `messages_updated` if anything new arrived.
         "open" => {
             let conv = param_str(params, "conversation")?;
+            // self_name comes from the cached session (a lock + clone, no network
+            // in the common case) so we can tag each cached message with is_self.
+            let self_name = {
+                let session = ctx.session().await?;
+                session.self_name.to_string()
+            };
             let cached = {
                 let store = ctx.store()?;
                 store.newest_messages(&conv, 200)?
@@ -209,6 +215,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // background refresh (does not block the response = instant switch)
             let ctx_bg = ctx.clone();
             let conv_bg = conv.clone();
+            let self_name_bg = self_name.clone();
             let had = cached.len();
             tokio::spawn(async move {
                 let session = match ctx_bg.session().await { Ok(s) => s, Err(_) => return };
@@ -224,11 +231,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     if let Some(msgs) = after {
                         // something changed vs the cache we already returned
                         let _ = had;
-                        ctx_bg.emit("messages_updated", json!({ "conversation": conv_bg, "messages": messages_value(&msgs) }));
+                        ctx_bg.emit("messages_updated", json!({ "conversation": conv_bg, "messages": messages_value(&msgs, &self_name_bg) }));
                     }
                 }
             });
-            Ok(messages_json(&cached))
+            Ok(messages_json(&cached, &self_name))
         }
 
         // older page for scroll-up
@@ -242,13 +249,14 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
             };
             let session = ctx.session().await?;
+            let self_name = session.self_name.to_string();
             let page = teams_read::fetch_messages_page(&ctx.http, &session, &conv, before_ms, 30).await?;
             let msgs = {
                 let store = ctx.store()?;
                 teams_read::persist_page(&store, &conv, &page)?;
                 store.newest_messages(&conv, 500)?
             };
-            Ok(messages_json(&msgs))
+            Ok(messages_json(&msgs, &self_name))
         }
 
         // send a message
@@ -275,29 +283,62 @@ fn param_str(params: &Value, key: &str) -> Result<String> {
 fn conversations_json(rows: &[teams_lite::store::ConversationRow]) -> Value {
     json!(rows
         .iter()
-        .map(|c| json!({ "id": c.id, "name": c.display_name, "last_message_time": c.last_message_time }))
-        .collect::<Vec<_>>())
-}
-
-fn messages_value(msgs: &[Message]) -> Value {
-    json!(msgs
-        .iter()
-        .map(|m| json!({
-            "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
-            "compose_time": m.compose_time, "sender": m.sender, "content": m.content
+        .map(|c| json!({
+            "id": c.id,
+            "name": c.display_name,
+            "last_message_time": c.last_message_time,
+            "kind": c.kind.as_str()
         }))
         .collect::<Vec<_>>())
 }
 
-fn messages_json(msgs: &[Message]) -> Value {
-    json!({ "messages": messages_value(msgs) })
+fn messages_value(msgs: &[Message], self_name: &str) -> Value {
+    json!(msgs
+        .iter()
+        .map(|m| json!({
+            "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
+            "compose_time": m.compose_time, "sender": m.sender, "content": m.content,
+            "is_self": !self_name.is_empty() && m.sender == *self_name
+        }))
+        .collect::<Vec<_>>())
 }
 
-fn message_json(m: &Message) -> Value {
+fn messages_json(msgs: &[Message], self_name: &str) -> Value {
+    json!({ "messages": messages_value(msgs, self_name) })
+}
+
+fn message_json(m: &Message, self_name: &str) -> Value {
     json!({
         "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
-        "compose_time": m.compose_time, "sender": m.sender, "content": m.content
+        "compose_time": m.compose_time, "sender": m.sender, "content": m.content,
+        "is_self": !self_name.is_empty() && m.sender == self_name
     })
+}
+
+/// Sync the conversation list from the network in the background: fetch, persist,
+/// resolve 1:1 names, and emit `conversations_changed` if anything changed. This
+/// keeps the `conversations` request off the network path (local-first startup).
+fn sync_conversations_bg(ctx: Ctx) {
+    tokio::spawn(async move {
+        let session = match ctx.session().await { Ok(s) => s, Err(_) => return };
+        let csa = match ctx.csa().await { Ok(t) => t, Err(_) => return };
+        let convs = match teams_read::fetch_conversations(&ctx.http, &session, &csa).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let inserted = {
+            if let Ok(store) = ctx.store() {
+                teams_read::persist_conversations(&store, &convs)
+            } else {
+                return;
+            }
+        };
+        if inserted > 0 {
+            ctx.emit("conversations_changed", json!({}));
+        }
+        // resolve 1:1 names in the background (emits conversations_changed itself)
+        resolve_names_bg(ctx, convs);
+    });
 }
 
 /// Resolve 1:1 display names in the background and emit conversations_changed.
@@ -342,13 +383,14 @@ fn spawn_realtime(ctx: Ctx, session: Session, ic3: String, db_path: String) {
 
     // consume trouter messages: persist + broadcast
     let ctx_msgs = ctx.clone();
+    let self_name = session.self_name.to_string();
     tokio::spawn(async move {
         while let Some(msgs) = ev_rx.recv().await {
             if let Ok(store) = ctx_msgs.store() {
                 for m in &msgs {
                     store.upsert_conversation(&m.conversation_id, "", m.compose_time).ok();
                     if store.insert_message(m).unwrap_or(false) {
-                        ctx_msgs.emit("message", message_json(m));
+                        ctx_msgs.emit("message", message_json(m, &self_name));
                     }
                 }
             }

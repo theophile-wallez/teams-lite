@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     display_name      TEXT,
     last_message_time INTEGER NOT NULL DEFAULT 0,
     oldest_cursor     TEXT,
-    has_more_older    INTEGER NOT NULL DEFAULT 1
+    has_more_older    INTEGER NOT NULL DEFAULT 1,
+    kind              TEXT NOT NULL DEFAULT 'unknown'
 );
 CREATE TABLE IF NOT EXISTS messages (
     id              TEXT NOT NULL,
@@ -41,12 +42,49 @@ pub struct Message {
     pub content: String,
 }
 
+/// The nature of a conversation. Modeled as an enum (not a bool) because there
+/// are more than two categories: a self "Notes" chat is neither a 1:1 nor a
+/// group. `Unknown` is the safe fallback for a legacy row or a chat type Teams
+/// introduces that we don't map yet — the UI treats it like a group (shows
+/// sender names), which never hides information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationKind {
+    OneOnOne,
+    Group,
+    Notes,
+    Unknown,
+}
+
+impl ConversationKind {
+    /// Stable wire/storage token. Kept in sync with `from_str` and the UI union.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConversationKind::OneOnOne => "one_on_one",
+            ConversationKind::Group => "group",
+            ConversationKind::Notes => "notes",
+            ConversationKind::Unknown => "unknown",
+        }
+    }
+
+    /// Parse a stored/wire token. Anything unrecognized maps to `Unknown` rather
+    /// than panicking, so an unexpected value never takes the process down.
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "one_on_one" => ConversationKind::OneOnOne,
+            "group" => ConversationKind::Group,
+            "notes" => ConversationKind::Notes,
+            _ => ConversationKind::Unknown,
+        }
+    }
+}
+
 /// A conversation row for the list pane, most-recent first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationRow {
     pub id: String,
     pub display_name: String,
     pub last_message_time: i64,
+    pub kind: ConversationKind,
 }
 
 pub struct Store {
@@ -66,6 +104,25 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
 
 const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, content";
 
+/// Idempotent, additive migrations for databases created before a column existed.
+/// `CREATE TABLE IF NOT EXISTS` never alters an existing table, so older stores
+/// miss columns added to SCHEMA. We add them here, ignoring the "duplicate column"
+/// error that a fresh store (already carrying the column) returns.
+fn migrate(conn: &Connection) -> Result<()> {
+    // kind: distinguishes 1:1 / group / notes conversations. Defaults to
+    // 'unknown' for legacy rows; the next network sync backfills the real value.
+    match conn.execute(
+        "ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'unknown'",
+        [],
+    ) {
+        Ok(_) => {}
+        // rusqlite surfaces "duplicate column name" when the column already exists
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column") => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -74,12 +131,14 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -94,6 +153,34 @@ impl Store {
                     THEN excluded.display_name ELSE conversations.display_name END,
                 last_message_time = MAX(conversations.last_message_time, excluded.last_message_time)",
             params![id, display_name, last_message_time],
+        )?;
+        Ok(())
+    }
+
+    /// Upsert a conversation carrying its `kind`. Only the network sync
+    /// (`persist_conversations`) knows this; blind upserts (live events, name
+    /// resolution) use `upsert_conversation`, which leaves the kind untouched.
+    /// A known kind is never downgraded to `unknown` by a later blank sync.
+    pub fn upsert_conversation_full(
+        &self,
+        id: &str,
+        display_name: &str,
+        last_message_time: i64,
+        kind: ConversationKind,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO conversations (id, display_name, last_message_time, kind)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                display_name = CASE
+                    WHEN excluded.display_name IS NOT NULL AND excluded.display_name <> ''
+                    THEN excluded.display_name ELSE conversations.display_name END,
+                last_message_time = MAX(conversations.last_message_time, excluded.last_message_time),
+                -- keep a known kind; only overwrite when the new value is meaningful
+                kind = CASE
+                    WHEN excluded.kind <> 'unknown' THEN excluded.kind
+                    ELSE conversations.kind END",
+            params![id, display_name, last_message_time, kind.as_str()],
         )?;
         Ok(())
     }
@@ -127,7 +214,8 @@ impl Store {
                             ORDER BY m.seq DESC LIMIT 1
                         ), '')
                     END AS name,
-                    c.last_message_time
+                    c.last_message_time,
+                    c.kind
              FROM conversations c
              ORDER BY c.last_message_time DESC, c.id ASC",
         )?;
@@ -136,6 +224,7 @@ impl Store {
                 id: r.get(0)?,
                 display_name: r.get(1)?,
                 last_message_time: r.get(2)?,
+                kind: ConversationKind::from_str(&r.get::<_, String>(3)?),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -284,6 +373,38 @@ mod tests {
         let c = s.conversations("").unwrap();
         assert_eq!(c[0].display_name, "Team Chat"); // title preserved
         assert_eq!(c[0].last_message_time, 200); // time advanced
+    }
+
+    #[test]
+    fn kind_defaults_unknown_and_is_sticky() {
+        let s = Store::open_in_memory().unwrap();
+        // a blind upsert (live event / name resolution) never sets kind
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        assert_eq!(s.conversations("").unwrap()[0].kind, ConversationKind::Unknown);
+
+        // a network sync establishes the real kind
+        s.upsert_conversation_full("c1", "Chat", 150, ConversationKind::OneOnOne)
+            .unwrap();
+        assert_eq!(s.conversations("").unwrap()[0].kind, ConversationKind::OneOnOne);
+
+        // a later blank/unknown sync must NOT downgrade a known kind
+        s.upsert_conversation_full("c1", "", 200, ConversationKind::Unknown)
+            .unwrap();
+        assert_eq!(s.conversations("").unwrap()[0].kind, ConversationKind::OneOnOne);
+
+        // but a meaningful kind change is honored
+        s.upsert_conversation_full("c1", "", 250, ConversationKind::Group)
+            .unwrap();
+        assert_eq!(s.conversations("").unwrap()[0].kind, ConversationKind::Group);
+    }
+
+    #[test]
+    fn kind_from_str_falls_back_to_unknown() {
+        assert_eq!(ConversationKind::from_str("one_on_one"), ConversationKind::OneOnOne);
+        assert_eq!(ConversationKind::from_str("group"), ConversationKind::Group);
+        assert_eq!(ConversationKind::from_str("notes"), ConversationKind::Notes);
+        assert_eq!(ConversationKind::from_str("something_new"), ConversationKind::Unknown);
+        assert_eq!(ConversationKind::from_str(""), ConversationKind::Unknown);
     }
 
     #[test]

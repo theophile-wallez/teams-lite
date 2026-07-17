@@ -20,7 +20,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::store::Message;
+use crate::store::{ConversationKind, Message};
 use crate::teams::Session;
 
 /// The chatsvcagg audience — the conversation-list aggregator rejects the ic3 token.
@@ -45,6 +45,30 @@ pub struct Conversation {
     /// For a 1:1, the mri of the OTHER member (not us). Empty otherwise. Used to
     /// resolve the conversation's display name via the profiles endpoint.
     pub other_member_mri: String,
+}
+
+impl Conversation {
+    /// Classify this conversation into a storable `ConversationKind`.
+    ///
+    /// Priority: a self "Notes" chat (Teams uses the `48:` id prefix, e.g.
+    /// `48:notes`) is detected first, since it can also carry a generic chat
+    /// type. Then the explicit 1:1 flag, then the group fallback. When we have
+    /// no signal at all we return `Unknown` so the store never guesses.
+    pub fn kind(&self) -> ConversationKind {
+        if self.id.starts_with("48:") {
+            return ConversationKind::Notes;
+        }
+        if self.is_one_on_one || self.chat_type.eq_ignore_ascii_case("oneonone") {
+            return ConversationKind::OneOnOne;
+        }
+        match self.chat_type.to_ascii_lowercase().as_str() {
+            "group" | "meeting" | "topic" => ConversationKind::Group,
+            "" => ConversationKind::Unknown,
+            // an unmapped-but-present chat type: treat as a group (shows names,
+            // which never hides information) rather than misclassifying as 1:1.
+            _ => ConversationKind::Group,
+        }
+    }
 }
 
 /// One page of history, oldest-first (ready to feed the store in seq order).
@@ -161,7 +185,10 @@ pub fn persist_conversations(store: &Store, convs: &[Conversation]) -> usize {
         if c.is_empty {
             continue;
         }
-        if store.upsert_conversation(&c.id, &c.title, c.last_message_time).is_ok() {
+        if store
+            .upsert_conversation_full(&c.id, &c.title, c.last_message_time, c.kind())
+            .is_ok()
+        {
             written += 1;
         }
     }
@@ -452,6 +479,42 @@ mod tests {
         assert!(convs[0].is_one_on_one);
         assert_eq!(convs[0].other_member_mri, "8:orgid:other");
         assert_eq!(convs[0].title, ""); // blank -> to be resolved by name lookup
+    }
+
+    #[test]
+    fn conversation_kind_classification() {
+        let base = Conversation {
+            id: "19:x@thread.v2".into(),
+            title: "".into(),
+            chat_type: "".into(),
+            is_one_on_one: false,
+            last_message_time: 0,
+            is_empty: false,
+            other_member_mri: "".into(),
+        };
+
+        // explicit 1:1 flag
+        let one = Conversation { is_one_on_one: true, ..base.clone() };
+        assert_eq!(one.kind(), ConversationKind::OneOnOne);
+
+        // chat type says oneOnOne even if the flag is missing
+        let one2 = Conversation { chat_type: "oneOnOne".into(), ..base.clone() };
+        assert_eq!(one2.kind(), ConversationKind::OneOnOne);
+
+        // self "Notes" chat detected by the 48: id prefix, wins over other signals
+        let notes = Conversation { id: "48:notes".into(), is_one_on_one: true, ..base.clone() };
+        assert_eq!(notes.kind(), ConversationKind::Notes);
+
+        // known group types
+        let group = Conversation { chat_type: "group".into(), ..base.clone() };
+        assert_eq!(group.kind(), ConversationKind::Group);
+
+        // no signal at all -> Unknown (store never guesses)
+        assert_eq!(base.kind(), ConversationKind::Unknown);
+
+        // present-but-unmapped type -> Group (shows names, never hides info)
+        let weird = Conversation { chat_type: "federated".into(), ..base.clone() };
+        assert_eq!(weird.kind(), ConversationKind::Group);
     }
 
     #[test]

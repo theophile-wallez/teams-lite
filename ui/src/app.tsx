@@ -13,6 +13,7 @@ import { useKeyboard } from "@opentui/solid";
 import { createSignal, createMemo, For, Show, onMount } from "solid-js";
 import { Backend, type Conversation, type ChatMessage } from "./client";
 import { ensureServer } from "./server";
+import { notifyMessage, shouldNotify } from "./notify";
 import { Splash } from "./splash";
 
 const backend = new Backend();
@@ -71,8 +72,8 @@ function plain(html: string): string {
 
 function convLabel(c: Conversation): string {
   if (c.name && c.name.length > 0) return c.name;
-  if (c.id.startsWith("48:")) return "Notes";
-  return "(sans titre)";
+  if (c.kind === "notes") return "Notes";
+  return "(untitled)";
 }
 
 // ---- backend wiring --------------------------------------------------------
@@ -121,6 +122,9 @@ function wireEvents() {
     // live message: if it belongs to the open conversation, append it
     if (m.conversation_id === openId()) {
       setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
+    } else if (shouldNotify(m, openId())) {
+      // incoming message for a conversation we're not looking at: notify desktop
+      notifyMessage(m.sender, m.content);
     }
     // bump the conversation list ordering (refetch is cheap enough here)
     refreshConversations();
@@ -179,8 +183,6 @@ function ConversationList() {
         backgroundColor: "#141414",
         flexDirection: "column",
         paddingTop: 1,
-        paddingLeft: 1,
-        paddingRight: 1,
       }}
     >
       <scrollbox
@@ -205,12 +207,12 @@ function ConversationList() {
             const fg = () => (isOpen() ? "#ffffff" : "#c0c0c0");
             return (
               <box
-                style={{ width: "100%", height: 1, backgroundColor: bg() }}
+                style={{ width: "100%", height: 3, flexDirection: "row", justifyContent: "flex-start", alignItems: "center", paddingLeft: 1, backgroundColor: bg() }}
                 onMouseDown={() => openConv(c.id, i())}
                 onMouseOver={() => setHoveredId(c.id)}
                 onMouseOut={() => setHoveredId((h) => (h === c.id ? null : h))}
               >
-                <text content={` ${convLabel(c)}`} style={{ fg: fg() }} />
+                <text content={convLabel(c)} style={{ fg: fg() }} />
               </box>
             );
           }}
@@ -220,13 +222,49 @@ function ConversationList() {
   );
 }
 
+// A single chat message, rendered as a bubble. Mine align right with an accent
+// background; everyone else's align left in a neutral grey. The sender name only
+// appears on incoming bubbles, and only in group chats (in a 1:1 or the Notes
+// chat the other party is implicit). My own messages never show a name — their
+// right alignment already says they're mine.
+export function MessageBubble(props: { message: ChatMessage; showSenderName: boolean }) {
+  const mine = () => props.message.is_self === true;
+  return (
+    <box
+      style={{
+        flexDirection: "column",
+        alignSelf: mine() ? "flex-end" : "flex-start",
+        maxWidth: "72%",
+        marginBottom: 1,
+        paddingLeft: 1,
+        paddingRight: 1,
+        backgroundColor: mine() ? "#2b5278" : "#1e1e1e",
+      }}
+    >
+      <Show when={!mine() && props.showSenderName}>
+        <text content={props.message.sender} style={{ fg: "#7fb0e0" }} />
+      </Show>
+      <text content={plain(props.message.content)} style={{ fg: "#e8e8e8" }} />
+    </box>
+  );
+}
+
 function MessagePane() {
+  const openConv = createMemo(() => {
+    const id = openId();
+    if (!id) return null;
+    return conversations().find((x) => x.id === id) ?? null;
+  });
   const title = createMemo(() => {
     const id = openId();
     if (!id) return " Messages ";
-    const c = conversations().find((x) => x.id === id);
+    const c = openConv();
     return ` ${c ? convLabel(c) : id} `;
   });
+  // Only group chats show a sender name on incoming bubbles. In a 1:1 (or the
+  // self "Notes" chat) the other party is implicit, and our own messages never
+  // show a name because they're already right-aligned.
+  const showSenderNames = createMemo(() => openConv()?.kind === "group");
   return (
     <box style={{ flexGrow: 1, flexDirection: "column", backgroundColor: "#0A0A0A", paddingTop: 1, paddingLeft: 1, paddingRight: 1 }}>
       <Show when={openId()}>
@@ -247,12 +285,7 @@ function MessagePane() {
             }
           >
             <For each={messages()}>
-              {(m) => (
-                <box style={{ flexDirection: "row", marginBottom: 0 }}>
-                  <text content={`${m.sender}: `} style={{ fg: "green" }} />
-                  <text content={plain(m.content)} />
-                </box>
-              )}
+              {(m) => <MessageBubble message={m} showSenderName={showSenderNames()} />}
             </For>
           </Show>
         </Show>
