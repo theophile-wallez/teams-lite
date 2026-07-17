@@ -147,8 +147,8 @@ async fn main() -> Result<()> {
     let session = teams::connect(&http).await?;
     eprintln!("[ok] region={} self={:?}", session.region, session.self_name);
 
-    let db_path = std::env::temp_dir().join("teams-lite.sqlite");
-    let db_path = db_path.to_str().unwrap().to_string();
+    let db_path = data_db_path()?;
+    eprintln!("[ok] store {db_path}");
     Store::open(&db_path)?; // ensure schema
 
     let (events_tx, _) = broadcast::channel::<Value>(256);
@@ -373,6 +373,31 @@ fn param_str(params: &Value, key: &str) -> Result<String> {
         .and_then(|v| v.as_str())
         .map(String::from)
         .with_context(|| format!("missing param: {key}"))
+}
+
+/// Resolve the persistent SQLite path, following the XDG Base Directory spec:
+/// `$XDG_DATA_HOME/teams-lite/teams-lite.sqlite`, falling back to
+/// `~/.local/share/teams-lite/teams-lite.sqlite`.
+///
+/// This MUST be a durable location. The store is the local-first cache — its
+/// entire value (instant open, offline history) depends on surviving restarts
+/// and reboots. The temp dir is often a tmpfs that's wiped on reboot, which
+/// silently defeats local-first (every conversation reloads from the network
+/// after a reboot), so we never put it there. The parent dir is created if
+/// missing.
+fn data_db_path() -> Result<String> {
+    // XDG spec: a relative $XDG_DATA_HOME is invalid and must be ignored.
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
+        .context("cannot resolve a data directory: neither XDG_DATA_HOME nor HOME is set")?;
+    let dir = base.join("teams-lite");
+    std::fs::create_dir_all(&dir).with_context(|| format!("create data dir {}", dir.display()))?;
+    dir.join("teams-lite.sqlite")
+        .into_os_string()
+        .into_string()
+        .map_err(|p| anyhow::anyhow!("data path is not valid UTF-8: {p:?}"))
 }
 
 fn conversations_json(rows: &[teams_lite::store::ConversationRow]) -> Value {
