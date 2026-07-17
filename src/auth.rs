@@ -8,7 +8,60 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+/// Broker access tokens live ~1h; refresh well before that to avoid 401s mid-use.
+const TOKEN_TTL: Duration = Duration::from_secs(50 * 60);
+
+/// A process-wide cache of broker tokens keyed by scope. Re-acquires silently via
+/// the PRT when a token is missing or older than [`TOKEN_TTL`]. Cheap to clone.
+#[derive(Clone, Default)]
+pub struct TokenCache {
+    inner: std::sync::Arc<Mutex<HashMap<String, (String, Instant)>>>,
+}
+
+impl TokenCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return a valid token for `scope`, refreshing through the broker if the
+    /// cached one is missing or near expiry.
+    pub async fn get(&self, scope: &str) -> Result<String> {
+        // fast path: a fresh token is already cached
+        if let Some(tok) = self.cached_fresh(scope) {
+            return Ok(tok);
+        }
+        // slow path: acquire a new one, then cache it
+        let tok = get_token(scope).await?;
+        if let Ok(mut map) = self.inner.lock() {
+            map.insert(scope.to_string(), (tok.clone(), Instant::now()));
+        }
+        Ok(tok)
+    }
+
+    /// Force a refresh for `scope` (e.g. after an unexpected 401) and cache it.
+    pub async fn refresh(&self, scope: &str) -> Result<String> {
+        let tok = get_token(scope).await?;
+        if let Ok(mut map) = self.inner.lock() {
+            map.insert(scope.to_string(), (tok.clone(), Instant::now()));
+        }
+        Ok(tok)
+    }
+
+    fn cached_fresh(&self, scope: &str) -> Option<String> {
+        let map = self.inner.lock().ok()?;
+        let (tok, at) = map.get(scope)?;
+        if at.elapsed() < TOKEN_TTL {
+            Some(tok.clone())
+        } else {
+            None
+        }
+    }
+}
 
 const BROKER_NAME: &str = "com.microsoft.identity.broker1";
 const BROKER_PATH: &str = "/com/microsoft/identity/broker1";

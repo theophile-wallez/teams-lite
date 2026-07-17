@@ -34,13 +34,23 @@ const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) teams-lite/0.1";
 #[derive(Clone)]
 struct Ctx {
     http: reqwest::Client,
-    session: Arc<Session>,
-    csa_token: Arc<String>,
-    profile_token: Arc<String>,
+    /// broker token cache (auto-refreshes per scope before expiry)
+    tokens: auth::TokenCache,
+    /// the Teams session (skypetoken + endpoints); refreshed when stale
+    session: Arc<tokio::sync::Mutex<SessionCell>>,
     db_path: Arc<String>,
     /// broadcast of server->client events (fan-out to every connected UI)
     events: broadcast::Sender<Value>,
 }
+
+/// The session plus when it was minted, so we can rebuild it before the
+/// skypetoken expires (~1 day, but we refresh conservatively).
+struct SessionCell {
+    session: Session,
+    minted: std::time::Instant,
+}
+
+const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(50 * 60);
 
 impl Ctx {
     fn store(&self) -> Result<Store> {
@@ -50,15 +60,40 @@ impl Ctx {
         // ignore send errors (no subscribers yet is fine)
         let _ = self.events.send(json!({ "event": event, "data": data }));
     }
+    /// A valid CSA-audience token (auto-refreshed).
+    async fn csa(&self) -> Result<String> {
+        self.tokens.get(teams_read::CSA_SCOPE).await
+    }
+    /// A valid profiles-audience token (auto-refreshed).
+    async fn profile(&self) -> Result<String> {
+        self.tokens.get(teams_profiles::PROFILE_SCOPE).await
+    }
+    /// A fresh clone of the Teams session, rebuilt if the cached one is stale.
+    async fn session(&self) -> Result<Session> {
+        {
+            let cell = self.session.lock().await;
+            if cell.minted.elapsed() < SESSION_TTL {
+                return Ok(cell.session.clone());
+            }
+        }
+        // stale: rebuild (skypetoken from a fresh skype token via the broker)
+        let fresh = teams::connect(&self.http).await?;
+        let mut cell = self.session.lock().await;
+        cell.session = fresh.clone();
+        cell.minted = std::time::Instant::now();
+        Ok(fresh)
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     eprintln!("teams-lite server — authenticating (broker)…");
     let http = reqwest::Client::builder().user_agent(UA).http1_only().build()?;
-    let ic3 = auth::get_token(IC3_SCOPE).await.context("ic3 token")?;
-    let csa = auth::get_token(teams_read::CSA_SCOPE).await.context("csa token")?;
-    let profile_token = auth::get_token(teams_profiles::PROFILE_SCOPE).await.context("profile token")?;
+    let tokens = auth::TokenCache::new();
+    // warm the caches used at boot (also validates the broker is reachable)
+    let ic3 = tokens.get(IC3_SCOPE).await.context("ic3 token")?;
+    tokens.get(teams_read::CSA_SCOPE).await.context("csa token")?;
+    tokens.get(teams_profiles::PROFILE_SCOPE).await.context("profile token")?;
     let session = teams::connect(&http).await?;
     eprintln!("[ok] region={} self={:?}", session.region, session.self_name);
 
@@ -69,9 +104,11 @@ async fn main() -> Result<()> {
     let (events_tx, _) = broadcast::channel::<Value>(256);
     let ctx = Ctx {
         http,
-        session: Arc::new(session.clone()),
-        csa_token: Arc::new(csa),
-        profile_token: Arc::new(profile_token),
+        tokens,
+        session: Arc::new(tokio::sync::Mutex::new(SessionCell {
+            session: session.clone(),
+            minted: std::time::Instant::now(),
+        })),
         db_path: Arc::new(db_path.clone()),
         events: events_tx,
     };
@@ -146,8 +183,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // full conversation list (from the store; triggers a background sync too)
         "conversations" => {
             // fetch fresh from the network, persist, then read back
-            let convs = teams_read::fetch_conversations(&ctx.http, &ctx.session, &ctx.csa_token).await?;
-            let self_name = ctx.session.self_name.to_string();
+            let session = ctx.session().await?;
+            let csa = ctx.csa().await?;
+            let convs = teams_read::fetch_conversations(&ctx.http, &session, &csa).await?;
+            let self_name = session.self_name.to_string();
             let rows = {
                 let store = ctx.store()?;
                 teams_read::persist_conversations(&store, &convs);
@@ -172,7 +211,8 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let conv_bg = conv.clone();
             let had = cached.len();
             tokio::spawn(async move {
-                if let Ok(page) = teams_read::fetch_newest(&ctx_bg.http, &ctx_bg.session, &conv_bg).await {
+                let session = match ctx_bg.session().await { Ok(s) => s, Err(_) => return };
+                if let Ok(page) = teams_read::fetch_newest(&ctx_bg.http, &session, &conv_bg).await {
                     let after = {
                         if let Ok(store) = ctx_bg.store() {
                             let inserted = teams_read::persist_page(&store, &conv_bg, &page).unwrap_or(0);
@@ -201,7 +241,8 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     (cursor, true) => cursor.and_then(|s| s.parse::<i64>().ok()),
                 }
             };
-            let page = teams_read::fetch_messages_page(&ctx.http, &ctx.session, &conv, before_ms, 30).await?;
+            let session = ctx.session().await?;
+            let page = teams_read::fetch_messages_page(&ctx.http, &session, &conv, before_ms, 30).await?;
             let msgs = {
                 let store = ctx.store()?;
                 teams_read::persist_page(&store, &conv, &page)?;
@@ -214,7 +255,8 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         "send" => {
             let conv = param_str(params, "conversation")?;
             let text = param_str(params, "text")?;
-            teams_send::send_message(&ctx.http, &ctx.session, &conv, &text).await?;
+            let session = ctx.session().await?;
+            teams_send::send_message(&ctx.http, &session, &conv, &text).await?;
             Ok(json!({ "sent": true }))
         }
 
@@ -270,7 +312,9 @@ fn resolve_names_bg(ctx: Ctx, convs: Vec<teams_read::Conversation>) {
             return;
         }
         let mris: Vec<String> = to_resolve.iter().map(|(_, m)| m.clone()).collect();
-        if let Ok(names) = teams_profiles::fetch_names(&ctx.http, &ctx.session, &ctx.profile_token, &mris).await {
+        let session = match ctx.session().await { Ok(s) => s, Err(_) => return };
+        let profile = match ctx.profile().await { Ok(t) => t, Err(_) => return };
+        if let Ok(names) = teams_profiles::fetch_names(&ctx.http, &session, &profile, &mris).await {
             if let Ok(store) = ctx.store() {
                 let mut changed = false;
                 for (conv_id, mri) in &to_resolve {
