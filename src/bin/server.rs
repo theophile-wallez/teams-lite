@@ -170,7 +170,17 @@ async fn main() -> Result<()> {
     eprintln!("[ok] server ws://{ADDR} — ready");
 
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        // A transient accept() error (e.g. fd pressure) must not take down the
+        // whole server — log it and keep serving. Propagating it here would
+        // exit the process and leave every connected UI reconnecting to nothing.
+        let (stream, _peer) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("[accept] transient error: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         let ctx = ctx.clone();
         tokio::spawn(async move {
             if let Err(e) = serve_conn(ctx, stream).await {
