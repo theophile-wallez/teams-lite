@@ -18,6 +18,7 @@ No Electron. No browser. Just messages — in real time, on Linux.
 ![UI](https://img.shields.io/badge/UI-Bun%20%2B%20OpenTUI%20%2B%20Solid-000000?style=flat-square)
 ![Interface](https://img.shields.io/badge/interface-keyboard--first-2b5278?style=flat-square)
 ![Realtime](https://img.shields.io/badge/realtime-%3C500ms-2ea043?style=flat-square)
+![Vibe-coded](https://img.shields.io/badge/100%25-vibe--coded-ff69b4?style=flat-square)
 
 </div>
 
@@ -35,6 +36,11 @@ type a name, and you're in the conversation.
 
 > **Heads up:** teams-lite is an independent, unofficial client. It is not
 > affiliated with or endorsed by Microsoft.
+
+> **Vibe-coded:** this project is 100% vibe-coded — built end-to-end with AI
+> coding agents, guided by intuition and momentum rather than a formal spec.
+> Treat it accordingly: it's a fun, fast-moving experiment, not battle-tested
+> production software. Read the code before you trust it.
 
 ## Highlights
 
