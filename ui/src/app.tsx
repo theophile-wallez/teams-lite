@@ -37,6 +37,13 @@ const [paletteOpen, setPaletteOpen] = createSignal(false);
 const [paletteQuery, setPaletteQuery] = createSignal("");
 const [draft, setDraft] = createSignal("");
 
+// Per-conversation message cache for this session. Once a conversation has been
+// loaded, re-opening it shows its messages INSTANTLY from here — no loading
+// spinner, no blank state, no visible refetch. Live `message` and background
+// `messages_updated` events keep each cached entry current, so the instant view
+// is also up to date. Bounded to conversations actually opened this session.
+const messageCache = new Map<string, ChatMessage[]>();
+
 // Composer auto-grow: starts at 3 rows, grows with newlines up to 23, then the
 // textarea scrolls internally.
 const COMPOSER_MIN_ROWS = 3;
@@ -95,17 +102,31 @@ async function refreshConversations() {
 
 async function openConversation(id: string) {
   setOpenId(id);
-  setMessages([]);
   setMessagesError(null);
-  setLoadingMessages(true);
+
+  const cached = messageCache.get(id);
+  if (cached) {
+    // Already loaded this session: show it INSTANTLY. No blank state, no
+    // spinner. The backend refresh below still runs, but invisibly.
+    setMessages(cached);
+    setLoadingMessages(false);
+  } else {
+    // Cold open (first time this session): nothing to show yet, so indicate
+    // loading. The backend answers from the SQLite cache, so this is brief.
+    setMessages([]);
+    setLoadingMessages(true);
+  }
+
   try {
-    // returns instantly from the SQLite cache; the network refresh (if any)
+    // Returns instantly from the SQLite cache; the network refresh (if any)
     // arrives later as a `messages_updated` (or `messages_error`) event.
     const res = await backend.open(id);
+    messageCache.set(id, res.messages);
     // guard against a slower response for a conversation we've since left
     if (openId() === id) setMessages(res.messages);
   } catch (e: any) {
-    if (openId() === id) setMessagesError(e?.message ?? String(e));
+    // Only surface the error if we have nothing cached to fall back on.
+    if (openId() === id && !cached) setMessagesError(e?.message ?? String(e));
     setStatus(`open error: ${e.message ?? e}`);
   } finally {
     if (openId() === id) setLoadingMessages(false);
@@ -127,6 +148,12 @@ async function sendDraft() {
 
 function wireEvents() {
   backend.on("message", (m: ChatMessage) => {
+    // Keep the per-conversation cache warm so re-opening stays instant AND
+    // current, even for a conversation we're not currently looking at.
+    const cached = messageCache.get(m.conversation_id);
+    if (cached && !cached.some((x) => x.id === m.id)) {
+      messageCache.set(m.conversation_id, [...cached, m]);
+    }
     // live message: if it belongs to the open conversation, append it
     if (m.conversation_id === openId()) {
       setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
@@ -139,6 +166,8 @@ function wireEvents() {
   });
   // background network refresh of an open conversation finished with new data
   backend.on("messages_updated", (d: { conversation: string; messages: ChatMessage[] }) => {
+    // reconcile the cache so a later re-open shows the refreshed set instantly
+    messageCache.set(d.conversation, d.messages);
     if (d.conversation === openId()) {
       setMessages(d.messages);
       setMessagesError(null);
