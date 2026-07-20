@@ -20,6 +20,7 @@ import { Splash } from "./splash";
 import { Spinner } from "./spinner";
 import { Border } from "./border";
 import { DialogSelect } from "./dialog-select";
+import { MessageActions } from "./message-actions";
 
 const backend = new Backend();
 
@@ -38,6 +39,7 @@ const [messagesError, setMessagesError] = createSignal<string | null>(null);
 const [status, setStatus] = createSignal("connecting…");
 const [live, setLive] = createSignal<"connecting" | "connected" | "disconnected">("connecting");
 const [paletteOpen, setPaletteOpen] = createSignal(false);
+const [messageMenu, setMessageMenu] = createSignal<ChatMessage | null>(null);
 const [draft, setDraft] = createSignal("");
 
 // Set once the backend's startup check reports a newer rolling build. Surfaced
@@ -349,7 +351,8 @@ const BOTTOM_HALF_GAP_BORDER = {
 // reply, the quoted message is drawn as a nested box with the same half-cell inset —
 // a shade lighter than the bubble on incoming messages, a shade darker on my own, so
 // the quote reads as recessed either way.
-export function MessageBubble(props: { message: ChatMessage; showSenderName: boolean }) {
+export function MessageBubble(props: { message: ChatMessage; showSenderName: boolean; onClick?: () => void }) {
+  const renderer = useRenderer();
   const mine = () => props.message.is_self === true;
   const parsed = createMemo(() => parseMessageContent(props.message.content));
   const bubbleBg = () => (mine() ? "#2b5278" : "#1e1e1e");
@@ -371,6 +374,10 @@ export function MessageBubble(props: { message: ChatMessage; showSenderName: boo
         maxWidth: "72%",
         marginBottom: 0,
         backgroundColor: bubbleBg(),
+      }}
+      onMouseUp={() => {
+        if (renderer.getSelection()?.getSelectedText()) return;
+        props.onClick?.();
       }}
     >
       <box
@@ -507,7 +514,13 @@ function MessagePane() {
             }
           >
             <For each={messages()}>
-              {(m) => <MessageBubble message={m} showSenderName={showSenderNames()} />}
+              {(m) => (
+                <MessageBubble
+                  message={m}
+                  showSenderName={showSenderNames()}
+                  onClick={() => setMessageMenu(m)}
+                />
+              )}
             </For>
           </Show>
         </Show>
@@ -542,7 +555,7 @@ function MessagePane() {
                   backgroundColor: "#1E1E1E",
                   focusedBackgroundColor: "#1E1E1E",
                 }}
-                focused={!paletteOpen()}
+                focused={!paletteOpen() && !messageMenu()}
                 placeholder="Write a message… (Enter to send, Shift+Enter for a new line)"
                 value={draft()}
                 keyBindings={[
@@ -597,7 +610,8 @@ export function App() {
   // Capture the renderer so a fatal "backend lost" can tear it down (which, via
   // index.tsx's onDestroy, exits the process) when there's no terminal left to
   // quit from.
-  appRenderer = useRenderer();
+  const renderer = useRenderer();
+  appRenderer = renderer;
 
   const [ready, setReady] = createSignal(false);
   const [splashMsg, setSplashMsg] = createSignal("starting backend");
@@ -623,7 +637,8 @@ export function App() {
     }
   });
 
-  // global keys: Ctrl+K palette, Escape closes it / leaves conversation.
+  // Global keys: Ctrl+K palette, Escape leaves the conversation. Open dialogs
+  // own their navigation and Escape handling while mounted.
   // We intentionally do NOT handle Ctrl+C here. OpenTUI's renderer owns Ctrl+C
   // by default (exitOnCtrlC: true) and runs destroy() on it, which restores the
   // terminal, exits the alternate screen, and — critically — disables mouse
@@ -633,12 +648,13 @@ export function App() {
   // "35;56;51M" SGR mouse reports on every mouse move after Ctrl+C.
   useKeyboard((e) => {
     if (e.ctrl && e.name === "k") {
+      setMessageMenu(null);
       setPaletteOpen((v) => !v);
       return;
     }
-    // While the palette is open it owns every other key (its own DialogSelect
-    // keyboard handler drives navigation, selection, and Escape-to-close).
-    if (paletteOpen()) return;
+    // While a dialog is open it owns every other key (its DialogSelect keyboard
+    // handler drives navigation, selection, and Escape-to-close).
+    if (paletteOpen() || messageMenu()) return;
     if (e.name === "escape") {
       setOpenId(null);
       return;
@@ -681,8 +697,22 @@ export function App() {
             onClose={() => setPaletteOpen(false)}
           />
         </Show>
+        <Show when={messageMenu()}>
+          {(message: Accessor<ChatMessage>) => (
+            <MessageActions
+              message={message()}
+              onCopy={(text) => {
+                if (renderer.copyToClipboardOSC52(text)) {
+                  setStatus("Message copied to clipboard");
+                  return;
+                }
+                setStatus("Copy failed: terminal clipboard is unavailable");
+              }}
+              onClose={() => setMessageMenu(null)}
+            />
+          )}
+        </Show>
       </box>
     </Show>
   );
 }
-
