@@ -19,6 +19,7 @@ import { coalesce } from "./singleflight";
 import { Splash } from "./splash";
 import { Spinner } from "./spinner";
 import { Border } from "./border";
+import { DialogSelect } from "./dialog-select";
 
 const backend = new Backend();
 
@@ -37,7 +38,6 @@ const [messagesError, setMessagesError] = createSignal<string | null>(null);
 const [status, setStatus] = createSignal("connecting…");
 const [live, setLive] = createSignal<"connecting" | "connected" | "disconnected">("connecting");
 const [paletteOpen, setPaletteOpen] = createSignal(false);
-const [paletteQuery, setPaletteQuery] = createSignal("");
 const [draft, setDraft] = createSignal("");
 
 // Set once the backend's startup check reports a newer rolling build. Surfaced
@@ -226,35 +226,6 @@ function wireEvents() {
     if (!process.stdout.isTTY) appRenderer?.destroy();
   });
 }
-
-// ---- palette (cmd+K) fuzzy filtering ---------------------------------------
-function fuzzyScore(hay: string, q: string): number | null {
-  if (!q) return 0;
-  hay = hay.toLowerCase();
-  q = q.toLowerCase();
-  let qi = 0;
-  let score = 0;
-  let last = -2;
-  for (let i = 0; i < hay.length && qi < q.length; i++) {
-    if (hay[i] === q[qi]) {
-      score += i === last + 1 ? 5 : 1;
-      if (i === 0) score += 3;
-      last = i;
-      qi++;
-    }
-  }
-  return qi === q.length ? score : null;
-}
-
-const paletteMatches = createMemo(() => {
-  const q = paletteQuery();
-  return conversations()
-    .map((c) => ({ c, s: fuzzyScore(convLabel(c), q) }))
-    .filter((x) => x.s !== null)
-    .sort((a, b) => (b.s! - a.s!))
-    .slice(0, 12)
-    .map((x) => x.c);
-});
 
 // ---- components ------------------------------------------------------------
 function ConversationList() {
@@ -596,57 +567,6 @@ function MessagePane() {
   );
 }
 
-function Palette() {
-  return (
-    <box
-      style={{
-        position: "absolute",
-        top: 0,
-        left: 0,
-        width: "100%",
-        height: "100%",
-        flexDirection: "column",
-        justifyContent: "center",
-        alignItems: "center",
-      }}
-    >
-      <box
-        style={{
-          width: 64,
-          height: 16,
-          flexDirection: "column",
-          backgroundColor: "#141414",
-          paddingTop: 1,
-          paddingLeft: 2,
-          paddingRight: 2,
-        }}
-      >
-        <text content="Go to conversation" style={{ fg: "#808080" }} />
-        <box style={{ height: 1 }} />
-        <input
-          style={{ height: 1, backgroundColor: "#0A0A0A" }}
-          focused={true}
-          placeholder="Search…"
-          value={paletteQuery()}
-          onInput={(v) => setPaletteQuery(v)}
-          onSubmit={() => {
-            const first = paletteMatches()[0];
-            if (first) {
-              openConversation(first.id);
-              setPaletteOpen(false);
-              setPaletteQuery("");
-            }
-          }}
-        />
-        <box style={{ height: 1 }} />
-        <For each={paletteMatches()}>
-          {(c) => <text content={`  ${convLabel(c)}`} style={{ fg: "#c0c0c0" }} />}
-        </For>
-      </box>
-    </box>
-  );
-}
-
 function StatusBar() {
   return (
     <box style={{ height: 1, flexDirection: "row", backgroundColor: "#0A0A0A", paddingLeft: 1 }}>
@@ -714,18 +634,19 @@ export function App() {
   useKeyboard((e) => {
     if (e.ctrl && e.name === "k") {
       setPaletteOpen((v) => !v);
-      setPaletteQuery("");
       return;
     }
+    // While the palette is open it owns every other key (its own DialogSelect
+    // keyboard handler drives navigation, selection, and Escape-to-close).
+    if (paletteOpen()) return;
     if (e.name === "escape") {
-      if (paletteOpen()) setPaletteOpen(false);
-      else setOpenId(null);
+      setOpenId(null);
       return;
     }
 
-    // conversation-list navigation (only when not typing in the palette or an
-    // open conversation's composer)
-    const typing = paletteOpen() || openId() !== null;
+    // conversation-list navigation (only when not typing in an open
+    // conversation's composer)
+    const typing = openId() !== null;
     if (!typing) {
       const list = conversations();
       if (e.name === "down" || e.name === "j") {
@@ -748,7 +669,17 @@ export function App() {
         </box>
         <StatusBar />
         <Show when={paletteOpen()}>
-          <Palette />
+          <DialogSelect
+            title="Go to conversation"
+            placeholder="Search conversations…"
+            current={openId() ?? undefined}
+            options={conversations().map((c) => ({ title: convLabel(c), value: c.id }))}
+            onSelect={(option) => {
+              openConversation(option.value);
+              setPaletteOpen(false);
+            }}
+            onClose={() => setPaletteOpen(false)}
+          />
         </Show>
       </box>
     </Show>
