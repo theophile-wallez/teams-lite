@@ -29,6 +29,14 @@ export type ChatMessage = {
   is_self?: boolean;
 };
 
+// Payload of the server-pushed "update_available" event: a newer rolling build
+// exists. `current`/`latest` are short commit SHAs; `url` is the release page.
+export type UpdateInfo = {
+  current: string;
+  latest: string;
+  url: string;
+};
+
 type Pending = { resolve: (v: any) => void; reject: (e: any) => void };
 type EventHandler = (data: any) => void;
 
@@ -220,9 +228,9 @@ export class Backend {
   // ---- events -------------------------------------------------------------
 
   /// Subscribe to an event. Server-pushed: "message", "status",
-  /// "conversations_changed", "realtime_status". Client-side connection state:
-  /// "disconnected" (each drop) and "backend_lost" (retries exhausted — fatal).
-  /// Returns an unsubscribe function.
+  /// "conversations_changed", "realtime_status", "update_available". Client-side
+  /// connection state: "disconnected" (each drop) and "backend_lost" (retries
+  /// exhausted — fatal). Returns an unsubscribe function.
   on(event: string, handler: EventHandler): () => void {
     if (!this.handlers.has(event)) this.handlers.set(event, new Set());
     this.handlers.get(event)!.add(handler);

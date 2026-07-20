@@ -10,7 +10,7 @@
 //   event    (server -> client):  { "event": "<name>", "data": {...} }   (no id)
 //
 // Methods: conversations | open | backfill | send
-// Events:  status | message | conversations_changed
+// Events:  status | message | conversations_changed | update_available
 //
 // No raw tokens are ever logged or sent.
 
@@ -41,6 +41,10 @@ struct Ctx {
     db_path: Arc<String>,
     /// broadcast of server->client events (fan-out to every connected UI)
     events: broadcast::Sender<Value>,
+    /// `update_available` event payload once the startup check has found a newer
+    /// release, else `None`. Cached so a UI that connects AFTER the one-shot
+    /// broadcast fired still learns about the update on its greeting.
+    update: Arc<std::sync::Mutex<Option<Value>>>,
 }
 
 /// The session plus when it was minted, so we can rebuild it before the
@@ -161,10 +165,14 @@ async fn main() -> Result<()> {
         })),
         db_path: Arc::new(db_path.clone()),
         events: events_tx,
+        update: Arc::new(std::sync::Mutex::new(None)),
     };
 
     // real-time: run the trouter, persist each live message, broadcast an event.
     spawn_realtime(ctx.clone(), session, db_path);
+
+    // one-shot, best-effort: is a newer rolling `latest` build available?
+    spawn_update_check(ctx.clone());
 
     let listener = TcpListener::bind(ADDR).await.with_context(|| format!("bind {ADDR}"))?;
     eprintln!("[ok] server ws://{ADDR} — ready");
@@ -199,6 +207,15 @@ async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream) -> Result<()> {
     // greet with current status
     let hello = json!({ "event": "status", "data": "connected" });
     write.send(WsMessage::Text(hello.to_string().into())).await?;
+
+    // If the startup update check already found a newer release, tell this UI
+    // right away — it may have connected after the one-shot broadcast fired, so
+    // it would otherwise never hear about it.
+    let pending_update = ctx.update.lock().ok().and_then(|slot| slot.clone());
+    if let Some(data) = pending_update {
+        let ev = json!({ "event": "update_available", "data": data });
+        write.send(WsMessage::Text(ev.to_string().into())).await?;
+    }
 
     loop {
         tokio::select! {
@@ -509,6 +526,45 @@ fn resolve_names_bg(ctx: Ctx, convs: Vec<teams_read::Conversation>) {
                     ctx.emit("conversations_changed", json!({}));
                 }
             }
+        }
+    });
+}
+
+/// Check GitHub once, in the background, for a newer rolling `latest` release
+/// than the commit this binary was built from, and tell the UI if there is one.
+///
+/// Best-effort by design: a dev build (no embedded commit), no network, or a
+/// rate-limited API all end the check quietly — it must never affect startup or
+/// the running app. On a hit we cache the payload (so UIs that connect later
+/// still learn about it, see `serve_conn`) and broadcast it to any UI already
+/// connected.
+fn spawn_update_check(ctx: Ctx) {
+    let Some(current) = teams_lite::update::build_rev() else {
+        // Built from source: nothing meaningful to compare against, so we never
+        // nag developers running a local build.
+        return;
+    };
+    tokio::spawn(async move {
+        match teams_lite::update::check(&ctx.http, current).await {
+            Ok(Some(info)) => {
+                let data = json!({
+                    "current": info.current,
+                    "latest": info.latest,
+                    "url": info.url,
+                });
+                if let Ok(mut slot) = ctx.update.lock() {
+                    *slot = Some(data.clone());
+                }
+                ctx.emit("update_available", data);
+                eprintln!(
+                    "[update] a newer build is available ({} -> {})",
+                    info.current, info.latest
+                );
+            }
+            // Up to date, or the remote commit couldn't be identified: say nothing.
+            Ok(None) => {}
+            // Reached-but-failed or offline: log once, never surface to the user.
+            Err(e) => eprintln!("[update] check skipped: {e}"),
         }
     });
 }

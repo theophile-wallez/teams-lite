@@ -11,7 +11,7 @@
 
 import { useKeyboard, useRenderer } from "@opentui/solid";
 import { createSignal, createMemo, For, Show, onMount, type Accessor } from "solid-js";
-import { Backend, type Conversation, type ChatMessage } from "./client";
+import { Backend, type Conversation, type ChatMessage, type UpdateInfo } from "./client";
 import { parseMessageContent, type MessageQuote } from "./message-content";
 import { ensureServer } from "./server";
 import { notifyMessage, shouldNotify } from "./notify";
@@ -39,6 +39,10 @@ const [live, setLive] = createSignal<"connecting" | "connected" | "disconnected"
 const [paletteOpen, setPaletteOpen] = createSignal(false);
 const [paletteQuery, setPaletteQuery] = createSignal("");
 const [draft, setDraft] = createSignal("");
+
+// Set once the backend's startup check reports a newer rolling build. Surfaced
+// as a subtle status-bar notice; never interrupts the user.
+const [update, setUpdate] = createSignal<UpdateInfo | null>(null);
 
 // Per-conversation message cache for this session. Once a conversation has been
 // loaded, re-opening it shows its messages INSTANTLY from here — no loading
@@ -184,6 +188,8 @@ function wireEvents() {
   });
   backend.on("conversations_changed", () => refreshConversations());
   backend.on("realtime_status", (s: string) => setLive(s as any));
+  // A newer rolling build exists (checked once at startup by the backend).
+  backend.on("update_available", (u: UpdateInfo) => setUpdate(u));
   backend.on("disconnected", () => setLive("disconnected"));
   // The client exhausted its reconnect retries: the backend is gone for good.
   backend.on("backend_lost", () => {
@@ -614,6 +620,17 @@ function StatusBar() {
         <text content={live() === "connected" ? "🟢 " : "🔴 "} />
       </Show>
       <text content={status()} style={{ fg: "gray" }} />
+      {/* Push the update notice to the right edge; the spacer is harmless when
+          there's no update to show. */}
+      <box style={{ flexGrow: 1 }} />
+      <Show when={update()}>
+        {(u: Accessor<UpdateInfo>) => (
+          <text
+            content={`↑ update available (${u().latest}) — reinstall to update `}
+            style={{ fg: "#e5c07b" }}
+          />
+        )}
+      </Show>
     </box>
   );
 }

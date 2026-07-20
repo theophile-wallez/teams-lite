@@ -48,6 +48,10 @@ jobs:
 
       # --- build the single self-contained binary ---
       - name: Build backend (release)
+        # Embed the commit this binary is built from so the running app can tell
+        # whether a newer rolling `latest` release exists (see src/update.rs).
+        env:
+          TEAMS_BUILD_REV: ${{ github.sha }}
         run: cargo build --release --bin server
 
       - name: Compile single `teams` binary
@@ -68,4 +72,5 @@ jobs:
           gh release create latest out/teams-linux-x64 \
             --title "teams-lite (latest)" \
             --notes "Rolling build from ${GITHUB_SHA} — $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
+            --target "${GITHUB_SHA}" \
             --latest
