@@ -85,6 +85,31 @@ function convLabel(c: Conversation): string {
   return "(untitled)";
 }
 
+// Sidebar preview line (the second row under a conversation title), mirroring
+// the Teams desktop list: "You:" when we sent the last message, "FirstName:" in
+// a group, and the bare snippet in a 1:1 / Notes where the sender is implicit.
+// The body is already HTML-stripped and length-capped server-side.
+function firstName(full: string): string {
+  const head = full.trim().split(/\s+/)[0];
+  return head || full;
+}
+
+function previewLine(c: Conversation): string {
+  const body = c.last_message_preview ?? "";
+  if (!body) return "";
+  if (c.last_message_from_me) return `You: ${body}`;
+  const isGroup = c.kind === "group" || c.kind === "unknown";
+  if (isGroup && c.last_message_sender) return `${firstName(c.last_message_sender)}: ${body}`;
+  return body;
+}
+
+// Hard-truncate to fit one sidebar row (the pane is only 34 cols wide), so a long
+// title or preview can never wrap and blow out the fixed row height.
+function clip(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return s.slice(0, Math.max(0, n - 1)).trimEnd() + "…";
+}
+
 // ---- backend wiring --------------------------------------------------------
 async function loadConversations() {
   try {
@@ -265,15 +290,28 @@ function ConversationList() {
             const isSelected = () => selectedIndex() === i();
             const bg = () =>
               isOpen() ? "#2a2a2a" : isHovered() ? "#242424" : isSelected() ? "#1e1e1e" : "#141414";
-            const fg = () => (isOpen() ? "#ffffff" : "#c0c0c0");
+            // Unread threads read brighter; muted threads stay dim even when
+            // unread (they shouldn't pull the eye), matching the Teams sidebar.
+            const unread = () => !c.is_read;
+            const titleFg = () =>
+              isOpen() ? "#ffffff" : c.is_muted ? "#8a8a8a" : unread() ? "#ffffff" : "#c0c0c0";
+            const previewFg = () =>
+              isOpen() ? "#a9b7c6" : unread() && !c.is_muted ? "#9a9a9a" : "#6f6f6f";
+            // The attention dot: only for unread, non-muted threads.
+            const dot = () => (unread() && !c.is_muted ? "●" : " ");
+            const preview = () => clip(previewLine(c), 29);
             return (
               <box
-                style={{ width: "100%", height: 3, flexDirection: "row", justifyContent: "flex-start", alignItems: "center", paddingLeft: 1, backgroundColor: bg() }}
+                style={{ width: "100%", height: 3, flexDirection: "row", alignItems: "center", paddingLeft: 1, backgroundColor: bg() }}
                 onMouseDown={() => openConv(c.id, i())}
                 onMouseOver={() => setHoveredId(c.id)}
                 onMouseOut={() => setHoveredId((h) => (h === c.id ? null : h))}
               >
-                <text content={convLabel(c)} style={{ fg: fg() }} />
+                <text content={dot()} style={{ fg: "#5b9bd5" }} />
+                <box style={{ flexDirection: "column", flexGrow: 1, paddingLeft: 1 }}>
+                  <text content={clip(convLabel(c), 29)} style={{ fg: titleFg() }} />
+                  <text content={preview()} style={{ fg: previewFg() }} />
+                </box>
               </box>
             );
           }}

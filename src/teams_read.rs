@@ -43,6 +43,12 @@ pub fn is_unauthorized(err: &anyhow::Error) -> bool {
 
 /// A conversation summary as surfaced by the CSA aggregator. This is what the
 /// conversation list (and cmd+K palette, later) is built from.
+///
+/// The extra fields beyond id/title mirror what the Teams desktop sidebar shows,
+/// so the TUI can render a faithful list: a last-message preview line, an unread
+/// marker, and muted/pinned/hidden state. All of it comes from the SAME CSA call
+/// (`users/me`) with zero extra round-trips — the `lastMessage` sub-object holds
+/// the preview body and sender, and the chat carries the state booleans.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conversation {
     pub id: String,
@@ -56,6 +62,26 @@ pub struct Conversation {
     /// For a 1:1, the mri of the OTHER member (not us). Empty otherwise. Used to
     /// resolve the conversation's display name via the profiles endpoint.
     pub other_member_mri: String,
+    /// Plain-text, HTML-stripped preview of the last message (`lastMessage.content`).
+    /// Empty for system frames or when the body is absent.
+    pub last_message_preview: String,
+    /// Display name of the last message's sender (`lastMessage.imDisplayName`).
+    /// Empty when unknown. The UI renders "You:" instead when `last_message_from_me`.
+    pub last_message_sender: String,
+    /// True when we sent the last message — the UI prefixes the preview with "You:".
+    pub last_message_from_me: bool,
+    /// False when the thread has unread messages. Drives the unread marker.
+    pub is_read: bool,
+    /// True when the user muted this conversation.
+    pub is_muted: bool,
+    /// True when the conversation is pinned to the top of the list (`isSticky`).
+    pub is_pinned: bool,
+    /// True when the conversation is hidden from the list until a new message.
+    pub is_hidden: bool,
+    /// Finer-grained thread classification from CSA (e.g. "chat", "meeting",
+    /// "sfbinteropchat"). `chat_type`/`kind()` stay the primary classifier; this
+    /// is carried through for faithful rendering and future use.
+    pub thread_type: String,
 }
 
 impl Conversation {
@@ -200,10 +226,21 @@ pub fn persist_conversations(store: &Store, convs: &[Conversation]) -> usize {
         // the caller emits `conversations_changed` ONLY on a real change. A
         // blanket "upsert succeeded" count would report a change on every sync
         // of identical data and spin the UI's refresh->sync->event loop.
-        if store
-            .upsert_conversation_full(&c.id, &c.title, c.last_message_time, c.kind())
-            .unwrap_or(false)
-        {
+        let update = crate::store::ConversationUpdate {
+            id: &c.id,
+            display_name: &c.title,
+            last_message_time: c.last_message_time,
+            kind: c.kind(),
+            last_message_preview: &c.last_message_preview,
+            last_message_sender: &c.last_message_sender,
+            last_message_from_me: c.last_message_from_me,
+            is_read: c.is_read,
+            is_muted: c.is_muted,
+            is_pinned: c.is_pinned,
+            is_hidden: c.is_hidden,
+            thread_type: &c.thread_type,
+        };
+        if store.upsert_conversation_full(&update).unwrap_or(false) {
             changed += 1;
         }
     }
@@ -320,6 +357,31 @@ fn parse_conversations_with_self(v: &Value, self_mri: &str) -> Vec<Conversation>
             .map(parse_iso_ms)
             .unwrap_or(0);
 
+        // Sidebar state, straight from the chat object (see the CSA capture spike).
+        // NB: the `lastMessage` sub-object uses camelCase field names
+        // (`imDisplayName`, `composeTime`) — NOT the lowercase names the
+        // chatService messages endpoint uses. Do not reuse `parse_message` here.
+        let last_message_preview = chat
+            .pointer("/lastMessage/content")
+            .and_then(|x| x.as_str())
+            .map(preview_from_html)
+            .unwrap_or_default();
+        let last_message_sender = chat
+            .pointer("/lastMessage/imDisplayName")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| chat.pointer("/lastMessage/fromDisplayNameInToken").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let last_message_from_me = chat.get("isLastMessageFromMe").and_then(|x| x.as_bool()).unwrap_or(false);
+        // `isRead` absent -> assume read, so a partial payload never floods the UI
+        // with false unread markers.
+        let is_read = chat.get("isRead").and_then(|x| x.as_bool()).unwrap_or(true);
+        let is_muted = chat.get("isMuted").and_then(|x| x.as_bool()).unwrap_or(false);
+        let is_pinned = chat.get("isSticky").and_then(|x| x.as_bool()).unwrap_or(false);
+        let is_hidden = chat.get("hidden").and_then(|x| x.as_bool()).unwrap_or(false);
+        let thread_type = chat.get("threadType").and_then(|x| x.as_str()).unwrap_or("").to_string();
+
         // For a 1:1, find the member that isn't us.
         let other_member_mri = if is_one_on_one {
             chat.get("members")
@@ -344,6 +406,14 @@ fn parse_conversations_with_self(v: &Value, self_mri: &str) -> Vec<Conversation>
             last_message_time,
             is_empty,
             other_member_mri,
+            last_message_preview,
+            last_message_sender,
+            last_message_from_me,
+            is_read,
+            is_muted,
+            is_pinned,
+            is_hidden,
+            thread_type,
         });
     }
     out
@@ -404,6 +474,44 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
 /// so a URL and a bare MRI for the same user compare equal.
 pub(crate) fn normalize_mri(from: &str) -> String {
     from.rsplit('/').next().unwrap_or(from).to_string()
+}
+
+/// Turn a Teams message body (HTML like `<p>hello <b>world</b></p>`) into a
+/// short, single-line plain-text preview for the conversation list — the same
+/// role as the second line under a chat title in the Teams desktop sidebar.
+///
+/// Best-effort and dependency-free: strip tags, decode the handful of entities
+/// Teams actually emits, collapse whitespace, and cap the length so a long
+/// message can't blow up a list row. Not a general HTML sanitizer.
+pub(crate) fn preview_from_html(html: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let mut text = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if in_tag => {}
+            _ => text.push(c),
+        }
+    }
+    // Decode the common entities Teams emits (order matters: &amp; last).
+    let text = text
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#160;", " ")
+        .replace("&amp;", "&");
+    // Collapse any run of whitespace (incl. newlines) to a single space.
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > MAX_CHARS {
+        let truncated: String = collapsed.chars().take(MAX_CHARS).collect();
+        format!("{}…", truncated.trim_end())
+    } else {
+        collapsed
+    }
 }
 
 /// Parse an ISO-8601 UTC timestamp ("2026-07-16T16:05:26.7670000Z") to epoch millis.
@@ -515,6 +623,84 @@ mod tests {
     }
 
     #[test]
+    fn parses_last_message_preview_and_sidebar_flags() {
+        // Shape mirrors the real CSA capture: lastMessage uses camelCase field
+        // names, and the chat carries the sidebar state booleans.
+        let v = json!({
+            "chats": [{
+                "id": "19:grp@thread.v2",
+                "title": "Backend",
+                "chatType": "group",
+                "threadType": "chat",
+                "isOneOnOne": false,
+                "isEmptyConversation": false,
+                "isRead": false,
+                "isMuted": true,
+                "isSticky": true,
+                "hidden": false,
+                "isLastMessageFromMe": false,
+                "lastMessage": {
+                    "id": "1784575974716",
+                    "composeTime": "2026-07-16T16:05:26.767Z",
+                    "content": "<p>ship it &amp; <b>relax</b></p>",
+                    "imDisplayName": "Clément BOSLE",
+                    "from": "8:orgid:clement",
+                    "messageType": "RichText/Html"
+                }
+            }]
+        });
+        let convs = parse_conversations(&v);
+        assert_eq!(convs.len(), 1);
+        let c = &convs[0];
+        assert_eq!(c.last_message_preview, "ship it & relax");
+        assert_eq!(c.last_message_sender, "Clément BOSLE");
+        assert!(!c.last_message_from_me);
+        assert!(!c.is_read); // unread
+        assert!(c.is_muted);
+        assert!(c.is_pinned); // isSticky
+        assert!(!c.is_hidden);
+        assert_eq!(c.thread_type, "chat");
+    }
+
+    #[test]
+    fn missing_flags_default_to_read_and_unmuted() {
+        // A chat with only the minimum fields must not surface a false unread
+        // marker or spurious muted/pinned/hidden state.
+        let v = json!({
+            "chats": [{
+                "id": "19:x@thread.v2",
+                "title": "Minimal",
+                "chatType": "group",
+                "lastMessage": { "id": "1", "composeTime": "2026-07-16T16:05:26.767Z" }
+            }]
+        });
+        let c = &parse_conversations(&v)[0];
+        assert!(c.is_read); // absent isRead -> treated as read
+        assert!(!c.is_muted);
+        assert!(!c.is_pinned);
+        assert!(!c.is_hidden);
+        assert_eq!(c.last_message_preview, ""); // no content -> empty preview
+        assert_eq!(c.last_message_sender, "");
+    }
+
+    #[test]
+    fn preview_from_html_strips_collapses_and_truncates() {
+        // tags stripped, entities decoded, whitespace collapsed
+        assert_eq!(
+            preview_from_html("<p>hello&nbsp;&amp; <b>bye</b>\n  now</p>"),
+            "hello & bye now"
+        );
+        // empty / plain passthrough
+        assert_eq!(preview_from_html(""), "");
+        assert_eq!(preview_from_html("just text"), "just text");
+        // long content is capped with an ellipsis
+        let long = format!("<p>{}</p>", "x".repeat(300));
+        let out = preview_from_html(&long);
+        assert!(out.chars().count() <= 121); // 120 + the ellipsis
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
     fn conversation_kind_classification() {
         let base = Conversation {
             id: "19:x@thread.v2".into(),
@@ -524,6 +710,14 @@ mod tests {
             last_message_time: 0,
             is_empty: false,
             other_member_mri: "".into(),
+            last_message_preview: String::new(),
+            last_message_sender: String::new(),
+            last_message_from_me: false,
+            is_read: true,
+            is_muted: false,
+            is_pinned: false,
+            is_hidden: false,
+            thread_type: String::new(),
         };
 
         // explicit 1:1 flag
@@ -658,6 +852,14 @@ mod tests {
             last_message_time,
             is_empty: false,
             other_member_mri: String::new(),
+            last_message_preview: String::new(),
+            last_message_sender: String::new(),
+            last_message_from_me: false,
+            is_read: true,
+            is_muted: false,
+            is_pinned: false,
+            is_hidden: false,
+            thread_type: "group".into(),
         }
     }
 

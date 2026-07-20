@@ -13,12 +13,20 @@ use rusqlite::{params, Connection, Row};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS conversations (
-    id                TEXT PRIMARY KEY,
-    display_name      TEXT,
-    last_message_time INTEGER NOT NULL DEFAULT 0,
-    oldest_cursor     TEXT,
-    has_more_older    INTEGER NOT NULL DEFAULT 1,
-    kind              TEXT NOT NULL DEFAULT 'unknown'
+    id                    TEXT PRIMARY KEY,
+    display_name          TEXT,
+    last_message_time     INTEGER NOT NULL DEFAULT 0,
+    oldest_cursor         TEXT,
+    has_more_older        INTEGER NOT NULL DEFAULT 1,
+    kind                  TEXT NOT NULL DEFAULT 'unknown',
+    last_message_preview  TEXT NOT NULL DEFAULT '',
+    last_message_sender   TEXT NOT NULL DEFAULT '',
+    last_message_from_me  INTEGER NOT NULL DEFAULT 0,
+    is_read               INTEGER NOT NULL DEFAULT 1,
+    is_muted              INTEGER NOT NULL DEFAULT 0,
+    is_pinned             INTEGER NOT NULL DEFAULT 0,
+    is_hidden             INTEGER NOT NULL DEFAULT 0,
+    thread_type           TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS messages (
     id              TEXT NOT NULL,
@@ -91,6 +99,41 @@ pub struct ConversationRow {
     pub display_name: String,
     pub last_message_time: i64,
     pub kind: ConversationKind,
+    /// Plain-text preview of the last message (HTML already stripped upstream).
+    pub last_message_preview: String,
+    /// Display name of the last message's sender (empty when unknown).
+    pub last_message_sender: String,
+    /// True when we sent the last message (UI renders "You:").
+    pub last_message_from_me: bool,
+    /// False when the conversation has unread messages.
+    pub is_read: bool,
+    pub is_muted: bool,
+    pub is_pinned: bool,
+    pub is_hidden: bool,
+    pub thread_type: String,
+}
+
+/// Rich conversation metadata from a CSA sync, fed to [`Store::upsert_conversation_full`].
+/// Grouped into a struct rather than a long positional argument list so callers
+/// can't transpose fields, and so adding a sidebar field is a one-line change.
+///
+/// Only the CSA sync path (`persist_conversations`) has this data. Live trouter
+/// events and name resolution use [`Store::upsert_conversation`], which leaves
+/// every field here untouched.
+#[derive(Debug, Clone)]
+pub struct ConversationUpdate<'a> {
+    pub id: &'a str,
+    pub display_name: &'a str,
+    pub last_message_time: i64,
+    pub kind: ConversationKind,
+    pub last_message_preview: &'a str,
+    pub last_message_sender: &'a str,
+    pub last_message_from_me: bool,
+    pub is_read: bool,
+    pub is_muted: bool,
+    pub is_pinned: bool,
+    pub is_hidden: bool,
+    pub thread_type: &'a str,
 }
 
 pub struct Store {
@@ -116,25 +159,37 @@ const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sende
 /// miss columns added to SCHEMA. We add them here, ignoring the "duplicate column"
 /// error that a fresh store (already carrying the column) returns.
 fn migrate(conn: &Connection) -> Result<()> {
+    // Add a column, treating "already exists" as success so migration is
+    // idempotent on both fresh and legacy stores.
+    let add_column = |ddl: &str| -> Result<()> {
+        match conn.execute(ddl, []) {
+            Ok(_) => Ok(()),
+            // rusqlite surfaces "duplicate column name" when the column already exists
+            Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column") => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    };
+
     // kind: distinguishes 1:1 / group / notes conversations. Defaults to
     // 'unknown' for legacy rows; the next network sync backfills the real value.
-    match conn.execute(
-        "ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'unknown'",
-        [],
-    ) {
-        Ok(_) => {}
-        // rusqlite surfaces "duplicate column name" when the column already exists
-        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column") => {}
-        Err(e) => return Err(e.into()),
-    }
+    add_column("ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'unknown'")?;
     // sender_mri: the sender's MRI, used to reliably tag a message as ours
     // (sender_mri == our own MRI). Legacy rows get NULL; the next network sync
     // backfills it for messages that come through again.
-    match conn.execute("ALTER TABLE messages ADD COLUMN sender_mri TEXT", []) {
-        Ok(_) => {}
-        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column") => {}
-        Err(e) => return Err(e.into()),
-    }
+    add_column("ALTER TABLE messages ADD COLUMN sender_mri TEXT")?;
+
+    // Sidebar-fidelity columns (last-message preview + unread/muted/pinned/hidden
+    // state), all sourced from the CSA `users/me` sync. Legacy rows get the
+    // defaults below and are healed on the next sync. Defaults are chosen so a
+    // pre-migration store never shows a false unread marker (is_read defaults 1).
+    add_column("ALTER TABLE conversations ADD COLUMN last_message_preview TEXT NOT NULL DEFAULT ''")?;
+    add_column("ALTER TABLE conversations ADD COLUMN last_message_sender TEXT NOT NULL DEFAULT ''")?;
+    add_column("ALTER TABLE conversations ADD COLUMN last_message_from_me INTEGER NOT NULL DEFAULT 0")?;
+    add_column("ALTER TABLE conversations ADD COLUMN is_read INTEGER NOT NULL DEFAULT 1")?;
+    add_column("ALTER TABLE conversations ADD COLUMN is_muted INTEGER NOT NULL DEFAULT 0")?;
+    add_column("ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")?;
+    add_column("ALTER TABLE conversations ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0")?;
+    add_column("ALTER TABLE conversations ADD COLUMN thread_type TEXT NOT NULL DEFAULT ''")?;
     Ok(())
 }
 
@@ -182,23 +237,29 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Upsert a conversation carrying its `kind`. Only the network sync
-    /// (`persist_conversations`) knows this; blind upserts (live events, name
-    /// resolution) use `upsert_conversation`, which leaves the kind untouched.
-    /// A known kind is never downgraded to `unknown` by a later blank sync.
+    /// Upsert a conversation carrying its full CSA metadata (`kind` + the sidebar
+    /// fields). Only the network sync (`persist_conversations`) has this data;
+    /// blind upserts (live events, name resolution) use `upsert_conversation`,
+    /// which leaves all of it untouched. A known kind is never downgraded to
+    /// `unknown` by a later blank sync.
     ///
     /// Returns true when the row was newly inserted or an existing row actually
-    /// changed (see `upsert_conversation` for why the `WHERE` guard matters).
-    pub fn upsert_conversation_full(
-        &self,
-        id: &str,
-        display_name: &str,
-        last_message_time: i64,
-        kind: ConversationKind,
-    ) -> Result<bool> {
+    /// changed (see `upsert_conversation` for why the `WHERE` guard matters — it
+    /// is what keeps a repeated identical sync from spinning the UI's
+    /// refresh->sync->`conversations_changed`->refresh loop).
+    ///
+    /// Message-derived fields (preview, sender, from-me, unread) are only written
+    /// when the incoming snapshot is at least as fresh as the stored one
+    /// (`last_message_time`), so an out-of-order sync can't regress them. Chat
+    /// settings (muted/pinned/hidden/thread_type) take the latest value, since
+    /// CSA always returns a full current snapshot.
+    pub fn upsert_conversation_full(&self, u: &ConversationUpdate) -> Result<bool> {
         let changed = self.conn.execute(
-            "INSERT INTO conversations (id, display_name, last_message_time, kind)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO conversations (
+                id, display_name, last_message_time, kind,
+                last_message_preview, last_message_sender, last_message_from_me,
+                is_read, is_muted, is_pinned, is_hidden, thread_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 display_name = CASE
                     WHEN excluded.display_name IS NOT NULL AND excluded.display_name <> ''
@@ -207,14 +268,58 @@ impl Store {
                 -- keep a known kind; only overwrite when the new value is meaningful
                 kind = CASE
                     WHEN excluded.kind <> 'unknown' THEN excluded.kind
-                    ELSE conversations.kind END
+                    ELSE conversations.kind END,
+                -- message-derived fields: only take the incoming snapshot when it is
+                -- at least as fresh, so a stale/out-of-order sync can't regress them
+                last_message_preview = CASE
+                    WHEN excluded.last_message_time >= conversations.last_message_time
+                    THEN excluded.last_message_preview ELSE conversations.last_message_preview END,
+                last_message_sender = CASE
+                    WHEN excluded.last_message_time >= conversations.last_message_time
+                    THEN excluded.last_message_sender ELSE conversations.last_message_sender END,
+                last_message_from_me = CASE
+                    WHEN excluded.last_message_time >= conversations.last_message_time
+                    THEN excluded.last_message_from_me ELSE conversations.last_message_from_me END,
+                is_read = CASE
+                    WHEN excluded.last_message_time >= conversations.last_message_time
+                    THEN excluded.is_read ELSE conversations.is_read END,
+                -- chat settings: latest snapshot wins
+                is_muted = excluded.is_muted,
+                is_pinned = excluded.is_pinned,
+                is_hidden = excluded.is_hidden,
+                thread_type = CASE
+                    WHEN excluded.thread_type <> '' THEN excluded.thread_type
+                    ELSE conversations.thread_type END
              WHERE
-                -- only write (and thus report a change) when a column would move
+                -- report a change ONLY when a column would actually move, so an
+                -- identical re-sync emits no `conversations_changed`
                 (excluded.display_name IS NOT NULL AND excluded.display_name <> ''
                     AND excluded.display_name <> conversations.display_name)
                 OR excluded.last_message_time > conversations.last_message_time
-                OR (excluded.kind <> 'unknown' AND excluded.kind <> conversations.kind)",
-            params![id, display_name, last_message_time, kind.as_str()],
+                OR (excluded.kind <> 'unknown' AND excluded.kind <> conversations.kind)
+                OR (excluded.last_message_time >= conversations.last_message_time AND (
+                       excluded.last_message_preview <> conversations.last_message_preview
+                    OR excluded.last_message_sender  <> conversations.last_message_sender
+                    OR excluded.last_message_from_me <> conversations.last_message_from_me
+                    OR excluded.is_read              <> conversations.is_read))
+                OR excluded.is_muted  <> conversations.is_muted
+                OR excluded.is_pinned <> conversations.is_pinned
+                OR excluded.is_hidden <> conversations.is_hidden
+                OR (excluded.thread_type <> '' AND excluded.thread_type <> conversations.thread_type)",
+            params![
+                u.id,
+                u.display_name,
+                u.last_message_time,
+                u.kind.as_str(),
+                u.last_message_preview,
+                u.last_message_sender,
+                u.last_message_from_me as i64,
+                u.is_read as i64,
+                u.is_muted as i64,
+                u.is_pinned as i64,
+                u.is_hidden as i64,
+                u.thread_type,
+            ],
         )?;
         Ok(changed > 0)
     }
@@ -267,9 +372,17 @@ impl Store {
                         ), '')
                     END AS name,
                     c.last_message_time,
-                    c.kind
+                    c.kind,
+                    c.last_message_preview,
+                    c.last_message_sender,
+                    c.last_message_from_me,
+                    c.is_read,
+                    c.is_muted,
+                    c.is_pinned,
+                    c.is_hidden,
+                    c.thread_type
              FROM conversations c
-             ORDER BY c.last_message_time DESC, c.id ASC",
+             ORDER BY c.is_pinned DESC, c.last_message_time DESC, c.id ASC",
         )?;
         let rows = stmt.query_map(params![self_name], |r| {
             Ok(ConversationRow {
@@ -277,6 +390,14 @@ impl Store {
                 display_name: r.get(1)?,
                 last_message_time: r.get(2)?,
                 kind: ConversationKind::from_str(&r.get::<_, String>(3)?),
+                last_message_preview: r.get(4)?,
+                last_message_sender: r.get(5)?,
+                last_message_from_me: r.get::<_, i64>(6)? != 0,
+                is_read: r.get::<_, i64>(7)? != 0,
+                is_muted: r.get::<_, i64>(8)? != 0,
+                is_pinned: r.get::<_, i64>(9)? != 0,
+                is_hidden: r.get::<_, i64>(10)? != 0,
+                thread_type: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -367,6 +488,25 @@ mod tests {
         }
     }
 
+    /// Minimal `ConversationUpdate` for the kind/change-detection tests: only the
+    /// id/name/time/kind vary; the sidebar fields take neutral defaults.
+    fn upd<'a>(id: &'a str, name: &'a str, time: i64, kind: ConversationKind) -> ConversationUpdate<'a> {
+        ConversationUpdate {
+            id,
+            display_name: name,
+            last_message_time: time,
+            kind,
+            last_message_preview: "",
+            last_message_sender: "",
+            last_message_from_me: false,
+            is_read: true,
+            is_muted: false,
+            is_pinned: false,
+            is_hidden: false,
+            thread_type: "",
+        }
+    }
+
     #[test]
     fn pagination_and_dedup() {
         let s = Store::open_in_memory().unwrap();
@@ -436,17 +576,17 @@ mod tests {
         assert_eq!(s.conversations("").unwrap()[0].kind, ConversationKind::Unknown);
 
         // a network sync establishes the real kind
-        s.upsert_conversation_full("c1", "Chat", 150, ConversationKind::OneOnOne)
+        s.upsert_conversation_full(&upd("c1", "Chat", 150, ConversationKind::OneOnOne))
             .unwrap();
         assert_eq!(s.conversations("").unwrap()[0].kind, ConversationKind::OneOnOne);
 
         // a later blank/unknown sync must NOT downgrade a known kind
-        s.upsert_conversation_full("c1", "", 200, ConversationKind::Unknown)
+        s.upsert_conversation_full(&upd("c1", "", 200, ConversationKind::Unknown))
             .unwrap();
         assert_eq!(s.conversations("").unwrap()[0].kind, ConversationKind::OneOnOne);
 
         // but a meaningful kind change is honored
-        s.upsert_conversation_full("c1", "", 250, ConversationKind::Group)
+        s.upsert_conversation_full(&upd("c1", "", 250, ConversationKind::Group))
             .unwrap();
         assert_eq!(s.conversations("").unwrap()[0].kind, ConversationKind::Group);
     }
@@ -478,14 +618,82 @@ mod tests {
     #[test]
     fn upsert_conversation_full_reports_change_only_on_real_change() {
         let s = Store::open_in_memory().unwrap();
-        assert!(s.upsert_conversation_full("c1", "Chat", 100, ConversationKind::Group).unwrap());
+        assert!(s.upsert_conversation_full(&upd("c1", "Chat", 100, ConversationKind::Group)).unwrap());
         // identical sync: no change
-        assert!(!s.upsert_conversation_full("c1", "Chat", 100, ConversationKind::Group).unwrap());
+        assert!(!s.upsert_conversation_full(&upd("c1", "Chat", 100, ConversationKind::Group)).unwrap());
         // blank title + unknown kind + same time: nothing moves
-        assert!(!s.upsert_conversation_full("c1", "", 100, ConversationKind::Unknown).unwrap());
+        assert!(!s.upsert_conversation_full(&upd("c1", "", 100, ConversationKind::Unknown)).unwrap());
         // a meaningful kind change is a change; repeating it is not
-        assert!(s.upsert_conversation_full("c1", "", 100, ConversationKind::OneOnOne).unwrap());
-        assert!(!s.upsert_conversation_full("c1", "", 100, ConversationKind::OneOnOne).unwrap());
+        assert!(s.upsert_conversation_full(&upd("c1", "", 100, ConversationKind::OneOnOne)).unwrap());
+        assert!(!s.upsert_conversation_full(&upd("c1", "", 100, ConversationKind::OneOnOne)).unwrap());
+    }
+
+    #[test]
+    fn sidebar_fields_persist_and_read_back() {
+        let s = Store::open_in_memory().unwrap();
+        let u = ConversationUpdate {
+            id: "c1",
+            display_name: "Backend",
+            last_message_time: 100,
+            kind: ConversationKind::Group,
+            last_message_preview: "ship it",
+            last_message_sender: "Clément",
+            last_message_from_me: false,
+            is_read: false,
+            is_muted: true,
+            is_pinned: true,
+            is_hidden: false,
+            thread_type: "chat",
+        };
+        assert!(s.upsert_conversation_full(&u).unwrap());
+        let convs = s.conversations("").unwrap();
+        let row = &convs[0];
+        assert_eq!(row.last_message_preview, "ship it");
+        assert_eq!(row.last_message_sender, "Clément");
+        assert!(!row.last_message_from_me);
+        assert!(!row.is_read);
+        assert!(row.is_muted);
+        assert!(row.is_pinned);
+        assert!(!row.is_hidden);
+        assert_eq!(row.thread_type, "chat");
+    }
+
+    #[test]
+    fn pinned_conversations_sort_above_newer_unpinned() {
+        let s = Store::open_in_memory().unwrap();
+        // older, but pinned
+        let mut pinned = upd("pin", "Pinned", 100, ConversationKind::Group);
+        pinned.is_pinned = true;
+        s.upsert_conversation_full(&pinned).unwrap();
+        // newer, not pinned
+        s.upsert_conversation_full(&upd("new", "Newer", 500, ConversationKind::Group)).unwrap();
+
+        let convs = s.conversations("").unwrap();
+        assert_eq!(convs[0].id, "pin"); // pinned floats to the top despite the older time
+        assert_eq!(convs[1].id, "new");
+    }
+
+    // A stale/out-of-order CSA sync (older last_message_time) must not overwrite a
+    // fresher preview or flip an unread thread back to read. Only the time is
+    // reconciled via MAX and never regresses.
+    #[test]
+    fn stale_sync_does_not_regress_preview_or_unread() {
+        let s = Store::open_in_memory().unwrap();
+        let mut fresh = upd("c1", "Chat", 200, ConversationKind::Group);
+        fresh.last_message_preview = "newest";
+        fresh.is_read = false;
+        s.upsert_conversation_full(&fresh).unwrap();
+
+        let mut stale = upd("c1", "Chat", 150, ConversationKind::Group);
+        stale.last_message_preview = "older";
+        stale.is_read = true;
+        s.upsert_conversation_full(&stale).unwrap();
+
+        let convs = s.conversations("").unwrap();
+        let row = &convs[0];
+        assert_eq!(row.last_message_preview, "newest"); // stale preview rejected
+        assert!(!row.is_read); // still unread
+        assert_eq!(row.last_message_time, 200); // time never regresses
     }
 
     #[test]

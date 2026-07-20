@@ -424,7 +424,15 @@ fn conversations_json(rows: &[teams_lite::store::ConversationRow]) -> Value {
             "id": c.id,
             "name": c.display_name,
             "last_message_time": c.last_message_time,
-            "kind": c.kind.as_str()
+            "kind": c.kind.as_str(),
+            "last_message_preview": c.last_message_preview,
+            "last_message_sender": c.last_message_sender,
+            "last_message_from_me": c.last_message_from_me,
+            "is_read": c.is_read,
+            "is_muted": c.is_muted,
+            "is_pinned": c.is_pinned,
+            "is_hidden": c.is_hidden,
+            "thread_type": c.thread_type
         }))
         .collect::<Vec<_>>())
 }

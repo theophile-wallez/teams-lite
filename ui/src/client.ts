@@ -17,6 +17,16 @@ export type Conversation = {
   name: string;
   last_message_time: number;
   kind: ConversationKind;
+  // Sidebar-fidelity fields, sourced from the CSA `users/me` sync (see
+  // src/teams_read.rs). The preview is already HTML-stripped server-side.
+  last_message_preview: string;
+  last_message_sender: string;
+  last_message_from_me: boolean;
+  is_read: boolean;
+  is_muted: boolean;
+  is_pinned: boolean;
+  is_hidden: boolean;
+  thread_type: string;
 };
 
 export type ChatMessage = {
