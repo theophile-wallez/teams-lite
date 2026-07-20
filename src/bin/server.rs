@@ -17,7 +17,8 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -29,6 +30,92 @@ use teams_lite::{auth, retry, teams, teams_profiles, teams_read, teams_send, tro
 const ADDR: &str = "127.0.0.1:8420";
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) teams-lite/0.1";
+/// Give the UI ample time to connect after the server becomes ready. Authentication
+/// happens before the listener binds, so this only covers local startup delays.
+const INITIAL_CLIENT_GRACE: Duration = Duration::from_secs(30);
+/// Once at least one UI has connected, an empty server is an orphan. Keep a short
+/// grace window for UI restarts/reconnects, then terminate the backend ourselves.
+const DISCONNECTED_CLIENT_GRACE: Duration = Duration::from_secs(10);
+
+/// Tracks established WebSocket clients. Raw TCP readiness probes do not count:
+/// the lease is acquired only after the WebSocket handshake succeeds.
+#[derive(Clone)]
+struct ClientTracker {
+    state: Arc<Mutex<ClientState>>,
+}
+
+struct ClientState {
+    active: usize,
+    ever_connected: bool,
+    last_change: Instant,
+}
+
+impl ClientTracker {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ClientState {
+                active: 0,
+                ever_connected: false,
+                last_change: Instant::now(),
+            })),
+        }
+    }
+
+    fn connect(&self) -> ClientLease {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.active += 1;
+        state.ever_connected = true;
+        state.last_change = Instant::now();
+        ClientLease {
+            tracker: self.clone(),
+        }
+    }
+
+    fn snapshot(&self) -> (usize, bool, Duration) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            state.active,
+            state.ever_connected,
+            state.last_change.elapsed(),
+        )
+    }
+}
+
+/// RAII keeps the active count correct through normal closes and every error path.
+struct ClientLease {
+    tracker: ClientTracker,
+}
+
+impl Drop for ClientLease {
+    fn drop(&mut self) {
+        let mut state = self.tracker.state.lock().unwrap_or_else(|e| e.into_inner());
+        debug_assert!(state.active > 0, "client tracker underflow");
+        state.active = state.active.saturating_sub(1);
+        state.last_change = Instant::now();
+    }
+}
+
+fn should_shutdown(active: usize, ever_connected: bool, idle_for: Duration) -> bool {
+    if active > 0 {
+        return false;
+    }
+    let grace = if ever_connected {
+        DISCONNECTED_CLIENT_GRACE
+    } else {
+        INITIAL_CLIENT_GRACE
+    };
+    idle_for >= grace
+}
+
+async fn wait_for_idle_shutdown(clients: ClientTracker) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let (active, ever_connected, idle_for) = clients.snapshot();
+        if should_shutdown(active, ever_connected, idle_for) {
+            return;
+        }
+    }
+}
 
 /// Shared backend context; cloned into each connection + the trouter task.
 #[derive(Clone)]
@@ -176,12 +263,22 @@ async fn main() -> Result<()> {
 
     let listener = TcpListener::bind(ADDR).await.with_context(|| format!("bind {ADDR}"))?;
     eprintln!("[ok] server ws://{ADDR} — ready");
+    let clients = ClientTracker::new();
+    let idle_shutdown = wait_for_idle_shutdown(clients.clone());
+    tokio::pin!(idle_shutdown);
 
     loop {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            _ = &mut idle_shutdown => {
+                eprintln!("[lifecycle] no UI clients remain — shutting down");
+                return Ok(());
+            }
+        };
         // A transient accept() error (e.g. fd pressure) must not take down the
         // whole server — log it and keep serving. Propagating it here would
         // exit the process and leave every connected UI reconnecting to nothing.
-        let (stream, _peer) = match listener.accept().await {
+        let (stream, _peer) = match accepted {
             Ok(pair) => pair,
             Err(e) => {
                 eprintln!("[accept] transient error: {e}");
@@ -190,8 +287,9 @@ async fn main() -> Result<()> {
             }
         };
         let ctx = ctx.clone();
+        let clients = clients.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_conn(ctx, stream).await {
+            if let Err(e) = serve_conn(ctx, stream, clients).await {
                 eprintln!("[conn] fin: {e}");
             }
         });
@@ -199,8 +297,9 @@ async fn main() -> Result<()> {
 }
 
 /// Handle one UI connection: answer requests + forward broadcast events.
-async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream) -> Result<()> {
+async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTracker) -> Result<()> {
     let ws = tokio_tungstenite::accept_async(stream).await?;
+    let _client_lease = clients.connect();
     let (mut write, mut read) = ws.split();
     let mut events_rx = ctx.events.subscribe();
 
@@ -621,4 +720,50 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     tokio::spawn(async move {
         trouter::run(ctx, epid, ev_tx, st_tx).await;
     });
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn active_clients_always_keep_server_alive() {
+        assert!(!should_shutdown(1, true, Duration::from_secs(60)));
+        assert!(!should_shutdown(2, false, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn server_waits_longer_for_its_first_client() {
+        assert!(!should_shutdown(
+            0,
+            false,
+            INITIAL_CLIENT_GRACE - Duration::from_millis(1)
+        ));
+        assert!(should_shutdown(0, false, INITIAL_CLIENT_GRACE));
+    }
+
+    #[test]
+    fn disconnected_server_exits_after_short_grace() {
+        assert!(!should_shutdown(
+            0,
+            true,
+            DISCONNECTED_CLIENT_GRACE - Duration::from_millis(1),
+        ));
+        assert!(should_shutdown(0, true, DISCONNECTED_CLIENT_GRACE));
+    }
+
+    #[test]
+    fn client_lease_tracks_connection_lifetime() {
+        let tracker = ClientTracker::new();
+        assert_eq!(tracker.snapshot().0, 0);
+        assert!(!tracker.snapshot().1);
+
+        {
+            let _lease = tracker.connect();
+            assert_eq!(tracker.snapshot().0, 1);
+            assert!(tracker.snapshot().1);
+        }
+
+        assert_eq!(tracker.snapshot().0, 0);
+    }
 }
