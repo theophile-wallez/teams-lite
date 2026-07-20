@@ -11,7 +11,8 @@
 // The UI holds no business logic: it renders backend state and sends commands.
 
 import { useKeyboard, useRenderer } from "@opentui/solid";
-import { createSignal, createMemo, For, Show, onMount, type Accessor } from "solid-js";
+import type { TextareaRenderable } from "@opentui/core";
+import { createEffect, createSignal, createMemo, For, Show, onMount, type Accessor } from "solid-js";
 import { Backend, type Conversation, type ChatMessage, type UpdateInfo } from "./client";
 import { parseMessageContent, type MessageQuote } from "./message-content";
 import { ensureServer } from "./server";
@@ -71,21 +72,6 @@ const messageCache = new Map<string, ChatMessage[]>();
 const COMPOSER_MIN_ROWS = 2;
 const COMPOSER_MAX_ROWS = 21;
 const [composerRows, setComposerRows] = createSignal(COMPOSER_MIN_ROWS);
-
-/// Coerce whatever the textarea's onContentChange hands us into a plain string.
-/// Depending on the binding version this can be a string, a StyledText-like
-/// object with `.toString()`, or undefined — never assume it's a string.
-function asText(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (value == null) return "";
-  const anyv = value as any;
-  if (typeof anyv.plainText === "string") return anyv.plainText;
-  if (typeof anyv.toString === "function") {
-    const s = anyv.toString();
-    return typeof s === "string" && s !== "[object Object]" ? s : "";
-  }
-  return "";
-}
 
 function recomputeComposerRows(value: string) {
   const lines = value.length === 0 ? 1 : value.split("\n").length;
@@ -208,10 +194,9 @@ async function openConversation(id: string) {
   }
 }
 
-async function sendDraft() {
+async function sendDraft(submittedDraft: string) {
   const id = openId();
   if (!id) return;
-  const submittedDraft = draftCache.get(id) ?? draft();
   const text = submittedDraft.trim();
   if (!text) return;
 
@@ -607,44 +592,72 @@ function MessagePane() {
               text sits between the first and last row of the 4-row input. */}
           <Border>
             <box style={{ width: "100%", paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1, backgroundColor: theme().backgroundElement }}>
-              <textarea
-                style={{
-                  // Pin focused/unfocused backgrounds to the same color so the
-                  // composer never flashes a different shade when it takes focus.
-                  // (The Solid reconciler constructs the textarea with only {id},
-                  // leaving focusedBackgroundColor at its "transparent" default
-                  // unless we set it explicitly.)
-                  width: "100%",
-                  height: composerRows(),
-                  backgroundColor: theme().backgroundElement,
-                  focusedBackgroundColor: theme().backgroundElement,
-                }}
+              <MessageComposer
                 focused={!paletteOpen() && !settingsOpen() && !messageMenu()}
-                placeholder="Write a message… (Enter to send, Shift+Enter for a new line)"
                 value={draft()}
-                keyBindings={[
-                  { name: "return", action: "submit" },
-                  { name: "return", shift: true, action: "newline" },
-                ]}
-                onContentChange={(v: unknown) => {
-                  const text = asText(v);
+                onContentChange={(text) => {
                   setDraft(text);
-                  recomputeComposerRows(text);
                   const id = openId();
                   if (id) {
                     draftCache.set(id, text);
                     scheduleDraftSave(id, text);
                   }
                 }}
-                onSubmit={() => {
-                  void sendDraft();
-                }}
+                onSubmit={sendDraft}
               />
             </box>
           </Border>
         </box>
       </Show>
     </box>
+  );
+}
+
+export function MessageComposer(props: {
+  value: string;
+  focused: boolean;
+  onContentChange: (text: string) => void;
+  onSubmit: (text: string) => void | Promise<void>;
+}) {
+  let textarea: TextareaRenderable | undefined;
+
+  createEffect(() => {
+    const value = props.value;
+    if (textarea && textarea.plainText !== value) {
+      textarea.setText(value);
+      recomputeComposerRows(value);
+    }
+  });
+
+  return (
+    <textarea
+      ref={(renderable: TextareaRenderable) => (textarea = renderable)}
+      initialValue={props.value}
+      style={{
+        // Pin focused/unfocused backgrounds to the same color so the composer
+        // never flashes a different shade when it takes focus.
+        width: "100%",
+        height: composerRows(),
+        backgroundColor: theme().backgroundElement,
+        focusedBackgroundColor: theme().backgroundElement,
+      }}
+      focused={props.focused}
+      placeholder="Write a message… (Enter to send, Shift+Enter for a new line)"
+      keyBindings={[
+        { name: "return", action: "submit" },
+        { name: "return", shift: true, action: "newline" },
+      ]}
+      onContentChange={() => {
+        const text = textarea?.plainText ?? "";
+        recomputeComposerRows(text);
+        props.onContentChange(text);
+      }}
+      onSubmit={() => {
+        const text = textarea?.plainText ?? "";
+        if (!text.trim()) return;
+        void props.onSubmit(text);
+      }}
+    />
   );
 }
 
