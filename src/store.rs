@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     is_muted              INTEGER NOT NULL DEFAULT 0,
     is_pinned             INTEGER NOT NULL DEFAULT 0,
     is_hidden             INTEGER NOT NULL DEFAULT 0,
-    thread_type           TEXT NOT NULL DEFAULT ''
+    thread_type           TEXT NOT NULL DEFAULT '',
+    draft                 TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS messages (
     id              TEXT NOT NULL,
@@ -111,6 +112,8 @@ pub struct ConversationRow {
     pub is_pinned: bool,
     pub is_hidden: bool,
     pub thread_type: String,
+    /// Unsent composer text, stored locally and scoped to this conversation.
+    pub draft: String,
 }
 
 /// Rich conversation metadata from a CSA sync, fed to [`Store::upsert_conversation_full`].
@@ -190,6 +193,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     add_column("ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")?;
     add_column("ALTER TABLE conversations ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0")?;
     add_column("ALTER TABLE conversations ADD COLUMN thread_type TEXT NOT NULL DEFAULT ''")?;
+    add_column("ALTER TABLE conversations ADD COLUMN draft TEXT NOT NULL DEFAULT ''")?;
     Ok(())
 }
 
@@ -334,6 +338,17 @@ impl Store {
         Ok(n == 1)
     }
 
+    /// Persist the unsent composer text for one conversation. Network syncs never
+    /// write this column, so a local draft cannot be clobbered by remote metadata.
+    pub fn set_draft(&self, conversation_id: &str, draft: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE conversations SET draft = ?2 WHERE id = ?1",
+            params![conversation_id, draft],
+        )?;
+        anyhow::ensure!(changed == 1, "unknown conversation: {conversation_id}");
+        Ok(())
+    }
+
     /// Backfill `sender_mri` on an existing row that predates the column (its MRI
     /// is NULL or empty). `insert_message` uses INSERT OR IGNORE, so a re-fetched
     /// message never overwrites the stored row — this heals legacy history so our
@@ -380,7 +395,8 @@ impl Store {
                     c.is_muted,
                     c.is_pinned,
                     c.is_hidden,
-                    c.thread_type
+                    c.thread_type,
+                    c.draft
              FROM conversations c
              ORDER BY c.is_pinned DESC, c.last_message_time DESC, c.id ASC",
         )?;
@@ -398,6 +414,7 @@ impl Store {
                 is_pinned: r.get::<_, i64>(9)? != 0,
                 is_hidden: r.get::<_, i64>(10)? != 0,
                 thread_type: r.get(11)?,
+                draft: r.get(12)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -656,6 +673,44 @@ mod tests {
         assert!(row.is_pinned);
         assert!(!row.is_hidden);
         assert_eq!(row.thread_type, "chat");
+    }
+
+    #[test]
+    fn draft_is_scoped_to_conversation_and_survives_network_sync() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation_full(&upd("c1", "First", 100, ConversationKind::Group)).unwrap();
+        s.upsert_conversation_full(&upd("c2", "Second", 100, ConversationKind::Group)).unwrap();
+
+        s.set_draft("c1", "unfinished message").unwrap();
+        s.upsert_conversation_full(&upd("c1", "First renamed", 200, ConversationKind::Group)).unwrap();
+
+        let convs = s.conversations("").unwrap();
+        let first = convs.iter().find(|c| c.id == "c1").unwrap();
+        let second = convs.iter().find(|c| c.id == "c2").unwrap();
+        assert_eq!(first.draft, "unfinished message");
+        assert_eq!(second.draft, "");
+
+        s.set_draft("c1", "").unwrap();
+        assert_eq!(s.conversations("").unwrap().iter().find(|c| c.id == "c1").unwrap().draft, "");
+    }
+
+    #[test]
+    fn migration_adds_draft_to_existing_store() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversations (id TEXT PRIMARY KEY);
+             CREATE TABLE messages (id TEXT PRIMARY KEY);
+             INSERT INTO conversations (id) VALUES ('c1');",
+        ).unwrap();
+
+        migrate(&conn).unwrap();
+
+        let draft: String = conn.query_row(
+            "SELECT draft FROM conversations WHERE id = 'c1'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(draft, "");
     }
 
     #[test]

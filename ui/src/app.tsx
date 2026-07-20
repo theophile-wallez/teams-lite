@@ -44,6 +44,13 @@ const [paletteOpen, setPaletteOpen] = createSignal(false);
 const [settingsOpen, setSettingsOpen] = createSignal(false);
 const [draft, setDraft] = createSignal("");
 
+// Drafts are keyed by conversation so switching panes is instant. SQLite remains
+// the durable source of truth across process restarts; this map is the warm UI
+// cache and also protects newer input while an older save is still in flight.
+const draftCache = new Map<string, string>();
+const draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const DRAFT_SAVE_DELAY_MS = 150;
+
 // Set once the backend's startup check reports a newer rolling build. Surfaced
 // as a subtle status-bar notice; never interrupts the user.
 const [update, setUpdate] = createSignal<UpdateInfo | null>(null);
@@ -118,6 +125,9 @@ function clip(s: string, n: number): string {
 async function loadConversations() {
   try {
     const convs = await backend.conversations();
+    for (const conv of convs) {
+      if (!draftCache.has(conv.id)) draftCache.set(conv.id, conv.draft);
+    }
     setConversations(convs);
     setStatus(`${convs.length} conversations`);
   } catch (e: any) {
@@ -134,7 +144,36 @@ async function loadConversations() {
 // real change — makes the loop settle instead of exploding.
 const refreshConversations = coalesce(loadConversations);
 
+function persistDraft(id: string, text: string): void {
+  void backend.setDraft(id, text).catch((e: any) => {
+    if (draftCache.get(id) === text) setStatus(`draft save failed: ${e.message ?? e}`);
+  });
+}
+
+function scheduleDraftSave(id: string, text: string): void {
+  const pending = draftSaveTimers.get(id);
+  if (pending) clearTimeout(pending);
+  draftSaveTimers.set(id, setTimeout(() => {
+    draftSaveTimers.delete(id);
+    persistDraft(id, text);
+  }, DRAFT_SAVE_DELAY_MS));
+}
+
+function flushDraft(id: string): void {
+  const pending = draftSaveTimers.get(id);
+  if (!pending) return;
+  clearTimeout(pending);
+  draftSaveTimers.delete(id);
+  persistDraft(id, draftCache.get(id) ?? "");
+}
+
 async function openConversation(id: string) {
+  const previousId = openId();
+  if (previousId && previousId !== id) flushDraft(previousId);
+  const nextDraft = draftCache.get(id) ?? conversations().find((c) => c.id === id)?.draft ?? "";
+  draftCache.set(id, nextDraft);
+  setDraft(nextDraft);
+  recomputeComposerRows(nextDraft);
   setOpenId(id);
   setMessagesError(null);
 
@@ -168,15 +207,36 @@ async function openConversation(id: string) {
 }
 
 async function sendDraft() {
-  const text = draft().trim();
   const id = openId();
-  if (!text || !id) return;
-  setDraft("");
+  if (!id) return;
+  const submittedDraft = draftCache.get(id) ?? draft();
+  const text = submittedDraft.trim();
+  if (!text) return;
+
+  const pending = draftSaveTimers.get(id);
+  if (pending) {
+    clearTimeout(pending);
+    draftSaveTimers.delete(id);
+  }
   try {
+    // Make the final pre-send value durable before attempting the network call.
+    await backend.setDraft(id, submittedDraft);
     await backend.send(id, text);
     // the sent line will arrive via the live `message` event; no manual refresh
   } catch (e: any) {
     setStatus(`send failed: ${e.message ?? e}`);
+    return;
+  }
+
+  // The user may have started another message while the send was in flight. Only
+  // clear the exact draft that was submitted; never erase newer composer input.
+  if (draftCache.get(id) === submittedDraft) {
+    draftCache.set(id, "");
+    if (openId() === id) {
+      setDraft("");
+      recomputeComposerRows("");
+    }
+    persistDraft(id, "");
   }
 }
 
@@ -557,10 +617,14 @@ function MessagePane() {
                   const text = asText(v);
                   setDraft(text);
                   recomputeComposerRows(text);
+                  const id = openId();
+                  if (id) {
+                    draftCache.set(id, text);
+                    scheduleDraftSave(id, text);
+                  }
                 }}
                 onSubmit={() => {
-                  sendDraft();
-                  setComposerRows(COMPOSER_MIN_ROWS);
+                  void sendDraft();
                 }}
               />
             </box>
@@ -650,6 +714,8 @@ export function App() {
       return;
     }
     if (e.name === "escape") {
+      const id = openId();
+      if (id) flushDraft(id);
       setOpenId(null);
       return;
     }
@@ -698,4 +764,3 @@ export function App() {
     </Show>
   );
 }
-

@@ -9,7 +9,7 @@
 //   response (server -> client):  { "id": <n>, "result": <v> }  |  { "id": <n>, "error": "<msg>" }
 //   event    (server -> client):  { "event": "<name>", "data": {...} }   (no id)
 //
-// Methods: conversations | open | backfill | send
+// Methods: conversations | open | backfill | set_draft | send
 // Events:  status | message | conversations_changed | update_available
 //
 // No raw tokens are ever logged or sent.
@@ -464,18 +464,35 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(messages_json(&msgs, &self_name, &self_mri))
         }
 
+        // Persist unsent composer text locally. This never touches the network.
+        "set_draft" => {
+            let conv = param_str(params, "conversation")?;
+            let text = param_str(params, "text")?;
+            let store = ctx.store()?;
+            store.set_draft(&conv, &text)?;
+            Ok(json!({ "saved": true }))
+        }
+
         // send a message
         "send" => {
             let conv = param_str(params, "conversation")?;
             let text = param_str(params, "text")?;
             let http = ctx.http.clone();
+            let send_conv = conv.clone();
             ctx.retry_on_auth(move |session, _csa| {
                 let http = http.clone();
-                let conv = conv.clone();
+                let conv = send_conv.clone();
                 let text = text.clone();
                 async move { teams_send::send_message(&http, &session, &conv, &text).await }
             })
             .await?;
+            // The network accepted the message, so the persisted draft is no
+            // longer needed. Never turn a successful send into an apparent
+            // failure if this best-effort cleanup hits a transient SQLite error;
+            // the UI also retries the same idempotent clear after the response.
+            if let Err(e) = ctx.store().and_then(|store| store.set_draft(&conv, "")) {
+                eprintln!("[draft] could not clear sent draft for {conv}: {e}");
+            }
             Ok(json!({ "sent": true }))
         }
 
@@ -531,7 +548,8 @@ fn conversations_json(rows: &[teams_lite::store::ConversationRow]) -> Value {
             "is_muted": c.is_muted,
             "is_pinned": c.is_pinned,
             "is_hidden": c.is_hidden,
-            "thread_type": c.thread_type
+            "thread_type": c.thread_type,
+            "draft": c.draft
         }))
         .collect::<Vec<_>>())
 }

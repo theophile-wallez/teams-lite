@@ -27,6 +27,7 @@ export type Conversation = {
   is_pinned: boolean;
   is_hidden: boolean;
   thread_type: string;
+  draft: string;
 };
 
 export type ChatMessage = {
@@ -230,6 +231,9 @@ export class Backend {
   }
   backfill(conversation: string): Promise<{ messages: ChatMessage[] }> {
     return this.request("backfill", { conversation });
+  }
+  setDraft(conversation: string, text: string): Promise<{ saved: boolean }> {
+    return this.request("set_draft", { conversation, text });
   }
   send(conversation: string, text: string): Promise<{ sent: boolean }> {
     return this.request("send", { conversation, text });
