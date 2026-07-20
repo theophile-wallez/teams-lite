@@ -6,11 +6,13 @@
 // runs when a Spinner is not mounted.
 
 import { createSignal, onMount, onCleanup, For } from "solid-js";
+import { type ColorInput } from "@opentui/core";
+import { theme } from "./theme";
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const FRAME_MS = 80;
 
-export function Spinner(props: { color?: string; label?: string }) {
+export function Spinner(props: { color?: ColorInput; label?: string }) {
   const [frame, setFrame] = createSignal(0);
   onMount(() => {
     const t = setInterval(() => setFrame((i) => (i + 1) % FRAMES.length), FRAME_MS);
@@ -18,7 +20,7 @@ export function Spinner(props: { color?: string; label?: string }) {
   });
 
   const content = () => (props.label ? `${FRAMES[frame()]} ${props.label}` : FRAMES[frame()]);
-  return <text content={content()} style={{ fg: props.color ?? "#808080" }} />;
+  return <text content={content()} style={{ fg: props.color ?? theme().textMuted }} />;
 }
 
 // A pulsing block bar (the "wave" spinner from opencode): a row of blocks where
@@ -26,15 +28,14 @@ export function Spinner(props: { color?: string; label?: string }) {
 // ramp based on its distance to the crest, so the whole bar reads as a moving
 // gradient rather than a single moving dot.
 //
-// The palette is a prop (darkest → brightest) with an opencode-blue default, so
-// a future theme system can pass its own ramp without touching this component.
+// The palette is a prop (darkest → brightest); it defaults to the active theme's
+// pulse ramp, so the splash bar recolors with the theme.
 
-const PULSE_BLUES = ["#1e293b", "#294056", "#3b6ea5", "#4a8be0", "#60a5fa"];
 const PULSE_MS = 90;
 
-export function PulseBar(props: { width?: number; colors?: readonly string[] }) {
+export function PulseBar(props: { width?: number; colors?: readonly ColorInput[] }) {
   const width = () => props.width ?? 8;
-  const ramp = () => props.colors ?? PULSE_BLUES;
+  const ramp = () => props.colors ?? theme().pulseRamp;
 
   // `pos` is the crest index; `dir` flips it at the ends for a ping-pong sweep.
   const [pos, setPos] = createSignal(0);

@@ -25,15 +25,9 @@ import { RGBA, TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import { createMemo, createSignal, createEffect, For, Show } from "solid-js";
 import * as fuzzysort from "fuzzysort";
+import { theme } from "./theme";
+import { selectedForeground } from "./theme/resolve";
 
-// opencode default dark theme (theme/assets/opencode.json → defs).
-const COLOR = {
-  panel: "#141414", // backgroundPanel (darkStep2) — the dialog surface
-  text: "#eeeeee", // text (darkStep12)
-  muted: "#808080", // textMuted (darkStep11)
-  primary: "#fab283", // primary (darkStep9) — the selection bar
-  selectedFg: "#0a0a0a", // selectedForeground() → background (darkStep1)
-};
 // Backdrop dim, matching opencode's RGBA.fromInts(0, 0, 0, 150).
 const BACKDROP = RGBA.fromInts(0, 0, 0, 150);
 
@@ -57,10 +51,14 @@ export function DialogSelect<T>(props: {
   onSelect: (option: DialogSelectOption<T>) => void;
   onClose: () => void;
   emptyText?: string;
+  /** Selection to start on (defaults to the first row). */
+  initialIndex?: number;
+  /** Fires whenever the highlighted row changes — used for live preview. */
+  onHighlight?: (option: DialogSelectOption<T>) => void;
 }) {
   const dimensions = useTerminalDimensions();
   const [query, setQuery] = createSignal("");
-  const [selected, setSelected] = createSignal(0);
+  const [selected, setSelected] = createSignal(props.initialIndex ?? 0);
   // Track whether the last input was keyboard or mouse. A filter change can
   // trigger a synthetic mousemove as the layout shifts under the cursor; without
   // this guard that phantom hover would hijack the keyboard selection.
@@ -78,8 +76,14 @@ export function DialogSelect<T>(props: {
 
   // Clamp the selection into range on every filter change (opencode resets to
   // the first item whenever the query changes) and pin the list back to the top.
+  // The first run is skipped so `initialIndex` survives mount.
+  let firstFilter = true;
   createEffect(() => {
     filtered();
+    if (firstFilter) {
+      firstFilter = false;
+      return;
+    }
     setInputMode("keyboard");
     setSelected(0);
     setTimeout(() => scroll?.scrollTo(0), 0);
@@ -91,6 +95,13 @@ export function DialogSelect<T>(props: {
     const n = filtered().length;
     if (n === 0) return 0;
     return Math.min(selected(), n - 1);
+  });
+
+  // Report the highlighted option so callers can preview it live (e.g. a theme
+  // picker applying the focused theme). Fires on mount and on every move.
+  createEffect(() => {
+    const option = filtered()[sel()];
+    if (option) props.onHighlight?.(option);
   });
 
   // Half-ish the screen, capped by the number of rows — opencode's exact sizing.
@@ -175,7 +186,7 @@ export function DialogSelect<T>(props: {
         style={{
           width: panelWidth(),
           flexDirection: "column",
-          backgroundColor: COLOR.panel,
+          backgroundColor: theme().backgroundPanel,
           paddingTop: 1,
           paddingBottom: 1,
         }}
@@ -183,20 +194,20 @@ export function DialogSelect<T>(props: {
         {/* header: title + esc, then the filter input */}
         <box style={{ paddingLeft: 4, paddingRight: 4, flexDirection: "column" }}>
           <box style={{ flexDirection: "row", justifyContent: "space-between" }}>
-            <text content={props.title} style={{ fg: COLOR.text, attributes: TextAttributes.BOLD }} />
-            <text content="esc" style={{ fg: COLOR.muted }} onMouseUp={() => props.onClose()} />
+            <text content={props.title} style={{ fg: theme().text, attributes: TextAttributes.BOLD }} />
+            <text content="esc" style={{ fg: theme().textMuted }} onMouseUp={() => props.onClose()} />
           </box>
           <box style={{ paddingTop: 1 }}>
             <input
               style={{
-                backgroundColor: COLOR.panel,
-                focusedBackgroundColor: COLOR.panel,
-                textColor: COLOR.text,
-                focusedTextColor: COLOR.text,
+                backgroundColor: theme().backgroundPanel,
+                focusedBackgroundColor: theme().backgroundPanel,
+                textColor: theme().text,
+                focusedTextColor: theme().text,
               }}
               focused={true}
               placeholder={props.placeholder ?? "Search"}
-              placeholderColor={COLOR.muted}
+              placeholderColor={theme().textMuted}
               value={query()}
               onInput={(v: string) => setQuery(v)}
             />
@@ -208,7 +219,7 @@ export function DialogSelect<T>(props: {
           when={filtered().length > 0}
           fallback={
             <box style={{ paddingLeft: 4, paddingRight: 4, paddingTop: 1 }}>
-              <text content={props.emptyText ?? "No results found"} style={{ fg: COLOR.muted }} />
+              <text content={props.emptyText ?? "No results found"} style={{ fg: theme().textMuted }} />
             </box>
           }
         >
@@ -223,7 +234,7 @@ export function DialogSelect<T>(props: {
                   const active = createMemo(() => i() === sel());
                   const current = createMemo(() => props.current !== undefined && option.value === props.current);
                   const fg = createMemo(() =>
-                    active() ? COLOR.selectedFg : current() ? COLOR.primary : COLOR.text,
+                    active() ? selectedForeground(theme()) : current() ? theme().primary : theme().text,
                   );
                   return (
                     <box
@@ -232,7 +243,7 @@ export function DialogSelect<T>(props: {
                         paddingLeft: current() ? 1 : 3,
                         paddingRight: 3,
                         gap: 1,
-                        backgroundColor: active() ? COLOR.primary : "transparent",
+                        backgroundColor: active() ? theme().primary : "transparent",
                       }}
                       onMouseMove={() => setInputMode("mouse")}
                       onMouseOver={() => {

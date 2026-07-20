@@ -12,6 +12,8 @@
 // a `╹` foot taper closes the bottom.
 
 import { type JSXElement } from "solid-js";
+import { type ColorInput } from "@opentui/core";
+import { theme } from "./theme";
 
 // Blank every border piece so only the ones we set below are drawn.
 const EMPTY_BORDER = {
@@ -30,10 +32,9 @@ const EMPTY_BORDER = {
 
 const HEAVY_VERTICAL = "┃"; // U+2503 BOX DRAWINGS HEAVY VERTICAL
 const FOOT = "╹"; // U+2579 BOX DRAWINGS HEAVY UP — tapers the bottom of the bar
-const DEFAULT_COLOR = "#4a8be0"; // opencode blue
 
 export function Border(props: {
-  color?: string;
+  color?: ColorInput;
   char?: string;
   gap?: number;
   children?: JSXElement;
@@ -41,7 +42,7 @@ export function Border(props: {
   return (
     <box
       border={["left"]}
-      borderColor={props.color ?? DEFAULT_COLOR}
+      borderColor={props.color ?? theme().primary}
       customBorderChars={{ ...EMPTY_BORDER, vertical: props.char ?? HEAVY_VERTICAL, bottomLeft: FOOT }}
       style={{ width: "100%" }}
     >

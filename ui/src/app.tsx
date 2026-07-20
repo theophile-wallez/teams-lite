@@ -5,7 +5,8 @@
 // - select gives keyboard + mouse navigation for free
 // - scrollbox gives wheel scroll + sticky-to-bottom for free
 // - input gives a text field with onSubmit (Enter) for sending
-// - Ctrl+K opens a fuzzy palette; Escape closes it
+// - Ctrl+K opens a fuzzy conversation palette; Ctrl+P opens settings (theme
+//   switch with live preview); Escape closes them
 //
 // The UI holds no business logic: it renders backend state and sends commands.
 
@@ -20,6 +21,8 @@ import { Splash } from "./splash";
 import { Spinner } from "./spinner";
 import { Border } from "./border";
 import { DialogSelect } from "./dialog-select";
+import { SettingsDialog } from "./settings";
+import { theme } from "./theme";
 
 const backend = new Backend();
 
@@ -38,6 +41,7 @@ const [messagesError, setMessagesError] = createSignal<string | null>(null);
 const [status, setStatus] = createSignal("connecting…");
 const [live, setLive] = createSignal<"connecting" | "connected" | "disconnected">("connecting");
 const [paletteOpen, setPaletteOpen] = createSignal(false);
+const [settingsOpen, setSettingsOpen] = createSignal(false);
 const [draft, setDraft] = createSignal("");
 
 // Set once the backend's startup check reports a newer rolling build. Surfaced
@@ -237,7 +241,7 @@ function ConversationList() {
     <box
       style={{
         width: 34,
-        backgroundColor: "#141414",
+        backgroundColor: theme().backgroundPanel,
         flexDirection: "column",
         paddingTop: 1,
       }}
@@ -245,11 +249,11 @@ function ConversationList() {
       <scrollbox
         style={{
           flexGrow: 1,
-          backgroundColor: "#141414",
+          backgroundColor: theme().backgroundPanel,
           verticalScrollbarOptions: {
             showArrows: false,
             // track blends into the sidebar so only the thumb (handle) shows
-            trackOptions: { backgroundColor: "#141414", foregroundColor: "#3a3a3a" },
+            trackOptions: { backgroundColor: theme().backgroundPanel, foregroundColor: theme().borderSubtle },
           },
         }}
         stickyScroll={false}
@@ -260,14 +264,14 @@ function ConversationList() {
             const isHovered = () => hoveredId() === c.id;
             const isSelected = () => selectedIndex() === i();
             const bg = () =>
-              isOpen() ? "#2a2a2a" : isHovered() ? "#242424" : isSelected() ? "#1e1e1e" : "#141414";
+              isOpen() ? theme().rowOpen : isHovered() ? theme().rowHovered : isSelected() ? theme().rowSelected : theme().rowIdle;
             // Unread threads read brighter; muted threads stay dim even when
             // unread (they shouldn't pull the eye), matching the Teams sidebar.
             const unread = () => !c.is_read;
             const titleFg = () =>
-              isOpen() ? "#ffffff" : c.is_muted ? "#8a8a8a" : unread() ? "#ffffff" : "#c0c0c0";
+              isOpen() ? theme().text : c.is_muted ? theme().textMuted : unread() ? theme().text : theme().textDim;
             const previewFg = () =>
-              isOpen() ? "#a9b7c6" : unread() && !c.is_muted ? "#9a9a9a" : "#6f6f6f";
+              isOpen() ? theme().textDim : unread() && !c.is_muted ? theme().textMuted : theme().textFaint;
             // The attention dot: only for unread, non-muted threads.
             const dot = () => (unread() && !c.is_muted ? "●" : " ");
             const preview = () => clip(previewLine(c), 29);
@@ -278,7 +282,7 @@ function ConversationList() {
                 onMouseOver={() => setHoveredId(c.id)}
                 onMouseOut={() => setHoveredId((h) => (h === c.id ? null : h))}
               >
-                <text content={dot()} style={{ fg: "#5b9bd5" }} />
+                <text content={dot()} style={{ fg: theme().unreadDot }} />
                 <box style={{ flexDirection: "column", flexGrow: 1, paddingLeft: 1 }}>
                   <text content={clip(convLabel(c), 29)} style={{ fg: titleFg() }} />
                   <text content={preview()} style={{ fg: previewFg() }} />
@@ -352,8 +356,8 @@ const BOTTOM_HALF_GAP_BORDER = {
 export function MessageBubble(props: { message: ChatMessage; showSenderName: boolean }) {
   const mine = () => props.message.is_self === true;
   const parsed = createMemo(() => parseMessageContent(props.message.content));
-  const bubbleBg = () => (mine() ? "#2b5278" : "#1e1e1e");
-  const quoteBg = () => (mine() ? "#1e3a54" : "#2f2f2f");
+  const bubbleBg = () => (mine() ? theme().bubbleMine : theme().bubbleIncoming);
+  const quoteBg = () => (mine() ? theme().quoteMine : theme().quoteIncoming);
   // The sender name only renders on incoming bubbles in group chats. It matters for
   // the quote's top gap below: when a name sits above the quote it gets its own ▀
   // inset, but when the message opens straight with a quote the bubble's own ▀ top
@@ -363,7 +367,7 @@ export function MessageBubble(props: { message: ChatMessage; showSenderName: boo
   return (
     <box
       border={["top"]}
-      borderColor="#0A0A0A"
+      borderColor={theme().background}
       customBorderChars={TOP_HALF_GAP_BORDER}
       style={{
         flexDirection: "column",
@@ -375,7 +379,7 @@ export function MessageBubble(props: { message: ChatMessage; showSenderName: boo
     >
       <box
         border={["bottom"]}
-        borderColor="#0A0A0A"
+        borderColor={theme().background}
         customBorderChars={BOTTOM_HALF_GAP_BORDER}
         style={{
           flexDirection: "column",
@@ -386,7 +390,7 @@ export function MessageBubble(props: { message: ChatMessage; showSenderName: boo
         }}
       >
         <Show when={nameShown()}>
-          <text content={props.message.sender} style={{ fg: "#7fb0e0" }} />
+          <text content={props.message.sender} style={{ fg: theme().senderName }} />
         </Show>
         <Show when={parsed().quote}>
           {(quote: Accessor<MessageQuote>) => (
@@ -413,15 +417,15 @@ export function MessageBubble(props: { message: ChatMessage; showSenderName: boo
                 }}
               >
                 <Show when={quote().sender.length > 0}>
-                  <text content={quote().sender} style={{ fg: mine() ? "#a9c2dd" : "#7fb0e0" }} />
+                  <text content={quote().sender} style={{ fg: mine() ? theme().senderNameMine : theme().senderName }} />
                 </Show>
-                <text content={quote().text} style={{ fg: mine() ? "#c3d3e3" : "#b6b6b6" }} />
+                <text content={quote().text} style={{ fg: mine() ? theme().quoteTextMine : theme().quoteTextIncoming }} />
               </box>
             </box>
           )}
         </Show>
         <Show when={parsed().body.length > 0}>
-          <text content={parsed().body} style={{ fg: "#e8e8e8" }} />
+          <text content={parsed().body} style={{ fg: theme().text }} />
         </Show>
       </box>
     </box>
@@ -448,10 +452,10 @@ const ERROR_ART = [
 function MessagesError(props: { message: string }) {
   return (
     <box style={{ flexDirection: "column", alignItems: "center" }}>
-      <text content={ERROR_ART} style={{ fg: "#5b5b5b" }} />
+      <text content={ERROR_ART} style={{ fg: theme().textFaint }} />
       <box style={{ height: 1 }} />
-      <text content="Couldn't load messages" style={{ fg: "#d08770" }} />
-      <text content={props.message} style={{ fg: "#7a5a4a" }} />
+      <text content="Couldn't load messages" style={{ fg: theme().error }} />
+      <text content={props.message} style={{ fg: theme().textMuted }} />
     </box>
   );
 }
@@ -473,16 +477,16 @@ function MessagePane() {
   // show a name because they're already right-aligned.
   const showSenderNames = createMemo(() => openConv()?.kind === "group");
   return (
-    <box style={{ flexGrow: 1, flexDirection: "column", backgroundColor: "#0A0A0A", paddingTop: 1, paddingLeft: 1, paddingRight: 1 }}>
+    <box style={{ flexGrow: 1, flexDirection: "column", backgroundColor: theme().background, paddingTop: 1, paddingLeft: 1, paddingRight: 1 }}>
       <Show when={openId()}>
-        <text content={title().trim()} style={{ fg: "#808080" }} />
+        <text content={title().trim()} style={{ fg: theme().textMuted }} />
       </Show>
       {/* paddingRight keeps message bubbles from butting against the scrollbar
           on the right; the left gap already comes from the pane's paddingLeft. */}
       <scrollbox style={{ flexGrow: 1, paddingRight: 1 }} stickyScroll stickyStart="bottom">
         <Show
           when={openId()}
-          fallback={<text content="Select a conversation (↑/↓, Enter, or click)." style={{ fg: "gray" }} />}
+          fallback={<text content="Select a conversation (↑/↓, Enter, or click)." style={{ fg: theme().textMuted }} />}
         >
           <Show
             when={messages().length > 0}
@@ -494,9 +498,9 @@ function MessagePane() {
                 fallback={
                   <Show
                     when={loadingMessages()}
-                    fallback={<text content="No messages yet." style={{ fg: "gray" }} />}
+                    fallback={<text content="No messages yet." style={{ fg: theme().textMuted }} />}
                   >
-                    <Spinner label="loading messages…" color="gray" />
+                    <Spinner label="loading messages…" color={theme().textMuted} />
                   </Show>
                 }
               >
@@ -524,12 +528,12 @@ function MessagePane() {
             scrollbox (flexGrow:1) squeezes the composer and its bottom rows get
             clipped, so the 4-row input renders as only 2. */}
         <box style={{ flexDirection: "column", marginTop: 1, flexShrink: 0 }}>
-          {/* Blue accent bar drawn as the box's native left border (┃), so it
-              spans the composer's full height automatically. The inner box adds
-              one blank row above and below the textarea so the text sits between
-              the first and last row of the 4-row input. */}
+          {/* Accent bar drawn as the box's native left border (┃) in the theme's
+              primary color, so it spans the composer's full height automatically.
+              The inner box adds one blank row above and below the textarea so the
+              text sits between the first and last row of the 4-row input. */}
           <Border>
-            <box style={{ width: "100%", paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1, backgroundColor: "#1E1E1E" }}>
+            <box style={{ width: "100%", paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1, backgroundColor: theme().backgroundElement }}>
               <textarea
                 style={{
                   // Pin focused/unfocused backgrounds to the same color so the
@@ -539,10 +543,10 @@ function MessagePane() {
                   // unless we set it explicitly.)
                   width: "100%",
                   height: composerRows(),
-                  backgroundColor: "#1E1E1E",
-                  focusedBackgroundColor: "#1E1E1E",
+                  backgroundColor: theme().backgroundElement,
+                  focusedBackgroundColor: theme().backgroundElement,
                 }}
-                focused={!paletteOpen()}
+                focused={!paletteOpen() && !settingsOpen()}
                 placeholder="Write a message… (Enter to send, Shift+Enter for a new line)"
                 value={draft()}
                 keyBindings={[
@@ -569,15 +573,15 @@ function MessagePane() {
 
 function StatusBar() {
   return (
-    <box style={{ height: 1, flexDirection: "row", backgroundColor: "#0A0A0A", paddingLeft: 1 }}>
+    <box style={{ height: 1, flexDirection: "row", backgroundColor: theme().background, paddingLeft: 1 }}>
       <Show when={live() === "connecting"}>
-        <Spinner color="gray" />
+        <Spinner color={theme().textMuted} />
         <text content=" " />
       </Show>
       <Show when={live() !== "connecting"}>
         <text content={live() === "connected" ? "🟢 " : "🔴 "} />
       </Show>
-      <text content={status()} style={{ fg: "gray" }} />
+      <text content={status()} style={{ fg: theme().textMuted }} />
       {/* Push the update notice to the right edge; the spacer is harmless when
           there's no update to show. */}
       <box style={{ flexGrow: 1 }} />
@@ -585,7 +589,7 @@ function StatusBar() {
         {(u: Accessor<UpdateInfo>) => (
           <text
             content={`↑ update available (${u().latest}) — reinstall to update `}
-            style={{ fg: "#e5c07b" }}
+            style={{ fg: theme().warning }}
           />
         )}
       </Show>
@@ -632,13 +636,19 @@ export function App() {
   // sequence was flushed, which is what left the terminal emitting stray
   // "35;56;51M" SGR mouse reports on every mouse move after Ctrl+C.
   useKeyboard((e) => {
+    // While a dialog is open (Ctrl+K conversation palette or Ctrl+P settings) it
+    // owns every key — its own DialogSelect handler drives navigation, selection
+    // and Escape-to-close — so we must NOT also treat Ctrl+K/Ctrl+P as global
+    // toggles here (Ctrl+P is the dialog's own "move up" binding).
+    if (paletteOpen() || settingsOpen()) return;
     if (e.ctrl && e.name === "k") {
-      setPaletteOpen((v) => !v);
+      setPaletteOpen(true);
       return;
     }
-    // While the palette is open it owns every other key (its own DialogSelect
-    // keyboard handler drives navigation, selection, and Escape-to-close).
-    if (paletteOpen()) return;
+    if (e.ctrl && e.name === "p") {
+      setSettingsOpen(true);
+      return;
+    }
     if (e.name === "escape") {
       setOpenId(null);
       return;
@@ -662,7 +672,7 @@ export function App() {
 
   return (
     <Show when={ready()} fallback={<Splash message={splashMsg()} />}>
-      <box style={{ flexDirection: "column", width: "100%", height: "100%", backgroundColor: "#0A0A0A" }}>
+      <box style={{ flexDirection: "column", width: "100%", height: "100%", backgroundColor: theme().background }}>
         <box style={{ flexDirection: "row", flexGrow: 1 }}>
           <ConversationList />
           <MessagePane />
@@ -680,6 +690,9 @@ export function App() {
             }}
             onClose={() => setPaletteOpen(false)}
           />
+        </Show>
+        <Show when={settingsOpen()}>
+          <SettingsDialog onClose={() => setSettingsOpen(false)} />
         </Show>
       </box>
     </Show>
