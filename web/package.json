@@ -45,6 +45,7 @@
     "@vitejs/plugin-react": "^5",
     "happy-dom": "^20.11.0",
     "jsdom": "^29.1.1",
+    "playwright-core": "^1.61.1",
     "typescript": "^5.9.3",
     "vite": "^7.3.6",
     "vite-tsconfig-paths": "^6.1.1",

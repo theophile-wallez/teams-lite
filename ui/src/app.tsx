@@ -11,6 +11,7 @@
 // The UI holds no business logic: it renders backend state and sends commands.
 
 import { useKeyboard, useRenderer } from "@opentui/solid";
+import { render } from "@opentui/solid";
 import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { createEffect, createSignal, createMemo, For, Show, onMount, type Accessor } from "solid-js";
 import { Backend, type Conversation, type ChatMessage, type MessagePage, type UpdateInfo } from "./client";
@@ -1004,4 +1005,14 @@ export function App() {
       </box>
     </Show>
   );
+}
+
+/// Mount the terminal UI. Kept here (not in index.tsx) so the entry point can
+/// stay JSX-free and select web vs. TUI without loading OpenTUI in web mode.
+/// `onDestroy` exits the process once OpenTUI restores the terminal (see the
+/// note in index.tsx for why we don't call process.exit ourselves on signals).
+export async function startTui(): Promise<void> {
+  await render(() => <App />, {
+    onDestroy: () => process.exit(0),
+  });
 }

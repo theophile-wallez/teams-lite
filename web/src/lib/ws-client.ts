@@ -163,11 +163,22 @@ export class Backend {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         return reject(new Error("not connected"));
       }
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      this.ws.send(JSON.stringify({ id, method, params }));
-      setTimeout(() => {
+      // Clear the timeout whenever the request settles, so a resolved/rejected
+      // request never leaves a lingering timer alive.
+      const timer = setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error(`timeout: ${method}`));
       }, REQUEST_TIMEOUT_MS);
+      this.pending.set(id, {
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v as T);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
+      this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
 

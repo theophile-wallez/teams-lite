@@ -48,6 +48,16 @@ const server = Bun.serve({
   idleTimeout: 60,
   async fetch(request) {
     const url = new URL(request.url);
+    // Browsers request /favicon.ico unconditionally; map it to our SVG so it
+    // never falls through to the SSR handler as a 404.
+    if (url.pathname === "/favicon.ico") {
+      const svg = join(clientDir, "favicon.svg");
+      if (existsSync(svg)) {
+        return new Response(Bun.file(svg), {
+          headers: { "cache-control": "public, max-age=86400" },
+        });
+      }
+    }
     const filePath = staticFileFor(url.pathname);
     if (filePath) {
       const isHashedAsset = url.pathname.startsWith("/assets/");

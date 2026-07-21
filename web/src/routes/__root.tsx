@@ -17,7 +17,10 @@ export const Route = createRootRoute({
       { name: "color-scheme", content: "dark" },
       { title: "teams-lite" },
     ],
-    links: [{ rel: "stylesheet", href: appCss }],
+    links: [
+      { rel: "stylesheet", href: appCss },
+      { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
+    ],
   }),
   component: RootComponent,
 });
