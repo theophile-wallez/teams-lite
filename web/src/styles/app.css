@@ -1,5 +1,8 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* Self-hosted Inter (variable). Bundled by Vite — no external CDN fetch,
+ * which keeps the app local-first and offline-safe. */
+@import "@fontsource-variable/inter";
 @import "./themes.gen.css";
 
 /* teams-lite web — Tailwind v4 theme wiring.
@@ -62,7 +65,7 @@
   --radius-sm: calc(var(--radius) - 4px);
 
   --font-sans:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif,
+    "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif,
     "Apple Color Emoji", "Segoe UI Emoji";
 }
 
