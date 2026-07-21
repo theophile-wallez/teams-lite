@@ -17,11 +17,17 @@
 - Backend: Rust (`src/`, binary `server` in `src/bin/server.rs`) — auth broker over
   D-Bus, real-time trouter client, local-first SQLite store, send, name resolution.
   Exposed over a local WebSocket (`ws://127.0.0.1:8420`).
-- UI: TypeScript + Bun + OpenTUI + Solid (`ui/`) — talks to the backend only through
-  the WebSocket (`ui/src/client.ts`). Local-first is enforced server-side; the UI
-  never touches the network or SQLite directly.
-- Architecture mirrors opencode: the UI process spawns/owns the backend as a child
-  process (`ui/src/server.ts`), so one command (`teams`) starts everything.
+- Two front-ends, both talking to the backend only through that WebSocket. Local-first
+  is enforced server-side; neither front-end touches the network or SQLite directly.
+  - Terminal UI (`ui/`): TypeScript + Bun + OpenTUI + Solid — keyboard-first TUI, client
+    in `ui/src/client.ts`. Architecture mirrors opencode: the UI process spawns/owns the
+    backend as a child process (`ui/src/server.ts`), so one command (`teams`) starts
+    everything.
+  - Web UI (`web/`): TypeScript + Bun + React + TanStack Start (SSR built with Vite),
+    WebSocket client in `web/src/lib/ws-client.ts`. Served by a plain Bun fetch server
+    (`web/server.ts`) and launched via `teams --web`, which opens it in the browser
+    against the same local backend. `web/mock/server.ts` is a backend mock used by the
+    E2E suite.
 
 ## Conventions
 
