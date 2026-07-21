@@ -253,6 +253,9 @@ export class Backend {
   send(conversation: string, text: string, replyTo?: ReplyTo): Promise<{ sent: boolean }> {
     return this.request("send", { conversation, text, reply_to: replyTo });
   }
+  edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {
+    return this.request("edit", { conversation, message_id: messageId, text });
+  }
 
   // ---- events -------------------------------------------------------------
 

@@ -33,6 +33,7 @@ export function MessagePane() {
   const olderError = useAppState((s) => s.olderError);
 
   const [menuMessage, setMenuMessage] = useState<ChatMessage | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [focusToken, setFocusToken] = useState(0);
 
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -108,6 +109,16 @@ export function MessagePane() {
     setMenuMessage(null);
   };
 
+  const doStartEdit = (m: ChatMessage) => {
+    setEditingId(m.id);
+    setMenuMessage(null);
+  };
+
+  const doSaveEdit = async (m: ChatMessage, text: string) => {
+    setEditingId(null);
+    await controller.editMessage(m.id, text);
+  };
+
   if (!openId) {
     return (
       <section className="flex flex-1 items-center justify-center bg-background">
@@ -160,7 +171,10 @@ export function MessagePane() {
                 key={m.id}
                 message={m}
                 showSenderName={isGroup}
+                editing={editingId === m.id}
                 onOpenActions={openActions}
+                onSaveEdit={doSaveEdit}
+                onCancelEdit={() => setEditingId(null)}
               />
             ))}
           </div>
@@ -184,6 +198,16 @@ export function MessagePane() {
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-1">
+            {menuMessage?.is_self && (
+              <Button
+                variant="ghost"
+                className="justify-start"
+                data-testid="action-edit"
+                onClick={() => menuMessage && doStartEdit(menuMessage)}
+              >
+                Edit
+              </Button>
+            )}
             <Button
               variant="ghost"
               className="justify-start"

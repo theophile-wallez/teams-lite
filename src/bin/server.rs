@@ -9,7 +9,7 @@
 //   response (server -> client):  { "id": <n>, "result": <v> }  |  { "id": <n>, "error": "<msg>" }
 //   event    (server -> client):  { "event": "<name>", "data": {...} }   (no id)
 //
-// Methods: conversations | open | backfill | set_draft | send
+// Methods: conversations | open | backfill | set_draft | send | edit
 // Events:  status | message | conversations_changed | update_available
 //
 // No raw tokens are ever logged or sent.
@@ -536,6 +536,44 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 eprintln!("[draft] could not clear sent draft for {conv}: {e}");
             }
             Ok(json!({ "sent": true }))
+        }
+
+        // edit one of our own messages in place. The network PUT replaces the
+        // message resource; we then update the local row and broadcast the new
+        // content so open UIs reflect the edit immediately (both clients merge
+        // live messages by id), without waiting for the trouter echo.
+        "edit" => {
+            let conv = param_str(params, "conversation")?;
+            let message_id = param_str(params, "message_id")?;
+            let text = param_str(params, "text")?;
+            let http = ctx.http.clone();
+            let edit_conv = conv.clone();
+            let edit_id = message_id.clone();
+            let edit_text = text.clone();
+            ctx.retry_on_auth(move |session, _csa| {
+                let http = http.clone();
+                let conv = edit_conv.clone();
+                let message_id = edit_id.clone();
+                let text = edit_text.clone();
+                async move {
+                    teams_send::edit_message(&http, &session, &conv, &message_id, &text).await
+                }
+            })
+            .await?;
+
+            let (self_name, self_mri) = {
+                let session = ctx.session().await?;
+                (session.self_name.to_string(), session.self_mri.to_string())
+            };
+            let new_content = teams_send::escape_html(&text);
+            if let Ok(store) = ctx.store() {
+                if let Some(updated) =
+                    store.update_message_content(&conv, &message_id, &new_content)?
+                {
+                    ctx.emit("message", message_json(&updated, &self_name, &self_mri));
+                }
+            }
+            Ok(json!({ "edited": true }))
         }
 
         other => anyhow::bail!("unknown method: {other}"),

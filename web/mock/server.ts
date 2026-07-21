@@ -11,7 +11,7 @@
 //   response (server -> client):  { "id": <n>, "result": <v> } | { "id": <n>, "error": "<msg>" }
 //   event    (server -> client):  { "event": "<name>", "data": <v> }   (no id)
 //
-// Methods: ping | conversations | open | backfill | set_draft | send
+// Methods: ping | conversations | open | backfill | set_draft | send | edit
 // Events:  status | realtime_status | message | conversations_changed
 //
 // Run it (from the web/ directory):
@@ -640,6 +640,14 @@ function dispatch(method: string, params: unknown): unknown {
       return { sent: true };
     }
 
+    case "edit": {
+      const id = requireString(params, "conversation");
+      const messageId = requireString(params, "message_id");
+      const text = requireString(params, "text");
+      editMessage(id, messageId, text);
+      return { edited: true };
+    }
+
     default:
       throw new Error(`unknown method: ${method}`);
   }
@@ -675,6 +683,22 @@ function handleFrame(ws: Socket, raw: string): void {
 function appendMessage(cs: ConvState, msg: ChatMessage): void {
   cs.messages.push(msg);
   recomputeSummary(cs);
+}
+
+/** Edit a stored message in place and broadcast the new content, mirroring the
+ *  Rust backend: it PUTs the message resource, updates the local row, then emits
+ *  a `message` event that the UI reconciles by id (replacing the old bubble). */
+function editMessage(convId: string, messageId: string, text: string): void {
+  const cs = store.get(convId);
+  if (!cs) return;
+  const msg = cs.messages.find((m) => m.id === messageId);
+  if (!msg) return;
+  const content = escapeHtml(text);
+  if (msg.content === content) return; // no-op edit: nothing to broadcast
+  msg.content = content;
+  recomputeSummary(cs);
+  broadcast("message", msg);
+  broadcast("conversations_changed", {});
 }
 
 /** ~150ms after a `send`, echo the message back as the backend's trouter would,

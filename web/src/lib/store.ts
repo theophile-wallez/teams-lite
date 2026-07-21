@@ -326,6 +326,26 @@ export class TeamsController {
     this.set({ replyingTo: null });
   }
 
+  /**
+   * Edit one of our own messages in place. The backend replaces the message
+   * over the network and broadcasts the new content as a live `message` event,
+   * which reconciles into the cache by id (see `wireEvents`), so we only need to
+   * fire the request and surface failures.
+   */
+  async editMessage(messageId: string, text: string): Promise<boolean> {
+    const id = this.get().openId;
+    if (!id) return false;
+    const clean = text.trim();
+    if (!clean) return false;
+    try {
+      await this.backend.edit(id, messageId, clean);
+      return true;
+    } catch (e) {
+      this.set({ status: `edit failed: ${errText(e)}` });
+      return false;
+    }
+  }
+
   async sendDraft(text: string): Promise<void> {
     const id = this.get().openId;
     if (!id) return;

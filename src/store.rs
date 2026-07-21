@@ -328,14 +328,44 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Insert a message, deduplicated by id. Returns true if it was newly inserted.
+    /// Insert a message, deduplicated by id. Returns true if it was newly
+    /// inserted OR its content changed (an edit). When the same id arrives again
+    /// with identical content, this is a no-op and returns false, so re-fetches
+    /// stay cheap while genuine edits — from us or anyone else — propagate.
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
         let n = self.conn.execute(
-            "INSERT OR IGNORE INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(conversation_id, id) DO UPDATE SET content = excluded.content
+                 WHERE messages.content <> excluded.content",
             params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content],
         )?;
         Ok(n == 1)
+    }
+
+    /// Update just the content of an existing message (an in-place edit) and
+    /// return the refreshed row. Returns `None` when the id is unknown or the
+    /// content is unchanged, so callers can skip a needless live broadcast.
+    pub fn update_message_content(
+        &self,
+        conversation_id: &str,
+        id: &str,
+        content: &str,
+    ) -> Result<Option<Message>> {
+        let changed = self.conn.execute(
+            "UPDATE messages SET content = ?3
+             WHERE conversation_id = ?1 AND id = ?2 AND content <> ?3",
+            params![conversation_id, id, content],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM messages WHERE conversation_id = ?1 AND id = ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let msg = stmt.query_row(params![conversation_id, id], row_to_msg)?;
+        Ok(Some(msg))
     }
 
     /// Persist the unsent composer text for one conversation. Network syncs never
@@ -350,10 +380,10 @@ impl Store {
     }
 
     /// Backfill `sender_mri` on an existing row that predates the column (its MRI
-    /// is NULL or empty). `insert_message` uses INSERT OR IGNORE, so a re-fetched
-    /// message never overwrites the stored row — this heals legacy history so our
-    /// own old messages get tagged as ours. No-op when the MRI is already set or
-    /// the incoming MRI is empty.
+    /// is NULL or empty). `insert_message` only ever updates `content` on
+    /// conflict, so a re-fetch never rewrites `sender_mri` on its own — this
+    /// heals legacy history so our own old messages get tagged as ours. No-op
+    /// when the MRI is already set or the incoming MRI is empty.
     pub fn backfill_sender_mri(&self, conversation_id: &str, id: &str, sender_mri: &str) -> Result<()> {
         if sender_mri.is_empty() {
             return Ok(());
@@ -551,6 +581,35 @@ mod tests {
         let top = s.messages_before("c1", 3, 10).unwrap();
         assert_eq!(top.len(), 2); // seq 1 and 2
         assert_eq!(top.first().unwrap().seq, 1);
+    }
+
+    #[test]
+    fn edit_updates_content_and_reports_change() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        assert!(s.insert_message(&msg("c1", 1)).unwrap());
+
+        // Re-inserting the same id with identical content is a no-op.
+        assert!(!s.insert_message(&msg("c1", 1)).unwrap());
+
+        // The same id with new content counts as a change (an edit echo).
+        let mut edited = msg("c1", 1);
+        edited.content = "edited body".into();
+        assert!(s.insert_message(&edited).unwrap());
+        assert_eq!(s.newest_messages("c1", 10).unwrap()[0].content, "edited body");
+
+        // update_message_content returns the refreshed row only on a real change.
+        let again = s.update_message_content("c1", "m1", "edited body").unwrap();
+        assert!(again.is_none(), "no-op edit must not report a change");
+        let changed = s
+            .update_message_content("c1", "m1", "final body")
+            .unwrap()
+            .expect("a real content change returns the row");
+        assert_eq!(changed.content, "final body");
+        assert_eq!(changed.seq, 1, "an edit keeps the original seq");
+
+        // An unknown id yields None rather than an error.
+        assert!(s.update_message_content("c1", "nope", "x").unwrap().is_none());
     }
 
     #[test]

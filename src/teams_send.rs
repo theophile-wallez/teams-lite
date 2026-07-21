@@ -91,6 +91,53 @@ pub async fn send_message(
     Ok(cmid)
 }
 
+/// Edit an existing message in place. Mirrors `send_message`, but targets the
+/// message resource directly with `PUT`, so the server updates the original
+/// message rather than creating a new one.
+///
+/// Shape proven from the Skype chatService messaging API (Terrance/SkPy,
+/// `SkypeChat.editRaw`):
+///   PUT {chatService}/v1/users/ME/conversations/{convId}/messages/{messageId}
+///   Header: Authentication: skypetoken=...
+///   Body: { "content": "<html>", "messagetype": "RichText/Html", "contenttype": "text" }
+///
+/// There is no `clientmessageid`: the message id already exists and identifies
+/// the resource being replaced. The server echoes a `MessageUpdate` over the
+/// trouter carrying the same message id and the new content.
+pub async fn edit_message(
+    http: &reqwest::Client,
+    session: &Session,
+    conversation_id: &str,
+    message_id: &str,
+    text: &str,
+) -> Result<()> {
+    let chat = session
+        .endpoint("chatService")
+        .context("no chatService endpoint in regionGtms")?
+        .trim_end_matches('/');
+    let url = format!(
+        "{chat}/v1/users/ME/conversations/{}/messages/{}",
+        urlencoding::encode(conversation_id),
+        urlencoding::encode(message_id)
+    );
+    let body = build_edit_body(text, &session.self_name);
+
+    let resp = http
+        .put(&url)
+        .header("authentication", format!("skypetoken={}", session.skypetoken))
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .context("edit message request")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let txt = resp.text().await.unwrap_or_default();
+        anyhow::bail!("edit -> {status}: {}", txt.chars().take(160).collect::<String>());
+    }
+    Ok(())
+}
+
 fn message_content(text: &str, reply_to: Option<&ReplyTo>) -> String {
     let Some(reply) = reply_to else {
         return escape_html(text);
@@ -123,6 +170,17 @@ fn build_body(client_message_id: &str, text: &str, self_name: &str, reply_to: Op
     json!({
         "clientmessageid": client_message_id,
         "content": message_content(text, reply_to),
+        "messagetype": "RichText/Html",
+        "contenttype": "text",
+        "imdisplayname": self_name,
+    })
+}
+
+/// Build the edit request body (pure, unit-tested). Edits carry plain text, so
+/// there is no reply markup and — unlike a send — no `clientmessageid`.
+fn build_edit_body(text: &str, self_name: &str) -> serde_json::Value {
+    json!({
+        "content": escape_html(text),
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "imdisplayname": self_name,
@@ -185,8 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn reply_markup_preserves_cursor_position() {
-        let reply = ReplyTo {
+    fn reply_markup_preserves_cursor_position() {        let reply = ReplyTo {
             compose_time: 42,
             sender: "Alice".into(),
             sender_mri: "8:alice".into(),
@@ -199,5 +256,15 @@ mod tests {
 
         assert!(content.starts_with("<p>First line</p><blockquote"));
         assert!(content.ends_with("</blockquote><p>Second line</p>"));
+    }
+
+    #[test]
+    fn edit_body_has_no_client_message_id_and_escapes_content() {
+        let b = build_edit_body("updated <text> & more", "Théophile WALLEZ");
+        assert!(b.get("clientmessageid").is_none());
+        assert_eq!(b["content"], "updated &lt;text&gt; &amp; more");
+        assert_eq!(b["messagetype"], "RichText/Html");
+        assert_eq!(b["contenttype"], "text");
+        assert_eq!(b["imdisplayname"], "Théophile WALLEZ");
     }
 }
