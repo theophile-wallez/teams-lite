@@ -121,9 +121,9 @@ export function MessagePane() {
   }
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col bg-background">
+    <section data-testid="message-pane" className="flex min-w-0 flex-1 flex-col bg-background">
       <header className="flex h-12 shrink-0 items-center border-b border-border px-4">
-        <h2 className="truncate text-sm font-semibold">
+        <h2 data-testid="conversation-title" className="truncate text-sm font-semibold">
           {openConv ? convLabel(openConv) : openId}
         </h2>
       </header>
@@ -131,6 +131,7 @@ export function MessagePane() {
       <div
         ref={viewportRef}
         onScroll={onScroll}
+        data-testid="message-scroll"
         className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3"
       >
         {messages.length === 0 ? (
@@ -183,10 +184,20 @@ export function MessagePane() {
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-1">
-            <Button variant="ghost" className="justify-start" onClick={() => menuMessage && doReply(menuMessage)}>
+            <Button
+              variant="ghost"
+              className="justify-start"
+              data-testid="action-reply"
+              onClick={() => menuMessage && doReply(menuMessage)}
+            >
               Reply
             </Button>
-            <Button variant="ghost" className="justify-start" onClick={() => menuMessage && void doCopy(menuMessage)}>
+            <Button
+              variant="ghost"
+              className="justify-start"
+              data-testid="action-copy"
+              onClick={() => menuMessage && void doCopy(menuMessage)}
+            >
               Copy
             </Button>
           </div>

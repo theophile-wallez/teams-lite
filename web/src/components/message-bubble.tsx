@@ -23,6 +23,8 @@ export function MessageBubble(props: {
   return (
     <div className={cn("group flex w-full", mine ? "justify-end" : "justify-start")}>
       <div
+        data-testid="message"
+        data-mine={mine ? "true" : "false"}
         className={cn(
           "relative max-w-[74%] rounded-2xl px-3 py-2 text-sm leading-relaxed shadow-sm",
           mine
@@ -79,6 +81,7 @@ export function MessageBubble(props: {
         <button
           type="button"
           aria-label="Message actions"
+          data-testid="message-actions"
           onClick={() => props.onOpenActions(props.message)}
           className={cn(
             "absolute -top-2 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100",

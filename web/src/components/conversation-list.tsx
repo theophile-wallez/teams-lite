@@ -25,7 +25,10 @@ export function ConversationList(props: { selectedIndex: number; onSelect: (inde
   });
 
   return (
-    <aside className="flex w-[300px] shrink-0 flex-col border-r border-border bg-panel">
+    <aside
+      data-testid="sidebar"
+      className="flex w-[300px] shrink-0 flex-col border-r border-border bg-panel"
+    >
       <div ref={parentRef} className="flex-1 overflow-y-auto overflow-x-hidden py-1">
         <div className="relative w-full" style={{ height: `${virtualizer.getTotalSize()}px` }}>
           {virtualizer.getVirtualItems().map((row) => {
@@ -69,6 +72,11 @@ function ConversationRow(props: {
     <button
       type="button"
       onClick={props.onClick}
+      data-testid="conversation-row"
+      data-conversation-id={c.id}
+      data-open={props.open ? "true" : undefined}
+      data-selected={props.selected ? "true" : undefined}
+      data-unread={unread ? "true" : undefined}
       aria-current={props.open ? "true" : undefined}
       className={cn(
         "flex h-full w-full items-center gap-2 rounded-md px-2 text-left transition-colors",

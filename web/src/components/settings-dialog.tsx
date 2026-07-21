@@ -12,19 +12,24 @@ import {
 } from "./ui/command";
 
 /**
- * Ctrl+P theme picker with live preview: highlighting a theme previews it
- * immediately (matching the TUI's live settings preview); selecting commits and
- * persists it, and dismissing without selecting reverts to the committed theme.
+ * Ctrl+P theme picker with live preview: the highlighted theme (via keyboard or
+ * mouse — driven by cmdk's active value) previews immediately, matching the
+ * TUI's live settings preview. Selecting commits and persists it; dismissing
+ * without selecting reverts to the committed theme.
  */
 export function SettingsDialog(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const controller = useController();
   const themeId = useAppState((s) => s.themeId);
   const [highlighted, setHighlighted] = useState<string>(themeId);
 
-  // Preview the highlighted theme while the picker is open.
+  // When the picker opens, start highlighting the committed theme.
   useEffect(() => {
-    if (!props.open) return;
-    controller.previewTheme(highlighted);
+    if (props.open) setHighlighted(themeId);
+  }, [props.open, themeId]);
+
+  // Preview whatever is currently highlighted while the picker is open.
+  useEffect(() => {
+    if (props.open) controller.previewTheme(highlighted);
   }, [props.open, highlighted, controller]);
 
   const close = (open: boolean) => {
@@ -33,7 +38,13 @@ export function SettingsDialog(props: { open: boolean; onOpenChange: (open: bool
   };
 
   return (
-    <CommandDialog open={props.open} onOpenChange={close} label="Choose a theme">
+    <CommandDialog
+      open={props.open}
+      onOpenChange={close}
+      label="Choose a theme"
+      value={highlighted}
+      onValueChange={setHighlighted}
+    >
       <CommandInput placeholder="Search themes…" />
       <CommandList>
         <CommandEmpty>No themes found.</CommandEmpty>
@@ -41,9 +52,8 @@ export function SettingsDialog(props: { open: boolean; onOpenChange: (open: bool
           {THEME_LIST.map((t) => (
             <CommandItem
               key={t.id}
-              value={`${t.name} ${t.id}`}
-              onMouseEnter={() => setHighlighted(t.id)}
-              onFocus={() => setHighlighted(t.id)}
+              value={t.id}
+              keywords={[t.name]}
               onSelect={() => {
                 controller.setTheme(t.id);
                 props.onOpenChange(false);

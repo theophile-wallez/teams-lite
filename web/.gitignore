@@ -8,6 +8,12 @@ dist/
 .tanstack/
 .vinxi/
 
+# playwright
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # logs / env
 *.log
 .env

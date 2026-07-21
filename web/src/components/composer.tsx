@@ -43,7 +43,10 @@ export function Composer(props: { focusToken: unknown }) {
   return (
     <div className="shrink-0 border-t border-border bg-background px-3 py-3">
       {replyingTo && (
-        <div className="mb-2 flex items-start gap-2 rounded-md border-l-2 border-primary bg-panel px-3 py-2">
+        <div
+          data-testid="reply-banner"
+          className="mb-2 flex items-start gap-2 rounded-md border-l-2 border-primary bg-panel px-3 py-2"
+        >
           <div className="min-w-0 flex-1">
             <div className="text-xs font-semibold text-primary">
               Replying to {replyingTo.message.sender}
@@ -55,6 +58,7 @@ export function Composer(props: { focusToken: unknown }) {
           <button
             type="button"
             aria-label="Cancel reply"
+            data-testid="reply-cancel"
             onClick={() => controller.cancelReply()}
             className="rounded p-0.5 text-muted-foreground hover:text-foreground"
           >
@@ -70,6 +74,7 @@ export function Composer(props: { focusToken: unknown }) {
           ref={textareaRef}
           value={draft}
           rows={1}
+          data-testid="composer"
           placeholder="Write a message…  (Enter to send, Shift+Enter for a new line)"
           className={cn(
             "max-h-64 w-full resize-none bg-transparent py-1 text-sm outline-none placeholder:text-text-faint",

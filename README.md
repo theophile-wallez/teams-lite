@@ -162,6 +162,21 @@ The `teams` binary embeds the terminal UI, the Rust backend, **and** the web UI.
 Every push to `master` builds this binary in CI and publishes it as the rolling
 `latest` release that `install.sh` downloads.
 
+## Testing
+
+```bash
+cargo test                       # Rust backend
+cd ui  && bun test               # terminal UI (deterministic subset runs in CI)
+cd web && bun run test           # web unit tests (Vitest)
+cd web && bun run test:e2e       # web end-to-end (Playwright, headless Chromium)
+```
+
+The web E2E suite boots the backend **mock** (`web/mock/server.ts`) and the SSR
+server, then drives a real browser through the whole app — connecting, opening
+conversations, sending/replying/copying, infinite history, the command palette,
+the theme picker, keyboard navigation, and live incoming messages. Pull requests
+run Rust, UI, web unit, typecheck, and E2E via `.github/workflows/ci.yml`.
+
 
 ## Keyboard shortcuts
 

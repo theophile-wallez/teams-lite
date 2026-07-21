@@ -87,10 +87,16 @@ const PAGE_SIZE = 40;
 const BACKLOG = 120;
 /** Fixed seed for the PRNG → deterministic content/structure across runs. */
 const SEED = 0x7ea115;
-/** How often to inject a live incoming message. */
-const LIVE_INTERVAL_MS = 7_000;
+/** How often to inject a live incoming message. Set MOCK_LIVE_MS=0 to disable
+ *  the random feed (used by the E2E suite so live events are deterministic). */
+const LIVE_INTERVAL_MS = Number(process.env.MOCK_LIVE_MS ?? 7_000);
 /** Delay before echoing a sent message, simulating the real-time round trip. */
 const SEND_ECHO_DELAY_MS = 150;
+
+/** When "1", expose an HTTP control plane (POST /__test/emit, GET
+ *  /__test/conversations) so E2E tests can drive live events deterministically.
+ *  Off by default — the mock behaves exactly as before for plain dev use. */
+const TEST_HOOKS = process.env.MOCK_TEST_HOOKS === "1";
 
 /** Our own identity. The UI tags messages via `is_self`; the MRI is the anchor. */
 const SELF_NAME = "You";
@@ -699,6 +705,7 @@ function scheduleSendEcho(convId: string, text: string, replyTo: ReplyTo | undef
 /** Every ~7s, drop an incoming (is_self:false) message into a random chat and
  *  push it live, so live updates and notifications are exercised in the UI. */
 function startLiveFeed(): void {
+  if (LIVE_INTERVAL_MS <= 0) return; // deterministic mode (e.g. E2E): no feed
   setInterval(() => {
     if (sockets.size === 0) return; // no listeners → don't grow history pointlessly
 
@@ -736,6 +743,82 @@ function startLiveFeed(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Test control plane (gated by MOCK_TEST_HOOKS) — deterministic live events.
+// ---------------------------------------------------------------------------
+
+/** Inject a message into a conversation and broadcast it live, exactly like the
+ *  live feed / send echo do. Returns the message, or null if the conversation
+ *  is unknown. Used only by the gated HTTP test hook. */
+function injectMessage(input: {
+  conversation: string;
+  content: string;
+  sender?: string;
+  senderMri?: string;
+  isSelf?: boolean;
+  reply?: boolean;
+}): ChatMessage | null {
+  const cs = store.get(input.conversation);
+  if (!cs) return null;
+  const isSelf = input.isSelf ?? false;
+  const fallback = cs.participants[0];
+  const sender = input.sender ?? (isSelf ? SELF_NAME : (fallback?.name ?? "Someone"));
+  const senderMri =
+    input.senderMri ?? (isSelf ? SELF_MRI : (fallback?.mri ?? "8:orgid:someone"));
+  const seq = nextSeqFor(cs);
+  const last = cs.messages.at(-1);
+  const content =
+    input.reply && last ? replyContent(last, input.content) : escapeHtml(input.content);
+  const msg: ChatMessage = {
+    id: `${cs.conv.id}#${seq}`,
+    conversation_id: cs.conv.id,
+    seq,
+    compose_time: Date.now(),
+    sender,
+    sender_mri: senderMri,
+    content,
+    is_self: isSelf,
+  };
+  appendMessage(cs, msg);
+  cs.conv.is_read = isSelf; // an incoming message is unread; ours is read
+  broadcast("message", msg);
+  broadcast("conversations_changed", {});
+  return msg;
+}
+
+/** Handle the gated test HTTP endpoints. Returns null when not a test route. */
+async function handleTestHook(req: Request, url: URL): Promise<Response | null> {
+  if (!TEST_HOOKS) return null;
+  if (req.method === "POST" && url.pathname === "/__test/emit") {
+    let body: Record<string, unknown> = {};
+    try {
+      body = (await req.json()) as Record<string, unknown>;
+    } catch {
+      /* tolerate an empty/invalid body */
+    }
+    const conversation =
+      typeof body.conversation === "string" ? body.conversation : (order[0] ?? "");
+    const msg = injectMessage({
+      conversation,
+      content: typeof body.content === "string" ? body.content : "test message",
+      sender: typeof body.sender === "string" ? body.sender : undefined,
+      senderMri: typeof body.sender_mri === "string" ? body.sender_mri : undefined,
+      isSelf: Boolean(body.is_self),
+      reply: Boolean(body.reply),
+    });
+    return Response.json({ ok: msg !== null, message: msg }, { status: msg ? 200 : 404 });
+  }
+  if (req.method === "GET" && url.pathname === "/__test/conversations") {
+    return Response.json(
+      order.map((id) => {
+        const c = store.get(id)!.conv;
+        return { id: c.id, name: c.name, kind: c.kind };
+      }),
+    );
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Boot.
 // ---------------------------------------------------------------------------
 
@@ -759,9 +842,13 @@ const server = Bun.serve({
       sockets.delete(ws);
     },
   },
-  fetch(req, server) {
-    // Upgrade WebSocket handshakes; anything else gets a plain hello.
+  async fetch(req, server) {
+    // Upgrade WebSocket handshakes first.
     if (server.upgrade(req)) return undefined;
+    const url = new URL(req.url);
+    const hook = await handleTestHook(req, url);
+    if (hook) return hook;
+    // A plain GET (e.g. Playwright's webServer readiness probe) gets a hello.
     return new Response("teams-lite mock backend");
   },
 });
@@ -769,5 +856,7 @@ const server = Bun.serve({
 startLiveFeed();
 
 console.log(
-  `[mock] teams-lite mock backend on ws://${server.hostname}:${server.port} (${store.size} conversations)`,
+  `[mock] teams-lite mock backend on ws://${server.hostname}:${server.port} (${store.size} conversations)` +
+    (TEST_HOOKS ? " [test-hooks]" : "") +
+    (LIVE_INTERVAL_MS <= 0 ? " [no-live-feed]" : ""),
 );

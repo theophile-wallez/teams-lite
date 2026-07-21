@@ -24,11 +24,15 @@ export function CommandDialog({
   open,
   onOpenChange,
   label,
+  value,
+  onValueChange,
 }: {
   children: React.ReactNode;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   label?: string;
+  value?: string;
+  onValueChange?: (value: string) => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -40,6 +44,8 @@ export function CommandDialog({
         <Command
           className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground [&_[cmdk-input-wrapper]_svg]:size-4 [&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-2.5 [&_[cmdk-item]_svg]:size-4"
           loop
+          value={value}
+          onValueChange={onValueChange}
         >
           {children}
         </Command>

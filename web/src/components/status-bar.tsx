@@ -11,9 +11,14 @@ export function StatusBar() {
   const update = useAppState((s) => s.update);
 
   return (
-    <footer className="flex h-7 shrink-0 items-center gap-2 border-t border-border bg-background px-3 text-xs text-muted-foreground">
+    <footer
+      data-testid="status-bar"
+      className="flex h-7 shrink-0 items-center gap-2 border-t border-border bg-background px-3 text-xs text-muted-foreground"
+    >
       <span className="flex items-center gap-1.5">
         <span
+          data-testid="live-dot"
+          data-state={live}
           className={
             "inline-block size-2 rounded-full transition-colors " +
             (live === "connected"

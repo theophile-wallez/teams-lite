@@ -1,0 +1,84 @@
+name: ci
+
+# Validation pipeline for pull requests and feature branches. The release
+# pipeline (build.yml) runs on master and publishes the binary; this workflow
+# is the pre-merge gate: Rust, terminal-UI, web unit tests, typecheck, and the
+# full Playwright E2E suite (browser-driven, against the mock backend).
+
+on:
+  pull_request: {}
+  push:
+    branches-ignore: [master]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Backend tests
+        run: cargo test
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install UI dependencies
+        working-directory: ui
+        run: bun install --frozen-lockfile
+      # Deterministic subset (the rest needs the Microsoft broker over D-Bus).
+      - name: UI history tests
+        working-directory: ui
+        run: bun test src/message-history.test.ts src/message-scroll.test.ts
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install web dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: Web unit tests
+        working-directory: web
+        run: bun run test
+      - name: Web typecheck
+        working-directory: web
+        run: bun run typecheck
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install web dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: Install Playwright Chromium
+        working-directory: web
+        run: bunx playwright install --with-deps chromium
+      # test:e2e builds the SSR app and boots the mock backend via Playwright's
+      # webServer, then drives a headless Chromium through the full app.
+      - name: Playwright E2E
+        working-directory: web
+        run: bun run test:e2e
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          retention-days: 7
