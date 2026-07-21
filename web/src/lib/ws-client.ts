@@ -196,8 +196,18 @@ export class Backend {
   setDraft(conversation: string, text: string): Promise<{ saved: boolean }> {
     return this.request<{ saved: boolean }>("set_draft", { conversation, text });
   }
-  send(conversation: string, text: string, replyTo?: ReplyTo): Promise<{ sent: boolean }> {
-    return this.request<{ sent: boolean }>("send", { conversation, text, reply_to: replyTo });
+  send(
+    conversation: string,
+    text: string,
+    replyTo?: ReplyTo,
+    contentHtml?: string,
+  ): Promise<{ sent: boolean }> {
+    return this.request<{ sent: boolean }>("send", {
+      conversation,
+      text,
+      reply_to: replyTo,
+      content_html: contentHtml,
+    });
   }
   edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {
     return this.request<{ edited: boolean }>("edit", { conversation, message_id: messageId, text });

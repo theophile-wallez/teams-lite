@@ -346,15 +346,22 @@ export class TeamsController {
     }
   }
 
-  async sendDraft(text: string): Promise<void> {
+  /**
+   * Send the current draft. In plain mode `text` carries the message; in rich
+   * mode `html` carries the already-normalized Teams-safe HTML (from the TipTap
+   * editor) and `text` is empty. When replying, the backend prepends the quote
+   * blockquote; the rich HTML (or plain `after` text) becomes the reply body.
+   */
+  async sendDraft(text: string, html?: string): Promise<void> {
     const id = this.get().openId;
     if (!id) return;
     const clean = text.trim();
-    if (!clean) return;
+    const richHtml = html?.trim() || undefined;
+    if (!clean && !richHtml) return;
 
     // When replying, the backend builds the outgoing HTML as
-    // paragraph(before) + quote + paragraph(after) and ignores the plain `text`
-    // (see src/teams_send.rs). So the composed reply body goes into `after`.
+    // quote + body. For plain sends the body is paragraph(after); for rich sends
+    // it is the normalized HTML, so the reply body goes into `after`/html.
     const reply = this.get().replyingTo;
     const replyTo: ReplyTo | undefined = reply
       ? replyToPayload(reply.message, "", clean)
@@ -368,7 +375,7 @@ export class TeamsController {
 
     try {
       await this.backend.setDraft(id, "");
-      await this.backend.send(id, clean, replyTo);
+      await this.backend.send(id, clean, replyTo, richHtml);
     } catch (e) {
       this.set({ status: `send failed: ${errText(e)}` });
       return;

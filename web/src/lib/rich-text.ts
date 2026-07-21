@@ -302,3 +302,75 @@ export function hasVisibleContent(nodes: RichNode[]): boolean {
     return hasVisibleContent(node.children);
   });
 }
+
+function escapeText(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeAttr(value: string): string {
+  return escapeText(value).replace(/"/g, "&quot;");
+}
+
+// Tags emitted verbatim (their name is safe and self-contained).
+const SIMPLE_TAGS: Partial<Record<RichTag, string>> = {
+  p: "p",
+  strong: "strong",
+  em: "em",
+  u: "u",
+  s: "s",
+  code: "code",
+  pre: "pre",
+  blockquote: "blockquote",
+  ul: "ul",
+  ol: "ol",
+  li: "li",
+};
+
+function serializeNodes(nodes: RichNode[]): string {
+  let out = "";
+  for (const node of nodes) {
+    if (node.type === "text") {
+      out += escapeText(node.text);
+      continue;
+    }
+    if (node.tag === "br") {
+      out += "<br>";
+      continue;
+    }
+    if (node.tag === "img") {
+      if (node.attrs.src) {
+        const alt = node.attrs.alt ? ` alt="${escapeAttr(node.attrs.alt)}"` : "";
+        out += `<img src="${escapeAttr(node.attrs.src)}"${alt}>`;
+      }
+      continue;
+    }
+    if (node.tag === "a") {
+      const inner = serializeNodes(node.children);
+      out += node.attrs.href
+        ? `<a href="${escapeAttr(node.attrs.href)}">${inner}</a>`
+        : inner;
+      continue;
+    }
+    if (node.tag === "mention") {
+      out += serializeNodes(node.children); // send mentions as plain text
+      continue;
+    }
+    const tag = SIMPLE_TAGS[node.tag];
+    if (tag) out += `<${tag}>${serializeNodes(node.children)}</${tag}>`;
+  }
+  return out;
+}
+
+/**
+ * Normalize arbitrary editor HTML (e.g. TipTap's `getHTML()`) into the bounded,
+ * Teams-safe HTML subset by round-tripping it through the same allowlist used to
+ * render inbound messages. Only allowlisted tags/attributes survive, so this is
+ * the single choke point that guarantees what we send matches what we render.
+ * Returns an empty string when there is no visible content.
+ */
+export function serializeTeamsHtml(html: string): string {
+  const nodes = parseRichHtml(html);
+  if (!hasVisibleContent(nodes)) return "";
+  return serializeNodes(nodes);
+}
+

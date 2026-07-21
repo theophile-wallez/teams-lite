@@ -518,6 +518,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let conv = param_str(params, "conversation")?;
             let text = param_str(params, "text")?;
             let reply_to = params.get("reply_to").map(parse_reply_to).transpose()?;
+            let content_html = params
+                .get("content_html")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             let http = ctx.http.clone();
             let send_conv = conv.clone();
             ctx.retry_on_auth(move |session, _csa| {
@@ -525,7 +529,18 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 let conv = send_conv.clone();
                 let text = text.clone();
                 let reply_to = reply_to.clone();
-                async move { teams_send::send_message(&http, &session, &conv, &text, reply_to.as_ref()).await }
+                let content_html = content_html.clone();
+                async move {
+                    teams_send::send_message(
+                        &http,
+                        &session,
+                        &conv,
+                        &text,
+                        reply_to.as_ref(),
+                        content_html.as_deref(),
+                    )
+                    .await
+                }
             })
             .await?;
             // The network accepted the message, so the persisted draft is no

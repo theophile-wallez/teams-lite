@@ -55,14 +55,22 @@ pub fn new_client_message_id() -> String {
     ms.to_string()
 }
 
-/// Send a plain-text message to a conversation. Returns the clientmessageid used
-/// (useful for optimistic echo correlation). `text` is the raw user input.
+/// Send a message to a conversation. Returns the clientmessageid used (useful
+/// for optimistic echo correlation).
+///
+/// `text` is the raw user input for a plain-text send. `content_html`, when set,
+/// is the rich message body already normalized to the Teams-safe HTML subset by
+/// the web client (see web/src/lib/rich-text.ts `serializeTeamsHtml`); it is
+/// forwarded as the message content. The web read path renders inbound HTML
+/// through an allowlist parser, so it is the XSS boundary; Teams also sanitizes
+/// server-side. When both are present for a reply, the quote is prepended.
 pub async fn send_message(
     http: &reqwest::Client,
     session: &Session,
     conversation_id: &str,
     text: &str,
     reply_to: Option<&ReplyTo>,
+    content_html: Option<&str>,
 ) -> Result<String> {
     let chat = session
         .endpoint("chatService")
@@ -73,7 +81,7 @@ pub async fn send_message(
         urlencoding::encode(conversation_id)
     );
     let cmid = new_client_message_id();
-    let body = build_body(&cmid, text, &session.self_name, reply_to);
+    let body = build_body(&cmid, text, &session.self_name, reply_to, content_html);
 
     let resp = http
         .post(&url)
@@ -138,22 +146,33 @@ pub async fn edit_message(
     Ok(())
 }
 
-fn message_content(text: &str, reply_to: Option<&ReplyTo>) -> String {
-    let Some(reply) = reply_to else {
-        return escape_html(text);
-    };
-
-    let quote = format!(
+/// The Teams reply blockquote that quotes the message being replied to.
+fn reply_quote(reply: &ReplyTo) -> String {
+    format!(
         "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" itemid=\"{time}\"><strong itemprop=\"mri\" itemid=\"{mri}\">{sender}</strong><span itemprop=\"time\" itemid=\"{time}\"></span><p itemprop=\"preview\">{preview}</p></blockquote>",
         time = reply.compose_time,
         mri = escape_html(&reply.sender_mri),
         sender = escape_html(&reply.sender),
         preview = escape_html(&reply.preview),
-    );
+    )
+}
+
+fn message_content(text: &str, reply_to: Option<&ReplyTo>, content_html: Option<&str>) -> String {
+    // Rich send: the body is pre-normalized Teams-safe HTML from the web client.
+    if let Some(html) = content_html.filter(|h| !h.is_empty()) {
+        return match reply_to {
+            Some(reply) => format!("{}{}", reply_quote(reply), html),
+            None => html.to_string(),
+        };
+    }
+
+    let Some(reply) = reply_to else {
+        return escape_html(text);
+    };
     format!(
         "{}{}{}",
         paragraph(&reply.before),
-        quote,
+        reply_quote(reply),
         paragraph(&reply.after)
     )
 }
@@ -166,10 +185,16 @@ fn paragraph(text: &str) -> String {
 }
 
 /// Build the request body (pure, unit-tested).
-fn build_body(client_message_id: &str, text: &str, self_name: &str, reply_to: Option<&ReplyTo>) -> serde_json::Value {
+fn build_body(
+    client_message_id: &str,
+    text: &str,
+    self_name: &str,
+    reply_to: Option<&ReplyTo>,
+    content_html: Option<&str>,
+) -> serde_json::Value {
     json!({
         "clientmessageid": client_message_id,
-        "content": message_content(text, reply_to),
+        "content": message_content(text, reply_to, content_html),
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "imdisplayname": self_name,
@@ -208,12 +233,40 @@ mod tests {
 
     #[test]
     fn body_has_required_fields() {
-        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None);
+        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None);
         assert_eq!(b["clientmessageid"], "12345");
         assert_eq!(b["content"], "hi &lt;there&gt;");
         assert_eq!(b["messagetype"], "RichText/Html");
         assert_eq!(b["contenttype"], "text");
         assert_eq!(b["imdisplayname"], "Théophile WALLEZ");
+    }
+
+    #[test]
+    fn rich_content_html_is_forwarded_as_content() {
+        let html = "<p>hi <strong>bold</strong> <a href=\"https://x\">link</a></p>";
+        let b = build_body("9", "", "Me", None, Some(html));
+        assert_eq!(b["content"], html);
+    }
+
+    #[test]
+    fn empty_rich_content_html_falls_back_to_plain() {
+        let b = build_body("9", "plain", "Me", None, Some(""));
+        assert_eq!(b["content"], "plain");
+    }
+
+    #[test]
+    fn rich_reply_prepends_quote_then_html_body() {
+        let reply = ReplyTo {
+            compose_time: 42,
+            sender: "Alice".into(),
+            sender_mri: "8:alice".into(),
+            preview: "quoted".into(),
+            before: String::new(),
+            after: String::new(),
+        };
+        let content = message_content("", Some(&reply), Some("<p><em>rich</em> reply</p>"));
+        assert!(content.starts_with("<blockquote itemscope"));
+        assert!(content.ends_with("</blockquote><p><em>rich</em> reply</p>"));
     }
 
     #[test]
@@ -227,7 +280,7 @@ mod tests {
             after: "new <reply>".into(),
         };
 
-        let b = build_body("12345", "new <reply>", "Me", Some(&reply));
+        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None);
 
         assert_eq!(
             b["content"],
@@ -252,7 +305,7 @@ mod tests {
             after: "Second line".into(),
         };
 
-        let content = message_content("First lineSecond line", Some(&reply));
+        let content = message_content("First lineSecond line", Some(&reply), None);
 
         assert!(content.starts_with("<p>First line</p><blockquote"));
         assert!(content.ends_with("</blockquote><p>Second line</p>"));

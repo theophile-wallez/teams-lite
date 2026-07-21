@@ -189,8 +189,17 @@ function quoteBlock(reply: {
 
 /** Compose outgoing content exactly like teams_send::message_content: when
  *  replying, the body is paragraph(before) + quote + paragraph(after) and the
- *  plain `text` is ignored (the web UI puts the composed body in `after`). */
-function composeContent(text: string, reply: ReplyTo | undefined): string {
+ *  plain `text` is ignored (the web UI puts the composed body in `after`).
+ *  When `contentHtml` is set (rich send), it is the pre-normalized Teams-safe
+ *  HTML body; for a reply the quote is prepended, mirroring the Rust backend. */
+function composeContent(
+  text: string,
+  reply: ReplyTo | undefined,
+  contentHtml?: string,
+): string {
+  if (contentHtml) {
+    return reply ? quoteBlock(reply) + contentHtml : contentHtml;
+  }
   if (!reply) return escapeHtml(text);
   return paragraph(reply.before) + quoteBlock(reply) + paragraph(reply.after);
 }
@@ -636,7 +645,9 @@ function dispatch(method: string, params: unknown): unknown {
       const id = requireString(params, "conversation");
       const text = requireString(params, "text");
       const replyTo = parseReplyTo(asObject(params).reply_to);
-      scheduleSendEcho(id, text, replyTo);
+      const rawHtml = asObject(params).content_html;
+      const contentHtml = typeof rawHtml === "string" && rawHtml.length > 0 ? rawHtml : undefined;
+      scheduleSendEcho(id, text, replyTo, contentHtml);
       return { sent: true };
     }
 
@@ -703,7 +714,12 @@ function editMessage(convId: string, messageId: string, text: string): void {
 
 /** ~150ms after a `send`, echo the message back as the backend's trouter would,
  *  then clear the draft (matches src/bin/server.rs behavior on a successful send). */
-function scheduleSendEcho(convId: string, text: string, replyTo: ReplyTo | undefined): void {
+function scheduleSendEcho(
+  convId: string,
+  text: string,
+  replyTo: ReplyTo | undefined,
+  contentHtml?: string,
+): void {
   setTimeout(() => {
     const cs = store.get(convId);
     if (!cs) return;
@@ -715,7 +731,7 @@ function scheduleSendEcho(convId: string, text: string, replyTo: ReplyTo | undef
       compose_time: Date.now(),
       sender: SELF_NAME,
       sender_mri: SELF_MRI,
-      content: composeContent(text, replyTo),
+      content: composeContent(text, replyTo, contentHtml),
       is_self: true,
     };
     appendMessage(cs, msg);

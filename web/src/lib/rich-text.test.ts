@@ -2,7 +2,13 @@
 // decoding. The parser turns Teams RichText/Html into an allowlisted node tree
 // with no DOM and no dangerouslySetInnerHTML, so these run in the node env.
 import { describe, it, expect } from "vitest";
-import { parseRichHtml, decodeEntities, hasVisibleContent, type RichNode } from "./rich-text";
+import {
+  parseRichHtml,
+  decodeEntities,
+  hasVisibleContent,
+  serializeTeamsHtml,
+  type RichNode,
+} from "./rich-text";
 
 /** Flatten a node tree back to visible text, for concise assertions. */
 function text(nodes: RichNode[]): string {
@@ -139,5 +145,41 @@ describe("hasVisibleContent", () => {
   it("is true when there is text or an image", () => {
     expect(hasVisibleContent(parseRichHtml("<p>hi</p>"))).toBe(true);
     expect(hasVisibleContent(parseRichHtml('<img src="https://x/y.png">'))).toBe(true);
+  });
+});
+
+describe("serializeTeamsHtml", () => {
+  it("keeps the Teams-safe formatting tags from editor HTML", () => {
+    const html = "<p>hi <strong>bold</strong> <em>it</em> <u>u</u> <s>x</s> <code>c</code></p>";
+    expect(serializeTeamsHtml(html)).toBe(html);
+  });
+
+  it("keeps lists", () => {
+    expect(serializeTeamsHtml("<ul><li>a</li><li>b</li></ul>")).toBe("<ul><li>a</li><li>b</li></ul>");
+  });
+
+  it("keeps links with only their href", () => {
+    expect(
+      serializeTeamsHtml('<p><a href="https://x" target="_blank" rel="noopener">y</a></p>'),
+    ).toBe('<p><a href="https://x">y</a></p>');
+  });
+
+  it("strips tags outside the Teams-safe subset but keeps their text", () => {
+    expect(serializeTeamsHtml('<p><span style="color:red">t</span></p><h1>H</h1>')).toBe(
+      "<p>t</p>H",
+    );
+  });
+
+  it("drops script content entirely", () => {
+    expect(serializeTeamsHtml("<p>a<script>evil()</script>b</p>")).toBe("<p>ab</p>");
+  });
+
+  it("re-escapes text so it round-trips safely", () => {
+    expect(serializeTeamsHtml("<p>a &lt; b &amp; c</p>")).toBe("<p>a &lt; b &amp; c</p>");
+  });
+
+  it("returns an empty string for empty editor content", () => {
+    expect(serializeTeamsHtml("<p></p>")).toBe("");
+    expect(serializeTeamsHtml("<p>   </p>")).toBe("");
   });
 });
