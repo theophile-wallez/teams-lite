@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Outlet, useNavigate, useParams } from "@tanstack/react-router";
 import { ControllerProvider, useAppState, useController } from "./controller-context";
 import { ConversationList } from "./conversation-list";
 import { MessagePane } from "./message-pane";
@@ -21,6 +22,7 @@ export function App() {
 
 function AppInner() {
   const controller = useController();
+  const navigate = useNavigate();
   const ready = useAppState((s) => s.ready);
   const fatal = useAppState((s) => s.fatal);
   const splashMessage = useAppState((s) => s.splashMessage);
@@ -28,9 +30,39 @@ function AppInner() {
   const openId = useAppState((s) => s.openId);
   const replyingTo = useAppState((s) => s.replyingTo);
 
+  // The URL is the source of truth for which conversation is open. `/` means no
+  // conversation; `/c/<id>` means that conversation. `strict: false` lets this
+  // shell read the param whether or not a conversation route is matched.
+  const { conversationId } = useParams({ strict: false });
+  const routeConversationId = conversationId ?? null;
+
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
+
+  const goToConversation = useCallback(
+    (id: string) => {
+      void navigate({ to: "/c/$conversationId", params: { conversationId: id } });
+    },
+    [navigate],
+  );
+  const goToList = useCallback(() => {
+    void navigate({ to: "/" });
+  }, [navigate]);
+
+  // Reconcile the controller with the URL: open the conversation named in the
+  // path, or close the open one when we're back on the list. The controller
+  // stays the single owner of message loading, drafts and live fan-in; routing
+  // only decides which conversation that machinery targets. Gated on `ready` so
+  // a deep link waits for the WebSocket handshake before opening.
+  useEffect(() => {
+    if (!ready) return;
+    if (routeConversationId) {
+      if (openId !== routeConversationId) void controller.openConversation(routeConversationId);
+    } else if (openId) {
+      controller.closeConversation();
+    }
+  }, [ready, routeConversationId, openId, controller]);
 
   // Keep the selection in range as the conversation list changes.
   useEffect(() => {
@@ -57,15 +89,15 @@ function AppInner() {
           controller.cancelReply();
           return;
         }
-        if (openId) {
-          controller.closeConversation();
+        if (routeConversationId) {
+          goToList();
           return;
         }
       }
 
       // List navigation is only active when no conversation is open (otherwise
       // the composer owns the keyboard), mirroring the TUI.
-      if (openId) return;
+      if (routeConversationId) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
 
@@ -77,10 +109,20 @@ function AppInner() {
         setSelectedIndex((i) => Math.max(i - 1, 0));
       } else if (e.key === "Enter") {
         const c = conversations[selectedIndex];
-        if (c) void controller.openConversation(c.id);
+        if (c) goToConversation(c.id);
       }
     },
-    [paletteOpen, settingsOpen, replyingTo, openId, conversations, selectedIndex, controller],
+    [
+      paletteOpen,
+      settingsOpen,
+      replyingTo,
+      routeConversationId,
+      conversations,
+      selectedIndex,
+      controller,
+      goToConversation,
+      goToList,
+    ],
   );
 
   useEffect(() => {
@@ -102,6 +144,11 @@ function AppInner() {
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
 
       {fatal && <FatalOverlay message={fatal} />}
+
+      {/* The conversation routes render nothing themselves; the shell above is
+          the whole UI. Rendering the Outlet keeps the matched route mounted so
+          its URL (and thus the open conversation) stays authoritative. */}
+      <Outlet />
     </div>
   );
 }
