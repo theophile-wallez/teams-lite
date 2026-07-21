@@ -1,8 +1,9 @@
 // teams-lite — entry point.
 //
 // Two modes, one binary (opencode-style):
-//   • default        → the terminal UI (OpenTUI + Solid)
-//   • `teams --web`  → the browser UI (TanStack Start SSR), served locally
+//   • default          → the terminal UI (OpenTUI + Solid)
+//   • `teams --web`     → the browser UI (TanStack Start SSR), served locally
+//   • `teams --web-dev` → same, but through Vite (HMR) for live-reload dev
 //
 // In web mode we must NOT load OpenTUI: it grabs the terminal (raw mode, alt
 // screen, mouse tracking) the moment its renderer loads. So the TUI module is

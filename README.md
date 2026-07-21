@@ -136,6 +136,21 @@ It ships **inside** the single `teams` binary — no extra install, no Node, no
 
 Everything is served on `127.0.0.1` by default, so it stays on your machine.
 
+### Dev mode (`teams --web-dev`)
+
+Working on the web UI? Use:
+
+```bash
+teams --web-dev
+```
+
+It does everything `teams --web` does — starts (or attaches to) the backend,
+holds it alive, opens the browser, honors `--port`/`--host`/`--no-open` — but
+serves the app through Vite's dev server, so your edits **hot-reload** in the
+browser instead of running the pre-built SSR bundle. It runs against the repo's
+`web/` sources, so it only works from a source checkout (`bun run`), not from
+the compiled single-file binary.
+
 ## Build from source
 
 For development, or to build the binary yourself:

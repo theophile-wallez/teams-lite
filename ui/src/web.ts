@@ -18,14 +18,24 @@ export type WebOptions = {
   port: number;
   host: string;
   open: boolean;
+  /// Dev mode (`--web-dev`): serve the web app through Vite's dev server so
+  /// source edits hot-reload in the browser, instead of the built SSR bundle.
+  dev: boolean;
 };
 
-const DEFAULTS: WebOptions = { port: 4321, host: "127.0.0.1", open: true };
+const DEFAULTS: WebOptions = { port: 4321, host: "127.0.0.1", open: true, dev: false };
 
-/** Parse `teams --web [--port N] [--host H] [--no-open]` from argv. */
+/**
+ * Parse `teams --web|--web-dev [--port N] [--host H] [--no-open]` from argv.
+ *
+ * `--web-dev` is the developer analog of `--web`: it wires up the backend,
+ * keepalive and browser exactly the same way, but serves the app through Vite
+ * (HMR) so changes re-render live. Both flags enter the web path.
+ */
 export function parseWebArgs(argv: string[]): { web: boolean; options: WebOptions } {
-  const web = argv.includes("--web");
-  const options: WebOptions = { ...DEFAULTS };
+  const dev = argv.includes("--web-dev");
+  const web = dev || argv.includes("--web");
+  const options: WebOptions = { ...DEFAULTS, dev };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--no-open") options.open = false;
@@ -113,15 +123,55 @@ function openBrowser(url: string): void {
   }
 }
 
-/** Run the full `teams --web` experience. Never returns (keeps serving). */
+/// Dev mode: serve the web app through Vite's dev server (`bun run dev`) against
+/// the repo's web/ sources, so edits hot-reload in the browser. This mirrors the
+/// production path (backend + keepalive + browser already handled by the caller)
+/// but swaps the built SSR bundle for a live-reloading Vite process. Only works
+/// from a source checkout: a compiled `teams` binary embeds the built bundle, not
+/// the sources Vite needs. Runs until the Vite process exits, then exits with it.
+async function runViteDev(options: WebOptions): Promise<never> {
+  if (isCompiledBinary()) {
+    throw new Error(
+      "teams --web-dev needs the web/ sources and only works from a source " +
+        "checkout (bun run). Use `teams --web` with the compiled binary.",
+    );
+  }
+
+  // Dev: ui/src -> repo root is two levels up; the web app lives at <root>/web.
+  const root = join(import.meta.dir, "..", "..");
+  const webDir = join(root, "web");
+
+  // Vite reads PORT/HOST from the environment (see web/vite.config.ts). `bun run
+  // dev` also regenerates the theme first, matching a hand-run dev session.
+  const proc = spawn(["bun", "run", "dev"], {
+    cwd: webDir,
+    env: { ...process.env, PORT: String(options.port), HOST: options.host },
+    stdout: "inherit",
+    stderr: "inherit",
+    stdin: "inherit",
+  });
+
+  const url = `http://${options.host}:${options.port}`;
+  console.error(`\n  teams-lite web UI (dev, hot reload) ready at ${url}\n`);
+  if (options.open) openBrowser(url);
+
+  const code = await proc.exited;
+  process.exit(code ?? 0);
+}
+
+/** Run the full `teams --web` / `--web-dev` experience (keeps serving). */
 export async function runWeb(options: WebOptions): Promise<void> {
-  console.error("teams-lite — starting web UI…");
+  console.error(`teams-lite — starting web UI${options.dev ? " (dev, hot reload)" : ""}…`);
 
   // 1. Bring up (or attach to) the Rust backend, and keep it alive.
   await ensureServer();
   startKeepalive();
 
-  // 2. Locate/build the web app and start its SSR server in-process. The server
+  // 2. Dev mode: hand off to Vite (HMR) instead of the built SSR server. Never
+  //    returns — it runs until the Vite process exits.
+  if (options.dev) await runViteDev(options);
+
+  // 3. Locate/build the web app and start its SSR server in-process. The server
   //    module reads PORT/HOST from the environment and self-starts Bun.serve.
   const { entry } = await resolveWebRoot();
   process.env.PORT = String(options.port);
@@ -133,6 +183,6 @@ export async function runWeb(options: WebOptions): Promise<void> {
   const url = `http://${options.host}:${options.port}`;
   console.error(`\n  teams-lite web UI ready at ${url}\n`);
 
-  // 3. Open the browser (unless suppressed).
+  // 4. Open the browser (unless suppressed).
   if (options.open) openBrowser(url);
 }

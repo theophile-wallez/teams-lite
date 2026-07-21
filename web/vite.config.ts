@@ -11,10 +11,14 @@ import viteReact from "@vitejs/plugin-react";
 // The dev server port for `vite dev`. The production server reads PORT at
 // runtime (see server.ts / the Nitro output), so this only affects local dev.
 const DEV_PORT = Number(process.env.PORT ?? 4321);
+// The dev server host. `teams --web-dev` sets HOST to bind the same interface as
+// the production launcher; unset lets Vite pick its default (localhost).
+const DEV_HOST = process.env.HOST || undefined;
 
 export default defineConfig({
   server: {
     port: DEV_PORT,
+    host: DEV_HOST,
     // The browser talks to the Rust backend directly over its own WebSocket
     // (ws://127.0.0.1:8420), so Vite needs no proxy — but keep HMR stable when
     // launched behind the `teams --web` supervisor.
