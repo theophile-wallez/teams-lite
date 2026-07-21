@@ -109,6 +109,47 @@ export function parseMessageContent(html: string): ParsedMessage {
   return { quote: { sender, text }, body, beforeQuote, afterQuote };
 }
 
+export type RichQuote = {
+  sender: string;
+  html: string;
+};
+
+export type ParsedRichMessage = {
+  quote?: RichQuote;
+  beforeHtml?: string;
+  bodyHtml: string;
+};
+
+/**
+ * Like {@link parseMessageContent}, but preserves the raw Teams HTML of each
+ * part instead of flattening it to plain text, so the web UI can render inbound
+ * formatting (bold, links, lists, code, mentions, images). The reply quote is
+ * still split out so it can be shown in its recessed block.
+ */
+export function parseRichMessage(html: string): ParsedRichMessage {
+  const match = html.match(REPLY_BLOCKQUOTE);
+  const inner = match?.[1];
+  if (inner === undefined) return { bodyHtml: html };
+
+  const sender = plain(inner.match(QUOTED_AUTHOR)?.[1] ?? "");
+  const previewHtml = inner.match(QUOTED_PREVIEW)?.[1];
+  const quoteHtml = previewHtml ?? inner.replace(QUOTED_AUTHOR, "");
+
+  const quoteIndex = match?.index ?? 0;
+  const quoteEnd = quoteIndex + (match?.[0].length ?? 0);
+  const beforeHtml = html.slice(0, quoteIndex);
+  const afterHtml = html.slice(quoteEnd);
+
+  if (!sender && plain(quoteHtml) === "") {
+    return { bodyHtml: [beforeHtml, afterHtml].filter((s) => plain(s)).join("") };
+  }
+  return {
+    quote: { sender, html: quoteHtml },
+    beforeHtml,
+    bodyHtml: afterHtml,
+  };
+}
+
 /** The plain text a "Copy"/"Reply" action should use for a message. */
 export function copyableMessageText(message: ChatMessage): string {
   const parsed = parseMessageContent(message.content);

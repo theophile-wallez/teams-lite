@@ -14,6 +14,7 @@ import {
   shouldNotify,
   replyToPayload,
   copyableMessageText,
+  parseRichMessage,
 } from "./protocol";
 import type { ChatMessage, Conversation, MessagePage } from "./protocol";
 
@@ -101,6 +102,31 @@ describe("parseMessageContent", () => {
     expect(parsed.beforeQuote).toBe("before the quote");
     expect(parsed.afterQuote).toBe("after the quote");
     expect(parsed.body).toBe("before the quote\nafter the quote");
+  });
+});
+
+describe("parseRichMessage", () => {
+  it("returns the raw HTML as bodyHtml when there is no quote", () => {
+    const html = `<p>hello <b>world</b></p>`;
+    const parsed = parseRichMessage(html);
+    expect(parsed.quote).toBeUndefined();
+    expect(parsed.beforeHtml).toBeUndefined();
+    expect(parsed.bodyHtml).toBe(html);
+  });
+
+  it("splits a reply into a quote (with HTML) and the reply body HTML", () => {
+    const parsed = parseRichMessage(REPLY_AFTER_ONLY);
+    expect(parsed.quote?.sender).toBe("Clement BOSLE");
+    expect(parsed.quote?.html).toContain("the original line");
+    expect(parsed.bodyHtml).toContain("my actual reply");
+    expect(parsed.bodyHtml).not.toContain("the original line");
+  });
+
+  it("keeps HTML both before and after the quote", () => {
+    const parsed = parseRichMessage(REPLY_BEFORE_AND_AFTER);
+    expect(parsed.beforeHtml).toContain("before the quote");
+    expect(parsed.bodyHtml).toContain("after the quote");
+    expect(parsed.quote?.sender).toBe("Bob");
   });
 });
 

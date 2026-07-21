@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { copyableMessageText, parseMessageContent, type ChatMessage } from "~/lib/protocol";
+import { copyableMessageText, parseRichMessage, type ChatMessage } from "~/lib/protocol";
+import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
 
 /**
@@ -7,9 +8,10 @@ import { cn } from "~/lib/utils";
  * background; others align left in the element color. The sender name shows only
  * on incoming bubbles in group chats. Replies render the quoted message as a
  * recessed block with a left accent bar, preserving text before/after the quote.
- * When `editing` is true, the body is replaced by an in-place editor (Enter to
- * save, Shift+Enter for a newline, Escape to cancel). Mirrors the TUI's
- * MessageBubble (ui/src/app.tsx).
+ * Inbound Teams formatting (bold, links, lists, mentions, …) is rendered via
+ * {@link RichContent}. When `editing` is true, the body is replaced by an
+ * in-place editor (Enter to save, Shift+Enter for a newline, Escape to cancel).
+ * Mirrors the TUI's MessageBubble (ui/src/app.tsx).
  */
 export function MessageBubble(props: {
   message: ChatMessage;
@@ -20,10 +22,8 @@ export function MessageBubble(props: {
   onCancelEdit: () => void;
 }) {
   const mine = props.message.is_self === true;
-  const parsed = useMemo(() => parseMessageContent(props.message.content), [props.message.content]);
+  const parsed = useMemo(() => parseRichMessage(props.message.content), [props.message.content]);
   const nameShown = !mine && props.showSenderName;
-
-  const body = parsed.quote ? parsed.afterQuote : parsed.body;
 
   return (
     <div className={cn("group flex w-full", mine ? "justify-end" : "justify-start")}>
@@ -55,9 +55,7 @@ export function MessageBubble(props: {
           />
         ) : (
           <>
-            {parsed.beforeQuote ? (
-              <p className="whitespace-pre-wrap break-words">{parsed.beforeQuote}</p>
-            ) : null}
+            {parsed.beforeHtml ? <RichContent html={parsed.beforeHtml} /> : null}
 
             {parsed.quote ? (
               <div
@@ -78,18 +76,14 @@ export function MessageBubble(props: {
                     {parsed.quote.sender}
                   </div>
                 ) : null}
-                <div
-                  className={cn(
-                    "whitespace-pre-wrap break-words text-xs",
-                    mine ? "text-quote-text-mine" : "text-quote-text-incoming",
-                  )}
-                >
-                  {parsed.quote.text}
-                </div>
+                <RichContent
+                  html={parsed.quote.html}
+                  className={cn("text-xs", mine ? "text-quote-text-mine" : "text-quote-text-incoming")}
+                />
               </div>
             ) : null}
 
-            {body ? <p className="whitespace-pre-wrap break-words">{body}</p> : null}
+            {parsed.bodyHtml ? <RichContent html={parsed.bodyHtml} /> : null}
 
             <button
               type="button"
