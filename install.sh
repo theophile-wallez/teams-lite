@@ -66,14 +66,14 @@ install -m 0755 "$tmp" "$BIN_DIR/teams-bin"
 #
 #   2. Broker reach — teams-lite signs in through the Microsoft Identity Broker
 #      (com.microsoft.identity.broker1) over the session D-Bus, in either Intune
-#      topology:
+#      topology, WITHOUT ever needing sudo:
 #        • Classic Intune: the broker runs as the real user and owns its name on
 #          the host session bus. We just launch directly.
-#        • Containerized Intune: the broker lives in a rootless container on its
-#          own bus (/run/user/0/bus) with container-uid 0 mapped to our host uid.
-#          We enter the container's user namespace (nsenter -U) so D-Bus EXTERNAL
-#          auth accepts us, keep the host mount namespace so the binary/$HOME stay
-#          visible, and point DBUS_SESSION_BUS_ADDRESS at the container bus.
+#        • Containerized Intune: the broker runs as the same host user inside a
+#          rootless container, on the container's own bus (/run/user/0/bus). That
+#          socket is reachable unprivileged from the host via
+#          /proc/<broker-pid>/root/run/user/0/bus, so we just point
+#          DBUS_SESSION_BUS_ADDRESS at it and connect directly.
 #      Detection is automatic; if no broker is found we still launch and let the
 #      binary surface its own error.
 cat > "$BIN_DIR/teams" <<EOF
@@ -84,13 +84,7 @@ TEAMS_BIN="$BIN_DIR/teams-bin"
 BROKER_MATCH='identity-broker/bin/microsoft-identity-broker'
 BROKER_DBUS_NAME='com.microsoft.identity.broker1'
 
-# Re-exec guard: inside the namespace we fall straight through to the binary.
-if [ "\${TEAMS_LITE_IN_NS:-}" = "1" ]; then
-  cd "$BIN_DIR" || exit 1
-  exec "\$TEAMS_BIN" "\$@"
-fi
-
-launch_direct() {
+launch() {
   cd "$BIN_DIR" || exit 1
   exec "\$TEAMS_BIN" "\$@"
 }
@@ -98,32 +92,26 @@ launch_direct() {
 # Topology 1 — classic Intune: broker name already on our host session bus.
 if command -v busctl >/dev/null 2>&1 &&
    busctl --user --list --no-legend 2>/dev/null | awk '{print \$1}' | grep -qx "\$BROKER_DBUS_NAME"; then
-  launch_direct "\$@"
+  launch "\$@"
 fi
 
-# Topology 2 — containerized Intune: bridge into the broker's user namespace.
+# Topology 2 — containerized Intune: connect directly to the in-container bus.
 BROKER_PID="\$(pgrep -f "\$BROKER_MATCH" | head -1 || true)"
 if [ -z "\$BROKER_PID" ]; then
   echo "teams-lite: identity broker not found — start Intune first. Launching" \\
        "anyway; sign-in will fail if the broker stays down." >&2
-  launch_direct "\$@"
+  launch "\$@"
 fi
 
 BROKER_BUS="/proc/\$BROKER_PID/root/run/user/0/bus"
 if [ ! -S "\$BROKER_BUS" ]; then
-  echo "teams-lite: broker \$BROKER_PID has no container bus at \$BROKER_BUS —" \\
+  echo "teams-lite: broker \$BROKER_PID has no reachable bus at \$BROKER_BUS —" \\
        "launching directly (sign-in may fail)." >&2
-  launch_direct "\$@"
+  launch "\$@"
 fi
 
-exec sudo nsenter -t "\$BROKER_PID" -U -- \\
-  env \\
-    TEAMS_LITE_IN_NS=1 \\
-    HOME="\$HOME" \\
-    XDG_DATA_HOME="\${XDG_DATA_HOME:-\$HOME/.local/share}" \\
-    XDG_CACHE_HOME="\${XDG_CACHE_HOME:-\$HOME/.cache}" \\
-    DBUS_SESSION_BUS_ADDRESS="unix:path=\$BROKER_BUS" \\
-    "$BIN_DIR/teams" "\$@"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=\$BROKER_BUS"
+launch "\$@"
 EOF
 chmod 0755 "$BIN_DIR/teams"
 

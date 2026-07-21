@@ -1,34 +1,28 @@
 #!/usr/bin/env bash
 # teams-lite launcher — reaches the Microsoft Identity Broker over D-Bus in either
-# of the two Intune topologies teams-lite supports.
+# of the two Intune topologies teams-lite supports, WITHOUT ever needing sudo.
 #
 # SUPPORTED TOPOLOGIES
-#   1. Classic Intune  — the broker (com.microsoft.identity.broker1) runs as the
+#   1. Classic Intune — the broker (com.microsoft.identity.broker1) runs as the
 #      real user and owns its well-known name on the HOST session bus
 #      (/run/user/<uid>/bus). Nothing special is needed: zbus::Connection::session()
-#      finds it straight away, so we just launch the binary directly.
+#      finds it straight away, so we launch the binary directly.
 #
-#   2. Containerized Intune — the broker runs inside a rootless container on its
-#      OWN session bus (/run/user/0/bus), not the host session bus. Two things then
-#      block a plain launch:
-#        a. The well-known name is absent from our bus, so
-#           zbus::Connection::session() can't find the broker at all.
-#        b. The container maps container-uid 0 -> host-uid <uid>, and the bus
-#           enforces D-Bus EXTERNAL auth by uid. zbus sends our host uid, which the
-#           bus rejects ("EXTERNAL rejected").
-#      Entering the container's USER namespace (nsenter -U) makes our process
-#      present as the mapped uid 0, so EXTERNAL succeeds. Keeping the host MOUNT
-#      namespace lets the binary and the host filesystem stay visible; the bus is
-#      reached via /proc/<broker-pid>/root/run/user/0/bus. We pin HOME/XDG_* to the
-#      real user so the SQLite store and cache land in ~/.local/share, not /root.
+#   2. Containerized Intune (e.g. the `intune-container` project) — the broker runs
+#      inside a rootless container as the SAME host user (container-root is mapped
+#      to our host uid), on the container's own session bus at
+#      /run/user/0/bus. That socket is reachable from the host, unprivileged, via
+#      /proc/<broker-pid>/root/run/user/0/bus, and the bus does NOT enforce D-Bus
+#      EXTERNAL auth by uid — so we just point DBUS_SESSION_BUS_ADDRESS at it and
+#      connect directly. No nsenter, no sudo, no namespace juggling.
 #
-#   The UI process spawns the Rust backend as a child that inherits our env and
-#   namespaces, so wrapping this single entry point fixes both processes.
+#   The UI process spawns the Rust backend as a child that inherits our env, so
+#   wrapping this single entry point fixes both processes.
 #
 # DETECTION ORDER
 #   • Broker name already on the host session bus  -> classic mode, direct launch.
-#   • Otherwise, a broker process found running     -> containerized mode, bridge
-#     into its user namespace and point D-Bus at its bus.
+#   • Otherwise, a broker process found running     -> containerized mode, point
+#     D-Bus at its in-container bus and launch directly.
 #   • Neither                                       -> launch directly and let the
 #     binary surface its own "broker unreachable" error (no silent magic, no hang).
 set -euo pipefail
@@ -43,23 +37,17 @@ BROKER_MATCH='identity-broker/bin/microsoft-identity-broker'
 # The broker's well-known D-Bus name (same in both topologies).
 BROKER_DBUS_NAME='com.microsoft.identity.broker1'
 
-# Guard against infinite re-exec: once we're inside the namespace we set this and
-# fall straight through to exec-ing the binary. A compiled Bun binary reads
-# bunfig.toml from the CURRENT directory at startup, so run from the binary's own
-# directory to avoid picking up another project's bunfig (mirrors install.sh).
-if [ "${TEAMS_LITE_IN_NS:-}" = "1" ]; then
-  cd "$(dirname "$TEAMS_BIN")" || exit 1
-  exec "$TEAMS_BIN" "$@"
-fi
-
 if [ ! -x "$TEAMS_BIN" ]; then
   echo "teams-lite: binary not found at $TEAMS_BIN" >&2
   echo "  build it with: (cd ui && bun run build)  or set TEAMS_LITE_BIN" >&2
   exit 1
 fi
 
-# Run the binary directly from its own directory (bunfig.toml reasons, see above).
-launch_direct() {
+# Run the binary from its own directory: a compiled Bun binary reads bunfig.toml
+# from the CURRENT directory at startup, so running inside another Bun project
+# (whose bunfig has a `preload`) would crash. teams-lite doesn't care about the
+# working directory (logs go to /tmp, database to the XDG data dir, both absolute).
+launch() {
   cd "$(dirname "$TEAMS_BIN")" || exit 1
   exec "$TEAMS_BIN" "$@"
 }
@@ -70,36 +58,28 @@ launch_direct() {
 # the same address zbus::Connection::session() will use.
 if command -v busctl >/dev/null 2>&1 &&
    busctl --user --list --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$BROKER_DBUS_NAME"; then
-  launch_direct "$@"
+  launch "$@"
 fi
 
 # --- Topology 2: containerized Intune (broker in a rootless container) -----------
-# Resolve the broker PID dynamically (PIDs are volatile across broker restarts).
+# The broker runs as our host user inside the container, so its session bus socket
+# is reachable unprivileged at /proc/<pid>/root/run/user/0/bus. Point D-Bus there
+# and connect directly — no nsenter, no sudo.
 BROKER_PID="$(pgrep -f "$BROKER_MATCH" | head -1 || true)"
 
 if [ -z "$BROKER_PID" ]; then
   echo "teams-lite: identity broker not found on the session bus or as a running" \
        "process — start Intune first (classic sign-in, or 'intune-container start')." \
        "Launching anyway; sign-in will fail if the broker stays down." >&2
-  launch_direct "$@"
+  launch "$@"
 fi
 
 BROKER_BUS="/proc/$BROKER_PID/root/run/user/0/bus"
 if [ ! -S "$BROKER_BUS" ]; then
-  echo "teams-lite: broker process $BROKER_PID has no container bus at $BROKER_BUS" \
+  echo "teams-lite: broker process $BROKER_PID has no reachable bus at $BROKER_BUS" \
        "— launching directly (sign-in may fail)." >&2
-  launch_direct "$@"
+  launch "$@"
 fi
 
-# Re-exec the whole launcher inside the broker's user namespace (uid maps to 0 so
-# D-Bus EXTERNAL auth is accepted) while keeping the host mount namespace (so the
-# binary and $HOME stay visible). Env is pinned to the real user's dirs.
-exec sudo nsenter -t "$BROKER_PID" -U -- \
-  env \
-    TEAMS_LITE_IN_NS=1 \
-    TEAMS_LITE_BIN="$TEAMS_BIN" \
-    HOME="$HOME" \
-    XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}" \
-    XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=$BROKER_BUS" \
-    "$0" "$@"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$BROKER_BUS"
+launch "$@"

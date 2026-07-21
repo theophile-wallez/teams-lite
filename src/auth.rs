@@ -72,6 +72,44 @@ const EDGE_CLIENT_ID: &str = "d7b530a4-7680-4c23-a8bf-c52c121d2e87";
 const OFFICE_CLIENT_ID: &str = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
 const NATIVE_REDIRECT: &str = "https://login.microsoftonline.com/common/oauth2/nativeclient";
 
+/// Connect to the broker's session bus, transparently handling both Intune
+/// topologies.
+///
+/// In a **classic** install the broker runs as us on our own session bus, and the
+/// default EXTERNAL handshake (which sends our real uid) is accepted.
+///
+/// In a **containerized** install (e.g. `intune-container`) the broker runs as us
+/// but on the container's session bus, whose `dbus-daemon` lives in a user
+/// namespace where we appear as uid 0. That daemon only accepts an EXTERNAL
+/// handshake claiming uid 0, so zbus's default (our real host uid) is rejected
+/// with "EXTERNAL rejected". We detect that and retry claiming uid 0 — the same
+/// credential `busctl` negotiates implicitly via SO_PEERCRED.
+///
+/// The `teams` launcher points `DBUS_SESSION_BUS_ADDRESS` at the right bus; here
+/// we only pick the uid the handshake must claim.
+async fn connect_broker_bus() -> Result<zbus::Connection> {
+    let address = zbus::Address::session().context("resolve session bus address")?;
+
+    // Default handshake first (correct for a classic, same-uid broker bus).
+    match zbus::connection::Builder::address(address.clone())?
+        .build()
+        .await
+    {
+        Ok(conn) => Ok(conn),
+        Err(zbus::Error::Handshake(msg)) if msg.contains("EXTERNAL rejected") => {
+            // Containerized broker bus: its dbus-daemon expects the namespace
+            // uid 0. Retry claiming it explicitly.
+            zbus::connection::Builder::address(address)?
+                .auth_mechanism(zbus::connection::AuthMechanism::External)
+                .user_id(0)
+                .build()
+                .await
+                .context("connect to containerized broker bus as uid 0")
+        }
+        Err(e) => Err(e).context("connect to session bus"),
+    }
+}
+
 async fn call(proxy: &zbus::Proxy<'_>, method: &str, sid: &str, payload: &Value) -> Result<Value> {
     let s = payload.to_string();
     let resp: String = proxy
@@ -86,7 +124,7 @@ async fn call(proxy: &zbus::Proxy<'_>, method: &str, sid: &str, payload: &Value)
 ///   "https://ic3.teams.office.com/Teams.AccessAsUser.All"
 ///   "https://api.spaces.skype.com/.default"
 pub async fn get_token(scope: &str) -> Result<String> {
-    let conn = zbus::Connection::session().await.context("connect to session bus")?;
+    let conn = connect_broker_bus().await?;
     let proxy = zbus::Proxy::new(&conn, BROKER_NAME, BROKER_PATH, BROKER_IFACE)
         .await
         .context("create broker proxy")?;

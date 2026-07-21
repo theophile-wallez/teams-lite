@@ -83,10 +83,9 @@ Linux machine — through the **Microsoft Identity Broker** — so it needs:
   automatically:
     - **Classic Intune** — the broker runs as your user on the host session bus;
       teams-lite talks to it directly.
-    - **Containerized Intune** — the broker runs inside a rootless container on
-      its own bus; the `teams` launcher detects this and bridges into the
-      container's user namespace so sign-in still works. This needs passwordless
-      `sudo nsenter` (as configured by the container setup).
+    - **Containerized Intune** — the broker runs inside a rootless container as
+      your user, on the container's own bus; the `teams` launcher points D-Bus at
+      that bus and teams-lite connects directly. No `sudo`, no privileges.
 - **`notify-send`** (from `libnotify`) for desktop notifications — optional, but
   recommended.
 
