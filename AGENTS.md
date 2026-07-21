@@ -33,9 +33,18 @@
 
 - Do task work on a dedicated branch off `master`, never directly on `master`,
   so an in-progress session can't leave `master` in a broken state.
-- Before treating a task as done, run the test suite (`cargo test`) on the
-  branch as a hard gate: only merge into `master` when it is green.
-- If tests fail, do not merge. Leave the branch intact and report what failed.
+- Before treating a task as done, run the tests that cover the parts you changed
+  as a hard gate: only merge into `master` when they are green. Match the test
+  scope to the change scope — do not run everything by reflex:
+  - Backend (`src/`, Rust): `cargo test`.
+  - Terminal UI (`ui/`): `bun test` (run in `ui/`).
+  - Web app (`web/`): `bun run test` (unit) plus `bun run typecheck`; add
+    `bun run test:e2e` when behavior or flows change.
+  - A change that only touches a frontend does not need `cargo test`, and a
+    backend-only change does not need the frontend suites. When a change spans
+    both (e.g. a protocol or WebSocket contract), run the suites on both sides.
+- If the tests you ran fail, do not merge. Leave the branch intact and report
+  what failed.
 - This is a convention the agent follows, not an enforced guarantee — the
   authoritative check that keeps `master` green belongs in CI or a pre-push hook.
 
