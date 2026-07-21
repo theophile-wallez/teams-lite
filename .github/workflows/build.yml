@@ -37,6 +37,10 @@ jobs:
         working-directory: ui
         run: bun install --frozen-lockfile
 
+      - name: Install web dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
       # --- gate: deterministic tests must pass before we publish anything ---
       - name: Backend tests
         run: cargo test
@@ -47,6 +51,16 @@ jobs:
         working-directory: ui
         run: bun test src/message-history.test.ts src/message-scroll.test.ts
 
+      # The web client's tests are fully deterministic (pure logic + a fake
+      # WebSocket), so the whole suite runs in CI, plus a typecheck gate.
+      - name: Web tests
+        working-directory: web
+        run: bun run test
+
+      - name: Web typecheck
+        working-directory: web
+        run: bun run typecheck
+
       # --- build the single self-contained binary ---
       - name: Build backend (release)
         # Embed the commit this binary is built from so the running app can tell
@@ -56,6 +70,8 @@ jobs:
         run: cargo build --release --bin server
 
       - name: Compile single `teams` binary
+        # build.ts also builds the web UI and embeds it, so `teams --web` works
+        # from the published binary (web deps were installed above).
         working-directory: ui
         run: bun run build.ts
 

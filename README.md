@@ -49,6 +49,7 @@ type a name, and you're in the conversation.
 - **💬 Clean chat view** — your messages align right, others align left, sender names show only where they matter (group chats).
 - **🔔 Desktop notifications** — get a native Linux notification when a message lands in a conversation you're not looking at.
 - **📴 Local-first** — conversations open instantly from a local cache, then refresh from the network in the background.
+- **🌐 Terminal or browser** — the same fast client, two front-ends: a keyboard-first TUI, or a modern web UI (`teams --web`) that opens in your browser and talks to the same local backend.
 - **🔐 Compliant sign-in** — authenticates silently through the Microsoft Identity Broker, so it satisfies your tenant's "compliant device" policies. No passwords are stored, and no raw tokens are ever logged.
 - **🪶 Tiny footprint** — a Rust backend and a terminal UI. That's it.
 
@@ -102,6 +103,33 @@ on exit. If a server is already running, it simply attaches to it.
 The installer drops the binary in `~/.teams-lite/bin` (override with
 `TEAMS_LITE_HOME`) and links it onto your `PATH` when it can.
 
+## Web UI (`teams --web`)
+
+Prefer a browser? Run:
+
+```bash
+teams --web
+```
+
+This starts the backend (or attaches to a running one), serves a modern web
+client locally, and opens it in your browser — the same idea as
+`opencode web`. The web UI is a [TanStack Start](https://tanstack.com/start)
+app (server-side rendered, React 19, Tailwind + shadcn-style components) and
+talks to the **same** local backend over the same WebSocket, so it is just as
+local-first as the terminal UI: your data never leaves your machine.
+
+It ships **inside** the single `teams` binary — no extra install, no Node, no
+`node_modules`. The whole web bundle is embedded and unpacked to
+`~/.cache/teams-lite/web` on first launch.
+
+| Flag             | Description                                             |
+| ---------------- | ------------------------------------------------------- |
+| `--port <n>`     | Port to serve the web UI on (default `4321`)            |
+| `--host <h>`     | Host/interface to bind (default `127.0.0.1`)            |
+| `--no-open`      | Don't open the browser automatically                    |
+
+Everything is served on `127.0.0.1` by default, so it stays on your machine.
+
 ## Build from source
 
 For development, or to build the binary yourself:
@@ -111,17 +139,25 @@ For development, or to build the binary yourself:
 git clone https://github.com/theophile-wallez/teams-lite.git
 cd teams-lite
 
-# 2. Install the UI dependencies
+# 2. Install dependencies (terminal UI + web UI)
 cd ui && bun install && cd ..
+cd web && bun install && cd ..
 
 # 3a. Run straight from source (spawns the debug/release backend it finds)
 cargo build --release --bin server
-cd ui && bun run start
+cd ui && bun run start            # terminal UI
+#   …or the web UI in dev (Vite + HMR), against a mock backend:
+cd web && bun run dev             # then, in another shell: bun run mock
 
-# 3b. …or produce the single `teams` binary (backend embedded)
+# 3b. …or produce the single `teams` binary (backend + web UI embedded)
 cargo build --release --bin server
-cd ui && bun run build   # -> ui/dist/teams
+cd ui && bun run build            # -> ui/dist/teams   (also builds & embeds web/)
+./ui/dist/teams --web             # run the browser UI from the binary
 ```
+
+The `teams` binary embeds the terminal UI, the Rust backend, **and** the web UI.
+`bun run build` builds the web app and bundles it in automatically; set
+`TEAMS_SKIP_WEB=1` to skip it for a faster terminal-only build.
 
 Every push to `master` builds this binary in CI and publishes it as the rolling
 `latest` release that `install.sh` downloads.
@@ -129,9 +165,12 @@ Every push to `master` builds this binary in CI and publishes it as the rolling
 
 ## Keyboard shortcuts
 
+Both the terminal and web UIs share the same shortcuts:
+
 | Key                | Action                                             |
 | ------------------ | -------------------------------------------------- |
 | `Ctrl + K`         | Open the command palette (fuzzy jump to a chat)    |
+| `Ctrl + P`         | Open the theme picker (live preview, 34 themes)    |
 | `↑` / `↓`, `j`/`k` | Move through the conversation list                 |
 | `Enter`            | Open the selected conversation / send a message    |
 | `Shift + Enter`    | New line in the message composer                   |
@@ -142,8 +181,14 @@ Every push to `master` builds this binary in CI and publishes it as the rolling
 
 teams-lite follows a decoupled server/client model (the same shape as
 [opencode](https://opencode.ai)): a Rust backend does all the real work and
-exposes it over a local WebSocket, while a terminal UI renders state and sends
-commands. The UI never touches the network or the database directly.
+exposes it over a local WebSocket, while a front-end renders state and sends
+commands. The front-end never touches the network or the database directly.
+
+There are two interchangeable front-ends, both speaking the same WebSocket
+protocol to the same backend: the **terminal UI** (OpenTUI + Solid, shown
+below) and the **web UI** (`teams --web` — TanStack Start SSR, served locally
+and opened in your browser). Whichever you run, the backend and the local-first
+store are identical.
 
 ```
         ┌───────────────────────────┐        ws://127.0.0.1:8420        ┌──────────────────────┐
