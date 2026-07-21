@@ -8,6 +8,7 @@ dist
 
 # single-binary build artifacts (see build.ts)
 server.embed
+web.tar.gz
 bunfig.toml.building
 
 # code coverage

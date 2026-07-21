@@ -23,7 +23,7 @@ import { join } from "node:path";
 export async function extractEmbeddedWeb(): Promise<string> {
   let bytes: Uint8Array;
   try {
-    const { default: bunfsPath } = await import("../web.tar.gz");
+    const { default: bunfsPath } = await import("./embedded-web");
     bytes = new Uint8Array(await Bun.file(bunfsPath).arrayBuffer());
   } catch {
     throw new Error(

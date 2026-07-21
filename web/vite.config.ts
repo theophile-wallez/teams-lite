@@ -20,6 +20,13 @@ export default defineConfig({
     // launched behind the `teams --web` supervisor.
     strictPort: false,
   },
+  // Bundle all dependencies into the SSR output so dist/server/server.js is
+  // self-contained (only node: builtins stay external). This is what lets the
+  // `teams --web` launcher run the server from the compiled binary's embedded,
+  // extracted bundle — where there is no node_modules to resolve bare imports.
+  ssr: {
+    noExternal: true,
+  },
   plugins: [
     tsConfigPaths({ projects: ["./tsconfig.json"] }),
     tailwindcss(),

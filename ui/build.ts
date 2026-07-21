@@ -41,6 +41,48 @@ if (!existsSync(serverBin)) {
 const embedPath = join(uiDir, "server.embed");
 copyFileSync(serverBin, embedPath);
 
+// 2b. Build the web UI and stage it as an embedded tarball so `teams --web`
+//     works from the single binary (see ui/src/embedded-web.ts / web-embed.ts).
+//     web/server.ts resolves its dist/ relative to itself, so the archive keeps
+//     that layout: server.ts + dist/ at the archive root -> extracted to
+//     ~/.cache/teams-lite/web on first launch. Set TEAMS_SKIP_WEB=1 to skip
+//     (produces a binary whose `teams --web` reports the UI is unavailable).
+const webDir = join(repoRoot, "web");
+const webTar = join(uiDir, "web.tar.gz");
+const skipWeb = process.env.TEAMS_SKIP_WEB === "1";
+if (!skipWeb) {
+  if (!existsSync(join(webDir, "node_modules"))) {
+    console.error(
+      "error: web deps missing. Run `cd web && bun install` first (or set TEAMS_SKIP_WEB=1).",
+    );
+    process.exit(1);
+  }
+  console.log("building web UI…");
+  const webBuild = Bun.spawnSync(["bun", "run", "build"], {
+    cwd: webDir,
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  if (!webBuild.success) {
+    console.error("error: web build failed.");
+    process.exit(1);
+  }
+  const tar = Bun.spawnSync(["tar", "-czf", webTar, "-C", webDir, "server.ts", "dist"], {
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  if (!tar.success) {
+    console.error("error: could not archive the web bundle.");
+    process.exit(1);
+  }
+} else {
+  // The embed import needs the file to exist even when empty, or the compile
+  // fails to resolve "../web.tar.gz". Write a tiny placeholder archive.
+  Bun.spawnSync(["tar", "-czf", webTar, "-C", uiDir, "--files-from", "/dev/null"], {
+    stderr: "inherit",
+  });
+}
+
 // 3. Compile the single binary. Emit inside the repo (same filesystem) to avoid
 //    the cross-filesystem zero-fill bug, then the caller/CI moves it if needed.
 const outDir = join(uiDir, "dist");
@@ -75,6 +117,7 @@ try {
 } finally {
   if (hadBunfig) renameSync(bunfigStashed, bunfig);
   rmSync(embedPath, { force: true });
+  rmSync(webTar, { force: true });
 }
 
 chmodSync(outfile, 0o755);
