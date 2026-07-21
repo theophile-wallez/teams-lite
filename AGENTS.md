@@ -37,8 +37,14 @@
 
 ## Git workflow
 
-- Do task work on a dedicated branch off `master`, never directly on `master`,
-  so an in-progress session can't leave `master` in a broken state.
+- Every new session/task MUST start from a dedicated git worktree created off
+  `master`, never work directly on `master` or in the main checkout, so an
+  in-progress session can't leave `master` in a broken state and parallel
+  sessions never collide. Create it with a branch off `master`, for example:
+  `git worktree add .worktrees/<task-name> -b <branch> master`.
+- Once the branch is merged into `master`, delete its worktree to keep the
+  checkout clean: `git worktree remove .worktrees/<task-name>` (and prune the
+  branch once it is no longer needed).
 - Before treating a task as done, run the tests that cover the parts you changed
   as a hard gate: only merge into `master` when they are green. Match the test
   scope to the change scope — do not run everything by reflex:
@@ -49,8 +55,8 @@
   - A change that only touches a frontend does not need `cargo test`, and a
     backend-only change does not need the frontend suites. When a change spans
     both (e.g. a protocol or WebSocket contract), run the suites on both sides.
-- If the tests you ran fail, do not merge. Leave the branch intact and report
-  what failed.
+- If the tests you ran fail, do not merge. Leave the worktree and branch intact
+  and report what failed.
 - This is a convention the agent follows, not an enforced guarantee — the
   authoritative check that keeps `master` green belongs in CI or a pre-push hook.
 
