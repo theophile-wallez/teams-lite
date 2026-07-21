@@ -56,15 +56,74 @@ fi
 
 install -m 0755 "$tmp" "$BIN_DIR/teams-bin"
 
-# Launcher wrapper. A compiled Bun binary reads bunfig.toml from the CURRENT
-# directory at startup, so running `teams` inside another Bun project (whose
-# bunfig has a `preload`) would crash. We sidestep that by running from a
-# directory we control — teams-lite doesn't care about the working directory
-# (its logs go to /tmp and its database to the XDG data dir, both absolute).
+# Launcher wrapper. It does two jobs:
+#
+#   1. bunfig isolation — a compiled Bun binary reads bunfig.toml from the CURRENT
+#      directory at startup, so running `teams` inside another Bun project (whose
+#      bunfig has a `preload`) would crash. We sidestep that by running from a
+#      directory we control (teams-lite doesn't care about the working directory:
+#      its logs go to /tmp and its database to the XDG data dir, both absolute).
+#
+#   2. Broker reach — teams-lite signs in through the Microsoft Identity Broker
+#      (com.microsoft.identity.broker1) over the session D-Bus, in either Intune
+#      topology:
+#        • Classic Intune: the broker runs as the real user and owns its name on
+#          the host session bus. We just launch directly.
+#        • Containerized Intune: the broker lives in a rootless container on its
+#          own bus (/run/user/0/bus) with container-uid 0 mapped to our host uid.
+#          We enter the container's user namespace (nsenter -U) so D-Bus EXTERNAL
+#          auth accepts us, keep the host mount namespace so the binary/$HOME stay
+#          visible, and point DBUS_SESSION_BUS_ADDRESS at the container bus.
+#      Detection is automatic; if no broker is found we still launch and let the
+#      binary surface its own error.
 cat > "$BIN_DIR/teams" <<EOF
-#!/bin/sh
-cd "$BIN_DIR" || exit 1
-exec "$BIN_DIR/teams-bin" "\$@"
+#!/usr/bin/env bash
+set -euo pipefail
+
+TEAMS_BIN="$BIN_DIR/teams-bin"
+BROKER_MATCH='identity-broker/bin/microsoft-identity-broker'
+BROKER_DBUS_NAME='com.microsoft.identity.broker1'
+
+# Re-exec guard: inside the namespace we fall straight through to the binary.
+if [ "\${TEAMS_LITE_IN_NS:-}" = "1" ]; then
+  cd "$BIN_DIR" || exit 1
+  exec "\$TEAMS_BIN" "\$@"
+fi
+
+launch_direct() {
+  cd "$BIN_DIR" || exit 1
+  exec "\$TEAMS_BIN" "\$@"
+}
+
+# Topology 1 — classic Intune: broker name already on our host session bus.
+if command -v busctl >/dev/null 2>&1 &&
+   busctl --user --list --no-legend 2>/dev/null | awk '{print \$1}' | grep -qx "\$BROKER_DBUS_NAME"; then
+  launch_direct "\$@"
+fi
+
+# Topology 2 — containerized Intune: bridge into the broker's user namespace.
+BROKER_PID="\$(pgrep -f "\$BROKER_MATCH" | head -1 || true)"
+if [ -z "\$BROKER_PID" ]; then
+  echo "teams-lite: identity broker not found — start Intune first. Launching" \\
+       "anyway; sign-in will fail if the broker stays down." >&2
+  launch_direct "\$@"
+fi
+
+BROKER_BUS="/proc/\$BROKER_PID/root/run/user/0/bus"
+if [ ! -S "\$BROKER_BUS" ]; then
+  echo "teams-lite: broker \$BROKER_PID has no container bus at \$BROKER_BUS —" \\
+       "launching directly (sign-in may fail)." >&2
+  launch_direct "\$@"
+fi
+
+exec sudo nsenter -t "\$BROKER_PID" -U -- \\
+  env \\
+    TEAMS_LITE_IN_NS=1 \\
+    HOME="\$HOME" \\
+    XDG_DATA_HOME="\${XDG_DATA_HOME:-\$HOME/.local/share}" \\
+    XDG_CACHE_HOME="\${XDG_CACHE_HOME:-\$HOME/.cache}" \\
+    DBUS_SESSION_BUS_ADDRESS="unix:path=\$BROKER_BUS" \\
+    "$BIN_DIR/teams" "\$@"
 EOF
 chmod 0755 "$BIN_DIR/teams"
 
@@ -73,6 +132,8 @@ echo "Installed teams-lite to $BIN_DIR/teams"
 # Make `teams` immediately runnable if a standard bin dir is on PATH; otherwise
 # print the one line the user needs to add.
 linked=""
+# Single candidate today; kept as a loop so more standard bin dirs can be added.
+# shellcheck disable=SC2066
 for d in "$HOME/.local/bin"; do
   case ":$PATH:" in
     *":$d:"*)

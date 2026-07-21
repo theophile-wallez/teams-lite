@@ -79,7 +79,14 @@ Linux machine — through the **Microsoft Identity Broker** — so it needs:
 - **Linux** with the **Microsoft Identity Broker** available on the session D-Bus
   (`com.microsoft.identity.broker1`). This ships with the Intune / Microsoft
   Entra sign-in components (e.g. the Intune Company Portal). Your work account
-  must already be signed in on the device.
+  must already be signed in on the device. Both Intune deployments are supported
+  automatically:
+    - **Classic Intune** — the broker runs as your user on the host session bus;
+      teams-lite talks to it directly.
+    - **Containerized Intune** — the broker runs inside a rootless container on
+      its own bus; the `teams` launcher detects this and bridges into the
+      container's user namespace so sign-in still works. This needs passwordless
+      `sudo nsenter` (as configured by the container setup).
 - **`notify-send`** (from `libnotify`) for desktop notifications — optional, but
   recommended.
 
