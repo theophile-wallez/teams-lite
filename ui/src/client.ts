@@ -36,8 +36,18 @@ export type ChatMessage = {
   seq: number;
   compose_time: number;
   sender: string;
+  sender_mri?: string;
   content: string;
   is_self?: boolean;
+};
+
+export type ReplyTo = {
+  compose_time: number;
+  sender: string;
+  sender_mri: string;
+  preview: string;
+  before: string;
+  after: string;
 };
 
 export type MessagePage = {
@@ -240,8 +250,8 @@ export class Backend {
   setDraft(conversation: string, text: string): Promise<{ saved: boolean }> {
     return this.request("set_draft", { conversation, text });
   }
-  send(conversation: string, text: string): Promise<{ sent: boolean }> {
-    return this.request("send", { conversation, text });
+  send(conversation: string, text: string, replyTo?: ReplyTo): Promise<{ sent: boolean }> {
+    return this.request("send", { conversation, text, reply_to: replyTo });
   }
 
   // ---- events -------------------------------------------------------------

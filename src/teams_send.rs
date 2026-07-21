@@ -20,6 +20,16 @@ use serde_json::json;
 
 use crate::teams::Session;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyTo {
+    pub compose_time: i64,
+    pub sender: String,
+    pub sender_mri: String,
+    pub preview: String,
+    pub before: String,
+    pub after: String,
+}
+
 /// Escape user-typed plain text into the minimal HTML the RichText/Html type wants.
 /// We send plain messages, so we only need to neutralize markup characters.
 pub fn escape_html(text: &str) -> String {
@@ -52,6 +62,7 @@ pub async fn send_message(
     session: &Session,
     conversation_id: &str,
     text: &str,
+    reply_to: Option<&ReplyTo>,
 ) -> Result<String> {
     let chat = session
         .endpoint("chatService")
@@ -62,7 +73,7 @@ pub async fn send_message(
         urlencoding::encode(conversation_id)
     );
     let cmid = new_client_message_id();
-    let body = build_body(&cmid, text, &session.self_name);
+    let body = build_body(&cmid, text, &session.self_name, reply_to);
 
     let resp = http
         .post(&url)
@@ -80,11 +91,38 @@ pub async fn send_message(
     Ok(cmid)
 }
 
+fn message_content(text: &str, reply_to: Option<&ReplyTo>) -> String {
+    let Some(reply) = reply_to else {
+        return escape_html(text);
+    };
+
+    let quote = format!(
+        "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" itemid=\"{time}\"><strong itemprop=\"mri\" itemid=\"{mri}\">{sender}</strong><span itemprop=\"time\" itemid=\"{time}\"></span><p itemprop=\"preview\">{preview}</p></blockquote>",
+        time = reply.compose_time,
+        mri = escape_html(&reply.sender_mri),
+        sender = escape_html(&reply.sender),
+        preview = escape_html(&reply.preview),
+    );
+    format!(
+        "{}{}{}",
+        paragraph(&reply.before),
+        quote,
+        paragraph(&reply.after)
+    )
+}
+
+fn paragraph(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    format!("<p>{}</p>", escape_html(text).replace('\n', "<br>"))
+}
+
 /// Build the request body (pure, unit-tested).
-fn build_body(client_message_id: &str, text: &str, self_name: &str) -> serde_json::Value {
+fn build_body(client_message_id: &str, text: &str, self_name: &str, reply_to: Option<&ReplyTo>) -> serde_json::Value {
     json!({
         "clientmessageid": client_message_id,
-        "content": escape_html(text),
+        "content": message_content(text, reply_to),
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "imdisplayname": self_name,
@@ -112,11 +150,54 @@ mod tests {
 
     #[test]
     fn body_has_required_fields() {
-        let b = build_body("12345", "hi <there>", "Théophile WALLEZ");
+        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None);
         assert_eq!(b["clientmessageid"], "12345");
         assert_eq!(b["content"], "hi &lt;there&gt;");
         assert_eq!(b["messagetype"], "RichText/Html");
         assert_eq!(b["contenttype"], "text");
         assert_eq!(b["imdisplayname"], "Théophile WALLEZ");
+    }
+
+    #[test]
+    fn body_encodes_native_teams_reply_markup() {
+        let reply = ReplyTo {
+            compose_time: 1_784_279_090_040,
+            sender: "Bob & Alice".into(),
+            sender_mri: "8:orgid:abc-123".into(),
+            preview: "old <message>".into(),
+            before: String::new(),
+            after: "new <reply>".into(),
+        };
+
+        let b = build_body("12345", "new <reply>", "Me", Some(&reply));
+
+        assert_eq!(
+            b["content"],
+            concat!(
+                "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" ",
+                "itemid=\"1784279090040\"><strong itemprop=\"mri\" ",
+                "itemid=\"8:orgid:abc-123\">Bob &amp; Alice</strong>",
+                "<span itemprop=\"time\" itemid=\"1784279090040\"></span>",
+                "<p itemprop=\"preview\">old &lt;message&gt;</p></blockquote>",
+                "<p>new &lt;reply&gt;</p>"
+            )
+        );
+    }
+
+    #[test]
+    fn reply_markup_preserves_cursor_position() {
+        let reply = ReplyTo {
+            compose_time: 42,
+            sender: "Alice".into(),
+            sender_mri: "8:alice".into(),
+            preview: "quoted".into(),
+            before: "First line".into(),
+            after: "Second line".into(),
+        };
+
+        let content = message_content("First lineSecond line", Some(&reply));
+
+        assert!(content.starts_with("<p>First line</p><blockquote"));
+        assert!(content.ends_with("</blockquote><p>Second line</p>"));
     }
 }

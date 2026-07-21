@@ -517,13 +517,15 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         "send" => {
             let conv = param_str(params, "conversation")?;
             let text = param_str(params, "text")?;
+            let reply_to = params.get("reply_to").map(parse_reply_to).transpose()?;
             let http = ctx.http.clone();
             let send_conv = conv.clone();
             ctx.retry_on_auth(move |session, _csa| {
                 let http = http.clone();
                 let conv = send_conv.clone();
                 let text = text.clone();
-                async move { teams_send::send_message(&http, &session, &conv, &text).await }
+                let reply_to = reply_to.clone();
+                async move { teams_send::send_message(&http, &session, &conv, &text, reply_to.as_ref()).await }
             })
             .await?;
             // The network accepted the message, so the persisted draft is no
@@ -538,6 +540,24 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
 
         other => anyhow::bail!("unknown method: {other}"),
     }
+}
+
+fn parse_reply_to(value: &Value) -> Result<teams_send::ReplyTo> {
+    Ok(teams_send::ReplyTo {
+        compose_time: value
+            .get("compose_time")
+            .and_then(Value::as_i64)
+            .context("missing param: reply_to.compose_time")?,
+        sender: param_str(value, "sender")?,
+        sender_mri: value
+            .get("sender_mri")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        preview: param_str(value, "preview")?,
+        before: param_str(value, "before")?,
+        after: param_str(value, "after")?,
+    })
 }
 
 fn param_str(params: &Value, key: &str) -> Result<String> {
@@ -610,7 +630,8 @@ fn messages_value(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
         .iter()
         .map(|m| json!({
             "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
-            "compose_time": m.compose_time, "sender": m.sender, "content": m.content,
+            "compose_time": m.compose_time, "sender": m.sender, "sender_mri": m.sender_mri,
+            "content": m.content,
             "is_self": is_self(m, self_name, self_mri)
         }))
         .collect::<Vec<_>>())
@@ -662,7 +683,8 @@ fn cached_history_page(
 fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
     json!({
         "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
-        "compose_time": m.compose_time, "sender": m.sender, "content": m.content,
+        "compose_time": m.compose_time, "sender": m.sender, "sender_mri": m.sender_mri,
+        "content": m.content,
         "is_self": is_self(m, self_name, self_mri)
     })
 }
@@ -860,6 +882,26 @@ mod tests {
         assert_eq!(last_page.len(), 20);
         assert_eq!(last_page.first().unwrap().seq, 1);
         assert!(!has_more);
+    }
+
+    #[test]
+    fn parses_reply_metadata_from_send_params() {
+        let reply = parse_reply_to(&json!({
+            "compose_time": 1_784_279_090_040_i64,
+            "sender": "Alice",
+            "sender_mri": "8:orgid:abc-123",
+            "preview": "Original message",
+            "before": "Draft before",
+            "after": "Draft after"
+        }))
+        .unwrap();
+
+        assert_eq!(reply.compose_time, 1_784_279_090_040);
+        assert_eq!(reply.sender, "Alice");
+        assert_eq!(reply.sender_mri, "8:orgid:abc-123");
+        assert_eq!(reply.preview, "Original message");
+        assert_eq!(reply.before, "Draft before");
+        assert_eq!(reply.after, "Draft after");
     }
 }
 

@@ -34,7 +34,7 @@ import { Border } from "./border";
 import { DialogSelect } from "./dialog-select";
 import { SettingsDialog } from "./settings";
 import { theme } from "./theme";
-import { MessageActions } from "./message-actions";
+import { inlineReplyMarker, MessageActions, replyToPayload } from "./message-actions";
 
 const backend = new Backend();
 
@@ -58,6 +58,8 @@ const [live, setLive] = createSignal<"connecting" | "connected" | "disconnected"
 const [paletteOpen, setPaletteOpen] = createSignal(false);
 const [settingsOpen, setSettingsOpen] = createSignal(false);
 const [messageMenu, setMessageMenu] = createSignal<ChatMessage | null>(null);
+type PendingReply = { message: ChatMessage; marker: string | null };
+const [replyingTo, setReplyingTo] = createSignal<PendingReply | null>(null);
 const [draft, setDraft] = createSignal("");
 
 // Drafts are keyed by conversation so switching panes is instant. SQLite remains
@@ -168,6 +170,24 @@ function flushDraft(id: string): void {
   persistDraft(id, draftCache.get(id) ?? "");
 }
 
+function cleanReplyMarker(text: string, reply = replyingTo()): string {
+  return reply?.marker ? text.replace(reply.marker, "") : text;
+}
+
+function cancelReply(): void {
+  const reply = replyingTo();
+  if (!reply) return;
+  const text = cleanReplyMarker(draft(), reply);
+  setReplyingTo(null);
+  setDraft(text);
+  recomputeComposerRows(text);
+  const id = openId();
+  if (id) {
+    draftCache.set(id, text);
+    scheduleDraftSave(id, text);
+  }
+}
+
 async function openConversation(id: string) {
   const previousId = openId();
   if (previousId && previousId !== id) flushDraft(previousId);
@@ -176,6 +196,7 @@ async function openConversation(id: string) {
   setDraft(nextDraft);
   recomputeComposerRows(nextDraft);
   setOpenId(id);
+  setReplyingTo(null);
   setMessagesError(null);
   setOlderMessagesError(null);
   setLoadingOlderMessages(false);
@@ -218,8 +239,14 @@ async function openConversation(id: string) {
 async function sendDraft(submittedDraft: string) {
   const id = openId();
   if (!id) return;
-  const text = submittedDraft.trim();
+  const replyTarget = replyingTo();
+  const markerIndex = replyTarget?.marker ? submittedDraft.indexOf(replyTarget.marker) : -1;
+  const before = markerIndex >= 0 ? submittedDraft.slice(0, markerIndex) : "";
+  const after = markerIndex >= 0 ? submittedDraft.slice(markerIndex + replyTarget!.marker!.length) : "";
+  const cleanSubmittedDraft = markerIndex >= 0 ? before + after : submittedDraft;
+  const text = cleanSubmittedDraft.trim();
   if (!text) return;
+  const replyTo = markerIndex >= 0 ? replyToPayload(replyTarget!.message, before, after) : undefined;
 
   const pending = draftSaveTimers.get(id);
   if (pending) {
@@ -228,8 +255,8 @@ async function sendDraft(submittedDraft: string) {
   }
   try {
     // Make the final pre-send value durable before attempting the network call.
-    await backend.setDraft(id, submittedDraft);
-    await backend.send(id, text);
+    await backend.setDraft(id, cleanSubmittedDraft);
+    await backend.send(id, text, replyTo);
     // the sent line will arrive via the live `message` event; no manual refresh
   } catch (e: any) {
     setStatus(`send failed: ${e.message ?? e}`);
@@ -238,7 +265,7 @@ async function sendDraft(submittedDraft: string) {
 
   // The user may have started another message while the send was in flight. Only
   // clear the exact draft that was submitted; never erase newer composer input.
-  if (draftCache.get(id) === submittedDraft) {
+  if (draftCache.get(id) === cleanSubmittedDraft) {
     draftCache.set(id, "");
     if (openId() === id) {
       setDraft("");
@@ -246,6 +273,7 @@ async function sendDraft(submittedDraft: string) {
     }
     persistDraft(id, "");
   }
+  if (replyingTo()?.message.id === replyTarget?.message.id) setReplyingTo(null);
 }
 
 function wireEvents() {
@@ -434,6 +462,7 @@ export function MessageBubble(props: { id?: string; message: ChatMessage; showSe
   // already provides the gap, so a second one would stack into a full cell of dead
   // bubble color above the quote.
   const nameShown = () => !mine() && props.showSenderName;
+  const quoteHasContentAbove = () => nameShown() || Boolean(parsed().beforeQuote?.length);
   return (
     <box
       id={props.id}
@@ -467,10 +496,13 @@ export function MessageBubble(props: { id?: string; message: ChatMessage; showSe
         <Show when={nameShown()}>
           <text content={props.message.sender} style={{ fg: theme().senderName }} />
         </Show>
+        <Show when={parsed().beforeQuote?.length}>
+          <text content={parsed().beforeQuote} style={{ fg: theme().text }} />
+        </Show>
         <Show when={parsed().quote}>
           {(quote: Accessor<MessageQuote>) => (
             <box
-              border={nameShown() ? ["top"] : []}
+              border={quoteHasContentAbove() ? ["top"] : []}
               borderColor={bubbleBg()}
               customBorderChars={TOP_HALF_GAP_BORDER}
               style={{
@@ -499,8 +531,8 @@ export function MessageBubble(props: { id?: string; message: ChatMessage; showSe
             </box>
           )}
         </Show>
-        <Show when={parsed().body.length > 0}>
-          <text content={parsed().body} style={{ fg: theme().text }} />
+        <Show when={(parsed().quote ? parsed().afterQuote : parsed().body)?.length}>
+          <text content={parsed().quote ? parsed().afterQuote : parsed().body} style={{ fg: theme().text }} />
         </Show>
       </box>
     </box>
@@ -735,13 +767,16 @@ function MessagePane() {
             <box style={{ width: "100%", paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1, backgroundColor: theme().backgroundElement }}>
               <MessageComposer
                 focused={!paletteOpen() && !settingsOpen() && !messageMenu()}
+                replyingTo={replyingTo()}
                 value={draft()}
+                onReplyMarkerInserted={(marker) => setReplyingTo((reply) => (reply ? { ...reply, marker } : null))}
                 onContentChange={(text) => {
                   setDraft(text);
+                  const cleanText = cleanReplyMarker(text);
                   const id = openId();
                   if (id) {
-                    draftCache.set(id, text);
-                    scheduleDraftSave(id, text);
+                    draftCache.set(id, cleanText);
+                    scheduleDraftSave(id, cleanText);
                   }
                 }}
                 onSubmit={sendDraft}
@@ -757,10 +792,13 @@ function MessagePane() {
 export function MessageComposer(props: {
   value: string;
   focused: boolean;
+  replyingTo?: PendingReply | null;
+  onReplyMarkerInserted?: (marker: string) => void;
   onContentChange: (text: string) => void;
   onSubmit: (text: string) => void | Promise<void>;
 }) {
   let textarea: TextareaRenderable | undefined;
+  let insertedReplyId: string | null = null;
 
   createEffect(() => {
     const value = props.value;
@@ -768,6 +806,19 @@ export function MessageComposer(props: {
       textarea.setText(value);
       recomputeComposerRows(value);
     }
+  });
+
+  createEffect(() => {
+    const reply = props.replyingTo;
+    if (!reply) {
+      insertedReplyId = null;
+      return;
+    }
+    if (!textarea || reply.marker || insertedReplyId === reply.message.id) return;
+    const marker = inlineReplyMarker(reply.message, textarea.plainText, textarea.cursorOffset);
+    insertedReplyId = reply.message.id;
+    props.onReplyMarkerInserted?.(marker);
+    textarea.insertText(marker);
   });
 
   return (
@@ -881,6 +932,10 @@ export function App() {
       return;
     }
     if (e.name === "escape") {
+      if (replyingTo()) {
+        cancelReply();
+        return;
+      }
       const id = openId();
       if (id) flushDraft(id);
       setOpenId(null);
@@ -931,6 +986,10 @@ export function App() {
           {(message: Accessor<ChatMessage>) => (
             <MessageActions
               message={message()}
+              onReply={(target) => {
+                cancelReply();
+                setReplyingTo({ message: target, marker: null });
+              }}
               onCopy={(text) => {
                 if (renderer.copyToClipboardOSC52(text)) {
                   setStatus("Message copied to clipboard");

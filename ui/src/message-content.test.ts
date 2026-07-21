@@ -14,6 +14,11 @@ const REPLY =
   `<p>Aaaaah okay mb je pensais jusqu'à 19h30 tu attendais ma réponse</p>`;
 
 const PLAIN = `<p>just a normal message</p>`;
+const INLINE_REPLY =
+  `<p>before quote</p>` +
+  `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="1">` +
+  `<strong itemprop="mri">Bob</strong><p itemprop="preview">quoted</p>` +
+  `</blockquote><p>after quote</p>`;
 const ENTITIES = `<p>a &amp; b &lt;c&gt; &quot;d&quot;</p>`;
 
 let ok = true;
@@ -41,6 +46,13 @@ function check(label: string, pass: boolean) {
   const p = parseMessageContent(PLAIN);
   check("plain: no quote", p.quote === undefined);
   check("plain: body is the whole message", p.body === "just a normal message");
+}
+
+{
+  const p = parseMessageContent(INLINE_REPLY);
+  check("inline reply: body before quote preserved", p.beforeQuote === "before quote");
+  check("inline reply: body after quote preserved", p.afterQuote === "after quote");
+  check("inline reply: copy body preserves order", p.body === "before quote\nafter quote");
 }
 
 {

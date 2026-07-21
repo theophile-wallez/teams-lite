@@ -1,10 +1,11 @@
 // Message content parsing for the terminal UI.
 //
 // Teams sends a reply as an HTML <blockquote itemtype="http://schema.skype.com/Reply">
-// that carries the quoted message's author + a preview of its text, immediately
-// followed by the reply body. We split that structure out here so the renderer can
-// show the quote as a nested block instead of flattening the whole thing into one
-// line. All HTML -> plain-text stripping lives in this module.
+// that carries the quoted message's author + a preview of its text. The quote may
+// sit between two body segments when it was inserted at the composer cursor. We
+// split that structure out here so the renderer preserves that position instead
+// of flattening the whole thing into one line. All HTML -> plain-text stripping
+// lives in this module.
 
 export type MessageQuote = {
   // Display name of the quoted message's author.
@@ -18,6 +19,10 @@ export type ParsedMessage = {
   quote?: MessageQuote;
   // The reply body, or the whole message when there is no quote. Plain text.
   body: string;
+  // Reply body segments on either side of the quote. They preserve the quote's
+  // position when it was inserted into an existing draft.
+  beforeQuote?: string;
+  afterQuote?: string;
 };
 
 // Strip HTML tags and decode the handful of entities Teams emits, for terminal
@@ -42,7 +47,8 @@ const QUOTED_PREVIEW = /<p\b[^>]*itemprop="preview"[^>]*>([\s\S]*?)<\/p>/i;
 
 // Split a raw Teams message HTML into an optional quote plus the body text.
 export function parseMessageContent(html: string): ParsedMessage {
-  const inner = html.match(REPLY_BLOCKQUOTE)?.[1];
+  const match = html.match(REPLY_BLOCKQUOTE);
+  const inner = match?.[1];
   if (inner === undefined) return { body: plain(html) };
 
   const sender = plain(inner.match(QUOTED_AUTHOR)?.[1] ?? "");
@@ -51,10 +57,12 @@ export function parseMessageContent(html: string): ParsedMessage {
   const previewHtml = inner.match(QUOTED_PREVIEW)?.[1];
   const text = plain(previewHtml ?? inner.replace(QUOTED_AUTHOR, ""));
 
-  // The body is everything outside the reply blockquote(s). We strip every reply
-  // blockquote so a (rare) multi-quote message doesn't leak quoted text into the body.
-  const body = plain(html.replace(new RegExp(REPLY_BLOCKQUOTE, "gi"), ""));
+  const quoteIndex = match?.index ?? 0;
+  const quoteEnd = quoteIndex + (match?.[0].length ?? 0);
+  const beforeQuote = plain(html.slice(0, quoteIndex));
+  const afterQuote = plain(html.slice(quoteEnd));
+  const body = [beforeQuote, afterQuote].filter(Boolean).join("\n");
 
   if (!sender && !text) return { body };
-  return { quote: { sender, text }, body };
+  return { quote: { sender, text }, body, beforeQuote, afterQuote };
 }

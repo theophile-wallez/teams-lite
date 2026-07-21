@@ -120,6 +120,32 @@ const WIDTH = 60;
   report("reply quote", checks, frame);
 }
 
+// --- inline reply: text around the quote keeps its original order ---
+{
+  const content =
+    `<p>BEFOREQUOTE</p>` +
+    `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="1">` +
+    `<strong itemprop="mri" itemid="8:orgid:x">Bob</strong>` +
+    `<p itemprop="preview">INLINEQUOTE</p></blockquote>` +
+    `<p>AFTERQUOTE</p>`;
+  const { renderOnce, captureCharFrame } = await testRender(
+    () => (
+      <box style={{ width: WIDTH, flexDirection: "column" }}>
+        <MessageBubble message={msg({ content, is_self: false })} showSenderName={false} />
+      </box>
+    ),
+    { width: WIDTH, height: 20 },
+  );
+  await renderOnce();
+  const frame = captureCharFrame().replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+  const rowOf = (needle: string) => frame.split("\n").findIndex((line) => line.includes(needle));
+  const checks: [string, boolean][] = [
+    ["inline reply: body before quote shown first", rowOf("BEFOREQUOTE") < rowOf("INLINEQUOTE")],
+    ["inline reply: body after quote shown last", rowOf("INLINEQUOTE") < rowOf("AFTERQUOTE")],
+  ];
+  report("inline reply quote", checks, frame);
+}
+
 // --- reply without a sender name: the quote must not stack a second top gap ---
 // When no name sits above the quote (1:1, or my own message), the bubble's own ▀
 // top already provides the gap, so the quote starts on the very next row instead of
