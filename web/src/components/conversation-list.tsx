@@ -1,8 +1,9 @@
 import { useRef } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { convLabel, previewLine, type Conversation } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
-import { useAppState, useController } from "./controller-context";
+import { useAppState } from "./controller-context";
 
 const ROW_HEIGHT = 60;
 
@@ -14,7 +15,7 @@ const ROW_HEIGHT = 60;
 export function ConversationList(props: { selectedIndex: number; onSelect: (index: number) => void }) {
   const conversations = useAppState((s) => s.conversations);
   const openId = useAppState((s) => s.openId);
-  const controller = useController();
+  const navigate = useNavigate();
 
   const parentRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
@@ -46,7 +47,10 @@ export function ConversationList(props: { selectedIndex: number; onSelect: (inde
                   selected={props.selectedIndex === row.index}
                   onClick={() => {
                     props.onSelect(row.index);
-                    void controller.openConversation(c.id);
+                    void navigate({
+                      to: "/c/$conversationId",
+                      params: { conversationId: c.id },
+                    });
                   }}
                 />
               </div>

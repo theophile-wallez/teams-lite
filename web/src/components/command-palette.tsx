@@ -1,5 +1,6 @@
+import { useNavigate } from "@tanstack/react-router";
 import { convLabel } from "~/lib/protocol";
-import { useAppState, useController } from "./controller-context";
+import { useAppState } from "./controller-context";
 import {
   CommandDialog,
   CommandEmpty,
@@ -15,7 +16,7 @@ import {
  */
 export function CommandPalette(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const conversations = useAppState((s) => s.conversations);
-  const controller = useController();
+  const navigate = useNavigate();
 
   return (
     <CommandDialog open={props.open} onOpenChange={props.onOpenChange} label="Go to conversation">
@@ -28,7 +29,7 @@ export function CommandPalette(props: { open: boolean; onOpenChange: (open: bool
               key={c.id}
               value={`${convLabel(c)} ${c.id}`}
               onSelect={() => {
-                void controller.openConversation(c.id);
+                void navigate({ to: "/c/$conversationId", params: { conversationId: c.id } });
                 props.onOpenChange(false);
               }}
             >
