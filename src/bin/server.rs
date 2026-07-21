@@ -15,6 +15,7 @@
 // No raw tokens are ever logged or sent.
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use futures_util::{stream::FuturesUnordered, FutureExt, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -25,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
-use teams_lite::{auth, retry, teams, teams_profiles, teams_read, teams_send, trouter};
+use teams_lite::{auth, retry, teams, teams_media, teams_profiles, teams_read, teams_send, trouter};
 
 const ADDR: &str = "127.0.0.1:8420";
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
@@ -505,6 +506,31 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         }
 
         // Persist unsent composer text locally. This never touches the network.
+        // Proxy one hosted-content media object (inline chat image or a shared
+        // file) with the session credentials, streaming the bytes back to the UI
+        // base64-encoded. The browser cannot fetch these URLs itself — they need
+        // the skypetoken — and the UI never touches the network directly, so this
+        // keeps images/attachments flowing through the same WebSocket protocol as
+        // everything else. The URL is host-checked (see `teams_media`) before the
+        // token is ever attached, so an untrusted URL can never exfiltrate it.
+        "fetch_media" => {
+            let url = param_str(params, "url")?;
+            anyhow::ensure!(
+                teams_media::is_allowed_media_url(&url),
+                "media host not allowed"
+            );
+            let http = ctx.http.clone();
+            let media = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let url = url.clone();
+                    async move { teams_media::fetch_media(&http, &session, &url).await }
+                })
+                .await?;
+            let data = base64::engine::general_purpose::STANDARD.encode(&media.bytes);
+            Ok(json!({ "content_type": media.content_type, "data_base64": data }))
+        }
+
         "set_draft" => {
             let conv = param_str(params, "conversation")?;
             let text = param_str(params, "text")?;
@@ -685,9 +711,17 @@ fn messages_value(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
             "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
             "compose_time": m.compose_time, "sender": m.sender, "sender_mri": m.sender_mri,
             "content": m.content,
+            "attachments": attachments_value(m),
             "is_self": is_self(m, self_name, self_mri)
         }))
         .collect::<Vec<_>>())
+}
+
+/// Decode a message's stored attachments (a JSON array string) back into a JSON
+/// value for the wire. A legacy/blank/malformed value degrades to an empty array
+/// so a single bad row can never break a whole page's serialization.
+fn attachments_value(m: &Message) -> Value {
+    serde_json::from_str(&m.attachments).unwrap_or_else(|_| json!([]))
 }
 
 fn messages_json(msgs: &[Message], self_name: &str, self_mri: &str, has_more: bool) -> Value {
@@ -738,6 +772,7 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
         "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
         "compose_time": m.compose_time, "sender": m.sender, "sender_mri": m.sender_mri,
         "content": m.content,
+        "attachments": attachments_value(m),
         "is_self": is_self(m, self_name, self_mri)
     })
 }
@@ -907,6 +942,7 @@ mod tests {
             sender: "Alice".into(),
             sender_mri: String::new(),
             content: format!("message {seq}"),
+            attachments: "[]".into(),
         }
     }
 

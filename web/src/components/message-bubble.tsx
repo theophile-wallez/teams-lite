@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { copyableMessageText, parseRichMessage, type ChatMessage } from "~/lib/protocol";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
+import { FileAttachment, MediaImage } from "./media-image";
 
 /**
  * A single chat message rendered as a bubble. Mine align right with an accent
@@ -84,6 +85,18 @@ export function MessageBubble(props: {
             ) : null}
 
             {parsed.bodyHtml ? <RichContent html={parsed.bodyHtml} /> : null}
+
+            {props.message.attachments && props.message.attachments.length > 0 ? (
+              <div className="mt-1 flex flex-col gap-1">
+                {props.message.attachments.map((att, i) =>
+                  att.kind === "image" ? (
+                    <MediaImage key={`att-${i}-${att.url}`} src={att.url} alt={att.name} />
+                  ) : (
+                    <FileAttachment key={`att-${i}-${att.url}`} attachment={att} />
+                  ),
+                )}
+              </div>
+            ) : null}
 
             <button
               type="button"

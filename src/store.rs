@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS messages (
     sender          TEXT,
     sender_mri      TEXT,
     content         TEXT,
+    attachments     TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (conversation_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_msg_conv_seq ON messages(conversation_id, seq);
@@ -55,6 +56,12 @@ pub struct Message {
     /// before this column existed, or for system frames without a `from`.
     pub sender_mri: String,
     pub content: String,
+    /// File/card attachments shared in the message, as a JSON array string (the
+    /// same shape the UI receives: `[{name, content_type, url, kind}]`). Inline
+    /// images embedded in `content` as `<img>` are NOT recorded here — the UI
+    /// extracts and renders those from the content HTML directly. Defaults to
+    /// `"[]"` for messages without attachments and for legacy rows.
+    pub attachments: String,
 }
 
 /// The nature of a conversation. Modeled as an enum (not a bool) because there
@@ -152,10 +159,14 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
         sender: row.get(4)?,
         sender_mri: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
         content: row.get(6)?,
+        attachments: row
+            .get::<_, Option<String>>(7)?
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "[]".to_string()),
     })
 }
 
-const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content";
+const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments";
 
 /// Idempotent, additive migrations for databases created before a column existed.
 /// `CREATE TABLE IF NOT EXISTS` never alters an existing table, so older stores
@@ -180,6 +191,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     // (sender_mri == our own MRI). Legacy rows get NULL; the next network sync
     // backfills it for messages that come through again.
     add_column("ALTER TABLE messages ADD COLUMN sender_mri TEXT")?;
+    // attachments: file/card attachments as a JSON array string. Legacy rows and
+    // messages without attachments carry the empty-array default.
+    add_column("ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")?;
 
     // Sidebar-fidelity columns (last-message preview + unread/muted/pinned/hidden
     // state), all sourced from the CSA `users/me` sync. Legacy rows get the
@@ -334,11 +348,11 @@ impl Store {
     /// stay cheap while genuine edits — from us or anyone else — propagate.
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
         let n = self.conn.execute(
-            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(conversation_id, id) DO UPDATE SET content = excluded.content
                  WHERE messages.content <> excluded.content",
-            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content],
+            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments],
         )?;
         Ok(n == 1)
     }
@@ -532,6 +546,7 @@ mod tests {
             sender: "alice".into(),
             sender_mri: String::new(),
             content: format!("message {seq}"),
+            attachments: "[]".into(),
         }
     }
 
@@ -828,11 +843,11 @@ mod tests {
         let me = "Théophile WALLEZ";
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
-            sender: me.into(), sender_mri: String::new(), content: "salut".into(),
+            sender: me.into(), sender_mri: String::new(), content: "salut".into(), attachments: "[]".into(),
         }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
-            sender: "Leonor GROELL".into(), sender_mri: String::new(), content: "hello".into(),
+            sender: "Leonor GROELL".into(), sender_mri: String::new(), content: "hello".into(), attachments: "[]".into(),
         }).unwrap();
 
         // direct derivation
@@ -850,7 +865,7 @@ mod tests {
         // only my own message present -> cannot derive the other name yet
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
-            sender: me.into(), sender_mri: String::new(), content: "coucou".into(),
+            sender: me.into(), sender_mri: String::new(), content: "coucou".into(), attachments: "[]".into(),
         }).unwrap();
         assert_eq!(s.other_party_name("dm", me).unwrap(), None);
         assert_eq!(s.conversations(me).unwrap()[0].display_name, "");
@@ -863,7 +878,7 @@ mod tests {
         // legacy row: no MRI captured
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "c1".into(), seq: 1, compose_time: 1,
-            sender: "Me".into(), sender_mri: String::new(), content: "hi".into(),
+            sender: "Me".into(), sender_mri: String::new(), content: "hi".into(), attachments: "[]".into(),
         }).unwrap();
 
         // backfill fills the empty MRI
@@ -877,5 +892,47 @@ mod tests {
         // empty incoming MRI is a no-op
         s.backfill_sender_mri("c1", "m1", "").unwrap();
         assert_eq!(s.newest_messages("c1", 1).unwrap()[0].sender_mri, "8:orgid:me");
+    }
+
+    #[test]
+    fn attachments_roundtrip_and_default_empty_array() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        // a message carrying a file attachment
+        s.insert_message(&Message {
+            id: "m1".into(), conversation_id: "c1".into(), seq: 1, compose_time: 1,
+            sender: "Me".into(), sender_mri: String::new(), content: "see file".into(),
+            attachments: r#"[{"name":"report.pdf","content_type":"application/pdf","url":"https://x.skype.com/o/1","kind":"file"}]"#.into(),
+        }).unwrap();
+        // a message without attachments keeps the empty-array default
+        s.insert_message(&Message {
+            id: "m2".into(), conversation_id: "c1".into(), seq: 2, compose_time: 2,
+            sender: "Me".into(), sender_mri: String::new(), content: "hi".into(),
+            attachments: "[]".into(),
+        }).unwrap();
+
+        let msgs = s.newest_messages("c1", 10).unwrap();
+        assert!(msgs[0].attachments.contains("report.pdf"));
+        assert_eq!(msgs[1].attachments, "[]");
+    }
+
+    #[test]
+    fn migration_backfills_attachments_default_on_legacy_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversations (id TEXT PRIMARY KEY);
+             CREATE TABLE messages (
+                id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+                PRIMARY KEY (conversation_id, id));
+             INSERT INTO messages (id, conversation_id) VALUES ('m1', 'c1');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let attachments: String = conn
+            .query_row("SELECT attachments FROM messages WHERE id = 'm1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(attachments, "[]");
     }
 }

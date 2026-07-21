@@ -35,6 +35,15 @@ import type { ServerWebSocket } from "bun";
 
 type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
 
+type AttachmentKind = "image" | "file";
+
+type Attachment = {
+  name: string;
+  content_type: string;
+  url: string;
+  kind: AttachmentKind;
+};
+
 type Conversation = {
   id: string;
   name: string;
@@ -59,6 +68,7 @@ type ChatMessage = {
   sender: string;
   sender_mri?: string;
   content: string; // HTML-ish, as Teams sends it
+  attachments?: Attachment[]; // file/card attachments (inline images live in content)
   is_self?: boolean;
 };
 
@@ -515,6 +525,111 @@ function seed(): void {
   });
 }
 
+/** Register a dedicated "Media Gallery" conversation whose messages exercise the
+ *  UI's inline-image and attachment rendering: a pasted screenshot embedded in
+ *  the HTML, an image shared as an attachment, and a non-image file. It is a
+ *  standalone conversation (not one the other specs mutate or reorder), so tests
+ *  reach it deterministically by name via the command palette. */
+function seedMediaSamples(): void {
+  const convId = "19:media-gallery-demo@thread.v2";
+  const other = PEOPLE[0]!;
+  // Dated well in the past so this fixed 4-message conversation never sorts to
+  // the top of the sidebar (index 0), where other specs expect a full backlog.
+  // Tests reach it by name via the command palette, so its position is moot.
+  const base = Date.now() - 30 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  let seq = 0;
+
+  const push = (
+    msg: Omit<ChatMessage, "id" | "conversation_id" | "seq" | "compose_time">,
+    offsetMs: number,
+  ): void => {
+    seq += 1;
+    messages.push({
+      id: `${convId}#${seq}`,
+      conversation_id: convId,
+      seq,
+      compose_time: base + offsetMs,
+      ...msg,
+    });
+  };
+
+  push(
+    { sender: other.name, sender_mri: other.mri, content: escapeHtml("Sharing some media below."), is_self: false },
+    0,
+  );
+  // 1. An inline pasted screenshot: the image is embedded in the message HTML,
+  //    exactly as Teams delivers an AMS inline image.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        `<div>Here's the screenshot from the incident:</div>` +
+        `<img itemtype="http://schema.skype.com/AMSImage" ` +
+        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-1/views/imgo" alt="incident graph"/>`,
+      is_self: false,
+    },
+    60_000,
+  );
+  // 2. An image shared as an attachment (surfaced from properties.files).
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content: `<p>And the updated diagram:</p>`,
+      attachments: [
+        {
+          name: "architecture.png",
+          content_type: "image/png",
+          url: "https://eu-api.asm.skype.com/v1/objects/mock-img-att-1/views/original",
+          kind: "image",
+        },
+      ],
+      is_self: true,
+    },
+    120_000,
+  );
+  // 3. A non-image file shared in the chat.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: `<p>Sharing the Q3 report</p>`,
+      attachments: [
+        {
+          name: "quarterly-report.pdf",
+          content_type: "application/pdf",
+          url: "https://eu-api.asm.skype.com/v1/objects/mock-file-1/content",
+          kind: "file",
+        },
+      ],
+      is_self: false,
+    },
+    180_000,
+  );
+
+  const conv: Conversation = {
+    id: convId,
+    name: "Media Gallery",
+    last_message_time: 0,
+    kind: "group",
+    last_message_preview: "",
+    last_message_sender: "",
+    last_message_from_me: false,
+    is_read: true,
+    is_muted: false,
+    is_pinned: false,
+    is_hidden: false,
+    thread_type: "chat",
+    draft: "",
+  };
+  const cs: ConvState = { conv, messages, participants: [other] };
+  recomputeSummary(cs);
+  store.set(convId, cs);
+  order.push(convId);
+}
+
 // ---------------------------------------------------------------------------
 // Paging (operate on ascending-by-seq arrays, mirroring the Rust store).
 // ---------------------------------------------------------------------------
@@ -530,6 +645,35 @@ function pageBefore(messages: ChatMessage[], beforeSeq: number): MessagePage {
   const older = messages.filter((m) => m.seq < beforeSeq); // still ascending
   const page = older.slice(-PAGE_SIZE);
   return { messages: page, has_more: older.length > page.length };
+}
+
+// ---------------------------------------------------------------------------
+// Mock hosted content — stands in for the Rust media proxy (`fetch_media`).
+// ---------------------------------------------------------------------------
+
+/** A stable non-negative hash of a string, for deriving a deterministic color. */
+function hashString(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h;
+}
+
+/** Return deterministic bytes for a requested media URL, mirroring the Rust
+ *  backend's `fetch_media` result shape `{ content_type, data_base64 }`. We
+ *  synthesize a labeled colored SVG so every hosted-content URL renders as a
+ *  distinct, visible image in the UI without any real tenant. */
+function mockMedia(url: string): { content_type: string; data_base64: string } {
+  const hue = hashString(url) % 360;
+  const label = (url.split("/").filter(Boolean).pop() ?? "media").slice(0, 24);
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200">` +
+    `<rect width="320" height="200" rx="12" fill="hsl(${hue} 65% 52%)"/>` +
+    `<text x="160" y="104" font-family="system-ui,sans-serif" font-size="16" fill="white" ` +
+    `text-anchor="middle" dominant-baseline="middle">${escapeHtml(label)}</text></svg>`;
+  return {
+    content_type: "image/svg+xml",
+    data_base64: Buffer.from(svg, "utf8").toString("base64"),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +801,11 @@ function dispatch(method: string, params: unknown): unknown {
       const text = requireString(params, "text");
       editMessage(id, messageId, text);
       return { edited: true };
+    }
+
+    case "fetch_media": {
+      const url = requireString(params, "url");
+      return mockMedia(url);
     }
 
     default:
@@ -863,6 +1012,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
 // ---------------------------------------------------------------------------
 
 seed();
+seedMediaSamples();
 
 const server = Bun.serve({
   port: PORT,

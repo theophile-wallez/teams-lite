@@ -90,6 +90,12 @@ export class TeamsController {
   private draftCache = new Map<string, string>();
   private draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+  // Media proxy cache: hosted-content URL -> a promise of a blob object URL.
+  // Deduplicates concurrent loads of the same image and makes re-mounts/re-opens
+  // instant. The created object URLs are revoked on dispose.
+  private mediaCache = new Map<string, Promise<string>>();
+  private mediaObjectUrls: string[] = [];
+
   private refreshConversations = coalesce(() => this.loadConversations());
 
   constructor(url: string = DEFAULT_WS_URL) {
@@ -138,6 +144,9 @@ export class TeamsController {
     this.disposers = [];
     for (const t of this.draftSaveTimers.values()) clearTimeout(t);
     this.draftSaveTimers.clear();
+    for (const url of this.mediaObjectUrls) URL.revokeObjectURL(url);
+    this.mediaObjectUrls = [];
+    this.mediaCache.clear();
     this.backend.close();
     this.started = false;
   }
@@ -322,6 +331,31 @@ export class TeamsController {
     this.set({ status: text });
   }
 
+  // ---- media (hosted-content proxy) ---------------------------------------
+
+  /** Resolve a Teams hosted-content URL (inline image or shared file) to a local
+   *  blob object URL, fetching the bytes through the backend proxy. Cached and
+   *  deduplicated per URL; a failed load is evicted so a later retry can refetch.
+   *  The returned object URL stays valid until the controller is disposed. */
+  loadMedia(url: string): Promise<string> {
+    const cached = this.mediaCache.get(url);
+    if (cached) return cached;
+
+    const pending = (async () => {
+      const res = await this.backend.fetchMedia(url);
+      const blob = new Blob([base64ToArrayBuffer(res.data_base64)], {
+        type: res.content_type || "application/octet-stream",
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      this.mediaObjectUrls.push(objectUrl);
+      return objectUrl;
+    })();
+
+    this.mediaCache.set(url, pending);
+    pending.catch(() => this.mediaCache.delete(url));
+    return pending;
+  }
+
   cancelReply(): void {
     this.set({ replyingTo: null });
   }
@@ -430,4 +464,14 @@ export class TeamsController {
 function errText(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+/** Decode a base64 string (as returned by the backend media proxy) to an
+ *  ArrayBuffer, suitable for constructing a Blob. */
+function base64ToArrayBuffer(b64: string): ArrayBuffer {
+  const binary = atob(b64);
+  const buffer = new ArrayBuffer(binary.length);
+  const view = new Uint8Array(buffer);
+  for (let i = 0; i < binary.length; i++) view[i] = binary.charCodeAt(i);
+  return buffer;
 }

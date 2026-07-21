@@ -8,6 +8,18 @@
 // Mirrors the Rust `ConversationKind` (src/store.rs).
 export type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
 
+/** A file/card attachment shared in a message (surfaced from Teams `properties`
+ *  by the backend). `url` is an authenticated hosted-content URL — it must be
+ *  loaded through the backend media proxy (see `TeamsController.loadMedia`),
+ *  never fetched directly by the browser. */
+export type AttachmentKind = "image" | "file";
+export type Attachment = {
+  name: string;
+  content_type: string;
+  url: string;
+  kind: AttachmentKind;
+};
+
 export type Conversation = {
   id: string;
   name: string;
@@ -32,6 +44,10 @@ export type ChatMessage = {
   sender: string;
   sender_mri?: string;
   content: string;
+  /** File/card attachments (absent or empty when the message has none). Inline
+   *  images embedded in `content` as `<img>` are NOT here — they are extracted
+   *  from the content HTML by `parseMessageContent`. */
+  attachments?: Attachment[];
   is_self?: boolean;
 };
 
@@ -64,24 +80,82 @@ export type MessageQuote = {
   text: string;
 };
 
+/** An image embedded inline in a message's HTML body (`<img>`), e.g. a pasted
+ *  screenshot. `src` may be an authenticated hosted-content URL (loaded through
+ *  the backend media proxy) or a public URL (loaded directly) — see
+ *  `mediaNeedsProxy`. */
+export type InlineImage = {
+  src: string;
+  alt: string;
+};
+
 export type ParsedMessage = {
   quote?: MessageQuote;
   body: string;
   beforeQuote?: string;
   afterQuote?: string;
+  /** Inline images found in the (non-quoted) message body. Empty when none. */
+  images: InlineImage[];
 };
 
-/** Strip HTML tags and decode the handful of entities Teams emits. */
-export function plain(html: string): string {
-  return html
-    .replace(/<[^>]+>/g, "")
+/** Decode the handful of HTML entities Teams emits. Shared by the tag stripper
+ *  and the inline-image extractor (URLs arrive with `&amp;`). */
+function decodeEntities(s: string): string {
+  return s
     .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&#39;/g, "'")
     .replace(/&quot;/g, '"')
-    .trim();
+    .replace(/&amp;/g, "&");
+}
+
+/** Strip HTML tags and decode the handful of entities Teams emits. */
+export function plain(html: string): string {
+  return decodeEntities(html.replace(/<[^>]+>/g, "")).trim();
+}
+
+/** Read a double- or single-quoted attribute value from a single HTML tag. */
+function tagAttr(tag: string, name: string): string {
+  const double = tag.match(new RegExp(`${name}\\s*=\\s*"([^"]*)"`, "i"));
+  if (double) return double[1] ?? "";
+  const single = tag.match(new RegExp(`${name}\\s*=\\s*'([^']*)'`, "i"));
+  return single?.[1] ?? "";
+}
+
+/** Extract inline `<img>` images from a message HTML fragment. Only `http(s)`
+ *  sources are kept; the `src` is entity-decoded so it is a usable URL. */
+export function extractImages(html: string): InlineImage[] {
+  const out: InlineImage[] = [];
+  const imgTag = /<img\b[^>]*>/gi;
+  for (const match of html.matchAll(imgTag)) {
+    const tag = match[0];
+    const src = decodeEntities(tagAttr(tag, "src"));
+    if (!/^https?:\/\//i.test(src)) continue;
+    out.push({ src, alt: decodeEntities(tagAttr(tag, "alt")) });
+  }
+  return out;
+}
+
+/** Microsoft domains whose media is authenticated and must be fetched through
+ *  the backend proxy (mirrors the allowlist in src/teams_media.rs). Everything
+ *  else — public CDNs like giphy or the Teams static-asset CDN — is loaded
+ *  directly by the browser, since it needs no credentials. */
+const PROXY_MEDIA_DOMAINS = [
+  "skype.com",
+  "teams.microsoft.com",
+  "teams.cloud.microsoft",
+  "teams.office.com",
+];
+
+/** True when a media URL must be loaded through the backend proxy (its host is
+ *  an authenticated Microsoft hosted-content domain). Public URLs return false
+ *  and are loaded directly by an `<img>`. */
+export function mediaNeedsProxy(url: string): boolean {
+  const authority = url.match(/^https?:\/\/([^/?#]+)/i)?.[1];
+  if (!authority) return false;
+  const host = (authority.split("@").pop() ?? "").split(":")[0]?.toLowerCase() ?? "";
+  return PROXY_MEDIA_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
 }
 
 const REPLY_BLOCKQUOTE =
@@ -93,7 +167,7 @@ const QUOTED_PREVIEW = /<p\b[^>]*itemprop="preview"[^>]*>([\s\S]*?)<\/p>/i;
 export function parseMessageContent(html: string): ParsedMessage {
   const match = html.match(REPLY_BLOCKQUOTE);
   const inner = match?.[1];
-  if (inner === undefined) return { body: plain(html) };
+  if (inner === undefined) return { body: plain(html), images: extractImages(html) };
 
   const sender = plain(inner.match(QUOTED_AUTHOR)?.[1] ?? "");
   const previewHtml = inner.match(QUOTED_PREVIEW)?.[1];
@@ -104,9 +178,11 @@ export function parseMessageContent(html: string): ParsedMessage {
   const beforeQuote = plain(html.slice(0, quoteIndex));
   const afterQuote = plain(html.slice(quoteEnd));
   const body = [beforeQuote, afterQuote].filter(Boolean).join("\n");
+  // Inline images live in the body, never inside the quoted preview.
+  const images = extractImages(html.slice(0, quoteIndex) + html.slice(quoteEnd));
 
-  if (!sender && !text) return { body };
-  return { quote: { sender, text }, body, beforeQuote, afterQuote };
+  if (!sender && !text) return { body, images };
+  return { quote: { sender, text }, body, beforeQuote, afterQuote, images };
 }
 
 export type RichQuote = {

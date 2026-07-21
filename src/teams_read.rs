@@ -481,7 +481,100 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         sender,
         sender_mri,
         content,
+        attachments: parse_attachments(m),
     })
+}
+
+/// Extract file attachments from a message's `properties` into the wire shape the
+/// UI renders: a JSON array string `[{name, content_type, url, kind}]`.
+///
+/// Teams delivers files shared in a chat under `properties.files`, each carrying
+/// a title, a file type, and an authenticated `objectUrl` (fetched through the
+/// backend media proxy — see `teams_media`). `properties` and `files` are each
+/// frequently delivered as a JSON-ENCODED STRING rather than a nested object, so
+/// we parse a level deeper when needed (same double-encoding as `userDetails` in
+/// `teams::fetch_self_identity`).
+///
+/// Inline images embedded directly in the message HTML (`<img>` in `content`) are
+/// NOT recorded here — the UI extracts and renders those from the content itself.
+///
+/// Best-effort by design: an absent, malformed, or empty `properties`/`files`
+/// yields `"[]"`, never an error, so a surprising attachment shape can never
+/// break message ingestion.
+fn parse_attachments(m: &Value) -> String {
+    let files = message_files(m);
+    let list: Vec<Value> = files.iter().filter_map(file_to_attachment).collect();
+    Value::Array(list).to_string()
+}
+
+/// Read `properties.files` as an array of file objects, transparently decoding
+/// the JSON-encoded-string form of either level. Returns an empty vec when
+/// absent or unparseable.
+fn message_files(m: &Value) -> Vec<Value> {
+    // `properties` may be an object or a JSON-encoded string.
+    let props = match m.get("properties") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        _ => Value::Null,
+    };
+    // `files` may itself be an array or a JSON-encoded string of an array.
+    match props.get("files") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).ok(),
+        Some(v @ Value::Array(_)) => Some(v.clone()),
+        _ => None,
+    }
+    .as_ref()
+    .and_then(Value::as_array)
+    .cloned()
+    .unwrap_or_default()
+}
+
+/// Normalize one Teams file object into `{name, content_type, url, kind}`, or
+/// `None` when it carries no usable URL.
+fn file_to_attachment(f: &Value) -> Option<Value> {
+    let first_str = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| f.get(*k).and_then(Value::as_str))
+            .map(str::to_string)
+    };
+    // Teams has used several key spellings across message shapes; accept them all.
+    let url = first_str(&["objectUrl", "fileUrl", "baseUrl", "url"]).filter(|u| !u.is_empty())?;
+    let name = first_str(&["title", "fileName", "name"]).unwrap_or_else(|| "attachment".to_string());
+    let file_type = first_str(&["fileType", "type"]).unwrap_or_default();
+    let (content_type, kind) = classify_attachment(&file_type, &name);
+    Some(serde_json::json!({
+        "name": name,
+        "content_type": content_type,
+        "url": url,
+        "kind": kind,
+    }))
+}
+
+/// Map a Teams file type / filename to a MIME type and a coarse kind
+/// ("image" | "file"). The kind lets the UI decide whether to render a thumbnail
+/// (via the media proxy) or a file chip.
+fn classify_attachment(file_type: &str, name: &str) -> (String, &'static str) {
+    // Prefer the explicit type; fall back to the filename extension.
+    let ext = if file_type.is_empty() {
+        name.rsplit('.').next().unwrap_or("")
+    } else {
+        file_type
+    }
+    .trim_start_matches('.')
+    .to_ascii_lowercase();
+
+    match ext.as_str() {
+        "jpg" | "jpeg" => ("image/jpeg".into(), "image"),
+        "png" => ("image/png".into(), "image"),
+        "gif" => ("image/gif".into(), "image"),
+        "webp" => ("image/webp".into(), "image"),
+        "bmp" => ("image/bmp".into(), "image"),
+        "svg" => ("image/svg+xml".into(), "image"),
+        "heic" | "heif" => (format!("image/{ext}"), "image"),
+        "pdf" => ("application/pdf".into(), "file"),
+        "" => ("application/octet-stream".into(), "file"),
+        other => (format!("application/{other}"), "file"),
+    }
 }
 
 /// Extract a bare MRI ("8:orgid:<guid>", "8:<skypename>", ...) from a message's
@@ -779,6 +872,69 @@ mod tests {
     }
 
     #[test]
+    fn message_without_properties_has_empty_attachments() {
+        let m = json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-16T16:05:26.767Z",
+            "content": "<p>just text</p>", "imdisplayname": "Alice"
+        });
+        let parsed = parse_message(&m, "c1").unwrap();
+        assert_eq!(parsed.attachments, "[]");
+    }
+
+    #[test]
+    fn parses_file_attachment_from_json_encoded_properties() {
+        // Teams double-encodes `properties`, and `files` inside it, as JSON strings.
+        let files = r#"[{"title":"quarterly.pdf","type":"pdf","objectUrl":"https://eu-api.asm.skype.com/v1/objects/0-eu-d1/content"}]"#;
+        let properties = serde_json::to_string(&json!({ "files": files })).unwrap();
+        let m = json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-16T16:05:26.767Z",
+            "content": "<p>here is the report</p>", "imdisplayname": "Alice",
+            "properties": properties
+        });
+
+        let parsed = parse_message(&m, "c1").unwrap();
+        let attachments: Value = serde_json::from_str(&parsed.attachments).unwrap();
+        let a = &attachments.as_array().unwrap()[0];
+        assert_eq!(a["name"], "quarterly.pdf");
+        assert_eq!(a["content_type"], "application/pdf");
+        assert_eq!(a["kind"], "file");
+        assert_eq!(
+            a["url"],
+            "https://eu-api.asm.skype.com/v1/objects/0-eu-d1/content"
+        );
+    }
+
+    #[test]
+    fn classifies_image_attachment_by_type() {
+        // `properties` given directly as an object, `files` as a real array.
+        let m = json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-16T16:05:26.767Z",
+            "content": "", "imdisplayname": "Alice",
+            "properties": { "files": [
+                { "title": "photo.PNG", "fileType": "png", "objectUrl": "https://eu-api.asm.skype.com/v1/objects/x/views/original" }
+            ]}
+        });
+
+        let parsed = parse_message(&m, "c1").unwrap();
+        let attachments: Value = serde_json::from_str(&parsed.attachments).unwrap();
+        let a = &attachments.as_array().unwrap()[0];
+        assert_eq!(a["kind"], "image");
+        assert_eq!(a["content_type"], "image/png");
+        assert_eq!(a["name"], "photo.PNG");
+    }
+
+    #[test]
+    fn drops_files_without_a_usable_url() {
+        let m = json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-16T16:05:26.767Z",
+            "content": "", "imdisplayname": "Alice",
+            "properties": { "files": [ { "title": "broken.txt" } ] }
+        });
+        let parsed = parse_message(&m, "c1").unwrap();
+        assert_eq!(parsed.attachments, "[]");
+    }
+
+    #[test]
     fn parses_message_page_oldest_first_with_cursor() {
         // API returns newest-first; two messages, page_size 30 => short page => top reached.
         let v = json!({
@@ -843,6 +999,7 @@ mod tests {
                 sender: "s".into(),
                 sender_mri: String::new(),
                 content: "c".into(),
+                attachments: "[]".into(),
             })
             .collect();
         MessagePage { messages, next_before_ms: Some(oldest_ms), has_more_older: has_more }

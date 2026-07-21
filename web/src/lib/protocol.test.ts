@@ -5,6 +5,8 @@
 import { describe, it, expect } from "vitest";
 import {
   parseMessageContent,
+  extractImages,
+  mediaNeedsProxy,
   mergeMessages,
   appendLiveMessage,
   mergeOlderHistoryPage,
@@ -102,6 +104,77 @@ describe("parseMessageContent", () => {
     expect(parsed.beforeQuote).toBe("before the quote");
     expect(parsed.afterQuote).toBe("after the quote");
     expect(parsed.body).toBe("before the quote\nafter the quote");
+  });
+
+  it("exposes an empty image list for a plain text message", () => {
+    expect(parseMessageContent("<p>no images here</p>").images).toEqual([]);
+  });
+
+  it("extracts an inline image and still yields its surrounding text", () => {
+    const html =
+      `<div>look at this</div>` +
+      `<img itemtype="http://schema.skype.com/AMSImage" ` +
+      `src="https://eu-api.asm.skype.com/v1/objects/abc/views/imgo" alt="a graph"/>`;
+    const parsed = parseMessageContent(html);
+
+    expect(parsed.body).toBe("look at this");
+    expect(parsed.images).toEqual([
+      { src: "https://eu-api.asm.skype.com/v1/objects/abc/views/imgo", alt: "a graph" },
+    ]);
+  });
+
+  it("does not treat an image inside the quoted preview as a body image", () => {
+    const html =
+      `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="1">` +
+      `<strong itemprop="mri">Bob</strong>` +
+      `<p itemprop="preview">see chart</p>` +
+      `</blockquote>` +
+      `<img src="https://eu-api.asm.skype.com/v1/objects/reply-img/views/imgo"/>`;
+    const parsed = parseMessageContent(html);
+
+    expect(parsed.images.map((i) => i.src)).toEqual([
+      "https://eu-api.asm.skype.com/v1/objects/reply-img/views/imgo",
+    ]);
+  });
+});
+
+describe("extractImages", () => {
+  it("decodes entity-escaped ampersands in the src", () => {
+    const html = `<img src="https://eu-api.asm.skype.com/o/x?a=1&amp;b=2"/>`;
+    expect(extractImages(html)).toEqual([
+      { src: "https://eu-api.asm.skype.com/o/x?a=1&b=2", alt: "" },
+    ]);
+  });
+
+  it("collects multiple images in document order", () => {
+    const html = `<img src="https://x.skype.com/a"/><p>and</p><img src="https://x.skype.com/b"/>`;
+    expect(extractImages(html).map((i) => i.src)).toEqual([
+      "https://x.skype.com/a",
+      "https://x.skype.com/b",
+    ]);
+  });
+
+  it("ignores non-http(s) sources (data URIs, empty, relative)", () => {
+    const html =
+      `<img src="data:image/png;base64,AAAA"/>` +
+      `<img src=""/>` +
+      `<img src="/local/path.png"/>`;
+    expect(extractImages(html)).toEqual([]);
+  });
+});
+
+describe("mediaNeedsProxy", () => {
+  it("proxies authenticated Microsoft hosted-content hosts", () => {
+    expect(mediaNeedsProxy("https://eu-api.asm.skype.com/v1/objects/x/views/imgo")).toBe(true);
+    expect(mediaNeedsProxy("https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/x")).toBe(true);
+    expect(mediaNeedsProxy("https://teams.microsoft.com/o/x")).toBe(true);
+  });
+
+  it("loads public CDN images directly (no proxy)", () => {
+    expect(mediaNeedsProxy("https://media1.giphy.com/media/abc/giphy.gif")).toBe(false);
+    expect(mediaNeedsProxy("https://statics.teams.cdn.office.net/emoji/x.png")).toBe(false);
+    expect(mediaNeedsProxy("https://skype.com.evil.example/x")).toBe(false);
+    expect(mediaNeedsProxy("not a url")).toBe(false);
   });
 });
 

@@ -212,6 +212,12 @@ export class Backend {
   edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {
     return this.request<{ edited: boolean }>("edit", { conversation, message_id: messageId, text });
   }
+  /** Fetch one hosted-content media object (inline image or shared file) through
+   *  the backend, which attaches the session credentials the browser lacks. The
+   *  bytes come back base64-encoded so they ride the same JSON WebSocket. */
+  fetchMedia(url: string): Promise<{ content_type: string; data_base64: string }> {
+    return this.request<{ content_type: string; data_base64: string }>("fetch_media", { url });
+  }
 
   // ---- events -------------------------------------------------------------
 

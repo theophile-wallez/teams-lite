@@ -1,6 +1,7 @@
 import { useMemo, type JSX } from "react";
 import { hasVisibleContent, parseRichHtml, type RichNode } from "~/lib/rich-text";
 import { cn } from "~/lib/utils";
+import { MediaImage } from "./media-image";
 
 /**
  * Renders a Teams HTML fragment as safe React elements. The HTML is parsed into
@@ -119,12 +120,11 @@ function renderNode(node: RichNode, key: number): JSX.Element | string | null {
       );
     case "img":
       return (
-        <img
+        <MediaImage
           key={key}
-          src={node.attrs.src}
+          src={node.attrs.src ?? ""}
           alt={node.attrs.alt ?? ""}
-          loading="lazy"
-          className="my-1 max-h-80 max-w-full rounded-md"
+          className="my-1"
         />
       );
     case "mention":
