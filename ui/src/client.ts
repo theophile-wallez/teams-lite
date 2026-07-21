@@ -40,6 +40,11 @@ export type ChatMessage = {
   is_self?: boolean;
 };
 
+export type MessagePage = {
+  messages: ChatMessage[];
+  has_more: boolean;
+};
+
 // Payload of the server-pushed "update_available" event: a newer rolling build
 // exists. `current`/`latest` are short commit SHAs; `url` is the release page.
 export type UpdateInfo = {
@@ -226,11 +231,11 @@ export class Backend {
   conversations(): Promise<Conversation[]> {
     return this.request<Conversation[]>("conversations");
   }
-  open(conversation: string): Promise<{ messages: ChatMessage[] }> {
+  open(conversation: string): Promise<MessagePage> {
     return this.request("open", { conversation });
   }
-  backfill(conversation: string): Promise<{ messages: ChatMessage[] }> {
-    return this.request("backfill", { conversation });
+  backfill(conversation: string, beforeSeq: number): Promise<MessagePage> {
+    return this.request("backfill", { conversation, before_seq: beforeSeq });
   }
   setDraft(conversation: string, text: string): Promise<{ saved: boolean }> {
     return this.request("set_draft", { conversation, text });

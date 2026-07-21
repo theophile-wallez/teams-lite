@@ -15,7 +15,7 @@
 // No raw tokens are ever logged or sent.
 
 use anyhow::{Context, Result};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{stream::FuturesUnordered, FutureExt, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -302,6 +302,7 @@ async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTrac
     let _client_lease = clients.connect();
     let (mut write, mut read) = ws.split();
     let mut events_rx = ctx.events.subscribe();
+    let mut requests = FuturesUnordered::new();
 
     // greet with current status
     let hello = json!({ "event": "status", "data": "connected" });
@@ -327,11 +328,14 @@ async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTrac
                         let id = req.get("id").cloned().unwrap_or(json!(0));
                         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
                         let params = req.get("params").cloned().unwrap_or(Value::Null);
-                        let reply = match dispatch(&ctx, &method, &params).await {
-                            Ok(result) => json!({ "id": id, "result": result }),
-                            Err(e) => json!({ "id": id, "error": e.to_string() }),
-                        };
-                        write.send(WsMessage::Text(reply.to_string().into())).await?;
+                        let request_ctx = ctx.clone();
+                        requests.push(async move {
+                            let reply = match dispatch(&request_ctx, &method, &params).await {
+                                Ok(result) => json!({ "id": id, "result": result }),
+                                Err(e) => json!({ "id": id, "error": e.to_string() }),
+                            };
+                            WsMessage::Text(reply.to_string().into())
+                        }.boxed());
                     }
                     WsMessage::Ping(p) => { write.send(WsMessage::Pong(p)).await.ok(); }
                     WsMessage::Close(_) => break,
@@ -345,6 +349,9 @@ async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTrac
                     Err(broadcast::error::RecvError::Lagged(_)) => {} // dropped some events, keep going
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
+            }
+            Some(reply) = requests.next(), if !requests.is_empty() => {
+                write.send(reply).await?;
             }
         }
     }
@@ -385,16 +392,16 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 let session = ctx.session().await?;
                 (session.self_name.to_string(), session.self_mri.to_string())
             };
-            let cached = {
+            let (cached, has_more) = {
                 let store = ctx.store()?;
-                store.newest_messages(&conv, 200)?
+                newest_history_page(&store, &conv)?
             };
             // background refresh (does not block the response = instant switch)
             let ctx_bg = ctx.clone();
             let conv_bg = conv.clone();
             let self_name_bg = self_name.clone();
             let self_mri_bg = self_mri.clone();
-            let had = cached.len();
+            let had_more = has_more;
             tokio::spawn(async move {
                 let http = ctx_bg.http.clone();
                 let conv_op = conv_bg.clone();
@@ -409,15 +416,20 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let after = {
                         if let Ok(store) = ctx_bg.store() {
                             let inserted = teams_read::persist_page(&store, &conv_bg, &page).unwrap_or(0);
-                            if inserted > 0 { store.newest_messages(&conv_bg, 200).ok() } else { None }
+                            newest_history_page(&store, &conv_bg)
+                                .ok()
+                                .filter(|(_, has_more)| inserted > 0 || *has_more != had_more)
                         } else {
                             None
                         }
                     };
-                    if let Some(msgs) = after {
+                    if let Some((msgs, has_more)) = after {
                         // something changed vs the cache we already returned
-                        let _ = had;
-                        ctx_bg.emit("messages_updated", json!({ "conversation": conv_bg, "messages": messages_value(&msgs, &self_name_bg, &self_mri_bg) }));
+                        ctx_bg.emit("messages_updated", json!({
+                            "conversation": conv_bg,
+                            "messages": messages_value(&msgs, &self_name_bg, &self_mri_bg),
+                            "has_more": has_more
+                        }));
                     }
                 } else if let Err(e) = page {
                     // The background network refresh failed (e.g. auth couldn't be
@@ -429,22 +441,43 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     );
                 }
             });
-            Ok(messages_json(&cached, &self_name, &self_mri))
+            Ok(messages_json(&cached, &self_name, &self_mri, has_more))
         }
 
         // older page for scroll-up
         "backfill" => {
             let conv = param_str(params, "conversation")?;
-            let before_ms = {
+            let before_seq = params
+                .get("before_seq")
+                .and_then(Value::as_i64)
+                .context("missing param: before_seq")?;
+            let (cached, cached_has_more) = {
                 let store = ctx.store()?;
-                match store.oldest_cursor(&conv)? {
-                    (_, false) => return Ok(json!({ "messages": [], "has_more": false })),
-                    (cursor, true) => cursor.and_then(|s| s.parse::<i64>().ok()),
-                }
+                cached_history_page(&store, &conv, before_seq)?
             };
+
             let session = ctx.session().await?;
             let self_name = session.self_name.to_string();
             let self_mri = session.self_mri.to_string();
+            if !cached.is_empty() {
+                return Ok(messages_json(
+                    &cached,
+                    &self_name,
+                    &self_mri,
+                    cached_has_more,
+                ));
+            }
+            if !cached_has_more {
+                return Ok(messages_json(&[], &self_name, &self_mri, false));
+            }
+
+            let before_ms = {
+                let store = ctx.store()?;
+                store
+                    .oldest_cursor(&conv)?
+                    .0
+                    .and_then(|cursor| cursor.parse::<i64>().ok())
+            };
             let http = ctx.http.clone();
             let conv_op = conv.clone();
             let page = ctx
@@ -452,16 +485,23 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let http = http.clone();
                     let conv = conv_op.clone();
                     async move {
-                        teams_read::fetch_messages_page(&http, &session, &conv, before_ms, 30).await
+                        teams_read::fetch_messages_page(
+                            &http,
+                            &session,
+                            &conv,
+                            before_ms,
+                            teams_read::DEFAULT_PAGE_SIZE,
+                        )
+                        .await
                     }
                 })
                 .await?;
-            let msgs = {
+            let has_more = {
                 let store = ctx.store()?;
-                teams_read::persist_page(&store, &conv, &page)?;
-                store.newest_messages(&conv, 500)?
+                teams_read::persist_backfill_page(&store, &conv, &page)?;
+                store.oldest_cursor(&conv)?.1
             };
-            Ok(messages_json(&msgs, &self_name, &self_mri))
+            Ok(messages_json(&page.messages, &self_name, &self_mri, has_more))
         }
 
         // Persist unsent composer text locally. This never touches the network.
@@ -576,8 +616,47 @@ fn messages_value(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
         .collect::<Vec<_>>())
 }
 
-fn messages_json(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
-    json!({ "messages": messages_value(msgs, self_name, self_mri) })
+fn messages_json(msgs: &[Message], self_name: &str, self_mri: &str, has_more: bool) -> Value {
+    json!({
+        "messages": messages_value(msgs, self_name, self_mri),
+        "has_more": has_more
+    })
+}
+
+fn newest_history_page(store: &Store, conversation_id: &str) -> Result<(Vec<Message>, bool)> {
+    let mut messages = store.newest_messages(
+        conversation_id,
+        i64::from(teams_read::DEFAULT_PAGE_SIZE) + 1,
+    )?;
+    let has_cached_more = messages.len() > teams_read::DEFAULT_PAGE_SIZE as usize;
+    if has_cached_more {
+        let extra = messages.len() - teams_read::DEFAULT_PAGE_SIZE as usize;
+        messages.drain(..extra);
+    }
+    let network_has_more = store.oldest_cursor(conversation_id)?.1;
+    Ok((messages, has_cached_more || network_has_more))
+}
+
+/// Return one older page from SQLite before using the network frontier. Reading
+/// one extra row lets us report `has_more` exactly when all known history is
+/// local; the persisted frontier covers history that still needs a network fetch.
+fn cached_history_page(
+    store: &Store,
+    conversation_id: &str,
+    before_seq: i64,
+) -> Result<(Vec<Message>, bool)> {
+    let mut messages = store.messages_before(
+        conversation_id,
+        before_seq,
+        i64::from(teams_read::DEFAULT_PAGE_SIZE) + 1,
+    )?;
+    let has_cached_more = messages.len() > teams_read::DEFAULT_PAGE_SIZE as usize;
+    if has_cached_more {
+        let extra = messages.len() - teams_read::DEFAULT_PAGE_SIZE as usize;
+        messages.drain(..extra);
+    }
+    let network_has_more = store.oldest_cursor(conversation_id)?.1;
+    Ok((messages, has_cached_more || network_has_more))
 }
 
 fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
@@ -738,6 +817,50 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     tokio::spawn(async move {
         trouter::run(ctx, epid, ev_tx, st_tx).await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(seq: i64) -> Message {
+        Message {
+            id: format!("m{seq}"),
+            conversation_id: "c1".into(),
+            seq,
+            compose_time: seq,
+            sender: "Alice".into(),
+            sender_mri: String::new(),
+            content: format!("message {seq}"),
+        }
+    }
+
+    #[test]
+    fn cached_history_is_served_in_exact_pages_before_network() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_conversation("c1", "Chat", 100).unwrap();
+        for seq in 1..=100 {
+            store.insert_message(&message(seq)).unwrap();
+        }
+        store.set_oldest_cursor("c1", Some("1"), false).unwrap();
+
+        let (initial, has_more) = newest_history_page(&store, "c1").unwrap();
+        assert_eq!(initial.len(), 40);
+        assert_eq!(initial.first().unwrap().seq, 61);
+        assert_eq!(initial.last().unwrap().seq, 100);
+        assert!(has_more);
+
+        let (page, has_more) = cached_history_page(&store, "c1", 101).unwrap();
+        assert_eq!(page.len(), 40);
+        assert_eq!(page.first().unwrap().seq, 61);
+        assert_eq!(page.last().unwrap().seq, 100);
+        assert!(has_more);
+
+        let (last_page, has_more) = cached_history_page(&store, "c1", 21).unwrap();
+        assert_eq!(last_page.len(), 20);
+        assert_eq!(last_page.first().unwrap().seq, 1);
+        assert!(!has_more);
+    }
 }
 
 #[cfg(test)]

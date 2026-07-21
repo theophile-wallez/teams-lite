@@ -28,7 +28,7 @@ pub const CSA_SCOPE: &str = "https://chatsvcagg.teams.microsoft.com/.default";
 
 const CSA_URL: &str =
     "https://teams.microsoft.com/api/csa/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true";
-const DEFAULT_PAGE_SIZE: u32 = 30;
+pub const DEFAULT_PAGE_SIZE: u32 = 40;
 
 /// True when an error from this module was caused by an expired/rejected
 /// credential (HTTP 401). Callers use this to force-refresh tokens and retry
@@ -279,7 +279,23 @@ pub async fn backfill_older(
     // The persisted cursor is the oldest compose time (ms) we hold, as a string.
     let before_ms = cursor.as_deref().and_then(|s| s.parse::<i64>().ok());
     let page = fetch_messages_page(http, session, conversation_id, before_ms, DEFAULT_PAGE_SIZE).await?;
-    persist_page(store, conversation_id, &page)
+    persist_backfill_page(store, conversation_id, &page)
+}
+
+/// Persist a page fetched from the historical frontier. An empty page is a
+/// definitive end-of-history signal, so remember it instead of retrying the same
+/// empty request every time the user reaches the top.
+pub fn persist_backfill_page(
+    store: &Store,
+    conversation_id: &str,
+    page: &MessagePage,
+) -> Result<usize> {
+    let inserted = persist_page(store, conversation_id, page)?;
+    if page.messages.is_empty() && !page.has_more_older {
+        let (cursor, _) = store.oldest_cursor(conversation_id)?;
+        store.set_oldest_cursor(conversation_id, cursor.as_deref(), false)?;
+    }
+    Ok(inserted)
 }
 
 /// Insert a page's messages and advance the persisted backfill cursor.
@@ -905,5 +921,21 @@ mod tests {
         // advances and paging stops.
         persist_page(&store, "c1", &page(&[80], 1000, false)).unwrap();
         assert_eq!(store.oldest_cursor("c1").unwrap(), (Some("1000".into()), false));
+    }
+
+    #[test]
+    fn empty_backfill_marks_history_complete() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_conversation("c1", "Chat", 0).unwrap();
+        persist_page(&store, "c1", &page(&[100], 5000, true)).unwrap();
+
+        let empty = MessagePage {
+            messages: Vec::new(),
+            next_before_ms: None,
+            has_more_older: false,
+        };
+        persist_backfill_page(&store, "c1", &empty).unwrap();
+
+        assert_eq!(store.oldest_cursor("c1").unwrap(), (Some("5000".into()), false));
     }
 }

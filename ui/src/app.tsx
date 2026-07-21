@@ -11,10 +11,20 @@
 // The UI holds no business logic: it renders backend state and sends commands.
 
 import { useKeyboard, useRenderer } from "@opentui/solid";
-import type { TextareaRenderable } from "@opentui/core";
+import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { createEffect, createSignal, createMemo, For, Show, onMount, type Accessor } from "solid-js";
-import { Backend, type Conversation, type ChatMessage, type UpdateInfo } from "./client";
+import { Backend, type Conversation, type ChatMessage, type MessagePage, type UpdateInfo } from "./client";
 import { parseMessageContent, type MessageQuote } from "./message-content";
+import {
+  appendLiveMessage,
+  captureHistoryScrollAnchor,
+  historyMessageId,
+  isPrefetchThresholdVisible,
+  mergeOlderHistoryPage,
+  mergeRefreshedHistoryPage,
+  restoreHistoryScrollAnchor,
+  type HistoryScrollAnchor,
+} from "./message-history";
 import { ensureServer } from "./server";
 import { notifyMessage, shouldNotify } from "./notify";
 import { coalesce } from "./singleflight";
@@ -39,6 +49,9 @@ const [selectedIndex, setSelectedIndex] = createSignal(0);
 const [hoveredId, setHoveredId] = createSignal<string | null>(null);
 const [messages, setMessages] = createSignal<ChatMessage[]>([]);
 const [loadingMessages, setLoadingMessages] = createSignal(false);
+const [loadingOlderMessages, setLoadingOlderMessages] = createSignal(false);
+const [hasMoreOlderMessages, setHasMoreOlderMessages] = createSignal(false);
+const [olderMessagesError, setOlderMessagesError] = createSignal<string | null>(null);
 const [messagesError, setMessagesError] = createSignal<string | null>(null);
 const [status, setStatus] = createSignal("connecting…");
 const [live, setLive] = createSignal<"connecting" | "connected" | "disconnected">("connecting");
@@ -63,7 +76,7 @@ const [update, setUpdate] = createSignal<UpdateInfo | null>(null);
 // spinner, no blank state, no visible refetch. Live `message` and background
 // `messages_updated` events keep each cached entry current, so the instant view
 // is also up to date. Bounded to conversations actually opened this session.
-const messageCache = new Map<string, ChatMessage[]>();
+const messageCache = new Map<string, MessagePage>();
 
 // Composer auto-grow: the textarea starts at 2 text rows and grows with newlines
 // up to 21, then scrolls internally. The composer wraps it with 1 blank row of
@@ -164,17 +177,21 @@ async function openConversation(id: string) {
   recomputeComposerRows(nextDraft);
   setOpenId(id);
   setMessagesError(null);
+  setOlderMessagesError(null);
+  setLoadingOlderMessages(false);
 
   const cached = messageCache.get(id);
   if (cached) {
     // Already loaded this session: show it INSTANTLY. No blank state, no
     // spinner. The backend refresh below still runs, but invisibly.
-    setMessages(cached);
+    setMessages(cached.messages);
+    setHasMoreOlderMessages(cached.has_more);
     setLoadingMessages(false);
   } else {
     // Cold open (first time this session): nothing to show yet, so indicate
     // loading. The backend answers from the SQLite cache, so this is brief.
     setMessages([]);
+    setHasMoreOlderMessages(false);
     setLoadingMessages(true);
   }
 
@@ -182,9 +199,13 @@ async function openConversation(id: string) {
     // Returns instantly from the SQLite cache; the network refresh (if any)
     // arrives later as a `messages_updated` (or `messages_error`) event.
     const res = await backend.open(id);
-    messageCache.set(id, res.messages);
+    const history = mergeRefreshedHistoryPage(messageCache.get(id), res);
+    messageCache.set(id, history);
     // guard against a slower response for a conversation we've since left
-    if (openId() === id) setMessages(res.messages);
+    if (openId() === id) {
+      setMessages(history.messages);
+      setHasMoreOlderMessages(history.has_more);
+    }
   } catch (e: any) {
     // Only surface the error if we have nothing cached to fall back on.
     if (openId() === id && !cached) setMessagesError(e?.message ?? String(e));
@@ -232,9 +253,7 @@ function wireEvents() {
     // Keep the per-conversation cache warm so re-opening stays instant AND
     // current, even for a conversation we're not currently looking at.
     const cached = messageCache.get(m.conversation_id);
-    if (cached && !cached.some((x) => x.id === m.id)) {
-      messageCache.set(m.conversation_id, [...cached, m]);
-    }
+    messageCache.set(m.conversation_id, appendLiveMessage(cached, m));
     // live message: if it belongs to the open conversation, append it
     if (m.conversation_id === openId()) {
       setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
@@ -246,11 +265,14 @@ function wireEvents() {
     refreshConversations();
   });
   // background network refresh of an open conversation finished with new data
-  backend.on("messages_updated", (d: { conversation: string; messages: ChatMessage[] }) => {
+  backend.on("messages_updated", (d: { conversation: string; messages: ChatMessage[]; has_more: boolean }) => {
     // reconcile the cache so a later re-open shows the refreshed set instantly
-    messageCache.set(d.conversation, d.messages);
+    const cached = messageCache.get(d.conversation);
+    const history = mergeRefreshedHistoryPage(cached, d);
+    messageCache.set(d.conversation, history);
     if (d.conversation === openId()) {
-      setMessages(d.messages);
+      setMessages(history.messages);
+      setHasMoreOlderMessages(history.has_more);
       setMessagesError(null);
       setLoadingMessages(false);
     }
@@ -400,7 +422,7 @@ const BOTTOM_HALF_GAP_BORDER = {
 // reply, the quoted message is drawn as a nested box with the same half-cell inset —
 // a shade lighter than the bubble on incoming messages, a shade darker on my own, so
 // the quote reads as recessed either way.
-export function MessageBubble(props: { message: ChatMessage; showSenderName: boolean; onClick?: () => void }) {
+export function MessageBubble(props: { id?: string; message: ChatMessage; showSenderName: boolean; onClick?: () => void }) {
   const renderer = useRenderer();
   const mine = () => props.message.is_self === true;
   const parsed = createMemo(() => parseMessageContent(props.message.content));
@@ -414,6 +436,7 @@ export function MessageBubble(props: { message: ChatMessage; showSenderName: boo
   const nameShown = () => !mine() && props.showSenderName;
   return (
     <box
+      id={props.id}
       border={["top"]}
       borderColor={theme().background}
       customBorderChars={TOP_HALF_GAP_BORDER}
@@ -513,6 +536,12 @@ function MessagesError(props: { message: string }) {
 }
 
 function MessagePane() {
+  let scrollbox: ScrollBoxRenderable | undefined;
+  let observedConversation: string | null = null;
+  let previousScrollTop = 0;
+  let userScrolledUp = false;
+  let pendingAnchor: (HistoryScrollAnchor & { conversation: string; waitForGrowth: boolean }) | null = null;
+
   const openConv = createMemo(() => {
     const id = openId();
     if (!id) return null;
@@ -528,6 +557,90 @@ function MessagePane() {
   // self "Notes" chat) the other party is implicit, and our own messages never
   // show a name because they're already right-aligned.
   const showSenderNames = createMemo(() => openConv()?.kind === "group");
+
+  async function loadOlderMessages(conversation: string) {
+    if (!scrollbox || loadingOlderMessages() || !hasMoreOlderMessages()) return;
+    const oldestMessage = messages()[0];
+    if (!oldestMessage) return;
+    setLoadingOlderMessages(true);
+    setOlderMessagesError(null);
+    try {
+      const page = await backend.backfill(conversation, oldestMessage.seq);
+      if (openId() !== conversation || !scrollbox) return;
+
+      const currentMessages = messages();
+      const history = mergeOlderHistoryPage(messageCache.get(conversation), page);
+      pendingAnchor = {
+        conversation,
+        ...captureHistoryScrollAnchor(scrollbox),
+        waitForGrowth: history.messages.length > currentMessages.length,
+      };
+      messageCache.set(conversation, history);
+      setMessages(history.messages);
+      setHasMoreOlderMessages(history.has_more);
+    } catch (error: any) {
+      if (openId() === conversation) {
+        const message = error?.message ?? String(error);
+        setOlderMessagesError(message);
+        setStatus(`history error: ${message}`);
+      }
+    } finally {
+      if (openId() === conversation) setLoadingOlderMessages(false);
+    }
+  }
+
+  function monitorMessageScroll() {
+    const conversation = openId();
+    if (!scrollbox) return;
+    if (!conversation) {
+      observedConversation = null;
+      userScrolledUp = false;
+      pendingAnchor = null;
+      return;
+    }
+
+    if (pendingAnchor?.conversation === conversation) {
+      if (pendingAnchor.waitForGrowth && scrollbox.scrollHeight <= pendingAnchor.scrollHeight) return;
+      restoreHistoryScrollAnchor(scrollbox, pendingAnchor);
+      previousScrollTop = scrollbox.scrollTop;
+      pendingAnchor = null;
+      if (historyViewportIsUnderfilled() && hasMoreOlderMessages() && !loadingOlderMessages()) {
+        void loadOlderMessages(conversation);
+      }
+      return;
+    }
+
+    if (observedConversation !== conversation) {
+      observedConversation = conversation;
+      previousScrollTop = scrollbox.scrollTop;
+      userScrolledUp = false;
+      pendingAnchor = null;
+      if (historyViewportIsUnderfilled() && hasMoreOlderMessages()) {
+        void loadOlderMessages(conversation);
+      }
+      return;
+    }
+
+    const currentScrollTop = scrollbox.scrollTop;
+    if (currentScrollTop < previousScrollTop) {
+      userScrolledUp = true;
+      if (olderMessagesError()) setOlderMessagesError(null);
+    }
+    previousScrollTop = currentScrollTop;
+    const underfilled = historyViewportIsUnderfilled();
+    if ((!userScrolledUp && !underfilled) || loadingOlderMessages() || !hasMoreOlderMessages() || olderMessagesError()) return;
+
+    if (isPrefetchThresholdVisible(scrollbox, messages())) {
+      void loadOlderMessages(conversation);
+    }
+  }
+
+  function historyViewportIsUnderfilled(): boolean {
+    if (!scrollbox) return false;
+    const statusRows = hasMoreOlderMessages() ? 1 : 0;
+    return scrollbox.scrollHeight - statusRows <= scrollbox.viewport.height;
+  }
+
   return (
     <box style={{ flexGrow: 1, flexDirection: "column", backgroundColor: theme().background, paddingTop: 1, paddingLeft: 1, paddingRight: 1 }}>
       <Show when={openId()}>
@@ -535,7 +648,13 @@ function MessagePane() {
       </Show>
       {/* paddingRight keeps message bubbles from butting against the scrollbar
           on the right; the left gap already comes from the pane's paddingLeft. */}
-      <scrollbox style={{ flexGrow: 1, paddingRight: 1 }} stickyScroll stickyStart="bottom">
+      <scrollbox
+        ref={(value: ScrollBoxRenderable) => (scrollbox = value)}
+        style={{ flexGrow: 1, paddingRight: 1 }}
+        stickyScroll
+        stickyStart="bottom"
+        renderAfter={monitorMessageScroll}
+      >
         <Show
           when={openId()}
           fallback={<text content="Select a conversation (↑/↓, Enter, or click)." style={{ fg: theme().textMuted }} />}
@@ -562,9 +681,31 @@ function MessagePane() {
               </Show>
             }
           >
+            <Show when={hasMoreOlderMessages()}>
+              <box style={{ height: 1, width: "100%", justifyContent: "center" }}>
+                <Show
+                  when={loadingOlderMessages()}
+                  fallback={
+                    <text
+                      content={
+                        olderMessagesError()
+                          ? historyViewportIsUnderfilled()
+                            ? "Couldn't load earlier messages. Reopen the conversation to retry."
+                            : "Couldn't load earlier messages. Scroll down and back up to retry."
+                          : ""
+                      }
+                      style={{ fg: theme().error }}
+                    />
+                  }
+                >
+                  <Spinner label="loading earlier messages…" color={theme().textMuted} />
+                </Show>
+              </box>
+            </Show>
             <For each={messages()}>
               {(m) => (
                 <MessageBubble
+                  id={historyMessageId(m.id)}
                   message={m}
                   showSenderName={showSenderNames()}
                   onClick={() => setMessageMenu(m)}
