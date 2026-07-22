@@ -15,7 +15,7 @@ const DEV_PORT = Number(process.env.PORT ?? 4321);
 // the production launcher; unset lets Vite pick its default (localhost).
 const DEV_HOST = process.env.HOST || undefined;
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   server: {
     port: DEV_PORT,
     host: DEV_HOST,
@@ -24,12 +24,18 @@ export default defineConfig({
     // launched behind the `teams --web` supervisor.
     strictPort: false,
   },
-  // Bundle all dependencies into the SSR output so dist/server/server.js is
-  // self-contained (only node: builtins stay external). This is what lets the
-  // `teams --web` launcher run the server from the compiled binary's embedded,
-  // extracted bundle — where there is no node_modules to resolve bare imports.
   ssr: {
-    noExternal: true,
+    // For the production BUILD, bundle every dependency into the SSR output so
+    // dist/server/server.js is self-contained (only node: builtins stay
+    // external) — this is what lets `teams --web` run the server from the
+    // compiled binary's embedded, extracted bundle (no node_modules there).
+    //
+    // In DEV (`vite dev` / `teams --web-dev`) we must NOT inline them: Vite's
+    // dev SSR module runner can't execute CommonJS deps such as react (they use
+    // `module.exports`). `noExternal` has no valid "false" value, so we leave it
+    // undefined in dev, which externalizes deps and lets the runtime require
+    // them as CJS normally — so HMR works.
+    noExternal: command === "build" ? true : undefined,
   },
   plugins: [
     tsConfigPaths({ projects: ["./tsconfig.json"] }),
@@ -38,4 +44,4 @@ export default defineConfig({
     // React's Vite plugin MUST come after Start's plugin (per the TanStack docs).
     viteReact(),
   ],
-});
+}));
