@@ -23,6 +23,7 @@ import {
   type Conversation,
   type LiveStatus,
   type MessagePage,
+  type Notification,
   type ReplyTo,
   type UpdateInfo,
 } from "./protocol";
@@ -56,6 +57,10 @@ export type AppState = {
   update: UpdateInfo | null;
   draft: string;
   replyingTo: PendingReply | null;
+  /** Activity feed (reactions/mentions/replies), newest-first. */
+  notifications: Notification[];
+  /** Count the bell badges (Teams' unread count, cleared locally when seen). */
+  notificationsUnread: number;
   /** User appearance preference (System follows the OS). */
   appearance: Appearance;
   /** Concrete theme currently applied to <html> (what CSS keys off). */
@@ -82,6 +87,8 @@ function initialState(): AppState {
     update: null,
     draft: "",
     replyingTo: null,
+    notifications: [],
+    notificationsUnread: 0,
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
   };
@@ -111,6 +118,7 @@ export class TeamsController {
   private darkListener: ((e: MediaQueryListEvent) => void) | null = null;
 
   private refreshConversations = coalesce(() => this.loadConversations());
+  private refreshNotifications = coalesce(() => this.loadNotifications());
 
   constructor(url: string = DEFAULT_WS_URL) {
     this.backend = new Backend(url);
@@ -138,6 +146,8 @@ export class TeamsController {
       this.set({ live: "connected" });
       await this.refreshConversations();
       this.set({ ready: true });
+      // The activity feed is best-effort and must never block startup.
+      void this.refreshNotifications();
     } catch (e) {
       const msg = errText(e);
       this.set({
@@ -207,6 +217,7 @@ export class TeamsController {
     });
 
     on("conversations_changed", () => void this.refreshConversations());
+    on("notifications_changed", () => void this.refreshNotifications());
     on("realtime_status", (s) => this.set({ live: s as LiveStatus }));
     on("update_available", (u) => this.set({ update: u as UpdateInfo }));
     on("disconnected", () => this.set({ live: "disconnected" }));
@@ -231,6 +242,49 @@ export class TeamsController {
     } catch (e) {
       this.set({ status: `error: ${errText(e)}` });
     }
+  }
+
+  // ---- notifications (activity feed) --------------------------------------
+
+  // Local "seen" high-water mark (epoch ms). The badge counts unread entries
+  // strictly newer than this, so opening the panel clears the badge even though
+  // a refetch still reports the same server-side unread — and a genuinely new
+  // activity (larger timestamp) re-badges it. Local only: Teams has no
+  // mark-read method we call yet.
+  private notificationsSeenAt = 0;
+
+  /** Refresh the activity feed. Best-effort: a failure leaves the current feed
+   *  untouched and never surfaces a fatal error (the panel just shows stale or
+   *  empty state). Called on startup and on every `notifications_changed`. */
+  private async loadNotifications(): Promise<void> {
+    try {
+      const feed = await this.backend.notifications();
+      this.set({ notifications: feed.items });
+      this.recomputeUnread();
+    } catch {
+      // ignore — notifications are non-critical
+    }
+  }
+
+  private recomputeUnread(): void {
+    const unread = this.get().notifications.filter(
+      (n) => !n.is_read && n.timestamp > this.notificationsSeenAt,
+    ).length;
+    if (unread !== this.get().notificationsUnread) this.set({ notificationsUnread: unread });
+  }
+
+  /** Clear the bell badge once the user has opened the panel, by marking every
+   *  current entry as seen. The badge re-appears when a newer activity arrives. */
+  markNotificationsSeen(): void {
+    const latest = this.get().notifications.reduce((max, n) => Math.max(max, n.timestamp), 0);
+    this.notificationsSeenAt = Math.max(this.notificationsSeenAt, latest);
+    this.recomputeUnread();
+  }
+
+  /** Force a feed refresh, e.g. when the user opens the panel. Coalesced with
+   *  the live-event refresh so rapid opens don't stack network calls. */
+  reloadNotifications(): void {
+    void this.refreshNotifications();
   }
 
   async openConversation(id: string): Promise<void> {

@@ -6,6 +6,7 @@ import { convLabel, previewLine, type Conversation } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { useAppState } from "./controller-context";
+import { NotificationsBell } from "./notifications-bell";
 import { StatusBar } from "./status-bar";
 
 const ROW_HEIGHT = 64;
@@ -65,6 +66,7 @@ export function ConversationList(props: {
           <span className="truncate text-sm font-medium text-foreground">teams-lite</span>
           <span className="truncate text-[11px] text-text-faint">Messages</span>
         </div>
+        <NotificationsBell />
         <button
           type="button"
           aria-label="Appearance"

@@ -9,7 +9,7 @@
 //   response <- { id, result } | { id, error }
 //   event    <- { event, data }        (server push)
 
-import type { Conversation, MessagePage, ReplyTo } from "./protocol";
+import type { Conversation, MessagePage, NotificationFeed, ReplyTo } from "./protocol";
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
 type EventHandler = (data: unknown) => void;
@@ -211,6 +211,11 @@ export class Backend {
   }
   edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {
     return this.request<{ edited: boolean }>("edit", { conversation, message_id: messageId, text });
+  }
+  /** Fetch the activity feed (reactions/mentions/replies directed at us). Not a
+   *  chat — the backend fetches it fresh from Teams and decodes each entry. */
+  notifications(limit?: number): Promise<NotificationFeed> {
+    return this.request<NotificationFeed>("notifications", limit ? { limit } : {});
   }
   /** Fetch one hosted-content media object (inline image or shared file) through
    *  the backend, which attaches the session credentials the browser lacks. The

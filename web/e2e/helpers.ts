@@ -52,6 +52,25 @@ export async function emitLive(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Inject an activity-feed entry (reaction/mention) through the mock's gated
+ *  test hook, then the mock broadcasts `notifications_changed`. */
+export async function emitNotification(
+  page: Page,
+  body: {
+    activity_type?: string;
+    activity_subtype?: string;
+    actor_name?: string;
+    source_thread_id?: string;
+    preview?: string;
+  } = {},
+): Promise<void> {
+  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
+  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+    data: { kind: "notification", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Filter out benign console noise so `consoleErrors` only holds real problems. */
 export function realErrors(errors: string[]): string[] {
   return errors.filter(

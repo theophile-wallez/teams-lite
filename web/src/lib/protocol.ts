@@ -73,6 +73,37 @@ export type UpdateInfo = {
 
 export type LiveStatus = "connecting" | "connected" | "disconnected";
 
+/** One activity-feed entry (from the Teams `48:notifications` thread), decoded
+ *  by the backend from `properties.activity`. Mirrors the Rust `Notification`
+ *  (src/teams_activity.rs). All phrasing/emoji mapping happens in the UI (see
+ *  lib/notifications.ts) so this stays a faithful mirror of Teams' own fields. */
+export type Notification = {
+  id: string;
+  /** Raw Teams activity type, e.g. "reactionInChat", "mention", "reply". */
+  activity_type: string;
+  /** Reaction flavor for reactions ("like", "heart", ...); "" otherwise. */
+  activity_subtype: string;
+  /** Who triggered it. */
+  actor_name: string;
+  actor_mri: string;
+  /** The chat/channel it happened in, so the panel can open it. */
+  source_thread_id: string;
+  /** Short preview of the target message. */
+  preview: string;
+  /** Epoch ms. */
+  timestamp: number;
+  /** Actors aggregated into this entry (>= 1). */
+  count: number;
+  /** Teams' server-side read state. */
+  is_read: boolean;
+};
+
+/** The activity feed plus its unread count, as returned by `notifications`. */
+export type NotificationFeed = {
+  unread: number;
+  items: Notification[];
+};
+
 // ---- message content parsing (ported from ui/src/message-content.ts) -------
 
 export type MessageQuote = {

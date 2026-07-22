@@ -748,6 +748,74 @@ function nextSeqFor(cs: ConvState): number {
 // Method dispatch — returns the `result` value or throws (message → error).
 // ---------------------------------------------------------------------------
 
+// Activity feed (`48:notifications`) — reactions/mentions/replies directed at
+// "me". The real backend decodes these from `properties.activity`; the mock
+// serves a small static sample keyed to real seeded conversations (so selecting
+// an entry opens a live chat), plus anything injected via the test hook.
+type MockNotification = {
+  id: string;
+  activity_type: string;
+  activity_subtype: string;
+  actor_name: string;
+  actor_mri: string;
+  source_thread_id: string;
+  preview: string;
+  timestamp: number;
+  count: number;
+  is_read: boolean;
+};
+
+const injectedNotifications: MockNotification[] = [];
+
+// Stable base time for the static sample — captured once so repeated
+// `notifications` calls return identical timestamps (a per-call Date.now() would
+// drift forward and spuriously re-mark entries unread after the panel is seen).
+const NOTIFICATIONS_BASE = Date.now();
+
+function notificationsFeed(): MockNotification[] {
+  const now = NOTIFICATIONS_BASE;
+  const thread = (i: number) => order[i] ?? order[0] ?? "";
+  const sample: MockNotification[] = [
+    {
+      id: "act-sample-1",
+      activity_type: "reactionInChat",
+      activity_subtype: "laugh",
+      actor_name: "Riley Carter",
+      actor_mri: "8:orgid:riley",
+      source_thread_id: thread(0),
+      preview: "Sounds good to me",
+      timestamp: now - 4 * 60_000,
+      count: 1,
+      is_read: false,
+    },
+    {
+      id: "act-sample-2",
+      activity_type: "reactionInChat",
+      activity_subtype: "heart",
+      actor_name: "Morgan Ellis",
+      actor_mri: "8:orgid:morgan",
+      source_thread_id: thread(1),
+      preview: "Can I deploy to staging real quick?",
+      timestamp: now - 55 * 60_000,
+      count: 1,
+      is_read: false,
+    },
+    {
+      id: "act-sample-3",
+      activity_type: "reactionInChat",
+      activity_subtype: "like",
+      actor_name: "Jordan Blake",
+      actor_mri: "8:orgid:jordan",
+      source_thread_id: thread(2),
+      preview: "I don't think so, we'd have had feedback otherwise",
+      timestamp: now - 3 * 3_600_000,
+      count: 1,
+      is_read: true,
+    },
+  ];
+  return [...injectedNotifications, ...sample];
+}
+
 function dispatch(method: string, params: unknown): unknown {
   switch (method) {
     case "ping":
@@ -760,6 +828,11 @@ function dispatch(method: string, params: unknown): unknown {
         .slice()
         .sort((a, b) => b.last_message_time - a.last_message_time)
         .map((c) => ({ ...c }));
+    }
+
+    case "notifications": {
+      const items = notificationsFeed();
+      return { unread: items.filter((n) => !n.is_read).length, items };
     }
 
     case "open": {
@@ -983,6 +1056,25 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       body = (await req.json()) as Record<string, unknown>;
     } catch {
       /* tolerate an empty/invalid body */
+    }
+    // Inject an activity-feed entry (reaction/mention) rather than a chat
+    // message, then nudge the client to refresh — exercises the bell + panel.
+    if (body.kind === "notification") {
+      injectedNotifications.unshift({
+        id: `act-live-${Date.now()}`,
+        activity_type: typeof body.activity_type === "string" ? body.activity_type : "reactionInChat",
+        activity_subtype: typeof body.activity_subtype === "string" ? body.activity_subtype : "laugh",
+        actor_name: typeof body.actor_name === "string" ? body.actor_name : "Riley Carter",
+        actor_mri: "8:orgid:riley",
+        source_thread_id:
+          typeof body.source_thread_id === "string" ? body.source_thread_id : (order[0] ?? ""),
+        preview: typeof body.preview === "string" ? body.preview : "reacted to your message",
+        timestamp: Date.now(),
+        count: 1,
+        is_read: false,
+      });
+      broadcast("notifications_changed", {});
+      return Response.json({ ok: true }, { status: 200 });
     }
     const conversation =
       typeof body.conversation === "string" ? body.conversation : (order[0] ?? "");
