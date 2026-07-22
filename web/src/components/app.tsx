@@ -3,7 +3,6 @@ import { Outlet, useNavigate, useParams } from "@tanstack/react-router";
 import { ControllerProvider, useAppState, useController } from "./controller-context";
 import { ConversationList } from "./conversation-list";
 import { MessagePane } from "./message-pane";
-import { StatusBar } from "./status-bar";
 import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
 import { Splash } from "./splash";
@@ -143,7 +142,6 @@ function AppInner() {
         />
         <MessagePane />
       </div>
-      <StatusBar />
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />

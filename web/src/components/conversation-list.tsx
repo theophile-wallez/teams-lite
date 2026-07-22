@@ -6,6 +6,7 @@ import { convLabel, previewLine, type Conversation } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { useAppState } from "./controller-context";
+import { StatusBar } from "./status-bar";
 
 const ROW_HEIGHT = 64;
 
@@ -132,6 +133,8 @@ export function ConversationList(props: {
           })}
         </div>
       </div>
+
+      <StatusBar />
     </aside>
   );
 }
