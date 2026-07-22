@@ -5,13 +5,6 @@ import { useAppState, useController } from "./controller-context";
 import { Avatar } from "./avatar";
 import { MessageBubble } from "./message-bubble";
 import { Composer } from "./composer";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "./ui/dialog";
 import { Button } from "./ui/button";
 
 const PREPEND_TRIGGER_PX = 160;
@@ -33,7 +26,6 @@ export function MessagePane() {
   const messagesError = useAppState((s) => s.messagesError);
   const olderError = useAppState((s) => s.olderError);
 
-  const [menuMessage, setMenuMessage] = useState<ChatMessage | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [focusToken, setFocusToken] = useState(0);
 
@@ -91,11 +83,8 @@ export function MessagePane() {
     }
   }, [messages, openId, maybeFill]);
 
-  const openActions = (m: ChatMessage) => setMenuMessage(m);
-
   const doReply = (m: ChatMessage) => {
     controller.startReply(m);
-    setMenuMessage(null);
     setFocusToken((t) => t + 1);
   };
 
@@ -107,12 +96,10 @@ export function MessagePane() {
     } catch {
       controller.setStatus("Copy failed: clipboard unavailable");
     }
-    setMenuMessage(null);
   };
 
   const doStartEdit = (m: ChatMessage) => {
     setEditingId(m.id);
-    setMenuMessage(null);
   };
 
   const doSaveEdit = async (m: ChatMessage, text: string) => {
@@ -170,7 +157,7 @@ export function MessagePane() {
             onRetry={() => void controller.openConversation(openId)}
           />
         ) : (
-          <div className="mx-auto flex max-w-3xl flex-col gap-2">
+          <div className="mx-auto flex max-w-3xl flex-col">
             {hasMoreOlder && (
               <div className="flex h-8 items-center justify-center">
                 {loadingOlder ? (
@@ -185,13 +172,17 @@ export function MessagePane() {
                 ) : null}
               </div>
             )}
-            {messages.map((m) => (
+            {messages.map((m, i) => (
               <MessageBubble
                 key={m.id}
                 message={m}
                 showSenderName={isGroup}
+                continuesAbove={sameAuthor(messages[i - 1], m)}
+                continuesBelow={sameAuthor(m, messages[i + 1])}
                 editing={editingId === m.id}
-                onOpenActions={openActions}
+                onReply={doReply}
+                onCopy={doCopy}
+                onStartEdit={doStartEdit}
                 onSaveEdit={doSaveEdit}
                 onCancelEdit={() => setEditingId(null)}
               />
@@ -207,47 +198,13 @@ export function MessagePane() {
       )}
 
       <Composer focusToken={focusToken} />
-
-      <Dialog open={menuMessage !== null} onOpenChange={(o) => !o && setMenuMessage(null)}>
-        <DialogContent className="max-w-xs" showClose={false}>
-          <DialogHeader>
-            <DialogTitle>Message actions</DialogTitle>
-            <DialogDescription className="truncate">
-              {menuMessage ? copyableMessageText(menuMessage) : ""}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-1">
-            {menuMessage?.is_self && (
-              <Button
-                variant="ghost"
-                className="justify-start"
-                data-testid="action-edit"
-                onClick={() => menuMessage && doStartEdit(menuMessage)}
-              >
-                Edit
-              </Button>
-            )}
-            <Button
-              variant="ghost"
-              className="justify-start"
-              data-testid="action-reply"
-              onClick={() => menuMessage && doReply(menuMessage)}
-            >
-              Reply
-            </Button>
-            <Button
-              variant="ghost"
-              className="justify-start"
-              data-testid="action-copy"
-              onClick={() => menuMessage && void doCopy(menuMessage)}
-            >
-              Copy
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
     </section>
   );
+}
+
+/** Two adjacent messages chain when they share the same author and side. */
+function sameAuthor(a: ChatMessage | undefined, b: ChatMessage | undefined): boolean {
+  return !!a && !!b && a.is_self === b.is_self && a.sender === b.sender;
 }
 
 /** A short, calm subtitle describing the open conversation. */

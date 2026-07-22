@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MoreHorizontal } from "lucide-react";
+import { Copy, MoreHorizontal, Pencil, Reply } from "lucide-react";
 import { copyableMessageText, parseRichMessage, type ChatMessage } from "~/lib/protocol";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
 import { FileAttachment, MediaImage } from "./media-image";
 
 /**
@@ -19,28 +25,49 @@ export function MessageBubble(props: {
   message: ChatMessage;
   showSenderName: boolean;
   editing: boolean;
-  onOpenActions: (message: ChatMessage) => void;
+  continuesAbove: boolean;
+  continuesBelow: boolean;
+  onReply: (message: ChatMessage) => void;
+  onCopy: (message: ChatMessage) => void;
+  onStartEdit: (message: ChatMessage) => void;
   onSaveEdit: (message: ChatMessage, text: string) => void;
   onCancelEdit: () => void;
 }) {
   const mine = props.message.is_self === true;
   const parsed = useMemo(() => parseRichMessage(props.message.content), [props.message.content]);
-  const nameShown = !mine && props.showSenderName;
+  // Only label the first message of a same-author run; continuations are clearly
+  // from the same person.
+  const nameShown = !mine && props.showSenderName && !props.continuesAbove;
+  const [menuOpen, setMenuOpen] = useState(false);
 
   return (
-    <div className={cn("group flex w-full", mine ? "justify-end" : "justify-start")}>
+    <div
+      className={cn(
+        "group flex w-full",
+        mine ? "justify-end" : "justify-start",
+        // Tighten the spacing within a same-author run; keep a wider gap between
+        // different authors.
+        props.continuesAbove ? "mt-0.5" : "mt-2",
+      )}
+    >
       <div
         data-testid="message"
         data-mine={mine ? "true" : "false"}
         className={cn(
           "relative max-w-[76%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed",
           mine
-            ? "rounded-br-md bg-bubble-mine text-bubble-mine-foreground shadow-chip"
-            : "rounded-bl-md bg-bubble-incoming text-bubble-incoming-foreground shadow-card",
+            ? "bg-bubble-mine text-bubble-mine-foreground shadow-chip"
+            : "bg-bubble-incoming text-bubble-incoming-foreground shadow-card",
+          // Chained messages (same author, adjacent) flatten the touching corners
+          // on the author's anchor side — right for mine, left for incoming — so a
+          // run of messages reads as one continuous block on that edge.
+          mine
+            ? cn(props.continuesAbove && "rounded-tr-md", props.continuesBelow && "rounded-br-md")
+            : cn(props.continuesAbove && "rounded-tl-md", props.continuesBelow && "rounded-bl-md"),
         )}
         onContextMenu={(e) => {
           e.preventDefault();
-          props.onOpenActions(props.message);
+          setMenuOpen(true);
         }}
       >
         {nameShown && (
@@ -99,18 +126,46 @@ export function MessageBubble(props: {
               </div>
             ) : null}
 
-            <button
-              type="button"
-              aria-label="Message actions"
-              data-testid="message-actions"
-              onClick={() => props.onOpenActions(props.message)}
-              className={cn(
-                "absolute -top-2.5 grid size-7 place-items-center rounded-full bg-popover text-text-dim opacity-0 shadow-chip transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100",
-                mine ? "-left-2.5" : "-right-2.5",
-              )}
-            >
-              <MoreHorizontal className="size-4" strokeWidth={1.6} />
-            </button>
+            <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="Message actions"
+                  data-testid="message-actions"
+                  className={cn(
+                    "absolute top-1/2 grid size-7 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-text-dim opacity-0 transition hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:bg-accent data-[state=open]:text-foreground data-[state=open]:opacity-100",
+                    mine ? "-left-9" : "-right-9",
+                  )}
+                >
+                  <MoreHorizontal className="size-4" strokeWidth={1.6} />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align={mine ? "start" : "end"}>
+                {mine && (
+                  <DropdownMenuItem
+                    data-testid="action-edit"
+                    onSelect={() => props.onStartEdit(props.message)}
+                  >
+                    <Pencil className="size-4" strokeWidth={1.6} />
+                    Edit
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem
+                  data-testid="action-reply"
+                  onSelect={() => props.onReply(props.message)}
+                >
+                  <Reply className="size-4" strokeWidth={1.6} />
+                  Reply
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  data-testid="action-copy"
+                  onSelect={() => props.onCopy(props.message)}
+                >
+                  <Copy className="size-4" strokeWidth={1.6} />
+                  Copy
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </>
         )}
       </div>
