@@ -28,7 +28,14 @@ import {
 } from "./protocol";
 import { coalesce } from "./singleflight";
 import { ensureNotificationPermission, notifyMessage } from "./notify";
-import { DEFAULT_THEME_ID, isThemeId } from "./theme-list.gen";
+import {
+  APPEARANCE_STORAGE_KEY,
+  DEFAULT_APPEARANCE,
+  coerceAppearance,
+  resolveTheme,
+  type Appearance,
+  type ResolvedTheme,
+} from "./appearance";
 
 export type PendingReply = { message: ChatMessage; marker: string | null };
 
@@ -49,10 +56,12 @@ export type AppState = {
   update: UpdateInfo | null;
   draft: string;
   replyingTo: PendingReply | null;
-  themeId: string;
+  /** User appearance preference (System follows the OS). */
+  appearance: Appearance;
+  /** Concrete theme currently applied to <html> (what CSS keys off). */
+  resolvedTheme: ResolvedTheme;
 };
 
-const THEME_STORAGE_KEY = "teams-theme";
 const DRAFT_SAVE_DELAY_MS = 150;
 
 function initialState(): AppState {
@@ -73,7 +82,8 @@ function initialState(): AppState {
     update: null,
     draft: "",
     replyingTo: null,
-    themeId: DEFAULT_THEME_ID,
+    appearance: DEFAULT_APPEARANCE,
+    resolvedTheme: "light",
   };
 }
 
@@ -96,6 +106,10 @@ export class TeamsController {
   private mediaCache = new Map<string, Promise<string>>();
   private mediaObjectUrls: string[] = [];
 
+  // Live OS dark-mode query, watched only while appearance === "system".
+  private darkQuery: MediaQueryList | null = null;
+  private darkListener: ((e: MediaQueryListEvent) => void) | null = null;
+
   private refreshConversations = coalesce(() => this.loadConversations());
 
   constructor(url: string = DEFAULT_WS_URL) {
@@ -115,7 +129,7 @@ export class TeamsController {
     if (this.started) return;
     this.started = true;
 
-    this.applyPersistedTheme();
+    this.applyPersistedAppearance();
     this.wireEvents();
 
     try {
@@ -142,6 +156,7 @@ export class TeamsController {
   dispose(): void {
     for (const d of this.disposers) d();
     this.disposers = [];
+    this.detachDarkQuery();
     for (const t of this.draftSaveTimers.values()) clearTimeout(t);
     this.draftSaveTimers.clear();
     for (const url of this.mediaObjectUrls) URL.revokeObjectURL(url);
@@ -420,44 +435,76 @@ export class TeamsController {
     this.persistDraft(id, "");
   }
 
-  // ---- theme ---------------------------------------------------------------
+  // ---- appearance (Light / Dark / System) ---------------------------------
 
-  private applyPersistedTheme(): void {
-    if (typeof document === "undefined") return;
-    let id = DEFAULT_THEME_ID;
+  private systemPrefersDark(): boolean {
+    if (typeof window === "undefined" || !window.matchMedia) return false;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+
+  /** Apply a resolved theme to <html> so the whole palette repaints. */
+  private paintTheme(theme: ResolvedTheme): void {
+    if (typeof document !== "undefined") {
+      document.documentElement.setAttribute("data-theme", theme);
+    }
+  }
+
+  /** Watch the OS dark-mode query while (and only while) following the system. */
+  private attachDarkQuery(): void {
+    if (this.darkQuery || typeof window === "undefined" || !window.matchMedia) return;
+    this.darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    this.darkListener = () => {
+      if (this.get().appearance !== "system") return;
+      const theme = this.systemPrefersDark() ? "dark" : "light";
+      this.paintTheme(theme);
+      this.set({ resolvedTheme: theme });
+    };
+    this.darkQuery.addEventListener("change", this.darkListener);
+  }
+
+  private detachDarkQuery(): void {
+    if (this.darkQuery && this.darkListener) {
+      this.darkQuery.removeEventListener("change", this.darkListener);
+    }
+    this.darkQuery = null;
+    this.darkListener = null;
+  }
+
+  private applyPersistedAppearance(): void {
+    let pref: Appearance = DEFAULT_APPEARANCE;
     try {
-      const stored = localStorage.getItem(THEME_STORAGE_KEY);
-      if (isThemeId(stored)) id = stored;
+      pref = coerceAppearance(localStorage.getItem(APPEARANCE_STORAGE_KEY));
     } catch {
       /* ignore */
     }
-    document.documentElement.setAttribute("data-theme", id);
-    this.set({ themeId: id });
+    const theme = resolveTheme(pref, this.systemPrefersDark());
+    this.paintTheme(theme);
+    this.set({ appearance: pref, resolvedTheme: theme });
+    if (pref === "system") this.attachDarkQuery();
   }
 
-  setTheme(id: string): void {
-    if (!isThemeId(id)) return;
-    if (typeof document !== "undefined") {
-      document.documentElement.setAttribute("data-theme", id);
-      try {
-        localStorage.setItem(THEME_STORAGE_KEY, id);
-      } catch {
-        /* ignore */
-      }
+  /** Commit and persist an appearance preference. */
+  setAppearance(pref: Appearance): void {
+    const theme = resolveTheme(pref, this.systemPrefersDark());
+    this.paintTheme(theme);
+    try {
+      localStorage.setItem(APPEARANCE_STORAGE_KEY, pref);
+    } catch {
+      /* ignore */
     }
-    this.set({ themeId: id });
+    this.set({ appearance: pref, resolvedTheme: theme });
+    if (pref === "system") this.attachDarkQuery();
+    else this.detachDarkQuery();
   }
 
-  /** Preview a theme without persisting (for live hover in the picker). */
-  previewTheme(id: string): void {
-    if (!isThemeId(id) || typeof document === "undefined") return;
-    document.documentElement.setAttribute("data-theme", id);
+  /** Preview an appearance without persisting (live hover in the picker). */
+  previewAppearance(pref: Appearance): void {
+    this.paintTheme(resolveTheme(pref, this.systemPrefersDark()));
   }
 
-  /** Revert a preview back to the committed theme. */
-  revertPreview(): void {
-    if (typeof document === "undefined") return;
-    document.documentElement.setAttribute("data-theme", this.get().themeId);
+  /** Revert a preview back to the committed appearance. */
+  revertAppearance(): void {
+    this.paintTheme(this.get().resolvedTheme);
   }
 }
 

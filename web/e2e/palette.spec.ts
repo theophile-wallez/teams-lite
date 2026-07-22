@@ -7,7 +7,7 @@ test.describe("command palette (Ctrl+K)", () => {
     const name = (await page
       .locator('[data-testid="conversation-row"]')
       .first()
-      .locator("span")
+      .locator('[data-testid="conversation-name"]')
       .first()
       .textContent())?.trim();
 

@@ -1,8 +1,8 @@
 // Vitest config for the teams-lite web client's pure-logic unit tests.
 //
-// The modules under test (protocol, color, theme-resolve, themes, ws-client)
-// touch neither the DOM nor the real network, so a plain "node" environment is
-// enough. We inject a fake WebSocket in the ws-client tests instead of a browser.
+// The modules under test (protocol, appearance, rich-text, ws-client) touch
+// neither the DOM nor the real network, so a plain "node" environment is enough.
+// We inject a fake WebSocket in the ws-client tests instead of a browser.
 //
 // Tests import { describe, it, expect, vi } from "vitest" explicitly (globals are
 // off) because tsconfig.json type-checks *.test.ts and does not list

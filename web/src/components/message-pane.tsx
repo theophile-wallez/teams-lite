@@ -1,7 +1,8 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
-import { Loader2, WifiOff } from "lucide-react";
-import { convLabel, copyableMessageText, type ChatMessage } from "~/lib/protocol";
+import { Loader2, MessagesSquare, WifiOff } from "lucide-react";
+import { convLabel, copyableMessageText, type ChatMessage, type Conversation } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
+import { Avatar } from "./avatar";
 import { MessageBubble } from "./message-bubble";
 import { Composer } from "./composer";
 import {
@@ -121,29 +122,46 @@ export function MessagePane() {
 
   if (!openId) {
     return (
-      <section className="flex flex-1 items-center justify-center bg-background">
-        <p className="text-sm text-muted-foreground">
-          Select a conversation, or press{" "}
-          <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 text-xs">Ctrl</kbd>+
-          <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 text-xs">K</kbd>.
-        </p>
+      <section className="flex flex-1 flex-col items-center justify-center gap-4 bg-background">
+        <div className="grid size-14 place-items-center rounded-2xl bg-primary/10 text-primary shadow-chip">
+          <MessagesSquare className="size-6" strokeWidth={1.4} />
+        </div>
+        <div className="flex flex-col items-center gap-1 text-center">
+          <p className="text-sm font-medium text-foreground">No conversation open</p>
+          <p className="text-[13px] text-text-faint">
+            Pick a chat on the left, or press{" "}
+            <kbd className="rounded bg-element px-1.5 py-0.5 text-[11px] font-medium text-text-dim">
+              Ctrl
+            </kbd>{" "}
+            <kbd className="rounded bg-element px-1.5 py-0.5 text-[11px] font-medium text-text-dim">
+              K
+            </kbd>{" "}
+            to search.
+          </p>
+        </div>
       </section>
     );
   }
 
   return (
     <section data-testid="message-pane" className="flex min-w-0 flex-1 flex-col bg-background">
-      <header className="flex h-12 shrink-0 items-center border-b border-border px-4">
-        <h2 data-testid="conversation-title" className="truncate text-sm font-semibold">
-          {openConv ? convLabel(openConv) : openId}
-        </h2>
+      <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border-subtle px-5">
+        {openConv && <Avatar seed={openConv.id} label={convLabel(openConv)} className="size-9" />}
+        <div className="flex min-w-0 flex-col">
+          <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">
+            {openConv ? convLabel(openConv) : openId}
+          </h2>
+          {openConv && (
+            <p className="truncate text-[11px] text-text-faint">{paneSubtitle(openConv)}</p>
+          )}
+        </div>
       </header>
 
       <div
         ref={viewportRef}
         onScroll={onScroll}
         data-testid="message-scroll"
-        className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3"
+        className="flex-1 overflow-y-auto overflow-x-hidden px-5 py-4"
       >
         {messages.length === 0 ? (
           <EmptyState
@@ -152,12 +170,13 @@ export function MessagePane() {
             onRetry={() => void controller.openConversation(openId)}
           />
         ) : (
-          <div className="mx-auto flex max-w-3xl flex-col gap-1.5">
+          <div className="mx-auto flex max-w-3xl flex-col gap-2">
             {hasMoreOlder && (
-              <div className="flex h-6 items-center justify-center">
+              <div className="flex h-8 items-center justify-center">
                 {loadingOlder ? (
-                  <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Loader2 className="size-3 animate-spin" /> loading earlier messages…
+                  <span className="flex items-center gap-2 text-xs text-text-faint">
+                    <Loader2 className="size-3 animate-spin" strokeWidth={1.6} /> Loading earlier
+                    messages…
                   </span>
                 ) : olderError ? (
                   <span className="text-xs text-destructive">
@@ -182,7 +201,7 @@ export function MessagePane() {
       </div>
 
       {messagesError && messages.length > 0 && (
-        <div className="border-t border-border bg-destructive/10 px-4 py-2 text-center text-xs text-destructive">
+        <div className="border-t border-border-subtle bg-destructive/10 px-5 py-2 text-center text-xs text-destructive">
           {messagesError}
         </div>
       )}
@@ -231,13 +250,28 @@ export function MessagePane() {
   );
 }
 
+/** A short, calm subtitle describing the open conversation. */
+function paneSubtitle(conv: Conversation): string {
+  switch (conv.kind) {
+    case "group":
+    case "unknown":
+      return "Group chat";
+    case "notes":
+      return "Your notes";
+    default:
+      return "Direct message";
+  }
+}
+
 function EmptyState(props: { loading: boolean; error: string | null; onRetry: () => void }) {
   if (props.error) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-        <WifiOff className="size-8 text-text-faint" />
-        <p className="text-sm text-destructive">Couldn't load messages</p>
-        <p className="max-w-sm text-xs text-muted-foreground">{props.error}</p>
+        <div className="grid size-12 place-items-center rounded-2xl bg-destructive/10 text-destructive shadow-chip">
+          <WifiOff className="size-5" strokeWidth={1.4} />
+        </div>
+        <p className="text-sm font-medium text-foreground">Couldn't load messages</p>
+        <p className="max-w-sm text-xs text-text-faint">{props.error}</p>
         <Button size="sm" variant="outline" onClick={props.onRetry}>
           Retry
         </Button>
@@ -246,13 +280,13 @@ function EmptyState(props: { loading: boolean; error: string | null; onRetry: ()
   }
   if (props.loading) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-        <Loader2 className="size-4 animate-spin" /> loading messages…
+      <div className="flex h-full items-center justify-center gap-2 text-sm text-text-faint">
+        <Loader2 className="size-4 animate-spin" strokeWidth={1.6} /> Loading messages…
       </div>
     );
   }
   return (
-    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+    <div className="flex h-full items-center justify-center text-sm text-text-faint">
       No messages yet.
     </div>
   );

@@ -5,8 +5,8 @@ test.describe("app boot", () => {
     const res = await page.goto("/");
     expect(res?.status()).toBe(200);
     await expect(page).toHaveTitle("teams-lite");
-    // SSR sets the default theme on <html> before any JS runs.
-    await expect(page.locator("html")).toHaveAttribute("data-theme", "teams");
+    // SSR sets the default (light) theme on <html> before any JS runs.
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
     await expect(page.locator('head link[rel="icon"]')).toHaveCount(1);
   });
 

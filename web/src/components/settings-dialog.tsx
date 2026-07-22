@@ -1,84 +1,95 @@
-import { useEffect, useState } from "react";
-import { Check } from "lucide-react";
-import { THEME_LIST } from "~/lib/theme-list.gen";
+import { Check, Monitor, MoonStar, Sun, type LucideIcon } from "lucide-react";
+import { APPEARANCES, appearanceLabel, type Appearance } from "~/lib/appearance";
+import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
 import {
-  CommandDialog,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from "./ui/command";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "./ui/dialog";
+
+const ICONS: Record<Appearance, LucideIcon> = {
+  system: Monitor,
+  light: Sun,
+  dark: MoonStar,
+};
+
+const HINTS: Record<Appearance, string> = {
+  system: "Match your device",
+  light: "Always light",
+  dark: "Always dark",
+};
 
 /**
- * Ctrl+P theme picker with live preview: the highlighted theme (via keyboard or
- * mouse — driven by cmdk's active value) previews immediately, matching the
- * TUI's live settings preview. Selecting commits and persists it; dismissing
- * without selecting reverts to the committed theme.
+ * Ctrl+P appearance picker: choose Light, Dark, or System (follow the OS). The
+ * hovered/focused option previews live; clicking commits and persists it, and
+ * dismissing without choosing reverts to the committed appearance.
  */
 export function SettingsDialog(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const controller = useController();
-  const themeId = useAppState((s) => s.themeId);
-  const [highlighted, setHighlighted] = useState<string>(themeId);
-
-  // When the picker opens, start highlighting the committed theme.
-  useEffect(() => {
-    if (props.open) setHighlighted(themeId);
-  }, [props.open, themeId]);
-
-  // Preview whatever is currently highlighted while the picker is open.
-  useEffect(() => {
-    if (props.open) controller.previewTheme(highlighted);
-  }, [props.open, highlighted, controller]);
+  const appearance = useAppState((s) => s.appearance);
 
   const close = (open: boolean) => {
-    if (!open) controller.revertPreview();
+    if (!open) controller.revertAppearance();
     props.onOpenChange(open);
   };
 
-  return (
-    <CommandDialog
-      open={props.open}
-      onOpenChange={close}
-      label="Choose a theme"
-      value={highlighted}
-      onValueChange={setHighlighted}
-    >
-      <CommandInput placeholder="Search themes…" />
-      <CommandList>
-        <CommandEmpty>No themes found.</CommandEmpty>
-        <CommandGroup heading="Theme">
-          {THEME_LIST.map((t) => (
-            <CommandItem
-              key={t.id}
-              value={t.id}
-              keywords={[t.name]}
-              onSelect={() => {
-                controller.setTheme(t.id);
-                props.onOpenChange(false);
-              }}
-            >
-              <ThemeSwatch id={t.id} />
-              <span className="flex-1 truncate">{t.name}</span>
-              {themeId === t.id && <Check className="size-4 text-primary" />}
-            </CommandItem>
-          ))}
-        </CommandGroup>
-      </CommandList>
-    </CommandDialog>
-  );
-}
+  const choose = (pref: Appearance) => {
+    controller.setAppearance(pref);
+    props.onOpenChange(false);
+  };
 
-// A small preview of a theme's primary/background, rendered by scoping the
-// theme's own [data-theme] variables to this element.
-function ThemeSwatch(props: { id: string }) {
   return (
-    <span
-      data-theme={props.id}
-      className="grid size-4 place-items-center overflow-hidden rounded-full border border-border bg-background"
-    >
-      <span className="size-2 rounded-full bg-primary" />
-    </span>
+    <Dialog open={props.open} onOpenChange={close}>
+      <DialogContent className="max-w-md" showClose={false}>
+        <DialogHeader>
+          <DialogTitle>Appearance</DialogTitle>
+          <DialogDescription>Choose how teams-lite looks.</DialogDescription>
+        </DialogHeader>
+
+        <div
+          className="grid grid-cols-3 gap-2"
+          onMouseLeave={() => controller.previewAppearance(appearance)}
+        >
+          {APPEARANCES.map((pref) => {
+            const Icon = ICONS[pref];
+            const active = appearance === pref;
+            return (
+              <button
+                key={pref}
+                type="button"
+                data-testid="appearance-option"
+                data-value={pref}
+                aria-pressed={active}
+                onMouseEnter={() => controller.previewAppearance(pref)}
+                onFocus={() => controller.previewAppearance(pref)}
+                onClick={() => choose(pref)}
+                className={cn(
+                  "group relative flex flex-col items-center gap-2 rounded-xl bg-card px-3 py-4 text-center transition-all",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  active
+                    ? "text-foreground shadow-card ring-1 ring-primary/40"
+                    : "text-muted-foreground shadow-chip hover:text-foreground hover:shadow-card",
+                )}
+              >
+                {active && (
+                  <span className="absolute right-2 top-2 text-primary">
+                    <Check className="size-3.5" strokeWidth={2} />
+                  </span>
+                )}
+                <Icon
+                  className={cn("size-5", active ? "text-primary" : "text-current")}
+                  strokeWidth={1.4}
+                />
+                <span className="text-[13px] font-medium">{appearanceLabel(pref)}</span>
+                <span className="text-[11px] text-text-faint">{HINTS[pref]}</span>
+              </button>
+            );
+          })}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

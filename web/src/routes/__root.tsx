@@ -2,19 +2,19 @@
 import { HeadContent, Outlet, Scripts, createRootRoute } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import appCss from "~/styles/app.css?url";
-import { DEFAULT_THEME_ID } from "~/lib/theme-list.gen";
 
-// Applied before hydration so the persisted theme paints with the first frame
-// (no flash). Kept tiny and dependency-free; it only touches the data-theme
-// attribute the whole palette keys off.
-const THEME_BOOTSTRAP = `(function(){try{var t=localStorage.getItem("teams-theme");if(t){document.documentElement.setAttribute("data-theme",t);}}catch(e){}})();`;
+// Applied before hydration so the resolved theme paints with the first frame
+// (no flash). Reads the stored preference ("system" | "light" | "dark") and, for
+// System, consults the OS media query. Dependency-free; it only sets the
+// data-theme attribute the whole palette keys off.
+const THEME_BOOTSTRAP = `(function(){try{var p=localStorage.getItem("teams-theme");if(p!=="light"&&p!=="dark"&&p!=="system")p="system";var dark=p==="dark"||(p==="system"&&window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-theme",dark?"dark":"light");}catch(e){}})();`;
 
 export const Route = createRootRoute({
   head: () => ({
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1, viewport-fit=cover" },
-      { name: "color-scheme", content: "dark" },
+      { name: "color-scheme", content: "light dark" },
       { title: "teams-lite" },
     ],
     links: [
@@ -35,7 +35,7 @@ function RootComponent() {
 
 function RootDocument({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" data-theme={DEFAULT_THEME_ID} className="h-full">
+    <html lang="en" data-theme="light" className="h-full">
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP }} />
         <HeadContent />

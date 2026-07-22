@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { MoreHorizontal } from "lucide-react";
 import { copyableMessageText, parseRichMessage, type ChatMessage } from "~/lib/protocol";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
@@ -32,10 +33,10 @@ export function MessageBubble(props: {
         data-testid="message"
         data-mine={mine ? "true" : "false"}
         className={cn(
-          "relative max-w-[74%] rounded-2xl px-3 py-2 text-sm leading-relaxed shadow-sm",
+          "relative max-w-[76%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed",
           mine
-            ? "rounded-br-md bg-bubble-mine text-bubble-mine-foreground"
-            : "rounded-bl-md bg-bubble-incoming text-bubble-incoming-foreground",
+            ? "rounded-br-md bg-bubble-mine text-bubble-mine-foreground shadow-chip"
+            : "rounded-bl-md bg-bubble-incoming text-bubble-incoming-foreground shadow-card",
         )}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -61,7 +62,7 @@ export function MessageBubble(props: {
             {parsed.quote ? (
               <div
                 className={cn(
-                  "my-1 rounded-md border-l-2 px-2 py-1",
+                  "my-1 rounded-lg border-l-2 px-2.5 py-1.5",
                   mine
                     ? "border-sender-name-mine bg-quote-mine"
                     : "border-sender-name bg-quote-incoming",
@@ -87,7 +88,7 @@ export function MessageBubble(props: {
             {parsed.bodyHtml ? <RichContent html={parsed.bodyHtml} /> : null}
 
             {props.message.attachments && props.message.attachments.length > 0 ? (
-              <div className="mt-1 flex flex-col gap-1">
+              <div className="mt-1.5 flex flex-col gap-1.5">
                 {props.message.attachments.map((att, i) =>
                   att.kind === "image" ? (
                     <MediaImage key={`att-${i}-${att.url}`} src={att.url} alt={att.name} />
@@ -104,13 +105,11 @@ export function MessageBubble(props: {
               data-testid="message-actions"
               onClick={() => props.onOpenActions(props.message)}
               className={cn(
-                "absolute -top-2 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100",
-                mine ? "left-1" : "right-1",
+                "absolute -top-2.5 grid size-7 place-items-center rounded-full bg-popover text-text-dim opacity-0 shadow-chip transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100",
+                mine ? "-left-2.5" : "-right-2.5",
               )}
             >
-              <span className="grid size-6 place-items-center rounded-full border border-border bg-popover text-muted-foreground shadow-sm hover:text-foreground">
-                ⋯
-              </span>
+              <MoreHorizontal className="size-4" strokeWidth={1.6} />
             </button>
           </>
         )}
@@ -147,14 +146,14 @@ function MessageEditor(props: {
   };
 
   return (
-    <div className="flex min-w-[12rem] flex-col gap-2">
+    <div className="flex min-w-[14rem] flex-col gap-2">
       <textarea
         ref={ref}
         value={value}
         rows={1}
         data-testid="message-edit-input"
         aria-label="Edit message"
-        className="w-full resize-none rounded-md bg-background/60 px-2 py-1 text-sm text-foreground outline-none ring-1 ring-border focus:ring-ring"
+        className="w-full resize-none rounded-lg bg-card px-2.5 py-1.5 text-sm text-foreground shadow-chip outline-none focus-visible:ring-2 focus-visible:ring-ring"
         onChange={(e) => {
           setValue(e.target.value);
           e.target.style.height = "auto";
@@ -179,7 +178,7 @@ function MessageEditor(props: {
           type="button"
           data-testid="edit-cancel"
           onClick={props.onCancel}
-          className="rounded px-2 py-1 text-muted-foreground hover:text-foreground"
+          className="rounded-md px-2.5 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
           Cancel
         </button>
@@ -188,7 +187,7 @@ function MessageEditor(props: {
           data-testid="edit-save"
           onClick={save}
           disabled={!value.trim()}
-          className="rounded bg-primary px-2 py-1 font-medium text-primary-foreground disabled:opacity-50"
+          className="rounded-md bg-primary px-2.5 py-1 font-medium text-primary-foreground shadow-chip transition-all hover:brightness-110 disabled:opacity-50"
         >
           Save
         </button>

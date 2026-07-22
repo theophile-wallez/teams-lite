@@ -135,7 +135,12 @@ function AppInner() {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
       <div className="flex min-h-0 flex-1">
-        <ConversationList selectedIndex={selectedIndex} onSelect={setSelectedIndex} />
+        <ConversationList
+          selectedIndex={selectedIndex}
+          onSelect={setSelectedIndex}
+          onOpenPalette={() => setPaletteOpen(true)}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
         <MessagePane />
       </div>
       <StatusBar />
@@ -155,11 +160,13 @@ function AppInner() {
 
 function FatalOverlay(props: { message: string }) {
   return (
-    <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-4 bg-background/95 backdrop-blur">
-      <p className="text-sm text-destructive">{props.message}</p>
-      <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
-        Reconnect
-      </Button>
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-6 backdrop-blur-sm">
+      <div className="flex max-w-sm flex-col items-center gap-4 rounded-2xl bg-card p-6 text-center shadow-pop">
+        <p className="text-sm text-destructive">{props.message}</p>
+        <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
+          Reconnect
+        </Button>
+      </div>
     </div>
   );
 }

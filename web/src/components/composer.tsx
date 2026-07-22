@@ -1,6 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { HugeiconsIcon } from "@hugeicons/react";
-import { Cancel01Icon, TextFontIcon } from "@hugeicons/core-free-icons";
+import { ArrowUp, Type, X } from "lucide-react";
 import { copyableMessageText } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
@@ -84,18 +83,20 @@ export function Composer(props: { focusToken: unknown }) {
     void controller.sendDraft(text);
   };
 
+  const canSend = draft.trim().length > 0;
+
   return (
-    <div className="shrink-0 border-t border-border bg-background px-3 py-3">
+    <div className="shrink-0 bg-background px-4 pb-4 pt-2">
       {replyingTo && (
         <div
           data-testid="reply-banner"
-          className="mb-2 flex items-start gap-2 rounded-md border-l-2 border-primary bg-panel px-3 py-2"
+          className="mb-2 flex items-start gap-2 rounded-xl border-l-2 border-primary bg-card px-3 py-2 shadow-chip"
         >
           <div className="min-w-0 flex-1">
             <div className="text-xs font-semibold text-primary">
               Replying to {replyingTo.message.sender}
             </div>
-            <div className="truncate text-xs text-muted-foreground">
+            <div className="truncate text-xs text-text-faint">
               {copyableMessageText(replyingTo.message)}
             </div>
           </div>
@@ -104,13 +105,13 @@ export function Composer(props: { focusToken: unknown }) {
             aria-label="Cancel reply"
             data-testid="reply-cancel"
             onClick={() => controller.cancelReply()}
-            className="rounded p-0.5 text-muted-foreground hover:text-foreground"
+            className="grid size-6 shrink-0 place-items-center rounded-md text-text-dim transition-colors hover:bg-accent hover:text-foreground"
           >
-            <HugeiconsIcon icon={Cancel01Icon} size={16} />
+            <X className="size-4" strokeWidth={1.6} />
           </button>
         </div>
       )}
-      <div className="flex items-end gap-2 rounded-xl border border-border bg-element px-3 py-2 focus-within:border-border-active focus-within:ring-1 focus-within:ring-ring">
+      <div className="flex items-end gap-1.5 rounded-2xl bg-card px-2 py-1.5 shadow-chip transition-shadow focus-within:shadow-card focus-within:ring-1 focus-within:ring-ring">
         <button
           type="button"
           aria-label="Toggle rich text formatting"
@@ -119,17 +120,17 @@ export function Composer(props: { focusToken: unknown }) {
           data-testid="composer-format-toggle"
           onClick={toggleRich}
           className={cn(
-            "mb-0.5 grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground",
-            rich && "bg-background text-primary",
+            "mb-0.5 grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground",
+            rich && "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
           )}
         >
-          <HugeiconsIcon icon={TextFontIcon} size={16} />
+          <Type className="size-4" strokeWidth={1.6} />
         </button>
 
         {rich ? (
           <Suspense
             fallback={
-              <div className="min-h-[1.5rem] w-full py-1 text-sm text-text-faint" aria-hidden />
+              <div className="min-h-[1.75rem] w-full py-1 text-sm text-text-faint" aria-hidden />
             }
           >
             <RichEditor
@@ -145,9 +146,9 @@ export function Composer(props: { focusToken: unknown }) {
             value={draft}
             rows={1}
             data-testid="composer"
-            placeholder="Write a message…  (Enter to send, Shift+Enter for a new line)"
+            placeholder="Write a message…"
             className={cn(
-              "max-h-64 w-full resize-none bg-transparent py-1 text-sm outline-none placeholder:text-text-faint",
+              "max-h-64 w-full resize-none self-center bg-transparent px-1 py-1.5 text-sm outline-none placeholder:text-text-faint",
             )}
             onChange={(e) => controller.setDraftText(e.target.value)}
             onKeyDown={(e) => {
@@ -157,6 +158,25 @@ export function Composer(props: { focusToken: unknown }) {
               }
             }}
           />
+        )}
+
+        {!rich && (
+          <button
+            type="button"
+            aria-label="Send message"
+            title="Send (Enter)"
+            data-testid="composer-send"
+            disabled={!canSend}
+            onClick={submitPlain}
+            className={cn(
+              "mb-0.5 grid size-8 shrink-0 place-items-center rounded-full transition-all",
+              canSend
+                ? "bg-primary text-primary-foreground shadow-chip hover:brightness-110 active:brightness-95"
+                : "bg-element text-text-faint",
+            )}
+          >
+            <ArrowUp className="size-4" strokeWidth={2} />
+          </button>
         )}
       </div>
     </div>

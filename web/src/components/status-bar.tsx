@@ -13,7 +13,7 @@ export function StatusBar() {
   return (
     <footer
       data-testid="status-bar"
-      className="flex h-7 shrink-0 items-center gap-2 border-t border-border bg-background px-3 text-xs text-muted-foreground"
+      className="flex h-7 shrink-0 items-center gap-2 border-t border-border-subtle bg-background px-4 text-[11px] text-text-faint"
     >
       <span className="flex items-center gap-1.5">
         <span

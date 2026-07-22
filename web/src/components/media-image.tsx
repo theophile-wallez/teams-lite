@@ -46,11 +46,11 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
       <div
         data-testid="message-image-error"
         className={cn(
-          "flex items-center gap-2 rounded-md border border-border bg-panel px-3 py-2 text-xs text-muted-foreground",
+          "flex items-center gap-2 rounded-lg bg-card px-3 py-2 text-xs text-text-dim shadow-chip",
           props.className,
         )}
       >
-        <ImageOff className="size-4 shrink-0" />
+        <ImageOff className="size-4 shrink-0" strokeWidth={1.6} />
         <span className="truncate">{props.alt || "Image unavailable"}</span>
       </div>
     );
@@ -60,11 +60,11 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
     return (
       <div
         className={cn(
-          "flex h-32 w-40 items-center justify-center rounded-md border border-border bg-panel",
+          "flex h-32 w-40 items-center justify-center rounded-lg bg-element",
           props.className,
         )}
       >
-        <Loader2 className="size-4 animate-spin text-muted-foreground" />
+        <Loader2 className="size-4 animate-spin text-text-faint" strokeWidth={1.6} />
       </div>
     );
   }
@@ -76,7 +76,7 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
       alt={props.alt || "image"}
       loading="lazy"
       onError={() => setFailed(true)}
-      className={cn("max-h-80 max-w-full rounded-md object-contain", props.className)}
+      className={cn("max-h-80 max-w-full rounded-xl object-contain shadow-card", props.className)}
     />
   );
 }
@@ -107,15 +107,15 @@ export function FileAttachment(props: { attachment: Attachment }) {
       type="button"
       data-testid="message-file"
       onClick={() => void open()}
-      className="flex items-center gap-2 rounded-md border border-border bg-panel px-3 py-2 text-left text-xs hover:bg-panel/70"
+      className="flex items-center gap-2 rounded-lg bg-element/80 px-3 py-2 text-left text-xs text-foreground shadow-chip transition-colors hover:bg-element"
     >
       {busy ? (
-        <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
+        <Loader2 className="size-4 shrink-0 animate-spin text-text-faint" strokeWidth={1.6} />
       ) : (
-        <FileText className="size-4 shrink-0 text-muted-foreground" />
+        <FileText className="size-4 shrink-0 text-text-faint" strokeWidth={1.6} />
       )}
       <span className="truncate">{props.attachment.name}</span>
-      <Download className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
+      <Download className="ml-auto size-3.5 shrink-0 text-text-faint" strokeWidth={1.6} />
     </button>
   );
 }

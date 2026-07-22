@@ -37,7 +37,7 @@ test.describe("conversations", () => {
       .locator('[data-testid="conversation-row"]')
       .first()
       .getAttribute("data-conversation-id");
-    const scroller = page.locator('[data-testid="sidebar"] > div');
+    const scroller = page.locator('[data-testid="sidebar-scroll"]');
     await scroller.evaluate((el) => (el.scrollTop = el.scrollHeight));
     // After scrolling to the bottom, the topmost rendered row should differ
     // (virtualization recycled the window).

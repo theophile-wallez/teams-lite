@@ -3,17 +3,16 @@ import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
-import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  TextBoldIcon,
-  TextItalicIcon,
-  TextUnderlineIcon,
-  TextStrikethroughIcon,
-  SourceCodeIcon,
-  Link01Icon,
-  LeftToRightListBulletIcon,
-  LeftToRightListNumberIcon,
-} from "@hugeicons/core-free-icons";
+  Bold,
+  Code,
+  Italic,
+  Link2,
+  List,
+  ListOrdered,
+  Strikethrough,
+  Underline,
+} from "lucide-react";
 import { serializeTeamsHtml } from "~/lib/rich-text";
 import { cn } from "~/lib/utils";
 
@@ -113,7 +112,7 @@ export function RichEditor(props: {
       <Toolbar editor={editor} onLink={() => promptForLink(editor)} />
       <BubbleMenu
         editor={editor}
-        className="flex items-center gap-0.5 rounded-lg border border-border bg-popover p-1 shadow-md"
+        className="flex items-center gap-0.5 rounded-xl bg-popover p-1 shadow-pop"
       >
         <ToolbarButtons editor={editor} onLink={() => promptForLink(editor)} />
       </BubbleMenu>
@@ -124,7 +123,7 @@ export function RichEditor(props: {
 
 function Toolbar(props: { editor: Editor; onLink: () => void }) {
   return (
-    <div className="mb-2 flex items-center gap-0.5 border-b border-border pb-2">
+    <div className="mb-2 flex items-center gap-0.5 border-b border-border-subtle pb-2">
       <ToolbarButtons editor={props.editor} onLink={props.onLink} />
     </div>
   );
@@ -139,53 +138,53 @@ function ToolbarButtons(props: { editor: Editor; onLink: () => void }) {
         active={editor.isActive("bold")}
         onClick={() => editor.chain().focus().toggleBold().run()}
       >
-        <HugeiconsIcon icon={TextBoldIcon} size={16} />
+        <Bold className="size-4" strokeWidth={1.8} />
       </FmtButton>
       <FmtButton
         label="Italic"
         active={editor.isActive("italic")}
         onClick={() => editor.chain().focus().toggleItalic().run()}
       >
-        <HugeiconsIcon icon={TextItalicIcon} size={16} />
+        <Italic className="size-4" strokeWidth={1.8} />
       </FmtButton>
       <FmtButton
         label="Underline"
         active={editor.isActive("underline")}
         onClick={() => editor.chain().focus().toggleUnderline().run()}
       >
-        <HugeiconsIcon icon={TextUnderlineIcon} size={16} />
+        <Underline className="size-4" strokeWidth={1.8} />
       </FmtButton>
       <FmtButton
         label="Strikethrough"
         active={editor.isActive("strike")}
         onClick={() => editor.chain().focus().toggleStrike().run()}
       >
-        <HugeiconsIcon icon={TextStrikethroughIcon} size={16} />
+        <Strikethrough className="size-4" strokeWidth={1.8} />
       </FmtButton>
       <FmtButton
         label="Inline code"
         active={editor.isActive("code")}
         onClick={() => editor.chain().focus().toggleCode().run()}
       >
-        <HugeiconsIcon icon={SourceCodeIcon} size={16} />
+        <Code className="size-4" strokeWidth={1.8} />
       </FmtButton>
       <FmtButton label="Link" active={editor.isActive("link")} onClick={props.onLink}>
-        <HugeiconsIcon icon={Link01Icon} size={16} />
+        <Link2 className="size-4" strokeWidth={1.8} />
       </FmtButton>
-      <span className="mx-0.5 h-4 w-px bg-border" aria-hidden />
+      <span className="mx-0.5 h-4 w-px bg-border-subtle" aria-hidden />
       <FmtButton
         label="Bulleted list"
         active={editor.isActive("bulletList")}
         onClick={() => editor.chain().focus().toggleBulletList().run()}
       >
-        <HugeiconsIcon icon={LeftToRightListBulletIcon} size={16} />
+        <List className="size-4" strokeWidth={1.8} />
       </FmtButton>
       <FmtButton
         label="Numbered list"
         active={editor.isActive("orderedList")}
         onClick={() => editor.chain().focus().toggleOrderedList().run()}
       >
-        <HugeiconsIcon icon={LeftToRightListNumberIcon} size={16} />
+        <ListOrdered className="size-4" strokeWidth={1.8} />
       </FmtButton>
     </>
   );
@@ -207,8 +206,8 @@ function FmtButton(props: {
       onMouseDown={(e) => e.preventDefault()}
       onClick={props.onClick}
       className={cn(
-        "grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-element hover:text-foreground",
-        props.active && "bg-element text-primary",
+        "grid size-7 place-items-center rounded-md text-text-dim transition-colors hover:bg-accent hover:text-foreground",
+        props.active && "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
       )}
     >
       {props.children}

@@ -41,6 +41,9 @@ export default defineConfig({
   use: {
     baseURL: `http://127.0.0.1:${WEB_PORT}`,
     headless: true,
+    // Pin the emulated OS scheme to light so the default "System" appearance
+    // resolves deterministically to the light theme in tests.
+    colorScheme: "light",
     trace: "on-first-retry",
     ...(executablePath ? { launchOptions: { executablePath } } : {}),
   },

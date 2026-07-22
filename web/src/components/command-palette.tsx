@@ -1,5 +1,6 @@
 import { useNavigate } from "@tanstack/react-router";
 import { convLabel } from "~/lib/protocol";
+import { Avatar } from "./avatar";
 import { useAppState } from "./controller-context";
 import {
   CommandDialog,
@@ -33,6 +34,7 @@ export function CommandPalette(props: { open: boolean; onOpenChange: (open: bool
                 props.onOpenChange(false);
               }}
             >
+              <Avatar seed={c.id} label={convLabel(c)} className="size-6 rounded-lg text-[10px]" />
               <span className="truncate">{convLabel(c)}</span>
             </CommandItem>
           ))}
