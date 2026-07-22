@@ -67,6 +67,36 @@ describe("parseRichHtml — formatting", () => {
   });
 });
 
+describe("parseRichHtml — whitespace & empty blocks", () => {
+  it("drops empty spacer paragraphs (e.g. a Teams reply spacer)", () => {
+    const nodes = parseRichHtml("<p>&nbsp;</p><p>reply</p>");
+    expect(tags(nodes)).toEqual(["p"]);
+    expect(text(nodes)).toBe("reply");
+  });
+
+  it("drops an empty paragraph between two paragraphs", () => {
+    const nodes = parseRichHtml("<p>a</p><p></p><p>b</p>");
+    expect(tags(nodes)).toEqual(["p", "p"]);
+    expect(text(nodes)).toBe("ab");
+  });
+
+  it("collapses insignificant whitespace between block elements", () => {
+    const nodes = parseRichHtml("<p>a</p>\n<p>b</p>");
+    expect(tags(nodes)).toEqual(["p", "p"]);
+    expect(text(nodes)).toBe("ab");
+  });
+
+  it("drops whitespace at fragment edges (e.g. after a reply quote)", () => {
+    const nodes = parseRichHtml("\n<p>reply</p>\n");
+    expect(tags(nodes)).toEqual(["p"]);
+    expect(text(nodes)).toBe("reply");
+  });
+
+  it("keeps significant whitespace between inline elements", () => {
+    expect(text(parseRichHtml("<strong>a</strong> <em>b</em>"))).toBe("a b");
+  });
+});
+
 describe("parseRichHtml — links", () => {
   it("keeps http(s) links with their href", () => {
     const [a] = parseRichHtml('<a href="https://example.com">site</a>');

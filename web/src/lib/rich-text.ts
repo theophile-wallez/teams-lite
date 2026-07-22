@@ -278,19 +278,45 @@ export function parseRichHtml(html: string): RichNode[] {
   return normalize(root.children);
 }
 
-/** Drop empty text and collapse trivially empty inline elements. */
+// Block-level tags: whitespace in the source HTML that merely separates these
+// is insignificant (a browser collapses it). Whitespace between inline elements
+// is significant and must be preserved.
+const BLOCK_TAGS = new Set<RichTag>(["p", "ul", "ol", "li", "pre", "blockquote", "br", "img"]);
+
+function isBlockElement(node: RichNode): boolean {
+  return node.type === "element" && BLOCK_TAGS.has(node.tag);
+}
+
+/**
+ * Clean the parsed tree so it renders without spurious blank lines:
+ *  - drop empty text nodes;
+ *  - drop paragraphs with no visible content (Teams' `<p></p>` / `<p>&nbsp;</p>`
+ *    reply spacers, which otherwise show as an empty line between a quote and
+ *    its body);
+ *  - drop whitespace-only text at a fragment edge or between block elements
+ *    (insignificant in HTML, but our `whitespace-pre-wrap` rendering would
+ *    otherwise surface it as a blank line — e.g. the newline a tenant may put
+ *    between a reply's quote and its body).
+ */
 function normalize(nodes: RichNode[]): RichNode[] {
-  const out: RichNode[] = [];
+  const cleaned: RichNode[] = [];
   for (const node of nodes) {
     if (node.type === "text") {
       if (node.text.length === 0) continue;
-      out.push(node);
+      cleaned.push(node);
       continue;
     }
     node.children = normalize(node.children);
-    out.push(node);
+    if (node.tag === "p" && !hasVisibleContent(node.children)) continue;
+    cleaned.push(node);
   }
-  return out;
+  return cleaned.filter((node, i) => {
+    if (node.type !== "text" || node.text.trim().length > 0) return true;
+    const prev = cleaned[i - 1];
+    const next = cleaned[i + 1];
+    if (prev === undefined || next === undefined) return false; // edge whitespace
+    return !isBlockElement(prev) && !isBlockElement(next);
+  });
 }
 
 /** Does this fragment contain any renderable content? (used to hide empties) */
