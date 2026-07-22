@@ -342,6 +342,18 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// Remove a conversation and all of its messages. Used to purge the
+    /// `48:notifications` activity feed, which older builds mis-persisted as a
+    /// chat (empty-content bubbles under a raw MRI-URL title) before it was
+    /// recognized as a system feed. Idempotent: a no-op when the id is absent.
+    pub fn delete_conversation(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM messages WHERE conversation_id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     /// Insert a message, deduplicated by id. Returns true if it was newly
     /// inserted OR its content changed (an edit). When the same id arrives again
     /// with identical content, this is a no-op and returns false, so re-fetches

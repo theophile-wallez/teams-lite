@@ -9,8 +9,8 @@
 //   response (server -> client):  { "id": <n>, "result": <v> }  |  { "id": <n>, "error": "<msg>" }
 //   event    (server -> client):  { "event": "<name>", "data": {...} }   (no id)
 //
-// Methods: conversations | open | backfill | set_draft | send | edit
-// Events:  status | message | conversations_changed | update_available
+// Methods: conversations | open | backfill | set_draft | send | edit | notifications
+// Events:  status | message | conversations_changed | notifications_changed | update_available
 //
 // No raw tokens are ever logged or sent.
 
@@ -26,7 +26,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
-use teams_lite::{auth, retry, teams, teams_media, teams_profiles, teams_read, teams_send, trouter};
+use teams_lite::{
+    auth, retry, teams, teams_activity, teams_media, teams_profiles, teams_read, teams_send, trouter,
+};
 
 const ADDR: &str = "127.0.0.1:8420";
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
@@ -242,6 +244,17 @@ async fn main() -> Result<()> {
     let db_path = data_db_path()?;
     eprintln!("[ok] store {db_path}");
     Store::open(&db_path)?; // ensure schema
+
+    // The activity feed (`48:notifications`) is a system thread, not a chat.
+    // Older builds mis-persisted it as a conversation full of empty-content
+    // bubbles under a raw MRI-URL title; purge that junk once so it stops
+    // showing in the sidebar. Going forward it is routed to the notifications
+    // surface and never re-persisted as a chat (see `spawn_realtime`).
+    if let Ok(store) = Store::open(&db_path) {
+        if let Err(e) = store.delete_conversation(teams_activity::NOTIFICATIONS_THREAD) {
+            eprintln!("[cleanup] could not purge {}: {e}", teams_activity::NOTIFICATIONS_THREAD);
+        }
+    }
 
     let (events_tx, _) = broadcast::channel::<Value>(256);
     let ctx = Ctx {
@@ -617,6 +630,27 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "edited": true }))
         }
 
+        // activity feed (`48:notifications`) — reactions / mentions / replies
+        // directed at us. Not a chat: fetched fresh from Teams (which holds the
+        // server-side read state), decoded into structured notifications, and
+        // surfaced in the UI's notifications panel. No local cache — the feed is
+        // small and the panel refreshes on `notifications_changed`.
+        "notifications" => {
+            let limit = params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|n| n.clamp(1, 100) as u32)
+                .unwrap_or(teams_activity::DEFAULT_NOTIFICATIONS_LIMIT);
+            let http = ctx.http.clone();
+            let items = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    async move { teams_activity::fetch_notifications(&http, &session, limit).await }
+                })
+                .await?;
+            Ok(notifications_json(&items))
+        }
+
         other => anyhow::bail!("unknown method: {other}"),
     }
 }
@@ -670,6 +704,30 @@ fn data_db_path() -> Result<String> {
         .into_os_string()
         .into_string()
         .map_err(|p| anyhow::anyhow!("data path is not valid UTF-8: {p:?}"))
+}
+
+/// Serialize the activity feed for the UI: the decoded notifications plus the
+/// unread count (derived from Teams' own read-state) so the bell can badge it.
+fn notifications_json(items: &[teams_activity::Notification]) -> Value {
+    let unread = items.iter().filter(|n| !n.is_read).count();
+    json!({
+        "unread": unread,
+        "items": items
+            .iter()
+            .map(|n| json!({
+                "id": n.id,
+                "activity_type": n.activity_type,
+                "activity_subtype": n.activity_subtype,
+                "actor_name": n.actor_name,
+                "actor_mri": n.actor_mri,
+                "source_thread_id": n.source_thread_id,
+                "preview": n.preview,
+                "timestamp": n.timestamp_ms,
+                "count": n.count,
+                "is_read": n.is_read
+            }))
+            .collect::<Vec<_>>()
+    })
 }
 
 fn conversations_json(rows: &[teams_lite::store::ConversationRow]) -> Value {
@@ -902,11 +960,24 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     tokio::spawn(async move {
         while let Some(msgs) = ev_rx.recv().await {
             if let Ok(store) = ctx_msgs.store() {
+                let mut activity_changed = false;
                 for m in &msgs {
+                    // The activity feed is not a chat: never persist it as a
+                    // conversation. Signal the UI to refresh notifications
+                    // instead — the full payload is re-fetched via the
+                    // `notifications` method (the live frame's chat `content` is
+                    // always empty; the payload lives in properties.activity).
+                    if teams_activity::is_notifications_thread(&m.conversation_id) {
+                        activity_changed = true;
+                        continue;
+                    }
                     store.upsert_conversation(&m.conversation_id, "", m.compose_time).ok();
                     if store.insert_message(m).unwrap_or(false) {
                         ctx_msgs.emit("message", message_json(m, &self_name, &self_mri));
                     }
+                }
+                if activity_changed {
+                    ctx_msgs.emit("notifications_changed", json!({}));
                 }
             }
         }

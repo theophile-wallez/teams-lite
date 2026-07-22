@@ -222,6 +222,11 @@ pub fn persist_conversations(store: &Store, convs: &[Conversation]) -> usize {
         if c.is_empty {
             continue;
         }
+        // The activity feed is a system thread, not a chat — keep it out of the
+        // conversation list entirely (it is surfaced in the notifications panel).
+        if crate::teams_activity::is_notifications_thread(&c.id) {
+            continue;
+        }
         // Count only conversations that were actually inserted or modified, so
         // the caller emits `conversations_changed` ONLY on a real change. A
         // blanket "upsert succeeded" count would report a change on every sync
