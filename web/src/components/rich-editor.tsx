@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, type MutableRefObject, type ReactNode } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
@@ -35,7 +35,7 @@ const EXTENSIONS = [
     },
   }),
   Placeholder.configure({
-    placeholder: "Write a message…  (Enter to send, Shift+Enter for a new line)",
+    placeholder: "Write a message…",
   }),
 ];
 
@@ -62,6 +62,12 @@ export function RichEditor(props: {
   initialContent: string;
   focusToken: unknown;
   onSubmit: (html: string) => void;
+  /** Registers the editor's submit fn so an outside control (send button) can call it. */
+  submitRef?: MutableRefObject<(() => void) | null>;
+  /** Registers a focus fn so clicking the composer's dead space can focus the editor. */
+  focusRef?: MutableRefObject<(() => void) | null>;
+  /** Reports whether the editor is empty, so the send button can reflect it. */
+  onEmptyChange?: (empty: boolean) => void;
 }) {
   const editor = useEditor({
     // TanStack Start renders on the server; ProseMirror needs the DOM, so defer
@@ -69,6 +75,8 @@ export function RichEditor(props: {
     immediatelyRender: false,
     extensions: EXTENSIONS,
     content: props.initialContent,
+    onCreate: ({ editor }) => props.onEmptyChange?.(editor.isEmpty),
+    onUpdate: ({ editor }) => props.onEmptyChange?.(editor.isEmpty),
     editorProps: {
       attributes: {
         class: "tiptap-message max-h-64 min-h-[1.5rem] w-full overflow-y-auto outline-none",
@@ -101,6 +109,26 @@ export function RichEditor(props: {
   useEffect(() => {
     editor?.commands.focus("end");
   }, [editor, props.focusToken]);
+
+  // Expose submit so the composer's send button can trigger it from the outside.
+  useEffect(() => {
+    const ref = props.submitRef;
+    if (!ref) return;
+    ref.current = submit;
+    return () => {
+      ref.current = null;
+    };
+  });
+
+  // Expose focus so clicking the composer's dead space can focus the editor.
+  useEffect(() => {
+    const ref = props.focusRef;
+    if (!ref) return;
+    ref.current = () => editor?.commands.focus("end");
+    return () => {
+      ref.current = null;
+    };
+  });
 
   if (!editor) {
     // Reserve the field height so the composer doesn't jump on hydration.
@@ -206,7 +234,7 @@ function FmtButton(props: {
       onMouseDown={(e) => e.preventDefault()}
       onClick={props.onClick}
       className={cn(
-        "grid size-7 place-items-center rounded-md text-text-dim transition-colors hover:bg-accent hover:text-foreground",
+        "grid size-7 cursor-pointer place-items-center rounded-md text-text-dim transition-colors hover:bg-accent hover:text-foreground",
         props.active && "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
       )}
     >

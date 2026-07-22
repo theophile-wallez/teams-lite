@@ -40,6 +40,11 @@ export function Composer(props: { focusToken: unknown }) {
   const openId = useAppState((s) => s.openId);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [rich, setRich] = useState(false);
+  // The rich editor owns its content, so it registers a submit callback here and
+  // reports emptiness for the send button's enabled state.
+  const richSubmitRef = useRef<(() => void) | null>(null);
+  const [richEmpty, setRichEmpty] = useState(true);
+  const richFocusRef = useRef<(() => void) | null>(null);
 
   // Restore the mode preference on the client (kept out of SSR to avoid a
   // hydration mismatch — the server always renders the plain textarea).
@@ -83,7 +88,17 @@ export function Composer(props: { focusToken: unknown }) {
     void controller.sendDraft(text);
   };
 
-  const canSend = draft.trim().length > 0;
+  const canSend = rich ? !richEmpty : draft.trim().length > 0;
+
+  const submit = () => {
+    if (rich) richSubmitRef.current?.();
+    else submitPlain();
+  };
+
+  const focusField = () => {
+    if (rich) richFocusRef.current?.();
+    else textareaRef.current?.focus();
+  };
 
   return (
     <div className="shrink-0 bg-background px-4 pb-4 pt-2">
@@ -111,32 +126,33 @@ export function Composer(props: { focusToken: unknown }) {
           </button>
         </div>
       )}
-      <div className="flex items-end gap-1.5 rounded-2xl bg-card px-2 py-1.5 shadow-chip transition-shadow focus-within:shadow-card focus-within:ring-1 focus-within:ring-ring">
-        <button
-          type="button"
-          aria-label="Toggle rich text formatting"
-          aria-pressed={rich}
-          title="Rich text formatting"
-          data-testid="composer-format-toggle"
-          onClick={toggleRich}
-          className={cn(
-            "mb-0.5 grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground",
-            rich && "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
-          )}
-        >
-          <Type className="size-4" strokeWidth={1.6} />
-        </button>
-
+      <div
+        className="flex cursor-text flex-col gap-2 rounded-2xl bg-card px-3 py-2.5 shadow-chip transition-shadow focus-within:shadow-card"
+        onMouseDown={(e) => {
+          // Clicking anywhere in the box focuses the field, except the action
+          // buttons (send / rich-text toggle) and the field itself, which handle
+          // their own clicks.
+          const el = e.target as HTMLElement;
+          if (el.closest("button") || el.closest("textarea, [contenteditable]")) return;
+          e.preventDefault();
+          focusField();
+        }}
+      >
+        {/* Input field. In rich mode the editor renders its formatting options in
+            the top part of the box; plain mode is a bare auto-growing textarea. */}
         {rich ? (
           <Suspense
             fallback={
-              <div className="min-h-[1.75rem] w-full py-1 text-sm text-text-faint" aria-hidden />
+              <div className="min-h-[1.75rem] w-full text-sm text-text-faint" aria-hidden />
             }
           >
             <RichEditor
               key={openId ?? "none"}
               initialContent={draftToHtml(draft)}
               focusToken={props.focusToken}
+              submitRef={richSubmitRef}
+              focusRef={richFocusRef}
+              onEmptyChange={setRichEmpty}
               onSubmit={(html) => void controller.sendDraft("", html)}
             />
           </Suspense>
@@ -148,7 +164,7 @@ export function Composer(props: { focusToken: unknown }) {
             data-testid="composer"
             placeholder="Write a message…"
             className={cn(
-              "max-h-64 w-full resize-none self-center bg-transparent px-1 py-1.5 text-sm outline-none placeholder:text-text-faint",
+              "max-h-64 w-full resize-none bg-transparent px-1 py-1 text-sm outline-none placeholder:text-text-faint",
             )}
             onChange={(e) => controller.setDraftText(e.target.value)}
             onKeyDown={(e) => {
@@ -160,16 +176,32 @@ export function Composer(props: { focusToken: unknown }) {
           />
         )}
 
-        {!rich && (
+        {/* Bottom control bar: rich-text toggle on the left, send on the right. */}
+        <div className="flex items-center justify-between gap-1.5">
+          <button
+            type="button"
+            aria-label="Toggle rich text formatting"
+            aria-pressed={rich}
+            title="Rich text formatting"
+            data-testid="composer-format-toggle"
+            onClick={toggleRich}
+            className={cn(
+              "grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground",
+              rich && "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
+            )}
+          >
+            <Type className="size-4" strokeWidth={1.6} />
+          </button>
+
           <button
             type="button"
             aria-label="Send message"
             title="Send (Enter)"
             data-testid="composer-send"
             disabled={!canSend}
-            onClick={submitPlain}
+            onClick={submit}
             className={cn(
-              "mb-0.5 grid size-8 shrink-0 place-items-center rounded-full transition-all",
+              "grid size-8 shrink-0 cursor-pointer place-items-center rounded-full transition-all disabled:cursor-default",
               canSend
                 ? "bg-primary text-primary-foreground shadow-chip hover:brightness-110 active:brightness-95"
                 : "bg-element text-text-faint",
@@ -177,7 +209,7 @@ export function Composer(props: { focusToken: unknown }) {
           >
             <ArrowUp className="size-4" strokeWidth={2} />
           </button>
-        )}
+        </div>
       </div>
     </div>
   );
