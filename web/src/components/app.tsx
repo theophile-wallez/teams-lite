@@ -5,6 +5,7 @@ import { ConversationList } from "./conversation-list";
 import { MessagePane } from "./message-pane";
 import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
+import { ImageLightboxProvider } from "./image-lightbox";
 import { Splash } from "./splash";
 import { TooltipProvider } from "./ui/tooltip";
 import { Button } from "./ui/button";
@@ -13,7 +14,9 @@ export function App() {
   return (
     <ControllerProvider>
       <TooltipProvider delayDuration={300}>
-        <AppInner />
+        <ImageLightboxProvider>
+          <AppInner />
+        </ImageLightboxProvider>
       </TooltipProvider>
     </ControllerProvider>
   );

@@ -3,6 +3,7 @@ import { Download, FileText, ImageOff, Loader2 } from "lucide-react";
 import { mediaNeedsProxy, type Attachment } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
+import { useImageLightbox } from "./image-lightbox";
 
 /**
  * An image from a chat message. Authenticated Teams hosted content (inline
@@ -14,6 +15,7 @@ import { useController } from "./controller-context";
  */
 export function MediaImage(props: { src: string; alt?: string; className?: string }) {
   const controller = useController();
+  const { openImage } = useImageLightbox();
   const proxied = mediaNeedsProxy(props.src);
   // Public images render straight from their URL; proxied ones wait for a blob.
   const [objectUrl, setObjectUrl] = useState<string | null>(proxied ? null : props.src);
@@ -69,15 +71,26 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
     );
   }
 
+  const alt = props.alt || "image";
   return (
-    <img
-      data-testid="message-image"
-      src={objectUrl}
-      alt={props.alt || "image"}
-      loading="lazy"
-      onError={() => setFailed(true)}
-      className={cn("max-h-80 max-w-full rounded-xl object-contain shadow-card", props.className)}
-    />
+    <button
+      type="button"
+      onClick={() => openImage(objectUrl, alt)}
+      aria-label={props.alt ? `View image: ${props.alt}` : "View image"}
+      className={cn(
+        "group block w-fit max-w-full cursor-zoom-in rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+        props.className,
+      )}
+    >
+      <img
+        data-testid="message-image"
+        src={objectUrl}
+        alt={alt}
+        loading="lazy"
+        onError={() => setFailed(true)}
+        className="max-h-80 max-w-full rounded-xl object-contain shadow-card transition-opacity duration-150 ease-out group-hover:opacity-95"
+      />
+    </button>
   );
 }
 

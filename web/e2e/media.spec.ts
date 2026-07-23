@@ -41,4 +41,53 @@ test.describe("media (images + attachments)", () => {
     await expect(file).toBeVisible();
     await expect(file).toContainText("quarterly-report.pdf");
   });
+
+  test("opens an image in the lightbox and dismisses it with Escape", async ({
+    page,
+    consoleErrors,
+  }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    const images = page.locator('[data-testid="message-image"]');
+    await expect.poll(() => images.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+    await images.first().click();
+
+    // The zoomed image shows the same proxied blob, over a modal backdrop.
+    const lightbox = page.locator('[data-testid="image-lightbox"]');
+    await expect(lightbox).toBeVisible();
+    await expect(lightbox).toHaveAttribute("role", "dialog");
+    const zoomed = page.locator('[data-testid="lightbox-image"]');
+    await expect(zoomed).toBeVisible();
+    await expect(zoomed).toHaveAttribute("src", /^blob:/);
+
+    // Escape closes the lightbox and must NOT also fall through to the app's
+    // global handler (which would leave the conversation).
+    await page.keyboard.press("Escape");
+    await expect(lightbox).toHaveCount(0);
+    await expect(page.locator('[data-testid="conversation-title"]')).toContainText("Media Gallery");
+
+    expect(realErrors(consoleErrors)).toEqual([]);
+  });
+
+  test("closes the lightbox via the close button and the backdrop", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    const images = page.locator('[data-testid="message-image"]');
+    await expect.poll(() => images.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+    const lightbox = page.locator('[data-testid="image-lightbox"]');
+
+    // Close button.
+    await images.first().click();
+    await expect(lightbox).toBeVisible();
+    await page.getByRole("button", { name: "Close image preview" }).click();
+    await expect(lightbox).toHaveCount(0);
+
+    // Clicking the dimmed backdrop (the padding area, not the image) closes it.
+    await images.first().click();
+    await expect(lightbox).toBeVisible();
+    await lightbox.click({ position: { x: 8, y: 8 } });
+    await expect(lightbox).toHaveCount(0);
+  });
 });
