@@ -132,6 +132,24 @@ describe("Backend request/response", () => {
     backend.close();
   });
 
+  it("frames a react request with conversation, message_id and key", async () => {
+    const { backend, socket } = await connected();
+
+    const promise = backend.react("c1", "c1#5", "heart");
+
+    const frame = JSON.parse(socket.sent[0]!) as {
+      id: number;
+      method: string;
+      params?: Record<string, unknown>;
+    };
+    expect(frame.method).toBe("react");
+    expect(frame.params).toEqual({ conversation: "c1", message_id: "c1#5", key: "heart" });
+
+    socket.simulateMessage(JSON.stringify({ id: frame.id, result: { reacted: true } }));
+    await expect(promise).resolves.toEqual({ reacted: true });
+    backend.close();
+  });
+
   it("rejects immediately when not connected", async () => {
     const backend = new Backend("ws://test");
     await expect(backend.open("c1")).rejects.toThrow("not connected");

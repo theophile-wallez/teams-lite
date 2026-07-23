@@ -11,7 +11,7 @@
 //   response (server -> client):  { "id": <n>, "result": <v> } | { "id": <n>, "error": "<msg>" }
 //   event    (server -> client):  { "event": "<name>", "data": <v> }   (no id)
 //
-// Methods: ping | conversations | open | backfill | set_draft | send | edit
+// Methods: ping | conversations | open | backfill | set_draft | send | edit | react
 //          | notifications | fetch_media | get_settings | set_settings | enrich_link
 // Events:  status | realtime_status | message | conversations_changed | typing
 //
@@ -70,8 +70,13 @@ type ChatMessage = {
   sender_mri?: string;
   content: string; // HTML-ish, as Teams sends it
   attachments?: Attachment[]; // file/card attachments (inline images live in content)
+  reactions?: Reaction[]; // aggregated per emotion (key + count + whether ours)
   is_self?: boolean;
 };
+
+// Aggregated reaction on a message (mirrors protocol.ts Reaction / the Rust
+// `reactions_value` wire shape).
+type Reaction = { key: string; count: number; mine: boolean };
 
 type MessagePage = { messages: ChatMessage[]; has_more: boolean };
 
@@ -1084,6 +1089,14 @@ function dispatch(method: string, params: unknown): unknown {
       return { edited: true };
     }
 
+    case "react": {
+      const id = requireString(params, "conversation");
+      const messageId = requireString(params, "message_id");
+      const key = requireString(params, "key");
+      const on = reactMessage(id, messageId, key);
+      return { reacted: on };
+    }
+
     case "fetch_media": {
       const url = requireString(params, "url");
       return mockMedia(url);
@@ -1155,6 +1168,37 @@ function editMessage(convId: string, messageId: string, text: string): void {
   recomputeSummary(cs);
   broadcast("message", msg);
   broadcast("conversations_changed", {});
+}
+
+/** Toggle OUR reaction on a message and broadcast it, mirroring the Rust
+ *  backend's `react`: Teams keeps one reaction per user, so clicking our current
+ *  emotion removes it and any other key replaces it. Returns the resulting on/off
+ *  (whether we now react with `key`). */
+function reactMessage(convId: string, messageId: string, key: string): boolean {
+  const cs = store.get(convId);
+  if (!cs) return false;
+  const msg = cs.messages.find((m) => m.id === messageId);
+  if (!msg) return false;
+
+  const list = msg.reactions ?? [];
+  // Drop our reaction from wherever it currently sits (one per user).
+  const withoutMine = list
+    .map((r) => (r.mine ? { ...r, count: r.count - 1, mine: false } : r))
+    .filter((r) => r.count > 0);
+  const wasMineKey = list.find((r) => r.mine)?.key;
+  const on = wasMineKey !== key; // same key => toggle off
+
+  let next = withoutMine;
+  if (on) {
+    const existing = withoutMine.find((r) => r.key === key);
+    next = existing
+      ? withoutMine.map((r) => (r.key === key ? { ...r, count: r.count + 1, mine: true } : r))
+      : [...withoutMine, { key, count: 1, mine: true }];
+  }
+
+  msg.reactions = next;
+  broadcast("message", msg);
+  return on;
 }
 
 /** ~150ms after a `send`, echo the message back as the backend's trouter would,
@@ -1314,6 +1358,26 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         is_typing: body.is_typing === undefined ? true : Boolean(body.is_typing),
       });
       return Response.json({ ok: true }, { status: 200 });
+    }
+    // Set a reaction on an existing message (from someone else by default), then
+    // re-broadcast it — exercises the received-reaction chips deterministically.
+    if (body.kind === "reaction") {
+      const conversation =
+        typeof body.conversation === "string" ? body.conversation : (order[0] ?? "");
+      const cs = store.get(conversation);
+      const key = typeof body.key === "string" ? body.key : "like";
+      const messageId =
+        typeof body.message_id === "string"
+          ? body.message_id
+          : (cs?.messages.at(-1)?.id ?? "");
+      const msg = cs?.messages.find((m) => m.id === messageId);
+      if (!msg) return Response.json({ ok: false }, { status: 404 });
+      const count = typeof body.count === "number" ? body.count : 1;
+      const mine = Boolean(body.mine);
+      const others = (msg.reactions ?? []).filter((r) => r.key !== key);
+      msg.reactions = count > 0 ? [...others, { key, count, mine }] : others;
+      broadcast("message", msg);
+      return Response.json({ ok: true, message: msg }, { status: 200 });
     }
     const conversation =
       typeof body.conversation === "string" ? body.conversation : (order[0] ?? "");

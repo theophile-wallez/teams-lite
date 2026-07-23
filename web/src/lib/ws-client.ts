@@ -219,6 +219,17 @@ export class Backend {
   edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {
     return this.request<{ edited: boolean }>("edit", { conversation, message_id: messageId, text });
   }
+  /** React to a message with an emoji (Teams "emotion"), or toggle ours off.
+   *  `key` is the emotion (e.g. "like", "heart"). The backend toggles — clicking
+   *  our current reaction removes it — and re-broadcasts the message, so state
+   *  reconciles via the `message` event; `reacted` is the resulting on/off. */
+  react(conversation: string, messageId: string, key: string): Promise<{ reacted: boolean }> {
+    return this.request<{ reacted: boolean }>("react", {
+      conversation,
+      message_id: messageId,
+      key,
+    });
+  }
   /** Fetch the activity feed (reactions/mentions/replies directed at us). Not a
    *  chat — the backend fetches it fresh from Teams and decodes each entry. */
   notifications(limit?: number): Promise<NotificationFeed> {

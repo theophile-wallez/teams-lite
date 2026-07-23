@@ -625,6 +625,25 @@ export class TeamsController {
   }
 
   /**
+   * React to a message with an emoji, or toggle our reaction off. The backend
+   * toggles (clicking our current reaction removes it), applies it optimistically
+   * on its side, and re-broadcasts the message, which reconciles into the cache
+   * by id (see `wireEvents`) — so we only fire the request and surface failures,
+   * exactly like `editMessage`.
+   */
+  async reactToMessage(messageId: string, key: string): Promise<boolean> {
+    const id = this.get().openId;
+    if (!id) return false;
+    try {
+      await this.backend.react(id, messageId, key);
+      return true;
+    } catch (e) {
+      this.set({ status: `reaction failed: ${errText(e)}` });
+      return false;
+    }
+  }
+
+  /**
    * Send the current draft. In plain mode `text` carries the message; in rich
    * mode `html` carries the already-normalized Teams-safe HTML (from the TipTap
    * editor) and `text` is empty. When replying, the backend prepends the quote

@@ -157,6 +157,10 @@ export function MessagePane() {
     await controller.editMessage(m.id, text);
   };
 
+  const doReact = (m: ChatMessage, key: string) => {
+    void controller.reactToMessage(m.id, key);
+  };
+
   if (!openId) {
     return (
       <section className="flex flex-1 flex-col items-center justify-center gap-4 bg-background">
@@ -233,6 +237,7 @@ export function MessagePane() {
                 highlighted={highlightId === m.id}
                 onReply={doReply}
                 onCopy={doCopy}
+                onReact={doReact}
                 onStartEdit={doStartEdit}
                 onSaveEdit={doSaveEdit}
                 onCancelEdit={() => setEditingId(null)}

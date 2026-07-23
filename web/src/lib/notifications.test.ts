@@ -7,6 +7,7 @@ import {
   leadingEmoji,
   notificationHeadline,
   reactionEmoji,
+  REACTION_PICKER,
 } from "./notifications";
 import type { Notification } from "./protocol";
 
@@ -43,6 +44,23 @@ describe("reactionEmoji", () => {
     expect(reactionEmoji("LAUGH")).toBe("😂");
     expect(reactionEmoji("someNewReaction")).toBe("👍");
     expect(reactionEmoji("")).toBe("👍");
+  });
+});
+
+describe("REACTION_PICKER", () => {
+  it("offers the six classic reactions in Teams order, each with an emoji", () => {
+    expect(REACTION_PICKER.map((r) => r.key)).toEqual([
+      "like",
+      "heart",
+      "laugh",
+      "surprised",
+      "sad",
+      "angry",
+    ]);
+    // every picker emoji agrees with reactionEmoji for the same key (DRY)
+    for (const { key, emoji } of REACTION_PICKER) {
+      expect(emoji).toBe(reactionEmoji(key));
+    }
   });
 });
 

@@ -6,7 +6,9 @@ import {
   urlHost,
   type ChatMessage,
   type GitLabLinkMetadata,
+  type Reaction,
 } from "~/lib/protocol";
+import { reactionEmoji, REACTION_PICKER } from "~/lib/notifications";
 import { dropLinks, extractLinks, hasVisibleContent, parseRichHtml } from "~/lib/rich-text";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
@@ -14,11 +16,17 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 import { FileAttachment, MediaImage } from "./media-image";
 import { GitLabLinkCard } from "./gitlab-link-card";
 import { useAppState, useController } from "./controller-context";
+
+/** Dwell before the hover reaction picker appears, the way Teams reveals its
+ *  reaction bar — long enough that merely passing the cursor over a message
+ *  doesn't flash it, short enough to feel responsive. */
+const REACTION_HOVER_MS = 350;
 
 /** Resolved enrichment for a set of links, keyed by URL: `undefined` while a
  *  lookup is in flight, `null` when the link is not an enrichable integration,
@@ -78,6 +86,7 @@ export function MessageBubble(props: {
   highlighted?: boolean;
   onReply: (message: ChatMessage) => void;
   onCopy: (message: ChatMessage) => void;
+  onReact: (message: ChatMessage, key: string) => void;
   onStartEdit: (message: ChatMessage) => void;
   onSaveEdit: (message: ChatMessage, text: string) => void;
   onCancelEdit: () => void;
@@ -126,8 +135,43 @@ export function MessageBubble(props: {
   const nameShown = !mine && props.showSenderName && !props.continuesAbove;
   const [menuOpen, setMenuOpen] = useState(false);
 
+  // Reactions on this message, and which emotion (if any) is ours — the latter
+  // highlights our chip and lets a click on it toggle the reaction off.
+  const reactions = props.message.reactions ?? [];
+  const myReactionKey = reactions.find((r) => r.mine)?.key;
+
+  // Hover reaction picker: revealed after a short dwell, dismissed on leave. The
+  // whole bubble row is the hover target; the picker floats just above it and,
+  // being a descendant, keeps the hover alive when the cursor moves onto it.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearHoverTimer = () => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    hoverTimer.current = null;
+  };
+  const openPickerSoon = () => {
+    if (props.editing || menuOpen) return;
+    clearHoverTimer();
+    hoverTimer.current = setTimeout(() => setPickerOpen(true), REACTION_HOVER_MS);
+  };
+  const cancelPicker = () => {
+    clearHoverTimer();
+    setPickerOpen(false);
+  };
+  useEffect(() => clearHoverTimer, []);
+
+  // Apply a reaction from either surface (hover picker, menu bar, or a chip),
+  // then close both transient surfaces. The backend toggles server-side.
+  const react = (key: string) => {
+    cancelPicker();
+    setMenuOpen(false);
+    props.onReact(props.message, key);
+  };
+
   return (
     <div
+      onMouseEnter={openPickerSoon}
+      onMouseLeave={cancelPicker}
       className={cn(
         "group flex w-full",
         mine ? "justify-end" : "justify-start",
@@ -169,6 +213,25 @@ export function MessageBubble(props: {
           setMenuOpen(true);
         }}
       >
+        {!props.editing && pickerOpen && (
+          <div
+            className={cn(
+              // Float just above the bubble on the author's anchor side. The
+              // `pb-1` is a transparent hover bridge so the cursor never crosses
+              // an empty gap between bubble and picker (which would dismiss it).
+              "absolute bottom-full z-20 pb-1 animate-in fade-in zoom-in-95 duration-150",
+              mine ? "right-0" : "left-0",
+            )}
+          >
+            <ReactionPicker
+              data-testid="reaction-picker"
+              activeKey={myReactionKey}
+              onPick={react}
+              className="rounded-full border border-border bg-popover p-1 shadow-pop"
+            />
+          </div>
+        )}
+
         {nameShown && (
           <div className="mb-0.5 text-xs font-semibold text-sender-name">
             {props.message.sender}
@@ -244,7 +307,19 @@ export function MessageBubble(props: {
               </div>
             ) : null}
 
-            <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+            {reactions.length > 0 ? (
+              <ReactionChips reactions={reactions} mine={mine} onToggle={react} />
+            ) : null}
+
+            <DropdownMenu
+              open={menuOpen}
+              onOpenChange={(open) => {
+                setMenuOpen(open);
+                // The menu and the hover picker are alternative reaction
+                // surfaces; never show both at once.
+                if (open) cancelPicker();
+              }}
+            >
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
@@ -259,6 +334,15 @@ export function MessageBubble(props: {
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align={mine ? "start" : "end"}>
+                {/* Reaction bar — the same emojis as the hover picker, so
+                    reacting is also reachable from the ⋯ menu (and by keyboard). */}
+                <ReactionPicker
+                  data-testid="menu-reaction-picker"
+                  activeKey={myReactionKey}
+                  onPick={react}
+                  className="justify-between px-1 pb-1"
+                />
+                <DropdownMenuSeparator />
                 {mine && (
                   <DropdownMenuItem
                     data-testid="action-edit"
@@ -287,6 +371,86 @@ export function MessageBubble(props: {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * A row of emoji buttons for adding a reaction, in Teams' canonical order. Used
+ * both as the floating hover picker and as the reaction bar at the top of the ⋯
+ * menu. The caller supplies chrome via `className` (a rounded popover for the
+ * hover picker; flat inside the menu). `activeKey` highlights our current
+ * reaction so re-picking it reads as "remove".
+ */
+function ReactionPicker(props: {
+  onPick: (key: string) => void;
+  activeKey?: string;
+  className?: string;
+  "data-testid"?: string;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="React"
+      data-testid={props["data-testid"]}
+      className={cn("flex items-center gap-0.5", props.className)}
+    >
+      {REACTION_PICKER.map(({ key, emoji }) => (
+        <button
+          key={key}
+          type="button"
+          aria-label={`React with ${key}`}
+          aria-pressed={props.activeKey === key}
+          data-testid={`reaction-option-${key}`}
+          onClick={() => props.onPick(key)}
+          className={cn(
+            "grid size-7 place-items-center rounded-full text-base leading-none transition-transform hover:scale-125 hover:bg-accent",
+            props.activeKey === key && "bg-accent",
+          )}
+        >
+          <span aria-hidden>{emoji}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The reaction chips shown under a message: one per emotion with a count, our
+ * own reaction highlighted. Clicking a chip toggles that reaction (removing ours
+ * when it is already ours, otherwise adding/replacing it). Aligned to the
+ * author's side so it reads as belonging to the bubble.
+ */
+function ReactionChips(props: {
+  reactions: Reaction[];
+  mine: boolean;
+  onToggle: (key: string) => void;
+}) {
+  return (
+    <div
+      data-testid="message-reactions"
+      className={cn("mt-1 flex flex-wrap gap-1", props.mine ? "justify-end" : "justify-start")}
+    >
+      {props.reactions.map((r) => (
+        <button
+          key={r.key}
+          type="button"
+          data-testid={`reaction-chip-${r.key}`}
+          data-mine={r.mine ? "true" : undefined}
+          aria-pressed={r.mine}
+          aria-label={`${r.mine ? "Remove your" : "Add"} ${r.key} reaction`}
+          onClick={() => props.onToggle(r.key)}
+          className={cn(
+            "flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs leading-none transition-colors",
+            r.mine
+              ? "border-primary/50 bg-primary/15 text-foreground"
+              : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground",
+          )}
+        >
+          <span aria-hidden>{reactionEmoji(r.key)}</span>
+          <span className="tabular-nums">{r.count}</span>
+        </button>
+      ))}
     </div>
   );
 }

@@ -20,6 +20,16 @@ export type Attachment = {
   kind: AttachmentKind;
 };
 
+/** One aggregated reaction (Teams "emotion") on a message, as the backend sends
+ *  it (see `reactions_value` in src/bin/server.rs): the emotion `key` — mapped to
+ *  an emoji by `reactionEmoji` in lib/notifications.ts — how many people reacted
+ *  with it, and whether we are one of them (drives the highlighted chip + toggle). */
+export type Reaction = {
+  key: string;
+  count: number;
+  mine: boolean;
+};
+
 export type Conversation = {
   id: string;
   name: string;
@@ -48,6 +58,9 @@ export type ChatMessage = {
    *  images embedded in `content` as `<img>` are NOT here — they are extracted
    *  from the content HTML by `parseMessageContent`. */
   attachments?: Attachment[];
+  /** Reactions on the message (absent or empty when none). Aggregated per emotion
+   *  by the backend; the UI maps each `key` to an emoji and shows a chip. */
+  reactions?: Reaction[];
   is_self?: boolean;
 };
 

@@ -83,6 +83,25 @@ export async function emitTyping(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Set a reaction on an existing message through the mock's gated test hook
+ *  (from someone else by default), then the mock re-broadcasts the message. */
+export async function emitReaction(
+  page: Page,
+  body: {
+    conversation?: string;
+    message_id?: string;
+    key?: string;
+    count?: number;
+    mine?: boolean;
+  },
+): Promise<void> {
+  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
+  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+    data: { kind: "reaction", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Filter out benign console noise so `consoleErrors` only holds real problems. */
 export function realErrors(errors: string[]): string[] {
   return errors.filter(

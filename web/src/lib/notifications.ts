@@ -23,6 +23,19 @@ export function reactionEmoji(subtype: string): string {
   return REACTION_EMOJI[subtype.toLowerCase()] ?? "👍";
 }
 
+/** The emojis offered in the hover reaction picker, in Teams' canonical order.
+ *  A subset of `REACTION_EMOJI` (the six classic reactions) so it stays DRY and
+ *  consistent with inbound reactions; a received reaction outside this set still
+ *  renders as a chip via `reactionEmoji()`. */
+export const REACTION_PICKER: ReadonlyArray<{ key: string; emoji: string }> = [
+  "like",
+  "heart",
+  "laugh",
+  "surprised",
+  "sad",
+  "angry",
+].map((key) => ({ key, emoji: REACTION_EMOJI[key]! }));
+
 /** Whether this activity is a reaction (drives the leading reaction glyph). */
 export function isReaction(n: Notification): boolean {
   return n.activity_type.toLowerCase().includes("reaction");
