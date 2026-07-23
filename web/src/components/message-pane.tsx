@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Loader2, MessagesSquare, WifiOff } from "lucide-react";
 import { convLabel, copyableMessageText, type ChatMessage, type Conversation } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
@@ -9,6 +9,10 @@ import { Button } from "./ui/button";
 
 const PREPEND_TRIGGER_PX = 160;
 const STICKY_BOTTOM_PX = 80;
+// Deep-link scroll: how many older pages to page through looking for the target
+// message before giving up, and how long to keep it visually highlighted.
+const MAX_SCROLL_PAGES = 20;
+const HIGHLIGHT_MS = 1600;
 
 /**
  * The right pane: conversation title, the scrolling message history (with
@@ -25,14 +29,19 @@ export function MessagePane() {
   const hasMoreOlder = useAppState((s) => s.hasMoreOlder);
   const messagesError = useAppState((s) => s.messagesError);
   const olderError = useAppState((s) => s.olderError);
+  const pendingScroll = useAppState((s) => s.pendingScroll);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [focusToken, setFocusToken] = useState(0);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
   const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const prevOpenIdRef = useRef<string | null>(null);
+  // Bounded paging budget for the current deep-link target, reset per nonce.
+  const scrollAttemptsRef = useRef(0);
+  const scrollNonceRef = useRef(-1);
 
   const openConv = conversations.find((c) => c.id === openId) ?? null;
   const isGroup = openConv?.kind === "group";
@@ -57,13 +66,46 @@ export function MessagePane() {
     }
   };
 
-  // Keep the viewport anchored: jump to bottom on open, preserve position when
-  // older messages are prepended, and stick to bottom when already at bottom.
+  // Keep the viewport anchored: a pending deep-link target wins (scroll to that
+  // message, paging older until it loads); otherwise jump to bottom on open,
+  // preserve position when older messages are prepended, and stick to bottom
+  // when already at bottom.
   useLayoutEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
     const openChanged = prevOpenIdRef.current !== openId;
     prevOpenIdRef.current = openId;
+
+    const target = pendingScroll && pendingScroll.convId === openId ? pendingScroll : null;
+    if (target) {
+      // Fresh target -> reset the paging budget.
+      if (scrollNonceRef.current !== target.nonce) {
+        scrollNonceRef.current = target.nonce;
+        scrollAttemptsRef.current = 0;
+      }
+      const node = findMessageNode(el, target.messageId);
+      if (node) {
+        node.scrollIntoView({ block: "center" });
+        atBottomRef.current = false;
+        prependAnchorRef.current = null;
+        setHighlightId(target.messageId);
+        controller.clearScrollTarget(target.nonce);
+        return;
+      }
+      // The first page (or an older page) is still in flight — keep the target
+      // pending and wait for the next render rather than giving up early.
+      if (loadingMessages || loadingOlder) return;
+      // Not loaded yet — page older toward it, bounded so a missing id (e.g. a
+      // channel activity that doesn't map to a stored message) can't loop.
+      if (hasMoreOlder && scrollAttemptsRef.current < MAX_SCROLL_PAGES) {
+        scrollAttemptsRef.current += 1;
+        prependAnchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+        void controller.loadOlderMessages();
+        return;
+      }
+      // Give up: fall through to normal anchoring and drop the request.
+      controller.clearScrollTarget(target.nonce);
+    }
 
     if (openChanged) {
       el.scrollTop = el.scrollHeight;
@@ -81,7 +123,14 @@ export function MessagePane() {
     } else if (atBottomRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages, openId, maybeFill]);
+  }, [messages, openId, maybeFill, pendingScroll, hasMoreOlder, loadingOlder, loadingMessages, controller]);
+
+  // Fade out the deep-link highlight after a short beat.
+  useEffect(() => {
+    if (!highlightId) return;
+    const t = setTimeout(() => setHighlightId(null), HIGHLIGHT_MS);
+    return () => clearTimeout(t);
+  }, [highlightId]);
 
   const doReply = (m: ChatMessage) => {
     controller.startReply(m);
@@ -180,6 +229,7 @@ export function MessagePane() {
                 continuesAbove={sameAuthor(messages[i - 1], m)}
                 continuesBelow={sameAuthor(m, messages[i + 1])}
                 editing={editingId === m.id}
+                highlighted={highlightId === m.id}
                 onReply={doReply}
                 onCopy={doCopy}
                 onStartEdit={doStartEdit}
@@ -205,6 +255,16 @@ export function MessagePane() {
 /** Two adjacent messages chain when they share the same author and side. */
 function sameAuthor(a: ChatMessage | undefined, b: ChatMessage | undefined): boolean {
   return !!a && !!b && a.is_self === b.is_self && a.sender === b.sender;
+}
+
+/** Find a rendered message bubble by id without CSS-selector escaping (message
+ *  ids contain `:`, `@`, `#`), by scanning the data attribute directly. */
+function findMessageNode(viewport: HTMLElement, messageId: string): HTMLElement | null {
+  const nodes = viewport.querySelectorAll<HTMLElement>("[data-message-id]");
+  for (const node of nodes) {
+    if (node.dataset.messageId === messageId) return node;
+  }
+  return null;
 }
 
 /** A short, calm subtitle describing the open conversation. */

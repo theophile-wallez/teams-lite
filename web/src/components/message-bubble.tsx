@@ -27,6 +27,7 @@ export function MessageBubble(props: {
   editing: boolean;
   continuesAbove: boolean;
   continuesBelow: boolean;
+  highlighted?: boolean;
   onReply: (message: ChatMessage) => void;
   onCopy: (message: ChatMessage) => void;
   onStartEdit: (message: ChatMessage) => void;
@@ -53,6 +54,8 @@ export function MessageBubble(props: {
       <div
         data-testid="message"
         data-mine={mine ? "true" : "false"}
+        data-message-id={props.message.id}
+        data-highlighted={props.highlighted ? "true" : undefined}
         className={cn(
           "relative max-w-[76%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed",
           mine
@@ -64,6 +67,10 @@ export function MessageBubble(props: {
           mine
             ? cn(props.continuesAbove && "rounded-tr-md", props.continuesBelow && "rounded-br-md")
             : cn(props.continuesAbove && "rounded-tl-md", props.continuesBelow && "rounded-bl-md"),
+          // Deep-link highlight: a brief ring pulse when opened from a
+          // notification, so the targeted message is unmistakable.
+          props.highlighted &&
+            "ring-2 ring-primary/70 ring-offset-2 ring-offset-background transition-shadow",
         )}
         onContextMenu={(e) => {
           e.preventDefault();

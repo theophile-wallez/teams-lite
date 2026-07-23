@@ -30,7 +30,9 @@ test.describe("notifications", () => {
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 
-  test("selecting a notification opens the source conversation", async ({ page }) => {
+  test("selecting a notification opens the source conversation and scrolls to the message", async ({
+    page,
+  }) => {
     await gotoApp(page);
     await page.locator('[data-testid="notifications-bell"]').click();
     const first = page.locator('[data-testid="notification-item"]').first();
@@ -39,6 +41,13 @@ test.describe("notifications", () => {
 
     await expect(page).toHaveURL(/\/c\//);
     await expect(page.locator('[data-testid="conversation-title"]')).not.toBeEmpty();
+
+    // The mock's first notification targets a specific, non-bottom message
+    // (`<convId>#100`); opening it must scroll that message into view.
+    const convId = decodeURIComponent(page.url().split("/c/")[1] ?? "");
+    expect(convId).not.toEqual("");
+    const target = page.locator(`[data-message-id="${convId}#100"]`);
+    await expect(target).toBeInViewport();
   });
 
   test("a live activity re-badges the bell after it was seen", async ({ page }) => {

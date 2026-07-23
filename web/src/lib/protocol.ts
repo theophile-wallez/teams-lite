@@ -88,6 +88,9 @@ export type Notification = {
   actor_mri: string;
   /** The chat/channel it happened in, so the panel can open it. */
   source_thread_id: string;
+  /** The targeted message's id in that thread (for chat reactions), so the UI
+   *  can scroll to it; "" when the activity has no specific target. */
+  source_message_id: string;
   /** Short preview of the target message. */
   preview: string;
   /** Epoch ms. */

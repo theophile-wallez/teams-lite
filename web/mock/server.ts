@@ -759,6 +759,7 @@ type MockNotification = {
   actor_name: string;
   actor_mri: string;
   source_thread_id: string;
+  source_message_id: string;
   preview: string;
   timestamp: number;
   count: number;
@@ -775,6 +776,10 @@ const NOTIFICATIONS_BASE = Date.now();
 function notificationsFeed(): MockNotification[] {
   const now = NOTIFICATIONS_BASE;
   const thread = (i: number) => order[i] ?? order[0] ?? "";
+  // Target a real, non-bottom message so opening the notification scrolls up to
+  // it (message ids are `${convId}#${seq}`; 1:1s seed 120 messages, newest page
+  // is seq 81..120).
+  const msg = (i: number, seq: number) => `${thread(i)}#${seq}`;
   const sample: MockNotification[] = [
     {
       id: "act-sample-1",
@@ -783,6 +788,7 @@ function notificationsFeed(): MockNotification[] {
       actor_name: "Riley Carter",
       actor_mri: "8:orgid:riley",
       source_thread_id: thread(0),
+      source_message_id: msg(0, 100),
       preview: "Sounds good to me",
       timestamp: now - 4 * 60_000,
       count: 1,
@@ -795,6 +801,7 @@ function notificationsFeed(): MockNotification[] {
       actor_name: "Morgan Ellis",
       actor_mri: "8:orgid:morgan",
       source_thread_id: thread(1),
+      source_message_id: msg(1, 96),
       preview: "Can I deploy to staging real quick?",
       timestamp: now - 55 * 60_000,
       count: 1,
@@ -807,6 +814,7 @@ function notificationsFeed(): MockNotification[] {
       actor_name: "Jordan Blake",
       actor_mri: "8:orgid:jordan",
       source_thread_id: thread(2),
+      source_message_id: msg(2, 90),
       preview: "I don't think so, we'd have had feedback otherwise",
       timestamp: now - 3 * 3_600_000,
       count: 1,
@@ -1068,6 +1076,10 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         actor_mri: "8:orgid:riley",
         source_thread_id:
           typeof body.source_thread_id === "string" ? body.source_thread_id : (order[0] ?? ""),
+        source_message_id:
+          typeof body.source_message_id === "string"
+            ? body.source_message_id
+            : `${order[0] ?? ""}#118`,
         preview: typeof body.preview === "string" ? body.preview : "reacted to your message",
         timestamp: Date.now(),
         count: 1,

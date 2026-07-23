@@ -61,6 +61,10 @@ export type AppState = {
   notifications: Notification[];
   /** Count the bell badges (Teams' unread count, cleared locally when seen). */
   notificationsUnread: number;
+  /** A pending request to scroll the open conversation to a specific message
+   *  (set when a notification is opened). The pane consumes it, paging older if
+   *  needed, then clears it. `nonce` lets the same target retrigger. */
+  pendingScroll: { convId: string; messageId: string; nonce: number } | null;
   /** User appearance preference (System follows the OS). */
   appearance: Appearance;
   /** Concrete theme currently applied to <html> (what CSS keys off). */
@@ -89,6 +93,7 @@ function initialState(): AppState {
     replyingTo: null,
     notifications: [],
     notificationsUnread: 0,
+    pendingScroll: null,
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
   };
@@ -285,6 +290,27 @@ export class TeamsController {
    *  the live-event refresh so rapid opens don't stack network calls. */
   reloadNotifications(): void {
     void this.refreshNotifications();
+  }
+
+  private scrollNonce = 0;
+
+  /** Ask the open pane to scroll to a specific message once it is loaded (the
+   *  pane pages older until it appears, then highlights it). Used when a
+   *  notification is opened so the user lands on the reacted-to message, not the
+   *  bottom of the chat. A no-op target id clears any pending request. */
+  requestScrollToMessage(convId: string, messageId: string): void {
+    if (!messageId) {
+      if (this.get().pendingScroll) this.set({ pendingScroll: null });
+      return;
+    }
+    this.scrollNonce += 1;
+    this.set({ pendingScroll: { convId, messageId, nonce: this.scrollNonce } });
+  }
+
+  /** Clear a consumed (or abandoned) scroll request, guarded by nonce so a newer
+   *  request set in the meantime is never dropped. */
+  clearScrollTarget(nonce: number): void {
+    if (this.get().pendingScroll?.nonce === nonce) this.set({ pendingScroll: null });
   }
 
   async openConversation(id: string): Promise<void> {

@@ -42,6 +42,10 @@ export function NotificationsBell() {
 
   const openThread = (n: Notification) => {
     if (!n.source_thread_id) return;
+    // Land on the reacted-to/replied-to message, not the bottom of the chat. The
+    // pane consumes this once the conversation is open (paging older if needed);
+    // an empty/unlocatable id just opens the conversation normally.
+    controller.requestScrollToMessage(n.source_thread_id, n.source_message_id);
     void navigate({ to: "/c/$conversationId", params: { conversationId: n.source_thread_id } });
   };
 

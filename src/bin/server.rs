@@ -721,6 +721,7 @@ fn notifications_json(items: &[teams_activity::Notification]) -> Value {
                 "actor_name": n.actor_name,
                 "actor_mri": n.actor_mri,
                 "source_thread_id": n.source_thread_id,
+                "source_message_id": n.source_message_id,
                 "preview": n.preview,
                 "timestamp": n.timestamp_ms,
                 "count": n.count,

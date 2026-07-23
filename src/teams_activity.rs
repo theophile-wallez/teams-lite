@@ -48,6 +48,11 @@ pub struct Notification {
     pub actor_mri: String,
     /// The chat/channel the activity happened in, so the UI can open it.
     pub source_thread_id: String,
+    /// The message the activity targets (the one that was reacted to / replied
+    /// to). For chat reactions this equals that message's `id` in the source
+    /// thread, so the UI can deep-link and scroll to it; may be empty for
+    /// activities that carry no specific target.
+    pub source_message_id: String,
     /// Short preview of the target message (may be "image", a filename, etc.).
     pub preview: String,
     /// When it happened (epoch ms).
@@ -87,6 +92,7 @@ pub fn parse_activity(frame: &Value) -> Option<Notification> {
         actor_name: field("sourceUserImDisplayName"),
         actor_mri: field("sourceUserId"),
         source_thread_id: field("sourceThreadId"),
+        source_message_id: id_to_string(activity.get("sourceMessageId")),
         preview: field("messagePreview"),
         timestamp_ms,
         count: parse_count(activity.get("count")),
@@ -142,6 +148,17 @@ fn decode_properties(frame: &Value) -> Value {
         Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
         Some(v) => v.clone(),
         _ => Value::Null,
+    }
+}
+
+/// Teams sends message ids as a JSON number on the read API but sometimes as a
+/// string on other shapes; render either as the plain decimal string that
+/// matches a stored message `id`. Empty when absent.
+fn id_to_string(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
     }
 }
 
@@ -211,6 +228,7 @@ mod tests {
         assert_eq!(n.actor_name, "Clément DELBARRE");
         assert_eq!(n.actor_mri, "8:orgid:bea5de00");
         assert_eq!(n.source_thread_id, "19:abc_def@unq.gbl.spaces");
+        assert_eq!(n.source_message_id, "1784734634778");
         assert_eq!(n.preview, "0 pause quoi");
         assert_eq!(n.count, 1);
         assert!(!n.is_read);

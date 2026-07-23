@@ -18,6 +18,7 @@ function notification(over: Partial<Notification> = {}): Notification {
     actor_name: "Clément DELBARRE",
     actor_mri: "8:orgid:abc",
     source_thread_id: "19:abc@unq.gbl.spaces",
+    source_message_id: "1784000000001",
     preview: "the target message",
     timestamp: 1_784_000_000_000,
     count: 1,
