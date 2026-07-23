@@ -8,8 +8,18 @@ import { Composer } from "./composer";
 import { TypingIndicator } from "./typing-indicator";
 import { Button } from "./ui/button";
 
-const PREPEND_TRIGGER_PX = 160;
+// Start prefetching older history well before the user reaches the very top, so
+// pages stream in off-screen and a gap in the backlog is rarely perceived. The
+// look-ahead is expressed in viewport heights (with a px floor for short panes).
+const PREPEND_TRIGGER_SCREENS = 2;
+const PREPEND_TRIGGER_MIN_PX = 600;
 const STICKY_BOTTOM_PX = 80;
+
+/** How close to the top (in px) the viewport must get before older history is
+ *  prefetched — a couple of screens ahead so loading stays invisible. */
+function prependTriggerPx(el: HTMLElement): number {
+  return Math.max(PREPEND_TRIGGER_MIN_PX, el.clientHeight * PREPEND_TRIGGER_SCREENS);
+}
 // Deep-link scroll: how many older pages to page through looking for the target
 // message before giving up, and how long to keep it visually highlighted.
 const MAX_SCROLL_PAGES = 20;
@@ -40,6 +50,11 @@ export function MessagePane() {
   const atBottomRef = useRef(true);
   const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const prevOpenIdRef = useRef<string | null>(null);
+  // Track the oldest message id + count across renders so we can tell an actual
+  // older-history prepend apart from intermediate re-renders (e.g. the loading
+  // flag toggling) or a live append at the bottom.
+  const prevOldestIdRef = useRef<string | null>(null);
+  const prevMessageCountRef = useRef(0);
   // Bounded paging budget for the current deep-link target, reset per nonce.
   const scrollAttemptsRef = useRef(0);
   const scrollNonceRef = useRef(-1);
@@ -61,7 +76,7 @@ export function MessagePane() {
     if (!el) return;
     const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     atBottomRef.current = distanceToBottom < STICKY_BOTTOM_PX;
-    if (el.scrollTop < PREPEND_TRIGGER_PX && hasMoreOlder && !loadingOlder && !olderError) {
+    if (el.scrollTop < prependTriggerPx(el) && hasMoreOlder && !loadingOlder && !olderError) {
       prependAnchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
       void controller.loadOlderMessages();
     }
@@ -76,6 +91,21 @@ export function MessagePane() {
     if (!el) return;
     const openChanged = prevOpenIdRef.current !== openId;
     prevOpenIdRef.current = openId;
+
+    // A real older-history prepend is the only change that must re-anchor the
+    // viewport: the list grew *and* its oldest message changed. Intermediate
+    // re-renders (the loading flag flipping) and live appends at the bottom
+    // leave the oldest id untouched, so they must not consume the anchor — doing
+    // so before the prepended rows actually mount is what made the view jump to
+    // the top of the freshly loaded page.
+    const oldestId = messages[0]?.id ?? null;
+    const prepended =
+      !openChanged &&
+      messages.length > prevMessageCountRef.current &&
+      oldestId !== null &&
+      oldestId !== prevOldestIdRef.current;
+    prevOldestIdRef.current = oldestId;
+    prevMessageCountRef.current = messages.length;
 
     const target = pendingScroll && pendingScroll.convId === openId ? pendingScroll : null;
     if (target) {
@@ -117,11 +147,23 @@ export function MessagePane() {
     }
 
     const anchor = prependAnchorRef.current;
-    if (anchor) {
+    if (prepended && anchor) {
+      // Older history just mounted above the viewport. Restore the exact prior
+      // offset plus the height added on top so the message the user was reading
+      // stays put. An absolute offset (not `+=`) is deliberate: at the very top
+      // the browser suppresses its own scroll anchoring, so this is the only
+      // thing keeping the view from snapping to the top of the new page.
       el.scrollTop = anchor.scrollTop + (el.scrollHeight - anchor.scrollHeight);
       prependAnchorRef.current = null;
       maybeFill();
-    } else if (atBottomRef.current) {
+      return;
+    }
+
+    // A backfill settled without prepending (empty page or error): drop the now
+    // stale anchor so a later bottom append can't get wrongly repositioned.
+    if (anchor && !loadingOlder) prependAnchorRef.current = null;
+
+    if (atBottomRef.current) {
       el.scrollTop = el.scrollHeight;
     }
   }, [messages, openId, maybeFill, pendingScroll, hasMoreOlder, loadingOlder, loadingMessages, controller]);
