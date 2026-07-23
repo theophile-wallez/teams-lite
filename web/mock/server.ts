@@ -71,7 +71,18 @@ type ChatMessage = {
   content: string; // HTML-ish, as Teams sends it
   attachments?: Attachment[]; // file/card attachments (inline images live in content)
   reactions?: Reaction[]; // aggregated per emotion (key + count + whether ours)
+  system_event?: SystemEvent; // when set, rendered as a centered system line
   is_self?: boolean;
+};
+
+// A structured system/activity event (mirrors protocol.ts SystemEvent and the Rust
+// `system_event_value` wire shape). Currently only call/meeting events.
+type SystemEvent = {
+  kind: "call";
+  event: "ended" | "missed" | "started";
+  duration_seconds?: number;
+  participant_count?: number;
+  participants?: string[];
 };
 
 // Aggregated reaction on a message (mirrors protocol.ts Reaction / the Rust
@@ -442,13 +453,23 @@ function generateBacklog(
 }
 
 /** Recompute the sidebar summary fields from the newest message. */
+/** Short sidebar label for a call/meeting system event (mirrors the backend's
+ *  `call_event_label` in src/teams_read.rs). */
+function callEventSidebarLabel(event: SystemEvent): string {
+  if (event.event === "missed") return "Missed call";
+  if (event.event === "started") return "Call started";
+  return "Call ended";
+}
+
 function recomputeSummary(cs: ConvState): void {
   const last = cs.messages.at(-1);
   if (!last) return;
   cs.conv.last_message_time = last.compose_time;
-  cs.conv.last_message_preview = previewOf(last.content);
-  cs.conv.last_message_sender = last.sender;
-  cs.conv.last_message_from_me = Boolean(last.is_self);
+  cs.conv.last_message_preview = last.system_event
+    ? callEventSidebarLabel(last.system_event)
+    : previewOf(last.content);
+  cs.conv.last_message_sender = last.system_event ? "" : last.sender;
+  cs.conv.last_message_from_me = Boolean(last.is_self) && !last.system_event;
 }
 
 /** Create one conversation with its backlog and register it in the store. */
@@ -671,10 +692,90 @@ function seedMediaSamples(): void {
   order.push(convId);
 }
 
-/** Register a dedicated "GitLab Links" conversation whose messages embed GitLab
- *  merge-request, issue, and project links (as real `<a href>` anchors, the way
- *  Teams delivers links), so the UI's rich link-preview cards are exercised. Its
- *  URLs resolve through the mock's `enrich_link`. Reached by name in the palette. */
+/** Register a dedicated "Call Events" conversation whose messages are call/meeting
+ *  system events (ended with a duration and roster, a missed call, a 1:1 call),
+ *  so the UI's centered `CallEventLine` (not a chat bubble) is exercised. Reached
+ *  by name in the command palette. */
+function seedCallEvents(): void {
+  const convId = "19:call-events-demo@thread.v2";
+  const other = PEOPLE[0]!;
+  const base = Date.now() - 20 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  let seq = 0;
+
+  const push = (
+    msg: Omit<ChatMessage, "id" | "conversation_id" | "seq" | "compose_time">,
+    offsetMs: number,
+  ): void => {
+    seq += 1;
+    messages.push({
+      id: `${convId}#${seq}`,
+      conversation_id: convId,
+      seq,
+      compose_time: base + offsetMs,
+      ...msg,
+    });
+  };
+
+  // A normal chat message, so the call lines sit among real bubbles.
+  push(
+    { sender: other.name, sender_mri: other.mri, content: escapeHtml("Jumping on a quick call."), is_self: false },
+    0,
+  );
+  // A group call that ended: duration + participant count show in the line.
+  push(
+    {
+      sender: "",
+      content: "",
+      system_event: {
+        kind: "call",
+        event: "ended",
+        duration_seconds: 600,
+        participant_count: 5,
+        participants: ["Leonor GROELL", "Clément DELBARRE", "Matthieu GAUCHER", "Clément BOSLE", "Théophile WALLEZ"],
+      },
+    },
+    60_000,
+  );
+  // A missed call (no duration), rendered with a red-ish accent.
+  push(
+    {
+      sender: "",
+      content: "",
+      system_event: { kind: "call", event: "missed", participant_count: 2 },
+    },
+    120_000,
+  );
+  // A 1:1 call that ended: only the duration, no participant count.
+  push(
+    {
+      sender: "",
+      content: "",
+      system_event: { kind: "call", event: "ended", duration_seconds: 1400, participant_count: 2 },
+    },
+    180_000,
+  );
+
+  const conv: Conversation = {
+    id: convId,
+    name: "Call Events",
+    last_message_time: 0,
+    kind: "group",
+    last_message_preview: "",
+    last_message_sender: "",
+    last_message_from_me: false,
+    is_read: true,
+    is_muted: false,
+    is_pinned: false,
+    is_hidden: false,
+    thread_type: "chat",
+    draft: "",
+  };
+  const cs: ConvState = { conv, messages, participants: [other] };
+  recomputeSummary(cs);
+  store.set(convId, cs);
+  order.push(convId);
+}
 function seedGitLabSamples(): void {
   const convId = "19:gitlab-links-demo@thread.v2";
   const other = PEOPLE[1]!;
@@ -1443,6 +1544,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
 
 seed();
 seedMediaSamples();
+seedCallEvents();
 seedGitLabSamples();
 
 const server = Bun.serve({

@@ -4,6 +4,7 @@ import { convLabel, copyableMessageText, type ChatMessage, type Conversation } f
 import { useAppState, useController } from "./controller-context";
 import { Avatar } from "./avatar";
 import { MessageBubble } from "./message-bubble";
+import { CallEventLine } from "./call-event-line";
 import { Composer } from "./composer";
 import { TypingIndicator } from "./typing-indicator";
 import { Button } from "./ui/button";
@@ -268,23 +269,27 @@ export function MessagePane() {
                 ) : null}
               </div>
             )}
-            {messages.map((m, i) => (
-              <MessageBubble
-                key={m.id}
-                message={m}
-                showSenderName={isGroup}
-                continuesAbove={sameAuthor(messages[i - 1], m)}
-                continuesBelow={sameAuthor(m, messages[i + 1])}
-                editing={editingId === m.id}
-                highlighted={highlightId === m.id}
-                onReply={doReply}
-                onCopy={doCopy}
-                onReact={doReact}
-                onStartEdit={doStartEdit}
-                onSaveEdit={doSaveEdit}
-                onCancelEdit={() => setEditingId(null)}
-              />
-            ))}
+            {messages.map((m, i) =>
+              m.system_event ? (
+                <CallEventLine key={m.id} event={m.system_event} />
+              ) : (
+                <MessageBubble
+                  key={m.id}
+                  message={m}
+                  showSenderName={isGroup}
+                  continuesAbove={sameAuthor(messages[i - 1], m)}
+                  continuesBelow={sameAuthor(m, messages[i + 1])}
+                  editing={editingId === m.id}
+                  highlighted={highlightId === m.id}
+                  onReply={doReply}
+                  onCopy={doCopy}
+                  onReact={doReact}
+                  onStartEdit={doStartEdit}
+                  onSaveEdit={doSaveEdit}
+                  onCancelEdit={() => setEditingId(null)}
+                />
+              ),
+            )}
           </div>
         )}
       </div>
@@ -301,9 +306,18 @@ export function MessagePane() {
   );
 }
 
-/** Two adjacent messages chain when they share the same author and side. */
+/** Two adjacent messages chain when they share the same author and side. A
+ *  system event (e.g. a call line) is never part of a run, so it breaks chaining
+ *  for its neighbours. */
 function sameAuthor(a: ChatMessage | undefined, b: ChatMessage | undefined): boolean {
-  return !!a && !!b && a.is_self === b.is_self && a.sender === b.sender;
+  return (
+    !!a &&
+    !!b &&
+    !a.system_event &&
+    !b.system_event &&
+    a.is_self === b.is_self &&
+    a.sender === b.sender
+  );
 }
 
 /** Find a rendered message bubble by id without CSS-selector escaping (message

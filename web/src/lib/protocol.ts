@@ -30,6 +30,20 @@ export type Reaction = {
   mine: boolean;
 };
 
+/** A structured system/activity event a message represents, rendered by the UI as
+ *  a centered line instead of a chat bubble (see `system_event_value` in
+ *  src/bin/server.rs and `CallEventLine`). Currently only call/meeting events. */
+export type SystemEvent = {
+  kind: "call";
+  /** "ended" (a completed call), "missed", or "started". */
+  event: "ended" | "missed" | "started";
+  /** Call length in seconds (longest participant duration); 0 when unknown. */
+  duration_seconds?: number;
+  participant_count?: number;
+  /** Display names of the participants, for a hover tooltip. */
+  participants?: string[];
+};
+
 export type Conversation = {
   id: string;
   name: string;
@@ -61,6 +75,9 @@ export type ChatMessage = {
   /** Reactions on the message (absent or empty when none). Aggregated per emotion
    *  by the backend; the UI maps each `key` to an emoji and shows a chip. */
   reactions?: Reaction[];
+  /** When present, this message is a system/activity event (e.g. a call ended) and
+   *  is rendered as a centered line, not a chat bubble; `content` is empty. */
+  system_event?: SystemEvent;
   is_self?: boolean;
 };
 
@@ -345,6 +362,36 @@ export function parseRichMessage(html: string): ParsedRichMessage {
 export function copyableMessageText(message: ChatMessage): string {
   const parsed = parseMessageContent(message.content);
   return parsed.body || parsed.quote?.text || "";
+}
+
+/** Compact, human call duration: "45s", "10 min", "1 h 05 min". */
+export function formatCallDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.round(seconds / 60);
+  if (mins < 60) return `${mins} min`;
+  const hours = Math.floor(mins / 60);
+  const rest = mins % 60;
+  return rest === 0 ? `${hours} h` : `${hours} h ${String(rest).padStart(2, "0")} min`;
+}
+
+/** A one-line label for a call/meeting system event, Teams-style, e.g.
+ *  "Call ended · 10 min · 5 participants". Duration is shown only for a completed
+ *  call, and the participant count only for a group (more than two people). Pure
+ *  and presentational — the UI renders it in a centered line (`CallEventLine`). */
+export function formatCallEvent(event: SystemEvent): string {
+  const base =
+    event.event === "missed"
+      ? "Missed call"
+      : event.event === "started"
+        ? "Call started"
+        : "Call ended";
+  const parts = [base];
+  if (event.event === "ended" && event.duration_seconds && event.duration_seconds > 0) {
+    parts.push(formatCallDuration(event.duration_seconds));
+  }
+  const count = event.participant_count ?? 0;
+  if (count > 2) parts.push(`${count} participants`);
+  return parts.join(" · ");
 }
 
 export function replyToPayload(message: ChatMessage, before: string, after: string): ReplyTo {

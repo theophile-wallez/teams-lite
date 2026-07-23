@@ -19,6 +19,8 @@ import {
   copyableMessageText,
   parseRichMessage,
   typingLabel,
+  formatCallEvent,
+  formatCallDuration,
 } from "./protocol";
 import type { ChatMessage, Conversation, MessagePage } from "./protocol";
 
@@ -508,5 +510,55 @@ describe("typingLabel", () => {
   it("de-duplicates repeated names and falls back to 'Someone' for blanks", () => {
     expect(typingLabel(["Clément", "Clément"])).toBe("Clément is typing");
     expect(typingLabel([""])).toBe("Someone is typing");
+  });
+});
+
+describe("formatCallDuration", () => {
+  it("shows seconds under a minute", () => {
+    expect(formatCallDuration(45)).toBe("45s");
+    expect(formatCallDuration(0)).toBe("0s");
+  });
+
+  it("rounds to whole minutes under an hour", () => {
+    expect(formatCallDuration(600)).toBe("10 min");
+    expect(formatCallDuration(1400)).toBe("23 min"); // 23.33 -> 23
+    expect(formatCallDuration(90)).toBe("2 min"); // 1.5 -> 2
+  });
+
+  it("shows hours and minutes past an hour", () => {
+    expect(formatCallDuration(3600)).toBe("1 h");
+    expect(formatCallDuration(3900)).toBe("1 h 05 min");
+    expect(formatCallDuration(7500)).toBe("2 h 05 min");
+  });
+});
+
+describe("formatCallEvent", () => {
+  it("labels a group call that ended with duration and participant count", () => {
+    expect(
+      formatCallEvent({ kind: "call", event: "ended", duration_seconds: 600, participant_count: 5 }),
+    ).toBe("Call ended · 10 min · 5 participants");
+  });
+
+  it("omits the participant count for a 1:1 call (two people)", () => {
+    expect(
+      formatCallEvent({ kind: "call", event: "ended", duration_seconds: 1400, participant_count: 2 }),
+    ).toBe("Call ended · 23 min");
+  });
+
+  it("shows a missed call with no duration", () => {
+    expect(formatCallEvent({ kind: "call", event: "missed", participant_count: 2 })).toBe(
+      "Missed call",
+    );
+  });
+
+  it("shows a started call and never a duration for it", () => {
+    expect(
+      formatCallEvent({ kind: "call", event: "started", duration_seconds: 999, participant_count: 5 }),
+    ).toBe("Call started · 5 participants");
+  });
+
+  it("degrades gracefully when duration is missing or zero", () => {
+    expect(formatCallEvent({ kind: "call", event: "ended" })).toBe("Call ended");
+    expect(formatCallEvent({ kind: "call", event: "ended", duration_seconds: 0 })).toBe("Call ended");
   });
 });
