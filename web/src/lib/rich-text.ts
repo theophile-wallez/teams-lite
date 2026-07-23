@@ -330,6 +330,26 @@ export function hasVisibleContent(nodes: RichNode[]): boolean {
 }
 
 /**
+ * Like {@link hasVisibleContent}, but images do NOT count as content. Used to
+ * tell an image-only message (text-free, just a picture) apart from one that
+ * also carries real text: the former drops its chat bubble.
+ */
+export function hasNonImageContent(nodes: RichNode[]): boolean {
+  return nodes.some((node) => {
+    if (node.type === "text") return node.text.trim().length > 0;
+    if (node.tag === "br" || node.tag === "img") return false;
+    return hasNonImageContent(node.children);
+  });
+}
+
+/** Whether the fragment contains at least one inline `<img>`. */
+export function containsImage(nodes: RichNode[]): boolean {
+  return nodes.some(
+    (node) => node.type === "element" && (node.tag === "img" || containsImage(node.children)),
+  );
+}
+
+/**
  * Collect every `http(s)` anchor href in a Teams HTML fragment, in document
  * order and de-duplicated. Reuses the same safe allowlist parser used to render,
  * so only real `<a href>` links are returned (never a URL that merely appears in

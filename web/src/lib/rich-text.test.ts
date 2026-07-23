@@ -4,9 +4,11 @@
 import { describe, it, expect } from "vitest";
 import {
   parseRichHtml,
+  containsImage,
   decodeEntities,
   dropLinks,
   extractLinks,
+  hasNonImageContent,
   hasVisibleContent,
   serializeTeamsHtml,
   type RichNode,
@@ -242,6 +244,31 @@ describe("hasVisibleContent", () => {
   it("is true when there is text or an image", () => {
     expect(hasVisibleContent(parseRichHtml("<p>hi</p>"))).toBe(true);
     expect(hasVisibleContent(parseRichHtml('<img src="https://x/y.png">'))).toBe(true);
+  });
+});
+
+describe("hasNonImageContent", () => {
+  it("is false when the fragment is empty, whitespace, or only images", () => {
+    expect(hasNonImageContent(parseRichHtml(""))).toBe(false);
+    expect(hasNonImageContent(parseRichHtml("<p>   </p>"))).toBe(false);
+    expect(hasNonImageContent(parseRichHtml('<img src="https://x/y.png">'))).toBe(false);
+    // Images wrapped in blocks / accompanied only by <br> still count as empty.
+    expect(hasNonImageContent(parseRichHtml('<p><img src="https://x/y.png"></p><br>'))).toBe(false);
+  });
+  it("is true as soon as there is real text alongside an image", () => {
+    expect(hasNonImageContent(parseRichHtml("<p>hi</p>"))).toBe(true);
+    expect(hasNonImageContent(parseRichHtml('caption <img src="https://x/y.png">'))).toBe(true);
+  });
+});
+
+describe("containsImage", () => {
+  it("detects an inline image, however nested", () => {
+    expect(containsImage(parseRichHtml('<img src="https://x/y.png">'))).toBe(true);
+    expect(containsImage(parseRichHtml('<p>a <img src="https://x/y.png"> b</p>'))).toBe(true);
+  });
+  it("is false when there is no image", () => {
+    expect(containsImage(parseRichHtml("<p>just text</p>"))).toBe(false);
+    expect(containsImage(parseRichHtml(""))).toBe(false);
   });
 });
 
