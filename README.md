@@ -173,12 +173,13 @@ cd ui && bun run start            # terminal UI
 cd web && bun run dev             # then, in another shell: bun run mock
 #
 #   …or drive the REAL backend + web dev server yourself, two terminals from web/.
-#   `dev:server` runs the backend with idle-exit disabled (TEAMS_NO_IDLE_EXIT) so
-#   it stays up across browser reloads/inactivity and only stops on Ctrl+C —
-#   without that, the backend self-terminates a few seconds after the last client
-#   disconnects (the orphan safety net for the UI-owned model):
+#   `dev:server` runs the backend from source with idle-exit disabled
+#   (TEAMS_NO_IDLE_EXIT) so it stays up across browser reloads/inactivity and only
+#   stops on Ctrl+C, and it bridges D-Bus to the Identity Broker the same way the
+#   production launcher does (so sign-in works from source, incl. containerized
+#   Intune). See bin/teams-dev-server.sh:
 cd web
-bun run dev:server                # terminal 1  (real backend, kept alive)
+bun run dev:server                # terminal 1  (real backend, authed + kept alive)
 bun run dev                       # terminal 2  (Vite HMR against :8420)
 
 # 3b. …or produce the single `teams` binary (backend + web UI embedded)
