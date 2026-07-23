@@ -80,6 +80,7 @@ pub async fn run(
     creds: impl CredentialProvider,
     epid: String,
     events: mpsc::UnboundedSender<Vec<Message>>,
+    typing: mpsc::UnboundedSender<crate::trouter_events::TypingEvent>,
     status: mpsc::UnboundedSender<Status>,
 ) {
     let http = match reqwest::Client::builder().user_agent(UA).http1_only().build() {
@@ -93,7 +94,7 @@ pub async fn run(
         // etc.) treat it like a disconnect and back off. connect_once only
         // returns on disconnect/error, so we ignore its result either way.
         if let Ok(Credentials { session, ic3 }) = creds.credentials().await {
-            let _ = connect_once(&http, &session, &ic3, &epid, &events, &status).await;
+            let _ = connect_once(&http, &session, &ic3, &epid, &events, &typing, &status).await;
         }
         // If the consumer is gone, stop.
         if events.is_closed() || status.is_closed() {
@@ -112,6 +113,7 @@ async fn connect_once(
     ic3: &str,
     epid: &str,
     events: &mpsc::UnboundedSender<Vec<Message>>,
+    typing: &mpsc::UnboundedSender<crate::trouter_events::TypingEvent>,
     status: &mpsc::UnboundedSender<Status>,
 ) -> Result<()> {
     // 1. trouter connect
@@ -202,11 +204,18 @@ async fn connect_once(
                                 let ack = json!({"id": id, "status": 200, "body": ""});
                                 write.send(WsMessage::Text(format!("3:::{ack}"))).await?;
 
-                                // decode + emit any chat messages (non-message pushes -> empty)
-                                if let Ok(msgs) = crate::trouter_events::messages_from_request(&reqv)
-                                    && !msgs.is_empty() && events.send(msgs).is_err() {
+                                // decode once, fan out chat messages + typing signals
+                                // (non-message pushes decode to empty and cost nothing).
+                                if let Ok(rt) = crate::trouter_events::realtime_from_request(&reqv) {
+                                    if !rt.messages.is_empty() && events.send(rt.messages).is_err() {
                                         return Ok(()); // consumer gone
                                     }
+                                    for t in rt.typing {
+                                        // A dropped typing receiver is non-fatal: presence is
+                                        // best-effort, so keep the chat stream alive.
+                                        let _ = typing.send(t);
+                                    }
+                                }
                             }
                     }
                     _ => {}
@@ -356,10 +365,11 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let provider = CountingProvider { calls: calls.clone() };
         let (ev_tx, ev_rx) = mpsc::unbounded_channel::<Vec<Message>>();
+        let (ty_tx, _ty_rx) = mpsc::unbounded_channel::<crate::trouter_events::TypingEvent>();
         let (st_tx, mut st_rx) = mpsc::unbounded_channel::<Status>();
 
         let handle = tokio::spawn(async move {
-            run(provider, "epid-test".to_string(), ev_tx, st_tx).await;
+            run(provider, "epid-test".to_string(), ev_tx, ty_tx, st_tx).await;
         });
 
         // Wait until the provider has been asked at least twice (proves it was

@@ -17,6 +17,7 @@ import {
   replyToPayload,
   copyableMessageText,
   parseRichMessage,
+  typingLabel,
 } from "./protocol";
 import type { ChatMessage, Conversation, MessagePage } from "./protocol";
 
@@ -461,5 +462,32 @@ describe("copyableMessageText / replyToPayload", () => {
   it("defaults sender_mri to an empty string when the message has none", () => {
     const msg = message(8, { content: "<p>x</p>", sender_mri: undefined });
     expect(replyToPayload(msg, "", "").sender_mri).toBe("");
+  });
+});
+
+describe("typingLabel", () => {
+  it("returns an empty string when nobody is typing", () => {
+    expect(typingLabel([])).toBe("");
+  });
+
+  it("renders a single typist by first name", () => {
+    expect(typingLabel(["Clément BOSLE"])).toBe("Clément is typing");
+  });
+
+  it("joins two typists with 'and'", () => {
+    expect(typingLabel(["Clément BOSLE", "Théophile WALLEZ"])).toBe(
+      "Clément and Théophile are typing",
+    );
+  });
+
+  it("summarizes three or more typists", () => {
+    expect(typingLabel(["Clément BOSLE", "Théophile WALLEZ", "Henri SERANO", "Ghiles CHERFAOUI"])).toBe(
+      "Clément, Théophile and 2 more are typing",
+    );
+  });
+
+  it("de-duplicates repeated names and falls back to 'Someone' for blanks", () => {
+    expect(typingLabel(["Clément", "Clément"])).toBe("Clément is typing");
+    expect(typingLabel([""])).toBe("Someone is typing");
   });
 });

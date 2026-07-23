@@ -10,7 +10,7 @@
 //   event    (server -> client):  { "event": "<name>", "data": {...} }   (no id)
 //
 // Methods: conversations | open | backfill | set_draft | send | edit | notifications
-// Events:  status | message | conversations_changed | notifications_changed | update_available
+// Events:  status | message | conversations_changed | notifications_changed | typing | update_available
 //
 // No raw tokens are ever logged or sent.
 
@@ -28,6 +28,7 @@ use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
     auth, retry, teams, teams_activity, teams_media, teams_profiles, teams_read, teams_send, trouter,
+    trouter_events,
 };
 
 const ADDR: &str = "127.0.0.1:8420";
@@ -961,6 +962,8 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     let epid = trouter::load_or_create_epid(&epid_path);
 
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Message>>();
+    let (ty_tx, mut ty_rx) =
+        tokio::sync::mpsc::unbounded_channel::<trouter_events::TypingEvent>();
     let (st_tx, mut st_rx) = tokio::sync::mpsc::unbounded_channel::<trouter::Status>();
 
     // consume trouter messages: persist + broadcast. self identity is stable
@@ -1006,8 +1009,38 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
         }
     });
 
+    // trouter typing signals -> `typing` event. Ephemeral presence: resolve the
+    // sender MRI to a display name from what the store already holds (no network),
+    // drop our own echo, and never touch the activity-feed thread.
+    let ctx_ty = ctx.clone();
+    let self_mri_ty = session.self_mri.to_string();
     tokio::spawn(async move {
-        trouter::run(ctx, epid, ev_tx, st_tx).await;
+        while let Some(t) = ty_rx.recv().await {
+            if t.sender_mri == self_mri_ty {
+                continue; // don't show ourselves typing
+            }
+            if teams_activity::is_notifications_thread(&t.conversation_id) {
+                continue; // the activity feed is not a chat
+            }
+            let sender = ctx_ty
+                .store()
+                .ok()
+                .and_then(|s| s.display_name_for_mri(&t.sender_mri).ok().flatten())
+                .unwrap_or_default();
+            ctx_ty.emit(
+                "typing",
+                json!({
+                    "conversation_id": t.conversation_id,
+                    "sender_mri": t.sender_mri,
+                    "sender": sender,
+                    "is_typing": t.is_typing,
+                }),
+            );
+        }
+    });
+
+    tokio::spawn(async move {
+        trouter::run(ctx, epid, ev_tx, ty_tx, st_tx).await;
     });
 }
 

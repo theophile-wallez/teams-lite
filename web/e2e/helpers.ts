@@ -71,6 +71,18 @@ export async function emitNotification(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Broadcast a typing/presence signal through the mock's gated test hook. */
+export async function emitTyping(
+  page: Page,
+  body: { conversation: string; sender?: string; sender_mri?: string; is_typing?: boolean },
+): Promise<void> {
+  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
+  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+    data: { kind: "typing", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Filter out benign console noise so `consoleErrors` only holds real problems. */
 export function realErrors(errors: string[]): string[] {
   return errors.filter(

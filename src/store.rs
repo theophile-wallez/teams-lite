@@ -525,6 +525,28 @@ impl Store {
         Ok(name)
     }
 
+    /// Resolve a display name for a sender MRI from the messages we already hold.
+    /// Used by the typing indicator: a `Control/Typing` frame carries the typer's
+    /// MRI but no display name, and this is a local, network-free lookup (in a
+    /// group chat the person has almost always sent a message we've stored).
+    /// Returns the most recent non-empty `sender` for that MRI, or None.
+    pub fn display_name_for_mri(&self, sender_mri: &str) -> Result<Option<String>> {
+        if sender_mri.is_empty() {
+            return Ok(None);
+        }
+        let name: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT sender FROM messages
+                 WHERE sender_mri = ?1 AND sender <> ''
+                 ORDER BY seq DESC LIMIT 1",
+                params![sender_mri],
+                |r| r.get(0),
+            )
+            .ok();
+        Ok(name)
+    }
+
     /// The newest `limit` messages of a conversation, ordered oldest -> newest (for display).
     pub fn newest_messages(&self, conversation_id: &str, limit: i64) -> Result<Vec<Message>> {
         let sql = format!(
@@ -719,6 +741,28 @@ mod tests {
         assert_eq!(s.oldest_cursor("c1").unwrap(), (None, true));
         s.set_oldest_cursor("c1", Some("cursor-xyz"), false).unwrap();
         assert_eq!(s.oldest_cursor("c1").unwrap(), (Some("cursor-xyz".to_string()), false));
+    }
+
+    #[test]
+    fn display_name_for_mri_uses_latest_known_sender() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 0).unwrap();
+        let mut with_mri = |seq: i64, name: &str, mri: &str| {
+            let mut m = msg("c1", seq);
+            m.sender = name.into();
+            m.sender_mri = mri.into();
+            s.insert_message(&m).unwrap();
+        };
+        with_mri(1, "Clément DELBARRE", "8:orgid:bea5de00");
+        with_mri(2, "Théophile WALLEZ", "8:orgid:2367c029");
+
+        assert_eq!(
+            s.display_name_for_mri("8:orgid:bea5de00").unwrap().as_deref(),
+            Some("Clément DELBARRE"),
+        );
+        // Unknown MRI and empty MRI resolve to None (caller falls back gracefully).
+        assert_eq!(s.display_name_for_mri("8:orgid:unknown").unwrap(), None);
+        assert_eq!(s.display_name_for_mri("").unwrap(), None);
     }
 
     #[test]

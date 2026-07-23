@@ -73,6 +73,22 @@ export type UpdateInfo = {
 
 export type LiveStatus = "connecting" | "connected" | "disconnected";
 
+/** Wire shape of the backend `typing` event (see src/bin/server.rs). Ephemeral
+ *  presence: `is_typing` is false when the sender stopped or just sent. `sender`
+ *  is the display name the backend resolved from `sender_mri` (may be empty when
+ *  unknown). */
+export type TypingSignal = {
+  conversation_id: string;
+  sender_mri: string;
+  sender: string;
+  is_typing: boolean;
+};
+
+/** Someone currently typing in a conversation, keyed by MRI so repeats from the
+ *  same person coalesce. */
+export type TypingName = { mri: string; name: string };
+
+
 /** One activity-feed entry (from the Teams `48:notifications` thread), decoded
  *  by the backend from `properties.activity`. Mirrors the Rust `Notification`
  *  (src/teams_activity.rs). All phrasing/emoji mapping happens in the UI (see
@@ -358,4 +374,25 @@ export function shouldNotify(
   if (msg.is_self) return false;
   if (openConversationId !== null && msg.conversation_id === openConversationId) return false;
   return true;
+}
+
+/**
+ * Human label for the people currently typing, e.g. "Clément is typing",
+ * "Clément and Théo are typing", or "Clément, Théo and 2 more are typing".
+ * First names keep the hint compact; an unknown name falls back to "Someone".
+ * Returns "" when nobody is typing (the indicator then renders nothing).
+ */
+export function typingLabel(names: string[]): string {
+  const unique = [...new Set(names.map((n) => firstName(n) || "Someone"))];
+  const [a, b] = unique;
+  switch (unique.length) {
+    case 0:
+      return "";
+    case 1:
+      return `${a} is typing`;
+    case 2:
+      return `${a} and ${b} are typing`;
+    default:
+      return `${a}, ${b} and ${unique.length - 2} more are typing`;
+  }
 }

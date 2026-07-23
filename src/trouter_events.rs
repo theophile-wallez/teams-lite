@@ -25,15 +25,34 @@ use std::io::Read;
 use crate::store::Message;
 use crate::teams_read;
 
+/// A live typing/presence signal for one conversation. `is_typing` is true for a
+/// `Control/Typing` frame (started) and false for `Control/ClearTyping` (stopped).
+/// Ephemeral — never persisted: the server resolves `sender_mri` to a display
+/// name and forwards it to the UIs, which show a transient "… is typing" hint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypingEvent {
+    pub conversation_id: String,
+    pub sender_mri: String,
+    pub is_typing: bool,
+}
+
+/// Everything one real-time push carries: chat messages plus typing signals.
+/// Both are decoded from the same EventMessage envelope, so we decode once and
+/// split, rather than running the (gzip/base64) pipeline twice.
+#[derive(Debug, Default, PartialEq)]
+pub struct Realtime {
+    pub messages: Vec<Message>,
+    pub typing: Vec<TypingEvent>,
+}
+
 /// Decode a Socket.IO "3:::" request payload (already stripped to the JSON object)
-/// and return any chat messages it carries. Returns an empty vec for non-message
-/// pushes (presence, thread updates, calls, etc.) — those are simply not our concern
-/// for slice 2.
-pub fn messages_from_request(request: &Value) -> Result<Vec<Message>> {
+/// and return everything it carries: chat messages and typing signals. Non-message
+/// pushes (presence, thread updates, calls, etc.) yield an empty result.
+pub fn realtime_from_request(request: &Value) -> Result<Realtime> {
     let url = request.get("url").and_then(|u| u.as_str()).unwrap_or("");
-    // Only chat traffic carries messages; skip everything else cheaply.
+    // Only chat traffic carries messages/typing; skip everything else cheaply.
     if !url.ends_with("/messaging") {
-        return Ok(Vec::new());
+        return Ok(Realtime::default());
     }
 
     let gzipped = request
@@ -46,10 +65,20 @@ pub fn messages_from_request(request: &Value) -> Result<Vec<Message>> {
     let payload = unwrap_nested(body_json)?;
 
     if payload.get("type").and_then(|t| t.as_str()) != Some("EventMessage") {
-        return Ok(Vec::new());
+        return Ok(Realtime::default());
     }
-    Ok(messages_from_event(&payload))
+    Ok(Realtime {
+        messages: messages_from_event(&payload),
+        typing: typing_from_event(&payload),
+    })
 }
+
+/// Back-compat convenience: just the chat messages from a push. Kept so callers
+/// (and tests) that only care about messages stay unchanged.
+pub fn messages_from_request(request: &Value) -> Result<Vec<Message>> {
+    Ok(realtime_from_request(request)?.messages)
+}
+
 
 /// Step 1: base64-decode + gunzip the outer body when it is gzip-encoded, then
 /// parse it as JSON. When not gzipped, the body is already a JSON string.
@@ -97,6 +126,39 @@ fn messages_from_event(event: &Value) -> Vec<Message> {
         return Vec::new();
     }
     teams_read::parse_message(resource, &conv_id).into_iter().collect()
+}
+
+/// Pull typing signals out of an EventMessage envelope. Teams delivers typing as
+/// a `NewMessage` resource whose `messagetype` is `Control/Typing` (started) or
+/// `Control/ClearTyping` (stopped) — the same channel as chat, which is exactly
+/// why `parse_message` drops them from history. Here we surface them instead as
+/// ephemeral presence, keyed by conversation and sender MRI. Other resource
+/// types and message types yield nothing.
+fn typing_from_event(event: &Value) -> Vec<TypingEvent> {
+    if event.get("resourceType").and_then(|r| r.as_str()) != Some("NewMessage") {
+        return Vec::new();
+    }
+    let Some(resource) = event.get("resource") else { return Vec::new() };
+    let messagetype = resource
+        .get("messagetype")
+        .or_else(|| resource.get("messageType"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    let is_typing = match messagetype {
+        "Control/Typing" => true,
+        "Control/ClearTyping" => false,
+        _ => return Vec::new(),
+    };
+    let conversation_id = conversation_id_of(resource);
+    let sender_mri = resource
+        .get("from")
+        .and_then(|x| x.as_str())
+        .map(teams_read::normalize_mri)
+        .unwrap_or_default();
+    if conversation_id.is_empty() || sender_mri.is_empty() {
+        return Vec::new();
+    }
+    vec![TypingEvent { conversation_id, sender_mri, is_typing }]
 }
 
 /// Extract the conversation id from a message resource. The live shape uses
@@ -275,5 +337,51 @@ mod tests {
         });
         let request = json!({ "url": "https://x/messaging", "headers": {}, "body": ev.to_string() });
         assert!(messages_from_request(&request).unwrap().is_empty());
+    }
+
+    fn control_event(messagetype: &str) -> Value {
+        json!({
+            "type": "EventMessage",
+            "resourceType": "NewMessage",
+            "resource": {
+                "id": "typing-1",
+                "messagetype": messagetype,
+                "content": "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:bea5de00",
+                "from": "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:bea5de00",
+                "conversationid": "19:abc@thread.v2"
+            }
+        })
+    }
+
+    #[test]
+    fn typing_signal_extracted_from_control_frame() {
+        // Control/Typing -> a typing signal (and no chat message), with the sender
+        // MRI normalized out of the contacts URL.
+        let req = json!({ "url": "https://x/messaging", "headers": {}, "body": control_event("Control/Typing").to_string() });
+        let rt = realtime_from_request(&req).unwrap();
+        assert!(rt.messages.is_empty(), "a typing frame is not a chat message");
+        assert_eq!(rt.typing.len(), 1);
+        let t = &rt.typing[0];
+        assert_eq!(t.conversation_id, "19:abc@thread.v2");
+        assert_eq!(t.sender_mri, "8:orgid:bea5de00");
+        assert!(t.is_typing);
+
+        // Control/ClearTyping -> a stop signal.
+        let req = json!({ "url": "https://x/messaging", "headers": {}, "body": control_event("Control/ClearTyping").to_string() });
+        let rt = realtime_from_request(&req).unwrap();
+        assert_eq!(rt.typing.len(), 1);
+        assert!(!rt.typing[0].is_typing);
+    }
+
+    #[test]
+    fn normal_message_carries_no_typing_signal() {
+        let request = json!({
+            "url": "https://x/messaging",
+            "headers": {},
+            "body": new_message_event().to_string()
+        });
+        let rt = realtime_from_request(&request).unwrap();
+        assert_eq!(rt.messages.len(), 1);
+        assert!(rt.typing.is_empty());
     }
 }

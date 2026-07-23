@@ -25,6 +25,8 @@ import {
   type MessagePage,
   type Notification,
   type ReplyTo,
+  type TypingName,
+  type TypingSignal,
   type UpdateInfo,
 } from "./protocol";
 import { coalesce } from "./singleflight";
@@ -65,6 +67,9 @@ export type AppState = {
    *  (set when a notification is opened). The pane consumes it, paging older if
    *  needed, then clears it. `nonce` lets the same target retrigger. */
   pendingScroll: { convId: string; messageId: string; nonce: number } | null;
+  /** People currently typing in the OPEN conversation (empty otherwise). Driven
+   *  by live `typing` events, keyed by MRI, and auto-expired. */
+  typing: TypingName[];
   /** User appearance preference (System follows the OS). */
   appearance: Appearance;
   /** Concrete theme currently applied to <html> (what CSS keys off). */
@@ -72,6 +77,10 @@ export type AppState = {
 };
 
 const DRAFT_SAVE_DELAY_MS = 150;
+// How long a "typing" signal lives without a refresh before we assume the person
+// stopped. Teams re-sends `Control/Typing` every few seconds while someone keeps
+// typing, so this is a safety net for a missed `Control/ClearTyping`.
+const TYPING_TIMEOUT_MS = 8000;
 
 function initialState(): AppState {
   return {
@@ -94,6 +103,7 @@ function initialState(): AppState {
     notifications: [],
     notificationsUnread: 0,
     pendingScroll: null,
+    typing: [],
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
   };
@@ -111,6 +121,14 @@ export class TeamsController {
   // Warm draft cache keyed by conversation (SQLite remains the durable source).
   private draftCache = new Map<string, string>();
   private draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  // Live typing presence per conversation: convId -> (senderMri -> {name, timer}).
+  // Non-reactive; the reactive `typing` slice is derived for the open conversation
+  // whenever this changes. Each entry self-expires via its timer.
+  private typingByConv = new Map<
+    string,
+    Map<string, { name: string; timer: ReturnType<typeof setTimeout> }>
+  >();
 
   // Media proxy cache: hosted-content URL -> a promise of a blob object URL.
   // Deduplicates concurrent loads of the same image and makes re-mounts/re-opens
@@ -174,6 +192,10 @@ export class TeamsController {
     this.detachDarkQuery();
     for (const t of this.draftSaveTimers.values()) clearTimeout(t);
     this.draftSaveTimers.clear();
+    for (const byMri of this.typingByConv.values()) {
+      for (const entry of byMri.values()) clearTimeout(entry.timer);
+    }
+    this.typingByConv.clear();
     for (const url of this.mediaObjectUrls) URL.revokeObjectURL(url);
     this.mediaObjectUrls = [];
     this.mediaCache.clear();
@@ -190,6 +212,11 @@ export class TeamsController {
       const m = raw as ChatMessage;
       const cached = this.messageCache.get(m.conversation_id);
       this.messageCache.set(m.conversation_id, appendLiveMessage(cached, m));
+      // A message from a sender means they stopped typing — clear their hint.
+      if (m.sender_mri) {
+        this.clearTyping(m.conversation_id, m.sender_mri);
+        this.syncTypingSlice(m.conversation_id);
+      }
       if (m.conversation_id === this.get().openId) {
         this.set({
           messages: this.messageCache.get(m.conversation_id)!.messages,
@@ -199,6 +226,8 @@ export class TeamsController {
       }
       void this.refreshConversations();
     });
+
+    on("typing", (raw) => this.onTyping(raw as TypingSignal));
 
     on("messages_updated", (raw) => {
       const d = raw as { conversation: string; messages: ChatMessage[]; has_more: boolean };
@@ -233,6 +262,62 @@ export class TeamsController {
         status: "backend lost — retries exhausted",
       }),
     );
+  }
+
+  // ---- typing presence -----------------------------------------------------
+
+  /** Fold a live `typing` signal into per-conversation presence and refresh the
+   *  open conversation's reactive slice. A `Control/Typing` (re)arms an expiry
+   *  timer; a `Control/ClearTyping` removes the person immediately. */
+  private onTyping(sig: TypingSignal): void {
+    const convId = sig.conversation_id;
+    const mri = sig.sender_mri;
+    if (!convId || !mri) return;
+
+    if (sig.is_typing) {
+      let byMri = this.typingByConv.get(convId);
+      if (!byMri) {
+        byMri = new Map();
+        this.typingByConv.set(convId, byMri);
+      }
+      const existing = byMri.get(mri);
+      if (existing) clearTimeout(existing.timer);
+      const timer = setTimeout(() => this.expireTyping(convId, mri), TYPING_TIMEOUT_MS);
+      byMri.set(mri, { name: sig.sender || "Someone", timer });
+    } else {
+      this.clearTyping(convId, mri);
+    }
+    this.syncTypingSlice(convId);
+  }
+
+  /** Remove one person's typing entry (they sent, stopped, or timed out). Pure:
+   *  callers refresh the reactive slice so a batch of clears renders once. */
+  private clearTyping(convId: string, mri: string): void {
+    const byMri = this.typingByConv.get(convId);
+    if (!byMri) return;
+    const entry = byMri.get(mri);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    byMri.delete(mri);
+    if (byMri.size === 0) this.typingByConv.delete(convId);
+  }
+
+  private expireTyping(convId: string, mri: string): void {
+    this.clearTyping(convId, mri);
+    this.syncTypingSlice(convId);
+  }
+
+  private typingNamesFor(convId: string): TypingName[] {
+    const byMri = this.typingByConv.get(convId);
+    if (!byMri) return [];
+    return [...byMri.entries()].map(([mri, e]) => ({ mri, name: e.name }));
+  }
+
+  /** Publish the typing slice for a conversation into reactive state, but only
+   *  when it is the open one — the indicator only ever renders in the open pane. */
+  private syncTypingSlice(convId: string): void {
+    if (convId !== this.get().openId) return;
+    this.set({ typing: this.typingNamesFor(convId) });
   }
 
   // ---- conversations -------------------------------------------------------
@@ -334,6 +419,7 @@ export class TeamsController {
       messages: cached?.messages ?? [],
       hasMoreOlder: cached?.has_more ?? false,
       loadingMessages: !cached,
+      typing: this.typingNamesFor(id),
     });
 
     try {

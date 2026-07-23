@@ -12,7 +12,7 @@
 //   event    (server -> client):  { "event": "<name>", "data": <v> }   (no id)
 //
 // Methods: ping | conversations | open | backfill | set_draft | send | edit
-// Events:  status | realtime_status | message | conversations_changed
+// Events:  status | realtime_status | message | conversations_changed | typing
 //
 // Run it (from the web/ directory):
 //   export PATH="$HOME/.bun/bin:$PATH"
@@ -1086,6 +1086,18 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         is_read: false,
       });
       broadcast("notifications_changed", {});
+      return Response.json({ ok: true }, { status: 200 });
+    }
+    // Broadcast a typing/presence signal, exactly like the Rust backend's
+    // `typing` event, so the E2E suite can drive the indicator deterministically.
+    if (body.kind === "typing") {
+      broadcast("typing", {
+        conversation_id:
+          typeof body.conversation === "string" ? body.conversation : (order[0] ?? ""),
+        sender_mri: typeof body.sender_mri === "string" ? body.sender_mri : "8:orgid:riley",
+        sender: typeof body.sender === "string" ? body.sender : "Riley Carter",
+        is_typing: body.is_typing === undefined ? true : Boolean(body.is_typing),
+      });
       return Response.json({ ok: true }, { status: 200 });
     }
     const conversation =

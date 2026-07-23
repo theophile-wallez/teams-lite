@@ -5,6 +5,7 @@ import { useAppState, useController } from "./controller-context";
 import { Avatar } from "./avatar";
 import { MessageBubble } from "./message-bubble";
 import { Composer } from "./composer";
+import { TypingIndicator } from "./typing-indicator";
 import { Button } from "./ui/button";
 
 const PREPEND_TRIGGER_PX = 160;
@@ -247,6 +248,7 @@ export function MessagePane() {
         </div>
       )}
 
+      <TypingIndicator />
       <Composer focusToken={focusToken} />
     </section>
   );
