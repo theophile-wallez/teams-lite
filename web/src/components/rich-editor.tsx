@@ -132,7 +132,9 @@ export function RichEditor(props: {
 
   if (!editor) {
     // Reserve the field height so the composer doesn't jump on hydration.
-    return <div className="min-h-[1.5rem] w-full py-1 text-sm text-text-faint" aria-hidden />;
+    return (
+      <div className="min-h-[1.5rem] w-full py-1 text-base text-text-faint md:text-sm" aria-hidden />
+    );
   }
 
   return (
@@ -144,7 +146,9 @@ export function RichEditor(props: {
       >
         <ToolbarButtons editor={editor} onLink={() => promptForLink(editor)} />
       </BubbleMenu>
-      <EditorContent editor={editor} data-testid="composer-rich" className="text-sm" />
+      {/* `text-base` (16px) on mobile stops iOS Safari auto-zooming on focus;
+          `md:text-sm` keeps 14px on desktop. */}
+      <EditorContent editor={editor} data-testid="composer-rich" className="text-base md:text-sm" />
     </div>
   );
 }

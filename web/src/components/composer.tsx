@@ -164,7 +164,9 @@ export function Composer(props: { focusToken: unknown }) {
             data-testid="composer"
             placeholder="Write a message…"
             className={cn(
-              "max-h-64 w-full resize-none bg-transparent px-1 py-1 text-sm outline-none placeholder:text-text-faint",
+              // `text-base` (16px) on mobile prevents iOS Safari from auto-zooming
+              // when the field is focused; `md:text-sm` restores 14px on desktop.
+              "max-h-64 w-full resize-none bg-transparent px-1 py-1 text-base outline-none md:text-sm placeholder:text-text-faint",
             )}
             onChange={(e) => controller.setDraftText(e.target.value)}
             onKeyDown={(e) => {
