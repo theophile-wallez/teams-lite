@@ -9,7 +9,14 @@ import {
   type Reaction,
 } from "~/lib/protocol";
 import { reactionEmoji, REACTION_PICKER } from "~/lib/notifications";
-import { dropLinks, extractLinks, hasVisibleContent, parseRichHtml } from "~/lib/rich-text";
+import {
+  containsImage,
+  dropLinks,
+  extractLinks,
+  hasNonImageContent,
+  hasVisibleContent,
+  parseRichHtml,
+} from "~/lib/rich-text";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
 import {
@@ -76,6 +83,11 @@ function useEnrichedLinks(urls: string[]): LinkResults {
  * GitLab links that resolve to a rich integration are shown as a preview card
  * and removed from the body text (never both). When the message is *only* such a
  * link, the bubble chrome is dropped entirely and just the card is shown.
+ *
+ * Likewise, a message that is *only* an image (inline or an image attachment,
+ * with no text) drops the bubble chrome so the picture stands alone. On an
+ * incoming image-only message the sender name still shows, floating in the void
+ * above the picture rather than inside a bubble.
  */
 export function MessageBubble(props: {
   message: ChatMessage;
@@ -118,17 +130,45 @@ export function MessageBubble(props: {
   }, [candidateLinks, enrichment]);
   const hiddenHrefs = useMemo(() => new Set(cards.map((c) => c.url)), [cards]);
 
-  // Whether the body still has visible content once the carded links are removed.
-  // When it doesn't (and there is a card, no quote, no attachments), the message
-  // is just an integration link → render only the card, without the bubble.
-  const bodyHasContent = useMemo(() => {
-    const has = (html?: string) =>
-      !!html && hasVisibleContent(dropLinks(parseRichHtml(html), hiddenHrefs));
-    return has(parsed.beforeHtml) || has(parsed.bodyHtml);
+  // The rendered body, split into its before-quote and main parts, each parsed
+  // to a node tree with carded links removed. Computed once so we can ask
+  // several questions of it (has text? has an image?) without re-parsing.
+  const bodyParts = useMemo(() => {
+    const parse = (html?: string) => (html ? dropLinks(parseRichHtml(html), hiddenHrefs) : []);
+    return [parse(parsed.beforeHtml), parse(parsed.bodyHtml)];
   }, [parsed, hiddenHrefs]);
-  const hasAttachments = (props.message.attachments?.length ?? 0) > 0;
+  // Any renderable content (text, links, lists, OR images) once carded links go.
+  const bodyHasContent = useMemo(() => bodyParts.some(hasVisibleContent), [bodyParts]);
+  // Real, non-image content — a text-free image body reads as empty here.
+  const bodyHasText = useMemo(() => bodyParts.some(hasNonImageContent), [bodyParts]);
+  // At least one inline image in the body.
+  const bodyHasImage = useMemo(() => bodyParts.some(containsImage), [bodyParts]);
+
+  const attachments = props.message.attachments ?? [];
+  const hasAttachments = attachments.length > 0;
+  const imageAttachments = attachments.filter((a) => a.kind === "image");
+
+  // When the message is *only* an integration link (a card, no quote, no
+  // attachments, no other body content), the bubble chrome is dropped and just
+  // the card is shown.
   const linkOnly =
     !props.editing && !parsed.quote && !hasAttachments && cards.length > 0 && !bodyHasContent;
+
+  // A media-only message: at least one image and nothing else — no text, no
+  // quote, no link card, and any attachments are images too. Such messages drop
+  // the bubble chrome so the picture stands alone (mine and incoming alike); an
+  // incoming one still shows the sender's name in the void above the image.
+  const hasImage = bodyHasImage || imageAttachments.length > 0;
+  const imageOnly =
+    !props.editing &&
+    !parsed.quote &&
+    cards.length === 0 &&
+    hasImage &&
+    !bodyHasText &&
+    imageAttachments.length === attachments.length;
+
+  // Media- and link-only messages render without the rounded, colored bubble.
+  const bare = linkOnly || imageOnly;
 
   // Only label the first message of a same-author run; continuations are clearly
   // from the same person.
@@ -186,23 +226,26 @@ export function MessageBubble(props: {
         data-message-id={props.message.id}
         data-highlighted={props.highlighted ? "true" : undefined}
         data-link-only={linkOnly ? "true" : undefined}
+        data-image-only={imageOnly ? "true" : undefined}
         className={cn(
           "relative text-sm leading-relaxed",
-          // Link-only messages drop the bubble chrome: the card is the surface.
-          linkOnly
-            ? "max-w-md"
-            : cn(
-                "max-w-[76%] rounded-2xl px-3.5 py-2",
-                mine
-                  ? "bg-bubble-mine text-bubble-mine-foreground shadow-chip"
-                  : "bg-bubble-incoming text-bubble-incoming-foreground shadow-card",
-                // Chained messages (same author, adjacent) flatten the touching
-                // corners on the author's anchor side — right for mine, left for
-                // incoming — so a run reads as one continuous block on that edge.
-                mine
-                  ? cn(props.continuesAbove && "rounded-tr-md", props.continuesBelow && "rounded-br-md")
-                  : cn(props.continuesAbove && "rounded-tl-md", props.continuesBelow && "rounded-bl-md"),
-              ),
+          // Media- and link-only messages drop the bubble chrome so the picture
+          // or card is the surface; a link card gets a tighter max width.
+          linkOnly && "max-w-md",
+          imageOnly && "max-w-[76%]",
+          !bare &&
+            cn(
+              "max-w-[76%] rounded-2xl px-3.5 py-2",
+              mine
+                ? "bg-bubble-mine text-bubble-mine-foreground shadow-chip"
+                : "bg-bubble-incoming text-bubble-incoming-foreground shadow-card",
+              // Chained messages (same author, adjacent) flatten the touching
+              // corners on the author's anchor side — right for mine, left for
+              // incoming — so a run reads as one continuous block on that edge.
+              mine
+                ? cn(props.continuesAbove && "rounded-tr-md", props.continuesBelow && "rounded-br-md")
+                : cn(props.continuesAbove && "rounded-tl-md", props.continuesBelow && "rounded-bl-md"),
+            ),
           // Deep-link highlight: a brief ring pulse when opened from a
           // notification, so the targeted message is unmistakable.
           props.highlighted &&
@@ -233,7 +276,10 @@ export function MessageBubble(props: {
         )}
 
         {nameShown && (
-          <div className="mb-0.5 text-xs font-semibold text-sender-name">
+          <div
+            data-testid="sender-name"
+            className="mb-0.5 text-xs font-semibold text-sender-name"
+          >
             {props.message.sender}
           </div>
         )}
@@ -287,7 +333,7 @@ export function MessageBubble(props: {
 
                 {hasAttachments ? (
                   <div className="mt-1.5 flex flex-col gap-1.5">
-                    {props.message.attachments!.map((att, i) =>
+                    {attachments.map((att, i) =>
                       att.kind === "image" ? (
                         <MediaImage key={`att-${i}-${att.url}`} src={att.url} alt={att.name} />
                       ) : (

@@ -90,4 +90,39 @@ test.describe("media (images + attachments)", () => {
     await lightbox.click({ position: { x: 8, y: 8 } });
     await expect(lightbox).toHaveCount(0);
   });
+
+  test("renders an image-only message without a bubble, mine and incoming alike", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    // An image I sent with no text drops the bubble chrome and carries no name.
+    const mine = page.locator('[data-testid="message"][data-image-only="true"][data-mine="true"]');
+    await expect(mine).toHaveCount(1);
+    await expect(mine.locator('[data-testid="message-image"]')).toHaveCount(1);
+    await expect(mine.locator('[data-testid="sender-name"]')).toHaveCount(0);
+
+    // An image someone else sent with no text also drops the bubble, but keeps
+    // the sender name floating in the void above the picture.
+    const incoming = page.locator(
+      '[data-testid="message"][data-image-only="true"][data-mine="false"]',
+    );
+    await expect(incoming).toHaveCount(1);
+    await expect(incoming.locator('[data-testid="message-image"]')).toHaveCount(1);
+    await expect(incoming.locator('[data-testid="sender-name"]')).toBeVisible();
+  });
+
+  test("keeps the bubble for a message that mixes an image with text", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    // The inline screenshot arrives with a sentence around it, so it is NOT
+    // image-only and keeps its bubble.
+    const withText = page
+      .locator('[data-testid="message"]', { hasText: "screenshot from the incident" })
+      .first();
+    await expect(withText.locator('[data-testid="message-image"]')).toHaveCount(1);
+    await expect(withText).not.toHaveAttribute("data-image-only", "true");
+  });
 });

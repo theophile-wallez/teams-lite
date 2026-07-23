@@ -533,9 +533,11 @@ function seed(): void {
 
 /** Register a dedicated "Media Gallery" conversation whose messages exercise the
  *  UI's inline-image and attachment rendering: a pasted screenshot embedded in
- *  the HTML, an image shared as an attachment, and a non-image file. It is a
- *  standalone conversation (not one the other specs mutate or reorder), so tests
- *  reach it deterministically by name via the command palette. */
+ *  the HTML, an image shared as an attachment, a non-image file, plus two
+ *  image-only messages (one mine, one incoming) that render without a bubble —
+ *  the incoming one keeping its sender name in the void above the picture. It is
+ *  a standalone conversation (not one the other specs mutate or reorder), so
+ *  tests reach it deterministically by name via the command palette. */
 function seedMediaSamples(): void {
   const convId = "19:media-gallery-demo@thread.v2";
   const other = PEOPLE[0]!;
@@ -613,6 +615,39 @@ function seedMediaSamples(): void {
       is_self: false,
     },
     180_000,
+  );
+  // 4. An image I sent with no text at all: an image-only message renders without
+  //    a bubble, the picture standing alone.
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content: "",
+      attachments: [
+        {
+          name: "sunset.png",
+          content_type: "image/png",
+          url: "https://eu-api.asm.skype.com/v1/objects/mock-img-att-2/views/original",
+          kind: "image",
+        },
+      ],
+      is_self: true,
+    },
+    240_000,
+  );
+  // 5. An inline image someone sent with no text. Following my message above, it
+  //    starts a fresh incoming run, so the sender name shows — floating in the
+  //    void above the picture rather than inside a bubble.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        `<img itemtype="http://schema.skype.com/AMSImage" ` +
+        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-2/views/imgo" alt="whiteboard"/>`,
+      is_self: false,
+    },
+    300_000,
   );
 
   const conv: Conversation = {
