@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
+    "dev:server": "TEAMS_NO_IDLE_EXIT=1 cargo run --bin server",
     "build": "vite build",
     "start": "bun run server.ts",
     "mock": "bun run mock/server.ts",

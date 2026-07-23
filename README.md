@@ -172,12 +172,14 @@ cd ui && bun run start            # terminal UI
 #   …or the web UI in dev (Vite + HMR), against a mock backend:
 cd web && bun run dev             # then, in another shell: bun run mock
 #
-#   …or drive the REAL backend yourself, two terminals. Set TEAMS_NO_IDLE_EXIT so
-#   the backend stays up across browser reloads/inactivity and only stops on Ctrl+C
-#   (without it, the backend self-terminates a few seconds after the last client
-#   disconnects — the orphan safety net for the UI-owned model):
-TEAMS_NO_IDLE_EXIT=1 ./target/release/server   # terminal 1  (or: cargo run --bin server)
-cd web && bun run dev                          # terminal 2  (HMR against :8420)
+#   …or drive the REAL backend + web dev server yourself, two terminals from web/.
+#   `dev:server` runs the backend with idle-exit disabled (TEAMS_NO_IDLE_EXIT) so
+#   it stays up across browser reloads/inactivity and only stops on Ctrl+C —
+#   without that, the backend self-terminates a few seconds after the last client
+#   disconnects (the orphan safety net for the UI-owned model):
+cd web
+bun run dev:server                # terminal 1  (real backend, kept alive)
+bun run dev                       # terminal 2  (Vite HMR against :8420)
 
 # 3b. …or produce the single `teams` binary (backend + web UI embedded)
 cargo build --release --bin server
