@@ -30,6 +30,11 @@ test.describe("message reactions", () => {
     await expect(chip).toContainText("1");
     await expect(chip).toHaveAttribute("data-mine", "true");
 
+    // Reacting closes the menu. Wait for it to fully dismiss before reopening —
+    // clicking the trigger while the close animation is still running races with
+    // Radix's toggle and can leave the menu shut (a real user is never that fast).
+    await expect(page.locator('[data-testid="menu-reaction-picker"]')).toHaveCount(0);
+
     // Reopening the menu now marks our reaction as active (highlighted).
     await bubble.hover();
     await bubble.locator('[data-testid="message-actions"]').click();
