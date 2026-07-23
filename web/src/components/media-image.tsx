@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Download, FileText, ImageOff, Loader2 } from "lucide-react";
+import { motion, useReducedMotion } from "motion/react";
 import { mediaNeedsProxy, type Attachment } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
@@ -16,6 +17,8 @@ import { useImageLightbox } from "./image-lightbox";
 export function MediaImage(props: { src: string; alt?: string; className?: string }) {
   const controller = useController();
   const { openImage } = useImageLightbox();
+  const reduceMotion = useReducedMotion();
+  const layoutId = useId();
   const proxied = mediaNeedsProxy(props.src);
   // Public images render straight from their URL; proxied ones wait for a blob.
   const [objectUrl, setObjectUrl] = useState<string | null>(proxied ? null : props.src);
@@ -75,20 +78,21 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
   return (
     <button
       type="button"
-      onClick={() => openImage(objectUrl, alt)}
+      onClick={() => openImage({ src: objectUrl, alt, layoutId: reduceMotion ? undefined : layoutId })}
       aria-label={props.alt ? `View image: ${props.alt}` : "View image"}
       className={cn(
-        "group block w-fit max-w-full cursor-zoom-in rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+        "block w-fit max-w-full cursor-zoom-in rounded-xl transition-opacity duration-150 ease-out hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
         props.className,
       )}
     >
-      <img
+      <motion.img
+        {...(reduceMotion ? {} : { layoutId })}
         data-testid="message-image"
         src={objectUrl}
         alt={alt}
         loading="lazy"
         onError={() => setFailed(true)}
-        className="max-h-80 max-w-full rounded-xl object-contain shadow-card transition-opacity duration-150 ease-out group-hover:opacity-95"
+        className="max-h-80 max-w-full rounded-xl object-contain shadow-card"
       />
     </button>
   );
