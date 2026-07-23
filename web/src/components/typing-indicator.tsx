@@ -9,8 +9,8 @@ import { useAppState } from "./controller-context";
  * (disabled under prefers-reduced-motion by the global rule in app.css).
  */
 export function TypingIndicator() {
-  const typing = useAppState((s) => s.typing);
-  if (typing.length === 0) return null;
+  const typing = useAppState((s) => (s.openId ? s.typingByConversation[s.openId] : undefined));
+  if (!typing || typing.length === 0) return null;
   const label = typingLabel(typing.map((t) => t.name));
   return (
     <div

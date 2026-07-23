@@ -58,4 +58,31 @@ test.describe("typing indicator", () => {
     await page.waitForTimeout(300);
     await expect(indicator).toHaveCount(0);
   });
+
+  test("surfaces typing on the sidebar row of another conversation", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0); // open the first conversation
+    const secondRow = page.locator('[data-testid="conversation-row"]').nth(1);
+    const secondId = await secondRow.getAttribute("data-conversation-id");
+    expect(secondId).toBeTruthy();
+
+    await emitTyping(page, {
+      conversation: secondId!,
+      sender: "Riley Carter",
+      sender_mri: "8:orgid:riley",
+    });
+    // The row's preview becomes the typing hint...
+    await expect(secondRow.getByTestId("conversation-typing")).toContainText("Riley is typing");
+    // ...while the open pane (a different conversation) stays quiet.
+    await expect(page.locator('[data-testid="typing-indicator"]')).toHaveCount(0);
+
+    // Stopping restores the normal preview.
+    await emitTyping(page, {
+      conversation: secondId!,
+      sender: "Riley Carter",
+      sender_mri: "8:orgid:riley",
+      is_typing: false,
+    });
+    await expect(secondRow.getByTestId("conversation-typing")).toHaveCount(0);
+  });
 });

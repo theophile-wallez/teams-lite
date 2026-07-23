@@ -67,9 +67,11 @@ export type AppState = {
    *  (set when a notification is opened). The pane consumes it, paging older if
    *  needed, then clears it. `nonce` lets the same target retrigger. */
   pendingScroll: { convId: string; messageId: string; nonce: number } | null;
-  /** People currently typing in the OPEN conversation (empty otherwise). Driven
-   *  by live `typing` events, keyed by MRI, and auto-expired. */
-  typing: TypingName[];
+  /** People currently typing, per conversation id (a key is present only while
+   *  someone is typing there). Drives both the message-pane hint and the sidebar
+   *  row preview. Keyed by MRI under the hood so repeats coalesce; each entry
+   *  auto-expires. */
+  typingByConversation: Record<string, TypingName[]>;
   /** User appearance preference (System follows the OS). */
   appearance: Appearance;
   /** Concrete theme currently applied to <html> (what CSS keys off). */
@@ -103,7 +105,7 @@ function initialState(): AppState {
     notifications: [],
     notificationsUnread: 0,
     pendingScroll: null,
-    typing: [],
+    typingByConversation: {},
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
   };
@@ -215,7 +217,7 @@ export class TeamsController {
       // A message from a sender means they stopped typing — clear their hint.
       if (m.sender_mri) {
         this.clearTyping(m.conversation_id, m.sender_mri);
-        this.syncTypingSlice(m.conversation_id);
+        this.publishTyping(m.conversation_id);
       }
       if (m.conversation_id === this.get().openId) {
         this.set({
@@ -287,11 +289,11 @@ export class TeamsController {
     } else {
       this.clearTyping(convId, mri);
     }
-    this.syncTypingSlice(convId);
+    this.publishTyping(convId);
   }
 
   /** Remove one person's typing entry (they sent, stopped, or timed out). Pure:
-   *  callers refresh the reactive slice so a batch of clears renders once. */
+   *  callers refresh reactive state so a batch of clears renders once. */
   private clearTyping(convId: string, mri: string): void {
     const byMri = this.typingByConv.get(convId);
     if (!byMri) return;
@@ -304,7 +306,7 @@ export class TeamsController {
 
   private expireTyping(convId: string, mri: string): void {
     this.clearTyping(convId, mri);
-    this.syncTypingSlice(convId);
+    this.publishTyping(convId);
   }
 
   private typingNamesFor(convId: string): TypingName[] {
@@ -313,11 +315,21 @@ export class TeamsController {
     return [...byMri.entries()].map(([mri, e]) => ({ mri, name: e.name }));
   }
 
-  /** Publish the typing slice for a conversation into reactive state, but only
-   *  when it is the open one — the indicator only ever renders in the open pane. */
-  private syncTypingSlice(convId: string): void {
-    if (convId !== this.get().openId) return;
-    this.set({ typing: this.typingNamesFor(convId) });
+  /** Publish a conversation's current typers into reactive state so the sidebar
+   *  row (and, when open, the message pane) updates. Preserves the array
+   *  references of other conversations so their rows don't re-render, and drops
+   *  the key entirely when nobody is typing there. */
+  private publishTyping(convId: string): void {
+    const names = this.typingNamesFor(convId);
+    const prev = this.get().typingByConversation;
+    if (names.length === 0) {
+      if (!(convId in prev)) return;
+      const next = { ...prev };
+      delete next[convId];
+      this.set({ typingByConversation: next });
+      return;
+    }
+    this.set({ typingByConversation: { ...prev, [convId]: names } });
   }
 
   // ---- conversations -------------------------------------------------------
@@ -419,7 +431,6 @@ export class TeamsController {
       messages: cached?.messages ?? [],
       hasMoreOlder: cached?.has_more ?? false,
       loadingMessages: !cached,
-      typing: this.typingNamesFor(id),
     });
 
     try {

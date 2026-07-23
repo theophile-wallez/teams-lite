@@ -2,7 +2,7 @@ import { useMemo, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { MoonStar, Search, Sun } from "lucide-react";
-import { convLabel, previewLine, type Conversation } from "~/lib/protocol";
+import { convLabel, previewLine, typingLabel, type Conversation } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { useAppState } from "./controller-context";
@@ -152,6 +152,9 @@ function ConversationRow(props: {
   const preview = previewLine(c);
   const label = convLabel(c);
   const time = useMemo(() => formatTime(c.last_message_time), [c.last_message_time]);
+  // Live typing wins over the last-message preview, exactly like Teams' sidebar.
+  const typers = useAppState((s) => s.typingByConversation[c.id]);
+  const typingText = typers && typers.length > 0 ? typingLabel(typers.map((t) => t.name)) : "";
 
   const emphasizeTitle = props.open || unread;
 
@@ -200,14 +203,28 @@ function ConversationRow(props: {
           )}
         </span>
         <span className="flex items-center gap-1.5">
-          <span
-            className={cn(
-              "flex-1 truncate text-xs",
-              props.open ? "text-text-dim" : unread ? "text-text-dim" : "text-text-faint",
-            )}
-          >
-            {preview || "\u00A0"}
-          </span>
+          {typingText ? (
+            <span
+              data-testid="conversation-typing"
+              className="flex flex-1 items-center gap-1.5 truncate text-xs text-primary"
+            >
+              <span className="typing-dots" aria-hidden="true">
+                <span className="typing-dot" />
+                <span className="typing-dot" />
+                <span className="typing-dot" />
+              </span>
+              <span className="truncate">{typingText}</span>
+            </span>
+          ) : (
+            <span
+              className={cn(
+                "flex-1 truncate text-xs",
+                props.open ? "text-text-dim" : unread ? "text-text-dim" : "text-text-faint",
+              )}
+            >
+              {preview || "\u00A0"}
+            </span>
+          )}
           {unread && (
             <span className="size-2 shrink-0 rounded-full bg-unread-dot" aria-hidden />
           )}
