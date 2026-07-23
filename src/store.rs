@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content         TEXT,
     attachments     TEXT NOT NULL DEFAULT '[]',
     reactions       TEXT NOT NULL DEFAULT '[]',
+    system_event    TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (conversation_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_msg_conv_seq ON messages(conversation_id, seq);
@@ -79,6 +80,14 @@ pub struct Message {
     /// simply didn't mention reactions. Reactions arrive as full snapshots (a
     /// whole-set overwrite), never incremental deltas.
     pub reactions: String,
+    /// The system/activity event this message represents, as a JSON object string,
+    /// or `""` for a normal chat message. When set, the UI renders a centered
+    /// system line (not a chat bubble) and `content` is empty. Currently only call
+    /// events, shape:
+    /// `{"kind":"call","event":"ended|missed|started","duration_seconds":600,"participant_count":5,"participants":["…"]}`.
+    /// Legacy rows stored before this column existed carry `""` and are upgraded
+    /// in place by [`Store::convert_legacy_call_events`].
+    pub system_event: String,
 }
 
 /// The nature of a conversation. Modeled as an enum (not a bool) because there
@@ -184,10 +193,11 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
             .get::<_, Option<String>>(8)?
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "[]".to_string()),
+        system_event: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
     })
 }
 
-const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions";
+const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event";
 
 /// Canonicalize an MRI for identity comparison: keep only the last path segment
 /// (so a `.../contacts/8:orgid:<guid>` URL becomes a bare MRI) and drop a leading
@@ -308,6 +318,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     // messages without reactions carry the empty-array default; the next network
     // sync or a live MessageUpdate backfills the real set.
     add_column("ALTER TABLE messages ADD COLUMN reactions TEXT NOT NULL DEFAULT '[]'")?;
+    // system_event: a structured system/activity event (currently call events) as
+    // a JSON object string, rendered by the UI as a centered line. Legacy rows get
+    // the empty default; `convert_legacy_call_events` upgrades raw call-event XML.
+    add_column("ALTER TABLE messages ADD COLUMN system_event TEXT NOT NULL DEFAULT ''")?;
 
     // Sidebar-fidelity columns (last-message preview + unread/muted/pinned/hidden
     // state), all sourced from the CSA `users/me` sync. Legacy rows get the
@@ -345,25 +359,24 @@ impl Store {
     }
 
     /// Delete control/system frames that older builds persisted as chat messages,
-    /// before ingestion started gating on `messagetype`. Three shapes leaked in:
+    /// before ingestion started gating on `messagetype`. Two shapes leaked in:
     ///   - typing/presence pushes whose body is a bare Skype notifications
-    ///     endpoint URL (`https://notifications.skype.net/…`),
+    ///     endpoint URL (`https://notifications.skype.net/…`), and
     ///   - `ThreadActivity` member/topic/policy changes whose body is a raw system
     ///     XML frame (`<partlist>`, `<addmember>`, `<topicupdate>`,
-    ///     `<meetingpolicyupdated>`, …), and
-    ///   - call/meeting events whose body opens with an `<ended>`/`<started>`
-    ///     marker and/or carries a `<callEventType>` element (e.g. the
-    ///     `<ended/><partlist>…</partlist>…<callEventType>callEnded</callEventType>`
-    ///     frame Teams sends when a call in the thread ends).
+    ///     `<meetingpolicyupdated>`, …).
+    ///
+    /// Call/meeting events are NOT deleted here — they carry useful information and
+    /// are upgraded into structured `system_event` rows by
+    /// [`Store::convert_legacy_call_events`] instead.
     ///
     /// A legitimate `RichText/Html` body never starts with any of these tokens
     /// (it begins with text or a standard HTML tag), a media/card body is a
-    /// `<URIObject>` (kept — a call-recording card carries a real title and link),
-    /// and chat content is never a bare push endpoint URL, so the match cannot hit
-    /// a real message. Meant to run once at startup (like the `48:notifications`
-    /// cleanup); idempotent, so a cleaned store deletes nothing on a later run.
-    /// Returns rows removed. `LIKE` is ASCII case-insensitive in SQLite, so tag
-    /// casing needs no extra patterns.
+    /// `<URIObject>`, and chat content is never a bare push endpoint URL, so the
+    /// match cannot hit a real message. Meant to run once at startup (like the
+    /// `48:notifications` cleanup); idempotent, so a cleaned store deletes nothing
+    /// on a later run. Returns rows removed. `LIKE` is ASCII case-insensitive in
+    /// SQLite, so tag casing needs no extra patterns.
     pub fn purge_control_frames(&self) -> Result<usize> {
         let n = self.conn.execute(
             "DELETE FROM messages WHERE
@@ -377,13 +390,49 @@ impl Store {
               OR content LIKE '<roleupdate%'
               OR content LIKE '<joiningenabledupdate%'
               OR content LIKE '<memberjoined%'
-              OR content LIKE '<meetingpolicyupdated%'
-              OR content LIKE '<ended%'
-              OR content LIKE '<started%'
-              OR content LIKE '%<callEventType>%'",
+              OR content LIKE '<meetingpolicyupdated%'",
             [],
         )?;
         Ok(n)
+    }
+
+    /// Upgrade call/meeting event rows that older builds stored as raw XML into the
+    /// structured `system_event` form the UI renders as a centered line. Finds rows
+    /// whose `content` still looks like a raw call frame and no `system_event` yet,
+    /// re-parses each via [`crate::teams_read::parse_call_event`], then blanks the
+    /// content and stores the parsed event.
+    ///
+    /// Meant to run once at startup (next to `purge_control_frames`); idempotent —
+    /// a converted row has empty content and an unparseable one is skipped, so a
+    /// later run converts nothing. Returns the number of rows upgraded.
+    pub fn convert_legacy_call_events(&self) -> Result<usize> {
+        let rows: Vec<(String, String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, conversation_id, content FROM messages
+                 WHERE system_event = ''
+                   AND (content LIKE '%<callEventType>%'
+                     OR content LIKE '<ended%'
+                     OR content LIKE '<started%')",
+            )?;
+            let mapped = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut converted = 0;
+        for (id, conversation_id, content) in rows {
+            // messagetype is unknown for a stored row, so rely on the content shape.
+            let Some(event) = crate::teams_read::parse_call_event("", &content) else {
+                continue;
+            };
+            self.conn.execute(
+                "UPDATE messages SET content = '', system_event = ?3
+                 WHERE conversation_id = ?1 AND id = ?2",
+                params![conversation_id, id, event.to_string()],
+            )?;
+            converted += 1;
+        }
+        Ok(converted)
     }
 
     /// Returns true when the row was newly inserted or an existing row actually
@@ -525,11 +574,11 @@ impl Store {
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
         let reactions = if m.reactions.is_empty() { "[]" } else { m.reactions.as_str() };
         let n = self.conn.execute(
-            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(conversation_id, id) DO UPDATE SET content = excluded.content
                  WHERE messages.content <> excluded.content",
-            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments, reactions],
+            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments, reactions, m.system_event],
         )?;
         Ok(n == 1)
     }
@@ -837,6 +886,7 @@ mod tests {
             content: format!("message {seq}"),
             attachments: "[]".into(),
             reactions: "[]".into(),
+            system_event: String::new(),
         }
     }
 
@@ -964,6 +1014,7 @@ mod tests {
             content: content.into(),
             attachments: "[]".into(),
             reactions: "[]".into(),
+            system_event: String::new(),
         };
 
         // Real chat messages that must survive — including one that merely mentions
@@ -973,17 +1024,18 @@ mod tests {
         s.insert_message(&frame("real1", "<p>hello world</p>")).unwrap();
         s.insert_message(&frame("real2", "<p>see https://notifications.skype.net/x</p>")).unwrap();
         s.insert_message(&frame("real3", "<URIObject type=\"Video.2/CallRecording.1\"><Title>Daily</Title><SessionEndReason value=\"CallEnded\" /></URIObject>")).unwrap();
+        // A call-ended event must NOT be purged — it is upgraded to a system_event
+        // by convert_legacy_call_events (see converts_legacy_call_events).
+        s.insert_message(&frame("call1", "<ended/><partlist alt=\"\"><part><displayName>Leonor GROELL</displayName><duration>600</duration></part></partlist><callEventType>callEnded</callEventType>")).unwrap();
         // Control/system frames that must be purged.
         s.insert_message(&frame("junk1", "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:bea5de00")).unwrap();
         s.insert_message(&frame("junk2", "<partlist alt=\"\"><part/></partlist>")).unwrap();
         s.insert_message(&frame("junk3", "<addmember><target>8:orgid:x</target></addmember>")).unwrap();
         s.insert_message(&frame("junk4", "<topicupdate><value>New</value></topicupdate>")).unwrap();
         s.insert_message(&frame("junk5", "<meetingpolicyupdated><value>x</value></meetingpolicyupdated>")).unwrap();
-        // A call-ended event: opens with <ended/> and carries <callEventType>.
-        s.insert_message(&frame("junk6", "<ended/><partlist alt=\"\" count=\"1\"><part identity=\"8:orgid:x\"><displayName>Leonor GROELL</displayName><duration>600</duration></part></partlist><callEventType>callEnded</callEventType>")).unwrap();
 
         let removed = s.purge_control_frames().unwrap();
-        assert_eq!(removed, 6, "only the six control/system frames are deleted");
+        assert_eq!(removed, 5, "only the five control/system frames are deleted");
 
         let mut left: Vec<_> = s
             .newest_messages("c1", 50)
@@ -992,10 +1044,51 @@ mod tests {
             .map(|m| m.id)
             .collect();
         left.sort();
-        assert_eq!(left, ["real1", "real2", "real3"], "real chat messages are untouched");
+        assert_eq!(left, ["call1", "real1", "real2", "real3"], "chat + call events are untouched");
 
         // Idempotent: a cleaned store deletes nothing on the next pass.
         assert_eq!(s.purge_control_frames().unwrap(), 0);
+    }
+
+    #[test]
+    fn converts_legacy_call_events() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+
+        let frame = |id: &str, content: &str| Message {
+            id: id.into(),
+            conversation_id: "c1".into(),
+            seq: 1,
+            compose_time: 1,
+            sender: "x".into(),
+            sender_mri: String::new(),
+            content: content.into(),
+            attachments: "[]".into(),
+            reactions: "[]".into(),
+            system_event: String::new(),
+        };
+
+        // A legacy call-ended row stored as raw XML, plus a normal chat message.
+        s.insert_message(&frame("call1", "<ended/><partlist alt=\"\" count=\"2\"><part><displayName>Alice</displayName><duration>600</duration></part><part><displayName>Bob</displayName><duration>600</duration></part></partlist><callEventType>callEnded</callEventType>")).unwrap();
+        s.insert_message(&frame("chat1", "<p>hello</p>")).unwrap();
+
+        let converted = s.convert_legacy_call_events().unwrap();
+        assert_eq!(converted, 1, "only the raw call-event row is upgraded");
+
+        let msgs = s.newest_messages("c1", 50).unwrap();
+        let call = msgs.iter().find(|m| m.id == "call1").unwrap();
+        assert_eq!(call.content, "", "raw XML content is cleared once structured");
+        assert!(call.system_event.contains("\"event\":\"ended\""), "event captured: {}", call.system_event);
+        assert!(call.system_event.contains("\"duration_seconds\":600"), "duration captured: {}", call.system_event);
+        assert!(call.system_event.contains("\"participant_count\":2"), "participants captured: {}", call.system_event);
+
+        // A normal chat message is left completely untouched.
+        let chat = msgs.iter().find(|m| m.id == "chat1").unwrap();
+        assert_eq!(chat.content, "<p>hello</p>");
+        assert_eq!(chat.system_event, "");
+
+        // Idempotent: a converted store upgrades nothing on the next pass.
+        assert_eq!(s.convert_legacy_call_events().unwrap(), 0);
     }
 
     #[test]
@@ -1238,11 +1331,13 @@ mod tests {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: String::new(), content: "salut".into(), attachments: "[]".into(),
             reactions: "[]".into(),
+            system_event: String::new(),
         }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: String::new(), content: "hello".into(), attachments: "[]".into(),
             reactions: "[]".into(),
+            system_event: String::new(),
         }).unwrap();
 
         // direct derivation
@@ -1262,6 +1357,7 @@ mod tests {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: String::new(), content: "coucou".into(), attachments: "[]".into(),
             reactions: "[]".into(),
+            system_event: String::new(),
         }).unwrap();
         assert_eq!(s.other_party_name("dm", me).unwrap(), None);
         assert_eq!(s.conversations(me).unwrap()[0].display_name, "");
@@ -1276,6 +1372,7 @@ mod tests {
             id: "m1".into(), conversation_id: "c1".into(), seq: 1, compose_time: 1,
             sender: "Me".into(), sender_mri: String::new(), content: "hi".into(), attachments: "[]".into(),
             reactions: "[]".into(),
+            system_event: String::new(),
         }).unwrap();
 
         // backfill fills the empty MRI
@@ -1301,6 +1398,7 @@ mod tests {
             sender: "Me".into(), sender_mri: String::new(), content: "see file".into(),
             attachments: r#"[{"name":"report.pdf","content_type":"application/pdf","url":"https://x.skype.com/o/1","kind":"file"}]"#.into(),
             reactions: "[]".into(),
+            system_event: String::new(),
         }).unwrap();
         // a message without attachments keeps the empty-array default
         s.insert_message(&Message {
@@ -1308,6 +1406,7 @@ mod tests {
             sender: "Me".into(), sender_mri: String::new(), content: "hi".into(),
             attachments: "[]".into(),
             reactions: "[]".into(),
+            system_event: String::new(),
         }).unwrap();
 
         let msgs = s.newest_messages("c1", 10).unwrap();

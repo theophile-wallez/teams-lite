@@ -299,6 +299,14 @@ async fn main() -> Result<()> {
             Ok(_) => {}
             Err(e) => eprintln!("[cleanup] could not purge control frames: {e}"),
         }
+        // Call/meeting events that older builds stored as raw XML are upgraded in
+        // place into structured `system_event` rows, so they render as a centered
+        // "Call ended" line instead of a wall of machine XML.
+        match store.convert_legacy_call_events() {
+            Ok(n) if n > 0 => eprintln!("[cleanup] upgraded {n} legacy call-event message(s)"),
+            Ok(_) => {}
+            Err(e) => eprintln!("[cleanup] could not convert call events: {e}"),
+        }
     }
 
     let (events_tx, _) = broadcast::channel::<Value>(256);
@@ -941,6 +949,7 @@ fn messages_value(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
             "content": m.content,
             "attachments": attachments_value(m),
             "reactions": reactions_value(m, self_mri),
+            "system_event": system_event_value(m),
             "is_self": is_self(m, self_name, self_mri)
         }))
         .collect::<Vec<_>>())
@@ -951,6 +960,17 @@ fn messages_value(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
 /// so a single bad row can never break a whole page's serialization.
 fn attachments_value(m: &Message) -> Value {
     serde_json::from_str(&m.attachments).unwrap_or_else(|_| json!([]))
+}
+
+/// Decode a message's structured system event (a JSON object string) for the wire,
+/// or `null` when the message is a normal chat message (empty `system_event`) or
+/// the stored value is malformed. The UI renders a centered system line when this
+/// is present (see `web/src/components/call-event-line.tsx`).
+fn system_event_value(m: &Message) -> Value {
+    if m.system_event.is_empty() {
+        return Value::Null;
+    }
+    serde_json::from_str(&m.system_event).unwrap_or(Value::Null)
 }
 
 /// Decode a message's stored reactions into the wire shape the UIs render: one
@@ -1033,6 +1053,7 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
         "content": m.content,
         "attachments": attachments_value(m),
         "reactions": reactions_value(m, self_mri),
+        "system_event": system_event_value(m),
         "is_self": is_self(m, self_name, self_mri)
     })
 }
@@ -1270,6 +1291,7 @@ mod tests {
             content: format!("message {seq}"),
             attachments: "[]".into(),
             reactions: "[]".into(),
+            system_event: String::new(),
         }
     }
 
@@ -1292,6 +1314,25 @@ mod tests {
         // `mine` is false when our MRI is not among the reactors
         let v = reactions_value(&m, "8:someone_else");
         assert_eq!(v.as_array().unwrap()[0]["mine"], false);
+    }
+
+    #[test]
+    fn system_event_rides_the_wire_only_for_events() {
+        // A normal chat message carries a null system_event on the wire.
+        let chat = message(1);
+        assert!(message_json(&chat, "Alice", "8:me")["system_event"].is_null());
+
+        // A call event serializes its structured payload for the UI to render.
+        let mut call = message(2);
+        call.content = String::new();
+        call.system_event =
+            r#"{"kind":"call","event":"ended","duration_seconds":600,"participant_count":5,"participants":["A"]}"#
+                .into();
+        let v = message_json(&call, "Alice", "8:me");
+        assert_eq!(v["system_event"]["kind"], "call");
+        assert_eq!(v["system_event"]["event"], "ended");
+        assert_eq!(v["system_event"]["duration_seconds"], 600);
+        assert_eq!(v["content"], "");
     }
 
     #[test]

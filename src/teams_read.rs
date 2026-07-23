@@ -398,13 +398,18 @@ fn parse_conversations_with_self(v: &Value, self_mri: &str) -> Vec<Conversation>
         // the chatService messages endpoint uses. Do not reuse `parse_message` here.
         //
         // Mirror the message-history gate so a system frame (typing/presence, a
-        // member/topic change, or a call event) that happens to be the newest
-        // frame never leaks its raw machine XML into the sidebar preview line.
+        // member/topic change) never leaks its raw machine XML into the sidebar
+        // preview line. A call event gets a short human label instead of being
+        // blanked, matching the centered line it renders as in the thread.
         let last_message_content =
             chat.pointer("/lastMessage/content").and_then(|x| x.as_str()).unwrap_or("");
         let last_message_type =
             chat.pointer("/lastMessage/messageType").and_then(|x| x.as_str()).unwrap_or("");
-        let last_message_preview = if is_displayable_message_type(last_message_type)
+        let last_message_preview = if let Some(event) =
+            parse_call_event(last_message_type, last_message_content)
+        {
+            call_event_label(&event).to_string()
+        } else if is_displayable_message_type(last_message_type)
             && !is_system_frame_content(last_message_content)
         {
             preview_from_html(last_message_content)
@@ -515,28 +520,119 @@ fn is_displayable_message_type(messagetype: &str) -> bool {
 }
 
 /// True when a message BODY is an unambiguous machine/system frame that must
-/// never render as a chat bubble, regardless of its `messagetype`.
+/// never render as a chat bubble AND carries nothing worth surfacing, so it is
+/// dropped outright — regardless of its `messagetype`.
 ///
 /// This backstops [`is_displayable_message_type`]: its empty-messagetype→show
-/// default would otherwise let a system frame through as garbage if one ever
-/// arrives without a type. The recognised shapes are:
-///   - call/meeting events — the frame carries a `<callEventType>` element (e.g.
-///     the `<ended/><partlist>…</partlist>…<callEventType>callEnded</callEventType>`
-///     body Teams sends when a call in the thread ends) and/or opens with an
-///     `<ended>`/`<started>` marker, and
-///   - a raw participant roster (`<partlist>`) or a `<meetingpolicyupdated>`
-///     thread-activity frame.
+/// default would otherwise let such a frame through as garbage if one ever
+/// arrives without a type. The recognised shapes are a raw participant roster
+/// (`<partlist>`) and a `<meetingpolicyupdated>` thread-activity frame.
 ///
-/// A real chat body never matches: `RichText/Html` begins with text or a standard
-/// HTML tag (`<p>`, `<div>`, `<blockquote>`, `<h1>`…) and a media/card body is a
-/// `<URIObject>` — none start with these markers or contain `<callEventType>`.
-/// Kept deliberately narrow so it can only ever hit genuine system frames.
+/// Call/meeting events are handled EARLIER by [`parse_call_event`], which turns
+/// them into a structured `system_event` the UI renders as a centered line — they
+/// never reach this check. A real chat body never matches either: `RichText/Html`
+/// begins with text or a standard HTML tag (`<p>`, `<div>`, `<blockquote>`, `<h1>`…)
+/// and a media/card body is a `<URIObject>`. Kept deliberately narrow so it can
+/// only ever hit genuine throwaway system frames.
 fn is_system_frame_content(content: &str) -> bool {
     let c = content.trim_start().to_ascii_lowercase();
-    c.contains("<calleventtype>")
-        || ["<ended", "<started", "<partlist", "<meetingpolicyupdated"]
-            .iter()
-            .any(|root| c.starts_with(root))
+    ["<partlist", "<meetingpolicyupdated"].iter().any(|root| c.starts_with(root))
+}
+
+/// Parse a Teams call/meeting `Event/Call` frame into the structured `system_event`
+/// payload the UI renders as a centered line, or `None` when the frame is not a
+/// call event.
+///
+/// A call frame is recognised by its `messagetype` (`Event/Call`) or, when that is
+/// absent/mis-reported (e.g. a legacy stored row, where `messagetype` is passed as
+/// `""`), by its body shape — a `<callEventType>` element or a leading
+/// `<ended>`/`<started>` marker. The Teams body looks like:
+/// `<ended/><partlist count="5"><part><displayName>…</displayName><duration>600</duration></part>…</partlist>…<callEventType>callEnded</callEventType>`.
+///
+/// Returns a JSON object:
+/// `{"kind":"call","event":"ended|missed|started","duration_seconds":<max part duration>,"participant_count":<n>,"participants":["…"]}`.
+/// A bare `<partlist>` roster (no call marker) is NOT a call event — it returns
+/// `None` and is dropped by [`is_system_frame_content`] instead.
+pub(crate) fn parse_call_event(messagetype: &str, content: &str) -> Option<Value> {
+    let lower = content.trim_start().to_ascii_lowercase();
+    let is_call = messagetype.eq_ignore_ascii_case("Event/Call")
+        || lower.contains("<calleventtype>")
+        || lower.starts_with("<ended")
+        || lower.starts_with("<started");
+    if !is_call {
+        return None;
+    }
+
+    let event = match xml_first_value(content, "callEventType") {
+        Some(v) if v.eq_ignore_ascii_case("callMissed") => "missed",
+        Some(v) if v.eq_ignore_ascii_case("callStarted") => "started",
+        // callEnded, and any unknown call-event type, present as "ended".
+        Some(_) => "ended",
+        // No explicit type: infer from the leading marker.
+        None if lower.starts_with("<started") => "started",
+        None => "ended",
+    };
+
+    // `<displayName>` only appears inside `<partlist>` parts, so each is a
+    // participant. Reuse preview_from_html to decode entities and trim.
+    let participants: Vec<String> = xml_values(content, "displayName")
+        .iter()
+        .map(|s| preview_from_html(s))
+        .filter(|s| !s.is_empty())
+        .collect();
+    // Call length ≈ the longest participant duration (seconds).
+    let duration_seconds = xml_values(content, "duration")
+        .iter()
+        .filter_map(|s| s.trim().parse::<i64>().ok())
+        .max()
+        .unwrap_or(0);
+
+    Some(serde_json::json!({
+        "kind": "call",
+        "event": event,
+        "duration_seconds": duration_seconds,
+        "participant_count": participants.len(),
+        "participants": participants,
+    }))
+}
+
+/// Collect the inner text of every `<tag>…</tag>` occurrence in `xml`, matched
+/// case-insensitively. A minimal, dependency-free extractor for the handful of
+/// simple, non-nested elements a Teams call frame carries (`displayName`,
+/// `duration`, `callEventType`). Not a general XML parser.
+///
+/// Byte indices from the lowercased haystack map 1:1 onto `xml` because
+/// ASCII-lowercasing preserves length and never touches multi-byte UTF-8, and the
+/// slice boundaries fall on single-byte `<`/`>` delimiters.
+fn xml_values(xml: &str, tag: &str) -> Vec<String> {
+    let hay = xml.to_ascii_lowercase();
+    let open = format!("<{}>", tag.to_ascii_lowercase());
+    let close = format!("</{}>", tag.to_ascii_lowercase());
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while let Some(o) = hay[i..].find(&open) {
+        let start = i + o + open.len();
+        let Some(c) = hay[start..].find(&close) else { break };
+        let end = start + c;
+        out.push(xml[start..end].to_string());
+        i = end + close.len();
+    }
+    out
+}
+
+/// The inner text of the FIRST `<tag>…</tag>` occurrence, or `None`.
+fn xml_first_value(xml: &str, tag: &str) -> Option<String> {
+    xml_values(xml, tag).into_iter().next()
+}
+
+/// A short, English sidebar label for a parsed call event (see [`parse_call_event`]).
+/// The in-thread line adds duration/participants; the sidebar stays terse.
+fn call_event_label(event: &Value) -> &'static str {
+    match event.get("event").and_then(Value::as_str) {
+        Some("missed") => "Missed call",
+        Some("started") => "Call started",
+        _ => "Call ended",
+    }
 }
 
 /// Parse a single message resource (shared by the read API and trouter events —
@@ -545,24 +641,12 @@ fn is_system_frame_content(content: &str) -> bool {
 /// resource's `conversationid`/`conversationLink` before calling.
 pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message> {
     let id = m.get("id").and_then(|x| x.as_str())?.to_string();
-    // Skip control/system frames (typing/presence, member & topic changes, call
-    // events). Teams pushes them alongside chat — notably as live `NewMessage`
-    // resources — so gate on `messagetype` and keep only user-visible bodies.
     let messagetype = m
         .get("messagetype")
         .or_else(|| m.get("messageType"))
         .and_then(|x| x.as_str())
         .unwrap_or("");
-    if !is_displayable_message_type(messagetype) {
-        return None;
-    }
     let content = m.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    // Backstop the messagetype gate: some system frames (notably call events) can
-    // reach here with an empty/mis-reported type, which the gate treats as
-    // displayable. Their body is machine XML that must never become a chat bubble.
-    if is_system_frame_content(&content) {
-        return None;
-    }
     let seq = m.get("sequenceId").and_then(|x| x.as_i64()).unwrap_or(0);
     let compose_time = m.get("composetime").and_then(|x| x.as_str()).map(parse_iso_ms).unwrap_or(0);
     let sender = m
@@ -577,6 +661,36 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         .and_then(|x| x.as_str())
         .map(normalize_mri)
         .unwrap_or_default();
+
+    // A call/meeting event becomes a structured system message (rendered as a
+    // centered line), NOT a chat bubble — so it is recognised before the
+    // messagetype gate that would otherwise drop `Event/*`.
+    if let Some(event) = parse_call_event(messagetype, &content) {
+        return Some(Message {
+            id,
+            conversation_id: conversation_id.to_string(),
+            seq,
+            compose_time,
+            sender,
+            sender_mri,
+            content: String::new(),
+            attachments: "[]".to_string(),
+            reactions: String::new(),
+            system_event: event.to_string(),
+        });
+    }
+
+    // Otherwise keep only user-visible chat bodies. Teams multiplexes control/
+    // system frames (typing/presence, member & topic changes) onto the SAME
+    // message channel — notably as live `NewMessage` resources — so gate on
+    // `messagetype`, with a content backstop for a system frame that arrives
+    // untyped (see `is_system_frame_content`).
+    if !is_displayable_message_type(messagetype) {
+        return None;
+    }
+    if is_system_frame_content(&content) {
+        return None;
+    }
     Some(Message {
         id,
         conversation_id: conversation_id.to_string(),
@@ -587,6 +701,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         content,
         attachments: parse_attachments(m),
         reactions: parse_emotions(m),
+        system_event: String::new(),
     })
 }
 
@@ -958,10 +1073,9 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_preview_hides_system_frame_last_message() {
-        // When the newest frame in a chat is a call event, its raw machine XML
-        // must not leak into the sidebar preview line — it renders empty, exactly
-        // as the message-history gate drops it from the thread.
+    fn sidebar_preview_labels_or_hides_system_frame_last_message() {
+        // When the newest frame in a chat is a call event, the sidebar shows a
+        // short human label — never the raw machine XML.
         let v = json!({
             "chats": [{
                 "id": "19:meeting@thread.v2",
@@ -978,7 +1092,20 @@ mod tests {
             }]
         });
         let c = &parse_conversations(&v)[0];
-        assert_eq!(c.last_message_preview, "", "a call-event last message shows no preview");
+        assert_eq!(c.last_message_preview, "Call ended", "a call-event last message shows a label");
+
+        // A bare roster / other system frame still renders no preview (blanked).
+        let v = json!({
+            "chats": [{
+                "id": "19:x@thread.v2", "title": "X", "chatType": "group",
+                "lastMessage": {
+                    "id": "9b", "composeTime": "2026-07-23T13:10:00.000Z",
+                    "messageType": "ThreadActivity/AddMember",
+                    "content": "<addmember><target>8:orgid:x</target></addmember>"
+                }
+            }]
+        });
+        assert_eq!(parse_conversations(&v)[0].last_message_preview, "");
 
         // A media/card last message (URIObject) is real content and still previews.
         let v = json!({
@@ -1105,31 +1232,20 @@ mod tests {
             "from": "8:orgid:bea5de00-723a-4526-b216-4cc52ac383f9"
         });
         assert!(parse_message(&typing, "c1").is_none(), "typing control frame must be skipped");
-        for mt in ["Control/ClearTyping", "ThreadActivity/AddMember", "ThreadActivity/TopicUpdate", "Event/Call", "Signal/Flamingo"] {
+        for mt in ["Control/ClearTyping", "ThreadActivity/AddMember", "ThreadActivity/TopicUpdate", "Signal/Flamingo"] {
             let m = json!({
                 "id": "3", "sequenceId": 3, "composetime": "2026-07-16T16:05:28.000Z",
                 "messagetype": mt, "content": "<partlist alt=\"\"><part/></partlist>"
             });
             assert!(parse_message(&m, "c1").is_none(), "{mt} must be skipped");
         }
-
-        // Backstop: a call/meeting event whose `messagetype` is absent (or a
-        // benign chat type) must STILL be dropped on its machine-XML body — this
-        // is the reported "callEnded" garbage bubble that the type gate alone,
-        // with its empty->displayable default, would let through.
-        let call_ended = "<ended/><partlist alt=\"\" count=\"1\"><part identity=\"8:orgid:x\">\
-            <displayName>Leonor GROELL</displayName><duration>600</duration></part></partlist>\
-            <callEventType>callEnded</callEventType>";
-        for mt in [None, Some("Text"), Some("RichText/Html")] {
-            let mut m = json!({
-                "id": "4", "sequenceId": 4, "composetime": "2026-07-16T16:05:29.000Z",
-                "content": call_ended, "from": "8:orgid:x"
-            });
-            if let Some(mt) = mt {
-                m["messagetype"] = json!(mt);
-            }
-            assert!(parse_message(&m, "c1").is_none(), "untyped call event ({mt:?}) must be skipped");
-        }
+        // A bare participant roster with NO call marker is a throwaway system frame
+        // even when it arrives untyped — it must be dropped, not treated as a call.
+        let roster = json!({
+            "id": "3b", "sequenceId": 3, "composetime": "2026-07-16T16:05:28.000Z",
+            "content": "<partlist alt=\"\"><part/></partlist>"
+        });
+        assert!(parse_message(&roster, "c1").is_none(), "a bare partlist roster must be skipped");
 
         // ...but a media/card body (URIObject) is a real message and stays, even
         // when it mentions a call (e.g. a call-recording card): it carries a title
@@ -1142,6 +1258,75 @@ mod tests {
             "imdisplayname": "Alice"
         });
         assert!(parse_message(&recording, "c1").is_some(), "a call-recording card must be kept");
+    }
+
+    #[test]
+    fn call_event_becomes_a_system_message() {
+        // A call/meeting event is NOT dropped — it is parsed into a structured
+        // `system_event` (rendered as a centered line), with the raw XML replaced
+        // by an empty `content`. This holds whether the frame is properly typed
+        // `Event/Call` or arrives untyped (the reported "callEnded" body), so the
+        // empty->displayable default can never leak the raw XML.
+        let call_ended = "<ended/><partlist alt=\"\" count=\"2\"><part identity=\"8:orgid:x\">\
+            <displayName>Leonor GROELL</displayName><duration>600</duration></part>\
+            <part identity=\"8:orgid:y\"><displayName>Matthieu GAUCHER</displayName>\
+            <duration>540</duration></part></partlist><callEventType>callEnded</callEventType>";
+        for mt in [None, Some("Event/Call"), Some("Text"), Some("RichText/Html")] {
+            let mut m = json!({
+                "id": "4", "sequenceId": 4, "composetime": "2026-07-16T16:05:29.000Z",
+                "content": call_ended, "from": "8:orgid:x"
+            });
+            if let Some(mt) = mt {
+                m["messagetype"] = json!(mt);
+            }
+            let parsed = parse_message(&m, "c1").expect("call event must be kept as a system message");
+            assert_eq!(parsed.content, "", "raw call XML must not become bubble content ({mt:?})");
+            let ev: Value = serde_json::from_str(&parsed.system_event).unwrap();
+            assert_eq!(ev["kind"], "call");
+            assert_eq!(ev["event"], "ended");
+            assert_eq!(ev["duration_seconds"], 600, "longest participant duration");
+            assert_eq!(ev["participant_count"], 2);
+            assert_eq!(ev["participants"][0], "Leonor GROELL");
+        }
+
+        // A missed call carries no duration/roster.
+        let missed = json!({
+            "id": "6", "sequenceId": 6, "composetime": "2026-07-16T16:05:31.000Z",
+            "messagetype": "Event/Call", "content": "<partlist alt=\"\"/><callEventType>callMissed</callEventType>"
+        });
+        let ev: Value = serde_json::from_str(&parse_message(&missed, "c1").unwrap().system_event).unwrap();
+        assert_eq!(ev["event"], "missed");
+        assert_eq!(ev["duration_seconds"], 0);
+        assert_eq!(ev["participant_count"], 0);
+
+        // A normal chat message never carries a system_event.
+        let chat = json!({
+            "id": "7", "sequenceId": 7, "composetime": "2026-07-16T16:05:32.000Z",
+            "messagetype": "RichText/Html", "content": "<p>hi</p>", "imdisplayname": "Alice"
+        });
+        assert_eq!(parse_message(&chat, "c1").unwrap().system_event, "");
+    }
+
+    #[test]
+    fn parse_call_event_shapes() {
+        // A non-call body is not a call event.
+        assert!(parse_call_event("RichText/Html", "<p>hello</p>").is_none());
+        assert!(parse_call_event("", "<partlist alt=\"\"><part/></partlist>").is_none());
+
+        // Event type inferred from a leading marker when there is no callEventType.
+        let started = parse_call_event("", "<started/><partlist/>").unwrap();
+        assert_eq!(started["event"], "started");
+
+        // An explicit callEventType wins; participant names are entity-decoded.
+        let ev = parse_call_event(
+            "Event/Call",
+            "<ended/><partlist><part><displayName>Ben &amp; Jerry</displayName>\
+             <duration>12</duration></part></partlist><callEventType>callEnded</callEventType>",
+        )
+        .unwrap();
+        assert_eq!(ev["event"], "ended");
+        assert_eq!(ev["participants"][0], "Ben & Jerry");
+        assert_eq!(ev["duration_seconds"], 12);
     }
 
     #[test]
@@ -1367,6 +1552,7 @@ mod tests {
                 content: "c".into(),
                 attachments: "[]".into(),
                 reactions: "[]".into(),
+                system_event: String::new(),
             })
             .collect();
         MessagePage { messages, next_before_ms: Some(oldest_ms), has_more_older: has_more }
