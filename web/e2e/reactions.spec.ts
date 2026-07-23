@@ -1,7 +1,9 @@
 import { test, expect, gotoApp, openConversationAt, emitReaction } from "./helpers";
 
 test.describe("message reactions", () => {
-  test("adds a reaction from the actions menu, then toggles it off", async ({ page }) => {
+  test("adds from the menu, highlights the active reaction, and toggles it off there", async ({
+    page,
+  }) => {
     await gotoApp(page);
     await openConversationAt(page, 0);
 
@@ -28,12 +30,20 @@ test.describe("message reactions", () => {
     await expect(chip).toContainText("1");
     await expect(chip).toHaveAttribute("data-mine", "true");
 
-    // Clicking our own chip toggles the reaction off.
-    await chip.click();
+    // Reopening the menu now marks our reaction as active (highlighted).
+    await bubble.hover();
+    await bubble.locator('[data-testid="message-actions"]').click();
+    const activeOption = page.locator(
+      '[data-testid="menu-reaction-picker"] [data-testid="reaction-option-heart"]',
+    );
+    await expect(activeOption).toHaveAttribute("data-active", "true");
+
+    // Clicking the active reaction again removes it (toggle off from the menu).
+    await activeOption.click();
     await expect(bubble.locator('[data-testid="reaction-chip-heart"]')).toHaveCount(0);
   });
 
-  test("reveals a hover reaction picker and reacts with it", async ({ page }) => {
+  test("reveals a hover reaction picker, reacts, then removes via the chip", async ({ page }) => {
     await gotoApp(page);
     await openConversationAt(page, 0);
 
@@ -55,6 +65,10 @@ test.describe("message reactions", () => {
     const chip = bubble.locator('[data-testid="reaction-chip-like"]');
     await expect(chip).toBeVisible();
     await expect(chip).toHaveAttribute("data-mine", "true");
+
+    // Clicking our own chip removes the reaction.
+    await chip.click();
+    await expect(bubble.locator('[data-testid="reaction-chip-like"]')).toHaveCount(0);
   });
 
   test("shows a reaction received on a message from someone else", async ({ page }) => {

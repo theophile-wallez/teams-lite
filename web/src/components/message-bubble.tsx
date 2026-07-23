@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Copy, MoreHorizontal, Pencil, Reply } from "lucide-react";
+import { Copy, MoreHorizontal, Pencil, Reply, X } from "lucide-react";
 import {
   copyableMessageText,
   parseRichMessage,
@@ -270,7 +270,8 @@ export function MessageBubble(props: {
               data-testid="reaction-picker"
               activeKey={myReactionKey}
               onPick={react}
-              className="rounded-full border border-border bg-popover p-1 shadow-pop"
+              floating
+              className="rounded-full border border-border/50 bg-popover/70 p-1 shadow-pop backdrop-blur-md"
             />
           </div>
         )}
@@ -424,13 +425,18 @@ export function MessageBubble(props: {
 /**
  * A row of emoji buttons for adding a reaction, in Teams' canonical order. Used
  * both as the floating hover picker and as the reaction bar at the top of the ⋯
- * menu. The caller supplies chrome via `className` (a rounded popover for the
- * hover picker; flat inside the menu). `activeKey` highlights our current
- * reaction so re-picking it reads as "remove".
+ * menu. The caller supplies chrome via `className` (a translucent, frosted
+ * rounded bar for the hover picker; flat inside the menu). `activeKey` marks our
+ * current reaction with a distinct highlight so re-picking it reads as "remove".
+ *
+ * `floating` (the hover picker) adds the pop-scale on hover and, on our active
+ * emoji, a small × badge on hover to signal that clicking removes the reaction —
+ * effects that would be clipped inside the menu's `overflow-hidden` surface.
  */
 function ReactionPicker(props: {
   onPick: (key: string) => void;
   activeKey?: string;
+  floating?: boolean;
   className?: string;
   "data-testid"?: string;
 }) {
@@ -441,22 +447,37 @@ function ReactionPicker(props: {
       data-testid={props["data-testid"]}
       className={cn("flex items-center gap-0.5", props.className)}
     >
-      {REACTION_PICKER.map(({ key, emoji }) => (
-        <button
-          key={key}
-          type="button"
-          aria-label={`React with ${key}`}
-          aria-pressed={props.activeKey === key}
-          data-testid={`reaction-option-${key}`}
-          onClick={() => props.onPick(key)}
-          className={cn(
-            "grid size-7 place-items-center rounded-full text-base leading-none transition-transform hover:scale-125 hover:bg-accent",
-            props.activeKey === key && "bg-accent",
-          )}
-        >
-          <span aria-hidden>{emoji}</span>
-        </button>
-      ))}
+      {REACTION_PICKER.map(({ key, emoji }) => {
+        const active = props.activeKey === key;
+        return (
+          <button
+            key={key}
+            type="button"
+            aria-label={active ? `Remove ${key} reaction` : `React with ${key}`}
+            aria-pressed={active}
+            data-active={active ? "true" : undefined}
+            data-testid={`reaction-option-${key}`}
+            onClick={() => props.onPick(key)}
+            className={cn(
+              "group/opt relative grid size-7 place-items-center rounded-full text-base leading-none transition-transform",
+              props.floating && "hover:scale-125",
+              active
+                ? "bg-primary/20 ring-1 ring-inset ring-primary/50"
+                : "hover:bg-accent",
+            )}
+          >
+            <span aria-hidden>{emoji}</span>
+            {props.floating && active ? (
+              <span
+                aria-hidden
+                className="pointer-events-none absolute -right-1 -top-1 grid size-3.5 place-items-center rounded-full bg-destructive text-destructive-foreground opacity-0 shadow-sm transition-opacity group-hover/opt:opacity-100"
+              >
+                <X className="size-2.5" strokeWidth={3} />
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
     </div>
   );
 }
