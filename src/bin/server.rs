@@ -975,7 +975,8 @@ fn reactions_value(m: &Message, self_mri: &str) -> Value {
             let mine = !self_mri.is_empty()
                 && users
                     .iter()
-                    .any(|u| u.get("mri").and_then(Value::as_str) == Some(self_mri));
+                    .filter_map(|u| u.get("mri").and_then(Value::as_str))
+                    .any(|m| teams_lite::store::same_user(m, self_mri));
             Some(json!({ "key": key, "count": users.len(), "mine": mine }))
         })
         .collect();

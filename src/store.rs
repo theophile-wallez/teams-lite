@@ -189,6 +189,25 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
 
 const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions";
 
+/// Canonicalize an MRI for identity comparison: keep only the last path segment
+/// (so a `.../contacts/8:orgid:<guid>` URL becomes a bare MRI) and drop a leading
+/// `8:` so `8:orgid:<guid>`, `orgid:<guid>` and the URL form all compare equal.
+/// Teams is inconsistent about these forms across a message's `from`, the self
+/// identity, and a reaction's `users[].mri`, so reaction OWNERSHIP is matched on
+/// this canonical id rather than by exact string equality (which silently missed
+/// our own reaction — no highlight, and the toggle re-added instead of removing).
+pub fn canonical_mri(mri: &str) -> String {
+    let bare = mri.rsplit('/').next().unwrap_or(mri);
+    bare.strip_prefix("8:").unwrap_or(bare).to_string()
+}
+
+/// Whether two MRIs refer to the same user, tolerant of the URL / `8:` prefix
+/// variations Teams mixes. Empty MRIs never match (so an unknown self identity
+/// can't spuriously claim a reaction).
+pub fn same_user(a: &str, b: &str) -> bool {
+    !a.is_empty() && !b.is_empty() && canonical_mri(a) == canonical_mri(b)
+}
+
 /// Return the emotion key our own MRI currently reacts with on a message, given
 /// its stored reactions JSON, or `None` when we have no reaction. Used to decide
 /// a toggle: clicking our current reaction removes it; a different key replaces
@@ -199,7 +218,11 @@ pub fn my_reaction_key(reactions_json: &str, my_mri: &str) -> Option<String> {
         let mine = entry
             .get("users")
             .and_then(|u| u.as_array())
-            .map(|us| us.iter().any(|u| u.get("mri").and_then(|m| m.as_str()) == Some(my_mri)))
+            .map(|us| {
+                us.iter()
+                    .filter_map(|u| u.get("mri").and_then(|m| m.as_str()))
+                    .any(|m| same_user(m, my_mri))
+            })
             .unwrap_or(false);
         if mine {
             return entry.get("key").and_then(|k| k.as_str()).map(str::to_string);
@@ -220,10 +243,13 @@ fn apply_my_reaction(reactions_json: &str, my_mri: &str, key: Option<&str>, time
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
 
-    // One reaction per user: remove our MRI from every emotion first.
+    // One reaction per user: remove our MRI from every emotion first. Matched on
+    // the canonical id so a differently-formatted stored MRI (URL form, or a
+    // missing "8:" prefix) is still recognized as ours and removed — otherwise a
+    // re-add would leave us listed twice under the same key.
     for entry in &mut entries {
         if let Some(users) = entry.get_mut("users").and_then(|u| u.as_array_mut()) {
-            users.retain(|u| u.get("mri").and_then(|m| m.as_str()) != Some(my_mri));
+            users.retain(|u| !u.get("mri").and_then(|m| m.as_str()).is_some_and(|m| same_user(m, my_mri)));
         }
     }
 
@@ -1386,6 +1412,57 @@ mod tests {
         let row = s.set_my_reaction("c1", "m1", me, None, 0).unwrap().expect("removed");
         assert_eq!(my_reaction_key(&row.reactions, "8:other").as_deref(), Some("like"));
         assert!(my_reaction_key(&row.reactions, me).is_none());
+    }
+
+    #[test]
+    fn canonical_mri_normalizes_url_and_prefix() {
+        assert_eq!(canonical_mri("8:orgid:guid"), "orgid:guid");
+        assert_eq!(canonical_mri("orgid:guid"), "orgid:guid");
+        assert_eq!(
+            canonical_mri("https://x/v1/users/ME/contacts/8:orgid:guid"),
+            "orgid:guid",
+        );
+        // same user across all three forms
+        assert!(same_user("8:orgid:guid", "orgid:guid"));
+        assert!(same_user("https://x/contacts/8:orgid:guid", "8:orgid:guid"));
+        // empties never match (an unknown self identity can't claim a reaction)
+        assert!(!same_user("", "8:orgid:guid"));
+        assert!(!same_user("8:orgid:guid", ""));
+        assert!(!same_user("8:orgid:a", "8:orgid:b"));
+    }
+
+    #[test]
+    fn my_reaction_key_matches_across_mri_forms() {
+        // Our reaction was stored with a bare (no "8:") MRI, but self identity is
+        // the "8:orgid:..." form: canonical matching must still find it as ours.
+        let reactions = r#"[{"key":"like","users":[{"mri":"orgid:me","time":1}]}]"#;
+        assert_eq!(my_reaction_key(reactions, "8:orgid:me").as_deref(), Some("like"));
+    }
+
+    #[test]
+    fn set_my_reaction_dedupes_across_mri_forms() {
+        // Regression: a message already reacted in real Teams stored our MRI in a
+        // different form than self identity. Re-picking the same emoji must TOGGLE
+        // it off (recognize it as ours), never list us twice or re-add.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        let mut m = msg("c1", 1);
+        m.reactions = r#"[{"key":"like","users":[{"mri":"orgid:me","time":1}]}]"#.into();
+        s.insert_message(&m).unwrap();
+        let me = "8:orgid:me";
+
+        // It is recognized as ours despite the differing MRI form.
+        assert_eq!(my_reaction_key(&m.reactions, me).as_deref(), Some("like"));
+
+        // Adding "like" again canonically removes the old entry first, so we are
+        // listed exactly once (no double-count), not twice.
+        let row = s.set_my_reaction("c1", "m1", me, Some("like"), 9).unwrap().expect("changed");
+        let parsed: serde_json::Value = serde_json::from_str(&row.reactions).unwrap();
+        assert_eq!(parsed[0]["users"].as_array().unwrap().len(), 1);
+
+        // And removing it clears the key entirely.
+        let row = s.set_my_reaction("c1", "m1", me, None, 0).unwrap().expect("removed");
+        assert_eq!(row.reactions, "[]");
     }
 
     #[test]
