@@ -14,7 +14,7 @@ async function openByPalette(page: Page, name: string): Promise<void> {
 }
 
 test.describe("GitLab rich link previews", () => {
-  test("renders a card for a merge request, an issue, and a project", async ({
+  test("renders cards for a merge request, an issue, and a project", async ({
     page,
     consoleErrors,
   }) => {
@@ -22,25 +22,46 @@ test.describe("GitLab rich link previews", () => {
     await openByPalette(page, "GitLab Links");
 
     const cards = page.locator('[data-testid="gitlab-link-card"]');
-    // Three seeded links → three cards, populated by the backend `enrich_link`.
-    await expect.poll(() => cards.count(), { timeout: 10_000 }).toBe(3);
+    // Four seeded links (MR + issue + project in sentences, plus a bare MR) →
+    // four cards, populated by the backend `enrich_link`.
+    await expect.poll(() => cards.count(), { timeout: 10_000 }).toBe(4);
 
-    const mr = page.locator('[data-testid="gitlab-link-card"][data-kind="merge_request"]');
+    const mrHref = "https://gitlab.com/acme/webapp/-/merge_requests/42";
+    const mr = page.locator(`[data-testid="gitlab-link-card"][href="${mrHref}"]`);
     await expect(mr).toHaveCount(1);
     await expect(mr).toContainText("Add rich link previews for GitLab");
     await expect(mr).toContainText("!42");
-    // The card links to the merge request it describes.
-    await expect(mr).toHaveAttribute("href", "https://gitlab.com/acme/webapp/-/merge_requests/42");
 
-    const issue = page.locator('[data-testid="gitlab-link-card"][data-kind="issue"]');
-    await expect(issue).toHaveCount(1);
-    await expect(issue).toContainText("#7");
+    // The raw link in the body is REPLACED by the card, not shown alongside it:
+    // exactly one anchor points at the MR (the card), never two.
+    await expect(page.locator(`a[href="${mrHref}"]`)).toHaveCount(1);
 
-    const project = page.locator('[data-testid="gitlab-link-card"][data-kind="project"]');
-    await expect(project).toHaveCount(1);
-    await expect(project).toContainText("acme/webapp");
+    await expect(
+      page.locator('[data-testid="gitlab-link-card"][href*="/-/issues/7"]'),
+    ).toContainText("#7");
+    await expect(
+      page.locator('[data-testid="gitlab-link-card"][href="https://gitlab.com/acme/webapp"]'),
+    ).toContainText("acme/webapp");
 
     expect(realErrors(consoleErrors)).toEqual([]);
+  });
+
+  test("shows a link-only message as just the card, without a bubble", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "GitLab Links");
+
+    // The bare-link message renders with no bubble chrome (data-link-only), and
+    // holds the integration card.
+    const linkOnly = page.locator('[data-testid="message"][data-link-only="true"]');
+    await expect(linkOnly).toHaveCount(1);
+    await expect(linkOnly.locator('[data-testid="gitlab-link-card"]')).toHaveCount(1);
+
+    // A message that has surrounding text keeps its bubble (not link-only).
+    const mrCard = page.locator(
+      '[data-testid="gitlab-link-card"][href="https://gitlab.com/acme/webapp/-/merge_requests/42"]',
+    );
+    const sentenceMessage = page.locator('[data-testid="message"]', { has: mrCard });
+    await expect(sentenceMessage).not.toHaveAttribute("data-link-only", "true");
   });
 });
 

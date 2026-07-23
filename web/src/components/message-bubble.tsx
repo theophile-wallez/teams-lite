@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Copy, MoreHorizontal, Pencil, Reply } from "lucide-react";
-import { copyableMessageText, parseRichMessage, urlHost, type ChatMessage } from "~/lib/protocol";
-import { extractLinks } from "~/lib/rich-text";
+import {
+  copyableMessageText,
+  parseRichMessage,
+  urlHost,
+  type ChatMessage,
+  type GitLabLinkMetadata,
+} from "~/lib/protocol";
+import { dropLinks, extractLinks, hasVisibleContent, parseRichHtml } from "~/lib/rich-text";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
 import {
@@ -12,7 +18,42 @@ import {
 } from "./ui/dropdown-menu";
 import { FileAttachment, MediaImage } from "./media-image";
 import { GitLabLinkCard } from "./gitlab-link-card";
-import { useAppState } from "./controller-context";
+import { useAppState, useController } from "./controller-context";
+
+/** Resolved enrichment for a set of links, keyed by URL: `undefined` while a
+ *  lookup is in flight, `null` when the link is not an enrichable integration,
+ *  or the metadata once resolved. */
+type LinkResults = Map<string, GitLabLinkMetadata | null | undefined>;
+
+/**
+ * Enrich a stable list of URLs through the controller (which goes to the backend
+ * and caches per URL). Returns a reactive map of results so the caller can hide
+ * enriched links from the body and render their cards. The owning component, not
+ * the card, drives this so it can decide the message's layout from the outcome.
+ */
+function useEnrichedLinks(urls: string[]): LinkResults {
+  const controller = useController();
+  const [results, setResults] = useState<LinkResults>(new Map());
+  // A stable key so the effect only re-runs when the actual set of URLs changes.
+  const key = urls.join("\n");
+
+  useEffect(() => {
+    let alive = true;
+    for (const url of urls) {
+      controller
+        .enrichLink(url)
+        .then((meta) => alive && setResults((prev) => new Map(prev).set(url, meta)))
+        .catch(() => alive && setResults((prev) => new Map(prev).set(url, null)));
+    }
+    return () => {
+      alive = false;
+    };
+    // `urls` is captured via its stable string `key`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller, key]);
+
+  return results;
+}
 
 /**
  * A single chat message rendered as a bubble. Mine align right with an accent
@@ -23,6 +64,10 @@ import { useAppState } from "./controller-context";
  * {@link RichContent}. When `editing` is true, the body is replaced by an
  * in-place editor (Enter to save, Shift+Enter for a newline, Escape to cancel).
  * Mirrors the TUI's MessageBubble (ui/src/app.tsx).
+ *
+ * GitLab links that resolve to a rich integration are shown as a preview card
+ * and removed from the body text (never both). When the message is *only* such a
+ * link, the bubble chrome is dropped entirely and just the card is shown.
  */
 export function MessageBubble(props: {
   message: ChatMessage;
@@ -39,17 +84,43 @@ export function MessageBubble(props: {
 }) {
   const mine = props.message.is_self === true;
   const parsed = useMemo(() => parseRichMessage(props.message.content), [props.message.content]);
-  // GitLab links in the authored body (not the quoted reply) that target the
-  // configured host get a rich preview card below the message. Filtering by host
-  // keeps enrichment to real GitLab links; the backend is authoritative on
-  // whether a given link is actually enrichable.
+  // Candidate GitLab links in the authored body (not the quoted reply) that
+  // target the configured host. Filtering by host keeps enrichment to real
+  // GitLab links; the backend is authoritative on whether one is enrichable.
   const gitlabHost = useAppState((s) => s.settings.gitlab_host);
-  const gitlabLinks = useMemo(() => {
+  const candidateLinks = useMemo(() => {
     const host = gitlabHost.trim().toLowerCase();
     if (!host) return [];
     const html = `${parsed.beforeHtml ?? ""}\n${parsed.bodyHtml}`;
     return extractLinks(html).filter((u) => urlHost(u) === host);
   }, [parsed, gitlabHost]);
+
+  const enrichment = useEnrichedLinks(candidateLinks);
+
+  // The links that resolved to an integration → shown as cards and hidden from
+  // the body, and the cards themselves (in document order).
+  const cards = useMemo(() => {
+    const out: { url: string; meta: GitLabLinkMetadata }[] = [];
+    for (const url of candidateLinks) {
+      const meta = enrichment.get(url);
+      if (meta) out.push({ url, meta });
+    }
+    return out;
+  }, [candidateLinks, enrichment]);
+  const hiddenHrefs = useMemo(() => new Set(cards.map((c) => c.url)), [cards]);
+
+  // Whether the body still has visible content once the carded links are removed.
+  // When it doesn't (and there is a card, no quote, no attachments), the message
+  // is just an integration link → render only the card, without the bubble.
+  const bodyHasContent = useMemo(() => {
+    const has = (html?: string) =>
+      !!html && hasVisibleContent(dropLinks(parseRichHtml(html), hiddenHrefs));
+    return has(parsed.beforeHtml) || has(parsed.bodyHtml);
+  }, [parsed, hiddenHrefs]);
+  const hasAttachments = (props.message.attachments?.length ?? 0) > 0;
+  const linkOnly =
+    !props.editing && !parsed.quote && !hasAttachments && cards.length > 0 && !bodyHasContent;
+
   // Only label the first message of a same-author run; continuations are clearly
   // from the same person.
   const nameShown = !mine && props.showSenderName && !props.continuesAbove;
@@ -70,17 +141,24 @@ export function MessageBubble(props: {
         data-mine={mine ? "true" : "false"}
         data-message-id={props.message.id}
         data-highlighted={props.highlighted ? "true" : undefined}
+        data-link-only={linkOnly ? "true" : undefined}
         className={cn(
-          "relative max-w-[76%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed",
-          mine
-            ? "bg-bubble-mine text-bubble-mine-foreground shadow-chip"
-            : "bg-bubble-incoming text-bubble-incoming-foreground shadow-card",
-          // Chained messages (same author, adjacent) flatten the touching corners
-          // on the author's anchor side — right for mine, left for incoming — so a
-          // run of messages reads as one continuous block on that edge.
-          mine
-            ? cn(props.continuesAbove && "rounded-tr-md", props.continuesBelow && "rounded-br-md")
-            : cn(props.continuesAbove && "rounded-tl-md", props.continuesBelow && "rounded-bl-md"),
+          "relative text-sm leading-relaxed",
+          // Link-only messages drop the bubble chrome: the card is the surface.
+          linkOnly
+            ? "max-w-md"
+            : cn(
+                "max-w-[76%] rounded-2xl px-3.5 py-2",
+                mine
+                  ? "bg-bubble-mine text-bubble-mine-foreground shadow-chip"
+                  : "bg-bubble-incoming text-bubble-incoming-foreground shadow-card",
+                // Chained messages (same author, adjacent) flatten the touching
+                // corners on the author's anchor side — right for mine, left for
+                // incoming — so a run reads as one continuous block on that edge.
+                mine
+                  ? cn(props.continuesAbove && "rounded-tr-md", props.continuesBelow && "rounded-br-md")
+                  : cn(props.continuesAbove && "rounded-tl-md", props.continuesBelow && "rounded-bl-md"),
+              ),
           // Deep-link highlight: a brief ring pulse when opened from a
           // notification, so the targeted message is unmistakable.
           props.highlighted &&
@@ -105,52 +183,63 @@ export function MessageBubble(props: {
           />
         ) : (
           <>
-            {parsed.beforeHtml ? <RichContent html={parsed.beforeHtml} /> : null}
+            {linkOnly ? null : (
+              <>
+                {parsed.beforeHtml ? (
+                  <RichContent html={parsed.beforeHtml} hiddenHrefs={hiddenHrefs} />
+                ) : null}
 
-            {parsed.quote ? (
-              <div
-                className={cn(
-                  "my-1 rounded-lg border-l-2 px-2.5 py-1.5",
-                  mine
-                    ? "border-sender-name-mine bg-quote-mine"
-                    : "border-sender-name bg-quote-incoming",
-                )}
-              >
-                {parsed.quote.sender ? (
+                {parsed.quote ? (
                   <div
                     className={cn(
-                      "text-xs font-semibold",
-                      mine ? "text-sender-name-mine" : "text-sender-name",
+                      "my-1 rounded-lg border-l-2 px-2.5 py-1.5",
+                      mine
+                        ? "border-sender-name-mine bg-quote-mine"
+                        : "border-sender-name bg-quote-incoming",
                     )}
                   >
-                    {parsed.quote.sender}
+                    {parsed.quote.sender ? (
+                      <div
+                        className={cn(
+                          "text-xs font-semibold",
+                          mine ? "text-sender-name-mine" : "text-sender-name",
+                        )}
+                      >
+                        {parsed.quote.sender}
+                      </div>
+                    ) : null}
+                    <RichContent
+                      html={parsed.quote.html}
+                      className={cn(
+                        "text-xs",
+                        mine ? "text-quote-text-mine" : "text-quote-text-incoming",
+                      )}
+                    />
                   </div>
                 ) : null}
-                <RichContent
-                  html={parsed.quote.html}
-                  className={cn("text-xs", mine ? "text-quote-text-mine" : "text-quote-text-incoming")}
-                />
-              </div>
-            ) : null}
 
-            {parsed.bodyHtml ? <RichContent html={parsed.bodyHtml} /> : null}
+                {parsed.bodyHtml ? (
+                  <RichContent html={parsed.bodyHtml} hiddenHrefs={hiddenHrefs} />
+                ) : null}
 
-            {props.message.attachments && props.message.attachments.length > 0 ? (
-              <div className="mt-1.5 flex flex-col gap-1.5">
-                {props.message.attachments.map((att, i) =>
-                  att.kind === "image" ? (
-                    <MediaImage key={`att-${i}-${att.url}`} src={att.url} alt={att.name} />
-                  ) : (
-                    <FileAttachment key={`att-${i}-${att.url}`} attachment={att} />
-                  ),
-                )}
-              </div>
-            ) : null}
+                {hasAttachments ? (
+                  <div className="mt-1.5 flex flex-col gap-1.5">
+                    {props.message.attachments!.map((att, i) =>
+                      att.kind === "image" ? (
+                        <MediaImage key={`att-${i}-${att.url}`} src={att.url} alt={att.name} />
+                      ) : (
+                        <FileAttachment key={`att-${i}-${att.url}`} attachment={att} />
+                      ),
+                    )}
+                  </div>
+                ) : null}
+              </>
+            )}
 
-            {gitlabLinks.length > 0 ? (
-              <div className="mt-1.5 flex flex-col gap-1.5">
-                {gitlabLinks.map((url) => (
-                  <GitLabLinkCard key={url} url={url} />
+            {cards.length > 0 ? (
+              <div className={cn("flex flex-col gap-1.5", !linkOnly && "mt-1.5")}>
+                {cards.map(({ url, meta }) => (
+                  <GitLabLinkCard key={url} metadata={meta} />
                 ))}
               </div>
             ) : null}

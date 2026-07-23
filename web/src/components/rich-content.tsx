@@ -1,5 +1,5 @@
 import { useMemo, type JSX } from "react";
-import { hasVisibleContent, parseRichHtml, type RichNode } from "~/lib/rich-text";
+import { dropLinks, hasVisibleContent, parseRichHtml, type RichNode } from "~/lib/rich-text";
 import { cn } from "~/lib/utils";
 import { MediaImage } from "./media-image";
 
@@ -9,9 +9,16 @@ import { MediaImage } from "./media-image";
  * then mapped to styled elements here. Supports bold, italic, underline,
  * strikethrough, inline code, code blocks, links, ordered/unordered lists,
  * @mentions, line breaks, and inline images.
+ *
+ * `hiddenHrefs` drops anchors with those hrefs from the output — used when a link
+ * is surfaced as a rich preview card instead, so it is never shown twice.
  */
-export function RichContent(props: { html: string; className?: string }) {
-  const nodes = useMemo(() => parseRichHtml(props.html), [props.html]);
+export function RichContent(props: { html: string; className?: string; hiddenHrefs?: Set<string> }) {
+  const { html, hiddenHrefs } = props;
+  const nodes = useMemo(() => {
+    const parsed = parseRichHtml(html);
+    return hiddenHrefs && hiddenHrefs.size > 0 ? dropLinks(parsed, hiddenHrefs) : parsed;
+  }, [html, hiddenHrefs]);
   if (!hasVisibleContent(nodes)) return null;
   return (
     <div className={cn("whitespace-pre-wrap break-words", props.className)}>

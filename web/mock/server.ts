@@ -692,6 +692,20 @@ function seedGitLabSamples(): void {
     },
     120_000,
   );
+  // A message that is ONLY a link (as Teams autolinks a pasted URL — the anchor
+  // text is the URL itself). It should render as just the integration card, with
+  // no message bubble around it.
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content:
+        `<a href="https://gitlab.com/acme/webapp/-/merge_requests/99">` +
+        `https://gitlab.com/acme/webapp/-/merge_requests/99</a>`,
+      is_self: true,
+    },
+    180_000,
+  );
 
   const conv: Conversation = {
     id: convId,

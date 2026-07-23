@@ -355,6 +355,28 @@ export function extractLinks(html: string): string[] {
   return out;
 }
 
+/**
+ * Remove anchor nodes whose href is in `hidden`, re-normalizing so no empty
+ * blocks or stray blank lines remain. Used to drop a link from the rendered
+ * message body when it is shown as a rich preview card instead — so the link is
+ * never displayed twice (once as text, once as the card).
+ */
+export function dropLinks(nodes: RichNode[], hidden: Set<string>): RichNode[] {
+  if (hidden.size === 0) return nodes;
+  const prune = (list: RichNode[]): RichNode[] => {
+    const out: RichNode[] = [];
+    for (const node of list) {
+      if (node.type === "element") {
+        if (node.tag === "a" && node.attrs.href && hidden.has(node.attrs.href)) continue;
+        node.children = prune(node.children);
+      }
+      out.push(node);
+    }
+    return out;
+  };
+  return normalize(prune(nodes));
+}
+
 function escapeText(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

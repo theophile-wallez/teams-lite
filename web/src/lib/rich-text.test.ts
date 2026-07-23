@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseRichHtml,
   decodeEntities,
+  dropLinks,
   extractLinks,
   hasVisibleContent,
   serializeTeamsHtml,
@@ -138,6 +139,42 @@ describe("extractLinks", () => {
 
   it("returns an empty list for content without links", () => {
     expect(extractLinks("<p>just text</p>")).toEqual([]);
+  });
+});
+
+describe("dropLinks", () => {
+  const HREF = "https://gitlab.com/a/b/-/merge_requests/1";
+
+  it("removes a matching anchor but keeps surrounding text", () => {
+    const nodes = dropLinks(
+      parseRichHtml(`<p>see <a href="${HREF}">MR</a> now</p>`),
+      new Set([HREF]),
+    );
+    expect(text(nodes)).toBe("see  now");
+    // No anchor survives.
+    expect(tags(nodes)).not.toContain("a");
+  });
+
+  it("leaves the fragment empty when the anchor was the only content", () => {
+    const nodes = dropLinks(parseRichHtml(`<a href="${HREF}">${HREF}</a>`), new Set([HREF]));
+    expect(hasVisibleContent(nodes)).toBe(false);
+  });
+
+  it("keeps anchors that are not in the hidden set", () => {
+    const other = "https://example.com/x";
+    const nodes = dropLinks(
+      parseRichHtml(`<a href="${HREF}">MR</a> <a href="${other}">x</a>`),
+      new Set([HREF]),
+    );
+    // Only the non-hidden anchor remains.
+    expect(tags(nodes).filter((t) => t === "a")).toHaveLength(1);
+    expect(text(nodes)).toContain("x");
+    expect(text(nodes)).not.toContain("MR");
+  });
+
+  it("is a no-op for an empty hidden set", () => {
+    const parsed = parseRichHtml(`<a href="${HREF}">MR</a>`);
+    expect(dropLinks(parsed, new Set())).toBe(parsed);
   });
 });
 

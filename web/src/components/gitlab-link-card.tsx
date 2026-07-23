@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import {
   ArrowRight,
   CircleDot,
@@ -8,7 +7,6 @@ import {
 } from "lucide-react";
 import type { GitLabLinkKind, GitLabLinkMetadata } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
-import { useController } from "./controller-context";
 
 const KIND_ICON: Record<GitLabLinkKind, LucideIcon> = {
   merge_request: GitPullRequestArrow,
@@ -68,32 +66,14 @@ function statusStyle(meta: GitLabLinkMetadata): StatusStyle | null {
 const MAX_LABELS = 4;
 
 /**
- * A rich preview card for a GitLab link (merge request, issue, or project). It
- * asks the controller to enrich the URL (which goes through the backend, so the
- * browser never touches GitLab directly) and renders title, state, reference,
- * author, branches, milestone, labels, and a short description. While loading —
- * or when the link is not an enrichable GitLab resource — it renders nothing, so
- * the plain link in the message body stays as the fallback.
+ * A rich preview card for a GitLab link (merge request, issue, or project),
+ * rendered from already-resolved metadata. It shows title, state, reference,
+ * author, branches, milestone, labels, and a short description, and is itself the
+ * clickable link to the resource. Enrichment (and its caching) is owned by the
+ * caller (see MessageBubble), so this component is pure and always renders.
  */
-export function GitLabLinkCard(props: { url: string }) {
-  const controller = useController();
-  // undefined = still loading; null = not enrichable (render nothing).
-  const [meta, setMeta] = useState<GitLabLinkMetadata | null | undefined>(undefined);
-
-  useEffect(() => {
-    let alive = true;
-    setMeta(undefined);
-    controller
-      .enrichLink(props.url)
-      .then((m) => alive && setMeta(m))
-      .catch(() => alive && setMeta(null));
-    return () => {
-      alive = false;
-    };
-  }, [controller, props.url]);
-
-  if (!meta) return null;
-
+export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
+  const meta = props.metadata;
   const Icon = KIND_ICON[meta.kind];
   const status = statusStyle(meta);
   const labels = meta.labels ?? [];
