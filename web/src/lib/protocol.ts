@@ -40,7 +40,7 @@ export type SystemEvent = {
   /** Call length in seconds (longest participant duration); 0 when unknown. */
   duration_seconds?: number;
   participant_count?: number;
-  /** Display names of the participants, for a hover tooltip. */
+  /** Display names of the participants, rendered as an overlapping avatar stack. */
   participants?: string[];
 };
 
@@ -375,9 +375,9 @@ export function formatCallDuration(seconds: number): string {
 }
 
 /** A one-line label for a call/meeting system event, Teams-style, e.g.
- *  "Call ended · 10 min · 5 participants". Duration is shown only for a completed
- *  call, and the participant count only for a group (more than two people). Pure
- *  and presentational — the UI renders it in a centered line (`CallEventLine`). */
+ *  "Call ended · 10 min". Duration is shown only for a completed call. The
+ *  participants are rendered separately as an avatar stack by `CallEventLine`,
+ *  so they are not part of this label. Pure and presentational. */
 export function formatCallEvent(event: SystemEvent): string {
   const base =
     event.event === "missed"
@@ -385,13 +385,10 @@ export function formatCallEvent(event: SystemEvent): string {
       : event.event === "started"
         ? "Call started"
         : "Call ended";
-  const parts = [base];
   if (event.event === "ended" && event.duration_seconds && event.duration_seconds > 0) {
-    parts.push(formatCallDuration(event.duration_seconds));
+    return `${base} · ${formatCallDuration(event.duration_seconds)}`;
   }
-  const count = event.participant_count ?? 0;
-  if (count > 2) parts.push(`${count} participants`);
-  return parts.join(" · ");
+  return base;
 }
 
 export function replyToPayload(message: ChatMessage, before: string, after: string): ReplyTo {

@@ -533,13 +533,13 @@ describe("formatCallDuration", () => {
 });
 
 describe("formatCallEvent", () => {
-  it("labels a group call that ended with duration and participant count", () => {
+  it("labels a call that ended with its duration (participants render as avatars, not text)", () => {
     expect(
       formatCallEvent({ kind: "call", event: "ended", duration_seconds: 600, participant_count: 5 }),
-    ).toBe("Call ended · 10 min · 5 participants");
+    ).toBe("Call ended · 10 min");
   });
 
-  it("omits the participant count for a 1:1 call (two people)", () => {
+  it("labels a 1:1 call that ended with its duration", () => {
     expect(
       formatCallEvent({ kind: "call", event: "ended", duration_seconds: 1400, participant_count: 2 }),
     ).toBe("Call ended · 23 min");
@@ -554,7 +554,7 @@ describe("formatCallEvent", () => {
   it("shows a started call and never a duration for it", () => {
     expect(
       formatCallEvent({ kind: "call", event: "started", duration_seconds: 999, participant_count: 5 }),
-    ).toBe("Call started · 5 participants");
+    ).toBe("Call started");
   });
 
   it("degrades gracefully when duration is missing or zero", () => {

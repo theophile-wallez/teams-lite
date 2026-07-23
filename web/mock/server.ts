@@ -722,7 +722,7 @@ function seedCallEvents(): void {
     { sender: other.name, sender_mri: other.mri, content: escapeHtml("Jumping on a quick call."), is_self: false },
     0,
   );
-  // A group call that ended: duration + participant count show in the line.
+  // A group call that ended: five participants -> a full avatar stack, no overflow.
   push(
     {
       sender: "",
@@ -737,23 +737,53 @@ function seedCallEvents(): void {
     },
     60_000,
   );
-  // A missed call (no duration), rendered with a red-ish accent.
+  // A large call: more than five participants -> five avatars plus a "+N" chip
+  // that opens the full-roster dialog.
   push(
     {
       sender: "",
       content: "",
-      system_event: { kind: "call", event: "missed", participant_count: 2 },
+      system_event: {
+        kind: "call",
+        event: "ended",
+        duration_seconds: 3600,
+        participant_count: 7,
+        participants: [
+          "Leonor GROELL",
+          "Clément DELBARRE",
+          "Matthieu GAUCHER",
+          "Clément BOSLE",
+          "Théophile WALLEZ",
+          "Souhail LYAMANI",
+          "James BASSE",
+        ],
+      },
     },
     120_000,
   );
-  // A 1:1 call that ended: only the duration, no participant count.
+  // A missed call (no duration, no roster), rendered with a red-ish accent.
   push(
     {
       sender: "",
       content: "",
-      system_event: { kind: "call", event: "ended", duration_seconds: 1400, participant_count: 2 },
+      system_event: { kind: "call", event: "missed" },
     },
     180_000,
+  );
+  // A 1:1 call that ended: two participants -> two avatars, duration only.
+  push(
+    {
+      sender: "",
+      content: "",
+      system_event: {
+        kind: "call",
+        event: "ended",
+        duration_seconds: 1400,
+        participant_count: 2,
+        participants: ["Clément BOSLE", "You"],
+      },
+    },
+    240_000,
   );
 
   const conv: Conversation = {

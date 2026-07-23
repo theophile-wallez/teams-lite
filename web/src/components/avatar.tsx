@@ -29,9 +29,11 @@ export function avatarInitials(label: string): string {
 /**
  * A rounded-square identity avatar with deterministic tint and initials. Size
  * and text size are controlled by the caller through `className` (defaults to a
- * 36px sidebar avatar).
+ * 36px sidebar avatar). Pass `initials` to override the computed initials — e.g.
+ * a single letter for a dense, overlapping avatar stack where two letters would
+ * be clipped by the overlap.
  */
-export function Avatar(props: { seed: string; label: string; className?: string }) {
+export function Avatar(props: { seed: string; label: string; initials?: string; className?: string }) {
   return (
     <span
       className={cn(
@@ -41,7 +43,7 @@ export function Avatar(props: { seed: string; label: string; className?: string 
       )}
       aria-hidden
     >
-      {avatarInitials(props.label)}
+      {props.initials ?? avatarInitials(props.label)}
     </span>
   );
 }
