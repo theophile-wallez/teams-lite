@@ -9,7 +9,7 @@
 //   response (server -> client):  { "id": <n>, "result": <v> }  |  { "id": <n>, "error": "<msg>" }
 //   event    (server -> client):  { "event": "<name>", "data": {...} }   (no id)
 //
-// Methods: conversations | open | backfill | set_draft | send | edit | notifications
+// Methods: conversations | open | backfill | set_draft | send | edit | react | notifications
 //          | fetch_media | get_settings | set_settings | enrich_link
 // Events:  status | message | conversations_changed | notifications_changed | typing | update_available
 //
@@ -679,6 +679,61 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "edited": true }))
         }
 
+        // react to a message with an emoji (Teams "emotion"), or toggle ours off.
+        // `key` is the emotion the user picked (e.g. "like", "heart"). Teams keeps
+        // one reaction per user per message, so we toggle: clicking our current
+        // reaction removes it; any other key replaces it. After the network PUT we
+        // optimistically update the local row and broadcast it (both clients merge
+        // by id), so the reaction shows immediately without waiting for the echo.
+        "react" => {
+            let conv = param_str(params, "conversation")?;
+            let message_id = param_str(params, "message_id")?;
+            let key = param_str(params, "key")?;
+
+            let (self_name, self_mri) = {
+                let session = ctx.session().await?;
+                (session.self_name.to_string(), session.self_mri.to_string())
+            };
+
+            // Decide the toggle from what we currently hold: same key -> off.
+            let current_key = ctx
+                .store()
+                .ok()
+                .and_then(|store| store.get_message(&conv, &message_id).ok().flatten())
+                .and_then(|m| teams_lite::store::my_reaction_key(&m.reactions, &self_mri));
+            let on = current_key.as_deref() != Some(key.as_str());
+
+            let http = ctx.http.clone();
+            let react_conv = conv.clone();
+            let react_id = message_id.clone();
+            let react_key = key.clone();
+            ctx.retry_on_auth(move |session, _csa| {
+                let http = http.clone();
+                let conv = react_conv.clone();
+                let message_id = react_id.clone();
+                let key = react_key.clone();
+                async move {
+                    teams_send::set_reaction(&http, &session, &conv, &message_id, &key, on).await
+                }
+            })
+            .await?;
+
+            // Optimistic local update: reflect our own reaction now.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            if let Ok(store) = ctx.store() {
+                let key_arg = if on { Some(key.as_str()) } else { None };
+                if let Some(updated) =
+                    store.set_my_reaction(&conv, &message_id, &self_mri, key_arg, now_ms)?
+                {
+                    ctx.emit("message", message_json(&updated, &self_name, &self_mri));
+                }
+            }
+            Ok(json!({ "reacted": on }))
+        }
+
         // activity feed (`48:notifications`) — reactions / mentions / replies
         // directed at us. Not a chat: fetched fresh from Teams (which holds the
         // server-side read state), decoded into structured notifications, and
@@ -885,6 +940,7 @@ fn messages_value(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
             "compose_time": m.compose_time, "sender": m.sender, "sender_mri": m.sender_mri,
             "content": m.content,
             "attachments": attachments_value(m),
+            "reactions": reactions_value(m, self_mri),
             "is_self": is_self(m, self_name, self_mri)
         }))
         .collect::<Vec<_>>())
@@ -895,6 +951,35 @@ fn messages_value(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
 /// so a single bad row can never break a whole page's serialization.
 fn attachments_value(m: &Message) -> Value {
     serde_json::from_str(&m.attachments).unwrap_or_else(|_| json!([]))
+}
+
+/// Decode a message's stored reactions into the wire shape the UIs render: one
+/// `{ "key", "count", "mine" }` per emotion that has at least one user, with
+/// `mine` true when our own MRI is among them. The full user list stays server-
+/// side; the UI only needs the aggregate plus whether we reacted. A legacy /
+/// blank / malformed value degrades to an empty array so one bad row can never
+/// break serialization.
+fn reactions_value(m: &Message, self_mri: &str) -> Value {
+    let parsed: Value = serde_json::from_str(&m.reactions).unwrap_or_else(|_| json!([]));
+    let Some(list) = parsed.as_array() else {
+        return json!([]);
+    };
+    let out: Vec<Value> = list
+        .iter()
+        .filter_map(|e| {
+            let key = e.get("key").and_then(Value::as_str)?;
+            let users = e.get("users").and_then(Value::as_array)?;
+            if users.is_empty() {
+                return None;
+            }
+            let mine = !self_mri.is_empty()
+                && users
+                    .iter()
+                    .any(|u| u.get("mri").and_then(Value::as_str) == Some(self_mri));
+            Some(json!({ "key": key, "count": users.len(), "mine": mine }))
+        })
+        .collect();
+    json!(out)
 }
 
 fn messages_json(msgs: &[Message], self_name: &str, self_mri: &str, has_more: bool) -> Value {
@@ -946,6 +1031,7 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
         "compose_time": m.compose_time, "sender": m.sender, "sender_mri": m.sender_mri,
         "content": m.content,
         "attachments": attachments_value(m),
+        "reactions": reactions_value(m, self_mri),
         "is_self": is_self(m, self_name, self_mri)
     })
 }
@@ -1089,8 +1175,29 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
                         continue;
                     }
                     store.upsert_conversation(&m.conversation_id, "", m.compose_time).ok();
-                    if store.insert_message(m).unwrap_or(false) {
-                        ctx_msgs.emit("message", message_json(m, &self_name, &self_mri));
+                    let inserted = store.insert_message(m).unwrap_or(false);
+                    // Reconcile reactions when this live frame carried an
+                    // emotions snapshot. An empty sentinel means the frame said
+                    // nothing about reactions (e.g. a plain edit), so we never
+                    // clobber an existing set. On a real change we get back the
+                    // refreshed row to broadcast.
+                    let reacted = if m.reactions.is_empty() {
+                        None
+                    } else {
+                        store
+                            .update_message_reactions(&m.conversation_id, &m.id, &m.reactions)
+                            .unwrap_or(None)
+                    };
+                    if inserted || reacted.is_some() {
+                        // Emit the authoritative stored row: on a reaction change
+                        // it is `reacted`; on a fresh insert / content edit re-read
+                        // so the broadcast still carries reactions preserved across
+                        // the change (the parsed `m` may hold the sentinel, not the
+                        // stored set).
+                        let row = reacted
+                            .or_else(|| store.get_message(&m.conversation_id, &m.id).ok().flatten())
+                            .unwrap_or_else(|| m.clone());
+                        ctx_msgs.emit("message", message_json(&row, &self_name, &self_mri));
                     }
                 }
                 if activity_changed {
@@ -1161,7 +1268,29 @@ mod tests {
             sender_mri: String::new(),
             content: format!("message {seq}"),
             attachments: "[]".into(),
+            reactions: "[]".into(),
         }
+    }
+
+    #[test]
+    fn reactions_value_aggregates_count_and_mine() {
+        let mut m = message(1);
+        m.reactions = r#"[
+            {"key":"like","users":[{"mri":"8:me","time":1},{"mri":"8:other","time":2}]},
+            {"key":"heart","users":[]}
+        ]"#
+        .into();
+
+        let v = reactions_value(&m, "8:me");
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "the empty-user 'heart' emotion is dropped");
+        assert_eq!(arr[0]["key"], "like");
+        assert_eq!(arr[0]["count"], 2);
+        assert_eq!(arr[0]["mine"], true);
+
+        // `mine` is false when our MRI is not among the reactors
+        let v = reactions_value(&m, "8:someone_else");
+        assert_eq!(v.as_array().unwrap()[0]["mine"], false);
     }
 
     #[test]

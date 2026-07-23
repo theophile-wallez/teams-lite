@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS messages (
     sender_mri      TEXT,
     content         TEXT,
     attachments     TEXT NOT NULL DEFAULT '[]',
+    reactions       TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (conversation_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_msg_conv_seq ON messages(conversation_id, seq);
@@ -66,6 +67,18 @@ pub struct Message {
     /// extracts and renders those from the content HTML directly. Defaults to
     /// `"[]"` for messages without attachments and for legacy rows.
     pub attachments: String,
+    /// Reactions (Teams "emotions") on the message, as a JSON array string in the
+    /// Teams shape: `[{"key":"like","users":[{"mri":"8:...","time":<ms>}]}]`. A
+    /// key whose `users` list is empty means "nobody currently reacts with it".
+    ///
+    /// Sentinel: an EMPTY string (`""`) means "this frame carried no emotions
+    /// information" (e.g. a plain edit `MessageUpdate`), as opposed to `"[]"`
+    /// which means "explicitly no reactions". The store never persists the
+    /// sentinel — [`row_to_msg`] coerces it to `"[]"` on read, and the ingestion
+    /// path uses it to avoid clobbering a real reaction set with a frame that
+    /// simply didn't mention reactions. Reactions arrive as full snapshots (a
+    /// whole-set overwrite), never incremental deltas.
+    pub reactions: String,
 }
 
 /// The nature of a conversation. Modeled as an enum (not a bool) because there
@@ -167,10 +180,77 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
             .get::<_, Option<String>>(7)?
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "[]".to_string()),
+        reactions: row
+            .get::<_, Option<String>>(8)?
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "[]".to_string()),
     })
 }
 
-const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments";
+const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions";
+
+/// Return the emotion key our own MRI currently reacts with on a message, given
+/// its stored reactions JSON, or `None` when we have no reaction. Used to decide
+/// a toggle: clicking our current reaction removes it; a different key replaces
+/// it (Teams allows one reaction per user per message).
+pub fn my_reaction_key(reactions_json: &str, my_mri: &str) -> Option<String> {
+    let arr = serde_json::from_str::<serde_json::Value>(reactions_json).ok()?;
+    for entry in arr.as_array()? {
+        let mine = entry
+            .get("users")
+            .and_then(|u| u.as_array())
+            .map(|us| us.iter().any(|u| u.get("mri").and_then(|m| m.as_str()) == Some(my_mri)))
+            .unwrap_or(false);
+        if mine {
+            return entry.get("key").and_then(|k| k.as_str()).map(str::to_string);
+        }
+    }
+    None
+}
+
+/// Pure transform: apply our own reaction to a reactions snapshot and return the
+/// new JSON. `key = Some(k)` makes our reaction exactly `k` (removing us from any
+/// other key); `key = None` removes it. Empty emotions (no users left) are
+/// dropped so a cleared key never lingers. Best-effort: a malformed input yields
+/// a fresh set rather than an error, so a surprising shape can never break
+/// reacting.
+fn apply_my_reaction(reactions_json: &str, my_mri: &str, key: Option<&str>, time_ms: i64) -> String {
+    let mut entries: Vec<serde_json::Value> = serde_json::from_str::<serde_json::Value>(reactions_json)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+
+    // One reaction per user: remove our MRI from every emotion first.
+    for entry in &mut entries {
+        if let Some(users) = entry.get_mut("users").and_then(|u| u.as_array_mut()) {
+            users.retain(|u| u.get("mri").and_then(|m| m.as_str()) != Some(my_mri));
+        }
+    }
+
+    // Add ourselves under the requested key, creating the entry if needed.
+    if let Some(k) = key {
+        let me = serde_json::json!({ "mri": my_mri, "time": time_ms });
+        match entries
+            .iter_mut()
+            .find(|e| e.get("key").and_then(|x| x.as_str()) == Some(k))
+            .and_then(|e| e.get_mut("users"))
+            .and_then(|u| u.as_array_mut())
+        {
+            Some(users) => users.push(me),
+            None => entries.push(serde_json::json!({ "key": k, "users": [me] })),
+        }
+    }
+
+    // Drop emotions nobody reacts with anymore, so empty keys never linger.
+    entries.retain(|e| {
+        e.get("users")
+            .and_then(|u| u.as_array())
+            .map(|us| !us.is_empty())
+            .unwrap_or(false)
+    });
+
+    serde_json::Value::Array(entries).to_string()
+}
 
 /// Idempotent, additive migrations for databases created before a column existed.
 /// `CREATE TABLE IF NOT EXISTS` never alters an existing table, so older stores
@@ -198,6 +278,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     // attachments: file/card attachments as a JSON array string. Legacy rows and
     // messages without attachments carry the empty-array default.
     add_column("ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")?;
+    // reactions: Teams "emotions" as a JSON array string. Legacy rows and
+    // messages without reactions carry the empty-array default; the next network
+    // sync or a live MessageUpdate backfills the real set.
+    add_column("ALTER TABLE messages ADD COLUMN reactions TEXT NOT NULL DEFAULT '[]'")?;
 
     // Sidebar-fidelity columns (last-message preview + unread/muted/pinned/hidden
     // state), all sourced from the CSA `users/me` sync. Legacy rows get the
@@ -393,13 +477,22 @@ impl Store {
     /// inserted OR its content changed (an edit). When the same id arrives again
     /// with identical content, this is a no-op and returns false, so re-fetches
     /// stay cheap while genuine edits — from us or anyone else — propagate.
+    ///
+    /// Reactions are stored on a fresh INSERT but left untouched on conflict:
+    /// they change independently of content (a reaction is not an edit), so the
+    /// ingestion path reconciles them separately via [`Store::update_message_reactions`],
+    /// which also lets a plain edit frame (no emotions) avoid clobbering an
+    /// existing reaction set. The empty-string sentinel on `m.reactions` ("frame
+    /// carried no emotions info") is coerced to `"[]"` here so the column never
+    /// stores it.
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
+        let reactions = if m.reactions.is_empty() { "[]" } else { m.reactions.as_str() };
         let n = self.conn.execute(
-            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(conversation_id, id) DO UPDATE SET content = excluded.content
                  WHERE messages.content <> excluded.content",
-            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments],
+            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments, reactions],
         )?;
         Ok(n == 1)
     }
@@ -427,6 +520,69 @@ impl Store {
         let mut stmt = self.conn.prepare(&sql)?;
         let msg = stmt.query_row(params![conversation_id, id], row_to_msg)?;
         Ok(Some(msg))
+    }
+
+    /// Fetch a single message by id, or `None` when it is not stored. Used to
+    /// emit the authoritative row after a live update, so the broadcast reflects
+    /// what is persisted (including a reaction set preserved across a plain edit).
+    pub fn get_message(&self, conversation_id: &str, id: &str) -> Result<Option<Message>> {
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM messages WHERE conversation_id = ?1 AND id = ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let msg = stmt
+            .query_row(params![conversation_id, id], row_to_msg)
+            .optional()?;
+        Ok(msg)
+    }
+
+    /// Overwrite a message's reaction set (a whole-set snapshot, the way Teams
+    /// delivers `properties.emotions`) and return the refreshed row. Returns
+    /// `None` when the id is unknown or the reactions are unchanged, so callers
+    /// can skip a needless live broadcast — exactly like [`Store::update_message_content`].
+    ///
+    /// This is the ONLY writer of the `reactions` column after the initial
+    /// INSERT, which is why a reaction change propagates even when the message
+    /// content is identical (the case `insert_message` deliberately ignores).
+    pub fn update_message_reactions(
+        &self,
+        conversation_id: &str,
+        id: &str,
+        reactions: &str,
+    ) -> Result<Option<Message>> {
+        let changed = self.conn.execute(
+            "UPDATE messages SET reactions = ?3
+             WHERE conversation_id = ?1 AND id = ?2 AND reactions <> ?3",
+            params![conversation_id, id, reactions],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_message(conversation_id, id)
+    }
+
+    /// Optimistically apply OUR own reaction to a message and return the refreshed
+    /// row. `key = Some("like")` makes our reaction exactly that emotion (removing
+    /// us from any other, since Teams allows one reaction per user per message);
+    /// `key = None` removes our reaction entirely. `time_ms` timestamps the added
+    /// reaction. Returns `None` when the id is unknown or nothing changed.
+    ///
+    /// The server calls this right after the network PUT succeeds so open UIs
+    /// reflect the reaction immediately, without waiting for the trouter echo
+    /// (mirrors how `edit` optimistically updates content).
+    pub fn set_my_reaction(
+        &self,
+        conversation_id: &str,
+        id: &str,
+        my_mri: &str,
+        key: Option<&str>,
+        time_ms: i64,
+    ) -> Result<Option<Message>> {
+        let Some(current) = self.get_message(conversation_id, id)? else {
+            return Ok(None);
+        };
+        let next = apply_my_reaction(&current.reactions, my_mri, key, time_ms);
+        self.update_message_reactions(conversation_id, id, &next)
     }
 
     /// Persist the unsent composer text for one conversation. Network syncs never
@@ -643,6 +799,7 @@ mod tests {
             sender_mri: String::new(),
             content: format!("message {seq}"),
             attachments: "[]".into(),
+            reactions: "[]".into(),
         }
     }
 
@@ -769,6 +926,7 @@ mod tests {
             sender_mri: String::new(),
             content: content.into(),
             attachments: "[]".into(),
+            reactions: "[]".into(),
         };
 
         // Real chat messages that must survive — including one that merely mentions
@@ -1036,10 +1194,12 @@ mod tests {
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: String::new(), content: "salut".into(), attachments: "[]".into(),
+            reactions: "[]".into(),
         }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: String::new(), content: "hello".into(), attachments: "[]".into(),
+            reactions: "[]".into(),
         }).unwrap();
 
         // direct derivation
@@ -1058,6 +1218,7 @@ mod tests {
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: String::new(), content: "coucou".into(), attachments: "[]".into(),
+            reactions: "[]".into(),
         }).unwrap();
         assert_eq!(s.other_party_name("dm", me).unwrap(), None);
         assert_eq!(s.conversations(me).unwrap()[0].display_name, "");
@@ -1071,6 +1232,7 @@ mod tests {
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "c1".into(), seq: 1, compose_time: 1,
             sender: "Me".into(), sender_mri: String::new(), content: "hi".into(), attachments: "[]".into(),
+            reactions: "[]".into(),
         }).unwrap();
 
         // backfill fills the empty MRI
@@ -1095,12 +1257,14 @@ mod tests {
             id: "m1".into(), conversation_id: "c1".into(), seq: 1, compose_time: 1,
             sender: "Me".into(), sender_mri: String::new(), content: "see file".into(),
             attachments: r#"[{"name":"report.pdf","content_type":"application/pdf","url":"https://x.skype.com/o/1","kind":"file"}]"#.into(),
+            reactions: "[]".into(),
         }).unwrap();
         // a message without attachments keeps the empty-array default
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "c1".into(), seq: 2, compose_time: 2,
             sender: "Me".into(), sender_mri: String::new(), content: "hi".into(),
             attachments: "[]".into(),
+            reactions: "[]".into(),
         }).unwrap();
 
         let msgs = s.newest_messages("c1", 10).unwrap();
@@ -1126,5 +1290,104 @@ mod tests {
             .query_row("SELECT attachments FROM messages WHERE id = 'm1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(attachments, "[]");
+    }
+
+    #[test]
+    fn reactions_roundtrip_on_insert() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        let mut m = msg("c1", 1);
+        m.reactions = r#"[{"key":"like","users":[{"mri":"8:a","time":1}]}]"#.into();
+        s.insert_message(&m).unwrap();
+        assert!(s.newest_messages("c1", 1).unwrap()[0].reactions.contains("like"));
+    }
+
+    #[test]
+    fn insert_coerces_empty_reactions_sentinel_to_array() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        let mut m = msg("c1", 1);
+        m.reactions = String::new(); // sentinel: this frame carried no emotions info
+        s.insert_message(&m).unwrap();
+        assert_eq!(s.newest_messages("c1", 1).unwrap()[0].reactions, "[]");
+    }
+
+    #[test]
+    fn update_message_reactions_reports_change_only_when_changed() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        s.insert_message(&msg("c1", 1)).unwrap();
+
+        let set = r#"[{"key":"heart","users":[{"mri":"8:a","time":1}]}]"#;
+        let row = s.update_message_reactions("c1", "m1", set).unwrap().expect("a real change returns the row");
+        assert!(row.reactions.contains("heart"));
+        // idempotent: the same snapshot reports no change
+        assert!(s.update_message_reactions("c1", "m1", set).unwrap().is_none());
+        // an unknown id yields None rather than an error
+        assert!(s.update_message_reactions("c1", "nope", set).unwrap().is_none());
+        // clearing back to [] is itself a change
+        assert!(s.update_message_reactions("c1", "m1", "[]").unwrap().is_some());
+    }
+
+    #[test]
+    fn set_my_reaction_toggles_replaces_and_removes() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        s.insert_message(&msg("c1", 1)).unwrap();
+        let me = "8:orgid:me";
+
+        // add "like"
+        let row = s.set_my_reaction("c1", "m1", me, Some("like"), 10).unwrap().expect("added");
+        assert_eq!(my_reaction_key(&row.reactions, me).as_deref(), Some("like"));
+
+        // replace with "heart" — one reaction per user, so "like" is gone
+        let row = s.set_my_reaction("c1", "m1", me, Some("heart"), 20).unwrap().expect("replaced");
+        assert_eq!(my_reaction_key(&row.reactions, me).as_deref(), Some("heart"));
+        assert!(!row.reactions.contains("like"), "the emptied 'like' key is dropped");
+
+        // remove
+        let row = s.set_my_reaction("c1", "m1", me, None, 0).unwrap().expect("removed");
+        assert_eq!(row.reactions, "[]");
+        assert!(my_reaction_key(&row.reactions, me).is_none());
+    }
+
+    #[test]
+    fn set_my_reaction_never_touches_other_users() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        let mut m = msg("c1", 1);
+        m.reactions = r#"[{"key":"like","users":[{"mri":"8:other","time":1}]}]"#.into();
+        s.insert_message(&m).unwrap();
+        let me = "8:orgid:me";
+
+        // I also like it: both users sit under "like"
+        let row = s.set_my_reaction("c1", "m1", me, Some("like"), 5).unwrap().expect("added");
+        let parsed: serde_json::Value = serde_json::from_str(&row.reactions).unwrap();
+        assert_eq!(parsed[0]["users"].as_array().unwrap().len(), 2);
+
+        // removing mine leaves the other person's like intact
+        let row = s.set_my_reaction("c1", "m1", me, None, 0).unwrap().expect("removed");
+        assert_eq!(my_reaction_key(&row.reactions, "8:other").as_deref(), Some("like"));
+        assert!(my_reaction_key(&row.reactions, me).is_none());
+    }
+
+    #[test]
+    fn migration_backfills_reactions_default_on_legacy_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversations (id TEXT PRIMARY KEY);
+             CREATE TABLE messages (
+                id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+                PRIMARY KEY (conversation_id, id));
+             INSERT INTO messages (id, conversation_id) VALUES ('m1', 'c1');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let reactions: String = conn
+            .query_row("SELECT reactions FROM messages WHERE id = 'm1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reactions, "[]");
     }
 }

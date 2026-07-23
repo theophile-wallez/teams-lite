@@ -315,12 +315,26 @@ pub fn persist_backfill_page(
 pub fn persist_page(store: &Store, conversation_id: &str, page: &MessagePage) -> Result<usize> {
     let mut inserted = 0;
     for m in &page.messages {
-        if store.insert_message(m)? {
+        let new_row = store.insert_message(m)?;
+        if new_row {
             inserted += 1;
         } else {
-            // Existing row (INSERT OR IGNORE skipped it): heal a legacy row that
-            // was stored before we captured the sender MRI.
+            // Existing row (INSERT skipped it): heal a legacy row that was
+            // stored before we captured the sender MRI.
             store.backfill_sender_mri(&m.conversation_id, &m.id, &m.sender_mri)?;
+        }
+        // Reconcile reactions when this frame carried an emotions snapshot (an
+        // empty sentinel means the frame said nothing about reactions). This lets
+        // a history refresh pick up a changed reaction set on an already-stored
+        // message — `insert_message`'s content-only conflict ignores it. Count a
+        // reaction-only change so the caller refreshes the open view.
+        if !m.reactions.is_empty()
+            && store
+                .update_message_reactions(&m.conversation_id, &m.id, &m.reactions)?
+                .is_some()
+            && !new_row
+        {
+            inserted += 1;
         }
     }
 
@@ -529,6 +543,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         sender_mri,
         content,
         attachments: parse_attachments(m),
+        reactions: parse_emotions(m),
     })
 }
 
@@ -552,6 +567,66 @@ fn parse_attachments(m: &Value) -> String {
     let files = message_files(m);
     let list: Vec<Value> = files.iter().filter_map(file_to_attachment).collect();
     Value::Array(list).to_string()
+}
+
+/// Extract a message's reactions ("emotions") from its `properties` into the
+/// Teams-shaped JSON array string the store and UI use:
+/// `[{"key":"like","users":[{"mri":"8:...","time":<ms>}]}]`.
+///
+/// Returns the EMPTY string when `properties.emotions` is ABSENT — the sentinel
+/// meaning "this frame carried no reaction info" (see `store::Message.reactions`),
+/// so a plain edit `MessageUpdate` never clobbers an existing reaction set.
+/// Returns `"[]"` when reactions are present but empty (e.g. the last reaction
+/// was removed), so a genuine clear propagates. Emotions whose `users` list is
+/// empty are dropped (Teams sometimes ships `{"key":"heart","users":[]}`).
+///
+/// `properties` and `emotions` may each be delivered as a JSON-encoded STRING
+/// rather than a nested value — the same double-encoding as `properties.files` —
+/// so we parse a level deeper when needed. Best-effort: a malformed shape yields
+/// the sentinel (leave existing reactions untouched) rather than an error, so a
+/// surprising reaction payload can never break message ingestion.
+fn parse_emotions(m: &Value) -> String {
+    let props = match m.get("properties") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        _ => Value::Null,
+    };
+    let Some(emotions_raw) = props.get("emotions") else {
+        return String::new(); // sentinel: this frame said nothing about reactions
+    };
+    let emotions = match emotions_raw {
+        Value::String(s) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        v => v.clone(),
+    };
+    // The key WAS present, so "not a usable array" means "no reactions" ("[]"),
+    // not the sentinel — a present-but-empty emotions clears the set.
+    let Some(list) = emotions.as_array() else {
+        return "[]".to_string();
+    };
+    let out: Vec<Value> = list
+        .iter()
+        .filter_map(|entry| {
+            let key = entry.get("key").and_then(Value::as_str)?;
+            let users: Vec<Value> = entry
+                .get("users")
+                .and_then(Value::as_array)
+                .map(|us| {
+                    us.iter()
+                        .filter_map(|u| {
+                            let mri = u.get("mri").and_then(Value::as_str)?;
+                            let time = u.get("time").and_then(Value::as_i64).unwrap_or(0);
+                            Some(serde_json::json!({ "mri": mri, "time": time }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if users.is_empty() {
+                return None; // drop an emotion nobody currently reacts with
+            }
+            Some(serde_json::json!({ "key": key, "users": users }))
+        })
+        .collect();
+    Value::Array(out).to_string()
 }
 
 /// Read `properties.files` as an array of file objects, transparently decoding
@@ -1096,6 +1171,71 @@ mod tests {
         assert!(page.next_before_ms.is_some());
     }
 
+    // ---- reactions (emotions) parsing ---------------------------------------
+
+    #[test]
+    fn parse_emotions_absent_returns_sentinel() {
+        // No properties at all, and properties present but without an emotions
+        // key, both mean "this frame carried no reaction info" (the sentinel).
+        assert_eq!(parse_emotions(&json!({ "id": "1" })), "");
+        assert_eq!(parse_emotions(&json!({ "properties": { "files": "[]" } })), "");
+    }
+
+    #[test]
+    fn parse_emotions_present_but_empty_clears() {
+        // An empty emotions array, or one whose only key has no users, both
+        // normalize to "[]" (a genuine clear), NOT the sentinel.
+        assert_eq!(parse_emotions(&json!({ "properties": { "emotions": [] } })), "[]");
+        assert_eq!(
+            parse_emotions(&json!({ "properties": { "emotions": [ { "key": "heart", "users": [] } ] } })),
+            "[]"
+        );
+    }
+
+    #[test]
+    fn parse_emotions_normalizes_and_drops_empty_keys() {
+        let m = json!({ "properties": { "emotions": [
+            { "key": "heart", "users": [] },
+            { "key": "like", "users": [
+                { "mri": "8:orgid:a", "time": 111, "value": "111" },
+                { "mri": "8:orgid:b", "time": 222 }
+            ] }
+        ] } });
+        let parsed: Value = serde_json::from_str(&parse_emotions(&m)).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "the users-less 'heart' key is dropped");
+        assert_eq!(arr[0]["key"], "like");
+        assert_eq!(arr[0]["users"].as_array().unwrap().len(), 2);
+        assert_eq!(arr[0]["users"][0]["mri"], "8:orgid:a");
+        assert_eq!(arr[0]["users"][0]["time"], 111);
+        // only mri + time are carried; Teams' "value" string is dropped
+        assert!(arr[0]["users"][0].get("value").is_none());
+    }
+
+    #[test]
+    fn parse_emotions_decodes_json_encoded_properties() {
+        // Teams sometimes double-encodes `properties` as a JSON string.
+        let m = json!({
+            "properties": "{\"emotions\":[{\"key\":\"laugh\",\"users\":[{\"mri\":\"8:x\",\"time\":9}]}]}"
+        });
+        let parsed: Value = serde_json::from_str(&parse_emotions(&m)).unwrap();
+        assert_eq!(parsed[0]["key"], "laugh");
+        assert_eq!(parsed[0]["users"][0]["mri"], "8:x");
+    }
+
+    #[test]
+    fn parse_message_carries_reactions() {
+        let m = json!({
+            "id": "m1", "messagetype": "RichText/Html", "content": "hi",
+            "sequenceId": 5, "composetime": "2026-07-16T15:43:03.240Z",
+            "imdisplayname": "Bob", "from": "8:orgid:bob",
+            "properties": { "emotions": [ { "key": "like", "users": [ { "mri": "8:orgid:a", "time": 1 } ] } ] }
+        });
+        let parsed = parse_message(&m, "c1").unwrap();
+        let reactions: Value = serde_json::from_str(&parsed.reactions).unwrap();
+        assert_eq!(reactions[0]["key"], "like");
+    }
+
     // ---- store wiring: local-first cursor + dedup ---------------------------
 
     fn page(seqs: &[i64], oldest_ms: i64, has_more: bool) -> MessagePage {
@@ -1112,6 +1252,7 @@ mod tests {
                 sender_mri: String::new(),
                 content: "c".into(),
                 attachments: "[]".into(),
+                reactions: "[]".into(),
             })
             .collect();
         MessagePage { messages, next_before_ms: Some(oldest_ms), has_more_older: has_more }

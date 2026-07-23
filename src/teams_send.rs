@@ -146,6 +146,60 @@ pub async fn edit_message(
     Ok(())
 }
 
+/// Set or clear OUR reaction (Teams "emotion") on a message. Teams keeps one
+/// reaction per user per message, so setting a new `key` replaces any previous
+/// one server-side; `on = false` clears our reaction for `key`.
+///
+/// Endpoint — the `properties?name=<name>` PUT pattern is proven in
+/// EionRobb/purple-teams (e.g. `consumptionhorizon`), and the emotions body
+/// mirrors the Skype chatService reaction API:
+///   PUT {chatService}/v1/users/ME/conversations/{convId}/messages/{messageId}/properties?name=emotions
+///   Header: Authentication: skypetoken=...
+///   Body (add):    { "emotions": { "key": "<key>", "value": <epoch_ms> } }
+///   Body (remove): { "emotions": { "key": "<key>", "value": 0 } }
+///
+/// Removal is a NON-destructive PUT (value 0), never a blanket DELETE of the
+/// emotions property, so it can only clear OUR own reaction and can never wipe
+/// other users' reactions. The `value: 0` clear is the single part not yet proven
+/// against a live tenant; the display path stays authoritative from the inbound
+/// `properties.emotions` snapshot regardless, so received reactions render
+/// correctly even if this exact clear shape later needs a tweak.
+pub async fn set_reaction(
+    http: &reqwest::Client,
+    session: &Session,
+    conversation_id: &str,
+    message_id: &str,
+    key: &str,
+    on: bool,
+) -> Result<()> {
+    let chat = session
+        .endpoint("chatService")
+        .context("no chatService endpoint in regionGtms")?
+        .trim_end_matches('/');
+    let url = format!(
+        "{chat}/v1/users/ME/conversations/{}/messages/{}/properties?name=emotions",
+        urlencoding::encode(conversation_id),
+        urlencoding::encode(message_id)
+    );
+    let value = if on { now_ms() } else { 0 };
+    let body = build_reaction_body(key, value);
+
+    let resp = http
+        .put(&url)
+        .header("authentication", format!("skypetoken={}", session.skypetoken))
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .context("set reaction request")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let txt = resp.text().await.unwrap_or_default();
+        anyhow::bail!("react -> {status}: {}", txt.chars().take(160).collect::<String>());
+    }
+    Ok(())
+}
+
 /// The Teams reply blockquote that quotes the message being replied to.
 fn reply_quote(reply: &ReplyTo) -> String {
     format!(
@@ -210,6 +264,21 @@ fn build_edit_body(text: &str, self_name: &str) -> serde_json::Value {
         "contenttype": "text",
         "imdisplayname": self_name,
     })
+}
+
+/// Current time in milliseconds since the Unix epoch — the timestamp Teams
+/// records for a reaction.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Build the reaction request body (pure, unit-tested). `value` is the reaction
+/// timestamp in ms when adding, or 0 to clear our reaction.
+fn build_reaction_body(key: &str, value: i64) -> serde_json::Value {
+    json!({ "emotions": { "key": key, "value": value } })
 }
 
 #[cfg(test)]
@@ -319,5 +388,20 @@ mod tests {
         assert_eq!(b["messagetype"], "RichText/Html");
         assert_eq!(b["contenttype"], "text");
         assert_eq!(b["imdisplayname"], "Théophile WALLEZ");
+    }
+
+    #[test]
+    fn reaction_body_add_carries_key_and_timestamp() {
+        let b = build_reaction_body("like", 1_700_000_000_000);
+        assert_eq!(b["emotions"]["key"], "like");
+        assert_eq!(b["emotions"]["value"], 1_700_000_000_000i64);
+    }
+
+    #[test]
+    fn reaction_body_remove_uses_zero_value() {
+        // Removal is a non-destructive PUT with value 0, never a DELETE.
+        let b = build_reaction_body("heart", 0);
+        assert_eq!(b["emotions"]["key"], "heart");
+        assert_eq!(b["emotions"]["value"], 0);
     }
 }
