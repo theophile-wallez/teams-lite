@@ -254,6 +254,16 @@ async fn main() -> Result<()> {
         if let Err(e) = store.delete_conversation(teams_activity::NOTIFICATIONS_THREAD) {
             eprintln!("[cleanup] could not purge {}: {e}", teams_activity::NOTIFICATIONS_THREAD);
         }
+        // Older builds also stored control/system frames (typing/presence pushes
+        // and ThreadActivity member/topic changes) as chat bubbles — the bare
+        // `notifications.skype.net` URLs and raw `<partlist>`/`<addmember>` XML.
+        // Ingestion now drops them (see `teams_read::parse_message`); clear the
+        // ones already persisted so existing chats read clean.
+        match store.purge_control_frames() {
+            Ok(n) if n > 0 => eprintln!("[cleanup] removed {n} legacy control-frame message(s)"),
+            Ok(_) => {}
+            Err(e) => eprintln!("[cleanup] could not purge control frames: {e}"),
+        }
     }
 
     let (events_tx, _) = broadcast::channel::<Value>(256);

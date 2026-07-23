@@ -255,4 +255,25 @@ mod tests {
         let request = json!({ "url": "https://x/messaging", "headers": {}, "body": ev.to_string() });
         assert_eq!(messages_from_request(&request).unwrap().len(), 1);
     }
+
+    #[test]
+    fn typing_control_frame_yields_no_message() {
+        // Teams pushes a typing indicator as a live `NewMessage` whose messagetype
+        // is a control type and whose body is a bare notifications endpoint URL.
+        // It passes the resourceType gate, so it must be dropped by parse_message.
+        let ev = json!({
+            "type": "EventMessage",
+            "resourceType": "NewMessage",
+            "resource": {
+                "id": "1784217930000",
+                "sequenceId": 9187,
+                "composetime": "2026-07-16T16:05:30.000Z",
+                "messagetype": "Control/Typing",
+                "content": "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:bea5de00-723a-4526-b216-4cc52ac383f9",
+                "conversationid": "19:abc@thread.v2"
+            }
+        });
+        let request = json!({ "url": "https://x/messaging", "headers": {}, "body": ev.to_string() });
+        assert!(messages_from_request(&request).unwrap().is_empty());
+    }
 }

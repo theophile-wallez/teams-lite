@@ -449,20 +449,62 @@ fn parse_message_page(v: &Value, conversation_id: &str, page_size: u32) -> Messa
     // oldest-first here so callers can insert in natural order.
     messages.sort_by_key(|m| m.seq);
 
-    // Cursor for the next older page = oldest compose time we now hold.
-    let next_before_ms = messages.first().map(|m| m.compose_time).filter(|&t| t > 0);
+    // Cursor for the next older page = oldest compose time in the RAW page, not
+    // just among the displayable messages. `parse_message` drops control/system
+    // frames (typing/presence, member & topic changes), so deriving the cursor
+    // from `messages` would stall — or silently truncate — backfill whenever a
+    // page happens to be entirely non-chat frames.
+    let next_before_ms = raw
+        .iter()
+        .filter_map(|m| m.get("composetime").and_then(|x| x.as_str()).map(parse_iso_ms))
+        .filter(|&t| t > 0)
+        .min();
     // A short page means we've reached the top of history.
     let has_more_older = count as u32 >= page_size && next_before_ms.is_some();
 
     MessagePage { messages, next_before_ms, has_more_older }
 }
 
+/// True when a message frame carries user-visible chat content, as opposed to a
+/// control/system frame that Teams multiplexes onto the SAME message channel.
+///
+/// Both the read history endpoint and the trouter live feed deliver, tagged by
+/// `messagetype`: chat bodies (`Text`, `RichText`, `RichText/Html`,
+/// `RichText/Media_*`, `RichText/UriObject`, …) AND machinery that must never
+/// render as a chat bubble — `Control/*` (typing/presence, whose body is a bare
+/// `notifications.skype.net` endpoint URL or a `<partlist>` roster),
+/// `ThreadActivity/*` (member/topic changes: `<addmember>`, `<topicupdate>`, …),
+/// `Event/*` (calls) and `Signal/*`. Only the chat families are displayable.
+///
+/// An absent/empty `messagetype` is treated as displayable: real frames always
+/// carry one, so absence only occurs for synthetic inputs, and defaulting to
+/// "show" guarantees a genuinely-typed message is never hidden by a missing field.
+fn is_displayable_message_type(messagetype: &str) -> bool {
+    let t = messagetype.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("Text") {
+        return true;
+    }
+    let lower = t.to_ascii_lowercase();
+    lower == "richtext" || lower.starts_with("richtext/")
+}
+
 /// Parse a single message resource (shared by the read API and trouter events —
 /// both deliver the same message shape). `conversation_id` is passed in because
 /// the read API groups by conversation; for a live event, derive it from the
 /// resource's `conversationid`/`conversationLink` before calling.
-pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message> {    let id = m.get("id").and_then(|x| x.as_str())?.to_string();
-    // Skip control/system frames that carry no displayable content.
+pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message> {
+    let id = m.get("id").and_then(|x| x.as_str())?.to_string();
+    // Skip control/system frames (typing/presence, member & topic changes, call
+    // events). Teams pushes them alongside chat — notably as live `NewMessage`
+    // resources — so gate on `messagetype` and keep only user-visible bodies.
+    let messagetype = m
+        .get("messagetype")
+        .or_else(|| m.get("messageType"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    if !is_displayable_message_type(messagetype) {
+        return None;
+    }
     let content = m.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let seq = m.get("sequenceId").and_then(|x| x.as_i64()).unwrap_or(0);
     let compose_time = m.get("composetime").and_then(|x| x.as_str()).map(parse_iso_ms).unwrap_or(0);
@@ -874,6 +916,71 @@ mod tests {
         assert_eq!(normalize_mri("8:orgid:abc-123"), "8:orgid:abc-123");
         // a URL is reduced to its last segment
         assert_eq!(normalize_mri(".../contacts/8:orgid:xyz"), "8:orgid:xyz");
+    }
+
+    #[test]
+    fn skips_control_and_system_frames() {
+        // A displayable chat body is kept regardless of casing, and an absent
+        // messagetype defaults to displayable (real frames always carry one).
+        for mt in ["Text", "RichText", "RichText/Html", "RichText/Media_GenericFile", "richtext/html"] {
+            let m = json!({
+                "id": "1", "sequenceId": 1, "composetime": "2026-07-16T16:05:26.767Z",
+                "content": "<p>hi</p>", "imdisplayname": "Alice", "messagetype": mt
+            });
+            assert!(parse_message(&m, "c1").is_some(), "{mt} must be displayable");
+        }
+        let no_type = json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-16T16:05:26.767Z",
+            "content": "<p>hi</p>", "imdisplayname": "Alice"
+        });
+        assert!(parse_message(&no_type, "c1").is_some(), "absent messagetype defaults to displayable");
+
+        // Control/system frames are dropped, whatever body they carry — the
+        // typing/presence push whose content is a bare notifications endpoint URL
+        // (the reported bug) and the ThreadActivity member/topic changes whose
+        // content is a raw <partlist>/<addmember>/… XML frame.
+        let typing = json!({
+            "id": "2", "sequenceId": 2, "composetime": "2026-07-16T16:05:27.000Z",
+            "messagetype": "Control/Typing",
+            "content": "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:bea5de00-723a-4526-b216-4cc52ac383f9",
+            "from": "8:orgid:bea5de00-723a-4526-b216-4cc52ac383f9"
+        });
+        assert!(parse_message(&typing, "c1").is_none(), "typing control frame must be skipped");
+        for mt in ["Control/ClearTyping", "ThreadActivity/AddMember", "ThreadActivity/TopicUpdate", "Event/Call", "Signal/Flamingo"] {
+            let m = json!({
+                "id": "3", "sequenceId": 3, "composetime": "2026-07-16T16:05:28.000Z",
+                "messagetype": mt, "content": "<partlist alt=\"\"><part/></partlist>"
+            });
+            assert!(parse_message(&m, "c1").is_none(), "{mt} must be skipped");
+        }
+    }
+
+    #[test]
+    fn control_frames_do_not_truncate_backfill_cursor() {
+        // A full page whose only displayable message is the newest — the rest
+        // being typing/activity frames — must still page into the past: the cursor
+        // comes from the oldest RAW compose time, not the oldest surviving message.
+        let v = json!({
+            "messages": [
+                {
+                    "id": "1784217926767", "sequenceId": 9186,
+                    "composetime": "2026-07-16T16:05:26.767Z",
+                    "content": "<p>real</p>", "messagetype": "RichText/Html", "imdisplayname": "Alice"
+                },
+                {
+                    "id": "typing-1", "sequenceId": 9185,
+                    "composetime": "2026-07-16T15:00:00.000Z",
+                    "messagetype": "Control/Typing",
+                    "content": "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:x"
+                }
+            ]
+        });
+        let page = parse_message_page(&v, "19:abc@thread.v2", 2);
+        assert_eq!(page.messages.len(), 1, "only the real message is stored");
+        assert_eq!(page.messages[0].content, "<p>real</p>");
+        // cursor = oldest RAW compose time (the typing frame's), so backfill continues
+        assert_eq!(page.next_before_ms, Some(parse_iso_ms("2026-07-16T15:00:00.000Z")));
+        assert!(page.has_more_older, "a full raw page must still signal more history");
     }
 
     #[test]
