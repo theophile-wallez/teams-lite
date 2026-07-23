@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseRichHtml,
   decodeEntities,
+  extractLinks,
   hasVisibleContent,
   serializeTeamsHtml,
   type RichNode,
@@ -108,6 +109,35 @@ describe("parseRichHtml — links", () => {
     const a = nodes[0];
     expect(a?.type === "element" ? a.attrs.href : "unexpected").toBeUndefined();
     expect(text(nodes)).toBe("click");
+  });
+});
+
+describe("extractLinks", () => {
+  it("collects http(s) anchor hrefs in document order", () => {
+    const html =
+      '<p>see <a href="https://gitlab.com/a/b/-/merge_requests/1">MR</a> and ' +
+      '<a href="https://example.com/x">x</a></p>';
+    expect(extractLinks(html)).toEqual([
+      "https://gitlab.com/a/b/-/merge_requests/1",
+      "https://example.com/x",
+    ]);
+  });
+
+  it("de-duplicates repeated links", () => {
+    const html =
+      '<a href="https://gitlab.com/a/b">one</a> <a href="https://gitlab.com/a/b">again</a>';
+    expect(extractLinks(html)).toEqual(["https://gitlab.com/a/b"]);
+  });
+
+  it("ignores plain-text URLs and unsafe schemes", () => {
+    // Not an anchor — must not be picked up.
+    expect(extractLinks("visit https://gitlab.com/a/b for details")).toEqual([]);
+    // Unsafe scheme: the parser drops the href, so there is nothing to collect.
+    expect(extractLinks('<a href="javascript:alert(1)">x</a>')).toEqual([]);
+  });
+
+  it("returns an empty list for content without links", () => {
+    expect(extractLinks("<p>just text</p>")).toEqual([]);
   });
 });
 

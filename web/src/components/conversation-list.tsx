@@ -1,7 +1,7 @@
 import { useMemo, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { MoonStar, Search, Sun } from "lucide-react";
+import { MoonStar, Search, Settings as SettingsIcon, Sun } from "lucide-react";
 import { convLabel, previewLine, typingLabel, type Conversation } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
@@ -38,6 +38,8 @@ export function ConversationList(props: {
   onSelect: (index: number) => void;
   onOpenPalette: () => void;
   onOpenSettings: () => void;
+  onOpenSettingsPage: () => void;
+  settingsActive: boolean;
 }) {
   const conversations = useAppState((s) => s.conversations);
   const openId = useAppState((s) => s.openId);
@@ -79,6 +81,22 @@ export function ConversationList(props: {
           ) : (
             <Sun className="size-4" strokeWidth={1.4} />
           )}
+        </button>
+        <button
+          type="button"
+          aria-label="Settings"
+          title="Settings"
+          data-testid="open-settings"
+          aria-current={props.settingsActive ? "page" : undefined}
+          onClick={props.onOpenSettingsPage}
+          className={cn(
+            "grid size-8 shrink-0 place-items-center rounded-lg transition-colors",
+            props.settingsActive
+              ? "bg-accent text-foreground"
+              : "text-text-dim hover:bg-accent hover:text-foreground",
+          )}
+        >
+          <SettingsIcon className="size-4" strokeWidth={1.4} />
         </button>
       </div>
 

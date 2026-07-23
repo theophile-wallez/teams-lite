@@ -7,6 +7,7 @@ import {
   parseMessageContent,
   extractImages,
   mediaNeedsProxy,
+  urlHost,
   mergeMessages,
   appendLiveMessage,
   mergeOlderHistoryPage,
@@ -176,6 +177,24 @@ describe("mediaNeedsProxy", () => {
     expect(mediaNeedsProxy("https://statics.teams.cdn.office.net/emoji/x.png")).toBe(false);
     expect(mediaNeedsProxy("https://skype.com.evil.example/x")).toBe(false);
     expect(mediaNeedsProxy("not a url")).toBe(false);
+  });
+});
+
+describe("urlHost", () => {
+  it("extracts the lowercased host of an http(s) URL", () => {
+    expect(urlHost("https://gitlab.com/group/project/-/merge_requests/1")).toBe("gitlab.com");
+    expect(urlHost("https://GitLab.EXAMPLE.com/a/b")).toBe("gitlab.example.com");
+    expect(urlHost("http://example.org/path")).toBe("example.org");
+  });
+
+  it("strips credentials and port", () => {
+    expect(urlHost("https://user:pass@gitlab.com:8443/x")).toBe("gitlab.com");
+  });
+
+  it("returns null for non-http(s) or malformed input", () => {
+    expect(urlHost("mailto:a@b.com")).toBeNull();
+    expect(urlHost("not a url")).toBeNull();
+    expect(urlHost("ftp://host/x")).toBeNull();
   });
 });
 

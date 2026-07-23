@@ -19,8 +19,10 @@ import {
   mergeRefreshedHistoryPage,
   replyToPayload,
   shouldNotify,
+  type AppSettings,
   type ChatMessage,
   type Conversation,
+  type GitLabLinkMetadata,
   type LiveStatus,
   type MessagePage,
   type Notification,
@@ -76,6 +78,9 @@ export type AppState = {
   appearance: Appearance;
   /** Concrete theme currently applied to <html> (what CSS keys off). */
   resolvedTheme: ResolvedTheme;
+  /** Non-secret app settings (GitLab host + whether a token is stored), loaded
+   *  from the backend on start. Drives which links get rich previews. */
+  settings: AppSettings;
 };
 
 const DRAFT_SAVE_DELAY_MS = 150;
@@ -108,6 +113,7 @@ function initialState(): AppState {
     typingByConversation: {},
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
+    settings: { gitlab_host: "gitlab.com", gitlab_token_set: false },
   };
 }
 
@@ -137,6 +143,12 @@ export class TeamsController {
   // instant. The created object URLs are revoked on dispose.
   private mediaCache = new Map<string, Promise<string>>();
   private mediaObjectUrls: string[] = [];
+
+  // GitLab link-enrichment cache: URL -> a promise of its metadata (or null when
+  // not enrichable). Deduplicates concurrent/repeat lookups of the same link
+  // across message re-renders and scrolling. A failed (transient) lookup is
+  // evicted so a later render can retry, matching the media cache.
+  private linkCache = new Map<string, Promise<GitLabLinkMetadata | null>>();
 
   // Live OS dark-mode query, watched only while appearance === "system".
   private darkQuery: MediaQueryList | null = null;
@@ -173,6 +185,9 @@ export class TeamsController {
       this.set({ ready: true });
       // The activity feed is best-effort and must never block startup.
       void this.refreshNotifications();
+      // App settings (GitLab host/token state) are best-effort too — a failure
+      // just leaves the defaults, so link previews target gitlab.com.
+      void this.loadSettings();
     } catch (e) {
       const msg = errText(e);
       this.set({
@@ -201,6 +216,7 @@ export class TeamsController {
     for (const url of this.mediaObjectUrls) URL.revokeObjectURL(url);
     this.mediaObjectUrls = [];
     this.mediaCache.clear();
+    this.linkCache.clear();
     this.backend.close();
     this.started = false;
   }
@@ -545,6 +561,42 @@ export class TeamsController {
 
     this.mediaCache.set(url, pending);
     pending.catch(() => this.mediaCache.delete(url));
+    return pending;
+  }
+
+  // ---- settings + GitLab link enrichment ----------------------------------
+
+  /** Load the non-secret app settings from the backend into reactive state.
+   *  Best-effort: on failure the defaults remain (host gitlab.com, no token). */
+  private async loadSettings(): Promise<void> {
+    try {
+      const settings = await this.backend.getSettings();
+      this.set({ settings });
+    } catch {
+      // ignore — settings are non-critical; defaults stand.
+    }
+  }
+
+  /** Persist app settings (partial) and reflect the fresh non-secret view in
+   *  state. Clears the link cache so previews re-evaluate against the new host /
+   *  token. Rejects on failure so the caller (the settings form) can surface it. */
+  async saveSettings(patch: { gitlabHost?: string; gitlabToken?: string }): Promise<AppSettings> {
+    const settings = await this.backend.setSettings(patch);
+    this.set({ settings });
+    this.linkCache.clear();
+    return settings;
+  }
+
+  /** Resolve rich metadata for a GitLab link (or null when not enrichable),
+   *  going through the backend. Cached and de-duplicated per URL; a transient
+   *  failure is evicted so a later render can retry. */
+  enrichLink(url: string): Promise<GitLabLinkMetadata | null> {
+    const cached = this.linkCache.get(url);
+    if (cached) return cached;
+
+    const pending = this.backend.enrichLink(url).then((res) => res.metadata ?? null);
+    this.linkCache.set(url, pending);
+    pending.catch(() => this.linkCache.delete(url));
     return pending;
   }
 

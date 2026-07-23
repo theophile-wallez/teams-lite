@@ -12,6 +12,7 @@
 //   event    (server -> client):  { "event": "<name>", "data": <v> }   (no id)
 //
 // Methods: ping | conversations | open | backfill | set_draft | send | edit
+//          | notifications | fetch_media | get_settings | set_settings | enrich_link
 // Events:  status | realtime_status | message | conversations_changed | typing
 //
 // Run it (from the web/ directory):
@@ -630,6 +631,89 @@ function seedMediaSamples(): void {
   order.push(convId);
 }
 
+/** Register a dedicated "GitLab Links" conversation whose messages embed GitLab
+ *  merge-request, issue, and project links (as real `<a href>` anchors, the way
+ *  Teams delivers links), so the UI's rich link-preview cards are exercised. Its
+ *  URLs resolve through the mock's `enrich_link`. Reached by name in the palette. */
+function seedGitLabSamples(): void {
+  const convId = "19:gitlab-links-demo@thread.v2";
+  const other = PEOPLE[1]!;
+  // Dated in the past so it never sorts to the top of the sidebar (other specs
+  // assume index 0 has a full backlog); tests reach it by name.
+  const base = Date.now() - 20 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  let seq = 0;
+
+  const push = (
+    msg: Omit<ChatMessage, "id" | "conversation_id" | "seq" | "compose_time">,
+    offsetMs: number,
+  ): void => {
+    seq += 1;
+    messages.push({
+      id: `${convId}#${seq}`,
+      conversation_id: convId,
+      seq,
+      compose_time: base + offsetMs,
+      ...msg,
+    });
+  };
+
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        `<p>Can you review ` +
+        `<a href="https://gitlab.com/acme/webapp/-/merge_requests/42">this merge request</a>` +
+        ` before the release?</p>`,
+      is_self: false,
+    },
+    0,
+  );
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content:
+        `<p>Sure — it's tracked by ` +
+        `<a href="https://gitlab.com/acme/webapp/-/issues/7">issue 7</a>.</p>`,
+      is_self: true,
+    },
+    60_000,
+  );
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        `<p>Repo for reference: ` +
+        `<a href="https://gitlab.com/acme/webapp">acme/webapp</a></p>`,
+      is_self: false,
+    },
+    120_000,
+  );
+
+  const conv: Conversation = {
+    id: convId,
+    name: "GitLab Links",
+    last_message_time: 0,
+    kind: "group",
+    last_message_preview: "",
+    last_message_sender: "",
+    last_message_from_me: false,
+    is_read: true,
+    is_muted: false,
+    is_pinned: false,
+    is_hidden: false,
+    thread_type: "chat",
+    draft: "",
+  };
+  const cs: ConvState = { conv, messages, participants: [other] };
+  recomputeSummary(cs);
+  store.set(convId, cs);
+  order.push(convId);
+}
+
 // ---------------------------------------------------------------------------
 // Paging (operate on ascending-by-seq arrays, mirroring the Rust store).
 // ---------------------------------------------------------------------------
@@ -673,6 +757,108 @@ function mockMedia(url: string): { content_type: string; data_base64: string } {
   return {
     content_type: "image/svg+xml",
     data_base64: Buffer.from(svg, "utf8").toString("base64"),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// App settings + GitLab link enrichment — stand-in for the Rust store settings
+// table (`get_settings`/`set_settings`) and the `gitlab` module (`enrich_link`).
+// Deterministic, self-contained: no real GitLab tenant is ever contacted.
+// ---------------------------------------------------------------------------
+
+/** In-memory settings (the real backend persists these in SQLite). The token is
+ *  write-only from the UI's side, so only its presence is ever reported back. */
+const mockSettings = { gitlab_host: "gitlab.com", gitlab_token: "" };
+
+/** Non-secret settings view, matching the Rust `get_settings` result. */
+function settingsView(): { gitlab_host: string; gitlab_token_set: boolean } {
+  const host = mockSettings.gitlab_host.trim() || "gitlab.com";
+  return { gitlab_host: host, gitlab_token_set: mockSettings.gitlab_token.length > 0 };
+}
+
+type GitLabKind = "merge_request" | "issue" | "project";
+type ParsedGitLab = { kind: GitLabKind; project_path: string; iid?: number };
+
+/** GitLab application routes that are never a project (mirrors src/gitlab.rs). */
+const GITLAB_RESERVED_TOP = new Set([
+  "-", "admin", "api", "dashboard", "explore", "groups", "help", "profile", "projects", "search",
+  "users",
+]);
+
+/** Parse a GitLab web URL into a supported resource, mirroring src/gitlab.rs. */
+function parseGitLabUrl(url: string, host: string): ParsedGitLab | null {
+  if (!/^https:\/\//i.test(url)) return null;
+  const match = url.match(/^https:\/\/([^/?#]+)([^?#]*)/i);
+  if (!match) return null;
+  const urlHost = (match[1]!.split("@").pop() ?? "").split(":")[0]!.toLowerCase();
+  if (urlHost !== host.trim().toLowerCase()) return null;
+
+  const segments = (match[2] ?? "").split("/").filter(Boolean);
+  if (segments.length < 2) return null;
+
+  const dash = segments.indexOf("-");
+  if (dash > 0) {
+    const projectPath = segments.slice(0, dash).join("/");
+    const rest = segments.slice(dash + 1);
+    if (rest[0] === "merge_requests" && /^\d+$/.test(rest[1] ?? "")) {
+      return { kind: "merge_request", project_path: projectPath, iid: Number(rest[1]) };
+    }
+    if (rest[0] === "issues" && /^\d+$/.test(rest[1] ?? "")) {
+      return { kind: "issue", project_path: projectPath, iid: Number(rest[1]) };
+    }
+    return null;
+  }
+  if (GITLAB_RESERVED_TOP.has(segments[0]!.toLowerCase())) return null;
+  return { kind: "project", project_path: segments.join("/") };
+}
+
+/** Deterministic metadata for a parsed GitLab URL — canned, but varied by iid so
+ *  the UI shows realistic, distinct cards without any tenant. */
+function mockGitLabMetadata(url: string): Record<string, unknown> | null {
+  const parsed = parseGitLabUrl(url, mockSettings.gitlab_host || "gitlab.com");
+  if (!parsed) return null;
+  const { project_path } = parsed;
+
+  if (parsed.kind === "merge_request") {
+    const iid = parsed.iid!;
+    const state = iid % 3 === 0 ? "merged" : "opened";
+    return {
+      kind: "merge_request",
+      url,
+      title: `Add rich link previews for GitLab (!${iid})`,
+      project_path,
+      reference: `!${iid}`,
+      state,
+      draft: iid % 5 === 0,
+      author_name: "Ada Lovelace",
+      source_branch: "feat/gitlab-rich-links",
+      target_branch: "main",
+      labels: ["frontend", "enhancement"],
+      milestone: "v1.0",
+      description: "Render GitLab links in chat as rich cards with title, state, and author.",
+    };
+  }
+  if (parsed.kind === "issue") {
+    const iid = parsed.iid!;
+    return {
+      kind: "issue",
+      url,
+      title: `Links should show a preview card (#${iid})`,
+      project_path,
+      reference: `#${iid}`,
+      state: iid % 2 === 0 ? "closed" : "opened",
+      author_name: "Grace Hopper",
+      labels: ["bug"],
+      description: "A bare URL is hard to scan; show the target's title and status inline.",
+    };
+  }
+  return {
+    kind: "project",
+    url,
+    title: project_path,
+    project_path,
+    reference: "",
+    description: "A sample GitLab project used by the teams-lite mock backend.",
   };
 }
 
@@ -887,6 +1073,21 @@ function dispatch(method: string, params: unknown): unknown {
     case "fetch_media": {
       const url = requireString(params, "url");
       return mockMedia(url);
+    }
+
+    case "get_settings":
+      return settingsView();
+
+    case "set_settings": {
+      const o = asObject(params);
+      if (typeof o.gitlab_host === "string") mockSettings.gitlab_host = o.gitlab_host.trim();
+      if (typeof o.gitlab_token === "string") mockSettings.gitlab_token = o.gitlab_token.trim();
+      return settingsView();
+    }
+
+    case "enrich_link": {
+      const url = requireString(params, "url");
+      return { metadata: mockGitLabMetadata(url) };
     }
 
     default:
@@ -1129,6 +1330,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
 
 seed();
 seedMediaSamples();
+seedGitLabSamples();
 
 const server = Bun.serve({
   port: PORT,

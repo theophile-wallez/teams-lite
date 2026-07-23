@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Copy, MoreHorizontal, Pencil, Reply } from "lucide-react";
-import { copyableMessageText, parseRichMessage, type ChatMessage } from "~/lib/protocol";
+import { copyableMessageText, parseRichMessage, urlHost, type ChatMessage } from "~/lib/protocol";
+import { extractLinks } from "~/lib/rich-text";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
 import {
@@ -10,6 +11,8 @@ import {
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 import { FileAttachment, MediaImage } from "./media-image";
+import { GitLabLinkCard } from "./gitlab-link-card";
+import { useAppState } from "./controller-context";
 
 /**
  * A single chat message rendered as a bubble. Mine align right with an accent
@@ -36,6 +39,17 @@ export function MessageBubble(props: {
 }) {
   const mine = props.message.is_self === true;
   const parsed = useMemo(() => parseRichMessage(props.message.content), [props.message.content]);
+  // GitLab links in the authored body (not the quoted reply) that target the
+  // configured host get a rich preview card below the message. Filtering by host
+  // keeps enrichment to real GitLab links; the backend is authoritative on
+  // whether a given link is actually enrichable.
+  const gitlabHost = useAppState((s) => s.settings.gitlab_host);
+  const gitlabLinks = useMemo(() => {
+    const host = gitlabHost.trim().toLowerCase();
+    if (!host) return [];
+    const html = `${parsed.beforeHtml ?? ""}\n${parsed.bodyHtml}`;
+    return extractLinks(html).filter((u) => urlHost(u) === host);
+  }, [parsed, gitlabHost]);
   // Only label the first message of a same-author run; continuations are clearly
   // from the same person.
   const nameShown = !mine && props.showSenderName && !props.continuesAbove;
@@ -130,6 +144,14 @@ export function MessageBubble(props: {
                     <FileAttachment key={`att-${i}-${att.url}`} attachment={att} />
                   ),
                 )}
+              </div>
+            ) : null}
+
+            {gitlabLinks.length > 0 ? (
+              <div className="mt-1.5 flex flex-col gap-1.5">
+                {gitlabLinks.map((url) => (
+                  <GitLabLinkCard key={url} url={url} />
+                ))}
               </div>
             ) : null}
 

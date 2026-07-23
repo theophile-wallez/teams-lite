@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod gitlab;
 pub mod retry;
 pub mod teams;
 pub mod teams_activity;

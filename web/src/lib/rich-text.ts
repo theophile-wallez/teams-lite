@@ -329,6 +329,32 @@ export function hasVisibleContent(nodes: RichNode[]): boolean {
   });
 }
 
+/**
+ * Collect every `http(s)` anchor href in a Teams HTML fragment, in document
+ * order and de-duplicated. Reuses the same safe allowlist parser used to render,
+ * so only real `<a href>` links are returned (never a URL that merely appears in
+ * text). Used to detect link-preview candidates (e.g. GitLab links) in a message.
+ */
+export function extractLinks(html: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const walk = (nodes: RichNode[]): void => {
+    for (const node of nodes) {
+      if (node.type !== "element") continue;
+      if (node.tag === "a") {
+        const href = node.attrs.href;
+        if (href && /^https?:\/\//i.test(href) && !seen.has(href)) {
+          seen.add(href);
+          out.push(href);
+        }
+      }
+      walk(node.children);
+    }
+  };
+  walk(parseRichHtml(html));
+  return out;
+}
+
 function escapeText(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

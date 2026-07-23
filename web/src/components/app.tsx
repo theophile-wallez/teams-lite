@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { Outlet, useNavigate, useParams } from "@tanstack/react-router";
+import { Outlet, useMatchRoute, useNavigate, useParams } from "@tanstack/react-router";
 import { ControllerProvider, useAppState, useController } from "./controller-context";
 import { ConversationList } from "./conversation-list";
 import { MessagePane } from "./message-pane";
+import { SettingsPane } from "./settings-pane";
 import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
 import { ImageLightboxProvider } from "./image-lightbox";
@@ -38,6 +39,11 @@ function AppInner() {
   const { conversationId } = useParams({ strict: false });
   const routeConversationId = conversationId ?? null;
 
+  // Whether the settings route is active. When it is, the right pane shows the
+  // settings surface instead of a conversation; the sidebar stays put.
+  const matchRoute = useMatchRoute();
+  const onSettings = !!matchRoute({ to: "/settings" });
+
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -50,6 +56,9 @@ function AppInner() {
   );
   const goToList = useCallback(() => {
     void navigate({ to: "/" });
+  }, [navigate]);
+  const goToSettings = useCallback(() => {
+    void navigate({ to: "/settings" });
   }, [navigate]);
 
   // Reconcile the controller with the URL: open the conversation named in the
@@ -91,15 +100,16 @@ function AppInner() {
           controller.cancelReply();
           return;
         }
-        if (routeConversationId) {
+        if (routeConversationId || onSettings) {
           goToList();
           return;
         }
       }
 
-      // List navigation is only active when no conversation is open (otherwise
-      // the composer owns the keyboard), mirroring the TUI.
-      if (routeConversationId) return;
+      // List navigation is only active when no conversation is open and we're not
+      // on settings (otherwise the composer / settings form own the keyboard),
+      // mirroring the TUI.
+      if (routeConversationId || onSettings) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
 
@@ -119,6 +129,7 @@ function AppInner() {
       settingsOpen,
       replyingTo,
       routeConversationId,
+      onSettings,
       conversations,
       selectedIndex,
       controller,
@@ -142,8 +153,10 @@ function AppInner() {
           onSelect={setSelectedIndex}
           onOpenPalette={() => setPaletteOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
+          onOpenSettingsPage={goToSettings}
+          settingsActive={onSettings}
         />
-        <MessagePane />
+        {onSettings ? <SettingsPane /> : <MessagePane />}
       </div>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />

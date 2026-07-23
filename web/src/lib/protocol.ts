@@ -123,6 +123,48 @@ export type NotificationFeed = {
   items: Notification[];
 };
 
+/** Non-secret view of the app settings (mirrors the Rust `get_settings` /
+ *  `set_settings` result in src/bin/server.rs). The GitLab token is write-only
+ *  from the UI's side: we only ever learn whether one is stored, never its value. */
+export type AppSettings = {
+  /** GitLab host used for link previews, e.g. "gitlab.com" or a self-hosted host. */
+  gitlab_host: string;
+  /** True when a GitLab access token is stored on the backend. */
+  gitlab_token_set: boolean;
+};
+
+/** Kind discriminant for an enriched GitLab link (mirrors the Rust `LinkMetadata`
+ *  `kind` in src/gitlab.rs). */
+export type GitLabLinkKind = "merge_request" | "issue" | "project";
+
+/** Rich metadata for a GitLab link, returned by `enrich_link` (mirrors the Rust
+ *  `LinkMetadata` in src/gitlab.rs). Optional fields are absent when GitLab did
+ *  not provide them or they do not apply to the resource kind. */
+export type GitLabLinkMetadata = {
+  kind: GitLabLinkKind;
+  /** Canonical web URL of the resource (what the card links to). */
+  url: string;
+  title: string;
+  /** Full project path, e.g. "group/subgroup/project". */
+  project_path: string;
+  /** Short reference: "!42" (MR), "#7" (issue), or "" (project). */
+  reference: string;
+  state?: string;
+  draft?: boolean;
+  author_name?: string;
+  source_branch?: string;
+  target_branch?: string;
+  labels?: string[];
+  milestone?: string;
+  description?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+/** Result of an `enrich_link` request: the metadata, or `null` when the link is
+ *  not an enrichable GitLab resource (or is private/absent). */
+export type LinkMetadataResult = { metadata: GitLabLinkMetadata | null };
+
 // ---- message content parsing (ported from ui/src/message-content.ts) -------
 
 export type MessageQuote = {
@@ -198,13 +240,23 @@ const PROXY_MEDIA_DOMAINS = [
   "teams.office.com",
 ];
 
+/** Lowercased host of an `http(s)` URL, without any `userinfo@` or `:port`, or
+ *  `null` when the string is not an http(s) URL. Kept dependency-free (no `URL`)
+ *  so it is identical under SSR and node tests, mirroring the backend's host
+ *  parsing in src/teams_media.rs / src/gitlab.rs. */
+export function urlHost(url: string): string | null {
+  const authority = url.match(/^https?:\/\/([^/?#]+)/i)?.[1];
+  if (!authority) return null;
+  const host = (authority.split("@").pop() ?? "").split(":")[0]?.toLowerCase() ?? "";
+  return host || null;
+}
+
 /** True when a media URL must be loaded through the backend proxy (its host is
  *  an authenticated Microsoft hosted-content domain). Public URLs return false
  *  and are loaded directly by an `<img>`. */
 export function mediaNeedsProxy(url: string): boolean {
-  const authority = url.match(/^https?:\/\/([^/?#]+)/i)?.[1];
-  if (!authority) return false;
-  const host = (authority.split("@").pop() ?? "").split(":")[0]?.toLowerCase() ?? "";
+  const host = urlHost(url);
+  if (!host) return false;
   return PROXY_MEDIA_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
 }
 

@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
+import { Route as AppSettingsRouteImport } from './routes/_app.settings'
 import { Route as AppCConversationIdRouteImport } from './routes/_app.c.$conversationId'
 
 const AppRoute = AppRouteImport.update({
@@ -22,6 +23,11 @@ const AppIndexRoute = AppIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppRoute,
 } as any)
+const AppSettingsRoute = AppSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppCConversationIdRoute = AppCConversationIdRouteImport.update({
   id: '/c/$conversationId',
   path: '/c/$conversationId',
@@ -30,24 +36,32 @@ const AppCConversationIdRoute = AppCConversationIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
+  '/settings': typeof AppSettingsRoute
   '/c/$conversationId': typeof AppCConversationIdRoute
 }
 export interface FileRoutesByTo {
+  '/settings': typeof AppSettingsRoute
   '/': typeof AppIndexRoute
   '/c/$conversationId': typeof AppCConversationIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
+  '/_app/settings': typeof AppSettingsRoute
   '/_app/': typeof AppIndexRoute
   '/_app/c/$conversationId': typeof AppCConversationIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/c/$conversationId'
+  fullPaths: '/' | '/settings' | '/c/$conversationId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/c/$conversationId'
-  id: '__root__' | '/_app' | '/_app/' | '/_app/c/$conversationId'
+  to: '/settings' | '/' | '/c/$conversationId'
+  id:
+    | '__root__'
+    | '/_app'
+    | '/_app/settings'
+    | '/_app/'
+    | '/_app/c/$conversationId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -70,6 +84,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppIndexRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/settings': {
+      id: '/_app/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof AppSettingsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/c/$conversationId': {
       id: '/_app/c/$conversationId'
       path: '/c/$conversationId'
@@ -81,11 +102,13 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
+  AppSettingsRoute: typeof AppSettingsRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCConversationIdRoute: typeof AppCConversationIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppSettingsRoute: AppSettingsRoute,
   AppIndexRoute: AppIndexRoute,
   AppCConversationIdRoute: AppCConversationIdRoute,
 }

@@ -9,7 +9,7 @@
 //     messages older than what we hold) + `has_more_older`.
 
 use anyhow::Result;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS conversations (
@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS messages (
     PRIMARY KEY (conversation_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_msg_conv_seq ON messages(conversation_id, seq);
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,6 +440,33 @@ impl Store {
         Ok(())
     }
 
+    /// Read one application setting by key. Returns `None` when the key was never
+    /// set. This is a simple key/value side table (see `SCHEMA`), used for
+    /// durable app configuration such as the GitLab host and access token — data
+    /// that is neither a conversation nor a message. Network syncs never touch it.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// Write one application setting, inserting or overwriting the existing value.
+    /// An empty string is a valid stored value (e.g. "token explicitly cleared"),
+    /// distinct from an absent key.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     /// Backfill `sender_mri` on an existing row that predates the column (its MRI
     /// is NULL or empty). `insert_message` only ever updates `content` on
     /// conflict, so a re-fetch never rewrites `sender_mri` on its own — this
@@ -632,6 +663,38 @@ mod tests {
             is_hidden: false,
             thread_type: "",
         }
+    }
+
+    #[test]
+    fn settings_get_returns_none_when_unset() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.get_setting("gitlab_token").unwrap(), None);
+    }
+
+    #[test]
+    fn settings_set_then_get_roundtrips() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_setting("gitlab_host", "gitlab.example.com").unwrap();
+        assert_eq!(
+            s.get_setting("gitlab_host").unwrap().as_deref(),
+            Some("gitlab.example.com")
+        );
+    }
+
+    #[test]
+    fn settings_set_overwrites_existing_value() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_setting("gitlab_token", "first").unwrap();
+        s.set_setting("gitlab_token", "second").unwrap();
+        assert_eq!(s.get_setting("gitlab_token").unwrap().as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn settings_empty_string_is_stored_and_distinct_from_unset() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_setting("gitlab_token", "").unwrap();
+        // An explicitly-cleared token is an empty string, not an absent key.
+        assert_eq!(s.get_setting("gitlab_token").unwrap().as_deref(), Some(""));
     }
 
     #[test]

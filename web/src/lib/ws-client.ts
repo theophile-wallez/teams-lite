@@ -9,7 +9,14 @@
 //   response <- { id, result } | { id, error }
 //   event    <- { event, data }        (server push)
 
-import type { Conversation, MessagePage, NotificationFeed, ReplyTo } from "./protocol";
+import type {
+  AppSettings,
+  Conversation,
+  LinkMetadataResult,
+  MessagePage,
+  NotificationFeed,
+  ReplyTo,
+} from "./protocol";
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
 type EventHandler = (data: unknown) => void;
@@ -222,6 +229,26 @@ export class Backend {
    *  bytes come back base64-encoded so they ride the same JSON WebSocket. */
   fetchMedia(url: string): Promise<{ content_type: string; data_base64: string }> {
     return this.request<{ content_type: string; data_base64: string }>("fetch_media", { url });
+  }
+
+  /** Read the non-secret app settings (GitLab host + whether a token is stored). */
+  getSettings(): Promise<AppSettings> {
+    return this.request<AppSettings>("get_settings");
+  }
+  /** Persist app settings (partial). Omit a field to leave it unchanged; pass
+   *  `gitlabToken: ""` to clear the stored token. Returns the fresh non-secret
+   *  view so the caller updates in one round-trip. */
+  setSettings(patch: { gitlabHost?: string; gitlabToken?: string }): Promise<AppSettings> {
+    const params: Record<string, string> = {};
+    if (patch.gitlabHost !== undefined) params.gitlab_host = patch.gitlabHost;
+    if (patch.gitlabToken !== undefined) params.gitlab_token = patch.gitlabToken;
+    return this.request<AppSettings>("set_settings", params);
+  }
+  /** Enrich a GitLab link with metadata for a rich preview card. Resolves with
+   *  `{ metadata: null }` when the link is not an enrichable GitLab resource (or
+   *  is private); rejects only on a transient backend/network failure. */
+  enrichLink(url: string): Promise<LinkMetadataResult> {
+    return this.request<LinkMetadataResult>("enrich_link", { url });
   }
 
   // ---- events -------------------------------------------------------------

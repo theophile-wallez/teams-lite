@@ -10,6 +10,7 @@
 //   event    (server -> client):  { "event": "<name>", "data": {...} }   (no id)
 //
 // Methods: conversations | open | backfill | set_draft | send | edit | notifications
+//          | fetch_media | get_settings | set_settings | enrich_link
 // Events:  status | message | conversations_changed | notifications_changed | typing | update_available
 //
 // No raw tokens are ever logged or sent.
@@ -30,6 +31,7 @@ use teams_lite::{
     auth, retry, teams, teams_activity, teams_media, teams_profiles, teams_read, teams_send, trouter,
     trouter_events,
 };
+use teams_lite::gitlab;
 
 const ADDR: &str = "127.0.0.1:8420";
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
@@ -40,6 +42,11 @@ const INITIAL_CLIENT_GRACE: Duration = Duration::from_secs(30);
 /// Once at least one UI has connected, an empty server is an orphan. Keep a short
 /// grace window for UI restarts/reconnects, then terminate the backend ourselves.
 const DISCONNECTED_CLIENT_GRACE: Duration = Duration::from_secs(10);
+
+/// Settings keys (see `store::Store::{get,set}_setting`). The GitLab host and a
+/// personal access token drive rich link previews (see `gitlab`).
+const SETTING_GITLAB_HOST: &str = "gitlab_host";
+const SETTING_GITLAB_TOKEN: &str = "gitlab_token";
 
 /// Tracks established WebSocket clients. Raw TCP readiness probes do not count:
 /// the lease is acquired only after the WebSocket handshake succeeds.
@@ -693,6 +700,54 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(notifications_json(&items))
         }
 
+        // Read the non-secret view of the app settings: the configured GitLab
+        // host and whether a token is stored. The raw token is NEVER returned —
+        // it is write-only from the UI's perspective, matching the "no raw tokens
+        // are ever sent" rule.
+        "get_settings" => {
+            let store = ctx.store()?;
+            gitlab_settings_json(&store)
+        }
+
+        // Persist app settings (partial update). Only keys present in `params`
+        // are written, so the UI can save the host without resending the token.
+        // `gitlab_token: ""` explicitly clears the token. Returns the same
+        // non-secret view as `get_settings` so the UI updates in one round-trip.
+        "set_settings" => {
+            let store = ctx.store()?;
+            if let Some(host) = params.get("gitlab_host").and_then(Value::as_str) {
+                store.set_setting(SETTING_GITLAB_HOST, host.trim())?;
+            }
+            if let Some(token) = params.get("gitlab_token").and_then(Value::as_str) {
+                store.set_setting(SETTING_GITLAB_TOKEN, token.trim())?;
+            }
+            gitlab_settings_json(&store)
+        }
+
+        // Enrich a GitLab link with metadata (title, state, author, …) so the UI
+        // can render a rich preview card instead of a bare URL. The configured
+        // token is read from the store and sent only to the configured host (see
+        // `gitlab`). Best-effort: a non-GitLab/private link yields `metadata:
+        // null` (the UI shows the plain link); only a transient failure errors.
+        "enrich_link" => {
+            let url = param_str(params, "url")?;
+            let (host, token) = {
+                let store = ctx.store()?;
+                (
+                    store.get_setting(SETTING_GITLAB_HOST)?,
+                    store.get_setting(SETTING_GITLAB_TOKEN)?,
+                )
+            };
+            let host = host
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty())
+                .unwrap_or_else(|| gitlab::DEFAULT_HOST.to_string());
+            let token = token.filter(|t| !t.is_empty());
+            let metadata =
+                gitlab::fetch_metadata(&ctx.http, &host, token.as_deref(), &url).await?;
+            Ok(json!({ "metadata": metadata }))
+        }
+
         other => anyhow::bail!("unknown method: {other}"),
     }
 }
@@ -721,6 +776,23 @@ fn param_str(params: &Value, key: &str) -> Result<String> {
         .and_then(|v| v.as_str())
         .map(String::from)
         .with_context(|| format!("missing param: {key}"))
+}
+
+/// Build the non-secret view of the app settings for the UI: the configured
+/// GitLab host (falling back to the default) and whether a token is stored. The
+/// raw token is deliberately never included — the UI only needs to know it is
+/// set, never its value.
+fn gitlab_settings_json(store: &Store) -> Result<Value> {
+    let host = store
+        .get_setting(SETTING_GITLAB_HOST)?
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| gitlab::DEFAULT_HOST.to_string());
+    let token_set = store
+        .get_setting(SETTING_GITLAB_TOKEN)?
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+    Ok(json!({ "gitlab_host": host, "gitlab_token_set": token_set }))
 }
 
 /// Resolve the persistent SQLite path, following the XDG Base Directory spec:
