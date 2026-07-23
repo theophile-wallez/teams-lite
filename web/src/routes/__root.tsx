@@ -13,7 +13,17 @@ export const Route = createRootRoute({
   head: () => ({
     meta: [
       { charSet: "utf-8" },
-      { name: "viewport", content: "width=device-width, initial-scale=1, viewport-fit=cover" },
+      {
+        name: "viewport",
+        // `viewport-fit=cover` lets the app paint into the safe-area insets (the
+        // iOS notch / home indicator) which the composer then pads around.
+        // `interactive-widget=resizes-content` makes the on-screen keyboard shrink
+        // the layout viewport (and thus 100dvh) instead of just overlaying it, so
+        // the composer rides above the keyboard on mobile Chrome rather than being
+        // hidden behind it.
+        content:
+          "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",
+      },
       { name: "color-scheme", content: "light dark" },
       { title: "teams-lite" },
     ],

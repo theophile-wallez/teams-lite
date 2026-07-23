@@ -40,6 +40,7 @@ export function ConversationList(props: {
   onOpenSettings: () => void;
   onOpenSettingsPage: () => void;
   settingsActive: boolean;
+  chatOpen: boolean;
 }) {
   const conversations = useAppState((s) => s.conversations);
   const openId = useAppState((s) => s.openId);
@@ -57,10 +58,18 @@ export function ConversationList(props: {
   return (
     <aside
       data-testid="sidebar"
-      className="flex w-[320px] shrink-0 flex-col border-r border-border-subtle bg-background"
+      className={cn(
+        // Mobile: the full-screen home list. Desktop (md+): a fixed 320px column.
+        // When a conversation slides in over the list on mobile, the list drifts
+        // slightly left for an iOS-style parallax; this is a no-op on desktop.
+        "flex w-full shrink-0 flex-col border-r border-border-subtle bg-background",
+        "transition-transform duration-300 ease-out will-change-transform",
+        "md:w-[320px] md:translate-x-0 md:transition-none md:will-change-auto",
+        props.chatOpen && "max-md:-translate-x-[12%]",
+      )}
     >
       {/* Account / workspace header. */}
-      <div className="flex items-center gap-2.5 px-4 pb-2 pt-4">
+      <div className="flex items-center gap-2.5 px-4 pb-2 pt-[calc(1rem+env(safe-area-inset-top))]">
         <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/12 text-primary">
           <span className="text-base font-semibold tracking-tight">t</span>
         </div>

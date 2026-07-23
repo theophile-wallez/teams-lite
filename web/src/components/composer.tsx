@@ -101,7 +101,7 @@ export function Composer(props: { focusToken: unknown }) {
   };
 
   return (
-    <div className="shrink-0 bg-background px-4 pb-4 pt-2">
+    <div className="shrink-0 bg-background px-4 pt-2 pb-[calc(1rem+env(safe-area-inset-bottom))]">
       {replyingTo && (
         <div
           data-testid="reply-banner"

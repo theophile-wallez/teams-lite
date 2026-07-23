@@ -373,7 +373,10 @@ export function MessageBubble(props: {
                   aria-label="Message actions"
                   data-testid="message-actions"
                   className={cn(
-                    "absolute top-1/2 grid size-7 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-text-dim opacity-0 transition hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:bg-accent data-[state=open]:text-foreground data-[state=open]:opacity-100",
+                    // Hidden until hover on a mouse, but always visible on touch
+                    // (coarse pointer) where there is no hover — otherwise the
+                    // reply/react/copy/edit menu would be unreachable on mobile.
+                    "absolute top-1/2 grid size-7 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-text-dim opacity-0 transition hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:bg-accent data-[state=open]:text-foreground data-[state=open]:opacity-100 [@media(pointer:coarse)]:opacity-100",
                     mine ? "-left-9" : "-right-9",
                   )}
                 >

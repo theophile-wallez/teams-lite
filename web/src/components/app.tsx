@@ -10,6 +10,12 @@ import { ImageLightboxProvider } from "./image-lightbox";
 import { Splash } from "./splash";
 import { TooltipProvider } from "./ui/tooltip";
 import { Button } from "./ui/button";
+import { cn } from "~/lib/utils";
+
+// Duration of the mobile detail-pane slide, kept in sync with the Tailwind
+// `duration-300` on the pane so the deferred conversation close (see AppInner)
+// lines up with the animation.
+const PANE_SLIDE_MS = 300;
 
 export function App() {
   return (
@@ -44,6 +50,13 @@ function AppInner() {
   const matchRoute = useMatchRoute();
   const onSettings = !!matchRoute({ to: "/settings" });
 
+  // Below the `md` breakpoint the UI is single-pane: the conversation list is the
+  // home screen and a conversation (or Settings) slides in over it as a separate
+  // "page", Teams-style. `paneOpen` drives that slide. On desktop both columns are
+  // always on screen, so it only feeds the subtle parallax on the list.
+  const isMobile = useIsMobile();
+  const paneOpen = !!routeConversationId || onSettings;
+
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -66,14 +79,31 @@ function AppInner() {
   // stays the single owner of message loading, drafts and live fan-in; routing
   // only decides which conversation that machinery targets. Gated on `ready` so
   // a deep link waits for the WebSocket handshake before opening.
+  //
+  // Closing is immediate on desktop (both panes are visible) and whenever Settings
+  // is shown. On mobile, returning to the list slides the message pane out of
+  // view; closing right away would swap its content to the empty state mid-slide,
+  // so we leave the conversation mounted and let the deferred effect below close
+  // it once the pane is off-screen.
   useEffect(() => {
     if (!ready) return;
     if (routeConversationId) {
       if (openId !== routeConversationId) void controller.openConversation(routeConversationId);
-    } else if (openId) {
-      controller.closeConversation();
+      return;
     }
-  }, [ready, routeConversationId, openId, controller]);
+    if (openId && (onSettings || !isMobile)) controller.closeConversation();
+  }, [ready, routeConversationId, onSettings, openId, isMobile, controller]);
+
+  // Mobile only: once the detail pane has slid fully out of view (paneOpen went
+  // false) close the still-open conversation. The delay matches the slide so the
+  // messages stay put throughout the animation; a timeout (rather than
+  // transitionend) also covers reduced-motion and interrupted transitions. If the
+  // pane reopens first, the cleanup cancels the close and reopening is instant.
+  useEffect(() => {
+    if (!isMobile || paneOpen || !openId) return;
+    const timer = setTimeout(() => controller.closeConversation(), PANE_SLIDE_MS + 40);
+    return () => clearTimeout(timer);
+  }, [isMobile, paneOpen, openId, controller]);
 
   // Keep the selection in range as the conversation list changes.
   useEffect(() => {
@@ -147,7 +177,7 @@ function AppInner() {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         <ConversationList
           selectedIndex={selectedIndex}
           onSelect={setSelectedIndex}
@@ -155,8 +185,24 @@ function AppInner() {
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenSettingsPage={goToSettings}
           settingsActive={onSettings}
+          chatOpen={paneOpen}
         />
-        {onSettings ? <SettingsPane /> : <MessagePane />}
+        {/* The detail pane. On mobile it is a full-screen overlay that slides in
+            from the right over the conversation list (translate-x driven by
+            `paneOpen`); at `md` and up it collapses into a static second column
+            that is always visible, so the desktop two-pane layout is unchanged. */}
+        <div
+          data-testid="detail-pane"
+          data-open={paneOpen ? "true" : undefined}
+          className={cn(
+            "absolute inset-0 z-20 flex bg-background",
+            "transition-transform duration-300 ease-out will-change-transform",
+            "md:static md:z-auto md:flex-1 md:translate-x-0 md:transition-none md:will-change-auto",
+            paneOpen ? "translate-x-0" : "translate-x-full",
+          )}
+        >
+          {onSettings ? <SettingsPane onBack={goToList} /> : <MessagePane onBack={goToList} />}
+        </div>
       </div>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
@@ -170,6 +216,24 @@ function AppInner() {
       <Outlet />
     </div>
   );
+}
+
+/** Tracks whether the viewport is under the `md` breakpoint (the single-pane
+ *  mobile layout). Defaults to false so SSR and the first client paint assume the
+ *  desktop layout; the true value is read on mount. The column layout itself is
+ *  pure CSS (Tailwind `md:` utilities), so an initial wrong guess never changes
+ *  what is rendered — this flag only tunes behavioural timing (the deferred
+ *  mobile close), which is why reading it a beat late is harmless. */
+function useIsMobile(): boolean {
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 767.98px)");
+    const update = () => setIsMobile(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  return isMobile;
 }
 
 function FatalOverlay(props: { message: string }) {

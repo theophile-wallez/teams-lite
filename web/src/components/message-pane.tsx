@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Loader2, MessagesSquare, WifiOff } from "lucide-react";
+import { ChevronLeft, Loader2, MessagesSquare, WifiOff } from "lucide-react";
 import { convLabel, copyableMessageText, type ChatMessage, type Conversation } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
 import { Avatar } from "./avatar";
@@ -31,7 +31,7 @@ const HIGHLIGHT_MS = 1600;
  * infinite upward loading + scroll anchoring + sticky-to-bottom), and the
  * composer. Mirrors the TUI's MessagePane (ui/src/app.tsx).
  */
-export function MessagePane() {
+export function MessagePane(props: { onBack?: () => void }) {
   const controller = useController();
   const openId = useAppState((s) => s.openId);
   const messages = useAppState((s) => s.messages);
@@ -229,7 +229,18 @@ export function MessagePane() {
 
   return (
     <section data-testid="message-pane" className="flex min-w-0 flex-1 flex-col bg-background">
-      <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border-subtle px-5">
+      <header className="flex min-h-16 shrink-0 items-center gap-2 border-b border-border-subtle px-3 pt-[env(safe-area-inset-top)] md:gap-3 md:px-5">
+        {props.onBack && (
+          <button
+            type="button"
+            onClick={props.onBack}
+            aria-label="Back to conversations"
+            data-testid="back-to-list"
+            className="-ml-1 grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground md:hidden"
+          >
+            <ChevronLeft className="size-5" strokeWidth={1.6} />
+          </button>
+        )}
         {openConv && <Avatar seed={openConv.id} label={convLabel(openConv)} className="size-9" />}
         <div className="flex min-w-0 flex-col">
           <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">
@@ -245,7 +256,7 @@ export function MessagePane() {
         ref={viewportRef}
         onScroll={onScroll}
         data-testid="message-scroll"
-        className="flex-1 overflow-y-auto overflow-x-hidden px-5 py-4"
+        className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 md:px-5"
       >
         {messages.length === 0 ? (
           <EmptyState

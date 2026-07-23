@@ -15,7 +15,7 @@ export function StatusBar() {
   return (
     <footer
       data-testid="status-bar"
-      className="flex h-7 shrink-0 items-center gap-2 border-t border-border-subtle px-4 text-[11px] text-text-faint"
+      className="flex min-h-7 shrink-0 items-center gap-2 border-t border-border-subtle px-4 pb-[env(safe-area-inset-bottom)] text-[11px] text-text-faint"
     >
       <span
         data-testid="live-dot"

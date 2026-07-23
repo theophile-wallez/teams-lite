@@ -81,6 +81,19 @@
     "Apple Color Emoji", "Segoe UI Emoji";
 }
 
+/* The app shell is exactly one dynamic viewport tall. `dvh` tracks the space the
+ * browser actually leaves for content, so when a mobile browser shows its
+ * retractable bottom toolbar (iOS Chrome/Safari) or the on-screen keyboard, the
+ * shell shrinks to fit and the composer pinned at its bottom is never hidden
+ * behind that chrome. This lives OUTSIDE `@layer` so it wins over the `h-full`
+ * (height:100%) utility that also sits on #app, regardless of Tailwind's layer
+ * order; engines without `dvh` keep that 100% height as the fallback. */
+@supports (height: 100dvh) {
+  #app {
+    height: 100dvh;
+  }
+}
+
 @layer base {
   html,
   body,

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Check,
+  ChevronLeft,
   ExternalLink,
   GitPullRequestArrow,
   Loader2,
@@ -31,14 +32,25 @@ type SaveState = { kind: "idle" | "saving" | "saved" } | { kind: "error"; messag
  * preference. All values persist through the backend (the token is write-only:
  * the UI only ever learns whether one is stored, never its value).
  */
-export function SettingsPane() {
+export function SettingsPane(props: { onBack?: () => void }) {
   return (
     <section
       data-testid="settings-pane"
       className="flex min-w-0 flex-1 flex-col bg-background"
     >
-      <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border-subtle px-5">
-        <div className="grid size-9 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
+      <header className="flex min-h-16 shrink-0 items-center gap-2 border-b border-border-subtle px-3 pt-[env(safe-area-inset-top)] md:gap-3 md:px-5">
+        {props.onBack && (
+          <button
+            type="button"
+            onClick={props.onBack}
+            aria-label="Back to conversations"
+            data-testid="back-to-list"
+            className="-ml-1 grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground md:hidden"
+          >
+            <ChevronLeft className="size-5" strokeWidth={1.6} />
+          </button>
+        )}
+        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
           <SettingsIcon className="size-5" strokeWidth={1.5} />
         </div>
         <div className="flex min-w-0 flex-col">
@@ -47,8 +59,8 @@ export function SettingsPane() {
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto px-5 py-6">
-        <div className="mx-auto flex max-w-xl flex-col gap-8">
+      <div className="flex-1 overflow-y-auto px-4 py-6 md:px-5">
+        <div className="mx-auto flex max-w-xl flex-col gap-8 pb-[env(safe-area-inset-bottom)]">
           <GitLabSettings />
           <AppearanceSettings />
         </div>
