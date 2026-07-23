@@ -319,18 +319,25 @@ impl Store {
     }
 
     /// Delete control/system frames that older builds persisted as chat messages,
-    /// before ingestion started gating on `messagetype`. Two shapes leaked in:
+    /// before ingestion started gating on `messagetype`. Three shapes leaked in:
     ///   - typing/presence pushes whose body is a bare Skype notifications
-    ///     endpoint URL (`https://notifications.skype.net/…`), and
-    ///   - `ThreadActivity` member/topic changes whose body is a raw system XML
-    ///     frame (`<partlist>`, `<addmember>`, `<deletemember>`, `<topicupdate>`, …).
+    ///     endpoint URL (`https://notifications.skype.net/…`),
+    ///   - `ThreadActivity` member/topic/policy changes whose body is a raw system
+    ///     XML frame (`<partlist>`, `<addmember>`, `<topicupdate>`,
+    ///     `<meetingpolicyupdated>`, …), and
+    ///   - call/meeting events whose body opens with an `<ended>`/`<started>`
+    ///     marker and/or carries a `<callEventType>` element (e.g. the
+    ///     `<ended/><partlist>…</partlist>…<callEventType>callEnded</callEventType>`
+    ///     frame Teams sends when a call in the thread ends).
     ///
     /// A legitimate `RichText/Html` body never starts with any of these tokens
-    /// (it begins with text or a standard HTML tag), and chat content is never a
-    /// bare push endpoint URL, so the match cannot hit a real message. Meant to
-    /// run once at startup (like the `48:notifications` cleanup); idempotent, so a
-    /// cleaned store deletes nothing on a later run. Returns rows removed. `LIKE`
-    /// is ASCII case-insensitive in SQLite, so tag casing needs no extra patterns.
+    /// (it begins with text or a standard HTML tag), a media/card body is a
+    /// `<URIObject>` (kept — a call-recording card carries a real title and link),
+    /// and chat content is never a bare push endpoint URL, so the match cannot hit
+    /// a real message. Meant to run once at startup (like the `48:notifications`
+    /// cleanup); idempotent, so a cleaned store deletes nothing on a later run.
+    /// Returns rows removed. `LIKE` is ASCII case-insensitive in SQLite, so tag
+    /// casing needs no extra patterns.
     pub fn purge_control_frames(&self) -> Result<usize> {
         let n = self.conn.execute(
             "DELETE FROM messages WHERE
@@ -343,7 +350,11 @@ impl Store {
               OR content LIKE '<pictureupdate%'
               OR content LIKE '<roleupdate%'
               OR content LIKE '<joiningenabledupdate%'
-              OR content LIKE '<memberjoined%'",
+              OR content LIKE '<memberjoined%'
+              OR content LIKE '<meetingpolicyupdated%'
+              OR content LIKE '<ended%'
+              OR content LIKE '<started%'
+              OR content LIKE '%<callEventType>%'",
             [],
         )?;
         Ok(n)
@@ -930,17 +941,23 @@ mod tests {
         };
 
         // Real chat messages that must survive — including one that merely mentions
-        // a notifications URL inside normal HTML (it does not START with it).
+        // a notifications URL inside normal HTML (it does not START with it), and a
+        // call-recording card (a URIObject with a real title/link) that mentions a
+        // call but is genuine content, NOT a system frame.
         s.insert_message(&frame("real1", "<p>hello world</p>")).unwrap();
         s.insert_message(&frame("real2", "<p>see https://notifications.skype.net/x</p>")).unwrap();
+        s.insert_message(&frame("real3", "<URIObject type=\"Video.2/CallRecording.1\"><Title>Daily</Title><SessionEndReason value=\"CallEnded\" /></URIObject>")).unwrap();
         // Control/system frames that must be purged.
         s.insert_message(&frame("junk1", "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:bea5de00")).unwrap();
         s.insert_message(&frame("junk2", "<partlist alt=\"\"><part/></partlist>")).unwrap();
         s.insert_message(&frame("junk3", "<addmember><target>8:orgid:x</target></addmember>")).unwrap();
         s.insert_message(&frame("junk4", "<topicupdate><value>New</value></topicupdate>")).unwrap();
+        s.insert_message(&frame("junk5", "<meetingpolicyupdated><value>x</value></meetingpolicyupdated>")).unwrap();
+        // A call-ended event: opens with <ended/> and carries <callEventType>.
+        s.insert_message(&frame("junk6", "<ended/><partlist alt=\"\" count=\"1\"><part identity=\"8:orgid:x\"><displayName>Leonor GROELL</displayName><duration>600</duration></part></partlist><callEventType>callEnded</callEventType>")).unwrap();
 
         let removed = s.purge_control_frames().unwrap();
-        assert_eq!(removed, 4, "only the four control/system frames are deleted");
+        assert_eq!(removed, 6, "only the six control/system frames are deleted");
 
         let mut left: Vec<_> = s
             .newest_messages("c1", 50)
@@ -949,7 +966,7 @@ mod tests {
             .map(|m| m.id)
             .collect();
         left.sort();
-        assert_eq!(left, ["real1", "real2"], "real chat messages are untouched");
+        assert_eq!(left, ["real1", "real2", "real3"], "real chat messages are untouched");
 
         // Idempotent: a cleaned store deletes nothing on the next pass.
         assert_eq!(s.purge_control_frames().unwrap(), 0);

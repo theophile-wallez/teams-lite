@@ -394,13 +394,23 @@ fn parse_conversations_with_self(v: &Value, self_mri: &str) -> Vec<Conversation>
 
         // Sidebar state, straight from the chat object (see the CSA capture spike).
         // NB: the `lastMessage` sub-object uses camelCase field names
-        // (`imDisplayName`, `composeTime`) — NOT the lowercase names the
-        // chatService messages endpoint uses. Do not reuse `parse_message` here.
-        let last_message_preview = chat
-            .pointer("/lastMessage/content")
-            .and_then(|x| x.as_str())
-            .map(preview_from_html)
-            .unwrap_or_default();
+        // (`imDisplayName`, `composeTime`, `messageType`) — NOT the lowercase names
+        // the chatService messages endpoint uses. Do not reuse `parse_message` here.
+        //
+        // Mirror the message-history gate so a system frame (typing/presence, a
+        // member/topic change, or a call event) that happens to be the newest
+        // frame never leaks its raw machine XML into the sidebar preview line.
+        let last_message_content =
+            chat.pointer("/lastMessage/content").and_then(|x| x.as_str()).unwrap_or("");
+        let last_message_type =
+            chat.pointer("/lastMessage/messageType").and_then(|x| x.as_str()).unwrap_or("");
+        let last_message_preview = if is_displayable_message_type(last_message_type)
+            && !is_system_frame_content(last_message_content)
+        {
+            preview_from_html(last_message_content)
+        } else {
+            String::new()
+        };
         let last_message_sender = chat
             .pointer("/lastMessage/imDisplayName")
             .and_then(|x| x.as_str())
@@ -493,6 +503,8 @@ fn parse_message_page(v: &Value, conversation_id: &str, page_size: u32) -> Messa
 /// An absent/empty `messagetype` is treated as displayable: real frames always
 /// carry one, so absence only occurs for synthetic inputs, and defaulting to
 /// "show" guarantees a genuinely-typed message is never hidden by a missing field.
+/// [`is_system_frame_content`] backstops that default so an untyped system frame
+/// (e.g. a call event) still cannot render as a chat bubble.
 fn is_displayable_message_type(messagetype: &str) -> bool {
     let t = messagetype.trim();
     if t.is_empty() || t.eq_ignore_ascii_case("Text") {
@@ -500,6 +512,31 @@ fn is_displayable_message_type(messagetype: &str) -> bool {
     }
     let lower = t.to_ascii_lowercase();
     lower == "richtext" || lower.starts_with("richtext/")
+}
+
+/// True when a message BODY is an unambiguous machine/system frame that must
+/// never render as a chat bubble, regardless of its `messagetype`.
+///
+/// This backstops [`is_displayable_message_type`]: its empty-messagetype→show
+/// default would otherwise let a system frame through as garbage if one ever
+/// arrives without a type. The recognised shapes are:
+///   - call/meeting events — the frame carries a `<callEventType>` element (e.g.
+///     the `<ended/><partlist>…</partlist>…<callEventType>callEnded</callEventType>`
+///     body Teams sends when a call in the thread ends) and/or opens with an
+///     `<ended>`/`<started>` marker, and
+///   - a raw participant roster (`<partlist>`) or a `<meetingpolicyupdated>`
+///     thread-activity frame.
+///
+/// A real chat body never matches: `RichText/Html` begins with text or a standard
+/// HTML tag (`<p>`, `<div>`, `<blockquote>`, `<h1>`…) and a media/card body is a
+/// `<URIObject>` — none start with these markers or contain `<callEventType>`.
+/// Kept deliberately narrow so it can only ever hit genuine system frames.
+fn is_system_frame_content(content: &str) -> bool {
+    let c = content.trim_start().to_ascii_lowercase();
+    c.contains("<calleventtype>")
+        || ["<ended", "<started", "<partlist", "<meetingpolicyupdated"]
+            .iter()
+            .any(|root| c.starts_with(root))
 }
 
 /// Parse a single message resource (shared by the read API and trouter events —
@@ -520,6 +557,12 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         return None;
     }
     let content = m.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    // Backstop the messagetype gate: some system frames (notably call events) can
+    // reach here with an empty/mis-reported type, which the gate treats as
+    // displayable. Their body is machine XML that must never become a chat bubble.
+    if is_system_frame_content(&content) {
+        return None;
+    }
     let seq = m.get("sequenceId").and_then(|x| x.as_i64()).unwrap_or(0);
     let compose_time = m.get("composetime").and_then(|x| x.as_str()).map(parse_iso_ms).unwrap_or(0);
     let sender = m
@@ -915,6 +958,47 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_preview_hides_system_frame_last_message() {
+        // When the newest frame in a chat is a call event, its raw machine XML
+        // must not leak into the sidebar preview line — it renders empty, exactly
+        // as the message-history gate drops it from the thread.
+        let v = json!({
+            "chats": [{
+                "id": "19:meeting@thread.v2",
+                "title": "[Stratumn] Daily",
+                "chatType": "meeting",
+                "lastMessage": {
+                    "id": "9",
+                    "composeTime": "2026-07-23T13:10:00.000Z",
+                    "messageType": "Event/Call",
+                    "content": "<ended/><partlist alt=\"\" count=\"1\"><part identity=\"8:orgid:x\">\
+                        <displayName>Leonor GROELL</displayName></part></partlist>\
+                        <callEventType>callEnded</callEventType>"
+                }
+            }]
+        });
+        let c = &parse_conversations(&v)[0];
+        assert_eq!(c.last_message_preview, "", "a call-event last message shows no preview");
+
+        // A media/card last message (URIObject) is real content and still previews.
+        let v = json!({
+            "chats": [{
+                "id": "19:meeting@thread.v2",
+                "title": "[Stratumn] Daily",
+                "chatType": "meeting",
+                "lastMessage": {
+                    "id": "10",
+                    "composeTime": "2026-07-23T13:11:00.000Z",
+                    "messageType": "RichText/Media_CallRecording",
+                    "content": "<URIObject type=\"Video.2/CallRecording.1\">recording</URIObject>"
+                }
+            }]
+        });
+        let c = &parse_conversations(&v)[0];
+        assert_eq!(c.last_message_preview, "recording");
+    }
+
+    #[test]
     fn preview_from_html_strips_collapses_and_truncates() {
         // tags stripped, entities decoded, whitespace collapsed
         assert_eq!(
@@ -1028,6 +1112,36 @@ mod tests {
             });
             assert!(parse_message(&m, "c1").is_none(), "{mt} must be skipped");
         }
+
+        // Backstop: a call/meeting event whose `messagetype` is absent (or a
+        // benign chat type) must STILL be dropped on its machine-XML body — this
+        // is the reported "callEnded" garbage bubble that the type gate alone,
+        // with its empty->displayable default, would let through.
+        let call_ended = "<ended/><partlist alt=\"\" count=\"1\"><part identity=\"8:orgid:x\">\
+            <displayName>Leonor GROELL</displayName><duration>600</duration></part></partlist>\
+            <callEventType>callEnded</callEventType>";
+        for mt in [None, Some("Text"), Some("RichText/Html")] {
+            let mut m = json!({
+                "id": "4", "sequenceId": 4, "composetime": "2026-07-16T16:05:29.000Z",
+                "content": call_ended, "from": "8:orgid:x"
+            });
+            if let Some(mt) = mt {
+                m["messagetype"] = json!(mt);
+            }
+            assert!(parse_message(&m, "c1").is_none(), "untyped call event ({mt:?}) must be skipped");
+        }
+
+        // ...but a media/card body (URIObject) is a real message and stays, even
+        // when it mentions a call (e.g. a call-recording card): it carries a title
+        // and a playable link, and its type is a displayable RichText/Media_*.
+        let recording = json!({
+            "id": "5", "sequenceId": 5, "composetime": "2026-07-16T16:05:30.000Z",
+            "messagetype": "RichText/Media_CallRecording",
+            "content": "<URIObject type=\"Video.2/CallRecording.1\"><Title>Daily</Title>\
+                <SessionEndReason value=\"CallEnded\" /></URIObject>",
+            "imdisplayname": "Alice"
+        });
+        assert!(parse_message(&recording, "c1").is_some(), "a call-recording card must be kept");
     }
 
     #[test]
