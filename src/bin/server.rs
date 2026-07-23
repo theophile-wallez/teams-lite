@@ -111,7 +111,34 @@ fn should_shutdown(active: usize, ever_connected: bool, idle_for: Duration) -> b
     idle_for >= grace
 }
 
-async fn wait_for_idle_shutdown(clients: ClientTracker) {
+/// Env escape hatch to keep the backend alive across frontend disconnects (dev /
+/// standalone use): with `TEAMS_NO_IDLE_EXIT` set, the process only stops on a
+/// signal (Ctrl+C), never because the last client went away. Any value counts as
+/// "on" except an explicit falsey token, so both `=1` and `=true` work.
+///
+/// Pure helper (takes the raw value) so the parsing is unit-tested without
+/// touching the process environment.
+fn env_flag_enabled(value: Option<&str>) -> bool {
+    match value {
+        None => false,
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        ),
+    }
+}
+
+/// Resolve whether idle auto-shutdown is disabled, from the process environment.
+fn idle_exit_disabled() -> bool {
+    env_flag_enabled(std::env::var("TEAMS_NO_IDLE_EXIT").ok().as_deref())
+}
+
+async fn wait_for_idle_shutdown(clients: ClientTracker, disabled: bool) {
+    // Dev/standalone: never resolve, so the caller's shutdown branch can't fire.
+    // Only a signal (Ctrl+C / SIGTERM) will stop the process.
+    if disabled {
+        std::future::pending::<()>().await;
+    }
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let (active, ever_connected, idle_for) = clients.snapshot();
@@ -289,7 +316,11 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(ADDR).await.with_context(|| format!("bind {ADDR}"))?;
     eprintln!("[ok] server ws://{ADDR} — ready");
     let clients = ClientTracker::new();
-    let idle_shutdown = wait_for_idle_shutdown(clients.clone());
+    let no_idle_exit = idle_exit_disabled();
+    if no_idle_exit {
+        eprintln!("[lifecycle] TEAMS_NO_IDLE_EXIT set — staying alive until terminated (Ctrl+C)");
+    }
+    let idle_shutdown = wait_for_idle_shutdown(clients.clone(), no_idle_exit);
     tokio::pin!(idle_shutdown);
 
     loop {
@@ -1137,6 +1168,33 @@ mod lifecycle_tests {
             DISCONNECTED_CLIENT_GRACE - Duration::from_millis(1),
         ));
         assert!(should_shutdown(0, true, DISCONNECTED_CLIENT_GRACE));
+    }
+
+    #[test]
+    fn no_idle_exit_flag_parsing() {
+        // Present + truthy (any non-falsey value) disables idle shutdown.
+        for on in ["1", "true", "TRUE", "yes", "on", " 1 ", "anything"] {
+            assert!(env_flag_enabled(Some(on)), "{on:?} should enable");
+        }
+        // Absent or an explicit falsey token keeps the orphan safety net.
+        for off in ["", "0", "false", "FALSE", "no", "off", "  "] {
+            assert!(!env_flag_enabled(Some(off)), "{off:?} should stay off");
+        }
+        assert!(!env_flag_enabled(None));
+    }
+
+    #[tokio::test]
+    async fn disabled_idle_watcher_never_shuts_down() {
+        // With idle-exit disabled (TEAMS_NO_IDLE_EXIT), the watcher must never
+        // resolve, even with no clients ever connected — only a signal stops the
+        // process. A short timeout is enough: the future pends immediately.
+        let clients = ClientTracker::new();
+        let res = tokio::time::timeout(
+            Duration::from_millis(200),
+            wait_for_idle_shutdown(clients, true),
+        )
+        .await;
+        assert!(res.is_err(), "keep-alive watcher must stay pending forever");
     }
 
     #[test]

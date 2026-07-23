@@ -149,7 +149,9 @@ holds it alive, opens the browser, honors `--port`/`--host`/`--no-open` — but
 serves the app through Vite's dev server, so your edits **hot-reload** in the
 browser instead of running the pre-built SSR bundle. It runs against the repo's
 `web/` sources, so it only works from a source checkout (`bun run`), not from
-the compiled single-file binary.
+the compiled single-file binary. The backend it spawns runs with idle-exit
+disabled (`TEAMS_NO_IDLE_EXIT`), so closing or reloading the browser tab won't
+take the backend down between hot reloads.
 
 ## Build from source
 
@@ -169,6 +171,13 @@ cargo build --release --bin server
 cd ui && bun run start            # terminal UI
 #   …or the web UI in dev (Vite + HMR), against a mock backend:
 cd web && bun run dev             # then, in another shell: bun run mock
+#
+#   …or drive the REAL backend yourself, two terminals. Set TEAMS_NO_IDLE_EXIT so
+#   the backend stays up across browser reloads/inactivity and only stops on Ctrl+C
+#   (without it, the backend self-terminates a few seconds after the last client
+#   disconnects — the orphan safety net for the UI-owned model):
+TEAMS_NO_IDLE_EXIT=1 ./target/release/server   # terminal 1  (or: cargo run --bin server)
+cd web && bun run dev                          # terminal 2  (HMR against :8420)
 
 # 3b. …or produce the single `teams` binary (backend + web UI embedded)
 cargo build --release --bin server

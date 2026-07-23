@@ -83,7 +83,12 @@ export type ServerHandle = { stop: () => void };
 
 /// Ensure the backend is running. If a server is already up, attach to it and
 /// don't manage its lifecycle. Otherwise spawn one and return a stop() handle.
-export async function ensureServer(): Promise<ServerHandle> {
+///
+/// `keepAlive` (dev use) starts the spawned backend with `TEAMS_NO_IDLE_EXIT`, so
+/// it survives frontend disconnects and only stops when we kill it — handy when
+/// the browser tab is closed/reloaded during development. It has no effect when
+/// we merely attach to a backend someone else already started.
+export async function ensureServer(opts: { keepAlive?: boolean } = {}): Promise<ServerHandle> {
   if (await portOpen()) {
     return { stop: () => {} }; // someone else owns it
   }
@@ -93,6 +98,7 @@ export async function ensureServer(): Promise<ServerHandle> {
     stdout: Bun.file("/tmp/teams-lite-server.log"),
     stderr: Bun.file("/tmp/teams-lite-server.log"),
     stdin: "ignore",
+    ...(opts.keepAlive ? { env: { ...process.env, TEAMS_NO_IDLE_EXIT: "1" } } : {}),
   });
 
   // wait for it to bind (auth broker handshake can take a few seconds)

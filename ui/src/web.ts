@@ -163,8 +163,10 @@ async function runViteDev(options: WebOptions): Promise<never> {
 export async function runWeb(options: WebOptions): Promise<void> {
   console.error(`teams-lite — starting web UI${options.dev ? " (dev, hot reload)" : ""}…`);
 
-  // 1. Bring up (or attach to) the Rust backend, and keep it alive.
-  await ensureServer();
+  // 1. Bring up (or attach to) the Rust backend, and keep it alive. In dev,
+  //    spawn it with idle-exit disabled so closing/reloading the browser doesn't
+  //    take the backend down between hot reloads.
+  await ensureServer({ keepAlive: options.dev });
   startKeepalive();
 
   // 2. Dev mode: hand off to Vite (HMR) instead of the built SSR server. Never
