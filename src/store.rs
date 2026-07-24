@@ -1466,8 +1466,11 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_conversation("19:plain@thread.v2", "Group Chat", 100).unwrap();
         s.upsert_conversation("19:leaked@thread.tacv2", "Ops / Standup", 200).unwrap();
+        // a channel post / deep link carries a `;messageid=` suffix, so the bare id
+        // does not end in @thread.tacv2 — it must still be filtered out.
+        s.upsert_conversation("19:post@thread.tacv2;messageid=1784899486984", "Post", 300).unwrap();
         let ids: Vec<_> = s.conversations("").unwrap().into_iter().map(|c| c.id).collect();
-        assert_eq!(ids, ["19:plain@thread.v2"]); // tacv2 thread filtered out
+        assert_eq!(ids, ["19:plain@thread.v2"]); // both tacv2 forms filtered out
     }
 
     #[test]

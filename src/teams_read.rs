@@ -113,8 +113,13 @@ impl Conversation {
 /// 1:1s (`@unq.gbl.spaces`) and system threads (`48:*`). This is the single
 /// discriminant the live-message path uses to keep a channel post out of the
 /// chat sidebar (see the trouter loop in the server).
+///
+/// A channel post / deep link appends a `;messageid=<root>` suffix to the thread
+/// id (e.g. `19:...@thread.tacv2;messageid=123`), so we match the thread-id part
+/// before any `;` — a bare `ends_with("@thread.tacv2")` misses that form and lets
+/// a per-post channel thread leak into the chat list.
 pub fn is_channel_thread_id(id: &str) -> bool {
-    id.ends_with("@thread.tacv2")
+    id.split(';').next().unwrap_or(id).ends_with("@thread.tacv2")
 }
 
 /// One team surfaced by the CSA aggregator, with its channels. Teams are the
@@ -1884,7 +1889,10 @@ mod tests {
     #[test]
     fn is_channel_thread_id_discriminates() {
         assert!(is_channel_thread_id("19:abc@thread.tacv2"));
+        // a channel post / deep link carries a `;messageid=` suffix — still a channel
+        assert!(is_channel_thread_id("19:abc@thread.tacv2;messageid=1784899486984"));
         assert!(!is_channel_thread_id("19:abc@thread.v2")); // group chat
+        assert!(!is_channel_thread_id("19:abc@thread.v2;messageid=1")); // group-chat deep link
         assert!(!is_channel_thread_id("19:abc@unq.gbl.spaces")); // 1:1
         assert!(!is_channel_thread_id("48:notes")); // system thread
         assert!(!is_channel_thread_id(""));
