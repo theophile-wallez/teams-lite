@@ -11,7 +11,9 @@
 //   2. GET  {socketio}socket.io/1/?v=v4&{connectparams}&...   -> sessionId
 //   3. WS   wss://{socketio}socket.io/1/websocket/{sessionId}?...  (+X-Skypetoken)
 //   4. on "1::" -> user.authenticate (Bearer ic3) + user.activity + registrar POST
+//        (+ opt-in calling registrations when TEAMS_LITE_CALLING=1)
 //   5. messages arrive as "3:::{...}"; ack every request, decode /messaging pushes
+//        (and, when enabled, native calling pushes on the calling worker URLs)
 //
 // No raw tokens are ever logged (Status carries only human-readable state).
 
@@ -71,6 +73,9 @@ pub trait CredentialProvider: Send + Sync {
 /// - `creds` supplies fresh credentials before every connection attempt (so a
 ///   reconnection past the ~1h token lifetime re-mints the skypetoken + ic3).
 /// - `events` receives batches of parsed chat messages as they arrive.
+/// - `typing` receives ephemeral typing/presence signals.
+/// - `calls` receives raw native-calling frames (experimental; only populated when
+///   calling is enabled via `TEAMS_LITE_CALLING=1`).
 /// - `status` receives lifecycle transitions (Connecting/Connected/Disconnected).
 /// - `epid` is the stable endpoint id; persist it across runs so the server keeps
 ///   routing to the same registration.
@@ -81,6 +86,7 @@ pub async fn run(
     epid: String,
     events: mpsc::UnboundedSender<Vec<Message>>,
     typing: mpsc::UnboundedSender<crate::trouter_events::TypingEvent>,
+    calls: mpsc::UnboundedSender<crate::trouter_events::CallFrame>,
     status: mpsc::UnboundedSender<Status>,
 ) {
     let http = match reqwest::Client::builder().user_agent(UA).http1_only().build() {
@@ -94,7 +100,7 @@ pub async fn run(
         // etc.) treat it like a disconnect and back off. connect_once only
         // returns on disconnect/error, so we ignore its result either way.
         if let Ok(Credentials { session, ic3 }) = creds.credentials().await {
-            let _ = connect_once(&http, &session, &ic3, &epid, &events, &typing, &status).await;
+            let _ = connect_once(&http, &session, &ic3, &epid, &events, &typing, &calls, &status).await;
         }
         // If the consumer is gone, stop.
         if events.is_closed() || status.is_closed() {
@@ -114,6 +120,7 @@ async fn connect_once(
     epid: &str,
     events: &mpsc::UnboundedSender<Vec<Message>>,
     typing: &mpsc::UnboundedSender<crate::trouter_events::TypingEvent>,
+    calls: &mpsc::UnboundedSender<crate::trouter_events::CallFrame>,
     status: &mpsc::UnboundedSender<Status>,
 ) -> Result<()> {
     // 1. trouter connect
@@ -205,7 +212,8 @@ async fn connect_once(
                                 write.send(WsMessage::Text(format!("3:::{ack}"))).await?;
 
                                 // decode once, fan out chat messages + typing signals
-                                // (non-message pushes decode to empty and cost nothing).
+                                // + calling frames (non-message pushes decode to
+                                // empty and cost nothing).
                                 if let Ok(rt) = crate::trouter_events::realtime_from_request(&reqv) {
                                     if !rt.messages.is_empty() && events.send(rt.messages).is_err() {
                                         return Ok(()); // consumer gone
@@ -214,6 +222,11 @@ async fn connect_once(
                                         // A dropped typing receiver is non-fatal: presence is
                                         // best-effort, so keep the chat stream alive.
                                         let _ = typing.send(t);
+                                    }
+                                    for c in rt.calls {
+                                        // Best-effort like typing: a dropped calls
+                                        // receiver must not kill the chat stream.
+                                        let _ = calls.send(c);
                                     }
                                 }
                             }
@@ -285,6 +298,48 @@ async fn register(http: &reqwest::Client, skypetoken: &str, ic3: &str, surl: &st
         .body(body.to_string())
         .send()
         .await?;
+
+    // Native calling (experimental, opt-in via TEAMS_LITE_CALLING=1). Registering
+    // the calling worker templates is what makes the calling service route incoming
+    // call notifications to this endpoint's trouter socket. Off by default because
+    // it changes how Teams routes the user's real calls across their endpoints.
+    if std::env::var("TEAMS_LITE_CALLING").as_deref() == Ok("1") {
+        register_calling(http, skypetoken, ic3, surl).await?;
+    }
+    Ok(())
+}
+
+/// Register the two native calling worker templates (NextGenCalling +
+/// SkypeSpacesWeb) so the calling service delivers call setup/state pushes to this
+/// endpoint. Each registration points at the same live trouter socket with a
+/// worker-specific path suffix (…/NGCallManagerWin, …/SkypeSpacesWeb) and its own
+/// registration id. Modeled on EionRobb/purple-teams teams_trouter.c.
+async fn register_calling(http: &reqwest::Client, skypetoken: &str, ic3: &str, surl: &str) -> Result<()> {
+    for (app_id, template_key, suffix) in [
+        ("NextGenCalling", "DesktopNgc_2.3:SkypeNgc", "NGCallManagerWin"),
+        ("SkypeSpacesWeb", "SkypeSpacesWeb_2.3", "SkypeSpacesWeb"),
+    ] {
+        let body = json!({
+            "clientDescription": {
+                "appId": app_id,
+                "aesKey": "",
+                "languageId": "en-US",
+                "platform": "edge",
+                "templateKey": template_key,
+                "platformUIVersion": CLIENT_VERSION
+            },
+            "registrationId": uuid::Uuid::new_v4().to_string(),
+            "nodeId": "",
+            "transports": { "TROUTER": [{ "context": "", "path": format!("{surl}{suffix}"), "ttl": 86400 }] }
+        });
+        http.post(REGISTRAR)
+            .header("content-type", "application/json")
+            .header("X-Skypetoken", skypetoken)
+            .header("authorization", format!("Bearer {ic3}"))
+            .body(body.to_string())
+            .send()
+            .await?;
+    }
     Ok(())
 }
 
@@ -366,10 +421,11 @@ mod tests {
         let provider = CountingProvider { calls: calls.clone() };
         let (ev_tx, ev_rx) = mpsc::unbounded_channel::<Vec<Message>>();
         let (ty_tx, _ty_rx) = mpsc::unbounded_channel::<crate::trouter_events::TypingEvent>();
+        let (call_tx, _call_rx) = mpsc::unbounded_channel::<crate::trouter_events::CallFrame>();
         let (st_tx, mut st_rx) = mpsc::unbounded_channel::<Status>();
 
         let handle = tokio::spawn(async move {
-            run(provider, "epid-test".to_string(), ev_tx, ty_tx, st_tx).await;
+            run(provider, "epid-test".to_string(), ev_tx, ty_tx, call_tx, st_tx).await;
         });
 
         // Wait until the provider has been asked at least twice (proves it was

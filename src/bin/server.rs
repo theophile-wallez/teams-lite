@@ -12,10 +12,15 @@
 // Methods: conversations | open | backfill | set_draft | send | edit | react | notifications
 //          | fetch_media | get_settings | set_settings | enrich_link
 // Events:  status | message | conversations_changed | notifications_changed | typing
-//          | call | update_available
+//          | call | call_signal | update_available
 //
-// The `call` event is incoming-call AWARENESS only (ring/dismiss a banner). The
-// client has no media stack: it cannot place, answer, or carry audio/video.
+// The `call` event is incoming-call AWARENESS only (ring/dismiss a banner) — it
+// rides on the after-the-fact `Event/Call` chat system message.
+//
+// `call_signal` is EXPERIMENTAL native-calling plumbing (opt-in via
+// TEAMS_LITE_CALLING=1): the raw, still-being-reverse-engineered call setup/state
+// frames from the calling trouter workers, forwarded verbatim for a live capture.
+// No media is placed/answered without an explicit user action.
 //
 // No raw tokens are ever logged or sent.
 
@@ -1272,6 +1277,8 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Message>>();
     let (ty_tx, mut ty_rx) =
         tokio::sync::mpsc::unbounded_channel::<trouter_events::TypingEvent>();
+    let (call_tx, mut call_rx) =
+        tokio::sync::mpsc::unbounded_channel::<trouter_events::CallFrame>();
     let (st_tx, mut st_rx) = tokio::sync::mpsc::unbounded_channel::<trouter::Status>();
 
     // consume trouter messages: persist + broadcast. self identity is stable
@@ -1401,8 +1408,33 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
         }
     });
 
+    // trouter native-calling frames -> `call_signal` event (experimental, opt-in
+    // via TEAMS_LITE_CALLING=1). The native call wire schema is only partially
+    // reverse-engineered, so we forward the whole decoded envelope to the UI and —
+    // behind TEAMS_LITE_CALL_DEBUG=1 — log it, so a live call to a consenting
+    // party pins down the exact shape. Distinct from the `call` awareness event,
+    // which rides on the after-the-fact `Event/Call` chat system message.
+    let ctx_call = ctx.clone();
     tokio::spawn(async move {
-        trouter::run(ctx, epid, ev_tx, ty_tx, st_tx).await;
+        let debug = std::env::var("TEAMS_LITE_CALL_DEBUG").as_deref() == Ok("1");
+        while let Some(c) = call_rx.recv().await {
+            if debug {
+                eprintln!(
+                    "[call_signal] {} id={}\n{}",
+                    c.url,
+                    c.call_id,
+                    serde_json::to_string_pretty(&c.body).unwrap_or_default()
+                );
+            }
+            ctx_call.emit(
+                "call_signal",
+                json!({ "url": c.url, "call_id": c.call_id, "body": c.body }),
+            );
+        }
+    });
+
+    tokio::spawn(async move {
+        trouter::run(ctx, epid, ev_tx, ty_tx, call_tx, st_tx).await;
     });
 }
 

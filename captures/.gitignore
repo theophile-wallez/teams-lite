@@ -1,0 +1,4 @@
+# Scratch drop for call-signaling captures / backend logs while reverse-engineering
+# the native Teams calling protocol. These may contain live tokens — never commit.
+*
+!.gitignore

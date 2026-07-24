@@ -21,6 +21,7 @@ import {
   shouldNotify,
   type AppSettings,
   type CallSignal,
+  type CallSignalFrame,
   type Channel,
   type ChatMessage,
   type Conversation,
@@ -302,6 +303,16 @@ export class TeamsController {
     on("typing", (raw) => this.onTyping(raw as TypingSignal));
 
     on("call", (raw) => this.onCall(raw as CallSignal));
+
+    // EXPERIMENTAL native-calling capture. The raw call setup/state frames from
+    // the calling trouter workers arrive here (only when the backend runs with
+    // TEAMS_LITE_CALLING=1). Their schema is still being reverse-engineered, so we
+    // log them to the console verbatim — a live call to a consenting party reveals
+    // the shape — rather than acting on them. No media is placed or answered here.
+    on("call_signal", (raw) => {
+      const f = raw as CallSignalFrame;
+      console.info("[call_signal]", f.url, f.call_id, f.body);
+    });
 
     on("messages_updated", (raw) => {
       const d = raw as { conversation: string; messages: ChatMessage[]; has_more: boolean };

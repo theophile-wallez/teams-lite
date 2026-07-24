@@ -173,6 +173,21 @@ export type IncomingCall = {
   participantCount: number;
 };
 
+/** Wire shape of the EXPERIMENTAL `call_signal` event (see src/bin/server.rs).
+ *  A raw, still-being-reverse-engineered native-calling frame from the calling
+ *  trouter workers, forwarded verbatim. Only emitted when the backend has calling
+ *  enabled (TEAMS_LITE_CALLING=1). `body` is the fully-decoded envelope (with any
+ *  nested payload expanded under `_decoded`); its schema is not yet pinned down,
+ *  so this is surfaced for capture, not acted upon — no media is placed/answered. */
+export type CallSignalFrame = {
+  /** The calling worker URL the frame arrived on (…/NGCallManagerWin, …/SkypeSpacesWeb). */
+  url: string;
+  /** Best-effort call id, for correlating an invite with its later state frames. */
+  call_id: string;
+  /** The fully-decoded calling envelope. Shape is proprietary and still being learned. */
+  body: unknown;
+};
+
 
 /** One activity-feed entry (from the Teams `48:notifications` thread), decoded
  *  by the backend from `properties.activity`. Mirrors the Rust `Notification`

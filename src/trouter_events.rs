@@ -14,6 +14,10 @@
 //        resource = body.resource
 //        resourceType in {NewMessage, MessageUpdate} -> a chat message
 //
+// Pushes on a calling worker URL (…/NGCallManagerWin, …/SkypeSpacesWeb) are decoded
+// separately into raw `CallFrame`s — the native calling wire schema is proprietary,
+// so we forward the whole envelope rather than a typed shape (experimental).
+//
 // This module is pure: no network, no websocket. The websocket loop calls
 // `messages_from_frame` and feeds the results to the store.
 
@@ -36,20 +40,54 @@ pub struct TypingEvent {
     pub is_typing: bool,
 }
 
-/// Everything one real-time push carries: chat messages plus typing signals.
-/// Both are decoded from the same EventMessage envelope, so we decode once and
-/// split, rather than running the (gzip/base64) pipeline twice.
+/// A raw native-CALLING frame (call invite / state / hangup), decoded from a
+/// trouter push on a calling worker URL (…/NGCallManagerWin or …/SkypeSpacesWeb).
+///
+/// The native call wire schema is proprietary and only partially known, so this
+/// deliberately carries the FULL decoded envelope (`body`, with any nested `cp`/`gp`
+/// payload expanded under `_decoded`) rather than a tight typed shape. The server
+/// logs it (behind TEAMS_LITE_CALL_DEBUG) and forwards it to the UI, so a live call
+/// pins down the exact schema. Experimental: only produced when calling is enabled
+/// (the calling trouter registrations are opt-in — see `trouter::register`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallFrame {
+    /// The trouter request URL the frame arrived on (identifies the calling worker).
+    pub url: String,
+    /// Best-effort call id, for correlating an invite with its later state frames.
+    pub call_id: String,
+    /// The fully-decoded envelope, for logging + forwarding while the schema is
+    /// still being reverse-engineered.
+    pub body: Value,
+}
+
+/// Everything one real-time push carries: chat messages, typing signals, and
+/// (experimental) native calling frames. Chat and typing are decoded from the same
+/// EventMessage envelope, so we decode once and split; calling frames arrive on a
+/// separate worker URL and carry a proprietary payload.
 #[derive(Debug, Default, PartialEq)]
 pub struct Realtime {
     pub messages: Vec<Message>,
     pub typing: Vec<TypingEvent>,
+    pub calls: Vec<CallFrame>,
 }
 
 /// Decode a Socket.IO "3:::" request payload (already stripped to the JSON object)
-/// and return everything it carries: chat messages and typing signals. Non-message
-/// pushes (presence, thread updates, calls, etc.) yield an empty result.
+/// and return everything it carries: chat messages, typing signals, and — when
+/// calling is enabled — native calling frames. Other pushes (presence, thread
+/// updates, etc.) yield an empty result.
 pub fn realtime_from_request(request: &Value) -> Result<Realtime> {
     let url = request.get("url").and_then(|u| u.as_str()).unwrap_or("");
+
+    // Native calling pushes arrive on a dedicated worker URL (…/NGCallManagerWin
+    // or …/SkypeSpacesWeb), NOT on /messaging, and carry a proprietary payload —
+    // decode them separately into raw `CallFrame`s (see `CallFrame`).
+    if is_calling_url(url) {
+        return Ok(Realtime {
+            calls: call_frames_from_request(request, url)?,
+            ..Default::default()
+        });
+    }
+
     // Only chat traffic carries messages/typing; skip everything else cheaply.
     if !url.ends_with("/messaging") {
         return Ok(Realtime::default());
@@ -70,6 +108,7 @@ pub fn realtime_from_request(request: &Value) -> Result<Realtime> {
     Ok(Realtime {
         messages: messages_from_event(&payload),
         typing: typing_from_event(&payload),
+        ..Default::default()
     })
 }
 
@@ -108,6 +147,75 @@ fn unwrap_nested(body: Value) -> Result<Value> {
         return serde_json::from_str(&text).context("parse gp");
     }
     Ok(body)
+}
+
+/// True for a trouter push delivered to one of the native calling workers
+/// (NextGenCalling → …/NGCallManagerWin, SkypeSpacesWeb → …/SkypeSpacesWeb).
+/// These carry call setup/state/hangup, not chat.
+fn is_calling_url(url: &str) -> bool {
+    url.ends_with("NGCallManagerWin") || url.contains("SkypeSpacesWeb")
+}
+
+/// Decode a native calling push into a `CallFrame`. The outer envelope carries
+/// routing fields (evt/callId/callerId); the actual callNotification is nested
+/// under `cp` (gzip+base64) or `gp` (base64). We expand that inner payload under
+/// `_decoded` rather than replacing the outer object, so nothing is lost while the
+/// proprietary schema is still being reverse-engineered. An empty or malformed
+/// body yields no frame rather than erroring the whole push.
+fn call_frames_from_request(request: &Value, url: &str) -> Result<Vec<CallFrame>> {
+    let gzipped = request
+        .pointer("/headers/X-Microsoft-Skype-Content-Encoding")
+        .and_then(|v| v.as_str())
+        == Some("gzip");
+    let raw_body = request.get("body").and_then(|b| b.as_str()).unwrap_or("");
+    if raw_body.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut body = decode_body(raw_body, gzipped)?;
+    if let Some(inner) = try_unwrap_nested(&body) {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("_decoded".to_string(), inner);
+        }
+    }
+    let call_id = extract_call_id(&body);
+    Ok(vec![CallFrame { url: url.to_string(), call_id, body }])
+}
+
+/// Like `unwrap_nested`, but returns the decoded inner payload (or `None`) instead
+/// of replacing the body — and never errors, so a malformed calling frame is just
+/// left un-expanded rather than dropping the whole push.
+fn try_unwrap_nested(body: &Value) -> Option<Value> {
+    if let Some(cp) = body.get("cp").and_then(|c| c.as_str()) {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(cp.trim()).ok()?;
+        let text = gunzip(&bytes).ok()?;
+        return serde_json::from_str(&text).ok();
+    }
+    if let Some(gp) = body.get("gp").and_then(|g| g.as_str()) {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(gp.trim()).ok()?;
+        let text = String::from_utf8(bytes).ok()?;
+        return serde_json::from_str(&text).ok();
+    }
+    None
+}
+
+/// Best-effort call id for correlating an invite with its later state/hangup
+/// frames. Checks the outer envelope first, then the decoded inner notification.
+fn extract_call_id(body: &Value) -> String {
+    fn pick(v: &Value) -> String {
+        for key in ["callId", "callID", "id"] {
+            match v.get(key) {
+                Some(Value::String(s)) => return s.clone(),
+                Some(Value::Number(n)) => return n.to_string(),
+                _ => {}
+            }
+        }
+        String::new()
+    }
+    let outer = pick(body);
+    if !outer.is_empty() {
+        return outer;
+    }
+    body.get("_decoded").map(pick).unwrap_or_default()
 }
 
 /// Step 3: pull chat messages out of an EventMessage envelope. Only NewMessage and
@@ -383,5 +491,103 @@ mod tests {
         let rt = realtime_from_request(&request).unwrap();
         assert_eq!(rt.messages.len(), 1);
         assert!(rt.typing.is_empty());
+    }
+
+    // ---- native calling (experimental) ------------------------------------
+
+    /// The inner callNotification the calling service nests under `cp`, modeled on
+    /// the envelope EionRobb/purple-teams documents (from/to, media, keys, links).
+    fn call_notification_inner() -> Value {
+        json!({
+            "from": { "id": "8:orgid:caller-guid", "displayName": "Alice Caller", "endpointId": "ep-1" },
+            "to": { "id": "8:orgid:me-guid", "endpointId": "ep-2" },
+            "mediaContent": { "contentType": "application/sdp-ngc-0.5", "blob": "v=0\r\n...", "mediaLegId": "leg-1" },
+            "udpKey": { "sessionKey": "k", "ticket": "t" },
+            "links": { "mediaAnswer": "cc://ma", "reject": "cc://rj", "attach": "cc://at" }
+        })
+    }
+
+    #[test]
+    fn calling_frame_is_decoded_and_inner_expanded() {
+        // Incoming call: outer envelope carries routing fields + the gzipped inner
+        // notification under `cp`. We must keep BOTH — the outer id and the expanded
+        // inner payload — and produce no chat message.
+        let outer = json!({
+            "evt": 107,
+            "callId": "call-abc-123",
+            "callerId": "8:orgid:caller-guid",
+            "cp": gzip_b64(&call_notification_inner().to_string())
+        });
+        let request = json!({
+            "url": "https://trouter.example/v4/f/xyz/NGCallManagerWin",
+            "headers": {},
+            "body": outer.to_string()
+        });
+        let rt = realtime_from_request(&request).unwrap();
+        assert!(rt.messages.is_empty(), "a call frame is not a chat message");
+        assert!(rt.typing.is_empty());
+        assert_eq!(rt.calls.len(), 1);
+        let c = &rt.calls[0];
+        assert_eq!(c.call_id, "call-abc-123");
+        assert!(c.url.ends_with("NGCallManagerWin"));
+        // The nested callNotification is expanded under `_decoded`, not lost.
+        assert_eq!(c.body["_decoded"]["mediaContent"]["contentType"], "application/sdp-ngc-0.5");
+        assert_eq!(c.body["_decoded"]["from"]["displayName"], "Alice Caller");
+        // The outer routing fields survive alongside it.
+        assert_eq!(c.body["callerId"], "8:orgid:caller-guid");
+    }
+
+    #[test]
+    fn skypespacesweb_url_is_treated_as_calling() {
+        // A plain (un-nested) state frame on the SkypeSpacesWeb worker.
+        let request = json!({
+            "url": "https://trouter.example/v4/f/xyz/SkypeSpacesWeb",
+            "headers": {},
+            "body": json!({ "callId": "c-9", "state": "connected" }).to_string()
+        });
+        let rt = realtime_from_request(&request).unwrap();
+        assert_eq!(rt.calls.len(), 1);
+        assert_eq!(rt.calls[0].call_id, "c-9");
+    }
+
+    #[test]
+    fn calling_frame_id_falls_back_to_inner_notification() {
+        // Outer envelope has no id; the id lives in the nested notification.
+        let inner = json!({ "callId": "inner-77", "from": { "displayName": "Bob" } });
+        let outer = json!({ "evt": 107, "cp": gzip_b64(&inner.to_string()) });
+        let request = json!({
+            "url": "https://trouter.example/v4/f/xyz/NGCallManagerWin",
+            "headers": {},
+            "body": outer.to_string()
+        });
+        let rt = realtime_from_request(&request).unwrap();
+        assert_eq!(rt.calls.len(), 1);
+        assert_eq!(rt.calls[0].call_id, "inner-77");
+    }
+
+    #[test]
+    fn messaging_push_carries_no_calls() {
+        let request = json!({
+            "url": "https://x/messaging",
+            "headers": {},
+            "body": new_message_event().to_string()
+        });
+        let rt = realtime_from_request(&request).unwrap();
+        assert_eq!(rt.messages.len(), 1);
+        assert!(rt.calls.is_empty());
+    }
+
+    #[test]
+    fn other_non_messaging_url_yields_no_calls() {
+        // A non-calling, non-messaging push (e.g. presence) must not be mistaken
+        // for a call even if it happens to carry a `callId`-shaped field.
+        let request = json!({
+            "url": "https://x/unifiedPresenceService",
+            "headers": {},
+            "body": json!({ "callId": "should-be-ignored" }).to_string()
+        });
+        let rt = realtime_from_request(&request).unwrap();
+        assert!(rt.calls.is_empty());
+        assert!(rt.messages.is_empty());
     }
 }
