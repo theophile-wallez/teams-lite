@@ -1583,6 +1583,27 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     let ctx_call = ctx.clone();
     tokio::spawn(async move {
         let debug = std::env::var("TEAMS_LITE_CALL_DEBUG").as_deref() == Ok("1");
+        // Durable capture: when TEAMS_LITE_CALL_CAPTURE names a file, append every
+        // decoded call frame as one JSON line (JSONL). Opened once in append mode so
+        // frames from several calls accumulate and survive a terminal scrollback wipe
+        // — a single real test call is then never lost. The records carry live tokens,
+        // identities, and SDP, so this must point inside the gitignored captures/ dir
+        // and must never be committed.
+        let mut capture_file = std::env::var("TEAMS_LITE_CALL_CAPTURE")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .and_then(|path| {
+                match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                    Ok(f) => {
+                        eprintln!("[call_signal] capturing decoded frames to {path}");
+                        Some(f)
+                    }
+                    Err(e) => {
+                        eprintln!("[call_signal] cannot open capture file {path}: {e}");
+                        None
+                    }
+                }
+            });
         while let Some(c) = call_rx.recv().await {
             if debug {
                 eprintln!(
@@ -1591,6 +1612,16 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
                     c.call_id,
                     serde_json::to_string_pretty(&c.body).unwrap_or_default()
                 );
+            }
+            if let Some(f) = capture_file.as_mut() {
+                use std::io::Write;
+                let ts_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                if let Err(e) = f.write_all(call_capture_line(ts_ms, &c.url, &c.call_id, &c.body).as_bytes()) {
+                    eprintln!("[call_signal] capture write failed: {e}");
+                }
             }
             ctx_call.emit(
                 "call_signal",
@@ -1602,6 +1633,20 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     tokio::spawn(async move {
         trouter::run(ctx, epid, ev_tx, ty_tx, rr_tx, call_tx, st_tx).await;
     });
+}
+
+/// Format one decoded call frame as a single JSON-lines (JSONL) capture record:
+/// `{ts_ms, url, call_id, body}` followed by a newline. Pure (no I/O) so it can be
+/// unit-tested; the actual append lives in the call_signal task above, guarded by
+/// TEAMS_LITE_CALL_CAPTURE. One self-describing object per line keeps a multi-call
+/// capture easy to replay while we reverse-engineer the native call schema.
+fn call_capture_line(ts_ms: u64, url: &str, call_id: &str, body: &Value) -> String {
+    let mut line = serde_json::to_string(
+        &json!({ "ts_ms": ts_ms, "url": url, "call_id": call_id, "body": body }),
+    )
+    .unwrap_or_default();
+    line.push('\n');
+    line
 }
 
 #[cfg(test)]
@@ -1621,6 +1666,23 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
         }
+    }
+
+    #[test]
+    fn call_capture_line_is_one_self_describing_json_object_per_line() {
+        let body = json!({ "evt": "callInvite", "callId": "abc", "from": { "displayName": "Riley" } });
+        let line = call_capture_line(1234, "https://x.trouter/NGCallManagerWin", "abc", &body);
+
+        // Exactly one line, newline-terminated (so several frames append cleanly).
+        assert!(line.ends_with('\n'));
+        assert_eq!(line.matches('\n').count(), 1);
+
+        // Round-trips to the {ts_ms, url, call_id, body} envelope with body intact.
+        let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(parsed["ts_ms"], 1234);
+        assert_eq!(parsed["url"], "https://x.trouter/NGCallManagerWin");
+        assert_eq!(parsed["call_id"], "abc");
+        assert_eq!(parsed["body"]["from"]["displayName"], "Riley");
     }
 
     #[test]
