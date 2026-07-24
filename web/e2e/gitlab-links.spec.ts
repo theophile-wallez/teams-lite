@@ -46,6 +46,37 @@ test.describe("GitLab rich link previews", () => {
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 
+  test("shows a CI pipeline badge on merge requests, but not on issues", async ({
+    page,
+    consoleErrors,
+  }) => {
+    await gotoApp(page);
+    await openByPalette(page, "GitLab Links");
+
+    // The MR card carries its pipeline status (mock: !42 → success → "Passed").
+    const mr = page.locator(
+      '[data-testid="gitlab-link-card"][href="https://gitlab.com/acme/webapp/-/merge_requests/42"]',
+    );
+    const mrPipeline = mr.locator('[data-testid="gitlab-pipeline-status"]');
+    await expect(mrPipeline).toHaveAttribute("data-status", "success");
+    await expect(mrPipeline).toContainText("Passed");
+
+    // The bare MR !99 is still in progress (mock: !99 → running → "Running"); this
+    // is the state the UI keeps polling until it turns terminal.
+    const runningPipeline = page
+      .locator('[data-testid="gitlab-link-card"][href="https://gitlab.com/acme/webapp/-/merge_requests/99"]')
+      .locator('[data-testid="gitlab-pipeline-status"]');
+    await expect(runningPipeline).toHaveAttribute("data-status", "running");
+    await expect(runningPipeline).toContainText("Running");
+
+    // Issues have no pipeline, so their card renders no badge.
+    const issue = page.locator('[data-testid="gitlab-link-card"][href*="/-/issues/7"]');
+    await expect(issue).toHaveCount(1);
+    await expect(issue.locator('[data-testid="gitlab-pipeline-status"]')).toHaveCount(0);
+
+    expect(realErrors(consoleErrors)).toEqual([]);
+  });
+
   test("shows a link-only message as just the card, without a bubble", async ({ page }) => {
     await gotoApp(page);
     await openByPalette(page, "GitLab Links");

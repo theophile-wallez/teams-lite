@@ -9,6 +9,7 @@ import {
   type Reaction,
 } from "~/lib/protocol";
 import { reactionEmoji, REACTION_PICKER } from "~/lib/notifications";
+import { hasActivePipeline } from "~/lib/gitlab-pipeline";
 import {
   containsImage,
   dropLinks,
@@ -40,11 +41,21 @@ const REACTION_HOVER_MS = 350;
  *  or the metadata once resolved. */
 type LinkResults = Map<string, GitLabLinkMetadata | null | undefined>;
 
+/** How often to re-fetch a merge request whose pipeline is still running. Kept
+ *  conservative: only links with an in-progress pipeline are polled (see
+ *  {@link hasActivePipeline}), and only while the tab is visible, so this stays a
+ *  trickle even with many open merge requests. */
+const PIPELINE_POLL_MS = 20_000;
+
 /**
  * Enrich a stable list of URLs through the controller (which goes to the backend
  * and caches per URL). Returns a reactive map of results so the caller can hide
  * enriched links from the body and render their cards. The owning component, not
  * the card, drives this so it can decide the message's layout from the outcome.
+ *
+ * A merge request whose pipeline is still running is additionally re-polled on an
+ * interval (see {@link PIPELINE_POLL_MS}) so its status badge stays live; polling
+ * stops the moment every pipeline reaches a terminal state.
  */
 function useEnrichedLinks(urls: string[]): LinkResults {
   const controller = useController();
@@ -66,6 +77,38 @@ function useEnrichedLinks(urls: string[]): LinkResults {
     // `urls` is captured via its stable string `key`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller, key]);
+
+  // Live pipeline polling. While any resolved link is a merge request with an
+  // in-progress pipeline, re-enrich just those links on an interval so the badge
+  // follows the running CI. The interval is armed only when something is active
+  // and torn down as soon as everything is terminal; it pauses while the tab is
+  // hidden, and a transient refresh failure keeps the last-known status.
+  const anyActive = urls.some((url) => hasActivePipeline(results.get(url)));
+  const resultsRef = useRef(results);
+  resultsRef.current = results;
+
+  useEffect(() => {
+    if (!anyActive) return;
+    let alive = true;
+    const id = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      for (const url of urls) {
+        if (!hasActivePipeline(resultsRef.current.get(url))) continue;
+        controller
+          .refreshLink(url)
+          .then((meta) => alive && meta && setResults((prev) => new Map(prev).set(url, meta)))
+          .catch(() => {
+            /* keep the last-known status on a transient refresh failure */
+          });
+      }
+    }, PIPELINE_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+    // `urls` is captured via `key`; `resultsRef` keeps the interval off the deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller, key, anyActive]);
 
   return results;
 }

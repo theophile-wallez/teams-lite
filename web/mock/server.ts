@@ -1203,6 +1203,9 @@ function mockGitLabMetadata(url: string): Record<string, unknown> | null {
   if (parsed.kind === "merge_request") {
     const iid = parsed.iid!;
     const state = iid % 3 === 0 ? "merged" : "opened";
+    // Deterministic CI status per MR so cards show realistic variety (mirrors
+    // GitLab's `head_pipeline.status`). !42 → success, !99 → running.
+    const pipeline_status = ["failed", "pending", "success", "canceled", "running"][iid % 5]!;
     return {
       kind: "merge_request",
       url,
@@ -1217,6 +1220,7 @@ function mockGitLabMetadata(url: string): Record<string, unknown> | null {
       labels: ["frontend", "enhancement"],
       milestone: "v1.0",
       description: "Render GitLab links in chat as rich cards with title, state, and author.",
+      pipeline_status,
     };
   }
   if (parsed.kind === "issue") {

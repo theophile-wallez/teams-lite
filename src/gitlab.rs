@@ -77,6 +77,12 @@ pub struct LinkMetadata {
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    /// Current CI/CD pipeline status for a merge request — GitLab's
+    /// `head_pipeline.status`, e.g. "running", "success", "failed", "pending",
+    /// "canceled". `None` for issues/projects, an MR with no pipeline, or a
+    /// GitLab version that omits it. The UI shows a live status badge from this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_status: Option<String>,
 }
 
 /// Top-level URL path segments that are GitLab application routes, never a user's
@@ -267,6 +273,17 @@ fn labels_field(value: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Read a merge request's current pipeline status. The single-MR endpoint returns
+/// the latest pipeline as `head_pipeline` (older/terser bodies use `pipeline`); we
+/// surface just its `status` string. A JSON `null` (no pipeline yet) is skipped
+/// rather than treated as a value, so absence cleanly yields `None`.
+fn pipeline_status(body: &serde_json::Value) -> Option<String> {
+    ["head_pipeline", "pipeline"]
+        .into_iter()
+        .filter_map(|key| body.get(key).filter(|v| v.is_object()))
+        .find_map(|pipeline| str_field(pipeline, "status"))
+}
+
 /// Collapse whitespace and truncate a description body to a short teaser.
 fn short_description(raw: &str) -> Option<String> {
     let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -314,6 +331,7 @@ fn build_metadata(
             description,
             created_at,
             updated_at,
+            pipeline_status: pipeline_status(body),
         },
         Resource::Issue { project_path, iid } => LinkMetadata {
             kind: "issue",
@@ -331,6 +349,7 @@ fn build_metadata(
             description,
             created_at,
             updated_at,
+            pipeline_status: None,
         },
         Resource::Project { project_path } => LinkMetadata {
             kind: "project",
@@ -351,6 +370,7 @@ fn build_metadata(
             description,
             created_at,
             updated_at,
+            pipeline_status: None,
         },
     }
 }
@@ -523,7 +543,8 @@ mod tests {
             "references": { "short": "!42" },
             "labels": ["frontend", "enhancement"],
             "milestone": { "title": "v1.0" },
-            "description": "This adds cards for GitLab links."
+            "description": "This adds cards for GitLab links.",
+            "head_pipeline": { "status": "running", "web_url": "https://gitlab.com/group/project/-/pipelines/7" }
         });
         let resource = Resource::MergeRequest {
             project_path: "group/project".to_string(),
@@ -540,6 +561,7 @@ mod tests {
         assert_eq!(meta.author_name.as_deref(), Some("Ada Lovelace"));
         assert_eq!(meta.labels, vec!["frontend", "enhancement"]);
         assert_eq!(meta.milestone.as_deref(), Some("v1.0"));
+        assert_eq!(meta.pipeline_status.as_deref(), Some("running"));
     }
 
     #[test]
@@ -554,5 +576,43 @@ mod tests {
         assert_eq!(meta.url, "https://fallback");
         assert!(meta.labels.is_empty());
         assert_eq!(meta.description, None);
+        // No pipeline in the body → no status (so the UI shows no CI badge).
+        assert_eq!(meta.pipeline_status, None);
+    }
+
+    #[test]
+    fn reads_pipeline_status_from_head_pipeline_with_fallbacks() {
+        // Preferred source: head_pipeline.status.
+        let body = serde_json::json!({ "head_pipeline": { "status": "success" } });
+        assert_eq!(pipeline_status(&body).as_deref(), Some("success"));
+
+        // Falls back to the terser `pipeline` object when head_pipeline is absent.
+        let body = serde_json::json!({ "pipeline": { "status": "failed" } });
+        assert_eq!(pipeline_status(&body).as_deref(), Some("failed"));
+
+        // A JSON null (no pipeline yet) is skipped, not treated as a value.
+        let body = serde_json::json!({ "head_pipeline": null, "pipeline": { "status": "pending" } });
+        assert_eq!(pipeline_status(&body).as_deref(), Some("pending"));
+
+        // Nothing pipeline-shaped → None.
+        assert_eq!(pipeline_status(&serde_json::json!({})), None);
+        assert_eq!(pipeline_status(&serde_json::json!({ "head_pipeline": null })), None);
+    }
+
+    #[test]
+    fn issue_and_project_have_no_pipeline_status() {
+        let issue = build_metadata(
+            &Resource::Issue { project_path: "g/p".to_string(), iid: 1 },
+            &serde_json::json!({ "head_pipeline": { "status": "running" } }),
+            "https://example",
+        );
+        assert_eq!(issue.pipeline_status, None);
+
+        let project = build_metadata(
+            &Resource::Project { project_path: "g/p".to_string() },
+            &serde_json::json!({ "head_pipeline": { "status": "running" } }),
+            "https://example",
+        );
+        assert_eq!(project.pipeline_status, None);
     }
 }

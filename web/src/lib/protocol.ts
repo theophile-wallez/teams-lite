@@ -323,6 +323,11 @@ export type GitLabLinkMetadata = {
   description?: string;
   created_at?: string;
   updated_at?: string;
+  /** Current CI/CD pipeline status for a merge request (GitLab
+   *  `head_pipeline.status`): "running" | "success" | "failed" | "pending" |
+   *  "canceled" | "skipped" | "manual" | … Absent for issues/projects, or an MR
+   *  with no pipeline. The card renders a live status badge from this. */
+  pipeline_status?: string;
 };
 
 /** Result of an `enrich_link` request: the metadata, or `null` when the link is

@@ -970,6 +970,17 @@ export class TeamsController {
     return pending;
   }
 
+  /** Re-enrich a link, bypassing the cached value but replacing it, so a later
+   *  render sees the freshest result. Used to keep a live signal current — a
+   *  merge request's pipeline status while its CI is still running. A transient
+   *  failure is evicted (not cached) so a subsequent lookup can retry. */
+  refreshLink(url: string): Promise<GitLabLinkMetadata | null> {
+    const pending = this.backend.enrichLink(url).then((res) => res.metadata ?? null);
+    this.linkCache.set(url, pending);
+    pending.catch(() => this.linkCache.delete(url));
+    return pending;
+  }
+
   cancelReply(): void {
     this.set({ replyingTo: null });
   }

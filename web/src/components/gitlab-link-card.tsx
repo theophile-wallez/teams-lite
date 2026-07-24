@@ -1,8 +1,15 @@
 import {
   ArrowRight,
+  CircleCheck,
+  CircleDashed,
   CircleDot,
+  CirclePlay,
+  CircleSlash,
+  CircleX,
+  Clock,
   FolderGit2,
   GitPullRequestArrow,
+  LoaderCircle,
   type LucideIcon,
 } from "lucide-react";
 import type { GitLabLinkKind, GitLabLinkMetadata } from "~/lib/protocol";
@@ -63,6 +70,71 @@ function statusStyle(meta: GitLabLinkMetadata): StatusStyle | null {
   }
 }
 
+type PipelineStyle = { label: string; badge: string; Icon: LucideIcon; spin?: boolean };
+
+/** Map a merge request's CI/CD pipeline status to a small status badge. The
+ *  in-progress states (queued/running) share a "working" look — the card is
+ *  polled and these update live — while the terminal states each get their own
+ *  semantic color. An unknown/newer status still renders as a neutral pill. */
+function pipelineStyle(status: string | undefined): PipelineStyle | null {
+  if (!status) return null;
+  switch (status) {
+    case "success":
+      return {
+        label: "Passed",
+        badge: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400",
+        Icon: CircleCheck,
+      };
+    case "failed":
+      return {
+        label: "Failed",
+        badge: "bg-rose-500/12 text-rose-600 dark:text-rose-400",
+        Icon: CircleX,
+      };
+    case "running":
+      return {
+        label: "Running",
+        badge: "bg-sky-500/12 text-sky-600 dark:text-sky-400",
+        Icon: LoaderCircle,
+        spin: true,
+      };
+    case "created":
+    case "waiting_for_resource":
+    case "preparing":
+    case "pending":
+    case "scheduled":
+      return {
+        label: "Pending",
+        badge: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+        Icon: Clock,
+      };
+    case "canceled":
+      return {
+        label: "Canceled",
+        badge: "bg-zinc-500/12 text-zinc-600 dark:text-zinc-400",
+        Icon: CircleSlash,
+      };
+    case "skipped":
+      return {
+        label: "Skipped",
+        badge: "bg-zinc-500/12 text-zinc-600 dark:text-zinc-400",
+        Icon: CircleSlash,
+      };
+    case "manual":
+      return {
+        label: "Manual",
+        badge: "bg-zinc-500/12 text-zinc-600 dark:text-zinc-400",
+        Icon: CirclePlay,
+      };
+    default:
+      return {
+        label: status.charAt(0).toUpperCase() + status.slice(1),
+        badge: "bg-zinc-500/12 text-zinc-600 dark:text-zinc-400",
+        Icon: CircleDashed,
+      };
+  }
+}
+
 const MAX_LABELS = 4;
 
 /**
@@ -76,6 +148,9 @@ export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
   const meta = props.metadata;
   const Icon = KIND_ICON[meta.kind];
   const status = statusStyle(meta);
+  // Only merge requests carry a pipeline; issues/projects never do.
+  const pipeline = meta.kind === "merge_request" ? pipelineStyle(meta.pipeline_status) : null;
+  const PipelineIcon = pipeline?.Icon;
   const labels = meta.labels ?? [];
   const extraLabels = labels.length - MAX_LABELS;
 
@@ -106,6 +181,24 @@ export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
                 )}
               >
                 {status.label}
+              </span>
+            )}
+            {pipeline && PipelineIcon && (
+              <span
+                data-testid="gitlab-pipeline-status"
+                data-status={meta.pipeline_status}
+                title={`Pipeline: ${pipeline.label}`}
+                className={cn(
+                  "flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
+                  pipeline.badge,
+                )}
+              >
+                <PipelineIcon
+                  className={cn("size-3", pipeline.spin && "animate-spin")}
+                  strokeWidth={2}
+                  aria-hidden
+                />
+                {pipeline.label}
               </span>
             )}
           </div>
