@@ -188,10 +188,18 @@ describe("mediaNeedsProxy", () => {
     expect(mediaNeedsProxy("https://teams.microsoft.com/o/x")).toBe(true);
   });
 
+  it("proxies OneDrive/SharePoint chat files (fetched via Graph on the backend)", () => {
+    expect(
+      mediaNeedsProxy("https://contoso-my.sharepoint.com/personal/user/Documents/x.json"),
+    ).toBe(true);
+    expect(mediaNeedsProxy("https://contoso.sharepoint.com/sites/team/x.pdf")).toBe(true);
+  });
+
   it("loads public CDN images directly (no proxy)", () => {
     expect(mediaNeedsProxy("https://media1.giphy.com/media/abc/giphy.gif")).toBe(false);
     expect(mediaNeedsProxy("https://statics.teams.cdn.office.net/emoji/x.png")).toBe(false);
     expect(mediaNeedsProxy("https://skype.com.evil.example/x")).toBe(false);
+    expect(mediaNeedsProxy("https://sharepoint.com.evil.example/x")).toBe(false);
     expect(mediaNeedsProxy("not a url")).toBe(false);
   });
 });

@@ -222,13 +222,14 @@ impl Ctx {
         Ok(fresh)
     }
 
-    /// Force-refresh every credential the read/send paths depend on: the CSA and
-    /// profile broker tokens, and the Teams session (skypetoken). Called after an
-    /// unexpected 401, whose cause may be either the bearer token or the
-    /// skypetoken, so we refresh both rather than guess.
+    /// Force-refresh every credential the read/send paths depend on: the CSA,
+    /// profile, and Graph (SharePoint file downloads) broker tokens, and the Teams
+    /// session (skypetoken). Called after an unexpected 401, whose cause may be any
+    /// of these, so we refresh them all rather than guess.
     async fn force_refresh_auth(&self) -> Result<Session> {
         let _ = self.tokens.refresh(teams_read::CSA_SCOPE).await;
         let _ = self.tokens.refresh(teams_profiles::PROFILE_SCOPE).await;
+        let _ = self.tokens.refresh(teams_media::GRAPH_SCOPE).await;
         let fresh = teams::connect(&self.http).await?;
         let mut cell = self.session.lock().await;
         cell.session = fresh.clone();
@@ -614,18 +615,33 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // token is ever attached, so an untrusted URL can never exfiltrate it.
         "fetch_media" => {
             let url = param_str(params, "url")?;
-            anyhow::ensure!(
-                teams_media::is_allowed_media_url(&url),
-                "media host not allowed"
-            );
             let http = ctx.http.clone();
-            let media = ctx
-                .retry_on_auth(move |session, _csa| {
+            // Two hosting schemes: legacy AMS / chatService objects carry the
+            // skypetoken; modern OneDrive/SharePoint chat files need a Graph bearer
+            // token instead. Route by host, and reject a URL on neither allowlist
+            // before any token is attached, so an untrusted URL can never leak one.
+            let media = if teams_media::is_allowed_media_url(&url) {
+                ctx.retry_on_auth(move |session, _csa| {
                     let http = http.clone();
                     let url = url.clone();
                     async move { teams_media::fetch_media(&http, &session, &url).await }
                 })
-                .await?;
+                .await?
+            } else if teams_media::is_sharepoint_url(&url) {
+                let tokens = ctx.tokens.clone();
+                ctx.retry_on_auth(move |_session, _csa| {
+                    let http = http.clone();
+                    let url = url.clone();
+                    let tokens = tokens.clone();
+                    async move {
+                        let graph = tokens.get(teams_media::GRAPH_SCOPE).await?;
+                        teams_media::fetch_sharepoint_media(&http, &graph, &url).await
+                    }
+                })
+                .await?
+            } else {
+                anyhow::bail!("media host not allowed");
+            };
             let data = base64::engine::general_purpose::STANDARD.encode(&media.bytes);
             Ok(json!({ "content_type": media.content_type, "data_base64": data }))
         }
