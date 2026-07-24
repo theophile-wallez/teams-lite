@@ -236,6 +236,9 @@ export type Notification = {
   /** The targeted message's id in that thread (for chat reactions), so the UI
    *  can scroll to it; "" when the activity has no specific target. */
   source_message_id: string;
+  /** The source conversation's title (e.g. "[Run] Engine merge requests"),
+   *  shown as context in the Mentions/Following tabs; "" when Teams omitted it. */
+  source_thread_topic: string;
   /** Short preview of the target message. */
   preview: string;
   /** Epoch ms. */
@@ -246,11 +249,24 @@ export type Notification = {
   is_read: boolean;
 };
 
-/** The activity feed plus its unread count, as returned by `notifications`. */
+/** One activity stream plus its unread count. */
 export type NotificationFeed = {
   unread: number;
   items: Notification[];
 };
+
+/** The three Teams activity streams the `notifications` method returns, one per
+ *  tab in the notifications panel: Activity (`48:notifications`), Mentions
+ *  (`48:mentions`), and Following (`48:threads`). */
+export type NotificationFeeds = {
+  activity: NotificationFeed;
+  mentions: NotificationFeed;
+  following: NotificationFeed;
+};
+
+/** The tab keys of the notifications panel, in display order. */
+export const NOTIFICATION_TABS = ["activity", "mentions", "following"] as const;
+export type NotificationTab = (typeof NOTIFICATION_TABS)[number];
 
 /** Non-secret view of the app settings (mirrors the Rust `get_settings` /
  *  `set_settings` result in src/bin/server.rs). The GitLab token is write-only

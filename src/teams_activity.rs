@@ -17,18 +17,37 @@ use serde_json::Value;
 use crate::teams::Session;
 use crate::teams_read::parse_iso_ms;
 
-/// The well-known id of the Teams activity/notifications thread.
+/// Well-known ids of the Teams activity/aggregation streams. Each is a system
+/// feed, NOT a chat: decoded from `properties.activity` by [`parse_activity`]
+/// and surfaced in the notifications panel (one tab per stream), never in the
+/// chat list.
+///
+/// - `48:notifications` — the Activity feed (reactions / mentions / replies).
+/// - `48:mentions`      — the @Mentions view (messages that mention us).
+/// - `48:threads`       — the Following feed (activity in threads we follow).
+///
+/// Teams cross-references the same event into several streams (a mention lands
+/// in both `48:notifications` and `48:mentions`), which is exactly why the panel
+/// shows them as distinct tabs.
 pub const NOTIFICATIONS_THREAD: &str = "48:notifications";
+pub const MENTIONS_THREAD: &str = "48:mentions";
+pub const THREADS_THREAD: &str = "48:threads";
+
+/// The one real chat in the `48:` id space: notes-to-self. It flows through the
+/// normal message pipeline, so it is the sole exception to the "`48:` is a
+/// system feed" rule.
+const NOTES_THREAD: &str = "48:notes";
 
 /// Default number of feed entries to fetch.
 pub const DEFAULT_NOTIFICATIONS_LIMIT: u32 = 30;
 
-/// True only for the activity/notifications system thread.
-///
-/// Deliberately an exact match: `48:notes` (notes-to-self) is a real chat and
-/// must keep flowing through the normal message pipeline.
-pub fn is_notifications_thread(id: &str) -> bool {
-    id == NOTIFICATIONS_THREAD
+/// True for any Teams system/aggregation feed — every `48:` thread except the
+/// real notes-to-self chat (`48:notes`). Covers the known activity streams
+/// (`48:notifications`, `48:mentions`, `48:threads`) and any future one
+/// (`48:calllogs`, …) without whack-a-mole, so none ever leaks into the chat
+/// list; they are only ever surfaced in the notifications panel.
+pub fn is_system_feed_thread(id: &str) -> bool {
+    id.starts_with("48:") && id != NOTES_THREAD
 }
 
 /// One decoded activity-feed entry.
@@ -53,6 +72,10 @@ pub struct Notification {
     /// thread, so the UI can deep-link and scroll to it; may be empty for
     /// activities that carry no specific target.
     pub source_message_id: String,
+    /// The source conversation's display title (`sourceThreadTopic`), e.g.
+    /// "[Run] Engine merge requests" — shown as context in the Mentions and
+    /// Following tabs. Empty when Teams omitted it (e.g. many chat reactions).
+    pub source_thread_topic: String,
     /// Short preview of the target message (may be "image", a filename, etc.).
     pub preview: String,
     /// When it happened (epoch ms).
@@ -93,6 +116,7 @@ pub fn parse_activity(frame: &Value) -> Option<Notification> {
         actor_mri: field("sourceUserId"),
         source_thread_id: field("sourceThreadId"),
         source_message_id: id_to_string(activity.get("sourceMessageId")),
+        source_thread_topic: field("sourceThreadTopic"),
         preview: field("messagePreview"),
         timestamp_ms,
         count: parse_count(activity.get("count")),
@@ -112,10 +136,14 @@ pub fn parse_notifications_page(page: &Value) -> Vec<Notification> {
     out
 }
 
-/// Fetch the newest page of the activity feed from chatService and decode it.
-pub async fn fetch_notifications(
+/// Fetch the newest page of a single activity stream from chatService and decode
+/// it. `stream` is a system-feed thread id (e.g. [`NOTIFICATIONS_THREAD`],
+/// [`MENTIONS_THREAD`], [`THREADS_THREAD`]) — all share the same frame shape, so
+/// the same decoding path serves every tab.
+pub async fn fetch_activity_stream(
     http: &reqwest::Client,
     session: &Session,
+    stream: &str,
     limit: u32,
 ) -> Result<Vec<Notification>> {
     let chat_service = session
@@ -124,20 +152,20 @@ pub async fn fetch_notifications(
         .trim_end_matches('/');
     let url = format!(
         "{chat_service}/v1/users/ME/conversations/{}/messages?pageSize={limit}&view=msnp24Equivalent",
-        urlencoding::encode(NOTIFICATIONS_THREAD)
+        urlencoding::encode(stream)
     );
     let resp = http
         .get(&url)
         .header("authentication", format!("skypetoken={}", session.skypetoken))
         .send()
         .await
-        .context("chatService notifications request")?;
+        .with_context(|| format!("chatService {stream} request"))?;
     let status = resp.status();
     let body = resp.text().await?;
     if !status.is_success() {
-        anyhow::bail!("chatService notifications -> {status}");
+        anyhow::bail!("chatService {stream} -> {status}");
     }
-    let v: Value = serde_json::from_str(&body).context("parse notifications page")?;
+    let v: Value = serde_json::from_str(&body).with_context(|| format!("parse {stream} page"))?;
     Ok(parse_notifications_page(&v))
 }
 
@@ -229,6 +257,7 @@ mod tests {
         assert_eq!(n.actor_mri, "8:orgid:bea5de00");
         assert_eq!(n.source_thread_id, "19:abc_def@unq.gbl.spaces");
         assert_eq!(n.source_message_id, "1784734634778");
+        assert_eq!(n.source_thread_topic, "", "the reaction frame carries no topic");
         assert_eq!(n.preview, "0 pause quoi");
         assert_eq!(n.count, 1);
         assert!(!n.is_read);
@@ -294,10 +323,56 @@ mod tests {
         assert_eq!(out[1].id, "older");
     }
 
+    /// A faithful `48:mentions` frame captured from the tenant: the same
+    /// activity shape as a reaction, but `activityType: "mentions"` and carrying
+    /// the real author + source thread topic so the panel can deep-link.
+    fn mention_frame() -> Value {
+        json!({
+            "id": "1784879568511",
+            "composetime": "2026-07-24T07:52:48.5110000Z",
+            "content": "",
+            "conversationid": "48:mentions",
+            "messagetype": "RichText/Html",
+            "properties": {
+                "isread": "false",
+                "activity": {
+                    "activityType": "mentions",
+                    "activitySubtype": "mention",
+                    "activityTimestamp": "2026-07-24T07:52:47.187Z",
+                    "messagePreview": "As expected Théophile, users complained",
+                    "sourceMessageId": 1784879567087_i64,
+                    "sourceThreadId": "19:fb9105cfa1da4bf3a69fdc52cc39e605@thread.tacv2",
+                    "sourceThreadTopic": "[Run] 👨‍💻 Devs",
+                    "sourceUserId": "8:orgid:matthieu",
+                    "sourceUserImDisplayName": "Matthieu GAUCHER",
+                }
+            }
+        })
+    }
+
     #[test]
-    fn only_the_exact_notifications_thread_matches() {
-        assert!(is_notifications_thread("48:notifications"));
-        assert!(!is_notifications_thread("48:notes"));
-        assert!(!is_notifications_thread("19:abc@thread.v2"));
+    fn parses_a_mention_frame_with_its_source_topic() {
+        let n = parse_activity(&mention_frame()).expect("should parse");
+        assert_eq!(n.activity_type, "mentions");
+        assert_eq!(n.actor_name, "Matthieu GAUCHER");
+        assert_eq!(n.source_thread_id, "19:fb9105cfa1da4bf3a69fdc52cc39e605@thread.tacv2");
+        assert_eq!(n.source_message_id, "1784879567087");
+        assert_eq!(n.source_thread_topic, "[Run] 👨‍💻 Devs");
+        assert!(!n.is_read);
+    }
+
+    #[test]
+    fn system_feed_covers_every_48_thread_except_notes() {
+        // Every known aggregation stream is a feed, not a chat.
+        assert!(is_system_feed_thread(NOTIFICATIONS_THREAD));
+        assert!(is_system_feed_thread(MENTIONS_THREAD));
+        assert!(is_system_feed_thread(THREADS_THREAD));
+        // …as is any future `48:` stream, without needing to enumerate it.
+        assert!(is_system_feed_thread("48:calllogs"));
+        // The sole exception: notes-to-self is a real chat.
+        assert!(!is_system_feed_thread(NOTES_THREAD));
+        // Ordinary chats/channels are never feeds.
+        assert!(!is_system_feed_thread("19:abc@thread.v2"));
+        assert!(!is_system_feed_thread("8:orgid:someone"));
     }
 }

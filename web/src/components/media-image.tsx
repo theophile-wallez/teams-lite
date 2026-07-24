@@ -16,9 +16,17 @@ import { useImageLightbox } from "./image-lightbox";
  */
 export function MediaImage(props: { src: string; alt?: string; className?: string }) {
   const controller = useController();
-  const { openImage } = useImageLightbox();
+  const { openImage, closingLayoutId } = useImageLightbox();
   const reduceMotion = useReducedMotion();
   const layoutId = useId();
+  // Normally this thumbnail carries the shared-layout id so opening morphs the
+  // picture out of the list. But while *its* lightbox is closing we drop the id
+  // so the exiting overlay copy (fixed, top-most layer) owns the shrink; if the
+  // thumbnail kept it, Motion would promote this in-list node as the morph lead
+  // and, trapped in the clipped, lower-stacked scroller, it would draw *under*
+  // the messages. The `key` forces a real remount on that flip — toggling the
+  // prop alone leaves the persistent node in Motion's group.
+  const morphs = !reduceMotion && closingLayoutId !== layoutId;
   const proxied = mediaNeedsProxy(props.src);
   // Public images render straight from their URL; proxied ones wait for a blob.
   const [objectUrl, setObjectUrl] = useState<string | null>(proxied ? null : props.src);
@@ -86,7 +94,13 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
       )}
     >
       <motion.img
-        {...(reduceMotion ? {} : { layoutId })}
+        key={morphs ? layoutId : `${layoutId}-closing`}
+        {...(morphs ? { layoutId } : {})}
+        // Never animate in: a thumbnail should just appear at its slot. This
+        // also kills the re-entry pop when it rejoins the group after a close —
+        // otherwise Motion animates the freshly-mounted node from the overlay's
+        // stale last projection back to rest.
+        initial={false}
         data-testid="message-image"
         src={objectUrl}
         alt={alt}

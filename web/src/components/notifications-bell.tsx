@@ -1,13 +1,18 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Bell } from "lucide-react";
+import { AtSign, Bell, MessagesSquare } from "lucide-react";
 import { cn } from "~/lib/utils";
-import type { Notification } from "~/lib/protocol";
+import {
+  NOTIFICATION_TABS,
+  type Notification,
+  type NotificationTab,
+} from "~/lib/protocol";
 import {
   actorLabel,
   activityVerb,
   formatRelativeTime,
   leadingEmoji,
+  sourceContext,
 } from "~/lib/notifications";
 import { Avatar } from "./avatar";
 import { useAppState, useController } from "./controller-context";
@@ -18,19 +23,48 @@ import {
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 
+/** Per-tab labels, empty-state copy, and glyphs. Kept together so the tab bar
+ *  and each panel stay in sync from one source. */
+const TAB_META: Record<
+  NotificationTab,
+  { label: string; icon: typeof Bell; emptyTitle: string; emptyHint: string }
+> = {
+  activity: {
+    label: "Activity",
+    icon: Bell,
+    emptyTitle: "You're all caught up",
+    emptyHint: "Reactions, mentions and replies show up here.",
+  },
+  mentions: {
+    label: "Mentions",
+    icon: AtSign,
+    emptyTitle: "No mentions yet",
+    emptyHint: "When someone @mentions you, it shows up here.",
+  },
+  following: {
+    label: "Following",
+    icon: MessagesSquare,
+    emptyTitle: "Nothing new to follow",
+    emptyHint: "Replies in threads you follow show up here.",
+  },
+};
+
 /**
  * The activity-feed bell in the sidebar header. Badges the unread count and
- * opens a portaled panel listing reactions / mentions / replies directed at the
- * user (the Teams `48:notifications` feed). Selecting an entry opens the chat it
- * happened in. This surface exists precisely so `48:notifications` is never
- * shown as a junk conversation — it is a feed, not a chat.
+ * opens a portaled panel with three horizontal tabs — Activity
+ * (`48:notifications`), Mentions (`48:mentions`) and Following (`48:threads`) —
+ * each listing entries directed at (or followed by) the user. Selecting an entry
+ * opens the chat it happened in and scrolls to the source message. This surface
+ * exists precisely so those Teams activity streams are never shown as junk
+ * conversations — they are feeds, not chats.
  */
 export function NotificationsBell() {
-  const items = useAppState((s) => s.notifications);
+  const feeds = useAppState((s) => s.notifications);
   const unread = useAppState((s) => s.notificationsUnread);
   const controller = useController();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<NotificationTab>("activity");
 
   const onOpenChange = (next: boolean) => {
     setOpen(next);
@@ -42,14 +76,16 @@ export function NotificationsBell() {
 
   const openThread = (n: Notification) => {
     if (!n.source_thread_id) return;
-    // Land on the reacted-to/replied-to message, not the bottom of the chat. The
-    // pane consumes this once the conversation is open (paging older if needed);
-    // an empty/unlocatable id just opens the conversation normally.
+    // Land on the reacted-to/replied-to/mentioning message, not the bottom of
+    // the chat. The pane consumes this once the conversation is open (paging
+    // older if needed); an empty/unlocatable id just opens it normally.
     controller.requestScrollToMessage(n.source_thread_id, n.source_message_id);
     void navigate({ to: "/c/$conversationId", params: { conversationId: n.source_thread_id } });
   };
 
   const badge = unread > 0 ? (unread > 9 ? "9+" : String(unread)) : null;
+  const items = feeds[tab];
+  const meta = TAB_META[tab];
 
   return (
     <DropdownMenu open={open} onOpenChange={onOpenChange}>
@@ -86,6 +122,35 @@ export function NotificationsBell() {
             <span className="text-[11px] font-medium text-text-faint">{unread} new</span>
           )}
         </div>
+
+        {/* Horizontal tabs. Plain role="tab" buttons (not menu items) so clicking
+            switches the panel without closing the dropdown. */}
+        <div role="tablist" aria-label="Notification streams" className="flex gap-1 px-2 pb-2">
+          {NOTIFICATION_TABS.map((key) => {
+            const t = TAB_META[key];
+            const active = key === tab;
+            return (
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                data-testid={`notifications-tab-${key}`}
+                data-state={active ? "active" : "inactive"}
+                onClick={() => setTab(key)}
+                className={cn(
+                  "flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-[12px] font-medium transition-colors",
+                  active
+                    ? "bg-accent text-foreground"
+                    : "text-text-dim hover:bg-accent/50 hover:text-foreground",
+                )}
+              >
+                <t.icon className="size-3.5" strokeWidth={1.6} />
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
         <div className="h-px bg-border-subtle" />
 
         {items.length === 0 ? (
@@ -93,12 +158,12 @@ export function NotificationsBell() {
             data-testid="notifications-empty"
             className="flex flex-col items-center gap-1 px-6 py-10 text-center"
           >
-            <Bell className="size-6 text-text-faint" strokeWidth={1.3} />
-            <p className="text-sm font-medium text-text-dim">You're all caught up</p>
-            <p className="text-xs text-text-faint">Reactions and mentions show up here.</p>
+            <meta.icon className="size-6 text-text-faint" strokeWidth={1.3} />
+            <p className="text-sm font-medium text-text-dim">{meta.emptyTitle}</p>
+            <p className="text-xs text-text-faint">{meta.emptyHint}</p>
           </div>
         ) : (
-          <div className="overflow-y-auto p-1">
+          <div role="tabpanel" className="overflow-y-auto p-1">
             {items.map((n) => (
               <NotificationRow key={n.id} notification={n} onOpen={() => openThread(n)} />
             ))}
@@ -113,6 +178,7 @@ function NotificationRow(props: { notification: Notification; onOpen: () => void
   const n = props.notification;
   const emoji = leadingEmoji(n);
   const time = formatRelativeTime(n.timestamp);
+  const context = sourceContext(n);
 
   return (
     <DropdownMenuItem
@@ -129,6 +195,7 @@ function NotificationRow(props: { notification: Notification; onOpen: () => void
           seed={n.actor_mri || n.actor_name}
           label={actorLabel(n)}
           photo={n.actor_mri ? { kind: "user", id: n.actor_mri } : undefined}
+          fallback="person"
           className="size-9"
         />
         {emoji && (
@@ -148,6 +215,9 @@ function NotificationRow(props: { notification: Notification; onOpen: () => void
             <time className="shrink-0 text-[11px] tabular-nums text-text-faint">{time}</time>
           )}
         </span>
+        {context && (
+          <span className="truncate text-[11px] font-medium text-text-dim">in {context}</span>
+        )}
         {n.preview && (
           <span className="line-clamp-2 whitespace-normal text-xs text-text-faint">
             {n.preview}

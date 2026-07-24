@@ -341,9 +341,10 @@ pub fn persist_conversations(store: &Store, convs: &[Conversation]) -> usize {
         if c.is_empty {
             continue;
         }
-        // The activity feed is a system thread, not a chat — keep it out of the
-        // conversation list entirely (it is surfaced in the notifications panel).
-        if crate::teams_activity::is_notifications_thread(&c.id) {
+        // Activity streams (`48:notifications`, `48:mentions`, `48:threads`, …)
+        // are system feeds, not chats — keep them out of the conversation list
+        // entirely (they are surfaced in the notifications panel's tabs).
+        if crate::teams_activity::is_system_feed_thread(&c.id) {
             continue;
         }
         // Count only conversations that were actually inserted or modified, so

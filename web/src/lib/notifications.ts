@@ -53,13 +53,22 @@ export function actorLabel(n: Notification): string {
 }
 
 /** A short human phrase for what happened, e.g. "reacted with 😂",
- *  "mentioned you", "replied to you". */
+ *  "mentioned you", "replied to you". The Following feed (activity in threads we
+ *  follow, `activityType: "threads"`) is phrased "replied" — it is a reply in a
+ *  thread, not directed at us, so it never claims "…to you". */
 export function activityVerb(n: Notification): string {
   const type = n.activity_type.toLowerCase();
   if (type.includes("reaction")) return `reacted with ${reactionEmoji(n.activity_subtype)}`;
   if (type.includes("mention")) return "mentioned you";
   if (type.includes("reply")) return "replied to you";
+  if (type.includes("thread")) return "replied";
   return "sent you an activity";
+}
+
+/** The source conversation's title (e.g. "[Run] Engine merge requests"), shown
+ *  as context in the Mentions/Following tabs; "" when Teams omitted it. */
+export function sourceContext(n: Notification): string {
+  return n.source_thread_topic.trim();
 }
 
 /** The full headline for a notification row: "Clément DELBARRE reacted with 😂". */

@@ -319,6 +319,7 @@ function ConversationRow(props: {
         seed={c.id}
         label={label}
         photo={c.avatar_mri ? { kind: "user", id: c.avatar_mri } : undefined}
+        fallback={c.kind === "one_on_one" ? "person" : "initials"}
       />
 
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">

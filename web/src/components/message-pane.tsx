@@ -277,7 +277,13 @@ export function MessagePane(props: { onBack?: () => void }) {
           </button>
         )}
         {(openConv || openChannel) && (
-          <Avatar seed={openId} label={headerLabel} photo={headerPhoto} className="size-9" />
+          <Avatar
+            seed={openId}
+            label={headerLabel}
+            photo={headerPhoto}
+            fallback={openConv?.kind === "one_on_one" ? "person" : "initials"}
+            className="size-9"
+          />
         )}
         <div className="flex min-w-0 flex-col">
           <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">

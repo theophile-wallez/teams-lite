@@ -1,15 +1,53 @@
 import { test, expect, gotoApp, emitNotification, realErrors } from "./helpers";
 
-// The activity feed (`48:notifications`) is surfaced as a bell + panel in the
-// sidebar header, never as a chat row. These specs drive the mock's notification
-// hook to prove the bell badges, the panel lists entries, selecting one opens the
-// source chat, and a live activity re-badges the bell after it has been seen.
+// The Teams system feeds (`48:notifications`, `48:mentions`, `48:threads`) are
+// surfaced as a bell + tabbed panel in the sidebar header, never as chat rows.
+// These specs drive the mock's notification hook to prove the bell badges, the
+// panel lists entries across its Activity/Mentions/Following tabs, selecting one
+// opens the source chat, and a live activity re-badges the bell after it was seen.
 test.describe("notifications", () => {
-  test("the feed is not a conversation row", async ({ page }) => {
+  test("the system feeds are never conversation rows", async ({ page }) => {
     await gotoApp(page);
-    await expect(
-      page.locator('[data-testid="conversation-row"][data-conversation-id="48:notifications"]'),
-    ).toHaveCount(0);
+    // None of the three `48:` activity streams may leak into the Chats list —
+    // they are feeds, not chats. `48:notes` (the real notes-to-self chat) stays.
+    for (const feed of ["48:notifications", "48:mentions", "48:threads"]) {
+      await expect(
+        page.locator(`[data-testid="conversation-row"][data-conversation-id="${feed}"]`),
+      ).toHaveCount(0);
+    }
+  });
+
+  test("the panel has Activity/Mentions/Following tabs that switch feeds", async ({
+    page,
+    consoleErrors,
+  }) => {
+    await gotoApp(page);
+    await page.locator('[data-testid="notifications-bell"]').click();
+    const panel = page.locator('[data-testid="notifications-panel"]');
+    await expect(panel).toBeVisible();
+
+    // Activity is the default tab and lists entries.
+    await expect(panel.locator('[data-testid="notifications-tab-activity"]')).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    await expect(panel.locator('[data-testid="notification-item"]').first()).toBeVisible();
+
+    // Mentions: switching shows the mention entries with their source-thread context.
+    await panel.locator('[data-testid="notifications-tab-mentions"]').click();
+    await expect(panel.locator('[data-testid="notifications-tab-mentions"]')).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    await expect(panel.locator('[data-testid="notification-item"]').first()).toBeVisible();
+    await expect(panel).toContainText("Platform Team");
+
+    // Following lists thread replies too.
+    await panel.locator('[data-testid="notifications-tab-following"]').click();
+    await expect(panel.locator('[data-testid="notification-item"]').first()).toBeVisible();
+    await expect(panel).toContainText("Frontend Guild");
+
+    expect(realErrors(consoleErrors)).toEqual([]);
   });
 
   test("bell badges unread and opens a panel of activity", async ({ page, consoleErrors }) => {

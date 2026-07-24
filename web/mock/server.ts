@@ -1317,10 +1317,13 @@ function threadFor(id: string): Thread | null {
 // Method dispatch — returns the `result` value or throws (message → error).
 // ---------------------------------------------------------------------------
 
-// Activity feed (`48:notifications`) — reactions/mentions/replies directed at
-// "me". The real backend decodes these from `properties.activity`; the mock
-// serves a small static sample keyed to real seeded conversations (so selecting
-// an entry opens a live chat), plus anything injected via the test hook.
+// Activity streams — the three Teams system feeds the `notifications` method
+// returns, one per tab: Activity (`48:notifications`, the superset of reactions/
+// mentions/replies directed at "me"), Mentions (`48:mentions`), and Following
+// (`48:threads`). The real backend decodes each from `properties.activity`; the
+// mock serves a small static sample per stream keyed to real seeded conversations
+// (so selecting an entry opens a live chat), plus anything injected via the test
+// hook (which lands in Activity).
 type MockNotification = {
   id: string;
   activity_type: string;
@@ -1329,11 +1332,18 @@ type MockNotification = {
   actor_mri: string;
   source_thread_id: string;
   source_message_id: string;
+  /** The source conversation's title, shown as context in Mentions/Following;
+   *  "" for reactions on 1:1 chats (no topic). */
+  source_thread_topic: string;
   preview: string;
   timestamp: number;
   count: number;
   is_read: boolean;
 };
+
+/** One activity stream plus its unread count (mirrors protocol.ts
+ *  `NotificationFeed`). */
+type MockFeed = { unread: number; items: MockNotification[] };
 
 const injectedNotifications: MockNotification[] = [];
 
@@ -1370,14 +1380,27 @@ function setReceipt(conversationId: string, receipt: ReadReceipt): ReadReceipt {
 // drift forward and spuriously re-mark entries unread after the panel is seen).
 const NOTIFICATIONS_BASE = Date.now();
 
-function notificationsFeed(): MockNotification[] {
+/** Build the three activity streams. Message ids are `${convId}#${seq}` and every
+ *  thread seeds 120 messages, so targeting seq 90..100 lands on a real, non-bottom
+ *  message (the newest page is seq 81..120) — opening the entry scrolls up to it.
+ *  Group chats are at indices 26.. in `order`, so mention/following samples point
+ *  there and set a matching topic; reactions on 1:1s carry no topic. */
+function buildNotificationFeeds(): {
+  activity: MockNotification[];
+  mentions: MockNotification[];
+  following: MockNotification[];
+} {
   const now = NOTIFICATIONS_BASE;
   const thread = (i: number) => order[i] ?? order[0] ?? "";
-  // Target a real, non-bottom message so opening the notification scrolls up to
-  // it (message ids are `${convId}#${seq}`; 1:1s seed 120 messages, newest page
-  // is seq 81..120).
   const msg = (i: number, seq: number) => `${thread(i)}#${seq}`;
-  const sample: MockNotification[] = [
+  // The seeded group chats, by name -> index in `order` (26 one-on-ones precede
+  // them), so a mention/following entry both opens the right chat and shows a
+  // topic that matches it.
+  const platform = 26; // "Platform Team"
+  const incident = 29; // "Incident Response"
+  const frontend = 28; // "Frontend Guild"
+
+  const reactions: MockNotification[] = [
     {
       id: "act-sample-1",
       activity_type: "reactionInChat",
@@ -1386,6 +1409,7 @@ function notificationsFeed(): MockNotification[] {
       actor_mri: "8:orgid:riley",
       source_thread_id: thread(0),
       source_message_id: msg(0, 100),
+      source_thread_topic: "",
       preview: "Sounds good to me",
       timestamp: now - 4 * 60_000,
       count: 1,
@@ -1399,6 +1423,7 @@ function notificationsFeed(): MockNotification[] {
       actor_mri: "8:orgid:morgan",
       source_thread_id: thread(1),
       source_message_id: msg(1, 96),
+      source_thread_topic: "",
       preview: "Can I deploy to staging real quick?",
       timestamp: now - 55 * 60_000,
       count: 1,
@@ -1412,13 +1437,90 @@ function notificationsFeed(): MockNotification[] {
       actor_mri: "8:orgid:jordan",
       source_thread_id: thread(2),
       source_message_id: msg(2, 90),
+      source_thread_topic: "",
       preview: "I don't think so, we'd have had feedback otherwise",
       timestamp: now - 3 * 3_600_000,
       count: 1,
       is_read: true,
     },
   ];
-  return [...injectedNotifications, ...sample];
+
+  const mentions: MockNotification[] = [
+    {
+      id: "mention-sample-1",
+      activity_type: "mention",
+      activity_subtype: "",
+      actor_name: "Priya Nair",
+      actor_mri: "8:orgid:priya",
+      source_thread_id: thread(platform),
+      source_message_id: msg(platform, 98),
+      source_thread_topic: "Platform Team",
+      preview: "can you take a look when you get a chance?",
+      timestamp: now - 12 * 60_000,
+      count: 1,
+      is_read: false,
+    },
+    {
+      id: "mention-sample-2",
+      activity_type: "mention",
+      activity_subtype: "",
+      actor_name: "Diego Santos",
+      actor_mri: "8:orgid:diego",
+      source_thread_id: thread(incident),
+      source_message_id: msg(incident, 92),
+      source_thread_topic: "Incident Response",
+      preview: "paging you on the sev-2, need eyes on the dashboard",
+      timestamp: now - 2 * 3_600_000,
+      count: 1,
+      is_read: true,
+    },
+  ];
+
+  const following: MockNotification[] = [
+    {
+      id: "following-sample-1",
+      activity_type: "threads",
+      activity_subtype: "",
+      actor_name: "Amelia Fischer",
+      actor_mri: "8:orgid:amelia-fischer",
+      source_thread_id: thread(frontend),
+      source_message_id: msg(frontend, 100),
+      source_thread_topic: "Frontend Guild",
+      preview: "pushed a follow-up, the flaky test is green now",
+      timestamp: now - 40 * 60_000,
+      count: 1,
+      is_read: false,
+    },
+    {
+      id: "following-sample-2",
+      activity_type: "threads",
+      activity_subtype: "",
+      actor_name: "Henry Walker",
+      actor_mri: "8:orgid:henry-walker",
+      source_thread_id: thread(frontend),
+      source_message_id: msg(frontend, 88),
+      source_thread_topic: "Frontend Guild",
+      preview: "agreed, let's split this into two tickets",
+      timestamp: now - 5 * 3_600_000,
+      count: 1,
+      is_read: true,
+    },
+  ];
+
+  // Activity is the superset: injected entries (from the test hook) + reactions +
+  // mentions, newest kept first as the client expects. Following stays its own
+  // stream, so the badge (Activity-only) never double-counts it.
+  return {
+    activity: [...injectedNotifications, ...reactions, ...mentions],
+    mentions,
+    following,
+  };
+}
+
+/** Wrap a stream as a `MockFeed` (items + unread count), matching the Rust
+ *  `feed_json` shape the `notifications` method returns per tab. */
+function toFeed(items: MockNotification[]): MockFeed {
+  return { unread: items.filter((n) => !n.is_read).length, items };
 }
 
 function dispatch(method: string, params: unknown): unknown {
@@ -1447,8 +1549,14 @@ function dispatch(method: string, params: unknown): unknown {
     }
 
     case "notifications": {
-      const items = notificationsFeed();
-      return { unread: items.filter((n) => !n.is_read).length, items };
+      // Three streams in one round-trip, one per panel tab (mirrors the Rust
+      // `notifications` method fetching 48:notifications / 48:mentions / 48:threads).
+      const feeds = buildNotificationFeeds();
+      return {
+        activity: toFeed(feeds.activity),
+        mentions: toFeed(feeds.mentions),
+        following: toFeed(feeds.following),
+      };
     }
 
     case "read_receipts": {
@@ -1756,6 +1864,8 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           typeof body.source_message_id === "string"
             ? body.source_message_id
             : `${order[0] ?? ""}#118`,
+        source_thread_topic:
+          typeof body.source_thread_topic === "string" ? body.source_thread_topic : "",
         preview: typeof body.preview === "string" ? body.preview : "reacted to your message",
         timestamp: Date.now(),
         count: 1,

@@ -7,6 +7,7 @@ import {
   leadingEmoji,
   notificationHeadline,
   reactionEmoji,
+  sourceContext,
   REACTION_PICKER,
 } from "./notifications";
 import type { Notification } from "./protocol";
@@ -20,6 +21,7 @@ function notification(over: Partial<Notification> = {}): Notification {
     actor_mri: "8:orgid:abc",
     source_thread_id: "19:abc@unq.gbl.spaces",
     source_message_id: "1784000000001",
+    source_thread_topic: "",
     preview: "the target message",
     timestamp: 1_784_000_000_000,
     count: 1,
@@ -77,10 +79,29 @@ describe("activityVerb / headline", () => {
     expect(activityVerb(notification({ activity_type: "replyInChat" }))).toBe("replied to you");
   });
 
+  it("phrases a followed-thread reply as a plain reply (not directed at us)", () => {
+    // The Following feed (`activityType: "threads"`) is activity in a thread we
+    // follow, not aimed at us — so it says "replied", never "…to you".
+    expect(activityVerb(notification({ activity_type: "threads" }))).toBe("replied");
+  });
+
   it("falls back for unknown activity types", () => {
     expect(activityVerb(notification({ activity_type: "somethingNew" }))).toBe(
       "sent you an activity",
     );
+  });
+});
+
+describe("sourceContext", () => {
+  it("returns the trimmed source thread topic, or empty when absent", () => {
+    expect(sourceContext(notification({ source_thread_topic: "Platform Team" }))).toBe(
+      "Platform Team",
+    );
+    expect(sourceContext(notification({ source_thread_topic: "  [Run] Devs  " }))).toBe(
+      "[Run] Devs",
+    );
+    expect(sourceContext(notification({ source_thread_topic: "" }))).toBe("");
+    expect(sourceContext(notification({ source_thread_topic: "   " }))).toBe("");
   });
 });
 

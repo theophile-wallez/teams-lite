@@ -49,7 +49,7 @@ export function ReadReceipts(props: { receipts: ReadReceipt[] }) {
                 <span
                   data-testid="read-receipt-avatar"
                   className={cn(
-                    "relative rounded-md ring-2 ring-background transition-transform hover:z-20 hover:-translate-y-0.5",
+                    "relative rounded-full ring-2 ring-background transition-transform hover:z-20 hover:-translate-y-0.5",
                     i > 0 && "-ml-1.5",
                   )}
                   style={{ zIndex: shown.length - i }}
@@ -58,7 +58,8 @@ export function ReadReceipts(props: { receipts: ReadReceipt[] }) {
                     seed={receipt.member_mri || name}
                     label={name}
                     initials={firstInitial(name)}
-                    className="size-4 rounded-md text-[8px] font-semibold"
+                    fallback="person"
+                    className="size-4 text-[8px] font-semibold"
                   />
                 </span>
               </TooltipTrigger>
@@ -66,7 +67,8 @@ export function ReadReceipts(props: { receipts: ReadReceipt[] }) {
                 <Avatar
                   seed={receipt.member_mri || name}
                   label={name}
-                  className="size-7 rounded-lg text-[10px]"
+                  fallback="person"
+                  className="size-7 text-[10px]"
                 />
                 <span className="flex flex-col">
                   <span className="text-xs font-medium text-popover-foreground">{name}</span>
@@ -92,7 +94,7 @@ function ReadReceiptsOverflow(props: { readers: ReadReceipt[] }) {
         <span
           data-testid="read-receipts-more"
           style={{ zIndex: 0 }}
-          className="relative -ml-1.5 grid size-4 place-items-center rounded-md bg-accent text-[7px] font-semibold text-text-dim ring-2 ring-background transition-transform hover:z-20 hover:-translate-y-0.5 hover:text-foreground"
+          className="relative -ml-1.5 grid size-4 place-items-center rounded-full bg-accent text-[7px] font-semibold text-text-dim ring-2 ring-background transition-transform hover:z-20 hover:-translate-y-0.5 hover:text-foreground"
         >
           +{props.readers.length}
         </span>

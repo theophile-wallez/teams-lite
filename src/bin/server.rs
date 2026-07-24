@@ -289,14 +289,21 @@ async fn main() -> Result<()> {
     eprintln!("[ok] store {db_path}");
     Store::open(&db_path)?; // ensure schema
 
-    // The activity feed (`48:notifications`) is a system thread, not a chat.
-    // Older builds mis-persisted it as a conversation full of empty-content
-    // bubbles under a raw MRI-URL title; purge that junk once so it stops
-    // showing in the sidebar. Going forward it is routed to the notifications
-    // surface and never re-persisted as a chat (see `spawn_realtime`).
+    // The Teams activity streams (`48:notifications`, `48:mentions`,
+    // `48:threads`) are system feeds, not chats. Older builds mis-persisted them
+    // as conversations full of empty-content bubbles under a raw MRI-URL title;
+    // purge that junk once so it stops showing in the sidebar. Going forward they
+    // are routed to the notifications surface and never re-persisted as chats
+    // (see `spawn_realtime` and `persist_conversations`).
     if let Ok(store) = Store::open(&db_path) {
-        if let Err(e) = store.delete_conversation(teams_activity::NOTIFICATIONS_THREAD) {
-            eprintln!("[cleanup] could not purge {}: {e}", teams_activity::NOTIFICATIONS_THREAD);
+        for feed in [
+            teams_activity::NOTIFICATIONS_THREAD,
+            teams_activity::MENTIONS_THREAD,
+            teams_activity::THREADS_THREAD,
+        ] {
+            if let Err(e) = store.delete_conversation(feed) {
+                eprintln!("[cleanup] could not purge {feed}: {e}");
+            }
         }
         // Older builds also stored control/system frames (typing/presence pushes
         // and ThreadActivity member/topic changes) as chat bubbles — the bare
@@ -807,11 +814,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "reacted": on }))
         }
 
-        // activity feed (`48:notifications`) — reactions / mentions / replies
-        // directed at us. Not a chat: fetched fresh from Teams (which holds the
-        // server-side read state), decoded into structured notifications, and
-        // surfaced in the UI's notifications panel. No local cache — the feed is
-        // small and the panel refreshes on `notifications_changed`.
+        // Notifications panel — the three Teams activity streams, one per tab:
+        // `48:notifications` (Activity: reactions / mentions / replies),
+        // `48:mentions` (@Mentions), and `48:threads` (Following). None is a
+        // chat: each is fetched fresh from Teams (which holds the server-side
+        // read state), decoded into structured notifications, and returned keyed
+        // by tab. No local cache — the feeds are small and refresh on
+        // `notifications_changed`. The three fetches run concurrently.
         "notifications" => {
             let limit = params
                 .get("limit")
@@ -819,13 +828,24 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .map(|n| n.clamp(1, 100) as u32)
                 .unwrap_or(teams_activity::DEFAULT_NOTIFICATIONS_LIMIT);
             let http = ctx.http.clone();
-            let items = ctx
+            let (activity, mentions, following) = ctx
                 .retry_on_auth(move |session, _csa| {
                     let http = http.clone();
-                    async move { teams_activity::fetch_notifications(&http, &session, limit).await }
+                    async move {
+                        let fetch = |stream| teams_activity::fetch_activity_stream(&http, &session, stream, limit);
+                        tokio::try_join!(
+                            fetch(teams_activity::NOTIFICATIONS_THREAD),
+                            fetch(teams_activity::MENTIONS_THREAD),
+                            fetch(teams_activity::THREADS_THREAD),
+                        )
+                    }
                 })
                 .await?;
-            Ok(notifications_json(&items))
+            Ok(json!({
+                "activity": feed_json(&activity),
+                "mentions": feed_json(&mentions),
+                "following": feed_json(&following),
+            }))
         }
 
         // Read receipts ("seen by") for a conversation: every OTHER member's read
@@ -986,9 +1006,9 @@ fn data_db_path() -> Result<String> {
         .map_err(|p| anyhow::anyhow!("data path is not valid UTF-8: {p:?}"))
 }
 
-/// Serialize the activity feed for the UI: the decoded notifications plus the
-/// unread count (derived from Teams' own read-state) so the bell can badge it.
-fn notifications_json(items: &[teams_activity::Notification]) -> Value {
+/// Serialize one activity stream for the UI: the decoded notifications plus the
+/// unread count (derived from Teams' own read-state) so the panel can badge it.
+fn feed_json(items: &[teams_activity::Notification]) -> Value {
     let unread = items.iter().filter(|n| !n.is_read).count();
     json!({
         "unread": unread,
@@ -1002,6 +1022,7 @@ fn notifications_json(items: &[teams_activity::Notification]) -> Value {
                 "actor_mri": n.actor_mri,
                 "source_thread_id": n.source_thread_id,
                 "source_message_id": n.source_message_id,
+                "source_thread_topic": n.source_thread_topic,
                 "preview": n.preview,
                 "timestamp": n.timestamp_ms,
                 "count": n.count,
@@ -1428,19 +1449,20 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
                     // Incoming-call awareness: a live `Event/Call` frame in a real
                     // conversation rings (or dismisses) an incoming-call banner.
                     // Ephemeral, like `typing` — the frame is still persisted +
-                    // broadcast as a `message` below. Never fires for the activity
-                    // feed (not a chat).
-                    if !teams_activity::is_notifications_thread(&m.conversation_id) {
+                    // broadcast as a `message` below. Never fires for an activity
+                    // stream (not a chat).
+                    if !teams_activity::is_system_feed_thread(&m.conversation_id) {
                         if let Some(call) = call_event_json(m, &self_name, &self_mri) {
                             ctx_msgs.emit("call", call);
                         }
                     }
-                    // The activity feed is not a chat: never persist it as a
-                    // conversation. Signal the UI to refresh notifications
-                    // instead — the full payload is re-fetched via the
-                    // `notifications` method (the live frame's chat `content` is
-                    // always empty; the payload lives in properties.activity).
-                    if teams_activity::is_notifications_thread(&m.conversation_id) {
+                    // An activity stream (Activity / Mentions / Following) is not
+                    // a chat: never persist it as a conversation. Signal the UI to
+                    // refresh the notifications panel instead — the full payload is
+                    // re-fetched via the `notifications` method (the live frame's
+                    // chat `content` is always empty; the payload lives in
+                    // properties.activity).
+                    if teams_activity::is_system_feed_thread(&m.conversation_id) {
                         activity_changed = true;
                         continue;
                     }
@@ -1521,8 +1543,8 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
             if t.sender_mri == self_mri_ty {
                 continue; // don't show ourselves typing
             }
-            if teams_activity::is_notifications_thread(&t.conversation_id) {
-                continue; // the activity feed is not a chat
+            if teams_activity::is_system_feed_thread(&t.conversation_id) {
+                continue; // an activity stream is not a chat
             }
             let sender = ctx_ty
                 .store()
@@ -1553,8 +1575,8 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
             if teams_lite::store::same_user(&r.member_mri, &self_mri_rr) {
                 continue; // never surface our own read position
             }
-            if teams_activity::is_notifications_thread(&r.conversation_id) {
-                continue; // the activity feed is not a chat
+            if teams_activity::is_system_feed_thread(&r.conversation_id) {
+                continue; // an activity stream is not a chat
             }
             let member = ctx_rr
                 .store()

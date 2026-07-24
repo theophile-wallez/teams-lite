@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
+import { PersonCoin } from "./person-coin";
 
 // Soft, low-saturation avatar tints, chosen deterministically per seed so a
 // conversation keeps the same colour across renders. Muted on purpose to honour
@@ -78,8 +79,15 @@ function useAvatarPhoto(photo?: AvatarPhoto): string | null {
  * be clipped by the overlap.
  *
  * Pass `photo` to load the subject's real profile picture: it renders over the
- * initials once fetched (and fades in), and the initials remain the fallback
- * while loading, when the subject has no photo, or if the image fails to decode.
+ * fallback once fetched (and fades in), and the fallback remains while loading,
+ * when the subject has no photo, or if the image fails to decode.
+ *
+ * `fallback` chooses that pre-photo layer: "initials" (default) is the tinted
+ * monogram on a rounded square; "person" is a faceted circular <PersonCoin>, for
+ * subjects that are a single human (a 1:1 chat, a reader, a call participant) —
+ * never a team, channel or group, which have no single face. A person avatar is
+ * always circular (so the coin and any photo match), regardless of the caller's
+ * radius class.
  */
 export function Avatar(props: {
   seed: string;
@@ -87,18 +95,30 @@ export function Avatar(props: {
   initials?: string;
   className?: string;
   photo?: AvatarPhoto;
+  fallback?: "initials" | "person";
 }) {
   const photoUrl = useAvatarPhoto(props.photo);
+  const person = props.fallback === "person";
   return (
     <span
       className={cn(
-        "relative grid size-9 shrink-0 place-items-center overflow-hidden rounded-xl text-[13px] font-semibold",
-        tintFor(props.seed),
+        "relative grid size-9 shrink-0 place-items-center overflow-hidden text-[13px] font-semibold",
+        // Initials sit on a tinted rounded square; a person coin is circular and
+        // brings its own gradient background (no tint needed).
+        person ? "rounded-full" : "rounded-xl",
+        !person && tintFor(props.seed),
         props.className,
+        // Re-assert round after the caller's className so dense monogram stacks
+        // (which pass rounded-md/lg) still get circular coins.
+        person && "rounded-full",
       )}
       aria-hidden
     >
-      {props.initials ?? avatarInitials(props.label)}
+      {person ? (
+        <PersonCoin seed={props.seed} className="size-full" />
+      ) : (
+        props.initials ?? avatarInitials(props.label)
+      )}
       {photoUrl && (
         <img
           src={photoUrl}
