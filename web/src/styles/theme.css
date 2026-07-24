@@ -63,7 +63,7 @@
   --row-open: #ffffff; /* active row = elevated white card (shadow-as-border) */
 
   /* Message bubbles: mine = solid accent, incoming = white surface (shadow ring). */
-  --bubble-mine: #6875e6;
+  --bubble-mine: #4a53a7;
   --bubble-mine-foreground: #ffffff;
   --bubble-incoming: #ffffff;
   --bubble-incoming-foreground: #292929;
@@ -134,7 +134,7 @@
   --row-hovered: #232323;
   --row-open: #2a2a2a;
 
-  --bubble-mine: #6875e6;
+  --bubble-mine: #2f3569;
   --bubble-mine-foreground: #ffffff;
   --bubble-incoming: #262626;
   --bubble-incoming-foreground: #e5e5e5;
