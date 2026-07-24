@@ -39,6 +39,25 @@ type LightboxImage = { src: string; alt: string; layoutId?: string };
 
 type ImageLightboxContextValue = {
   openImage: (image: LightboxImage) => void;
+  /**
+   * The `layoutId` of the image whose lightbox is *currently closing* — set when
+   * `close()` fires and cleared once the exit animation finishes. The matching
+   * {@link MediaImage} watches this and, for that window only, drops its
+   * shared-layout id (via a key-forced remount, so Motion actually releases it
+   * rather than keeping the persistent node in the group). That leaves the
+   * exiting overlay copy as the sole holder of the id, so it fades/shrinks in
+   * place in the fixed, top-most layer.
+   *
+   * Why only on close: on open the thumbnail must stay in the group so the
+   * grow-morph has a start box — and there the *entering* overlay is the lead,
+   * which already renders on top. The bug is exit-only: when the overlay
+   * unmounts, Motion promotes the remaining in-list thumbnail as the lead and
+   * renders the shrink there — but the thumbnail sits inside the message
+   * scroller (`overflow` clip, lower stacking context), so it draws *under* the
+   * messages. Pulling the thumbnail out of the group for the close prevents
+   * that handoff.
+   */
+  closingLayoutId: string | null;
 };
 
 const ImageLightboxContext = createContext<ImageLightboxContextValue | null>(null);
@@ -63,11 +82,19 @@ const FOCUSABLE_SELECTOR =
 
 export function ImageLightboxProvider(props: { children: ReactNode }) {
   const [image, setImage] = useState<LightboxImage | null>(null);
+  // The id of the image whose close animation is in flight: set when `close()`
+  // fires and cleared on `onExitComplete`. During that window the matching
+  // thumbnail leaves the shared-layout group so the exiting overlay owns the
+  // morph (see the `closingLayoutId` doc on the context type).
+  const [closingLayoutId, setClosingLayoutId] = useState<string | null>(null);
   const reduceMotion = useReducedMotion();
 
   const containerRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const lastFocusedRef = useRef<HTMLElement | null>(null);
+  // Latest image, read by the stable `close` callback without re-creating it.
+  const imageRef = useRef<LightboxImage | null>(null);
+  imageRef.current = image;
 
   const openImage = useCallback((next: LightboxImage) => {
     if (!next.src) return;
@@ -75,7 +102,14 @@ export function ImageLightboxProvider(props: { children: ReactNode }) {
     setImage(next);
   }, []);
 
-  const close = useCallback(() => setImage(null), []);
+  // Flag the closing image's id in the same commit that unmounts the overlay,
+  // so the thumbnail drops out of the shared-layout group exactly as the
+  // overlay begins to exit — leaving the overlay as the sole id holder.
+  const close = useCallback(() => {
+    const layoutId = imageRef.current?.layoutId;
+    if (layoutId) setClosingLayoutId(layoutId);
+    setImage(null);
+  }, []);
 
   // While open: lock scroll, move focus in, trap Tab, and swallow Escape before
   // the app's global key handler can also act on it (open conversation, etc.).
@@ -127,10 +161,10 @@ export function ImageLightboxProvider(props: { children: ReactNode }) {
   const morphing = !!image?.layoutId;
 
   return (
-    <ImageLightboxContext.Provider value={{ openImage }}>
+    <ImageLightboxContext.Provider value={{ openImage, closingLayoutId }}>
       <LayoutGroup>
         {props.children}
-        <AnimatePresence>
+        <AnimatePresence onExitComplete={() => setClosingLayoutId(null)}>
           {image ? (
             <motion.div
               ref={containerRef}
@@ -156,7 +190,15 @@ export function ImageLightboxProvider(props: { children: ReactNode }) {
                 className="max-h-full max-w-full rounded-2xl object-contain shadow-pop"
                 initial={morphing ? undefined : reduceMotion ? false : { opacity: 0, scale: 0.96 }}
                 animate={morphing ? undefined : { opacity: 1, scale: 1 }}
-                exit={morphing ? undefined : { opacity: 0, scale: 0.98 }}
+                // On close the matching thumbnail has left the shared-layout
+                // group, so this overlay copy is the sole holder of the id and
+                // simply fades + shrinks in place here in the fixed top layer —
+                // it does not morph back down into the clipped message list.
+                exit={
+                  morphing
+                    ? { opacity: 0, scale: 0.92, transition: { duration: 0.24, ease: EASE_OUT } }
+                    : { opacity: 0, scale: 0.98 }
+                }
                 transition={morphing ? MORPH_TRANSITION : { duration: 0.2, ease: EASE_OUT }}
               />
               <button
