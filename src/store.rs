@@ -557,6 +557,57 @@ impl Store {
         Ok(converted)
     }
 
+    /// Upgrade meeting-recording rows that older builds stored as raw
+    /// `<URIObject type="Video.2/CallRecording.1">` bubbles into the media form the
+    /// UI now renders (a video card). The final `Success` recording becomes an
+    /// empty-body row carrying a `{kind:"recording"}` attachment (and a blanked
+    /// sender, since the frame's only author hint is a bare contacts-URL `from`);
+    /// the in-progress notices Teams also posts (`Initial`/`ChunkFinished`) are
+    /// deleted as noise. [`crate::teams_read::parse_call_recording`] is the source
+    /// of truth — a row that merely mentions the marker in real text (so it does
+    /// not parse as a recording) is left untouched, never deleted.
+    ///
+    /// Meant to run once at startup (next to [`Store::convert_legacy_call_events`]);
+    /// idempotent — an upgraded row no longer contains the marker in `content`, so
+    /// a later run matches nothing. Returns `(upgraded, deleted)`.
+    pub fn convert_legacy_call_recordings(&self) -> Result<(usize, usize)> {
+        let rows: Vec<(String, String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, conversation_id, content FROM messages
+                 WHERE content LIKE '%CallRecording%'",
+            )?;
+            let mapped = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let (mut upgraded, mut deleted) = (0usize, 0usize);
+        for (id, conversation_id, content) in rows {
+            match crate::teams_read::parse_call_recording("", &content) {
+                Some(crate::teams_read::CallRecording::Ready(attachment)) => {
+                    let attachments = serde_json::Value::Array(vec![attachment]).to_string();
+                    self.conn.execute(
+                        "UPDATE messages SET content = '', sender = '', attachments = ?3
+                         WHERE conversation_id = ?1 AND id = ?2",
+                        params![conversation_id, id, attachments],
+                    )?;
+                    upgraded += 1;
+                }
+                Some(crate::teams_read::CallRecording::Pending) => {
+                    self.conn.execute(
+                        "DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2",
+                        params![conversation_id, id],
+                    )?;
+                    deleted += 1;
+                }
+                // Not actually a recording frame (a real message that just mentions
+                // the marker) — leave it exactly as it is.
+                None => {}
+            }
+        }
+        Ok((upgraded, deleted))
+    }
+
     /// Returns true when the row was newly inserted or an existing row actually
     /// changed. The guarded `DO UPDATE ... WHERE` makes a no-op upsert modify 0
     /// rows, so callers can emit a `conversations_changed` event ONLY on a real
@@ -1450,6 +1501,61 @@ mod tests {
 
         // Idempotent: a converted store upgrades nothing on the next pass.
         assert_eq!(s.convert_legacy_call_events().unwrap(), 0);
+    }
+
+    #[test]
+    fn converts_legacy_call_recordings() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+
+        let frame = |id: &str, content: &str| Message {
+            id: id.into(),
+            conversation_id: "c1".into(),
+            seq: 1,
+            compose_time: 1,
+            sender: "Meeting".into(),
+            sender_mri: String::new(),
+            content: content.into(),
+            attachments: "[]".into(),
+            reactions: "[]".into(),
+            system_event: String::new(),
+            thread_root_id: String::new(), thread_subject: String::new(),
+        };
+
+        // A finished recording (upgraded to a media card), an in-progress notice
+        // (deleted as noise), and a real chat message that merely mentions the
+        // marker word in text (must be left untouched — it is not a recording).
+        s.insert_message(&frame("rec1", "<URIObject type=\"Video.2/CallRecording.1\" url_thumbnail=\"https://x.asyncgw.teams.microsoft.com/t\"><RecordingStatus status=\"Success\" code=\"200\"/><Title>Daily</Title><a href=\"https://t-my.sharepoint.com/:v:/g/x\">Play</a><RecordingContent duration=\"0:05:30\"/></URIObject>")).unwrap();
+        s.insert_message(&frame("rec2", "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"Initial\" code=\"0\"/><a href=\"\">Play</a></URIObject>")).unwrap();
+        s.insert_message(&frame("chat1", "<p>read the CallRecording docs</p>")).unwrap();
+
+        let (upgraded, deleted) = s.convert_legacy_call_recordings().unwrap();
+        assert_eq!((upgraded, deleted), (1, 1), "one recording upgraded, one notice removed");
+
+        let msgs = s.newest_messages("c1", 50).unwrap();
+        let ids: std::collections::HashSet<_> = msgs.iter().map(|m| m.id.as_str()).collect();
+        assert!(!ids.contains("rec2"), "the in-progress notice is deleted");
+
+        // The finished recording became an empty-body row with a blank sender and a
+        // lone `recording` attachment holding the SharePoint link.
+        let rec = msgs.iter().find(|m| m.id == "rec1").unwrap();
+        assert_eq!(rec.content, "", "raw URIObject content is cleared once structured");
+        assert_eq!(rec.sender, "", "the recording's placeholder sender is blanked");
+        let atts: serde_json::Value = serde_json::from_str(&rec.attachments).unwrap();
+        assert_eq!(atts.as_array().unwrap().len(), 1);
+        assert_eq!(atts[0]["kind"], "recording");
+        assert_eq!(atts[0]["name"], "Daily");
+        assert_eq!(atts[0]["url"], "https://t-my.sharepoint.com/:v:/g/x");
+        assert_eq!(atts[0]["duration_seconds"], 330);
+
+        // The real chat message is left completely untouched.
+        let chat = msgs.iter().find(|m| m.id == "chat1").unwrap();
+        assert_eq!(chat.content, "<p>read the CallRecording docs</p>");
+        assert_eq!(chat.sender, "Meeting");
+
+        // Idempotent: an upgraded row no longer holds the marker, so a second pass
+        // matches (and changes) nothing.
+        assert_eq!(s.convert_legacy_call_recordings().unwrap(), (0, 0));
     }
 
     #[test]

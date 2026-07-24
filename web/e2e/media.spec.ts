@@ -130,6 +130,47 @@ test.describe("media (images + attachments)", () => {
     await expect(incoming.locator('[data-testid="sender-name"]')).toBeVisible();
   });
 
+  test("renders a meeting recording as a video card without a bubble", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    const rec = page.locator('[data-testid="message-recording"]');
+    await expect(rec).toHaveCount(1);
+    await expect(rec).toBeVisible();
+
+    // The recording drops the bubble chrome (recording-only) and, since the
+    // backend clears the recording's sender, shows no name floating above it.
+    const msg = page.locator('[data-testid="message"][data-recording-only="true"]');
+    await expect(msg).toHaveCount(1);
+    await expect(msg).toHaveAttribute("data-mine", "false");
+    await expect(msg.locator('[data-testid="sender-name"]')).toHaveCount(0);
+
+    // The card is captioned with the recording title and badged with its length.
+    await expect(rec).toContainText("Keynote #3 du Lab Eng X Gen AI");
+    await expect(rec).toContainText("1 h 08 min");
+
+    // The poster is authenticated hosted content, fetched through the media proxy
+    // (a local blob src), the same path an image attachment takes.
+    const poster = rec.locator("img");
+    await expect(poster).toBeVisible();
+    await expect(poster).toHaveAttribute("src", /^blob:/);
+
+    // Clicking opens the recording's SharePoint player page in a new tab — we
+    // stub window.open to capture the exact target without a real navigation.
+    await page.evaluate(() => {
+      (window as unknown as { __opened: string[] }).__opened = [];
+      window.open = ((url: string) => {
+        (window as unknown as { __opened: string[] }).__opened.push(String(url));
+        return null;
+      }) as typeof window.open;
+    });
+    await rec.click();
+    const opened = await page.evaluate(() => (window as unknown as { __opened: string[] }).__opened);
+    expect(opened).toEqual([
+      "https://siapartners1-my.sharepoint.com/:v:/g/personal/demo/IQCmMockRecording",
+    ]);
+  });
+
   test("keeps the bubble for a message that mixes an image with text", async ({ page }) => {
     await gotoApp(page);
     await openByPalette(page, "Media Gallery");

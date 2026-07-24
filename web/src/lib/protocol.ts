@@ -12,12 +12,19 @@ export type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
  *  by the backend). `url` is an authenticated hosted-content URL — it must be
  *  loaded through the backend media proxy (see `TeamsController.loadMedia`),
  *  never fetched directly by the browser. */
-export type AttachmentKind = "image" | "file";
+export type AttachmentKind = "image" | "file" | "recording";
 export type Attachment = {
   name: string;
   content_type: string;
   url: string;
   kind: AttachmentKind;
+  /** Meeting-recording only (`kind: "recording"`): a poster frame for the video,
+   *  itself an authenticated hosted-content URL loaded through the media proxy.
+   *  Empty/absent when Teams reported no thumbnail (the card shows a play glyph). */
+  thumbnail_url?: string;
+  /** Meeting-recording only: the recording's length in whole seconds (0 when
+   *  unknown), rendered as a duration badge via {@link formatCallDuration}. */
+  duration_seconds?: number;
 };
 
 /** One aggregated reaction (Teams "emotion") on a message, as the backend sends

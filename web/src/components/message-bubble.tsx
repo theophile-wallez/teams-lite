@@ -27,7 +27,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
-import { FileAttachment, MediaImage } from "./media-image";
+import { FileAttachment, MediaImage, RecordingAttachment } from "./media-image";
 import { GitLabLinkCard } from "./gitlab-link-card";
 import { useAppState, useController } from "./controller-context";
 
@@ -191,6 +191,7 @@ export function MessageBubble(props: {
   const attachments = props.message.attachments ?? [];
   const hasAttachments = attachments.length > 0;
   const imageAttachments = attachments.filter((a) => a.kind === "image");
+  const recordingAttachments = attachments.filter((a) => a.kind === "recording");
 
   // When the message is *only* an integration link (a card, no quote, no
   // attachments, no other body content), the bubble chrome is dropped and just
@@ -211,13 +212,29 @@ export function MessageBubble(props: {
     !bodyHasText &&
     imageAttachments.length === attachments.length;
 
+  // A recording-only message: a meeting recording and nothing else (the backend
+  // clears the body and any sender for these, so they always arrive this way).
+  // Like an image-only message it drops the bubble chrome — the recording card
+  // (poster + play + caption) is its own surface, so it needs no mat.
+  const recordingOnly =
+    !props.editing &&
+    !parsed.quote &&
+    cards.length === 0 &&
+    recordingAttachments.length > 0 &&
+    !bodyHasContent &&
+    recordingAttachments.length === attachments.length;
+
   // Media- and link-only messages render without the standard rounded, colored
-  // bubble — an image gets the atelier mat instead, a link just its card.
-  const bare = linkOnly || imageOnly;
+  // bubble — an image gets the atelier mat, a recording its video card, a link
+  // just its preview card.
+  const bare = linkOnly || imageOnly || recordingOnly;
 
   // Only label the first message of a same-author run; continuations are clearly
-  // from the same person.
-  const nameShown = !mine && props.showSenderName && !props.continuesAbove;
+  // from the same person. A message with no sender (e.g. a meeting recording,
+  // whose only author hint is a bare contacts URL the backend drops) shows no
+  // name — an empty label would just be a blank gap above the card.
+  const nameShown =
+    !mine && props.showSenderName && !props.continuesAbove && props.message.sender.trim() !== "";
   const [menuOpen, setMenuOpen] = useState(false);
 
   // Reactions on this message, and which emotion (if any) is ours — the latter
@@ -294,6 +311,8 @@ export function MessageBubble(props: {
           {attachments.map((att, i) =>
             att.kind === "image" ? (
               <MediaImage key={`att-${i}-${att.url}`} src={att.url} alt={att.name} />
+            ) : att.kind === "recording" ? (
+              <RecordingAttachment key={`att-${i}-${att.url}`} attachment={att} />
             ) : (
               <FileAttachment key={`att-${i}-${att.url}`} attachment={att} />
             ),
@@ -322,13 +341,16 @@ export function MessageBubble(props: {
         data-highlighted={props.highlighted ? "true" : undefined}
         data-link-only={linkOnly ? "true" : undefined}
         data-image-only={imageOnly ? "true" : undefined}
+        data-recording-only={recordingOnly ? "true" : undefined}
         className={cn(
           "relative text-sm leading-relaxed",
           // Media- and link-only messages drop the standard bubble chrome; the
-          // link card / atelier mat (below) becomes the surface. A link card
-          // gets a tighter max width; the mat is capped at the usual bubble one.
+          // link card / atelier mat / recording card (below) becomes the surface.
+          // A link card gets a tighter max width; the mat is capped at the usual
+          // bubble one; a recording card sizes itself (max-w-sm).
           linkOnly && "max-w-md",
           imageOnly && "max-w-[76%]",
+          recordingOnly && "w-full max-w-sm",
           !bare &&
             cn(
               "max-w-[76%] rounded-2xl px-3.5 py-2",

@@ -199,6 +199,14 @@ fn parse_last_message(container: &Value) -> LastMessage {
     let message_type = container.pointer("/lastMessage/messageType").and_then(|x| x.as_str()).unwrap_or("");
     let preview = if let Some(event) = parse_call_event(message_type, content) {
         call_event_label(&event).to_string()
+    } else if let Some(recording) = parse_call_recording(message_type, content) {
+        // A meeting recording previews as a clean event-style label (like a call),
+        // never the raw URIObject text (which would leak the stray "Play" link);
+        // an in-progress notice shows nothing.
+        match recording {
+            CallRecording::Ready(_) => "Meeting recording".to_string(),
+            CallRecording::Pending => String::new(),
+        }
     } else if is_displayable_message_type(message_type) && !is_system_frame_content(content) {
         preview_from_html(content)
     } else {
@@ -977,6 +985,107 @@ fn call_event_label(event: &Value) -> &'static str {
     }
 }
 
+/// Outcome of inspecting a message body for a Teams meeting-recording notice — a
+/// `<URIObject type="Video.2/CallRecording.1">`. Teams posts one such frame each
+/// time the recording changes state, but only the final, stored one is playable.
+pub(crate) enum CallRecording {
+    /// The recording is still being produced (`RecordingStatus` is `Initial` or
+    /// `ChunkFinished`) so it carries no playable link yet — dropped as noise.
+    Pending,
+    /// The recording finished (`RecordingStatus` `Success`): a synthetic
+    /// `{name, content_type, url, kind:"recording", thumbnail_url, duration_seconds}`
+    /// attachment, ready for the UI to frame as a video card.
+    Ready(Value),
+}
+
+/// Recognise a meeting-recording notice and, when the recording is ready, turn it
+/// into a media attachment. Returns `None` for any body that is NOT a recording
+/// URIObject, so the caller can handle it as a normal message.
+///
+/// Teams posts a `<URIObject type="Video.2/CallRecording.1">` into a meeting/call
+/// chat as the recording progresses — `RecordingStatus` walks `Initial` →
+/// `ChunkFinished` → `Success`. Only `Success` carries a real `<a href>` (the
+/// SharePoint/OneDrive video the "Play" button opens), a poster thumbnail, and a
+/// duration; the earlier states are noise and map to [`CallRecording::Pending`].
+/// A `Success` that somehow lacks a usable link is also treated as pending — a
+/// linkless card is worse than nothing.
+///
+/// The attachment mirrors [`file_to_attachment`]'s shape plus a `thumbnail_url`
+/// (a Teams AMS poster, loaded through the media proxy) and `duration_seconds`,
+/// tagged `kind:"recording"` so the UI frames it as a video card rather than a
+/// plain image or file. Detection is by body shape (not `messagetype`), matching
+/// how [`parse_call_event`] recognises a call frame, so it works on live frames,
+/// history rows, and the legacy-row migration alike.
+pub(crate) fn parse_call_recording(_messagetype: &str, content: &str) -> Option<CallRecording> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("<URIObject") || !trimmed.contains("CallRecording") {
+        return None;
+    }
+    // Only the final, stored recording is playable; earlier states carry no link.
+    let ready = xml_attr(trimmed, "status")
+        .map(|s| s.eq_ignore_ascii_case("Success"))
+        .unwrap_or(false);
+    if !ready {
+        return Some(CallRecording::Pending);
+    }
+    let Some(url) = recording_play_url(trimmed) else {
+        return Some(CallRecording::Pending);
+    };
+    let title = xml_first_value(trimmed, "Title")
+        .map(|s| preview_from_html(&s))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Meeting recording".to_string());
+    let thumbnail = xml_attr(trimmed, "url_thumbnail").unwrap_or_default();
+    let duration_seconds = xml_attr(trimmed, "duration")
+        .map(|d| parse_hms_to_seconds(&d))
+        .unwrap_or(0);
+    Some(CallRecording::Ready(serde_json::json!({
+        "name": title,
+        "content_type": "video/mp4",
+        "url": url,
+        "kind": "recording",
+        "thumbnail_url": thumbnail,
+        "duration_seconds": duration_seconds,
+    })))
+}
+
+/// The playable URL for a finished recording: the `<a href>` Teams renders as the
+/// "Play" button (a SharePoint/OneDrive video viewer), falling back to the
+/// `onedriveForBusinessVideo` media item. `None` when neither is a usable
+/// `http(s)` URL. Only `https` SharePoint viewer URLs are expected; we keep the
+/// check to `http(s)` so a malformed frame can't smuggle in another scheme.
+fn recording_play_url(content: &str) -> Option<String> {
+    let is_http = |u: &str| u.starts_with("https://") || u.starts_with("http://");
+    if let Some(href) = xml_attr(content, "href").filter(|u| is_http(u)) {
+        return Some(href);
+    }
+    // Fallback: the OneDrive/SharePoint video item, whose `uri` sits in the same
+    // `<item type="onedriveForBusinessVideo" uri="…">` opening tag.
+    let idx = content.find("onedriveForBusinessVideo")?;
+    let tag = &content[idx..];
+    let end = tag.find('>').map(|g| g + 1).unwrap_or(tag.len());
+    xml_attr(&tag[..end], "uri").filter(|u| is_http(u))
+}
+
+/// Parse a Teams recording `duration` attribute ("H:MM:SS[.frac]" or "MM:SS")
+/// into whole seconds; `0` when it is absent, zero, or unparseable. The
+/// fractional part (e.g. `03.92`) is discarded — the UI shows whole minutes.
+fn parse_hms_to_seconds(s: &str) -> i64 {
+    let whole = |x: &str| x.split('.').next().unwrap_or("").trim().parse::<i64>().ok();
+    let parts: Vec<&str> = s.trim().split(':').collect();
+    match parts.as_slice() {
+        [h, m, sec] => match (whole(h), whole(m), whole(sec)) {
+            (Some(h), Some(m), Some(sec)) => h * 3600 + m * 60 + sec,
+            _ => 0,
+        },
+        [m, sec] => match (whole(m), whole(sec)) {
+            (Some(m), Some(sec)) => m * 60 + sec,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
 /// Parse a single message resource (shared by the read API and trouter events —
 /// both deliver the same message shape). `conversation_id` is passed in because
 /// the read API groups by conversation; for a live event, derive it from the
@@ -1022,6 +1131,36 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             thread_root_id: String::new(),
             thread_subject: String::new(),
         });
+    }
+
+    // A meeting-recording notice becomes a media message (a video card), not a
+    // chat bubble of raw `<URIObject>` XML. Teams posts one each time the
+    // recording changes state; only the final, playable one is surfaced, and the
+    // in-progress notices are dropped as noise. Recognised by body shape before
+    // the messagetype gate below (which would otherwise let it through as a
+    // `RichText/*` bubble). The `from` on these frames is a bare contacts-endpoint
+    // URL and `imdisplayname` is empty, so `sender` is blanked rather than left as
+    // that URL — the card is self-describing and needs no author line.
+    match parse_call_recording(messagetype, &content) {
+        Some(CallRecording::Ready(attachment)) => {
+            let (thread_root_id, thread_subject) = parse_thread(m);
+            return Some(Message {
+                id,
+                conversation_id: conversation_id.to_string(),
+                seq,
+                compose_time,
+                sender: String::new(),
+                sender_mri,
+                content: String::new(),
+                attachments: Value::Array(vec![attachment]).to_string(),
+                reactions: parse_emotions(m),
+                system_event: String::new(),
+                thread_root_id,
+                thread_subject,
+            });
+        }
+        Some(CallRecording::Pending) => return None,
+        None => {}
     }
 
     // Otherwise keep only user-visible chat bodies. Teams multiplexes control/
@@ -1490,7 +1629,9 @@ mod tests {
         });
         assert_eq!(parse_conversations(&v)[0].last_message_preview, "");
 
-        // A media/card last message (URIObject) is real content and still previews.
+        // A finished meeting recording as the last message previews as a clean,
+        // event-style label — never the raw URIObject text (which would leak the
+        // "Play" link the stripper leaves behind).
         let v = json!({
             "chats": [{
                 "id": "19:meeting@thread.v2",
@@ -1500,12 +1641,26 @@ mod tests {
                     "id": "10",
                     "composeTime": "2026-07-23T13:11:00.000Z",
                     "messageType": "RichText/Media_CallRecording",
-                    "content": "<URIObject type=\"Video.2/CallRecording.1\">recording</URIObject>"
+                    "content": "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"Success\" code=\"200\"/><Title>Daily</Title><a href=\"https://t-my.sharepoint.com/:v:/g/x\">Play</a></URIObject>"
                 }
             }]
         });
         let c = &parse_conversations(&v)[0];
-        assert_eq!(c.last_message_preview, "recording");
+        assert_eq!(c.last_message_preview, "Meeting recording");
+
+        // An in-progress recording notice as the last message previews as nothing
+        // (it is noise the message list drops entirely).
+        let v = json!({
+            "chats": [{
+                "id": "19:meeting2@thread.v2", "title": "Daily", "chatType": "meeting",
+                "lastMessage": {
+                    "id": "11", "composeTime": "2026-07-23T13:12:00.000Z",
+                    "messageType": "RichText/Media_CallRecording",
+                    "content": "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"Initial\" code=\"0\"/><a href=\"\">Play</a></URIObject>"
+                }
+            }]
+        });
+        assert_eq!(parse_conversations(&v)[0].last_message_preview, "");
     }
 
     #[test]
@@ -1630,17 +1785,20 @@ mod tests {
         });
         assert!(parse_message(&roster, "c1").is_none(), "a bare partlist roster must be skipped");
 
-        // ...but a media/card body (URIObject) is a real message and stays, even
-        // when it mentions a call (e.g. a call-recording card): it carries a title
-        // and a playable link, and its type is a displayable RichText/Media_*.
+        // ...but a FINISHED recording card (a URIObject carrying a playable link) is
+        // a real message and stays — surfaced as a media card, not dropped as a
+        // system frame. (Its exact shape, and the dropping of the in-progress
+        // notices Teams also posts, are covered by `parse_call_recording_shapes` /
+        // `recording_becomes_a_media_message`.)
         let recording = json!({
             "id": "5", "sequenceId": 5, "composetime": "2026-07-16T16:05:30.000Z",
             "messagetype": "RichText/Media_CallRecording",
-            "content": "<URIObject type=\"Video.2/CallRecording.1\"><Title>Daily</Title>\
-                <SessionEndReason value=\"CallEnded\" /></URIObject>",
+            "content": "<URIObject type=\"Video.2/CallRecording.1\">\
+                <RecordingStatus status=\"Success\" code=\"200\"/><Title>Daily</Title>\
+                <a href=\"https://t-my.sharepoint.com/:v:/g/x\">Play</a></URIObject>",
             "imdisplayname": "Alice"
         });
-        assert!(parse_message(&recording, "c1").is_some(), "a call-recording card must be kept");
+        assert!(parse_message(&recording, "c1").is_some(), "a finished recording card must be kept");
     }
 
     #[test]
@@ -1770,6 +1928,110 @@ mod tests {
         // A self-closing `<part/>` (no name) contributes nothing.
         assert!(call_participants("<partlist alt=\"\"/>").is_empty());
         assert!(call_participants("<partlist><part/></partlist>").is_empty());
+    }
+
+    /// A finished (`Success`) recording URIObject, as Teams posts it — trimmed to
+    /// the parts the parser reads (status, title, the "Play" link, the poster
+    /// thumbnail on the root, and the duration on `<RecordingContent>`).
+    const RECORDING_SUCCESS: &str = "<URIObject format_version=\"1.1\" \
+        type=\"Video.2/CallRecording.1\" \
+        url_thumbnail=\"https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frs/views/thumbnail_small\" \
+        uri=\"\" version=\"1.0\"><RecordingStatus status=\"Success\" code=\"200\"/>\
+        <Title>Keynote #3 du Lab Eng X Gen AI</Title>\
+        <a href=\"https://siapartners1-my.sharepoint.com/:v:/g/personal/x/IQCm\">Play</a>\
+        <RecordingContent contentTypes=\"Recording+Transcript\" duration=\"1:08:03.92\">\
+        <item type=\"onedriveForBusinessVideo\" uri=\"https://siapartners1-my.sharepoint.com/:v:/g/personal/x/IQCm\"/>\
+        </RecordingContent></URIObject>";
+
+    #[test]
+    fn parse_call_recording_shapes() {
+        // A finished recording → a `recording` attachment with the title, the
+        // SharePoint "Play" link, the poster thumbnail, and whole-second duration.
+        let att = match parse_call_recording("", RECORDING_SUCCESS) {
+            Some(CallRecording::Ready(a)) => a,
+            _ => panic!("a Success recording must parse as Ready"),
+        };
+        assert_eq!(att["kind"], "recording");
+        assert_eq!(att["name"], "Keynote #3 du Lab Eng X Gen AI");
+        assert_eq!(att["url"], "https://siapartners1-my.sharepoint.com/:v:/g/personal/x/IQCm");
+        assert_eq!(
+            att["thumbnail_url"],
+            "https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frs/views/thumbnail_small"
+        );
+        assert_eq!(att["duration_seconds"], 4083); // 1*3600 + 8*60 + 3
+        assert_eq!(att["content_type"], "video/mp4");
+
+        // The in-progress notices Teams also posts carry no link → Pending (noise).
+        for status in ["Initial", "ChunkFinished"] {
+            let body = format!(
+                "<URIObject type=\"Video.2/CallRecording.1\" url_thumbnail=\"\">\
+                 <RecordingStatus status=\"{status}\" code=\"0\"/>\
+                 <Title>x</Title><a href=\"\">Play</a></URIObject>"
+            );
+            assert!(
+                matches!(parse_call_recording("", &body), Some(CallRecording::Pending)),
+                "{status} recording must be Pending"
+            );
+        }
+
+        // A `Success` whose `<a>` link is empty falls back to the OneDrive item uri.
+        let fallback = "<URIObject type=\"Video.2/CallRecording.1\">\
+            <RecordingStatus status=\"Success\" code=\"200\"/><Title>t</Title><a href=\"\">Play</a>\
+            <RecordingContent duration=\"0:05:00\">\
+            <item type=\"onedriveForBusinessVideo\" uri=\"https://t-my.sharepoint.com/:v:/g/x\"/>\
+            </RecordingContent></URIObject>";
+        let att = match parse_call_recording("", fallback) {
+            Some(CallRecording::Ready(a)) => a,
+            _ => panic!("fallback recording must parse as Ready"),
+        };
+        assert_eq!(att["url"], "https://t-my.sharepoint.com/:v:/g/x");
+        assert_eq!(att["duration_seconds"], 300);
+
+        // Non-recording bodies are not recordings (the caller handles them normally).
+        assert!(parse_call_recording("", "<p>hello</p>").is_none());
+        assert!(parse_call_recording("", "<URIObject type=\"SWIFT.1\"><Swift/></URIObject>").is_none());
+        // A real message that merely MENTIONS the marker in text is not a recording.
+        assert!(parse_call_recording("", "<p>see the CallRecording docs</p>").is_none());
+    }
+
+    #[test]
+    fn recording_becomes_a_media_message() {
+        // A finished recording is surfaced as a media message: empty body, a lone
+        // `recording` attachment, and a BLANK sender (the frame's `from` is a bare
+        // contacts-endpoint URL we must not show as an author) — but its MRI is kept.
+        let m = json!({
+            "id": "42", "sequenceId": 42, "composetime": "2026-07-21T16:01:44.000Z",
+            "messagetype": "RichText/Media_CallRecording",
+            "content": RECORDING_SUCCESS,
+            "from": "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:1c34ddea"
+        });
+        let parsed = parse_message(&m, "19:meeting_x@thread.v2").expect("recording kept as a message");
+        assert_eq!(parsed.content, "", "raw URIObject XML must not become bubble content");
+        assert_eq!(parsed.sender, "", "the bare contacts-URL `from` must not show as a sender");
+        assert_eq!(parsed.sender_mri, "8:orgid:1c34ddea", "the organizer MRI is still captured");
+        assert_eq!(parsed.system_event, "", "a recording is media, not a system event");
+        let atts: Value = serde_json::from_str(&parsed.attachments).unwrap();
+        assert_eq!(atts.as_array().unwrap().len(), 1);
+        assert_eq!(atts[0]["kind"], "recording");
+        assert_eq!(atts[0]["name"], "Keynote #3 du Lab Eng X Gen AI");
+
+        // An in-progress notice is dropped entirely (returns no message).
+        let pending = json!({
+            "id": "43", "sequenceId": 43, "composetime": "2026-07-21T16:01:39.000Z",
+            "messagetype": "RichText/Media_CallRecording",
+            "content": "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"Initial\" code=\"0\"/><a href=\"\">Play</a></URIObject>"
+        });
+        assert!(parse_message(&pending, "19:meeting_x@thread.v2").is_none(), "an in-progress recording notice is dropped");
+    }
+
+    #[test]
+    fn parse_hms_to_seconds_handles_teams_durations() {
+        assert_eq!(parse_hms_to_seconds("1:08:03.92"), 4083);
+        assert_eq!(parse_hms_to_seconds("0:00:00"), 0);
+        assert_eq!(parse_hms_to_seconds("05:30"), 330);
+        assert_eq!(parse_hms_to_seconds("2:00:00"), 7200);
+        assert_eq!(parse_hms_to_seconds(""), 0);
+        assert_eq!(parse_hms_to_seconds("garbage"), 0);
     }
 
     #[test]

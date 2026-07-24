@@ -38,13 +38,15 @@ import type { ServerWebSocket } from "bun";
 
 type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
 
-type AttachmentKind = "image" | "file";
+type AttachmentKind = "image" | "file" | "recording";
 
 type Attachment = {
   name: string;
   content_type: string;
   url: string;
   kind: AttachmentKind;
+  thumbnail_url?: string;
+  duration_seconds?: number;
 };
 
 type Conversation = {
@@ -829,6 +831,31 @@ function seedMediaSamples(): void {
       is_self: false,
     },
     300_000,
+  );
+  // 6. A finished meeting recording (Teams `Video.2/CallRecording.1`), surfaced as
+  //    a video card: a proxied poster with a play overlay and a duration badge,
+  //    captioned with the recording title. The backend clears the body and the
+  //    sender for these (their only author hint is a bare contacts URL), so this
+  //    renders with no name and no bubble — exercising the blank-sender path.
+  push(
+    {
+      sender: "",
+      sender_mri: other.mri,
+      content: "",
+      attachments: [
+        {
+          name: "Keynote #3 du Lab Eng X Gen AI",
+          content_type: "video/mp4",
+          url: "https://siapartners1-my.sharepoint.com/:v:/g/personal/demo/IQCmMockRecording",
+          kind: "recording",
+          thumbnail_url:
+            "https://eu-prod.asyncgw.teams.microsoft.com/v1/objects/mock-recording-1/views/thumbnail",
+          duration_seconds: 4083,
+        },
+      ],
+      is_self: false,
+    },
+    360_000,
   );
 
   const conv: Conversation = {

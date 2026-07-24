@@ -324,6 +324,16 @@ async fn main() -> Result<()> {
             Ok(_) => {}
             Err(e) => eprintln!("[cleanup] could not convert call events: {e}"),
         }
+        // Meeting-recording notices that older builds stored as raw `<URIObject>`
+        // bubbles are upgraded in place into a media video card (final recording)
+        // or removed (the in-progress notices Teams also posts).
+        match store.convert_legacy_call_recordings() {
+            Ok((up, del)) if up > 0 || del > 0 => {
+                eprintln!("[cleanup] recordings: upgraded {up}, removed {del} in-progress notice(s)")
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("[cleanup] could not convert call recordings: {e}"),
+        }
     }
 
     let (events_tx, _) = broadcast::channel::<Value>(256);
