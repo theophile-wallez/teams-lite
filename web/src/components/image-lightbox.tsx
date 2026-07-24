@@ -87,6 +87,10 @@ export function ImageLightboxProvider(props: { children: ReactNode }) {
   // thumbnail leaves the shared-layout group so the exiting overlay owns the
   // morph (see the `closingLayoutId` doc on the context type).
   const [closingLayoutId, setClosingLayoutId] = useState<string | null>(null);
+  // Phase-1 flag of a morph close: set while the overlay is re-rendered *without*
+  // its shared-layout id but still mounted, before it is actually unmounted a
+  // frame later (see `close` and the effect below).
+  const [closing, setClosing] = useState(false);
   const reduceMotion = useReducedMotion();
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -98,18 +102,46 @@ export function ImageLightboxProvider(props: { children: ReactNode }) {
 
   const openImage = useCallback((next: LightboxImage) => {
     if (!next.src) return;
+    setClosing(false);
+    setClosingLayoutId(null);
     lastFocusedRef.current = document.activeElement as HTMLElement | null;
     setImage(next);
   }, []);
 
-  // Flag the closing image's id in the same commit that unmounts the overlay,
-  // so the thumbnail drops out of the shared-layout group exactly as the
-  // overlay begins to exit — leaving the overlay as the sole id holder.
+  // Close a morphed lightbox in two phases so that *no* element holds the shared
+  // layout id at the moment the overlay unmounts. If the overlay still carried
+  // the id as it exited, Motion would treat the id as changing hands — snapping
+  // the picture to the thumbnail's slot (a visible teleport) and morphing from
+  // there — the very handoff we're avoiding. So phase 1 drops the id from both
+  // the overlay (`closing`) and the thumbnail (`closingLayoutId`) while keeping
+  // the overlay mounted and centred (its box is unchanged, so nothing moves);
+  // phase 2 (the effect below) unmounts it a frame later, leaving AnimatePresence
+  // to fade/shrink it in place. Non-morph closes (reduced motion, inline images
+  // with no layout id) just unmount straight away.
   const close = useCallback(() => {
     const layoutId = imageRef.current?.layoutId;
-    if (layoutId) setClosingLayoutId(layoutId);
-    setImage(null);
-  }, []);
+    if (layoutId && !reduceMotion) {
+      setClosingLayoutId(layoutId);
+      setClosing(true);
+    } else {
+      setImage(null);
+    }
+  }, [reduceMotion]);
+
+  // Phase 2 of a morph close: once the overlay has committed a render without its
+  // layout id, unmount it on the next frame(s) so Motion has processed the id
+  // removal first and the exit is a plain in-place fade/shrink, not a morph.
+  useEffect(() => {
+    if (!closing) return;
+    let inner = 0;
+    const outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(() => setImage(null));
+    });
+    return () => {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+    };
+  }, [closing]);
 
   // While open: lock scroll, move focus in, trap Tab, and swallow Escape before
   // the app's global key handler can also act on it (open conversation, etc.).
@@ -158,13 +190,20 @@ export function ImageLightboxProvider(props: { children: ReactNode }) {
     };
   }, [image, close]);
 
-  const morphing = !!image?.layoutId;
+  // During phase 1 of a close the overlay is still mounted but must render
+  // *without* its layout id, so `closing` drops out of the morph too.
+  const morphing = !!image?.layoutId && !closing;
 
   return (
     <ImageLightboxContext.Provider value={{ openImage, closingLayoutId }}>
       <LayoutGroup>
         {props.children}
-        <AnimatePresence onExitComplete={() => setClosingLayoutId(null)}>
+        <AnimatePresence
+          onExitComplete={() => {
+            setClosingLayoutId(null);
+            setClosing(false);
+          }}
+        >
           {image ? (
             <motion.div
               ref={containerRef}
@@ -190,15 +229,12 @@ export function ImageLightboxProvider(props: { children: ReactNode }) {
                 className="max-h-full max-w-full rounded-2xl object-contain shadow-pop"
                 initial={morphing ? undefined : reduceMotion ? false : { opacity: 0, scale: 0.96 }}
                 animate={morphing ? undefined : { opacity: 1, scale: 1 }}
-                // On close the matching thumbnail has left the shared-layout
-                // group, so this overlay copy is the sole holder of the id and
-                // simply fades + shrinks in place here in the fixed top layer —
-                // it does not morph back down into the clipped message list.
-                exit={
-                  morphing
-                    ? { opacity: 0, scale: 0.92, transition: { duration: 0.24, ease: EASE_OUT } }
-                    : { opacity: 0, scale: 0.98 }
-                }
+                // The overlay always exits by fading + shrinking in place: by the
+                // time it unmounts, its layout id has already been dropped (see
+                // `close`), so it never morphs back down into the clipped message
+                // list. Reduced-motion / inline (non-morph) images exit the same
+                // way, just without the preceding two-phase dance.
+                exit={{ opacity: 0, scale: 0.94, transition: { duration: 0.24, ease: EASE_OUT } }}
                 transition={morphing ? MORPH_TRANSITION : { duration: 0.2, ease: EASE_OUT }}
               />
               <button
