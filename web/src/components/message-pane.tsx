@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, Loader2, MessagesSquare, WifiOff } from "lucide-react";
 import {
   channelLabel,
+  computeReadReceiptAnchors,
   convLabel,
   copyableMessageText,
   type Channel,
@@ -12,6 +13,7 @@ import { useAppState, useController } from "./controller-context";
 import { Avatar, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
 import { CallEventLine } from "./call-event-line";
+import { ReadReceipts } from "./read-receipts";
 import { Composer } from "./composer";
 import { TypingIndicator } from "./typing-indicator";
 import { Button } from "./ui/button";
@@ -50,6 +52,7 @@ export function MessagePane(props: { onBack?: () => void }) {
   const messagesError = useAppState((s) => s.messagesError);
   const olderError = useAppState((s) => s.olderError);
   const pendingScroll = useAppState((s) => s.pendingScroll);
+  const readReceipts = useAppState((s) => s.readReceipts);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [focusToken, setFocusToken] = useState(0);
@@ -67,6 +70,14 @@ export function MessagePane(props: { onBack?: () => void }) {
   // Bounded paging budget for the current deep-link target, reset per nonce.
   const scrollAttemptsRef = useRef(0);
   const scrollNonceRef = useRef(-1);
+
+  // Which message each other member has read up to → their "seen by" avatar row.
+  // Recomputed only when the messages or receipts change (cheap, but this is the
+  // hot render path under a live message stream).
+  const readAnchors = useMemo(
+    () => computeReadReceiptAnchors(messages, readReceipts),
+    [messages, readReceipts],
+  );
 
   const openConv = conversations.find((c) => c.id === openId) ?? null;
   // A thread the pane opens is either a chat (in `conversations`) or a channel
@@ -311,27 +322,32 @@ export function MessagePane(props: { onBack?: () => void }) {
                   ) : null}
                 </div>
               )}
-              {messages.map((m, i) =>
-                m.system_event ? (
-                  <CallEventLine key={m.id} event={m.system_event} />
-                ) : (
-                  <MessageBubble
-                    key={m.id}
-                    message={m}
-                    showSenderName={isGroup}
-                    continuesAbove={sameAuthor(messages[i - 1], m)}
-                    continuesBelow={sameAuthor(m, messages[i + 1])}
-                    editing={editingId === m.id}
-                    highlighted={highlightId === m.id}
-                    onReply={doReply}
-                    onCopy={doCopy}
-                    onReact={doReact}
-                    onStartEdit={doStartEdit}
-                    onSaveEdit={doSaveEdit}
-                    onCancelEdit={() => setEditingId(null)}
-                  />
-                ),
-              )}
+              {messages.map((m, i) => {
+                const seenBy = readAnchors.get(m.id);
+                return (
+                  <div key={m.id} className="contents">
+                    {m.system_event ? (
+                      <CallEventLine event={m.system_event} />
+                    ) : (
+                      <MessageBubble
+                        message={m}
+                        showSenderName={isGroup}
+                        continuesAbove={sameAuthor(messages[i - 1], m)}
+                        continuesBelow={sameAuthor(m, messages[i + 1])}
+                        editing={editingId === m.id}
+                        highlighted={highlightId === m.id}
+                        onReply={doReply}
+                        onCopy={doCopy}
+                        onReact={doReact}
+                        onStartEdit={doStartEdit}
+                        onSaveEdit={doSaveEdit}
+                        onCancelEdit={() => setEditingId(null)}
+                      />
+                    )}
+                    {seenBy && <ReadReceipts receipts={seenBy} />}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

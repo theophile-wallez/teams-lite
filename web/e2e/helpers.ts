@@ -83,6 +83,36 @@ export async function emitTyping(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Move a member's read position ("seen by") through the mock's gated test hook,
+ *  then the mock broadcasts a `read_receipt` event. Defaults anchor the reader to
+ *  the conversation's newest message (avatars land at the bottom). */
+export async function emitReadReceipt(
+  page: Page,
+  body: {
+    conversation: string;
+    member?: string;
+    member_mri?: string;
+    last_read_message_id?: string;
+    read_time_ms?: number;
+  },
+): Promise<void> {
+  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
+  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+    data: { kind: "read_receipt", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Clear every injected read position on the shared mock, so "seen by" avatars
+ *  from one spec never leak into the next. */
+export async function clearReadReceipts(page: Page): Promise<void> {
+  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
+  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+    data: { kind: "read_receipt", clear: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Set a reaction on an existing message through the mock's gated test hook
  *  (from someone else by default), then the mock re-broadcasts the message. */
 export async function emitReaction(

@@ -27,6 +27,8 @@ import {
   type LiveStatus,
   type MessagePage,
   type Notification,
+  type ReadReceipt,
+  type ReadReceiptSignal,
   type ReplyTo,
   type TypingName,
   type TypingSignal,
@@ -91,6 +93,11 @@ export type AppState = {
    *  row preview. Keyed by MRI under the hood so repeats coalesce; each entry
    *  auto-expires. */
   typingByConversation: Record<string, TypingName[]>;
+  /** Read receipts ("seen by") for the OPEN conversation: every other member's
+   *  read position, used to anchor their avatar to the last message they read.
+   *  Refreshed on open and kept live by the `read_receipt` event. Empty for the
+   *  no-open / channel / receipts-disabled cases. */
+  readReceipts: ReadReceipt[];
   /** User appearance preference (System follows the OS). */
   appearance: Appearance;
   /** Concrete theme currently applied to <html> (what CSS keys off). */
@@ -133,6 +140,7 @@ function initialState(): AppState {
     notificationsUnread: 0,
     pendingScroll: null,
     typingByConversation: {},
+    readReceipts: [],
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
     settings: { gitlab_host: "gitlab.com", gitlab_token_set: false },
@@ -159,6 +167,12 @@ export class TeamsController {
     string,
     Map<string, { name: string; timer: ReturnType<typeof setTimeout> }>
   >();
+
+  // Read receipts per conversation: convId -> (memberMri -> read position).
+  // Non-reactive; the reactive `readReceipts` slice is derived for the open
+  // conversation whenever this changes. Seeded by the `read_receipts` fetch on
+  // open and updated in place by live `read_receipt` events.
+  private receiptsByConv = new Map<string, Map<string, ReadReceipt>>();
 
   // Media proxy cache: hosted-content URL -> a promise of a blob object URL.
   // Deduplicates concurrent loads of the same image and makes re-mounts/re-opens
@@ -247,6 +261,7 @@ export class TeamsController {
       for (const entry of byMri.values()) clearTimeout(entry.timer);
     }
     this.typingByConv.clear();
+    this.receiptsByConv.clear();
     for (const url of this.mediaObjectUrls) URL.revokeObjectURL(url);
     this.mediaObjectUrls = [];
     this.mediaCache.clear();
@@ -291,6 +306,8 @@ export class TeamsController {
     });
 
     on("typing", (raw) => this.onTyping(raw as TypingSignal));
+
+    on("read_receipt", (raw) => this.onReadReceipt(raw as ReadReceiptSignal));
 
     on("messages_updated", (raw) => {
       const d = raw as { conversation: string; messages: ChatMessage[]; has_more: boolean };
@@ -392,6 +409,55 @@ export class TeamsController {
       return;
     }
     this.set({ typingByConversation: { ...prev, [convId]: names } });
+  }
+
+  // ---- read receipts ("seen by") -------------------------------------------
+
+  /** Fetch a conversation's read receipts and seed the per-conversation cache,
+   *  then publish them if that conversation is still open. Best-effort: a
+   *  failure (or a channel / receipts-disabled thread returning nothing) just
+   *  leaves no "seen by" avatars. Live movement arrives via `read_receipt`. */
+  private async loadReadReceipts(convId: string): Promise<void> {
+    let receipts: ReadReceipt[];
+    try {
+      const res = await this.backend.readReceipts(convId);
+      receipts = res.receipts ?? [];
+    } catch {
+      return; // best-effort — keep whatever we already have (usually nothing)
+    }
+    const byMri = new Map<string, ReadReceipt>();
+    for (const r of receipts) byMri.set(r.member_mri, r);
+    this.receiptsByConv.set(convId, byMri);
+    if (this.get().openId === convId) this.publishReadReceipts(convId);
+  }
+
+  /** Fold a live `read_receipt` update into the per-conversation cache (upsert by
+   *  MRI so a member's position only ever moves forward in practice) and refresh
+   *  the open conversation's reactive slice. */
+  private onReadReceipt(sig: ReadReceiptSignal): void {
+    const convId = sig.conversation_id;
+    const mri = sig.member_mri;
+    if (!convId || !mri) return;
+    let byMri = this.receiptsByConv.get(convId);
+    if (!byMri) {
+      byMri = new Map();
+      this.receiptsByConv.set(convId, byMri);
+    }
+    byMri.set(mri, {
+      member_mri: mri,
+      member: sig.member,
+      last_read_message_id: sig.last_read_message_id,
+      read_time_ms: sig.read_time_ms,
+    });
+    if (this.get().openId === convId) this.publishReadReceipts(convId);
+  }
+
+  /** Publish a conversation's current read receipts into reactive state, but only
+   *  while it is the open one (the slice is single-conversation). */
+  private publishReadReceipts(convId: string): void {
+    if (this.get().openId !== convId) return;
+    const byMri = this.receiptsByConv.get(convId);
+    this.set({ readReceipts: byMri ? [...byMri.values()] : [] });
   }
 
   // ---- conversations -------------------------------------------------------
@@ -547,6 +613,7 @@ export class TeamsController {
     this.draftCache.set(id, nextDraft);
 
     const cached = this.messageCache.get(id);
+    const cachedReceipts = this.receiptsByConv.get(id);
     this.set({
       openId: id,
       replyingTo: null,
@@ -557,7 +624,14 @@ export class TeamsController {
       messages: cached?.messages ?? [],
       hasMoreOlder: cached?.has_more ?? false,
       loadingMessages: !cached,
+      // Show any cached "seen by" positions instantly on re-open; the fetch below
+      // (and live `read_receipt` events) then reconcile them.
+      readReceipts: cachedReceipts ? [...cachedReceipts.values()] : [],
     });
+
+    // Fetch the current read positions best-effort — never blocks the open, and a
+    // channel / receipts-disabled thread just resolves to no avatars.
+    void this.loadReadReceipts(id);
 
     try {
       const res = await this.backend.open(id);
@@ -577,7 +651,8 @@ export class TeamsController {
   closeConversation(): void {
     const id = this.get().openId;
     if (id) this.flushDraft(id);
-    this.set({ openId: null, replyingTo: null });
+    // The read-receipts slice is single-conversation — drop it when nothing is open.
+    this.set({ openId: null, replyingTo: null, readReceipts: [] });
   }
 
   async loadOlderMessages(): Promise<void> {

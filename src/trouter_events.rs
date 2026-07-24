@@ -24,6 +24,7 @@ use std::io::Read;
 
 use crate::store::Message;
 use crate::teams_read;
+use crate::teams_readstate;
 
 /// A live typing/presence signal for one conversation. `is_typing` is true for a
 /// `Control/Typing` frame (started) and false for `Control/ClearTyping` (stopped).
@@ -36,13 +37,30 @@ pub struct TypingEvent {
     pub is_typing: bool,
 }
 
-/// Everything one real-time push carries: chat messages plus typing signals.
-/// Both are decoded from the same EventMessage envelope, so we decode once and
-/// split, rather than running the (gzip/base64) pipeline twice.
+/// A live read-receipt signal: one member's read position moved in a
+/// conversation. Teams pushes this as a `ThreadActivity/MemberConsumptionHorizon
+/// Update` message on the same channel as chat; we surface it as ephemeral state
+/// (never persisted) so the "seen by" avatars update without re-polling. The
+/// server resolves `member_mri` to a display name before forwarding to the UIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadReceiptEvent {
+    pub conversation_id: String,
+    pub member_mri: String,
+    /// The id of the last message this member has read (a real message id).
+    pub last_read_message_id: String,
+    /// When they read it (epoch ms), or 0 when Teams omitted it.
+    pub read_time_ms: i64,
+}
+
+/// Everything one real-time push carries: chat messages, typing signals, and
+/// read-receipt updates. All are decoded from the same EventMessage envelope, so
+/// we decode once and split, rather than running the (gzip/base64) pipeline once
+/// per kind.
 #[derive(Debug, Default, PartialEq)]
 pub struct Realtime {
     pub messages: Vec<Message>,
     pub typing: Vec<TypingEvent>,
+    pub read_receipts: Vec<ReadReceiptEvent>,
 }
 
 /// Decode a Socket.IO "3:::" request payload (already stripped to the JSON object)
@@ -70,6 +88,7 @@ pub fn realtime_from_request(request: &Value) -> Result<Realtime> {
     Ok(Realtime {
         messages: messages_from_event(&payload),
         typing: typing_from_event(&payload),
+        read_receipts: read_receipts_from_event(&payload),
     })
 }
 
@@ -159,6 +178,43 @@ fn typing_from_event(event: &Value) -> Vec<TypingEvent> {
         return Vec::new();
     }
     vec![TypingEvent { conversation_id, sender_mri, is_typing }]
+}
+
+/// Pull read-receipt updates out of an EventMessage envelope. Teams delivers a
+/// member's moved read position as a `NewMessage` resource whose `messagetype`
+/// is `ThreadActivity/MemberConsumptionHorizonUpdate` and whose `content` is a
+/// JSON string carrying the reader's MRI and their new consumption horizon (see
+/// `teams_readstate::parse_horizon_update_content`) — the same channel as chat,
+/// which is exactly why `parse_message` drops it from history. Other resource /
+/// message types, and a horizon that means "never read", yield nothing.
+fn read_receipts_from_event(event: &Value) -> Vec<ReadReceiptEvent> {
+    if event.get("resourceType").and_then(|r| r.as_str()) != Some("NewMessage") {
+        return Vec::new();
+    }
+    let Some(resource) = event.get("resource") else { return Vec::new() };
+    let messagetype = resource
+        .get("messagetype")
+        .or_else(|| resource.get("messageType"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    if messagetype != "ThreadActivity/MemberConsumptionHorizonUpdate" {
+        return Vec::new();
+    }
+    let conversation_id = conversation_id_of(resource);
+    let content = resource.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    let Some(horizon) = teams_readstate::parse_horizon_update_content(content) else {
+        return Vec::new();
+    };
+    let member_mri = teams_read::normalize_mri(&horizon.mri);
+    if conversation_id.is_empty() || member_mri.is_empty() {
+        return Vec::new();
+    }
+    vec![ReadReceiptEvent {
+        conversation_id,
+        member_mri,
+        last_read_message_id: horizon.last_read_message_id,
+        read_time_ms: horizon.read_time_ms,
+    }]
 }
 
 /// Extract the conversation id from a message resource. The live shape uses
@@ -383,5 +439,35 @@ mod tests {
         let rt = realtime_from_request(&request).unwrap();
         assert_eq!(rt.messages.len(), 1);
         assert!(rt.typing.is_empty());
+        assert!(rt.read_receipts.is_empty());
+    }
+
+    #[test]
+    fn consumption_horizon_update_yields_a_read_receipt_not_a_message() {
+        // Teams pushes another member's moved read position as a live `NewMessage`
+        // whose messagetype is a ThreadActivity control type and whose `content`
+        // is a JSON horizon. It must decode to a read receipt (and no chat
+        // message), with the reader MRI normalized out of any contacts URL.
+        let ev = json!({
+            "type": "EventMessage",
+            "resourceType": "NewMessage",
+            "resource": {
+                "id": "1784217930000",
+                "messagetype": "ThreadActivity/MemberConsumptionHorizonUpdate",
+                "from": "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:reader",
+                "content": "{\"user\":\"8:orgid:reader\",\"consumptionhorizon\":\"1784217900000;1784217901000;0\"}",
+                "conversationid": "19:abc@thread.v2"
+            }
+        });
+        let req = json!({ "url": "https://x/messaging", "headers": {}, "body": ev.to_string() });
+        let rt = realtime_from_request(&req).unwrap();
+        assert!(rt.messages.is_empty(), "a horizon update is not a chat message");
+        assert!(rt.typing.is_empty());
+        assert_eq!(rt.read_receipts.len(), 1);
+        let r = &rt.read_receipts[0];
+        assert_eq!(r.conversation_id, "19:abc@thread.v2");
+        assert_eq!(r.member_mri, "8:orgid:reader");
+        assert_eq!(r.last_read_message_id, "1784217900000");
+        assert_eq!(r.read_time_ms, 1784217901000);
     }
 }

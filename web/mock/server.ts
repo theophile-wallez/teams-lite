@@ -12,10 +12,10 @@
 //   event    (server -> client):  { "event": "<name>", "data": <v> }   (no id)
 //
 // Methods: ping | conversations | channels | open | backfill | set_draft | send
-//          | edit | react | notifications | fetch_media | fetch_avatar
+//          | edit | react | notifications | read_receipts | fetch_media | fetch_avatar
 //          | get_settings | set_settings | enrich_link
 // Events:  status | realtime_status | message | conversations_changed
-//          | channels_changed | typing
+//          | channels_changed | typing | read_receipt
 //
 // Run it (from the web/ directory):
 //   export PATH="$HOME/.bun/bin:$PATH"
@@ -1337,6 +1337,34 @@ type MockNotification = {
 
 const injectedNotifications: MockNotification[] = [];
 
+// ---------------------------------------------------------------------------
+// Read receipts ("seen by") — mirrors protocol.ts `ReadReceipt`. Empty by
+// default so opening a conversation shows no avatars until a test injects one
+// via POST /__test/emit {kind:"read_receipt"}; the RPC and the live event both
+// read from this same per-conversation store, keyed by member MRI.
+// ---------------------------------------------------------------------------
+
+type ReadReceipt = {
+  member_mri: string;
+  member: string;
+  last_read_message_id: string;
+  read_time_ms: number;
+};
+
+const injectedReceipts = new Map<string, Map<string, ReadReceipt>>();
+
+/** Upsert one member's read position for a conversation (newest write wins),
+ *  returning the stored receipt so the caller can broadcast it. */
+function setReceipt(conversationId: string, receipt: ReadReceipt): ReadReceipt {
+  let byMri = injectedReceipts.get(conversationId);
+  if (!byMri) {
+    byMri = new Map();
+    injectedReceipts.set(conversationId, byMri);
+  }
+  byMri.set(receipt.member_mri, receipt);
+  return receipt;
+}
+
 // Stable base time for the static sample — captured once so repeated
 // `notifications` calls return identical timestamps (a per-call Date.now() would
 // drift forward and spuriously re-mark entries unread after the panel is seen).
@@ -1421,6 +1449,15 @@ function dispatch(method: string, params: unknown): unknown {
     case "notifications": {
       const items = notificationsFeed();
       return { unread: items.filter((n) => !n.is_read).length, items };
+    }
+
+    case "read_receipts": {
+      // "Seen by": every OTHER member's read position. Empty until a test injects
+      // one (mirrors the real backend returning nothing for a receipts-disabled
+      // or channel thread); our own position is never included.
+      const id = requireString(params, "conversation");
+      const byMri = injectedReceipts.get(id);
+      return { receipts: byMri ? [...byMri.values()] : [] };
     }
 
     case "open": {
@@ -1738,6 +1775,34 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         is_typing: body.is_typing === undefined ? true : Boolean(body.is_typing),
       });
       return Response.json({ ok: true }, { status: 200 });
+    }
+    // Move a member's read position ("seen by") and broadcast it, exactly like
+    // the Rust backend's `read_receipt` event, so the E2E suite can drive the
+    // avatar row deterministically. Defaults anchor the reader to the newest
+    // message (avatars land at the bottom), and persist so a re-open's
+    // `read_receipts` fetch returns the same position.
+    if (body.kind === "read_receipt") {
+      // Clear all injected read positions — lets a serial E2E suite reset the
+      // shared mock between specs so "seen by" avatars never leak across tests.
+      if (body.clear === true) {
+        injectedReceipts.clear();
+        return Response.json({ ok: true, cleared: true }, { status: 200 });
+      }
+      const conversation =
+        typeof body.conversation === "string" ? body.conversation : (order[0] ?? "");
+      const t = threadFor(conversation);
+      const lastReadMessageId =
+        typeof body.last_read_message_id === "string"
+          ? body.last_read_message_id
+          : (t?.messages.at(-1)?.id ?? "");
+      const receipt = setReceipt(conversation, {
+        member_mri: typeof body.member_mri === "string" ? body.member_mri : "8:orgid:riley",
+        member: typeof body.member === "string" ? body.member : "Riley Carter",
+        last_read_message_id: lastReadMessageId,
+        read_time_ms: typeof body.read_time_ms === "number" ? body.read_time_ms : Date.now(),
+      });
+      broadcast("read_receipt", { conversation_id: conversation, ...receipt });
+      return Response.json({ ok: true, receipt }, { status: 200 });
     }
     // Set a reaction on an existing message (from someone else by default), then
     // re-broadcast it — exercises the received-reaction chips deterministically.

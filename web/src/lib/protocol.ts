@@ -157,6 +157,26 @@ export type TypingSignal = {
  *  same person coalesce. */
 export type TypingName = { mri: string; name: string };
 
+/** One member's read position in a conversation ("seen by"), as returned by the
+ *  `read_receipts` method and pushed by the `read_receipt` event (see
+ *  src/bin/server.rs). Our own position is never included — we only ever show
+ *  who ELSE has read. `member` is the display name the backend resolved from
+ *  `member_mri` (may be empty when unknown); `last_read_message_id` is the id of
+ *  the last message this person has read, used to anchor their avatar. */
+export type ReadReceipt = {
+  member_mri: string;
+  member: string;
+  last_read_message_id: string;
+  /** When they read it (epoch ms), or 0 when unknown. */
+  read_time_ms: number;
+};
+
+/** Result of the `read_receipts` method: every OTHER member's read position. */
+export type ReadReceiptsResult = { receipts: ReadReceipt[] };
+
+/** Wire shape of the `read_receipt` live event: one member's read position moved. */
+export type ReadReceiptSignal = ReadReceipt & { conversation_id: string };
+
 
 /** One activity-feed entry (from the Teams `48:notifications` thread), decoded
  *  by the backend from `properties.activity`. Mirrors the Rust `Notification`
@@ -486,6 +506,60 @@ export function mergeRefreshedHistoryPage(
     messages: mergeMessages(current?.messages ?? [], incoming.messages),
     has_more: currentExtendsFurtherBack ? current!.has_more : incoming.has_more,
   };
+}
+
+// ---- read receipts ("seen by") ---------------------------------------------
+
+/** Compare two Teams message ids by read order. Ids are arrival timestamps in
+ *  milliseconds, so a numeric compare orders them; a non-numeric id (rare) falls
+ *  back to a lexicographic compare so the function is always total. */
+function compareMessageIds(a: string, b: string): number {
+  const na = Number(a);
+  const nb = Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Map each currently-displayed message to the members who have read up to it —
+ * their "seen by" anchor. For every receipt, the anchor is the newest displayed
+ * message whose id is `<=` the member's last-read id (they have read everything
+ * up to and including it). A member who has read only messages older than the
+ * loaded window has no visible anchor and is omitted, so their avatar never
+ * floats above the history; it appears once they read into the loaded range.
+ *
+ * Each member appears at exactly one anchor (their latest read position). Within
+ * an anchor, members are ordered most-recently-read first. Pure and dependency-
+ * free so it is unit-testable and cheap to recompute as messages/receipts change.
+ */
+export function computeReadReceiptAnchors(
+  messages: Pick<ChatMessage, "id">[],
+  receipts: ReadReceipt[],
+): Map<string, ReadReceipt[]> {
+  const anchors = new Map<string, ReadReceipt[]>();
+  if (messages.length === 0) return anchors;
+
+  for (const receipt of receipts) {
+    // Walk newest → oldest and take the first displayed message the member has
+    // reached. `messages` is sorted oldest → newest, so scan from the end.
+    let anchorId: string | null = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const id = messages[i]!.id;
+      if (compareMessageIds(id, receipt.last_read_message_id) <= 0) {
+        anchorId = id;
+        break;
+      }
+    }
+    if (anchorId === null) continue; // read position is older than the window
+    const bucket = anchors.get(anchorId);
+    if (bucket) bucket.push(receipt);
+    else anchors.set(anchorId, [receipt]);
+  }
+
+  for (const bucket of anchors.values()) {
+    bucket.sort((a, b) => b.read_time_ms - a.read_time_ms);
+  }
+  return anchors;
 }
 
 // ---- conversation display helpers (ported from ui/src/app.tsx) -------------

@@ -16,6 +16,7 @@ import type {
   LinkMetadataResult,
   MessagePage,
   NotificationFeed,
+  ReadReceiptsResult,
   ReplyTo,
 } from "./protocol";
 
@@ -241,6 +242,13 @@ export class Backend {
    *  chat — the backend fetches it fresh from Teams and decodes each entry. */
   notifications(limit?: number): Promise<NotificationFeed> {
     return this.request<NotificationFeed>("notifications", limit ? { limit } : {});
+  }
+  /** Fetch a conversation's read receipts ("seen by"): every OTHER member's read
+   *  position. Best-effort on the backend — a thread with receipts disabled or
+   *  too many members resolves to an empty list, never an error. The positions
+   *  then refresh live via the `read_receipt` event. */
+  readReceipts(conversation: string): Promise<ReadReceiptsResult> {
+    return this.request<ReadReceiptsResult>("read_receipts", { conversation });
   }
   /** Fetch one hosted-content media object (inline image or shared file) through
    *  the backend, which attaches the session credentials the browser lacks. The

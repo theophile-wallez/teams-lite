@@ -29,7 +29,7 @@ use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
     auth, retry, teams, teams_activity, teams_avatars, teams_media, teams_profiles, teams_read,
-    teams_send, trouter, trouter_events,
+    teams_readstate, teams_send, trouter, trouter_events,
 };
 use teams_lite::gitlab;
 
@@ -819,6 +819,44 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(notifications_json(&items))
         }
 
+        // Read receipts ("seen by") for a conversation: every OTHER member's read
+        // position, fetched from the dedicated `consumptionhorizons` thread
+        // sub-resource. READ-ONLY — we only ever GET horizons, never write our
+        // own. Best-effort: a thread with receipts disabled (tenant policy), too
+        // many members (Teams stops tracking past ~20), or a transient failure
+        // yields an empty list rather than an error, so the UI simply shows no
+        // "seen by" avatars. Channels are skipped (they are large multi-party
+        // threads that don't carry per-member receipts). The horizons refresh
+        // live via the `read_receipt` event (see `spawn_realtime`).
+        "read_receipts" => {
+            let conv = param_str(params, "conversation")?;
+            let (self_name, self_mri) = {
+                let session = ctx.session().await?;
+                (session.self_name.to_string(), session.self_mri.to_string())
+            };
+            let is_channel = {
+                let store = ctx.store()?;
+                teams_read::is_channel_thread_id(&conv) || store.is_channel(&conv).unwrap_or(false)
+            };
+            if is_channel {
+                return Ok(json!({ "receipts": [] }));
+            }
+            let http = ctx.http.clone();
+            let conv_op = conv.clone();
+            let horizons = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let conv = conv_op.clone();
+                    async move {
+                        teams_readstate::fetch_consumption_horizons(&http, &session, &conv).await
+                    }
+                })
+                .await
+                .unwrap_or_default();
+            let store = ctx.store()?;
+            Ok(read_receipts_json(&store, &conv, &horizons, &self_name, &self_mri))
+        }
+
         // Read the non-secret view of the app settings: the configured GitLab
         // host and whether a token is stored. The raw token is NEVER returned —
         // it is write-only from the UI's perspective, matching the "no raw tokens
@@ -1128,6 +1166,54 @@ fn cached_history_page(
     Ok((messages, has_cached_more || network_has_more))
 }
 
+/// Serialize a conversation's read receipts for the wire: one entry per OTHER
+/// member (our own horizon is dropped — we never show our own read state), each
+/// carrying the reader's MRI, a resolved display name, and the id of the last
+/// message they have read. The UI anchors a small avatar to that message.
+///
+/// Names are resolved locally from stored messages (network-free), exactly like
+/// the typing indicator. For a 1:1 where the other party has read but never
+/// posted, that lookup misses, so we fall back to the conversation's other-party
+/// name when there is a single unresolved member. An MRI that still resolves to
+/// nothing is passed through with an empty name; the UI shows a neutral avatar.
+fn read_receipts_json(
+    store: &Store,
+    conversation_id: &str,
+    horizons: &[teams_readstate::ConsumptionHorizon],
+    self_name: &str,
+    self_mri: &str,
+) -> Value {
+    let others: Vec<&teams_readstate::ConsumptionHorizon> = horizons
+        .iter()
+        .filter(|h| !teams_lite::store::same_user(&h.mri, self_mri))
+        .collect();
+    let single_other = others.len() == 1;
+    let receipts: Vec<Value> = others
+        .iter()
+        .map(|h| {
+            let mut name = store
+                .display_name_for_mri(&h.mri)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if name.is_empty() && single_other {
+                name = store
+                    .other_party_name(conversation_id, self_name)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+            }
+            json!({
+                "member_mri": h.mri,
+                "member": name,
+                "last_read_message_id": h.last_read_message_id,
+                "read_time_ms": h.read_time_ms,
+            })
+        })
+        .collect();
+    json!({ "receipts": receipts })
+}
+
 fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
     json!({
         "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
@@ -1271,6 +1357,8 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Message>>();
     let (ty_tx, mut ty_rx) =
         tokio::sync::mpsc::unbounded_channel::<trouter_events::TypingEvent>();
+    let (rr_tx, mut rr_rx) =
+        tokio::sync::mpsc::unbounded_channel::<trouter_events::ReadReceiptEvent>();
     let (st_tx, mut st_rx) = tokio::sync::mpsc::unbounded_channel::<trouter::Status>();
 
     // consume trouter messages: persist + broadcast. self identity is stable
@@ -1390,8 +1478,41 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
         }
     });
 
+    // trouter read-receipt updates -> `read_receipt` event. Ephemeral, like
+    // typing: resolve the reader MRI to a display name from what the store
+    // already holds (no network), drop our own echo (we never show our own read
+    // state), and never touch the activity-feed thread. The UI merges each update
+    // into the open conversation's "seen by" avatars.
+    let ctx_rr = ctx.clone();
+    let self_mri_rr = session.self_mri.to_string();
     tokio::spawn(async move {
-        trouter::run(ctx, epid, ev_tx, ty_tx, st_tx).await;
+        while let Some(r) = rr_rx.recv().await {
+            if teams_lite::store::same_user(&r.member_mri, &self_mri_rr) {
+                continue; // never surface our own read position
+            }
+            if teams_activity::is_notifications_thread(&r.conversation_id) {
+                continue; // the activity feed is not a chat
+            }
+            let member = ctx_rr
+                .store()
+                .ok()
+                .and_then(|s| s.display_name_for_mri(&r.member_mri).ok().flatten())
+                .unwrap_or_default();
+            ctx_rr.emit(
+                "read_receipt",
+                json!({
+                    "conversation_id": r.conversation_id,
+                    "member_mri": r.member_mri,
+                    "member": member,
+                    "last_read_message_id": r.last_read_message_id,
+                    "read_time_ms": r.read_time_ms,
+                }),
+            );
+        }
+    });
+
+    tokio::spawn(async move {
+        trouter::run(ctx, epid, ev_tx, ty_tx, rr_tx, st_tx).await;
     });
 }
 

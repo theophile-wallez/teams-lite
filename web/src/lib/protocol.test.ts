@@ -26,8 +26,9 @@ import {
   typingLabel,
   formatCallEvent,
   formatCallDuration,
+  computeReadReceiptAnchors,
 } from "./protocol";
-import type { ChatMessage, Conversation, MessagePage, Channel } from "./protocol";
+import type { ChatMessage, Conversation, MessagePage, Channel, ReadReceipt } from "./protocol";
 
 function message(
   seq: number,
@@ -708,5 +709,75 @@ describe("formatCallEvent", () => {
   it("degrades gracefully when duration is missing or zero", () => {
     expect(formatCallEvent({ kind: "call", event: "ended" })).toBe("Call ended");
     expect(formatCallEvent({ kind: "call", event: "ended", duration_seconds: 0 })).toBe("Call ended");
+  });
+});
+
+describe("computeReadReceiptAnchors", () => {
+  // Teams message ids are arrival timestamps (ms), so a conversation is a run of
+  // ascending numeric-string ids. Build one so the numeric id comparison is
+  // exercised the way it runs in production.
+  function numberedMessages(ids: number[]): Pick<ChatMessage, "id">[] {
+    return ids.map((id) => ({ id: String(id) }));
+  }
+  function receipt(mri: string, lastRead: number, readAt: number): ReadReceipt {
+    return {
+      member_mri: mri,
+      member: mri,
+      last_read_message_id: String(lastRead),
+      read_time_ms: readAt,
+    };
+  }
+
+  it("anchors a member to the newest message at or before their read position", () => {
+    const messages = numberedMessages([100, 200, 300]);
+    // Read up to 250 → anchors to 200 (the newest they've reached), not 300.
+    const anchors = computeReadReceiptAnchors(messages, [receipt("a", 250, 1)]);
+
+    expect([...anchors.keys()]).toEqual(["200"]);
+    expect(anchors.get("200")!.map((r) => r.member_mri)).toEqual(["a"]);
+    expect(anchors.get("300")).toBeUndefined();
+  });
+
+  it("anchors to the exact message when the read id matches one on screen", () => {
+    const messages = numberedMessages([100, 200, 300]);
+    const anchors = computeReadReceiptAnchors(messages, [receipt("a", 300, 1)]);
+
+    expect([...anchors.keys()]).toEqual(["300"]);
+  });
+
+  it("omits a member whose read position is older than the loaded window", () => {
+    const messages = numberedMessages([200, 300]);
+    // Read only up to 100 — before anything on screen — so no avatar floats above
+    // the history; it appears once they read into the loaded range.
+    const anchors = computeReadReceiptAnchors(messages, [receipt("a", 100, 1)]);
+
+    expect(anchors.size).toBe(0);
+  });
+
+  it("groups everyone reading up to the same message and orders them most-recent-first", () => {
+    const messages = numberedMessages([100, 200, 300]);
+    const anchors = computeReadReceiptAnchors(messages, [
+      receipt("early", 300, 10),
+      receipt("late", 300, 30),
+      receipt("mid", 300, 20),
+    ]);
+
+    expect(anchors.get("300")!.map((r) => r.member_mri)).toEqual(["late", "mid", "early"]);
+  });
+
+  it("places members at their own distinct anchors", () => {
+    const messages = numberedMessages([100, 200, 300]);
+    const anchors = computeReadReceiptAnchors(messages, [
+      receipt("behind", 150, 1),
+      receipt("caught-up", 300, 2),
+    ]);
+
+    expect(anchors.get("100")!.map((r) => r.member_mri)).toEqual(["behind"]);
+    expect(anchors.get("300")!.map((r) => r.member_mri)).toEqual(["caught-up"]);
+  });
+
+  it("returns nothing for an empty conversation or no receipts", () => {
+    expect(computeReadReceiptAnchors([], [receipt("a", 100, 1)]).size).toBe(0);
+    expect(computeReadReceiptAnchors(numberedMessages([100]), []).size).toBe(0);
   });
 });
