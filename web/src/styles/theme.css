@@ -74,6 +74,12 @@
   --sender-name: #3849dc; /* indigo-600 for legibility on white */
   --sender-name-mine: rgba(255, 255, 255, 0.92);
 
+  /* Image-only messages sit on a soft "atelier" mat — one neutral surface for
+   * both sides — with a barely-there diagonal hatch showing at the picture's
+   * padded edges, framing a lone image like a matted print. */
+  --image-mat: #f3f3f5;
+  --image-mat-line: rgba(17, 17, 17, 0.05);
+
   /* Elevation — "shadow as a border": a crisp 1px ring + a 1–2px micro-drop.
    * Elevation scales by opacity + tiny offset, never by wide blur. */
   --elev-chip: 0 0 0 1px rgba(17, 17, 17, 0.04), 0 1px 1px rgba(17, 17, 17, 0.04);
@@ -138,6 +144,9 @@
   --quote-text-incoming: #a1a1a1;
   --sender-name: #97a2fc; /* indigo-300 */
   --sender-name-mine: rgba(255, 255, 255, 0.92);
+
+  --image-mat: #242424;
+  --image-mat-line: rgba(255, 255, 255, 0.055);
 
   /* Dark: shadows barely show — separate surfaces with a hairline inset ring
    * (lightness step) plus a soft drop for popovers. */

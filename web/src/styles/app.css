@@ -157,6 +157,30 @@
   }
 }
 
+/* A lone image (a message that is only a picture) sits on a soft "atelier" mat
+   instead of floating in the void: one neutral card — the same on both sides of
+   the conversation — carrying a faint diagonal hatch. The card's few px of
+   padding let the hatch peek around the picture's edges, framing it like a
+   matted print. Colors come from --image-mat / --image-mat-line (theme.css). */
+.image-mat {
+  background-color: var(--image-mat);
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--image-mat-line) 0,
+    var(--image-mat-line) 1px,
+    transparent 1px,
+    transparent 8px
+  );
+}
+/* Neutralize the media's own in-bubble vertical margins (the inline image's
+   `my-1`, the attachment stack's `mt-1.5`) so the hatch border is even on every
+   side; the mat's own flex gap spaces any stacked images instead. */
+.image-mat > *,
+.image-mat > * > * {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
 /* TipTap rich-text composer. The editor renders raw ProseMirror HTML, so it
    needs its own element styles (Tailwind's preflight resets lists/margins). */
 .tiptap-message {

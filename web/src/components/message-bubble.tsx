@@ -85,9 +85,10 @@ function useEnrichedLinks(urls: string[]): LinkResults {
  * link, the bubble chrome is dropped entirely and just the card is shown.
  *
  * Likewise, a message that is *only* an image (inline or an image attachment,
- * with no text) drops the bubble chrome so the picture stands alone. On an
- * incoming image-only message the sender name still shows, floating in the void
- * above the picture rather than inside a bubble.
+ * with no text) drops the bubble chrome and instead frames the picture on a soft
+ * "atelier" mat — a neutral card, the same on both sides, carrying a faint
+ * diagonal hatch that peeks around the picture's padded edges. On an incoming
+ * image-only message the sender name still shows, floating above the mat.
  */
 export function MessageBubble(props: {
   message: ChatMessage;
@@ -155,9 +156,9 @@ export function MessageBubble(props: {
     !props.editing && !parsed.quote && !hasAttachments && cards.length > 0 && !bodyHasContent;
 
   // A media-only message: at least one image and nothing else — no text, no
-  // quote, no link card, and any attachments are images too. Such messages drop
-  // the bubble chrome so the picture stands alone (mine and incoming alike); an
-  // incoming one still shows the sender's name in the void above the image.
+  // quote, no link card, and any attachments are images too. Such messages swap
+  // the bubble chrome for the "atelier" mat below (mine and incoming alike); an
+  // incoming one still shows the sender's name above the mat.
   const hasImage = bodyHasImage || imageAttachments.length > 0;
   const imageOnly =
     !props.editing &&
@@ -167,7 +168,8 @@ export function MessageBubble(props: {
     !bodyHasText &&
     imageAttachments.length === attachments.length;
 
-  // Media- and link-only messages render without the rounded, colored bubble.
+  // Media- and link-only messages render without the standard rounded, colored
+  // bubble — an image gets the atelier mat instead, a link just its card.
   const bare = linkOnly || imageOnly;
 
   // Only label the first message of a same-author run; continuations are clearly
@@ -208,6 +210,56 @@ export function MessageBubble(props: {
     props.onReact(props.message, key);
   };
 
+  // The message's rendered media/body — text/rich content, a quoted reply, and
+  // attachments. Pulled out so an image-only message can wrap it in the
+  // "atelier" mat (a framed card) while an ordinary message renders it plainly
+  // inside the bubble.
+  const mediaBody = (
+    <>
+      {parsed.beforeHtml ? (
+        <RichContent html={parsed.beforeHtml} hiddenHrefs={hiddenHrefs} />
+      ) : null}
+
+      {parsed.quote ? (
+        <div
+          className={cn(
+            "my-1 rounded-lg border-l-2 px-2.5 py-1.5",
+            mine ? "border-sender-name-mine bg-quote-mine" : "border-sender-name bg-quote-incoming",
+          )}
+        >
+          {parsed.quote.sender ? (
+            <div
+              className={cn(
+                "text-xs font-semibold",
+                mine ? "text-sender-name-mine" : "text-sender-name",
+              )}
+            >
+              {parsed.quote.sender}
+            </div>
+          ) : null}
+          <RichContent
+            html={parsed.quote.html}
+            className={cn("text-xs", mine ? "text-quote-text-mine" : "text-quote-text-incoming")}
+          />
+        </div>
+      ) : null}
+
+      {parsed.bodyHtml ? <RichContent html={parsed.bodyHtml} hiddenHrefs={hiddenHrefs} /> : null}
+
+      {hasAttachments ? (
+        <div className="mt-1.5 flex flex-col gap-1.5">
+          {attachments.map((att, i) =>
+            att.kind === "image" ? (
+              <MediaImage key={`att-${i}-${att.url}`} src={att.url} alt={att.name} />
+            ) : (
+              <FileAttachment key={`att-${i}-${att.url}`} attachment={att} />
+            ),
+          )}
+        </div>
+      ) : null}
+    </>
+  );
+
   return (
     <div
       onMouseEnter={openPickerSoon}
@@ -229,8 +281,9 @@ export function MessageBubble(props: {
         data-image-only={imageOnly ? "true" : undefined}
         className={cn(
           "relative text-sm leading-relaxed",
-          // Media- and link-only messages drop the bubble chrome so the picture
-          // or card is the surface; a link card gets a tighter max width.
+          // Media- and link-only messages drop the standard bubble chrome; the
+          // link card / atelier mat (below) becomes the surface. A link card
+          // gets a tighter max width; the mat is capped at the usual bubble one.
           linkOnly && "max-w-md",
           imageOnly && "max-w-[76%]",
           !bare &&
@@ -293,57 +346,18 @@ export function MessageBubble(props: {
           />
         ) : (
           <>
-            {linkOnly ? null : (
-              <>
-                {parsed.beforeHtml ? (
-                  <RichContent html={parsed.beforeHtml} hiddenHrefs={hiddenHrefs} />
-                ) : null}
-
-                {parsed.quote ? (
-                  <div
-                    className={cn(
-                      "my-1 rounded-lg border-l-2 px-2.5 py-1.5",
-                      mine
-                        ? "border-sender-name-mine bg-quote-mine"
-                        : "border-sender-name bg-quote-incoming",
-                    )}
-                  >
-                    {parsed.quote.sender ? (
-                      <div
-                        className={cn(
-                          "text-xs font-semibold",
-                          mine ? "text-sender-name-mine" : "text-sender-name",
-                        )}
-                      >
-                        {parsed.quote.sender}
-                      </div>
-                    ) : null}
-                    <RichContent
-                      html={parsed.quote.html}
-                      className={cn(
-                        "text-xs",
-                        mine ? "text-quote-text-mine" : "text-quote-text-incoming",
-                      )}
-                    />
-                  </div>
-                ) : null}
-
-                {parsed.bodyHtml ? (
-                  <RichContent html={parsed.bodyHtml} hiddenHrefs={hiddenHrefs} />
-                ) : null}
-
-                {hasAttachments ? (
-                  <div className="mt-1.5 flex flex-col gap-1.5">
-                    {attachments.map((att, i) =>
-                      att.kind === "image" ? (
-                        <MediaImage key={`att-${i}-${att.url}`} src={att.url} alt={att.name} />
-                      ) : (
-                        <FileAttachment key={`att-${i}-${att.url}`} attachment={att} />
-                      ),
-                    )}
-                  </div>
-                ) : null}
-              </>
+            {linkOnly ? null : imageOnly ? (
+              // A lone picture: frame it on the atelier mat — a neutral card
+              // with a faint diagonal hatch peeking around a few px of padding.
+              // `w-fit` hugs the image; `max-w-full` keeps it within the row cap.
+              <div
+                data-testid="image-mat"
+                className="image-mat flex w-fit max-w-full flex-col gap-1.5 rounded-2xl p-2 shadow-card"
+              >
+                {mediaBody}
+              </div>
+            ) : (
+              mediaBody
             )}
 
             {cards.length > 0 ? (
