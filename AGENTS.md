@@ -1,5 +1,26 @@
 # teams-lite — agent guidelines
 
+## Sending messages (MANDATORY)
+
+- **Never send a message without the user's explicit consent for that exact
+  message.** Sends go out through the user's *personal* Teams account, so every
+  send is a real, visible action performed as them — this applies to channels and
+  to one-to-one/group chats alike.
+- This covers anything that posts to Teams on the user's behalf — new messages,
+  replies, reactions, edits — whether triggered through the UI, the backend
+  `server`, a script, or a direct API/WebSocket call.
+- **The one standing exception is the designated sandbox channel**
+  `19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2`
+  (`http://localhost:4321/c/19%3A21d2695ae8ff4e25ace9c662e5c326cb%40thread.v2`).
+  Sending there is pre-authorized — it is the only place a send is allowed without
+  asking first. Treat every other channel and chat as off-limits absent explicit
+  consent.
+- Reading, searching, drafting, and showing a proposed message to the user for
+  review are always fine. Only the actual send requires a green light.
+- Outside the sandbox channel, consent is per-message and never standing: approval
+  to send one message is not permission to send others. When in doubt, draft it and
+  ask first.
+
 ## Language policy (MANDATORY)
 
 - **All artifacts are in English.** This includes: UI strings, labels, button text,
