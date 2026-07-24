@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS messages (
     attachments     TEXT NOT NULL DEFAULT '[]',
     reactions       TEXT NOT NULL DEFAULT '[]',
     system_event    TEXT NOT NULL DEFAULT '',
+    thread_root_id  TEXT NOT NULL DEFAULT '',
+    thread_subject  TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (conversation_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_msg_conv_seq ON messages(conversation_id, seq);
@@ -112,6 +114,16 @@ pub struct Message {
     /// Legacy rows stored before this column existed carry `""` and are upgraded
     /// in place by [`Store::convert_legacy_call_events`].
     pub system_event: String,
+    /// For a team-channel message, the id of the thread's ROOT message (Teams
+    /// `rootMessageId` / the `;messageid=<root>` in `conversationLink`). A root
+    /// message carries its OWN id here. Empty for chats/group messages and for
+    /// legacy rows stored before this column existed. The UI groups a channel's
+    /// flat, `seq`-ordered messages into threads by this key.
+    pub thread_root_id: String,
+    /// For a team-channel thread ROOT, the thread's title (Teams
+    /// `properties.subject`), shown as the thread heading. Empty for replies,
+    /// chats, and legacy rows.
+    pub thread_subject: String,
 }
 
 /// The nature of a conversation. Modeled as an enum (not a bool) because there
@@ -271,10 +283,12 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "[]".to_string()),
         system_event: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        thread_root_id: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+        thread_subject: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
     })
 }
 
-const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event";
+const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject";
 
 /// Canonicalize an MRI for identity comparison: keep only the last path segment
 /// (so a `.../contacts/8:orgid:<guid>` URL becomes a bare MRI) and drop a leading
@@ -407,6 +421,11 @@ fn migrate(conn: &Connection) -> Result<()> {
     // a JSON object string, rendered by the UI as a centered line. Legacy rows get
     // the empty default; `convert_legacy_call_events` upgrades raw call-event XML.
     add_column("ALTER TABLE messages ADD COLUMN system_event TEXT NOT NULL DEFAULT ''")?;
+    // Channel-thread linkage: the thread root's message id and (on the root) its
+    // subject/title. Legacy channel rows get the empty default and simply fall
+    // back to ungrouped rendering until the next network sync re-inserts them.
+    add_column("ALTER TABLE messages ADD COLUMN thread_root_id TEXT NOT NULL DEFAULT ''")?;
+    add_column("ALTER TABLE messages ADD COLUMN thread_subject TEXT NOT NULL DEFAULT ''")?;
 
     // Sidebar-fidelity columns (last-message preview + unread/muted/pinned/hidden
     // state), all sourced from the CSA `users/me` sync. Legacy rows get the
@@ -833,11 +852,11 @@ impl Store {
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
         let reactions = if m.reactions.is_empty() { "[]" } else { m.reactions.as_str() };
         let n = self.conn.execute(
-            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(conversation_id, id) DO UPDATE SET content = excluded.content
                  WHERE messages.content <> excluded.content",
-            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments, reactions, m.system_event],
+            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments, reactions, m.system_event, m.thread_root_id, m.thread_subject],
         )?;
         Ok(n == 1)
     }
@@ -1185,6 +1204,7 @@ mod tests {
             attachments: "[]".into(),
             reactions: "[]".into(),
             system_event: String::new(),
+            thread_root_id: String::new(), thread_subject: String::new(),
         }
     }
 
@@ -1340,6 +1360,7 @@ mod tests {
             attachments: "[]".into(),
             reactions: "[]".into(),
             system_event: String::new(),
+            thread_root_id: String::new(), thread_subject: String::new(),
         };
 
         // Real chat messages that must survive — including one that merely mentions
@@ -1391,6 +1412,7 @@ mod tests {
             attachments: "[]".into(),
             reactions: "[]".into(),
             system_event: String::new(),
+            thread_root_id: String::new(), thread_subject: String::new(),
         };
 
         // A legacy call-ended row stored as raw XML, plus a normal chat message.
@@ -1672,12 +1694,14 @@ mod tests {
             sender: me.into(), sender_mri: String::new(), content: "salut".into(), attachments: "[]".into(),
             reactions: "[]".into(),
             system_event: String::new(),
+            thread_root_id: String::new(), thread_subject: String::new(),
         }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: String::new(), content: "hello".into(), attachments: "[]".into(),
             reactions: "[]".into(),
             system_event: String::new(),
+            thread_root_id: String::new(), thread_subject: String::new(),
         }).unwrap();
 
         // direct derivation
@@ -1698,6 +1722,7 @@ mod tests {
             sender: me.into(), sender_mri: String::new(), content: "coucou".into(), attachments: "[]".into(),
             reactions: "[]".into(),
             system_event: String::new(),
+            thread_root_id: String::new(), thread_subject: String::new(),
         }).unwrap();
         assert_eq!(s.other_party_name("dm", me).unwrap(), None);
         assert_eq!(s.conversations(me).unwrap()[0].display_name, "");
@@ -1713,21 +1738,18 @@ mod tests {
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: "8:orgid:me".into(), content: "salut".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(),
-        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(),        }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: "8:orgid:leonor".into(), content: "hello".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(),
-        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(),        }).unwrap();
 
         // A group: even though it has non-self senders, a group has no single face.
         s.upsert_conversation_full(&upd("grp", "Team chat", 400, ConversationKind::Group)).unwrap();
         s.insert_message(&Message {
             id: "g1".into(), conversation_id: "grp".into(), seq: 1, compose_time: 1,
             sender: "Grace HOPPER".into(), sender_mri: "8:orgid:grace".into(), content: "hi all".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(),
-        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(),        }).unwrap();
 
         let by_id = |id: &str| {
             s.conversations(me).unwrap().into_iter().find(|c| c.id == id).unwrap()
@@ -1746,6 +1768,7 @@ mod tests {
             sender: "Me".into(), sender_mri: String::new(), content: "hi".into(), attachments: "[]".into(),
             reactions: "[]".into(),
             system_event: String::new(),
+            thread_root_id: String::new(), thread_subject: String::new(),
         }).unwrap();
 
         // backfill fills the empty MRI
@@ -1772,6 +1795,7 @@ mod tests {
             attachments: r#"[{"name":"report.pdf","content_type":"application/pdf","url":"https://x.skype.com/o/1","kind":"file"}]"#.into(),
             reactions: "[]".into(),
             system_event: String::new(),
+            thread_root_id: String::new(), thread_subject: String::new(),
         }).unwrap();
         // a message without attachments keeps the empty-array default
         s.insert_message(&Message {
@@ -1780,6 +1804,7 @@ mod tests {
             attachments: "[]".into(),
             reactions: "[]".into(),
             system_event: String::new(),
+            thread_root_id: String::new(), thread_subject: String::new(),
         }).unwrap();
 
         let msgs = s.newest_messages("c1", 10).unwrap();

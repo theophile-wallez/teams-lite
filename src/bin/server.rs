@@ -1093,15 +1093,7 @@ fn is_self(m: &Message, self_name: &str, self_mri: &str) -> bool {
 fn messages_value(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
     json!(msgs
         .iter()
-        .map(|m| json!({
-            "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
-            "compose_time": m.compose_time, "sender": m.sender, "sender_mri": m.sender_mri,
-            "content": m.content,
-            "attachments": attachments_value(m),
-            "reactions": reactions_value(m, self_mri),
-            "system_event": system_event_value(m),
-            "is_self": is_self(m, self_name, self_mri)
-        }))
+        .map(|m| message_json(m, self_name, self_mri))
         .collect::<Vec<_>>())
 }
 
@@ -1252,7 +1244,9 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
         "attachments": attachments_value(m),
         "reactions": reactions_value(m, self_mri),
         "system_event": system_event_value(m),
-        "is_self": is_self(m, self_name, self_mri)
+        "is_self": is_self(m, self_name, self_mri),
+        "thread_root_id": m.thread_root_id,
+        "thread_subject": m.thread_subject
     })
 }
 
@@ -1294,6 +1288,7 @@ fn call_event_json(m: &Message, self_name: &str, self_mri: &str) -> Option<Value
         "caller": m.sender,
         "caller_mri": m.sender_mri,
         "participants": event.get("participants").cloned().unwrap_or_else(|| json!([])),
+        "participant_mris": event.get("participant_mris").cloned().unwrap_or_else(|| json!([])),
         "participant_count": event.get("participant_count").cloned().unwrap_or_else(|| json!(0)),
     }))
 }
@@ -1687,6 +1682,7 @@ mod tests {
             attachments: "[]".into(),
             reactions: "[]".into(),
             system_event: String::new(),
+            thread_root_id: String::new(), thread_subject: String::new(),
         }
     }
 

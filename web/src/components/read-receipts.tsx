@@ -1,6 +1,6 @@
 import type { ReadReceipt } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
-import { Avatar } from "./avatar";
+import { Avatar, type AvatarPhoto } from "./avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 /** How many "seen by" avatars to show before collapsing the rest into a "+N". */
@@ -43,6 +43,11 @@ export function ReadReceipts(props: { receipts: ReadReceipt[] }) {
       <span className="flex items-center">
         {shown.map((receipt, i) => {
           const name = receiptName(receipt);
+          // Load the reader's real photo when we know their MRI; otherwise the
+          // Avatar keeps its generated person coin.
+          const photo: AvatarPhoto | undefined = receipt.member_mri
+            ? { kind: "user", id: receipt.member_mri }
+            : undefined;
           return (
             <Tooltip key={receipt.member_mri}>
               <TooltipTrigger asChild>
@@ -59,6 +64,7 @@ export function ReadReceipts(props: { receipts: ReadReceipt[] }) {
                     label={name}
                     initials={firstInitial(name)}
                     fallback="person"
+                    photo={photo}
                     className="size-4 text-[8px] font-semibold"
                   />
                 </span>
@@ -68,6 +74,7 @@ export function ReadReceipts(props: { receipts: ReadReceipt[] }) {
                   seed={receipt.member_mri || name}
                   label={name}
                   fallback="person"
+                  photo={photo}
                   className="size-7 text-[10px]"
                 />
                 <span className="flex flex-col">

@@ -484,6 +484,7 @@ export class TeamsController {
         caller: sig.caller || "",
         callerMri: sig.caller_mri || "",
         participants: Array.isArray(sig.participants) ? sig.participants : [],
+        participantMris: Array.isArray(sig.participant_mris) ? sig.participant_mris : [],
         participantCount: sig.participant_count ?? 0,
       });
     } else {

@@ -42,6 +42,11 @@ export type SystemEvent = {
   participant_count?: number;
   /** Display names of the participants, rendered as an overlapping avatar stack. */
   participants?: string[];
+  /** Each participant's MRI, aligned index-for-index with {@link participants},
+   *  used to load their real profile photo. An empty string (or missing entry)
+   *  means no identity was reported, so that avatar falls back to a coin. Absent
+   *  on system events stored before photos were wired in. */
+  participant_mris?: string[];
 };
 
 export type Conversation = {
@@ -118,6 +123,12 @@ export type ChatMessage = {
    *  is rendered as a centered line, not a chat bubble; `content` is empty. */
   system_event?: SystemEvent;
   is_self?: boolean;
+  /** Team-channel only: the id of the thread's ROOT message. All posts sharing a
+   *  value belong to one thread. Empty for non-channel (chat) messages. */
+  thread_root_id?: string;
+  /** Team-channel only: the thread title (Teams `properties.subject`), present on
+   *  the thread's ROOT post; empty on replies and on non-channel messages. */
+  thread_subject?: string;
 };
 
 export type ReplyTo = {
@@ -168,6 +179,8 @@ export type CallSignal = {
   caller: string;
   caller_mri: string;
   participants: string[];
+  /** Participants' MRIs, aligned with `participants`, for their profile photos. */
+  participant_mris?: string[];
   participant_count: number;
 };
 
@@ -179,6 +192,8 @@ export type IncomingCall = {
   caller: string;
   callerMri: string;
   participants: string[];
+  /** Participants' MRIs, aligned with `participants`, for their profile photos. */
+  participantMris: string[];
   participantCount: number;
 };
 

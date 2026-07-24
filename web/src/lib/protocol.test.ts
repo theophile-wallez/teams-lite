@@ -726,6 +726,7 @@ describe("incomingCallTitle", () => {
     caller: "Riley Carter",
     callerMri: "8:orgid:riley",
     participants: [],
+    participantMris: [],
     participantCount: 0,
     ...overrides,
   });

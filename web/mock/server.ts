@@ -96,6 +96,8 @@ type ChatMessage = {
   reactions?: Reaction[]; // aggregated per emotion (key + count + whether ours)
   system_event?: SystemEvent; // when set, rendered as a centered system line
   is_self?: boolean;
+  thread_root_id?: string; // channel only: id of the thread's root post
+  thread_subject?: string; // channel only: thread title, present on the root
 };
 
 // A structured system/activity event (mirrors protocol.ts SystemEvent and the Rust
@@ -106,6 +108,7 @@ type SystemEvent = {
   duration_seconds?: number;
   participant_count?: number;
   participants?: string[];
+  participant_mris?: string[]; // aligned with participants, for real profile photos
 };
 
 // Aggregated reaction on a message (mirrors protocol.ts Reaction / the Rust
@@ -281,6 +284,13 @@ function personFrom(name: string): Person {
   return { name, mri: `8:orgid:${slug}` };
 }
 
+/** MRIs for a call's participant names, aligned index-for-index — so mock call
+ *  events exercise the real-photo path on the avatar stack (see `mockAvatar`,
+ *  which gives roughly two-in-three subjects a picture and the rest a coin). */
+function callMris(names: string[]): string[] {
+  return names.map((n) => personFrom(n).mri);
+}
+
 const PEOPLE: Person[] = [
   "Ava Thompson",
   "Liam Nguyen",
@@ -444,11 +454,25 @@ function gapMs(r: () => number): number {
 }
 
 /** Generate a deterministic backlog for one conversation (ascending by seq). */
+// Thread titles for channel backlogs (Teams `properties.subject`). Only used
+// when `generateBacklog` runs in channel mode, to give each thread a heading.
+const THREAD_SUBJECTS = [
+  "Weekly sync notes",
+  "Deploy went out 🎉",
+  "Flaky test in CI",
+  "Design review: new nav",
+  "Who's on-call this week?",
+  "Bug: avatars not loading",
+  "Proposal: bump the token TTL",
+  "Lunch plans?",
+];
+
 function generateBacklog(
   convId: string,
   kind: ConversationKind,
   participants: Person[],
   newestTime: number,
+  channel = false,
 ): ChatMessage[] {
   // Fill timestamps backward from the newest so seq order == time order.
   const times = new Array<number>(BACKLOG);
@@ -460,6 +484,11 @@ function generateBacklog(
 
   const messages: ChatMessage[] = [];
   let prevSelf = rand() < 0.5; // whichever side opens the 1:1
+  // In channel mode, posts belong to threads: keep a few threads "open" and
+  // either start a new one (this post is its root, with a subject) or reply to a
+  // recent one. Posts from different threads thus interleave by seq, exactly as
+  // the real API returns them — which is what the UI regroups.
+  const openThreads: string[] = [];
   for (let i = 0; i < BACKLOG; i++) {
     const seq = i + 1;
     const compose_time = times[i]!;
@@ -498,8 +527,23 @@ function generateBacklog(
       content = escapeHtml(pick(MESSAGE_POOL, rand));
     }
 
+    const id = `${convId}#${seq}`;
+    let thread_root_id: string | undefined;
+    let thread_subject: string | undefined;
+    if (channel) {
+      const startNew = openThreads.length === 0 || rand() < 0.28;
+      if (startNew) {
+        thread_root_id = id; // this post is the thread's root
+        thread_subject = pick(THREAD_SUBJECTS, rand);
+        openThreads.push(id);
+        if (openThreads.length > 4) openThreads.shift(); // keep a handful active
+      } else {
+        thread_root_id = pick(openThreads, rand); // a reply to a recent thread
+      }
+    }
+
     messages.push({
-      id: `${convId}#${seq}`,
+      id,
       conversation_id: convId,
       seq,
       compose_time,
@@ -507,6 +551,8 @@ function generateBacklog(
       sender_mri: senderMri,
       content,
       is_self: isSelf,
+      thread_root_id,
+      thread_subject,
     });
   }
   return messages;
@@ -638,7 +684,7 @@ function seedChannels(): void {
       const memberCount = 3 + Math.floor(rand() * 3); // 3..5 teammates
       const participants = sample(PEOPLE, memberCount, rand);
       const newestTime = Date.now() - Math.floor(rand() * 6 * 24 * 3_600_000);
-      const messages = generateBacklog(id, "group", participants, newestTime);
+      const messages = generateBacklog(id, "group", participants, newestTime, true);
       const channel: Channel = {
         id,
         team_id: team.id,
@@ -837,6 +883,7 @@ function seedCallEvents(): void {
     0,
   );
   // A group call that ended: five participants -> a full avatar stack, no overflow.
+  const groupRoster = ["Leonor GROELL", "Clément DELBARRE", "Matthieu GAUCHER", "Clément BOSLE", "Théophile WALLEZ"];
   push(
     {
       sender: "",
@@ -845,14 +892,24 @@ function seedCallEvents(): void {
         kind: "call",
         event: "ended",
         duration_seconds: 600,
-        participant_count: 5,
-        participants: ["Leonor GROELL", "Clément DELBARRE", "Matthieu GAUCHER", "Clément BOSLE", "Théophile WALLEZ"],
+        participant_count: groupRoster.length,
+        participants: groupRoster,
+        participant_mris: callMris(groupRoster),
       },
     },
     60_000,
   );
   // A large call: more than five participants -> five avatars plus a "+N" chip
   // that opens the full-roster dialog.
+  const largeRoster = [
+    "Leonor GROELL",
+    "Clément DELBARRE",
+    "Matthieu GAUCHER",
+    "Clément BOSLE",
+    "Théophile WALLEZ",
+    "Souhail LYAMANI",
+    "James BASSE",
+  ];
   push(
     {
       sender: "",
@@ -861,16 +918,9 @@ function seedCallEvents(): void {
         kind: "call",
         event: "ended",
         duration_seconds: 3600,
-        participant_count: 7,
-        participants: [
-          "Leonor GROELL",
-          "Clément DELBARRE",
-          "Matthieu GAUCHER",
-          "Clément BOSLE",
-          "Théophile WALLEZ",
-          "Souhail LYAMANI",
-          "James BASSE",
-        ],
+        participant_count: largeRoster.length,
+        participants: largeRoster,
+        participant_mris: callMris(largeRoster),
       },
     },
     120_000,
@@ -885,6 +935,7 @@ function seedCallEvents(): void {
     180_000,
   );
   // A 1:1 call that ended: two participants -> two avatars, duration only.
+  const oneOnOneRoster = ["Clément BOSLE", "You"];
   push(
     {
       sender: "",
@@ -893,8 +944,9 @@ function seedCallEvents(): void {
         kind: "call",
         event: "ended",
         duration_seconds: 1400,
-        participant_count: 2,
-        participants: ["Clément BOSLE", "You"],
+        participant_count: oneOnOneRoster.length,
+        participants: oneOnOneRoster,
+        participant_mris: callMris(oneOnOneRoster),
       },
     },
     240_000,
