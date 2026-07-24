@@ -352,6 +352,13 @@ pub fn persist_conversations(store: &Store, convs: &[Conversation]) -> usize {
         if crate::teams_activity::is_system_feed_thread(&c.id) {
             continue;
         }
+        // A team channel (incl. its `;messageid=` post threads) is not a chat —
+        // never write it into the conversations table. The read-time filter in
+        // `Store::conversations` also gates on this, but skipping the write keeps
+        // channel rows out of the table entirely so they can't accumulate.
+        if is_channel_thread_id(&c.id) {
+            continue;
+        }
         // Count only conversations that were actually inserted or modified, so
         // the caller emits `conversations_changed` ONLY on a real change. A
         // blanket "upsert succeeded" count would report a change on every sync
