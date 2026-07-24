@@ -1040,7 +1040,10 @@ impl Store {
              -- a channel that leaked into the conversations table (a live post that
              -- landed before the CSA sync classified it) must never show in the chat
              -- list; exclude any id the channels table now owns. persist_channels
-             -- also deletes such rows, so this is belt-and-suspenders.
+             -- also deletes such rows, so this is belt-and-suspenders. The channels
+             -- table only covers channels CSA has actually surfaced, though — a
+             -- `@thread.tacv2` thread CSA never classified would slip through here, so
+             -- the collect below applies is_channel_thread_id as the canonical gate.
              WHERE c.id NOT IN (SELECT id FROM channels)
              ORDER BY c.is_pinned DESC, c.last_message_time DESC, c.id ASC",
         )?;
@@ -1062,7 +1065,17 @@ impl Store {
                 avatar_mri: r.get(13)?,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        // Canonical chat/channel gate, mirroring the live-message path in the
+        // server (is_channel_thread_id || is_channel). The SQL above only knows the
+        // channels table; this drops any tacv2 thread CSA has not yet classified so
+        // a channel can never leak into the chat sidebar.
+        rows.filter(|r| {
+            r.as_ref()
+                .map(|c| !crate::teams_read::is_channel_thread_id(&c.id))
+                .unwrap_or(true)
+        })
+        .collect::<rusqlite::Result<_>>()
+        .map_err(Into::into)
     }
 
     /// Derive a display name for a conversation whose stored title is empty
@@ -1443,6 +1456,18 @@ mod tests {
         let convs = s.conversations("").unwrap();
         let names: Vec<_> = convs.iter().map(|c| c.display_name.as_str()).collect();
         assert_eq!(names, ["Bravo", "Charlie", "Alpha"]); // by last_message_time desc
+    }
+
+    #[test]
+    fn tacv2_thread_never_shows_in_chat_list() {
+        // A channel post can land in the conversations table before CSA sync has
+        // classified it into the channels table. The chat list must still exclude
+        // it on the canonical suffix rule, not just channels-table membership.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("19:plain@thread.v2", "Group Chat", 100).unwrap();
+        s.upsert_conversation("19:leaked@thread.tacv2", "Ops / Standup", 200).unwrap();
+        let ids: Vec<_> = s.conversations("").unwrap().into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["19:plain@thread.v2"]); // tacv2 thread filtered out
     }
 
     #[test]
