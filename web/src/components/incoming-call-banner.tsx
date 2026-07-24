@@ -88,7 +88,7 @@ function IncomingCallCard(props: { call: IncomingCall }) {
 
       {call.participants.length > 0 && (
         <div className="pl-1">
-          <CallParticipants participants={call.participants} />
+          <CallParticipants participants={call.participants} mris={call.participantMris} />
         </div>
       )}
 

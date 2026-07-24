@@ -1288,6 +1288,7 @@ fn call_event_json(m: &Message, self_name: &str, self_mri: &str) -> Option<Value
         "caller": m.sender,
         "caller_mri": m.sender_mri,
         "participants": event.get("participants").cloned().unwrap_or_else(|| json!([])),
+        "participant_mris": event.get("participant_mris").cloned().unwrap_or_else(|| json!([])),
         "participant_count": event.get("participant_count").cloned().unwrap_or_else(|| json!(0)),
     }))
 }

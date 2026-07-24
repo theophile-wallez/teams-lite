@@ -42,6 +42,11 @@ export type SystemEvent = {
   participant_count?: number;
   /** Display names of the participants, rendered as an overlapping avatar stack. */
   participants?: string[];
+  /** Each participant's MRI, aligned index-for-index with {@link participants},
+   *  used to load their real profile photo. An empty string (or missing entry)
+   *  means no identity was reported, so that avatar falls back to a coin. Absent
+   *  on system events stored before photos were wired in. */
+  participant_mris?: string[];
 };
 
 export type Conversation = {
@@ -174,6 +179,8 @@ export type CallSignal = {
   caller: string;
   caller_mri: string;
   participants: string[];
+  /** Participants' MRIs, aligned with `participants`, for their profile photos. */
+  participant_mris?: string[];
   participant_count: number;
 };
 
@@ -185,6 +192,8 @@ export type IncomingCall = {
   caller: string;
   callerMri: string;
   participants: string[];
+  /** Participants' MRIs, aligned with `participants`, for their profile photos. */
+  participantMris: string[];
   participantCount: number;
 };
 

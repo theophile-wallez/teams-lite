@@ -108,6 +108,7 @@ type SystemEvent = {
   duration_seconds?: number;
   participant_count?: number;
   participants?: string[];
+  participant_mris?: string[]; // aligned with participants, for real profile photos
 };
 
 // Aggregated reaction on a message (mirrors protocol.ts Reaction / the Rust
@@ -281,6 +282,13 @@ type Person = { name: string; mri: string };
 function personFrom(name: string): Person {
   const slug = name.toLowerCase().replace(/[^a-z]+/g, "-").replace(/(^-|-$)/g, "");
   return { name, mri: `8:orgid:${slug}` };
+}
+
+/** MRIs for a call's participant names, aligned index-for-index — so mock call
+ *  events exercise the real-photo path on the avatar stack (see `mockAvatar`,
+ *  which gives roughly two-in-three subjects a picture and the rest a coin). */
+function callMris(names: string[]): string[] {
+  return names.map((n) => personFrom(n).mri);
 }
 
 const PEOPLE: Person[] = [
@@ -875,6 +883,7 @@ function seedCallEvents(): void {
     0,
   );
   // A group call that ended: five participants -> a full avatar stack, no overflow.
+  const groupRoster = ["Leonor GROELL", "Clément DELBARRE", "Matthieu GAUCHER", "Clément BOSLE", "Théophile WALLEZ"];
   push(
     {
       sender: "",
@@ -883,14 +892,24 @@ function seedCallEvents(): void {
         kind: "call",
         event: "ended",
         duration_seconds: 600,
-        participant_count: 5,
-        participants: ["Leonor GROELL", "Clément DELBARRE", "Matthieu GAUCHER", "Clément BOSLE", "Théophile WALLEZ"],
+        participant_count: groupRoster.length,
+        participants: groupRoster,
+        participant_mris: callMris(groupRoster),
       },
     },
     60_000,
   );
   // A large call: more than five participants -> five avatars plus a "+N" chip
   // that opens the full-roster dialog.
+  const largeRoster = [
+    "Leonor GROELL",
+    "Clément DELBARRE",
+    "Matthieu GAUCHER",
+    "Clément BOSLE",
+    "Théophile WALLEZ",
+    "Souhail LYAMANI",
+    "James BASSE",
+  ];
   push(
     {
       sender: "",
@@ -899,16 +918,9 @@ function seedCallEvents(): void {
         kind: "call",
         event: "ended",
         duration_seconds: 3600,
-        participant_count: 7,
-        participants: [
-          "Leonor GROELL",
-          "Clément DELBARRE",
-          "Matthieu GAUCHER",
-          "Clément BOSLE",
-          "Théophile WALLEZ",
-          "Souhail LYAMANI",
-          "James BASSE",
-        ],
+        participant_count: largeRoster.length,
+        participants: largeRoster,
+        participant_mris: callMris(largeRoster),
       },
     },
     120_000,
@@ -923,6 +935,7 @@ function seedCallEvents(): void {
     180_000,
   );
   // A 1:1 call that ended: two participants -> two avatars, duration only.
+  const oneOnOneRoster = ["Clément BOSLE", "You"];
   push(
     {
       sender: "",
@@ -931,8 +944,9 @@ function seedCallEvents(): void {
         kind: "call",
         event: "ended",
         duration_seconds: 1400,
-        participant_count: 2,
-        participants: ["Clément BOSLE", "You"],
+        participant_count: oneOnOneRoster.length,
+        participants: oneOnOneRoster,
+        participant_mris: callMris(oneOnOneRoster),
       },
     },
     240_000,

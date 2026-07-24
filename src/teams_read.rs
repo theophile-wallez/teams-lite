@@ -815,13 +815,11 @@ pub(crate) fn parse_call_event(messagetype: &str, content: &str) -> Option<Value
         None => "ended",
     };
 
-    // `<displayName>` only appears inside `<partlist>` parts, so each is a
-    // participant. Reuse preview_from_html to decode entities and trim.
-    let participants: Vec<String> = xml_values(content, "displayName")
-        .iter()
-        .map(|s| preview_from_html(s))
-        .filter(|s| !s.is_empty())
-        .collect();
+    // Each `<part>` is a participant: its `<displayName>` paired with its
+    // `identity` MRI (used to fetch a real profile photo, empty when absent).
+    let people = call_participants(content);
+    let participants: Vec<String> = people.iter().map(|(name, _)| name.clone()).collect();
+    let participant_mris: Vec<String> = people.iter().map(|(_, mri)| mri.clone()).collect();
     // Call length ≈ the longest participant duration (seconds).
     let duration_seconds = xml_values(content, "duration")
         .iter()
@@ -835,7 +833,71 @@ pub(crate) fn parse_call_event(messagetype: &str, content: &str) -> Option<Value
         "duration_seconds": duration_seconds,
         "participant_count": participants.len(),
         "participants": participants,
+        // Aligned index-for-index with `participants`; empty string where a part
+        // carries no identity, so the UI can zip them and fall back per-slot.
+        "participant_mris": participant_mris,
     }))
+}
+
+/// Each participant in a call `<partlist>`, as `(display name, identity MRI)`.
+/// The MRI comes from the part's `identity="…"` attribute (e.g. `8:orgid:<guid>`,
+/// directly usable as a `user` avatar id) and is empty when the part carries none
+/// (an anonymous or PSTN leg), so the UI falls back to a generated avatar. Names
+/// are entity-decoded and trimmed; a part with an empty name is dropped, keeping
+/// the name/MRI arrays the UI zips index-aligned.
+///
+/// Walks `<part …>` elements directly — rather than flat-scanning `<displayName>`
+/// — so each name pairs with the identity from its *own* opening tag. `<partlist>`
+/// (which also begins with `<part`) is skipped: the char after `part` is a letter,
+/// not a tag delimiter.
+fn call_participants(content: &str) -> Vec<(String, String)> {
+    let hay = content.to_ascii_lowercase();
+    let bytes = hay.as_bytes();
+    // Byte offsets where a genuine `<part` element opens.
+    let mut starts = Vec::new();
+    let mut i = 0usize;
+    while let Some(o) = hay[i..].find("<part") {
+        let pos = i + o;
+        if matches!(
+            bytes.get(pos + 5),
+            Some(b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')
+        ) {
+            starts.push(pos);
+        }
+        i = pos + 5;
+    }
+
+    let mut out = Vec::new();
+    for (idx, &start) in starts.iter().enumerate() {
+        // This part's slice runs until the next part opens (or the frame ends).
+        let end = starts.get(idx + 1).copied().unwrap_or(content.len());
+        let block = &content[start..end];
+        let name = xml_first_value(block, "displayName")
+            .map(|s| preview_from_html(&s))
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        // `identity` lives only in the opening `<part …>` tag; bound the search to
+        // it so nothing downstream in the slice can be mistaken for an attribute.
+        let open_end = block.find('>').map(|g| g + 1).unwrap_or(block.len());
+        let mri = xml_attr(&block[..open_end], "identity").unwrap_or_default();
+        out.push((name, mri));
+    }
+    out
+}
+
+/// The value of a double-quoted attribute (`name="value"`) in an XML opening tag,
+/// or `None`. Minimal: finds the first case-insensitive `name="` and reads to the
+/// next `"`. Sufficient for the `identity` attribute on a call `<part>`.
+fn xml_attr(tag: &str, name: &str) -> Option<String> {
+    let hay = tag.to_ascii_lowercase();
+    let needle = format!("{}=\"", name.to_ascii_lowercase());
+    let at = hay.find(&needle)?;
+    let start = at + needle.len();
+    let rest = &tag[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 /// Collect the inner text of every `<tag>…</tag>` occurrence in `xml`, matched
@@ -1570,6 +1632,9 @@ mod tests {
             assert_eq!(ev["duration_seconds"], 600, "longest participant duration");
             assert_eq!(ev["participant_count"], 2);
             assert_eq!(ev["participants"][0], "Leonor GROELL");
+            // Each part's `identity` MRI rides along, aligned with `participants`,
+            // so the UI can load a real profile photo per reader.
+            assert_eq!(ev["participant_mris"], json!(["8:orgid:x", "8:orgid:y"]));
         }
 
         // A missed call carries no duration/roster.
@@ -1610,6 +1675,31 @@ mod tests {
         assert_eq!(ev["event"], "ended");
         assert_eq!(ev["participants"][0], "Ben & Jerry");
         assert_eq!(ev["duration_seconds"], 12);
+        // The part carried no `identity` attribute → an empty MRI slot (still
+        // present so the array stays aligned; the UI falls back to a coin).
+        assert_eq!(ev["participant_mris"], json!([""]));
+    }
+
+    #[test]
+    fn call_participants_pair_name_with_identity() {
+        // Names pair with their own part's `identity`; a part without one yields an
+        // empty MRI slot, and `<partlist>`/`<part/>` never masquerade as a person.
+        let content = "<ended/><partlist alt=\"\" count=\"3\">\
+            <part identity=\"8:orgid:aaa\"><displayName>Ada L</displayName><duration>30</duration></part>\
+            <part><displayName>No Id</displayName><duration>10</duration></part>\
+            <part identity=\"8:orgid:ccc\"><displayName>Grace &amp; Co</displayName></part>\
+            </partlist><callEventType>callEnded</callEventType>";
+        assert_eq!(
+            call_participants(content),
+            vec![
+                ("Ada L".to_string(), "8:orgid:aaa".to_string()),
+                ("No Id".to_string(), String::new()),
+                ("Grace & Co".to_string(), "8:orgid:ccc".to_string()),
+            ]
+        );
+        // A self-closing `<part/>` (no name) contributes nothing.
+        assert!(call_participants("<partlist alt=\"\"/>").is_empty());
+        assert!(call_participants("<partlist><part/></partlist>").is_empty());
     }
 
     #[test]
