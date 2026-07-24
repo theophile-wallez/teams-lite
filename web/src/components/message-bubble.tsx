@@ -350,9 +350,11 @@ export function MessageBubble(props: {
               // A lone picture: frame it on the atelier mat — a neutral card
               // with a faint diagonal hatch peeking around a few px of padding.
               // `w-fit` hugs the image; `max-w-full` keeps it within the row cap.
+              // The mat's radius stays concentric with the image (`rounded-xl`,
+              // 12px): outer = inner + padding, so 6px padding → 18px radius.
               <div
                 data-testid="image-mat"
-                className="image-mat flex w-fit max-w-full flex-col gap-1.5 rounded-2xl p-2 shadow-card"
+                className="image-mat flex w-fit max-w-full flex-col gap-1.5 rounded-[18px] p-1.5 shadow-card"
               >
                 {mediaBody}
               </div>
