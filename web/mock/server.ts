@@ -662,18 +662,6 @@ function seedChannels(): void {
   }
 }
 
-/** Sort channels for the `channels` result exactly like the Rust `channels()`
- *  query: team name, then team id, General first, then channel name, then id. */
-function channelSort(a: Channel, b: Channel): number {
-  return (
-    a.team_name.localeCompare(b.team_name) ||
-    a.team_id.localeCompare(b.team_id) ||
-    (a.is_general === b.is_general ? 0 : a.is_general ? -1 : 1) ||
-    a.name.localeCompare(b.name) ||
-    a.id.localeCompare(b.id)
-  );
-}
-
 /** Register a dedicated "Media Gallery" conversation whose messages exercise the
  *  UI's inline-image and attachment rendering: a pasted screenshot embedded in
  *  the HTML, an image shared as an attachment, a non-image file, plus two
@@ -1388,13 +1376,12 @@ function dispatch(method: string, params: unknown): unknown {
     }
 
     case "channels": {
-      // Team-grouped, General-first — the exact order the Rust `channels()`
-      // query returns, which the sidebar's `groupChannelsByTeam` relies on.
-      return channelOrder
-        .map((id) => channelStore.get(id)!.channel)
-        .slice()
-        .sort(channelSort)
-        .map((c) => ({ ...c }));
+      // The user's own Microsoft Teams order: the seed insertion order
+      // (team-by-team, General first within each team), which is exactly what the
+      // Rust `channels()` query now returns (team_pos, General-first, channel_pos)
+      // — NOT an alphabetical sort. `channelOrder` already holds ids in that order,
+      // and the sidebar's `groupChannelsByTeam` preserves it.
+      return channelOrder.map((id) => ({ ...channelStore.get(id)!.channel }));
     }
 
     case "notifications": {

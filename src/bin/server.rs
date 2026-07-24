@@ -1425,6 +1425,8 @@ mod tests {
                 last_message_sender: "Alice",
                 last_message_from_me: false,
                 is_read: false,
+                team_pos: 0,
+                channel_pos: 0,
             })
             .unwrap();
 

@@ -50,8 +50,10 @@ CREATE TABLE IF NOT EXISTS settings (
 -- Team channels, kept SEPARATE from `conversations` so channel posts never mix
 -- into the chat list. A channel's messages still live in the shared `messages`
 -- table keyed by its thread id, so open/backfill/send/react reuse the same
--- pipeline unchanged. This is a brand-new table, so `CREATE TABLE IF NOT EXISTS`
--- here (run on every open) is all the migration it needs — no ALTER in migrate().
+-- pipeline unchanged. Fresh stores get the full column set here; stores created
+-- before a column was added are healed by the guarded ALTERs in migrate().
+-- `team_pos`/`channel_pos` hold the CSA array order so the sidebar mirrors the
+-- user's own team/channel order in Microsoft Teams (not an alphabetical sort).
 CREATE TABLE IF NOT EXISTS channels (
     id                    TEXT PRIMARY KEY,
     team_id               TEXT NOT NULL DEFAULT '',
@@ -64,7 +66,9 @@ CREATE TABLE IF NOT EXISTS channels (
     last_message_sender   TEXT NOT NULL DEFAULT '',
     last_message_from_me  INTEGER NOT NULL DEFAULT 0,
     is_read               INTEGER NOT NULL DEFAULT 1,
-    draft                 TEXT NOT NULL DEFAULT ''
+    draft                 TEXT NOT NULL DEFAULT '',
+    team_pos              INTEGER NOT NULL DEFAULT 0,
+    channel_pos           INTEGER NOT NULL DEFAULT 0
 );
 "#;
 
@@ -227,6 +231,12 @@ pub struct ChannelUpdate<'a> {
     pub last_message_sender: &'a str,
     pub last_message_from_me: bool,
     pub is_read: bool,
+    /// Zero-based index of the parent team in the CSA `teams` array — the user's
+    /// own team order in Microsoft Teams. Drives the sidebar's team ordering.
+    pub team_pos: i64,
+    /// Zero-based index of the channel within its team's `channels` array — the
+    /// user's own channel order (General is still pinned first by the query).
+    pub channel_pos: i64,
 }
 
 pub struct Store {
@@ -355,8 +365,16 @@ fn migrate(conn: &Connection) -> Result<()> {
     let add_column = |ddl: &str| -> Result<()> {
         match conn.execute(ddl, []) {
             Ok(_) => Ok(()),
-            // rusqlite surfaces "duplicate column name" when the column already exists
-            Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column") => Ok(()),
+            // "duplicate column name" means the column already exists; "no such
+            // table" means the table wasn't created on this connection (only
+            // happens in isolated migration unit tests — `open` always runs SCHEMA,
+            // which defines every table with its full current column set, before
+            // migrate). Both are no-ops: an ALTER only heals a pre-existing table.
+            Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+                if msg.contains("duplicate column") || msg.contains("no such table") =>
+            {
+                Ok(())
+            }
             Err(e) => Err(e.into()),
         }
     };
@@ -393,6 +411,14 @@ fn migrate(conn: &Connection) -> Result<()> {
     add_column("ALTER TABLE conversations ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0")?;
     add_column("ALTER TABLE conversations ADD COLUMN thread_type TEXT NOT NULL DEFAULT ''")?;
     add_column("ALTER TABLE conversations ADD COLUMN draft TEXT NOT NULL DEFAULT ''")?;
+
+    // team_pos / channel_pos: the channel's position in the CSA `teams[].channels[]`
+    // arrays, so the sidebar renders teams and channels in the user's own Microsoft
+    // Teams order instead of alphabetically. Stores created before these columns
+    // existed get 0 for every row (a stable, grouping-friendly default); the next
+    // CSA sync backfills the real positions.
+    add_column("ALTER TABLE channels ADD COLUMN team_pos INTEGER NOT NULL DEFAULT 0")?;
+    add_column("ALTER TABLE channels ADD COLUMN channel_pos INTEGER NOT NULL DEFAULT 0")?;
     Ok(())
 }
 
@@ -616,8 +642,8 @@ impl Store {
             "INSERT INTO channels (
                 id, team_id, team_name, display_name, is_general, is_favorite,
                 last_message_time, last_message_preview, last_message_sender,
-                last_message_from_me, is_read)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                last_message_from_me, is_read, team_pos, channel_pos)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 team_id = excluded.team_id,
                 team_name = CASE
@@ -628,6 +654,8 @@ impl Store {
                     ELSE channels.display_name END,
                 is_general = excluded.is_general,
                 is_favorite = excluded.is_favorite,
+                team_pos = excluded.team_pos,
+                channel_pos = excluded.channel_pos,
                 last_message_time = MAX(channels.last_message_time, excluded.last_message_time),
                 -- message-derived fields: only take the incoming snapshot when it is
                 -- at least as fresh, so a stale/out-of-order sync can't regress them
@@ -651,6 +679,8 @@ impl Store {
                 OR (excluded.display_name <> '' AND excluded.display_name <> channels.display_name)
                 OR excluded.is_general <> channels.is_general
                 OR excluded.is_favorite <> channels.is_favorite
+                OR excluded.team_pos <> channels.team_pos
+                OR excluded.channel_pos <> channels.channel_pos
                 OR excluded.last_message_time > channels.last_message_time
                 OR (excluded.last_message_time >= channels.last_message_time AND (
                        excluded.last_message_preview <> channels.last_message_preview
@@ -669,6 +699,8 @@ impl Store {
                 u.last_message_sender,
                 u.last_message_from_me as i64,
                 u.is_read as i64,
+                u.team_pos,
+                u.channel_pos,
             ],
         )?;
         Ok(changed > 0)
@@ -705,16 +737,20 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// All channels, grouped for the sidebar tree: by team, General first within a
-    /// team, then by channel name. Empty channels are never inserted, so every row
-    /// here has content.
+    /// All channels, grouped for the sidebar tree in the user's own Microsoft Teams
+    /// order: by the team's CSA position, then General first within a team, then the
+    /// channel's CSA position. Alphabetical tie-breakers keep the order deterministic
+    /// for rows that share a position (e.g. legacy rows synced before positions
+    /// existed, which all default to 0). Empty channels are never inserted, so every
+    /// row here has content.
     pub fn channels(&self) -> Result<Vec<ChannelRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, team_id, team_name, display_name, is_general, is_favorite,
                     last_message_time, last_message_preview, last_message_sender,
                     last_message_from_me, is_read, draft
              FROM channels
-             ORDER BY team_name ASC, team_id ASC, is_general DESC, display_name ASC, id ASC",
+             ORDER BY team_pos ASC, team_name ASC, team_id ASC,
+                      is_general DESC, channel_pos ASC, display_name ASC, id ASC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(ChannelRow {
@@ -1147,6 +1183,8 @@ mod tests {
             last_message_sender: "",
             last_message_from_me: false,
             is_read: true,
+            team_pos: 0,
+            channel_pos: 0,
         }
     }
 
@@ -1863,6 +1901,59 @@ mod tests {
         // Meta/Zeta; Beta's channel last. Sort is grouping-based, NOT time-based.
         assert_eq!(order, ["General", "Meta", "Zeta", "Random"]);
         assert!(rows[0].is_general);
+    }
+
+    #[test]
+    fn channels_follow_csa_team_and_channel_order() {
+        let s = Store::open_in_memory().unwrap();
+        // "Zeta Team" is FIRST in Microsoft Teams (team_pos 0) even though it sorts
+        // last alphabetically; "Alpha Team" is second (team_pos 1). Inside Zeta the
+        // user's channel order is Deploy(1) then Build(2); General is pinned first
+        // regardless of its stored channel_pos. This proves the CSA position wins
+        // over the alphabetical tie-breakers.
+        s.upsert_channel_full(&ChannelUpdate {
+            team_pos: 0,
+            channel_pos: 2,
+            ..chan_upd("19:zb@thread.tacv2", "19:tz@thread.tacv2", "Zeta Team", "Build", 10)
+        })
+        .unwrap();
+        s.upsert_channel_full(&ChannelUpdate {
+            team_pos: 0,
+            channel_pos: 1,
+            ..chan_upd("19:zd@thread.tacv2", "19:tz@thread.tacv2", "Zeta Team", "Deploy", 10)
+        })
+        .unwrap();
+        s.upsert_channel_full(&ChannelUpdate {
+            is_general: true,
+            team_pos: 0,
+            channel_pos: 5,
+            ..chan_upd("19:zg@thread.tacv2", "19:tz@thread.tacv2", "Zeta Team", "General", 10)
+        })
+        .unwrap();
+        s.upsert_channel_full(&ChannelUpdate {
+            team_pos: 1,
+            channel_pos: 0,
+            ..chan_upd("19:ar@thread.tacv2", "19:ta@thread.tacv2", "Alpha Team", "Random", 10)
+        })
+        .unwrap();
+
+        let rows = s.channels().unwrap();
+        let order: Vec<&str> = rows.iter().map(|c| c.display_name.as_str()).collect();
+        assert_eq!(order, ["General", "Deploy", "Build", "Random"]);
+        let teams: Vec<&str> = rows.iter().map(|c| c.team_name.as_str()).collect();
+        assert_eq!(teams, ["Zeta Team", "Zeta Team", "Zeta Team", "Alpha Team"]);
+    }
+
+    #[test]
+    fn channel_reorder_is_a_real_change() {
+        // A pure position change (team/channel moved in Teams) must be reported so
+        // the UI re-renders the tree, and must converge to a no-op on re-sync.
+        let s = Store::open_in_memory().unwrap();
+        let base = chan_upd("19:c@thread.tacv2", "19:t@thread.tacv2", "Ops", "Standup", 100);
+        assert!(s.upsert_channel_full(&base).unwrap());
+        let moved = ChannelUpdate { team_pos: 3, channel_pos: 2, ..base.clone() };
+        assert!(s.upsert_channel_full(&moved).unwrap(), "a reorder is a real change");
+        assert!(!s.upsert_channel_full(&moved).unwrap(), "re-sync of the same order is a no-op");
     }
 
     #[test]

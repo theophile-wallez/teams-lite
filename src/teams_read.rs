@@ -379,8 +379,11 @@ pub fn persist_conversations(store: &Store, convs: &[Conversation]) -> usize {
 pub fn persist_channels(store: &Store, teams: &[Team]) -> (usize, usize) {
     let mut changed = 0;
     let mut healed = 0;
-    for team in teams {
-        for c in &team.channels {
+    // `team_pos`/`channel_pos` are the array indices, capturing the user's own
+    // team/channel order as Microsoft Teams reports it (skipped empty channels
+    // leave gaps, which is harmless — only the relative order is used for sorting).
+    for (team_idx, team) in teams.iter().enumerate() {
+        for (chan_idx, c) in team.channels.iter().enumerate() {
             if c.is_empty {
                 continue;
             }
@@ -402,6 +405,8 @@ pub fn persist_channels(store: &Store, teams: &[Team]) -> (usize, usize) {
                 last_message_sender: &c.last_message_sender,
                 last_message_from_me: c.last_message_from_me,
                 is_read: c.is_read,
+                team_pos: team_idx as i64,
+                channel_pos: chan_idx as i64,
             };
             if store.upsert_channel_full(&update).unwrap_or(false) {
                 changed += 1;
