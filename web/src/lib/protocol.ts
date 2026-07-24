@@ -374,15 +374,19 @@ export function extractImages(html: string): InlineImage[] {
   return out;
 }
 
-/** Microsoft domains whose media is authenticated and must be fetched through
- *  the backend proxy (mirrors the allowlist in src/teams_media.rs). Everything
- *  else — public CDNs like giphy or the Teams static-asset CDN — is loaded
- *  directly by the browser, since it needs no credentials. */
+/** Microsoft domains whose media is authenticated and must be fetched through the
+ *  backend proxy: the skypetoken hosts (AMS / chatService) plus OneDrive/SharePoint
+ *  (`*.sharepoint.com`), which modern Teams uses for files shared in a chat/channel
+ *  and the backend fetches via Microsoft Graph. Mirrors the hosts handled in
+ *  src/teams_media.rs. Everything else — public CDNs like giphy or the Teams
+ *  static-asset CDN — is loaded directly by the browser, since it needs no
+ *  credentials. */
 const PROXY_MEDIA_DOMAINS = [
   "skype.com",
   "teams.microsoft.com",
   "teams.cloud.microsoft",
   "teams.office.com",
+  "sharepoint.com",
 ];
 
 /** Lowercased host of an `http(s)` URL, without any `userinfo@` or `:port`, or

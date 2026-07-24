@@ -15,8 +15,16 @@
 //     is not on the allowlist is rejected before a request is made.
 //   - SIZE CAP: a single media object is bounded so a hostile/huge response
 //     can't blow up memory or the WebSocket frame.
+//
+// A THIRD path covers modern OneDrive/SharePoint files: files shared in a current
+// Teams chat/channel live on `*.sharepoint.com`, not the AMS object store, and the
+// skypetoken cannot open them. Those are fetched through Microsoft Graph with a
+// Graph bearer token (see `fetch_sharepoint_media`); the same size-cap rail
+// applies, and the Graph token only ever goes to `graph.microsoft.com` — never to
+// the user-supplied URL — so it can't be exfiltrated by a hostile attachment.
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
 
 use crate::teams::Session;
 
@@ -133,6 +141,106 @@ pub async fn fetch_media(http: &reqwest::Client, session: &Session, url: &str) -
     })
 }
 
+/// Base domain for OneDrive / SharePoint, where modern Teams stores files shared
+/// in a chat or channel — the sender's OneDrive (`<tenant>-my.sharepoint.com`) for
+/// 1:1/group chats, or a team site (`<tenant>.sharepoint.com`) for channels. These
+/// are NOT served with the skypetoken; they need a Microsoft Graph bearer token, so
+/// they take a separate fetch path ([`fetch_sharepoint_media`]) from the AMS /
+/// chatService hosts in `ALLOWED_BASE_DOMAINS` above.
+const SHAREPOINT_BASE_DOMAIN: &str = "sharepoint.com";
+
+/// The Microsoft Graph host we route OneDrive/SharePoint downloads through. The
+/// Graph bearer token is only ever sent HERE (a fixed Microsoft host); the
+/// user-supplied SharePoint URL is passed only as opaque data (base64 in the
+/// request path), so a hostile attachment URL can never receive the token.
+const GRAPH_HOST: &str = "graph.microsoft.com";
+
+/// Graph scope for the delegated file download, acquired via the broker/PRT like
+/// every other token (see `auth::get_token` / `auth::TokenCache`).
+pub const GRAPH_SCOPE: &str = "https://graph.microsoft.com/.default";
+
+/// True when `url` is an `https` URL on OneDrive/SharePoint (`*.sharepoint.com`).
+/// Such files are fetched through Microsoft Graph (see [`fetch_sharepoint_media`]),
+/// never through the skypetoken path — [`is_allowed_media_url`] returns false for
+/// them, so the two paths never overlap.
+pub fn is_sharepoint_url(url: &str) -> bool {
+    let Some(host) = https_host(url) else {
+        return false;
+    };
+    // Exact apex or a subdomain; the leading dot rejects "sharepoint.com.evil".
+    host == SHAREPOINT_BASE_DOMAIN || host.ends_with(&format!(".{SHAREPOINT_BASE_DOMAIN}"))
+}
+
+/// Encode an absolute file URL as a Graph share id, per the Graph
+/// `/shares/{shareId}` convention: URL-safe base64 of the UTF-8 URL, no `=`
+/// padding, prefixed with `u!`. This lets us address a OneDrive/SharePoint file the
+/// caller can access by its URL alone, without first resolving a drive + item id.
+fn graph_share_id(url: &str) -> String {
+    format!(
+        "u!{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(url.as_bytes())
+    )
+}
+
+/// Fetch one OneDrive/SharePoint-hosted file (a modern Teams chat/channel file
+/// attachment) through Microsoft Graph, with a Graph bearer token.
+///
+/// Files shared in current Teams are uploaded to OneDrive/SharePoint, not the
+/// legacy AMS object store, so their `objectUrl` is a `*.sharepoint.com` URL the
+/// skypetoken cannot open. We resolve them via Graph's shares endpoint —
+/// `GET /v1.0/shares/{u!<base64url>}/driveItem/content` — which 302-redirects to a
+/// short-lived, pre-authenticated download URL that `reqwest` follows (dropping the
+/// bearer on the cross-host hop, so the token stays with Graph).
+///
+/// The caller MUST have validated the URL with [`is_sharepoint_url`]; this
+/// re-checks defensively so a future caller mistake can't turn the proxy into an
+/// open Graph-shares fetch for an arbitrary URL.
+pub async fn fetch_sharepoint_media(
+    http: &reqwest::Client,
+    graph_token: &str,
+    url: &str,
+) -> Result<Media> {
+    anyhow::ensure!(
+        is_sharepoint_url(url),
+        "refusing to fetch a non-SharePoint URL through Graph"
+    );
+
+    let endpoint = format!(
+        "https://{GRAPH_HOST}/v1.0/shares/{}/driveItem/content",
+        graph_share_id(url)
+    );
+    let resp = http
+        .get(&endpoint)
+        .bearer_auth(graph_token)
+        .send()
+        .await
+        .context("graph shares content request")?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    if !status.is_success() {
+        anyhow::bail!("graph shares content -> {status}");
+    }
+
+    let bytes = resp.bytes().await.context("read media body")?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_MEDIA_BYTES,
+        "media object too large: {} bytes",
+        bytes.len()
+    );
+
+    Ok(Media {
+        content_type,
+        bytes: bytes.to_vec(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +302,51 @@ mod tests {
         assert!(is_allowed_media_url(
             "https://EU-API.ASM.SKYPE.COM/v1/objects/x/views/imgo"
         ));
+    }
+
+    #[test]
+    fn detects_sharepoint_and_onedrive_hosts() {
+        // OneDrive-for-Business: a file shared in a 1:1 / group chat.
+        assert!(is_sharepoint_url(
+            "https://contoso-my.sharepoint.com/personal/user/Documents/x.json"
+        ));
+        // A team site: a file shared in a channel.
+        assert!(is_sharepoint_url(
+            "https://contoso.sharepoint.com/sites/team/Shared%20Documents/x.pdf"
+        ));
+        // Apex, and case-insensitive.
+        assert!(is_sharepoint_url("https://sharepoint.com/x"));
+        assert!(is_sharepoint_url("https://CONTOSO.SHAREPOINT.COM/x"));
+
+        // Not SharePoint, a look-alike, or a non-https scheme.
+        assert!(!is_sharepoint_url("https://eu-api.asm.skype.com/v1/objects/x"));
+        assert!(!is_sharepoint_url("https://sharepoint.com.evil.example/x"));
+        assert!(!is_sharepoint_url("http://contoso.sharepoint.com/x"));
+    }
+
+    #[test]
+    fn sharepoint_and_skypetoken_paths_never_overlap() {
+        // A SharePoint file is NEVER eligible for the skypetoken path, and an AMS
+        // object is never treated as SharePoint — the router picks exactly one.
+        let sp = "https://contoso-my.sharepoint.com/personal/user/x.json";
+        assert!(is_sharepoint_url(sp) && !is_allowed_media_url(sp));
+        let ams = "https://eu-api.asm.skype.com/v1/objects/x/views/imgo";
+        assert!(is_allowed_media_url(ams) && !is_sharepoint_url(ams));
+    }
+
+    #[test]
+    fn graph_share_id_is_urlsafe_base64_unpadded() {
+        let url = "https://contoso-my.sharepoint.com/personal/a/Documents/x.json";
+        let id = graph_share_id(url);
+        // "u!" + URL-safe base64, no padding or non-URL-safe chars.
+        assert!(id.starts_with("u!"));
+        assert!(!id.contains('='));
+        assert!(!id.contains('+'));
+        assert!(!id.contains('/'));
+        // Round-trips back to the original URL.
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(id.trim_start_matches("u!"))
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), url);
     }
 }
