@@ -54,9 +54,10 @@ function promptForLink(editor: Editor) {
 /**
  * A Teams-compatible rich-text message editor built on TipTap. Enter sends,
  * Shift+Enter inserts a line break, Cmd/Ctrl+B/I/U format the selection, and
- * Cmd/Ctrl+K adds a link. A floating BubbleMenu appears over the selection and a
- * static toolbar sits above the field. On submit the HTML is normalized to the
- * Teams-safe subset by {@link serializeTeamsHtml}.
+ * Cmd/Ctrl+K adds a link. Formatting has no permanent toolbar: a floating
+ * BubbleMenu appears over the selection, so the field reads as a plain box until
+ * you select text. On submit the HTML is normalized to the Teams-safe subset by
+ * {@link serializeTeamsHtml}.
  */
 export function RichEditor(props: {
   initialContent: string;
@@ -68,6 +69,8 @@ export function RichEditor(props: {
   focusRef?: MutableRefObject<(() => void) | null>;
   /** Reports whether the editor is empty, so the send button can reflect it. */
   onEmptyChange?: (empty: boolean) => void;
+  /** Mirrors the editor's plain text out, so the composer can persist it as the draft. */
+  onChangeText?: (text: string) => void;
 }) {
   const editor = useEditor({
     // TanStack Start renders on the server; ProseMirror needs the DOM, so defer
@@ -76,7 +79,10 @@ export function RichEditor(props: {
     extensions: EXTENSIONS,
     content: props.initialContent,
     onCreate: ({ editor }) => props.onEmptyChange?.(editor.isEmpty),
-    onUpdate: ({ editor }) => props.onEmptyChange?.(editor.isEmpty),
+    onUpdate: ({ editor }) => {
+      props.onEmptyChange?.(editor.isEmpty);
+      props.onChangeText?.(editor.getText());
+    },
     editorProps: {
       attributes: {
         class: "tiptap-message max-h-64 min-h-[1.5rem] w-full overflow-y-auto outline-none",
@@ -139,7 +145,9 @@ export function RichEditor(props: {
 
   return (
     <div className="w-full">
-      <Toolbar editor={editor} onLink={() => promptForLink(editor)} />
+      {/* No permanent toolbar — formatting is keyboard-driven (Ctrl+B/I/U, Ctrl+K)
+          plus this select-to-format menu, so the field stays as lean as the plain
+          textarea. */}
       <BubbleMenu
         editor={editor}
         className="flex items-center gap-0.5 rounded-xl bg-popover p-1 shadow-pop"
@@ -149,14 +157,6 @@ export function RichEditor(props: {
       {/* `text-base` (16px) on mobile stops iOS Safari auto-zooming on focus;
           `md:text-sm` keeps 14px on desktop. */}
       <EditorContent editor={editor} data-testid="composer-rich" className="text-base md:text-sm" />
-    </div>
-  );
-}
-
-function Toolbar(props: { editor: Editor; onLink: () => void }) {
-  return (
-    <div className="mb-2 flex items-center gap-0.5 border-b border-border-subtle pb-2">
-      <ToolbarButtons editor={props.editor} onLink={props.onLink} />
     </div>
   );
 }
