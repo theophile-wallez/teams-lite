@@ -82,12 +82,13 @@ function useAvatarPhoto(photo?: AvatarPhoto): string | null {
  * fallback once fetched (and fades in), and the fallback remains while loading,
  * when the subject has no photo, or if the image fails to decode.
  *
- * `fallback` chooses that pre-photo layer: "initials" (default) is the tinted
- * monogram on a rounded square; "person" is a faceted circular <PersonCoin>, for
- * subjects that are a single human (a 1:1 chat, a reader, a call participant) —
- * never a team, channel or group, which have no single face. A person avatar is
- * always circular (so the coin and any photo match), regardless of the caller's
- * radius class.
+ * `fallback` chooses that pre-photo layer's shape and its no-photo placeholder.
+ * "initials" (default) is the tinted monogram on a rounded square, for teams /
+ * channels / group chats (no single face). "person" is circular, for a single
+ * human (a 1:1 chat, a reader, a call participant): it shows their tinted
+ * initials like Teams, and only falls back to a faceless circular <PersonCoin>
+ * when the subject has no nameable label. A person avatar is always circular (so
+ * initials, coin and any photo match), regardless of the caller's radius class.
  */
 export function Avatar(props: {
   seed: string;
@@ -99,25 +100,29 @@ export function Avatar(props: {
 }) {
   const photoUrl = useAvatarPhoto(props.photo);
   const person = props.fallback === "person";
+  const initials = props.initials ?? avatarInitials(props.label);
+  // A named person shows tinted initials (like Teams); the faceless coin is only
+  // for a human we can't name (a bare MRI / phone number → avatarInitials → "?").
+  const coin = person && initials === "?";
   return (
     <span
       className={cn(
         "relative grid size-9 shrink-0 place-items-center overflow-hidden text-[13px] font-semibold",
-        // Initials sit on a tinted rounded square; a person coin is circular and
-        // brings its own gradient background (no tint needed).
         person ? "rounded-full" : "rounded-xl",
-        !person && tintFor(props.seed),
+        // Initials sit on a tinted disc; a person coin brings its own gradient
+        // background, so the tint is skipped only when a coin is what shows.
+        !coin && tintFor(props.seed),
         props.className,
         // Re-assert round after the caller's className so dense monogram stacks
-        // (which pass rounded-md/lg) still get circular coins.
+        // (which pass rounded-md/lg) still get circular avatars.
         person && "rounded-full",
       )}
       aria-hidden
     >
-      {person ? (
+      {coin ? (
         <PersonCoin seed={props.seed} className="size-full" />
       ) : (
-        props.initials ?? avatarInitials(props.label)
+        initials
       )}
       {photoUrl && (
         <img
