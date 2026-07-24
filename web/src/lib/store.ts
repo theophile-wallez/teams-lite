@@ -30,6 +30,7 @@ import {
   type LiveStatus,
   type MessagePage,
   type Notification,
+  type NotificationTab,
   type ReadReceipt,
   type ReadReceiptSignal,
   type ReplyTo,
@@ -83,9 +84,13 @@ export type AppState = {
   update: UpdateInfo | null;
   draft: string;
   replyingTo: PendingReply | null;
-  /** Activity feed (reactions/mentions/replies), newest-first. */
-  notifications: Notification[];
-  /** Count the bell badges (Teams' unread count, cleared locally when seen). */
+  /** The notifications panel's three activity streams (newest-first each), one
+   *  per tab: Activity, Mentions, Following. */
+  notifications: Record<NotificationTab, Notification[]>;
+  /** Count the bell badges: unread in the Activity stream, cleared locally when
+   *  the panel is seen. Activity is the superset (a mention also appears there),
+   *  so it is the single source for the badge — Mentions/Following never
+   *  double-count it. */
   notificationsUnread: number;
   /** A pending request to scroll the open conversation to a specific message
    *  (set when a notification is opened). The pane consumes it, paging older if
@@ -149,7 +154,7 @@ function initialState(): AppState {
     update: null,
     draft: "",
     replyingTo: null,
-    notifications: [],
+    notifications: { activity: [], mentions: [], following: [] },
     notificationsUnread: 0,
     pendingScroll: null,
     typingByConversation: {},
@@ -664,30 +669,44 @@ export class TeamsController {
   // mark-read method we call yet.
   private notificationsSeenAt = 0;
 
-  /** Refresh the activity feed. Best-effort: a failure leaves the current feed
-   *  untouched and never surfaces a fatal error (the panel just shows stale or
-   *  empty state). Called on startup and on every `notifications_changed`. */
+  /** Refresh all three activity streams. Best-effort: a failure leaves the
+   *  current feeds untouched and never surfaces a fatal error (the panel just
+   *  shows stale or empty state). Called on startup and on every
+   *  `notifications_changed`. */
   private async loadNotifications(): Promise<void> {
     try {
-      const feed = await this.backend.notifications();
-      this.set({ notifications: feed.items });
+      const feeds = await this.backend.notifications();
+      this.set({
+        notifications: {
+          activity: feeds.activity.items,
+          mentions: feeds.mentions.items,
+          following: feeds.following.items,
+        },
+      });
       this.recomputeUnread();
     } catch {
       // ignore — notifications are non-critical
     }
   }
 
+  /** The badge counts unread Activity entries newer than the seen mark. Activity
+   *  is the superset stream, so a mention (which also lands in Mentions) is
+   *  counted once, here. */
   private recomputeUnread(): void {
-    const unread = this.get().notifications.filter(
+    const unread = this.get().notifications.activity.filter(
       (n) => !n.is_read && n.timestamp > this.notificationsSeenAt,
     ).length;
     if (unread !== this.get().notificationsUnread) this.set({ notificationsUnread: unread });
   }
 
-  /** Clear the bell badge once the user has opened the panel, by marking every
-   *  current entry as seen. The badge re-appears when a newer activity arrives. */
+  /** Clear the bell badge once the user has opened the panel, by marking the
+   *  Activity stream's newest entry as seen. The badge re-appears when a newer
+   *  activity arrives. */
   markNotificationsSeen(): void {
-    const latest = this.get().notifications.reduce((max, n) => Math.max(max, n.timestamp), 0);
+    const latest = this.get().notifications.activity.reduce(
+      (max, n) => Math.max(max, n.timestamp),
+      0,
+    );
     this.notificationsSeenAt = Math.max(this.notificationsSeenAt, latest);
     this.recomputeUnread();
   }

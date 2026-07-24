@@ -15,7 +15,7 @@ import type {
   Conversation,
   LinkMetadataResult,
   MessagePage,
-  NotificationFeed,
+  NotificationFeeds,
   ReadReceiptsResult,
   ReplyTo,
 } from "./protocol";
@@ -238,10 +238,11 @@ export class Backend {
       key,
     });
   }
-  /** Fetch the activity feed (reactions/mentions/replies directed at us). Not a
-   *  chat — the backend fetches it fresh from Teams and decodes each entry. */
-  notifications(limit?: number): Promise<NotificationFeed> {
-    return this.request<NotificationFeed>("notifications", limit ? { limit } : {});
+  /** Fetch the notifications panel's three activity streams — Activity, Mentions
+   *  and Following — in one round-trip. None is a chat: the backend fetches them
+   *  fresh from Teams (concurrently) and decodes each entry. */
+  notifications(limit?: number): Promise<NotificationFeeds> {
+    return this.request<NotificationFeeds>("notifications", limit ? { limit } : {});
   }
   /** Fetch a conversation's read receipts ("seen by"): every OTHER member's read
    *  position. Best-effort on the backend — a thread with receipts disabled or
