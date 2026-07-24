@@ -17,6 +17,8 @@ import {
   channelLabel,
   channelPreviewLine,
   groupChannelsByTeam,
+  channelIsFavorite,
+  organizeChannels,
   shouldNotify,
   replyToPayload,
   copyableMessageText,
@@ -504,6 +506,58 @@ describe("groupChannelsByTeam", () => {
 
   it("returns an empty list for no channels", () => {
     expect(groupChannelsByTeam([])).toEqual([]);
+  });
+});
+
+describe("channelIsFavorite", () => {
+  it("falls back to the Teams-sourced value when there is no override", () => {
+    expect(channelIsFavorite(channel({ id: "x", is_favorite: true }), {})).toBe(true);
+    expect(channelIsFavorite(channel({ id: "x", is_favorite: false }), {})).toBe(false);
+  });
+
+  it("lets a local override win over the Teams value", () => {
+    const fav = channel({ id: "x", is_favorite: false });
+    expect(channelIsFavorite(fav, { x: true })).toBe(true);
+    const unfav = channel({ id: "x", is_favorite: true });
+    expect(channelIsFavorite(unfav, { x: false })).toBe(false);
+  });
+
+  it("treats only its own id's override, ignoring others", () => {
+    const c = channel({ id: "x", is_favorite: false });
+    expect(channelIsFavorite(c, { y: true })).toBe(false);
+  });
+});
+
+describe("organizeChannels", () => {
+  it("lifts favorites into a flat top list, preserving incoming order", () => {
+    const channels = [
+      channel({ id: "a-general", team_id: "A", team_name: "Alpha", name: "General" }),
+      channel({ id: "a-random", team_id: "A", team_name: "Alpha", name: "Random", is_favorite: true }),
+      channel({ id: "b-general", team_id: "B", team_name: "Beta", name: "General", is_favorite: true }),
+    ];
+    const { favorites, teams } = organizeChannels(channels, {});
+    // Favorites keep their incoming (Teams) order and are removed from their teams.
+    expect(favorites.map((c) => c.id)).toEqual(["a-random", "b-general"]);
+    expect(teams.map((g) => g.team_id)).toEqual(["A"]);
+    expect(teams[0]!.channels.map((c) => c.id)).toEqual(["a-general"]);
+  });
+
+  it("honours local overrides when deciding favorites", () => {
+    const channels = [
+      channel({ id: "a", team_id: "A", team_name: "Alpha", is_favorite: true }),
+      channel({ id: "b", team_id: "A", team_name: "Alpha", is_favorite: false }),
+    ];
+    // Override unfavorites the Teams-favorite and favorites the other.
+    const { favorites, teams } = organizeChannels(channels, { a: false, b: true });
+    expect(favorites.map((c) => c.id)).toEqual(["b"]);
+    expect(teams[0]!.channels.map((c) => c.id)).toEqual(["a"]);
+  });
+
+  it("has no favorites section when nothing is favorited", () => {
+    const channels = [channel({ id: "a", team_id: "A", team_name: "Alpha", is_favorite: false })];
+    const { favorites, teams } = organizeChannels(channels, {});
+    expect(favorites).toEqual([]);
+    expect(teams.map((g) => g.team_id)).toEqual(["A"]);
   });
 });
 

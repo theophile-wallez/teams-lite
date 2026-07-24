@@ -1,12 +1,12 @@
 import { useMemo, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Hash, MoonStar, Search, Settings as SettingsIcon, Sun } from "lucide-react";
+import { Hash, MoonStar, Search, Settings as SettingsIcon, Star, Sun } from "lucide-react";
 import {
+  channelIsFavorite,
   channelLabel,
-  channelPreviewLine,
   convLabel,
-  groupChannelsByTeam,
+  organizeChannels,
   previewLine,
   typingLabel,
   type Channel,
@@ -14,7 +14,7 @@ import {
 } from "~/lib/protocol";
 import type { SidebarTab } from "~/lib/store";
 import { cn } from "~/lib/utils";
-import { Avatar } from "./avatar";
+import { Avatar, tintFor } from "./avatar";
 import { useAppState, useController } from "./controller-context";
 import { NotificationsBell } from "./notifications-bell";
 import { StatusBar } from "./status-bar";
@@ -207,15 +207,23 @@ function ChatList(props: { selectedIndex: number; onSelect: (index: number) => v
   );
 }
 
-/** The team → channel tree (the Channels tab): each team is a titled section, its
- *  channels listed beneath (General first, courtesy of the backend sort). */
+/** The channel surface (the Channels tab): a pinned Favorites section on top, then
+ *  the team → channel tree. Teams and channels render in the user's own Microsoft
+ *  Teams order — the backend preserves the CSA array order and `organizeChannels`
+ *  keeps it, with General first within each team. Favorited channels are lifted
+ *  out of their team into the Favorites section. */
 function ChannelTree() {
   const channels = useAppState((s) => s.channels);
   const openId = useAppState((s) => s.openId);
+  const favorites = useAppState((s) => s.channelFavorites);
+  const controller = useController();
   const navigate = useNavigate();
-  const teams = useMemo(() => groupChannelsByTeam(channels), [channels]);
+  const { favorites: pinned, teams } = useMemo(
+    () => organizeChannels(channels, favorites),
+    [channels, favorites],
+  );
 
-  if (teams.length === 0) {
+  if (channels.length === 0) {
     return (
       <div
         data-testid="channels-empty"
@@ -226,26 +234,39 @@ function ChannelTree() {
     );
   }
 
+  const renderRow = (c: Channel) => (
+    <ChannelRow
+      key={c.id}
+      channel={c}
+      open={openId === c.id}
+      favorite={channelIsFavorite(c, favorites)}
+      onToggleFavorite={() => controller.toggleChannelFavorite(c.id)}
+      onClick={() =>
+        void navigate({ to: "/c/$conversationId", params: { conversationId: c.id } })
+      }
+    />
+  );
+
   return (
     <div
       data-testid="channels-scroll"
       className="flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2"
     >
+      {pinned.length > 0 && (
+        <section data-testid="favorites-group">
+          <h3 className="flex items-center gap-1.5 truncate px-2.5 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
+            <Star className="size-3 fill-amber-400 text-amber-400" strokeWidth={1.6} />
+            Favorites
+          </h3>
+          {pinned.map(renderRow)}
+        </section>
+      )}
       {teams.map((team) => (
         <section key={team.team_id} data-testid="team-group" data-team-id={team.team_id}>
           <h3 className="truncate px-2.5 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
             {team.team_name || "Team"}
           </h3>
-          {team.channels.map((c) => (
-            <ChannelRow
-              key={c.id}
-              channel={c}
-              open={openId === c.id}
-              onClick={() =>
-                void navigate({ to: "/c/$conversationId", params: { conversationId: c.id } })
-              }
-            />
-          ))}
+          {team.channels.map(renderRow)}
         </section>
       ))}
     </div>
@@ -345,83 +366,90 @@ function ConversationRow(props: {
   );
 }
 
-/** One channel row under its team. A leading `#` mirrors Teams' channel glyph;
- *  the preview line and unread dot match the chat rows for a consistent read. */
-function ChannelRow(props: { channel: Channel; open: boolean; onClick: () => void }) {
+/** One channel row: a colour-tinted `#` glyph (Teams' channel avatar), the channel
+ *  name, and a date — a single, vertically-centered line, no subtitle. Unread is
+ *  conveyed by a bolder name (Teams-style). A star toggles the channel's favorite
+ *  state: revealed on hover, and shown filled at all times once favorited. */
+function ChannelRow(props: {
+  channel: Channel;
+  open: boolean;
+  favorite: boolean;
+  onToggleFavorite: () => void;
+  onClick: () => void;
+}) {
   const c = props.channel;
   const unread = !c.is_read;
-  const preview = channelPreviewLine(c);
   const label = channelLabel(c);
   const time = useMemo(() => formatTime(c.last_message_time), [c.last_message_time]);
-  const typers = useAppState((s) => s.typingByConversation[c.id]);
-  const typingText = typers && typers.length > 0 ? typingLabel(typers.map((t) => t.name)) : "";
-  const emphasizeTitle = props.open || unread;
+  const emphasize = props.open || unread;
 
   return (
-    <button
-      type="button"
-      onClick={props.onClick}
-      data-testid="channel-row"
-      data-channel-id={c.id}
-      data-team-id={c.team_id}
-      data-open={props.open ? "true" : undefined}
-      data-unread={unread ? "true" : undefined}
-      aria-current={props.open ? "true" : undefined}
-      className={cn(
-        "my-0.5 flex h-[54px] w-full items-center gap-2.5 rounded-xl px-2.5 text-left transition-all",
-        props.open ? "bg-row-open shadow-card" : "hover:bg-row-hovered",
-      )}
-    >
-      <span
+    <div className="group/chan relative my-0.5">
+      <button
+        type="button"
+        onClick={props.onClick}
+        data-testid="channel-row"
+        data-channel-id={c.id}
+        data-team-id={c.team_id}
+        data-open={props.open ? "true" : undefined}
+        data-unread={unread ? "true" : undefined}
+        data-favorite={props.favorite ? "true" : undefined}
+        aria-current={props.open ? "true" : undefined}
         className={cn(
-          "grid size-7 shrink-0 place-items-center rounded-lg text-text-dim",
-          props.open ? "bg-primary/15 text-primary" : "bg-element",
+          "flex h-10 w-full items-center gap-2.5 rounded-lg px-2.5 text-left transition-colors",
+          props.open ? "bg-row-open shadow-card" : "hover:bg-row-hovered",
         )}
-        aria-hidden
       >
-        <Hash className="size-3.5" strokeWidth={1.8} />
-      </span>
+        <span
+          className={cn("grid size-6 shrink-0 place-items-center rounded-md", tintFor(c.id))}
+          aria-hidden
+        >
+          <Hash className="size-3.5" strokeWidth={2} />
+        </span>
 
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="flex items-center gap-2">
-          <span
-            data-testid="channel-name"
+        <span
+          data-testid="channel-name"
+          className={cn(
+            "min-w-0 flex-1 truncate text-[13px]",
+            emphasize ? "font-medium text-foreground" : "text-text-dim",
+          )}
+        >
+          {label}
+        </span>
+        {/* Date, hidden on hover and once favorited so the star can take its place. */}
+        {time && (
+          <time
             className={cn(
-              "truncate text-[13px]",
-              emphasizeTitle ? "font-medium text-foreground" : "text-text-dim",
+              "shrink-0 text-[11px] tabular-nums text-text-faint transition-opacity",
+              "group-hover/chan:opacity-0",
+              props.favorite && "opacity-0",
             )}
           >
-            {label}
-          </span>
-          {time && (
-            <time className="ml-auto shrink-0 text-[11px] tabular-nums text-text-faint">
-              {time}
-            </time>
-          )}
-        </span>
-        <span className="flex items-center gap-1.5">
-          {typingText ? (
-            <span className="flex flex-1 items-center gap-1.5 truncate text-xs text-primary">
-              <span className="typing-dots" aria-hidden="true">
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-              </span>
-              <span className="truncate">{typingText}</span>
-            </span>
-          ) : (
-            <span
-              className={cn(
-                "flex-1 truncate text-xs",
-                unread ? "text-text-dim" : "text-text-faint",
-              )}
-            >
-              {preview || " "}
-            </span>
-          )}
-          {unread && <span className="size-2 shrink-0 rounded-full bg-unread-dot" aria-hidden />}
-        </span>
-      </span>
-    </button>
+            {time}
+          </time>
+        )}
+      </button>
+
+      {/* Favorite toggle in the trailing corner: revealed on hover/focus and shown
+          filled at all times once the channel is favorited. */}
+      <button
+        type="button"
+        data-testid="channel-favorite"
+        aria-label={props.favorite ? "Unfavorite channel" : "Favorite channel"}
+        aria-pressed={props.favorite}
+        onClick={props.onToggleFavorite}
+        className={cn(
+          "absolute right-2 top-1/2 grid size-6 -translate-y-1/2 place-items-center rounded-md",
+          "text-text-faint transition-opacity hover:text-foreground focus-visible:opacity-100",
+          "opacity-0 group-hover/chan:opacity-100",
+          props.favorite && "opacity-100",
+        )}
+      >
+        <Star
+          className={cn("size-3.5", props.favorite && "fill-amber-400 text-amber-400")}
+          strokeWidth={1.8}
+        />
+      </button>
+    </div>
   );
 }

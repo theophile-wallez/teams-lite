@@ -12,7 +12,10 @@ const AVATAR_TINTS = [
   "bg-cyan-100 text-cyan-700 dark:bg-cyan-400/15 dark:text-cyan-300",
 ];
 
-function tintFor(seed: string): string {
+/** Deterministic avatar tint (bg + text colour classes) for a seed string, so the
+ *  same conversation/channel keeps its colour across renders. Exported so channel
+ *  rows can tint their `#` glyph the same way identity avatars are tinted. */
+export function tintFor(seed: string): string {
   let hash = 0;
   for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
   return AVATAR_TINTS[hash % AVATAR_TINTS.length]!;

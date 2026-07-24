@@ -118,6 +118,68 @@ test.describe("channels", () => {
     await expect(composer).toHaveValue("");
   });
 
+  test("favoriting a channel lifts it into a Favorites section and back", async ({ page }) => {
+    await gotoApp(page);
+    await openChannelsTab(page);
+
+    // The mock seeds no favorites, so there is no Favorites section to start.
+    await expect(page.locator('[data-testid="favorites-group"]')).toHaveCount(0);
+
+    const firstRow = page.locator('[data-testid="channel-row"]').first();
+    const channelId = await firstRow.getAttribute("data-channel-id");
+    const channelName = (
+      (await firstRow.locator('[data-testid="channel-name"]').textContent()) ?? ""
+    ).trim();
+    expect(channelId).toBeTruthy();
+
+    // Reveal (on hover) and click the row's star toggle.
+    await firstRow.hover();
+    await page.locator('[data-testid="channel-favorite"]').first().click();
+
+    // The channel is lifted into a pinned Favorites section and marked favorite,
+    // and is no longer listed under its team group.
+    const favorites = page.locator('[data-testid="favorites-group"]');
+    await expect(favorites).toBeVisible();
+    await expect(favorites.locator('[data-testid="channel-name"]').first()).toHaveText(channelName);
+    await expect(favorites.locator(`[data-channel-id="${channelId}"]`)).toHaveAttribute(
+      "data-favorite",
+      "true",
+    );
+    await expect(
+      page.locator(`[data-testid="team-group"] [data-channel-id="${channelId}"]`),
+    ).toHaveCount(0);
+
+    // Unfavoriting returns it to its team and drops the now-empty Favorites section.
+    await favorites.locator('[data-testid="channel-favorite"]').first().click();
+    await expect(page.locator('[data-testid="favorites-group"]')).toHaveCount(0);
+    await expect(
+      page.locator(`[data-testid="team-group"] [data-channel-id="${channelId}"]`),
+    ).toHaveCount(1);
+  });
+
+  test("a favorited channel persists across a reload", async ({ page }) => {
+    await gotoApp(page);
+    await openChannelsTab(page);
+
+    const firstRow = page.locator('[data-testid="channel-row"]').first();
+    const channelId = await firstRow.getAttribute("data-channel-id");
+    await firstRow.hover();
+    await page.locator('[data-testid="channel-favorite"]').first().click();
+    await expect(page.locator('[data-testid="favorites-group"]')).toBeVisible();
+
+    // The favorite override is persisted client-side, so it survives a reload even
+    // though the backend still reports the channel as non-favorite.
+    await page.reload();
+    await openChannelsTab(page);
+
+    const favorites = page.locator('[data-testid="favorites-group"]');
+    await expect(favorites).toBeVisible();
+    await expect(favorites.locator(`[data-channel-id="${channelId}"]`)).toHaveAttribute(
+      "data-favorite",
+      "true",
+    );
+  });
+
   test("runs clean with no console errors", async ({ page, consoleErrors }) => {
     await gotoApp(page);
     await openChannelsTab(page);

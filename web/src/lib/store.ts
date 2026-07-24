@@ -58,6 +58,11 @@ export type AppState = {
   channels: Channel[];
   /** The active sidebar tab (chats vs. channels). */
   sidebarTab: SidebarTab;
+  /** Local per-channel favorite overrides (channel id → favorited), persisted to
+   *  localStorage. Overrides the backend's Teams-sourced `is_favorite`; a channel
+   *  absent here falls back to that value. Drives the sidebar's pinned Favorites
+   *  section (see `channelIsFavorite`/`organizeChannels`). */
+  channelFavorites: Record<string, boolean>;
   openId: string | null;
   messages: ChatMessage[];
   loadingMessages: boolean;
@@ -100,12 +105,15 @@ const DRAFT_SAVE_DELAY_MS = 150;
 // stopped. Teams re-sends `Control/Typing` every few seconds while someone keeps
 // typing, so this is a safety net for a missed `Control/ClearTyping`.
 const TYPING_TIMEOUT_MS = 8000;
+// Where local channel-favorite overrides are persisted (client-only).
+const CHANNEL_FAVORITES_KEY = "teams-lite:channel-favorites";
 
 function initialState(): AppState {
   return {
     conversations: [],
     channels: [],
     sidebarTab: "chats",
+    channelFavorites: {},
     openId: null,
     messages: [],
     loadingMessages: false,
@@ -190,6 +198,7 @@ export class TeamsController {
     this.started = true;
 
     this.applyPersistedAppearance();
+    this.applyPersistedFavorites();
     this.wireEvents();
 
     try {
@@ -409,6 +418,46 @@ export class TeamsController {
   /** Switch the sidebar between the chat list and the channel tree. */
   setSidebarTab(tab: SidebarTab): void {
     if (this.get().sidebarTab !== tab) this.set({ sidebarTab: tab });
+  }
+
+  /** Load the persisted local channel-favorite overrides into state. Best-effort
+   *  and SSR-safe: any failure (no localStorage, malformed JSON) leaves the empty
+   *  default, so the backend's Teams-sourced `is_favorite` stands alone. */
+  private applyPersistedFavorites(): void {
+    try {
+      const raw = localStorage.getItem(CHANNEL_FAVORITES_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object") {
+        const overrides: Record<string, boolean> = {};
+        for (const [id, fav] of Object.entries(parsed as Record<string, unknown>)) {
+          if (typeof fav === "boolean") overrides[id] = fav;
+        }
+        this.set({ channelFavorites: overrides });
+      }
+    } catch {
+      /* ignore — favorites are non-critical */
+    }
+  }
+
+  private persistFavorites(overrides: Record<string, boolean>): void {
+    try {
+      localStorage.setItem(CHANNEL_FAVORITES_KEY, JSON.stringify(overrides));
+    } catch {
+      /* ignore — a failed persist just doesn't survive reload */
+    }
+  }
+
+  /** Toggle a channel's favorite state, pinning it into (or out of) the sidebar's
+   *  Favorites section. Records a local override that wins over Teams' own
+   *  `is_favorite`, updates reactive state, and persists it. */
+  toggleChannelFavorite(id: string): void {
+    const base = this.get().channels.find((c) => c.id === id)?.is_favorite ?? false;
+    const overrides = this.get().channelFavorites;
+    const current = overrides[id] ?? base;
+    const next = { ...overrides, [id]: !current };
+    this.set({ channelFavorites: next });
+    this.persistFavorites(next);
   }
 
   // ---- notifications (activity feed) --------------------------------------

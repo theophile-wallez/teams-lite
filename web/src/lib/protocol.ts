@@ -547,6 +547,46 @@ export function groupChannelsByTeam(channels: Channel[]): TeamGroup[] {
   return groups;
 }
 
+/**
+ * Whether a channel is favorited, honouring a local override. The backend seeds
+ * `is_favorite` from Teams' own favorite/pinned state; the user can then toggle
+ * it locally (persisted client-side), and that override wins. Absent an override
+ * we fall back to Teams' value, so channels favorited in real Teams show as
+ * favorites out of the box.
+ */
+export function channelIsFavorite(c: Channel, overrides: Record<string, boolean>): boolean {
+  const override = overrides[c.id];
+  return override === undefined ? c.is_favorite : override;
+}
+
+/** The sidebar's channel sections: a flat Favorites list pinned at the top, then
+ *  the team → channel tree for everything else. Mirrors Microsoft Teams, where a
+ *  favorited channel is lifted into a top "Favorites" area. */
+export type ChannelSections = {
+  favorites: Channel[];
+  teams: TeamGroup[];
+};
+
+/**
+ * Split the (Teams-ordered) channel list into the pinned Favorites and the
+ * remaining team tree. Favorited channels are lifted out of their team into a
+ * single flat Favorites list, preserving the incoming order (the user's own
+ * Microsoft Teams order); the rest keep their team grouping via
+ * {@link groupChannelsByTeam}. Pure, so the sidebar re-renders deterministically.
+ */
+export function organizeChannels(
+  channels: Channel[],
+  overrides: Record<string, boolean>,
+): ChannelSections {
+  const favorites: Channel[] = [];
+  const rest: Channel[] = [];
+  for (const c of channels) {
+    if (channelIsFavorite(c, overrides)) favorites.push(c);
+    else rest.push(c);
+  }
+  return { favorites, teams: groupChannelsByTeam(rest) };
+}
+
 /** Should an incoming message raise a notification? Pure, so it is testable. */
 export function shouldNotify(
   msg: { conversation_id: string; is_self?: boolean },
