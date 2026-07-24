@@ -16,6 +16,7 @@ import type {
   LinkMetadataResult,
   MessagePage,
   NotificationFeed,
+  ReadReceiptsResult,
   ReplyTo,
 } from "./protocol";
 
@@ -242,11 +243,33 @@ export class Backend {
   notifications(limit?: number): Promise<NotificationFeed> {
     return this.request<NotificationFeed>("notifications", limit ? { limit } : {});
   }
+  /** Fetch a conversation's read receipts ("seen by"): every OTHER member's read
+   *  position. Best-effort on the backend — a thread with receipts disabled or
+   *  too many members resolves to an empty list, never an error. The positions
+   *  then refresh live via the `read_receipt` event. */
+  readReceipts(conversation: string): Promise<ReadReceiptsResult> {
+    return this.request<ReadReceiptsResult>("read_receipts", { conversation });
+  }
   /** Fetch one hosted-content media object (inline image or shared file) through
    *  the backend, which attaches the session credentials the browser lacks. The
    *  bytes come back base64-encoded so they ride the same JSON WebSocket. */
   fetchMedia(url: string): Promise<{ content_type: string; data_base64: string }> {
     return this.request<{ content_type: string; data_base64: string }>("fetch_media", { url });
+  }
+
+  /** Fetch a real profile photo — a person (`kind: "user"`, `id` = their MRI) or a
+   *  Teams "team" group (`kind: "team"`, `id` = its AAD group id) — through the
+   *  backend, which holds the credentials the browser lacks. `found` is false when
+   *  the subject has no photo set, so the caller can fall back to initials and
+   *  negative-cache the miss. Bytes come back base64-encoded over the same JSON WS. */
+  fetchAvatar(
+    kind: "user" | "team",
+    id: string,
+  ): Promise<{ found: boolean; content_type?: string; data_base64?: string }> {
+    return this.request<{ found: boolean; content_type?: string; data_base64?: string }>(
+      "fetch_avatar",
+      { kind, id },
+    );
   }
 
   /** Read the non-secret app settings (GitLab host + whether a token is stored). */

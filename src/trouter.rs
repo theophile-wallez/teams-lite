@@ -74,6 +74,7 @@ pub trait CredentialProvider: Send + Sync {
 ///   reconnection past the ~1h token lifetime re-mints the skypetoken + ic3).
 /// - `events` receives batches of parsed chat messages as they arrive.
 /// - `typing` receives ephemeral typing/presence signals.
+/// - `receipts` receives ephemeral read-receipt (consumption-horizon) updates.
 /// - `calls` receives raw native-calling frames (experimental; only populated when
 ///   calling is enabled via `TEAMS_LITE_CALLING=1`).
 /// - `status` receives lifecycle transitions (Connecting/Connected/Disconnected).
@@ -86,6 +87,7 @@ pub async fn run(
     epid: String,
     events: mpsc::UnboundedSender<Vec<Message>>,
     typing: mpsc::UnboundedSender<crate::trouter_events::TypingEvent>,
+    receipts: mpsc::UnboundedSender<crate::trouter_events::ReadReceiptEvent>,
     calls: mpsc::UnboundedSender<crate::trouter_events::CallFrame>,
     status: mpsc::UnboundedSender<Status>,
 ) {
@@ -100,7 +102,7 @@ pub async fn run(
         // etc.) treat it like a disconnect and back off. connect_once only
         // returns on disconnect/error, so we ignore its result either way.
         if let Ok(Credentials { session, ic3 }) = creds.credentials().await {
-            let _ = connect_once(&http, &session, &ic3, &epid, &events, &typing, &calls, &status).await;
+            let _ = connect_once(&http, &session, &ic3, &epid, &events, &typing, &receipts, &calls, &status).await;
         }
         // If the consumer is gone, stop.
         if events.is_closed() || status.is_closed() {
@@ -113,6 +115,10 @@ pub async fn run(
 }
 
 /// One full connect → listen cycle. Returns when the socket closes or errors.
+// The credentials/ids plus the four fan-out sinks (messages, typing, receipts,
+// calls) and the status channel are genuinely distinct inputs threaded from `run`;
+// bundling them would only obscure the flow, so allow the wider signature.
+#[allow(clippy::too_many_arguments)]
 async fn connect_once(
     http: &reqwest::Client,
     sess: &Session,
@@ -120,6 +126,7 @@ async fn connect_once(
     epid: &str,
     events: &mpsc::UnboundedSender<Vec<Message>>,
     typing: &mpsc::UnboundedSender<crate::trouter_events::TypingEvent>,
+    receipts: &mpsc::UnboundedSender<crate::trouter_events::ReadReceiptEvent>,
     calls: &mpsc::UnboundedSender<crate::trouter_events::CallFrame>,
     status: &mpsc::UnboundedSender<Status>,
 ) -> Result<()> {
@@ -222,6 +229,11 @@ async fn connect_once(
                                         // A dropped typing receiver is non-fatal: presence is
                                         // best-effort, so keep the chat stream alive.
                                         let _ = typing.send(t);
+                                    }
+                                    for r in rt.read_receipts {
+                                        // Read receipts are best-effort too: a dropped
+                                        // receiver must never take down the chat stream.
+                                        let _ = receipts.send(r);
                                     }
                                     for c in rt.calls {
                                         // Best-effort like typing: a dropped calls
@@ -421,11 +433,12 @@ mod tests {
         let provider = CountingProvider { calls: calls.clone() };
         let (ev_tx, ev_rx) = mpsc::unbounded_channel::<Vec<Message>>();
         let (ty_tx, _ty_rx) = mpsc::unbounded_channel::<crate::trouter_events::TypingEvent>();
+        let (rr_tx, _rr_rx) = mpsc::unbounded_channel::<crate::trouter_events::ReadReceiptEvent>();
         let (call_tx, _call_rx) = mpsc::unbounded_channel::<crate::trouter_events::CallFrame>();
         let (st_tx, mut st_rx) = mpsc::unbounded_channel::<Status>();
 
         let handle = tokio::spawn(async move {
-            run(provider, "epid-test".to_string(), ev_tx, ty_tx, call_tx, st_tx).await;
+            run(provider, "epid-test".to_string(), ev_tx, ty_tx, rr_tx, call_tx, st_tx).await;
         });
 
         // Wait until the provider has been asked at least twice (proves it was

@@ -150,6 +150,42 @@ describe("Backend request/response", () => {
     backend.close();
   });
 
+  it("frames a fetch_avatar request with kind and id, resolving the photo result", async () => {
+    const { backend, socket } = await connected();
+
+    const promise = backend.fetchAvatar("team", "group-guid");
+
+    const frame = JSON.parse(socket.sent[0]!) as {
+      id: number;
+      method: string;
+      params?: Record<string, unknown>;
+    };
+    expect(frame.method).toBe("fetch_avatar");
+    expect(frame.params).toEqual({ kind: "team", id: "group-guid" });
+
+    socket.simulateMessage(
+      JSON.stringify({
+        id: frame.id,
+        result: { found: true, content_type: "image/jpeg", data_base64: "AAAA" },
+      }),
+    );
+    await expect(promise).resolves.toEqual({
+      found: true,
+      content_type: "image/jpeg",
+      data_base64: "AAAA",
+    });
+    backend.close();
+  });
+
+  it("resolves fetch_avatar with found=false when the subject has no photo", async () => {
+    const { backend, socket } = await connected();
+    const promise = backend.fetchAvatar("user", "8:orgid:nobody");
+    const frame = JSON.parse(socket.sent[0]!) as { id: number };
+    socket.simulateMessage(JSON.stringify({ id: frame.id, result: { found: false } }));
+    await expect(promise).resolves.toEqual({ found: false });
+    backend.close();
+  });
+
   it("rejects immediately when not connected", async () => {
     const backend = new Backend("ws://test");
     await expect(backend.open("c1")).rejects.toThrow("not connected");

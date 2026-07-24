@@ -58,6 +58,10 @@ export type Conversation = {
   is_hidden: boolean;
   thread_type: string;
   draft: string;
+  /** For a 1:1 chat, the other party's MRI — used to fetch their real profile
+   *  photo (see `TeamsController.loadAvatar`). Empty/absent for groups and for
+   *  1:1s with no message from the other party yet; the UI falls back to initials. */
+  avatar_mri?: string;
 };
 
 /** One team channel, as returned by the `channels` method (mirrors the Rust
@@ -70,6 +74,9 @@ export type Channel = {
   id: string;
   team_id: string;
   team_name: string;
+  /** The parent team's AAD group id (bare GUID), used to fetch the team's photo.
+   *  Empty/absent when Teams did not report one; the UI keeps the tinted `#` glyph. */
+  team_group_id?: string;
   name: string;
   /** The team's General channel; sorted first within its team. */
   is_general: boolean;
@@ -87,6 +94,8 @@ export type Channel = {
 export type TeamGroup = {
   team_id: string;
   team_name: string;
+  /** The team's AAD group id (bare GUID), for its photo. Empty when unknown. */
+  group_id: string;
   channels: Channel[];
 };
 
@@ -187,6 +196,26 @@ export type CallSignalFrame = {
   /** The fully-decoded calling envelope. Shape is proprietary and still being learned. */
   body: unknown;
 };
+
+/** One member's read position in a conversation ("seen by"), as returned by the
+ *  `read_receipts` method and pushed by the `read_receipt` event (see
+ *  src/bin/server.rs). Our own position is never included — we only ever show
+ *  who ELSE has read. `member` is the display name the backend resolved from
+ *  `member_mri` (may be empty when unknown); `last_read_message_id` is the id of
+ *  the last message this person has read, used to anchor their avatar. */
+export type ReadReceipt = {
+  member_mri: string;
+  member: string;
+  last_read_message_id: string;
+  /** When they read it (epoch ms), or 0 when unknown. */
+  read_time_ms: number;
+};
+
+/** Result of the `read_receipts` method: every OTHER member's read position. */
+export type ReadReceiptsResult = { receipts: ReadReceipt[] };
+
+/** Wire shape of the `read_receipt` live event: one member's read position moved. */
+export type ReadReceiptSignal = ReadReceipt & { conversation_id: string };
 
 
 /** One activity-feed entry (from the Teams `48:notifications` thread), decoded
@@ -530,6 +559,60 @@ export function mergeRefreshedHistoryPage(
   };
 }
 
+// ---- read receipts ("seen by") ---------------------------------------------
+
+/** Compare two Teams message ids by read order. Ids are arrival timestamps in
+ *  milliseconds, so a numeric compare orders them; a non-numeric id (rare) falls
+ *  back to a lexicographic compare so the function is always total. */
+function compareMessageIds(a: string, b: string): number {
+  const na = Number(a);
+  const nb = Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Map each currently-displayed message to the members who have read up to it —
+ * their "seen by" anchor. For every receipt, the anchor is the newest displayed
+ * message whose id is `<=` the member's last-read id (they have read everything
+ * up to and including it). A member who has read only messages older than the
+ * loaded window has no visible anchor and is omitted, so their avatar never
+ * floats above the history; it appears once they read into the loaded range.
+ *
+ * Each member appears at exactly one anchor (their latest read position). Within
+ * an anchor, members are ordered most-recently-read first. Pure and dependency-
+ * free so it is unit-testable and cheap to recompute as messages/receipts change.
+ */
+export function computeReadReceiptAnchors(
+  messages: Pick<ChatMessage, "id">[],
+  receipts: ReadReceipt[],
+): Map<string, ReadReceipt[]> {
+  const anchors = new Map<string, ReadReceipt[]>();
+  if (messages.length === 0) return anchors;
+
+  for (const receipt of receipts) {
+    // Walk newest → oldest and take the first displayed message the member has
+    // reached. `messages` is sorted oldest → newest, so scan from the end.
+    let anchorId: string | null = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const id = messages[i]!.id;
+      if (compareMessageIds(id, receipt.last_read_message_id) <= 0) {
+        anchorId = id;
+        break;
+      }
+    }
+    if (anchorId === null) continue; // read position is older than the window
+    const bucket = anchors.get(anchorId);
+    if (bucket) bucket.push(receipt);
+    else anchors.set(anchorId, [receipt]);
+  }
+
+  for (const bucket of anchors.values()) {
+    bucket.sort((a, b) => b.read_time_ms - a.read_time_ms);
+  }
+  return anchors;
+}
+
 // ---- conversation display helpers (ported from ui/src/app.tsx) -------------
 
 export function convLabel(c: Conversation): string {
@@ -589,10 +672,17 @@ export function groupChannelsByTeam(channels: Channel[]): TeamGroup[] {
   for (const c of channels) {
     let group = byTeam.get(c.team_id);
     if (!group) {
-      group = { team_id: c.team_id, team_name: c.team_name, channels: [] };
+      group = {
+        team_id: c.team_id,
+        team_name: c.team_name,
+        group_id: c.team_group_id ?? "",
+        channels: [],
+      };
       byTeam.set(c.team_id, group);
       groups.push(group);
     }
+    // A later row may carry the group id when the first (e.g. General) lacked it.
+    if (!group.group_id && c.team_group_id) group.group_id = c.team_group_id;
     group.channels.push(c);
   }
   return groups;

@@ -12,10 +12,10 @@
 //   event    (server -> client):  { "event": "<name>", "data": <v> }   (no id)
 //
 // Methods: ping | conversations | channels | open | backfill | set_draft | send
-//          | edit | react | notifications | fetch_media | get_settings
-//          | set_settings | enrich_link
+//          | edit | react | notifications | read_receipts | fetch_media | fetch_avatar
+//          | get_settings | set_settings | enrich_link
 // Events:  status | realtime_status | message | conversations_changed
-//          | channels_changed | typing | call
+//          | channels_changed | typing | call | read_receipt
 //
 // Run it (from the web/ directory):
 //   export PATH="$HOME/.bun/bin:$PATH"
@@ -72,6 +72,7 @@ type Channel = {
   id: string;
   team_id: string;
   team_name: string;
+  team_group_id: string;
   name: string;
   is_general: boolean;
   is_favorite: boolean;
@@ -642,6 +643,9 @@ function seedChannels(): void {
         id,
         team_id: team.id,
         team_name: team.name,
+        // In real tenants this is the AAD group id from the team's site info; the
+        // mock reuses the stable team id so each team resolves a team avatar.
+        team_group_id: team.id,
         name: channelName,
         is_general: isGeneral,
         is_favorite: false,
@@ -1055,6 +1059,36 @@ function mockMedia(url: string): { content_type: string; data_base64: string } {
   };
 }
 
+/** Synthesize a deterministic "profile photo" for an avatar subject, mirroring
+ *  the Rust backend's `fetch_avatar` result shape `{ found, content_type,
+ *  data_base64 }`. We draw a head-and-shoulders silhouette on a per-id gradient
+ *  so a real photo is visibly distinct from the flat tinted initials. Roughly
+ *  one subject in three deterministically has *no* photo (`found: false`), so
+ *  the UI's initials fallback is exercised too — as on a real tenant where many
+ *  people and teams never set a picture. */
+function mockAvatar(
+  kind: "user" | "team",
+  id: string,
+): { found: true; content_type: string; data_base64: string } | { found: false } {
+  if (hashString(`${kind}:${id}`) % 3 === 0) return { found: false };
+  const hue = hashString(id) % 360;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">` +
+    `<defs><radialGradient id="g" cx="35%" cy="28%" r="90%">` +
+    `<stop offset="0%" stop-color="hsl(${hue} 80% 72%)"/>` +
+    `<stop offset="100%" stop-color="hsl(${(hue + 40) % 360} 68% 42%)"/>` +
+    `</radialGradient></defs>` +
+    `<rect width="192" height="192" fill="url(#g)"/>` +
+    `<circle cx="96" cy="76" r="34" fill="rgba(255,255,255,0.92)"/>` +
+    `<rect x="38" y="120" width="116" height="88" rx="44" fill="rgba(255,255,255,0.92)"/>` +
+    `</svg>`;
+  return {
+    found: true,
+    content_type: "image/svg+xml",
+    data_base64: Buffer.from(svg, "utf8").toString("base64"),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // App settings + GitLab link enrichment — stand-in for the Rust store settings
 // table (`get_settings`/`set_settings`) and the `gitlab` module (`enrich_link`).
@@ -1303,6 +1337,34 @@ type MockNotification = {
 
 const injectedNotifications: MockNotification[] = [];
 
+// ---------------------------------------------------------------------------
+// Read receipts ("seen by") — mirrors protocol.ts `ReadReceipt`. Empty by
+// default so opening a conversation shows no avatars until a test injects one
+// via POST /__test/emit {kind:"read_receipt"}; the RPC and the live event both
+// read from this same per-conversation store, keyed by member MRI.
+// ---------------------------------------------------------------------------
+
+type ReadReceipt = {
+  member_mri: string;
+  member: string;
+  last_read_message_id: string;
+  read_time_ms: number;
+};
+
+const injectedReceipts = new Map<string, Map<string, ReadReceipt>>();
+
+/** Upsert one member's read position for a conversation (newest write wins),
+ *  returning the stored receipt so the caller can broadcast it. */
+function setReceipt(conversationId: string, receipt: ReadReceipt): ReadReceipt {
+  let byMri = injectedReceipts.get(conversationId);
+  if (!byMri) {
+    byMri = new Map();
+    injectedReceipts.set(conversationId, byMri);
+  }
+  byMri.set(receipt.member_mri, receipt);
+  return receipt;
+}
+
 // Stable base time for the static sample — captured once so repeated
 // `notifications` calls return identical timestamps (a per-call Date.now() would
 // drift forward and spuriously re-mark entries unread after the panel is seen).
@@ -1389,6 +1451,15 @@ function dispatch(method: string, params: unknown): unknown {
       return { unread: items.filter((n) => !n.is_read).length, items };
     }
 
+    case "read_receipts": {
+      // "Seen by": every OTHER member's read position. Empty until a test injects
+      // one (mirrors the real backend returning nothing for a receipts-disabled
+      // or channel thread); our own position is never included.
+      const id = requireString(params, "conversation");
+      const byMri = injectedReceipts.get(id);
+      return { receipts: byMri ? [...byMri.values()] : [] };
+    }
+
     case "open": {
       const id = requireString(params, "conversation");
       const t = threadFor(id);
@@ -1441,6 +1512,13 @@ function dispatch(method: string, params: unknown): unknown {
     case "fetch_media": {
       const url = requireString(params, "url");
       return mockMedia(url);
+    }
+
+    case "fetch_avatar": {
+      const o = asObject(params);
+      const kind = o.kind === "team" ? "team" : "user";
+      const id = requireString(params, "id");
+      return mockAvatar(kind, id);
     }
 
     case "get_settings":
@@ -1713,6 +1791,34 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           typeof body.participant_count === "number" ? body.participant_count : 0,
       });
       return Response.json({ ok: true }, { status: 200 });
+    }
+    // Move a member's read position ("seen by") and broadcast it, exactly like
+    // the Rust backend's `read_receipt` event, so the E2E suite can drive the
+    // avatar row deterministically. Defaults anchor the reader to the newest
+    // message (avatars land at the bottom), and persist so a re-open's
+    // `read_receipts` fetch returns the same position.
+    if (body.kind === "read_receipt") {
+      // Clear all injected read positions — lets a serial E2E suite reset the
+      // shared mock between specs so "seen by" avatars never leak across tests.
+      if (body.clear === true) {
+        injectedReceipts.clear();
+        return Response.json({ ok: true, cleared: true }, { status: 200 });
+      }
+      const conversation =
+        typeof body.conversation === "string" ? body.conversation : (order[0] ?? "");
+      const t = threadFor(conversation);
+      const lastReadMessageId =
+        typeof body.last_read_message_id === "string"
+          ? body.last_read_message_id
+          : (t?.messages.at(-1)?.id ?? "");
+      const receipt = setReceipt(conversation, {
+        member_mri: typeof body.member_mri === "string" ? body.member_mri : "8:orgid:riley",
+        member: typeof body.member === "string" ? body.member : "Riley Carter",
+        last_read_message_id: lastReadMessageId,
+        read_time_ms: typeof body.read_time_ms === "number" ? body.read_time_ms : Date.now(),
+      });
+      broadcast("read_receipt", { conversation_id: conversation, ...receipt });
+      return Response.json({ ok: true, receipt }, { status: 200 });
     }
     // Set a reaction on an existing message (from someone else by default), then
     // re-broadcast it — exercises the received-reaction chips deterministically.

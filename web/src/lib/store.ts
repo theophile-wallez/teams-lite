@@ -30,6 +30,8 @@ import {
   type LiveStatus,
   type MessagePage,
   type Notification,
+  type ReadReceipt,
+  type ReadReceiptSignal,
   type ReplyTo,
   type TypingName,
   type TypingSignal,
@@ -99,6 +101,11 @@ export type AppState = {
    *  timeout). AWARENESS only — teams-lite has no media stack, so the banner these
    *  drive can point the user at the chat but never answer or place a call. */
   incomingCalls: IncomingCall[];
+  /** Read receipts ("seen by") for the OPEN conversation: every other member's
+   *  read position, used to anchor their avatar to the last message they read.
+   *  Refreshed on open and kept live by the `read_receipt` event. Empty for the
+   *  no-open / channel / receipts-disabled cases. */
+  readReceipts: ReadReceipt[];
   /** User appearance preference (System follows the OS). */
   appearance: Appearance;
   /** Concrete theme currently applied to <html> (what CSS keys off). */
@@ -147,6 +154,7 @@ function initialState(): AppState {
     pendingScroll: null,
     typingByConversation: {},
     incomingCalls: [],
+    readReceipts: [],
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
     settings: { gitlab_host: "gitlab.com", gitlab_token_set: false },
@@ -179,11 +187,25 @@ export class TeamsController {
   // terminal `call` event ever arrives (see CALL_RING_TIMEOUT_MS).
   private callTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+  // Read receipts per conversation: convId -> (memberMri -> read position).
+  // Non-reactive; the reactive `readReceipts` slice is derived for the open
+  // conversation whenever this changes. Seeded by the `read_receipts` fetch on
+  // open and updated in place by live `read_receipt` events.
+  private receiptsByConv = new Map<string, Map<string, ReadReceipt>>();
+
   // Media proxy cache: hosted-content URL -> a promise of a blob object URL.
   // Deduplicates concurrent loads of the same image and makes re-mounts/re-opens
   // instant. The created object URLs are revoked on dispose.
   private mediaCache = new Map<string, Promise<string>>();
   private mediaObjectUrls: string[] = [];
+
+  // Avatar cache: "user:<mri>" / "team:<groupId>" -> a promise of a blob object
+  // URL, or null when the subject has NO photo. The null is a deliberate negative
+  // cache — it is kept so a person/team without a photo is asked for only once —
+  // whereas a transient failure is evicted so a later render can retry (mirrors
+  // the media cache). Object URLs are revoked on dispose.
+  private avatarCache = new Map<string, Promise<string | null>>();
+  private avatarObjectUrls: string[] = [];
 
   // GitLab link-enrichment cache: URL -> a promise of its metadata (or null when
   // not enrichable). Deduplicates concurrent/repeat lookups of the same link
@@ -260,9 +282,13 @@ export class TeamsController {
     this.typingByConv.clear();
     for (const t of this.callTimers.values()) clearTimeout(t);
     this.callTimers.clear();
+    this.receiptsByConv.clear();
     for (const url of this.mediaObjectUrls) URL.revokeObjectURL(url);
     this.mediaObjectUrls = [];
     this.mediaCache.clear();
+    for (const url of this.avatarObjectUrls) URL.revokeObjectURL(url);
+    this.avatarObjectUrls = [];
+    this.avatarCache.clear();
     this.linkCache.clear();
     this.backend.close();
     this.started = false;
@@ -313,6 +339,8 @@ export class TeamsController {
       const f = raw as CallSignalFrame;
       console.info("[call_signal]", f.url, f.call_id, f.body);
     });
+
+    on("read_receipt", (raw) => this.onReadReceipt(raw as ReadReceiptSignal));
 
     on("messages_updated", (raw) => {
       const d = raw as { conversation: string; messages: ChatMessage[]; has_more: boolean };
@@ -501,6 +529,55 @@ export class TeamsController {
     return channel?.name || undefined;
   }
 
+  // ---- read receipts ("seen by") -------------------------------------------
+
+  /** Fetch a conversation's read receipts and seed the per-conversation cache,
+   *  then publish them if that conversation is still open. Best-effort: a
+   *  failure (or a channel / receipts-disabled thread returning nothing) just
+   *  leaves no "seen by" avatars. Live movement arrives via `read_receipt`. */
+  private async loadReadReceipts(convId: string): Promise<void> {
+    let receipts: ReadReceipt[];
+    try {
+      const res = await this.backend.readReceipts(convId);
+      receipts = res.receipts ?? [];
+    } catch {
+      return; // best-effort — keep whatever we already have (usually nothing)
+    }
+    const byMri = new Map<string, ReadReceipt>();
+    for (const r of receipts) byMri.set(r.member_mri, r);
+    this.receiptsByConv.set(convId, byMri);
+    if (this.get().openId === convId) this.publishReadReceipts(convId);
+  }
+
+  /** Fold a live `read_receipt` update into the per-conversation cache (upsert by
+   *  MRI so a member's position only ever moves forward in practice) and refresh
+   *  the open conversation's reactive slice. */
+  private onReadReceipt(sig: ReadReceiptSignal): void {
+    const convId = sig.conversation_id;
+    const mri = sig.member_mri;
+    if (!convId || !mri) return;
+    let byMri = this.receiptsByConv.get(convId);
+    if (!byMri) {
+      byMri = new Map();
+      this.receiptsByConv.set(convId, byMri);
+    }
+    byMri.set(mri, {
+      member_mri: mri,
+      member: sig.member,
+      last_read_message_id: sig.last_read_message_id,
+      read_time_ms: sig.read_time_ms,
+    });
+    if (this.get().openId === convId) this.publishReadReceipts(convId);
+  }
+
+  /** Publish a conversation's current read receipts into reactive state, but only
+   *  while it is the open one (the slice is single-conversation). */
+  private publishReadReceipts(convId: string): void {
+    if (this.get().openId !== convId) return;
+    const byMri = this.receiptsByConv.get(convId);
+    this.set({ readReceipts: byMri ? [...byMri.values()] : [] });
+  }
+
   // ---- conversations -------------------------------------------------------
 
   private async loadConversations(): Promise<void> {
@@ -654,6 +731,7 @@ export class TeamsController {
     this.draftCache.set(id, nextDraft);
 
     const cached = this.messageCache.get(id);
+    const cachedReceipts = this.receiptsByConv.get(id);
     this.set({
       openId: id,
       replyingTo: null,
@@ -664,7 +742,14 @@ export class TeamsController {
       messages: cached?.messages ?? [],
       hasMoreOlder: cached?.has_more ?? false,
       loadingMessages: !cached,
+      // Show any cached "seen by" positions instantly on re-open; the fetch below
+      // (and live `read_receipt` events) then reconcile them.
+      readReceipts: cachedReceipts ? [...cachedReceipts.values()] : [],
     });
+
+    // Fetch the current read positions best-effort — never blocks the open, and a
+    // channel / receipts-disabled thread just resolves to no avatars.
+    void this.loadReadReceipts(id);
 
     try {
       const res = await this.backend.open(id);
@@ -684,7 +769,8 @@ export class TeamsController {
   closeConversation(): void {
     const id = this.get().openId;
     if (id) this.flushDraft(id);
-    this.set({ openId: null, replyingTo: null });
+    // The read-receipts slice is single-conversation — drop it when nothing is open.
+    this.set({ openId: null, replyingTo: null, readReceipts: [] });
   }
 
   async loadOlderMessages(): Promise<void> {
@@ -778,6 +864,37 @@ export class TeamsController {
 
     this.mediaCache.set(url, pending);
     pending.catch(() => this.mediaCache.delete(url));
+    return pending;
+  }
+
+  /** Resolve a real profile photo to a local blob object URL, fetching the bytes
+   *  through the backend proxy — a person (`kind: "user"`, `id` = their MRI) or a
+   *  Teams "team" group (`kind: "team"`, `id` = its AAD group id). Resolves to
+   *  `null` when the subject has no photo, so the caller falls back to initials.
+   *  Cached and de-duplicated per identity: a "no photo" miss is cached so it is
+   *  never re-requested, while a transient failure is evicted for a later retry.
+   *  Returns `null` immediately for an empty id. */
+  loadAvatar(kind: "user" | "team", id: string): Promise<string | null> {
+    if (!id) return Promise.resolve(null);
+    const key = `${kind}:${id}`;
+    const cached = this.avatarCache.get(key);
+    if (cached) return cached;
+
+    const pending = (async () => {
+      const res = await this.backend.fetchAvatar(kind, id);
+      if (!res.found || !res.data_base64) return null;
+      const blob = new Blob([base64ToArrayBuffer(res.data_base64)], {
+        type: res.content_type || "application/octet-stream",
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      this.avatarObjectUrls.push(objectUrl);
+      return objectUrl;
+    })();
+
+    this.avatarCache.set(key, pending);
+    // Evict only on a transient failure (network/backend error), so it can retry;
+    // a resolved `null` (no photo) stays cached to avoid re-asking.
+    pending.catch(() => this.avatarCache.delete(key));
     return pending;
   }
 

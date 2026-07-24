@@ -263,8 +263,14 @@ function ChannelTree() {
       )}
       {teams.map((team) => (
         <section key={team.team_id} data-testid="team-group" data-team-id={team.team_id}>
-          <h3 className="truncate px-2.5 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
-            {team.team_name || "Team"}
+          <h3 className="flex items-center gap-2 px-2.5 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
+            <Avatar
+              seed={team.team_id}
+              label={team.team_name || "Team"}
+              photo={team.group_id ? { kind: "team", id: team.group_id } : undefined}
+              className="size-5 rounded-md text-[9px]"
+            />
+            <span className="truncate">{team.team_name || "Team"}</span>
           </h3>
           {team.channels.map(renderRow)}
         </section>
@@ -309,7 +315,11 @@ function ConversationRow(props: {
             : "hover:bg-row-hovered",
       )}
     >
-      <Avatar seed={c.id} label={label} />
+      <Avatar
+        seed={c.id}
+        label={label}
+        photo={c.avatar_mri ? { kind: "user", id: c.avatar_mri } : undefined}
+      />
 
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex items-center gap-2">

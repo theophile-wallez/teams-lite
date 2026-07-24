@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { cn } from "~/lib/utils";
+import { useController } from "./controller-context";
 
 // Soft, low-saturation avatar tints, chosen deterministically per seed so a
 // conversation keeps the same colour across renders. Muted on purpose to honour
@@ -29,24 +31,87 @@ export function avatarInitials(label: string): string {
   return (words[0]![0]! + words[words.length - 1]![0]!).toUpperCase();
 }
 
+/** A real profile photo to load for an avatar: a person (`kind: "user"`, `id` =
+ *  their MRI) or a Teams "team" group (`kind: "team"`, `id` = its AAD group id).
+ *  When the subject has no photo, the avatar keeps its tinted initials. */
+export type AvatarPhoto = { kind: "user" | "team"; id: string };
+
+/**
+ * Resolve a profile photo to a blob object URL through the controller, or `null`
+ * while loading / when there is none (fall back to initials). Safe to call with
+ * `undefined` (no fetch). Loads client-side only via an effect, so SSR always
+ * renders the initials and hydration is stable.
+ */
+function useAvatarPhoto(photo?: AvatarPhoto): string | null {
+  const controller = useController();
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!photo || !photo.id) {
+      setSrc(null);
+      return;
+    }
+    let active = true;
+    setSrc(null);
+    controller
+      .loadAvatar(photo.kind, photo.id)
+      .then((url) => {
+        if (active) setSrc(url);
+      })
+      .catch(() => {
+        // transient failure — stay on initials; loadAvatar evicts so a later
+        // render retries.
+      });
+    return () => {
+      active = false;
+    };
+  }, [controller, photo?.kind, photo?.id]);
+
+  return src;
+}
+
 /**
  * A rounded-square identity avatar with deterministic tint and initials. Size
  * and text size are controlled by the caller through `className` (defaults to a
  * 36px sidebar avatar). Pass `initials` to override the computed initials — e.g.
  * a single letter for a dense, overlapping avatar stack where two letters would
  * be clipped by the overlap.
+ *
+ * Pass `photo` to load the subject's real profile picture: it renders over the
+ * initials once fetched (and fades in), and the initials remain the fallback
+ * while loading, when the subject has no photo, or if the image fails to decode.
  */
-export function Avatar(props: { seed: string; label: string; initials?: string; className?: string }) {
+export function Avatar(props: {
+  seed: string;
+  label: string;
+  initials?: string;
+  className?: string;
+  photo?: AvatarPhoto;
+}) {
+  const photoUrl = useAvatarPhoto(props.photo);
   return (
     <span
       className={cn(
-        "grid size-9 shrink-0 place-items-center rounded-xl text-[13px] font-semibold",
+        "relative grid size-9 shrink-0 place-items-center overflow-hidden rounded-xl text-[13px] font-semibold",
         tintFor(props.seed),
         props.className,
       )}
       aria-hidden
     >
       {props.initials ?? avatarInitials(props.label)}
+      {photoUrl && (
+        <img
+          src={photoUrl}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className="absolute inset-0 size-full rounded-[inherit] object-cover animate-in fade-in duration-200"
+          // If the blob fails to decode, drop it so the initials show through.
+          onError={(e) => {
+            e.currentTarget.style.display = "none";
+          }}
+        />
+      )}
     </span>
   );
 }
