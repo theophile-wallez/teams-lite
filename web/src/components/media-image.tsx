@@ -1,10 +1,9 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useState } from "react";
 import { Download, FileText, ImageOff, Loader2 } from "lucide-react";
-import { motion, useReducedMotion } from "motion/react";
+import Zoom from "react-medium-image-zoom";
 import { mediaNeedsProxy, type Attachment } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
-import { useImageLightbox } from "./image-lightbox";
 
 /**
  * An image from a chat message. Authenticated Teams hosted content (inline
@@ -16,17 +15,6 @@ import { useImageLightbox } from "./image-lightbox";
  */
 export function MediaImage(props: { src: string; alt?: string; className?: string }) {
   const controller = useController();
-  const { openImage, closingLayoutId } = useImageLightbox();
-  const reduceMotion = useReducedMotion();
-  const layoutId = useId();
-  // Normally this thumbnail carries the shared-layout id so opening morphs the
-  // picture out of the list. But while *its* lightbox is closing we drop the id
-  // so the exiting overlay copy (fixed, top-most layer) owns the shrink; if the
-  // thumbnail kept it, Motion would promote this in-list node as the morph lead
-  // and, trapped in the clipped, lower-stacked scroller, it would draw *under*
-  // the messages. The `key` forces a real remount on that flip — toggling the
-  // prop alone leaves the persistent node in Motion's group.
-  const morphs = !reduceMotion && closingLayoutId !== layoutId;
   const proxied = mediaNeedsProxy(props.src);
   // Public images render straight from their URL; proxied ones wait for a blob.
   const [objectUrl, setObjectUrl] = useState<string | null>(proxied ? null : props.src);
@@ -84,31 +72,34 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
 
   const alt = props.alt || "image";
   return (
-    <button
-      type="button"
-      onClick={() => openImage({ src: objectUrl, alt, layoutId: reduceMotion ? undefined : layoutId })}
-      aria-label={props.alt ? `View image: ${props.alt}` : "View image"}
-      className={cn(
-        "block w-fit max-w-full cursor-zoom-in rounded-xl transition-opacity duration-150 ease-out hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-        props.className,
-      )}
-    >
-      <motion.img
-        key={morphs ? layoutId : `${layoutId}-closing`}
-        {...(morphs ? { layoutId } : {})}
-        // Never animate in: a thumbnail should just appear at its slot. This
-        // also kills the re-entry pop when it rejoins the group after a close —
-        // otherwise Motion animates the freshly-mounted node from the overlay's
-        // stale last projection back to rest.
-        initial={false}
-        data-testid="message-image"
-        src={objectUrl}
-        alt={alt}
-        loading="lazy"
-        onError={() => setFailed(true)}
-        className="max-h-80 max-w-full rounded-xl object-contain shadow-card"
-      />
-    </button>
+    // Click-to-zoom is delegated to react-medium-image-zoom: it portals a native
+    // <dialog> (opened with showModal → the top layer) to <body>, so the
+    // enlarged picture and its zoom/close transition are never clipped by, nor
+    // drawn under, the message scroller — the failure the previous hand-rolled
+    // Motion morph kept hitting. It also centres the picture with a symmetric
+    // margin on every side. The wrapping span shrink-wraps the thumbnail and
+    // carries `props.className` (e.g. the inline image's `my-1`) at the same
+    // depth the old trigger button did, so the image-only "atelier mat" still
+    // zeroes that margin (see `.image-mat` in app.css). `wrapElement="span"`
+    // keeps the whole subtree phrasing content — valid inside a rich-text <p>.
+    <span className={cn("block w-fit max-w-full", props.className)}>
+      <Zoom
+        wrapElement="span"
+        classDialog="teams-image-zoom"
+        zoomMargin={32}
+        a11yNameButtonZoom="View image"
+        a11yNameButtonUnzoom="Close image preview"
+      >
+        <img
+          data-testid="message-image"
+          src={objectUrl}
+          alt={alt}
+          loading="lazy"
+          onError={() => setFailed(true)}
+          className="block max-h-80 max-w-full rounded-xl object-contain shadow-card transition-opacity duration-150 ease-out hover:opacity-90"
+        />
+      </Zoom>
+    </span>
   );
 }
 

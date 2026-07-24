@@ -4,6 +4,11 @@
  * which keeps the app local-first and offline-safe. */
 @import "@fontsource-variable/inter";
 @import "./theme.css";
+/* Medium-style click-to-zoom for chat images (react-medium-image-zoom). Its
+ * modal is a native <dialog> portaled to <body>, so the enlarged picture is
+ * never clipped by, or drawn under, the message list. The overlay is restyled
+ * from its shipped white to the app's dark scrim further down this file. */
+@import "react-medium-image-zoom/dist/styles.css";
 
 /* teams-lite web — Clean UI Tailwind wiring.
  *
@@ -179,6 +184,25 @@
 .image-mat > * > * {
   margin-top: 0;
   margin-bottom: 0;
+}
+
+/* react-medium-image-zoom: the library lays its thumbnail wrappers out as
+   inline spans and ships a white fullscreen modal overlay. Restore block flow
+   so the wrappers shrink-wrap the picture (and there is no inline baseline gap
+   beneath it), and repaint the backdrop in the app's dark scrim. Both fade
+   states share the one black so the 0.3s transition never washes through grey.
+   Scoped to `.teams-image-zoom` (our `classDialog`) so only chat-image modals
+   are affected. */
+[data-rmiz],
+[data-rmiz-content] {
+  display: block;
+}
+.teams-image-zoom [data-rmiz-modal-overlay="hidden"] {
+  background-color: rgb(0 0 0 / 0);
+}
+.teams-image-zoom [data-rmiz-modal-overlay="visible"] {
+  background-color: rgb(0 0 0 / 0.8);
+  backdrop-filter: blur(4px);
 }
 
 /* TipTap rich-text composer. The editor renders raw ProseMirror HTML, so it

@@ -7,7 +7,6 @@ import { SettingsPane } from "./settings-pane";
 import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
 import { IncomingCallBanner } from "./incoming-call-banner";
-import { ImageLightboxProvider } from "./image-lightbox";
 import { Splash } from "./splash";
 import { TooltipProvider } from "./ui/tooltip";
 import { Button } from "./ui/button";
@@ -22,9 +21,7 @@ export function App() {
   return (
     <ControllerProvider>
       <TooltipProvider delayDuration={300}>
-        <ImageLightboxProvider>
-          <AppInner />
-        </ImageLightboxProvider>
+        <AppInner />
       </TooltipProvider>
     </ControllerProvider>
   );

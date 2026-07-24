@@ -51,18 +51,29 @@ test.describe("media (images + attachments)", () => {
 
     const images = page.locator('[data-testid="message-image"]');
     await expect.poll(() => images.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
-    await images.first().click();
+    const thumb = images.first();
+    // The zoom library ignores the click until the picture has decoded, so wait
+    // for it to actually load before clicking.
+    await expect(thumb).toBeVisible();
+    await expect
+      .poll(() => thumb.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0))
+      .toBe(true);
+    await thumb.click();
 
-    // The zoomed image shows the same proxied blob, over a modal backdrop.
-    const lightbox = page.locator('[data-testid="image-lightbox"]');
+    // react-medium-image-zoom opens a native <dialog> portaled to <body>, so the
+    // enlarged picture renders in the top layer, above the messages. Only the
+    // clicked image's dialog carries the `open` attribute.
+    const lightbox = page.locator("dialog[data-rmiz-modal][open]");
     await expect(lightbox).toBeVisible();
     await expect(lightbox).toHaveAttribute("role", "dialog");
-    const zoomed = page.locator('[data-testid="lightbox-image"]');
+    // The zoomed image shows the same proxied blob as the thumbnail.
+    const zoomed = lightbox.locator("img[data-rmiz-modal-img]");
     await expect(zoomed).toBeVisible();
     await expect(zoomed).toHaveAttribute("src", /^blob:/);
 
     // Escape closes the lightbox and must NOT also fall through to the app's
-    // global handler (which would leave the conversation).
+    // global handler (which would leave the conversation). The library catches
+    // Escape in the capture phase and stops propagation, so we stay put.
     await page.keyboard.press("Escape");
     await expect(lightbox).toHaveCount(0);
     await expect(page.locator('[data-testid="conversation-title"]')).toContainText("Media Gallery");
@@ -76,16 +87,22 @@ test.describe("media (images + attachments)", () => {
 
     const images = page.locator('[data-testid="message-image"]');
     await expect.poll(() => images.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
-    const lightbox = page.locator('[data-testid="image-lightbox"]');
+    const thumb = images.first();
+    await expect(thumb).toBeVisible();
+    await expect
+      .poll(() => thumb.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0))
+      .toBe(true);
+    const lightbox = page.locator("dialog[data-rmiz-modal][open]");
 
-    // Close button.
-    await images.first().click();
+    // Close button (the library's unzoom control, named via a11yNameButtonUnzoom).
+    await thumb.click();
     await expect(lightbox).toBeVisible();
-    await page.getByRole("button", { name: "Close image preview" }).click();
+    await lightbox.getByRole("button", { name: "Close image preview" }).click();
     await expect(lightbox).toHaveCount(0);
 
-    // Clicking the dimmed backdrop (the padding area, not the image) closes it.
-    await images.first().click();
+    // Clicking the dimmed area around the picture (the modal content, not the
+    // image itself) closes it.
+    await thumb.click();
     await expect(lightbox).toBeVisible();
     await lightbox.click({ position: { x: 8, y: 8 } });
     await expect(lightbox).toHaveCount(0);
