@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, Loader2, MessagesSquare, WifiOff } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ChevronDown, ChevronLeft, ChevronRight, Loader2, MessagesSquare, WifiOff } from "lucide-react";
 import {
   channelLabel,
   computeReadReceiptAnchors,
@@ -14,6 +14,7 @@ import { Avatar, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
 import { CallEventLine } from "./call-event-line";
 import { ReadReceipts } from "./read-receipts";
+import { groupThreads, type Thread } from "~/lib/threads";
 import { Composer } from "./composer";
 import { TypingIndicator } from "./typing-indicator";
 import { Button } from "./ui/button";
@@ -57,6 +58,17 @@ export function MessagePane(props: { onBack?: () => void }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [focusToken, setFocusToken] = useState(0);
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  // Which channel threads are expanded (keyed by root message id). Threads are
+  // collapsed by default — a thread shows its root post plus an "N replies" chip.
+  const [expandedThreads, setExpandedThreads] = useState<Set<string>>(new Set());
+  const toggleThread = useCallback((rootId: string) => {
+    setExpandedThreads((prev) => {
+      const next = new Set(prev);
+      if (next.has(rootId)) next.delete(rootId);
+      else next.add(rootId);
+      return next;
+    });
+  }, []);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
@@ -97,6 +109,27 @@ export function MessagePane(props: { onBack?: () => void }) {
     : openChannel?.team_group_id
       ? { kind: "team", id: openChannel.team_group_id }
       : undefined;
+
+  // Channels render as threads: the flat, seq-ordered page is regrouped by
+  // `thread_root_id` so a thread's root post and its replies sit together even
+  // though the API interleaves posts from different threads. Chats stay flat
+  // (`threads` is null). `replyRootOf` maps a reply's id back to its thread so a
+  // deep-link into a collapsed thread can auto-expand it.
+  const isChannel = openChannel !== null;
+  const { threads, replyRootOf } = useMemo(() => {
+    if (!isChannel) return { threads: null, replyRootOf: null };
+    return groupThreads(messages);
+  }, [isChannel, messages]);
+
+  // Deep-linking to a reply inside a collapsed thread: expand that thread so the
+  // scroll effect can find and center the target node.
+  useEffect(() => {
+    if (!replyRootOf || !pendingScroll || pendingScroll.convId !== openId) return;
+    const rootId = replyRootOf.get(pendingScroll.messageId);
+    if (rootId) {
+      setExpandedThreads((prev) => (prev.has(rootId) ? prev : new Set(prev).add(rootId)));
+    }
+  }, [replyRootOf, pendingScroll, openId]);
 
   const maybeFill = useCallback(() => {
     const el = viewportRef.current;
@@ -239,6 +272,37 @@ export function MessagePane(props: { onBack?: () => void }) {
     void controller.reactToMessage(m.id, key);
   };
 
+  // One rendered row: a system-event line or a message bubble, with its optional
+  // "seen by" receipts underneath. `prev`/`next` drive avatar/name chaining and
+  // are the visually adjacent rows (within a thread for channels, else the flat
+  // neighbours), not necessarily the raw array neighbours.
+  const renderMsg = (m: ChatMessage, prev?: ChatMessage, next?: ChatMessage) => {
+    const seenBy = readAnchors.get(m.id);
+    return (
+      <div key={m.id} className="contents">
+        {m.system_event ? (
+          <CallEventLine event={m.system_event} />
+        ) : (
+          <MessageBubble
+            message={m}
+            showSenderName={isGroup}
+            continuesAbove={sameAuthor(prev, m)}
+            continuesBelow={sameAuthor(m, next)}
+            editing={editingId === m.id}
+            highlighted={highlightId === m.id}
+            onReply={doReply}
+            onCopy={doCopy}
+            onReact={doReact}
+            onStartEdit={doStartEdit}
+            onSaveEdit={doSaveEdit}
+            onCancelEdit={() => setEditingId(null)}
+          />
+        )}
+        {seenBy && <ReadReceipts receipts={seenBy} />}
+      </div>
+    );
+  };
+
   if (!openId) {
     return (
       <section className="flex flex-1 flex-col items-center justify-center gap-4 bg-background">
@@ -328,32 +392,17 @@ export function MessagePane(props: { onBack?: () => void }) {
                   ) : null}
                 </div>
               )}
-              {messages.map((m, i) => {
-                const seenBy = readAnchors.get(m.id);
-                return (
-                  <div key={m.id} className="contents">
-                    {m.system_event ? (
-                      <CallEventLine event={m.system_event} />
-                    ) : (
-                      <MessageBubble
-                        message={m}
-                        showSenderName={isGroup}
-                        continuesAbove={sameAuthor(messages[i - 1], m)}
-                        continuesBelow={sameAuthor(m, messages[i + 1])}
-                        editing={editingId === m.id}
-                        highlighted={highlightId === m.id}
-                        onReply={doReply}
-                        onCopy={doCopy}
-                        onReact={doReact}
-                        onStartEdit={doStartEdit}
-                        onSaveEdit={doSaveEdit}
-                        onCancelEdit={() => setEditingId(null)}
-                      />
-                    )}
-                    {seenBy && <ReadReceipts receipts={seenBy} />}
-                  </div>
-                );
-              })}
+              {threads
+                ? threads.map((t) => (
+                    <ThreadGroup
+                      key={t.rootId}
+                      thread={t}
+                      expanded={expandedThreads.has(t.rootId)}
+                      onToggle={() => toggleThread(t.rootId)}
+                      renderMsg={renderMsg}
+                    />
+                  ))
+                : messages.map((m, i) => renderMsg(m, messages[i - 1], messages[i + 1]))}
             </div>
           )}
         </div>
@@ -376,6 +425,46 @@ export function MessagePane(props: { onBack?: () => void }) {
       <TypingIndicator />
       <Composer focusToken={focusToken} />
     </section>
+  );
+}
+
+/** One channel thread: the root post, an optional subject heading, and a
+ *  collapsible "N replies" block (collapsed by default). */
+function ThreadGroup(props: {
+  thread: Thread;
+  expanded: boolean;
+  onToggle: () => void;
+  renderMsg: (m: ChatMessage, prev?: ChatMessage, next?: ChatMessage) => ReactNode;
+}) {
+  const { thread, expanded, onToggle, renderMsg } = props;
+  const { subject, lead, replies } = thread;
+  const Chevron = expanded ? ChevronDown : ChevronRight;
+  return (
+    <div className="mb-3 rounded-2xl border border-border-subtle/60 bg-element/20 px-2 py-2">
+      {subject && (
+        <h3 className="px-1 pb-1 text-[13px] font-semibold text-foreground">{subject}</h3>
+      )}
+      {renderMsg(lead, undefined, undefined)}
+      {replies.length > 0 && (
+        <>
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={expanded}
+            data-testid="thread-toggle"
+            className="mt-1 flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
+          >
+            <Chevron className="size-3.5" strokeWidth={1.8} />
+            {replies.length} {replies.length === 1 ? "reply" : "replies"}
+          </button>
+          {expanded && (
+            <div className="mt-1 border-l-2 border-border-subtle/60 pl-2">
+              {replies.map((r, i) => renderMsg(r, replies[i - 1], replies[i + 1]))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

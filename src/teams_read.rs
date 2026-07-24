@@ -919,6 +919,8 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             attachments: "[]".to_string(),
             reactions: String::new(),
             system_event: event.to_string(),
+            thread_root_id: String::new(),
+            thread_subject: String::new(),
         });
     }
 
@@ -933,6 +935,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
     if is_system_frame_content(&content) {
         return None;
     }
+    let (thread_root_id, thread_subject) = parse_thread(m);
     Some(Message {
         id,
         conversation_id: conversation_id.to_string(),
@@ -944,7 +947,45 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         attachments: parse_attachments(m),
         reactions: parse_emotions(m),
         system_event: String::new(),
+        thread_root_id,
+        thread_subject,
     })
+}
+
+/// Extract the channel-thread linkage from a message resource: the thread ROOT's
+/// message id and (only on the root itself) its subject/title.
+///
+/// Teams tags every channel (`@thread.tacv2`) message with a top-level
+/// `rootMessageId`; the `;messageid=<root>` suffix of `conversationLink`/
+/// `conversationid` carries the SAME value and backs it up when the top-level
+/// field is absent. `properties.subject` is set only on the thread ROOT, so a
+/// reply returns an empty subject — the UI reads the title off the root message
+/// (whose `id` == root id). Chats and group messages have no thread structure and
+/// yield empty strings. Best-effort by design: a surprising shape yields empty,
+/// never an error, so it can never break message ingestion.
+fn parse_thread(m: &Value) -> (String, String) {
+    let root_id = m
+        .get("rootMessageId")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            m.get("conversationLink")
+                .or_else(|| m.get("conversationid"))
+                .and_then(|x| x.as_str())
+                .and_then(|link| link.split(";messageid=").nth(1))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default();
+    // `properties` may be a nested object or a JSON-encoded string (same double
+    // encoding as files/emotions); decode a level deeper when needed.
+    let props = match m.get("properties") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        _ => Value::Null,
+    };
+    let subject = props.get("subject").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    (root_id, subject)
 }
 
 /// Extract file attachments from a message's `properties` into the wire shape the
@@ -1795,6 +1836,7 @@ mod tests {
                 attachments: "[]".into(),
                 reactions: "[]".into(),
                 system_event: String::new(),
+                thread_root_id: String::new(), thread_subject: String::new(),
             })
             .collect();
         MessagePage { messages, next_before_ms: Some(oldest_ms), has_more_older: has_more }

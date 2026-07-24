@@ -1,0 +1,76 @@
+import { describe, it, expect } from "vitest";
+import { groupThreads } from "./threads";
+import type { ChatMessage } from "./protocol";
+
+// A minimal channel post; overrides fill in the thread linkage under test.
+function post(id: string, seq: number, over: Partial<ChatMessage> = {}): ChatMessage {
+  return {
+    id,
+    conversation_id: "19:chan@thread.tacv2",
+    seq,
+    compose_time: seq,
+    sender: "Someone",
+    content: `msg ${id}`,
+    ...over,
+  };
+}
+
+describe("groupThreads", () => {
+  it("groups a root post with its replies even when threads interleave", () => {
+    // seq order: rootA, rootB, replyA1, replyB1, replyA2 — as the flat page arrives.
+    const messages = [
+      post("a", 1, { thread_root_id: "a", thread_subject: "About cats" }),
+      post("b", 2, { thread_root_id: "b", thread_subject: "About dogs" }),
+      post("a1", 3, { thread_root_id: "a" }),
+      post("b1", 4, { thread_root_id: "b" }),
+      post("a2", 5, { thread_root_id: "a" }),
+    ];
+
+    const { threads } = groupThreads(messages);
+
+    expect(threads.map((t) => t.rootId)).toEqual(["a", "b"]);
+    expect(threads[0]!.subject).toBe("About cats");
+    expect(threads[0]!.lead.id).toBe("a");
+    expect(threads[0]!.replies.map((r) => r.id)).toEqual(["a1", "a2"]);
+    expect(threads[1]!.lead.id).toBe("b");
+    expect(threads[1]!.replies.map((r) => r.id)).toEqual(["b1"]);
+  });
+
+  it("orders threads by the earliest loaded post in each", () => {
+    const messages = [
+      post("b", 1, { thread_root_id: "b" }),
+      post("a", 2, { thread_root_id: "a" }),
+    ];
+    expect(groupThreads(messages).threads.map((t) => t.rootId)).toEqual(["b", "a"]);
+  });
+
+  it("maps each reply id back to its thread root", () => {
+    const { replyRootOf } = groupThreads([
+      post("a", 1, { thread_root_id: "a" }),
+      post("a1", 2, { thread_root_id: "a" }),
+    ]);
+    expect(replyRootOf.get("a1")).toBe("a");
+    expect(replyRootOf.has("a")).toBe(false); // the root is not a reply
+  });
+
+  it("stands in the earliest post as lead when the root isn't on the page", () => {
+    // Only replies loaded (root scrolled off / not yet paged in).
+    const { threads } = groupThreads([
+      post("a1", 3, { thread_root_id: "a" }),
+      post("a2", 4, { thread_root_id: "a" }),
+    ]);
+    expect(threads).toHaveLength(1);
+    expect(threads[0]!.lead.id).toBe("a1");
+    expect(threads[0]!.subject).toBe("");
+    expect(threads[0]!.replies.map((r) => r.id)).toEqual(["a2"]);
+  });
+
+  it("treats a post without thread linkage as its own single-post thread", () => {
+    // e.g. a system event, or a chat message that carries no thread_root_id.
+    const { threads } = groupThreads([post("x", 1)]);
+    expect(threads).toHaveLength(1);
+    expect(threads[0]!.rootId).toBe("x");
+    expect(threads[0]!.lead.id).toBe("x");
+    expect(threads[0]!.replies).toEqual([]);
+  });
+});

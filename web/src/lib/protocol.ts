@@ -118,6 +118,12 @@ export type ChatMessage = {
    *  is rendered as a centered line, not a chat bubble; `content` is empty. */
   system_event?: SystemEvent;
   is_self?: boolean;
+  /** Team-channel only: the id of the thread's ROOT message. All posts sharing a
+   *  value belong to one thread. Empty for non-channel (chat) messages. */
+  thread_root_id?: string;
+  /** Team-channel only: the thread title (Teams `properties.subject`), present on
+   *  the thread's ROOT post; empty on replies and on non-channel messages. */
+  thread_subject?: string;
 };
 
 export type ReplyTo = {
