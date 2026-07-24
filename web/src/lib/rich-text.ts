@@ -192,7 +192,13 @@ export function parseRichHtml(html: string): RichNode[] {
     }
 
     if (isClose) {
-      const mapped = TAG_MAP[rawName];
+      // A mention is opened as a <span> but recorded under its semantic
+      // "mention" tag, so its closing </span> must target that frame — otherwise
+      // it would be ignored (span isn't in TAG_MAP) and the mention would swallow
+      // every following sibling, tinting the rest of the message its accent color.
+      // Non-mention spans are unwrapped (no frame), so a stray </span> matches
+      // nothing and is harmlessly skipped by the unwinding loop below.
+      const mapped = rawName === "span" ? "mention" : TAG_MAP[rawName];
       if (!mapped || VOID_TAGS.has(rawName)) continue;
       // Close the nearest matching open frame, unwinding any that stayed open.
       for (let i = stack.length - 1; i > 0; i--) {

@@ -197,12 +197,50 @@ describe("parseRichHtml — images", () => {
 });
 
 describe("parseRichHtml — mentions", () => {
+  const mentionSpan = (name: string) =>
+    `<span itemscope itemtype="http://schema.skype.com/Mention" itemid="0">${name}</span>`;
+
   it("renders a Skype mention span as a mention node", () => {
-    const html =
-      '<span itemtype="http://schema.skype.com/Mention" itemid="0">Alice Smith</span>';
+    const html = mentionSpan("Alice Smith");
     const [m] = parseRichHtml(html);
     expect(m).toMatchObject({ tag: "mention" });
     expect(text(parseRichHtml(html))).toBe("Alice Smith");
+  });
+
+  it("closes the mention at its </span> so trailing text is not swallowed", () => {
+    // Regression: a mention's </span> was ignored (span isn't in TAG_MAP), so
+    // the mention frame stayed open and every following sibling became its child
+    // — tinting the rest of the message the mention's accent color.
+    const nodes = parseRichHtml(`Hello ${mentionSpan("Apurva")}, it's clear.`);
+    const mention = nodes.find((n) => n.type === "element" && n.tag === "mention");
+    // The mention contains ONLY the name; the trailing text is a sibling.
+    expect(mention).toMatchObject({ tag: "mention" });
+    expect(text(mention ? [mention] : [])).toBe("Apurva");
+    expect(nodes.filter((n) => n.type === "text").map((n) => n.type === "text" && n.text)).toEqual([
+      "Hello ",
+      ", it's clear.",
+    ]);
+    expect(text(nodes)).toBe("Hello Apurva, it's clear.");
+  });
+
+  it("keeps two mentions distinct with text between and after them", () => {
+    const html = `${mentionSpan("Ann")} and ${mentionSpan("Bob")} both know.`;
+    const nodes = parseRichHtml(html);
+    expect(tags(nodes)).toEqual(["mention", "mention"]);
+    const mentionText = nodes
+      .filter((n) => n.type === "element" && n.tag === "mention")
+      .map((n) => text([n]));
+    expect(mentionText).toEqual(["Ann", "Bob"]);
+    expect(text(nodes)).toBe("Ann and Bob both know.");
+  });
+
+  it("nests a mention inside formatting without leaking past it", () => {
+    const html = `<strong>hi ${mentionSpan("Cy")}</strong> bye`;
+    const nodes = parseRichHtml(html);
+    // The mention stays inside the <strong>; " bye" is outside both.
+    const strong = nodes.find((n) => n.type === "element" && n.tag === "strong");
+    expect(strong && strong.type === "element" && tags([strong])).toEqual(["strong", "mention"]);
+    expect(text(nodes)).toBe("hi Cy bye");
   });
 });
 
