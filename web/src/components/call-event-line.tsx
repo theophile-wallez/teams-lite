@@ -70,7 +70,7 @@ function CallParticipants(props: { participants: string[] }) {
             <span
               data-testid="call-avatar"
               className={cn(
-                "relative rounded-lg ring-2 ring-element transition-transform hover:z-20 hover:-translate-y-0.5",
+                "relative rounded-full ring-2 ring-element transition-transform hover:z-20 hover:-translate-y-0.5",
                 i > 0 && "-ml-2",
               )}
               style={{ zIndex: shown.length - i }}
@@ -79,12 +79,13 @@ function CallParticipants(props: { participants: string[] }) {
                 seed={name}
                 label={name}
                 initials={firstInitial(name)}
-                className="size-6 rounded-lg text-[10px]"
+                fallback="person"
+                className="size-6 text-[10px]"
               />
             </span>
           </TooltipTrigger>
           <TooltipContent className="flex items-center gap-2 px-2 py-1.5">
-            <Avatar seed={name} label={name} className="size-7 rounded-lg text-[10px]" />
+            <Avatar seed={name} label={name} fallback="person" className="size-7 text-[10px]" />
             <span className="text-xs font-medium text-popover-foreground">{name}</span>
           </TooltipContent>
         </Tooltip>
@@ -109,7 +110,7 @@ function CallParticipantsOverflow(props: { participants: string[]; overflow: num
             data-testid="call-participants-more"
             onClick={() => setOpen(true)}
             style={{ zIndex: 0 }}
-            className="relative -ml-2 grid size-6 place-items-center rounded-lg bg-accent text-[9px] font-semibold text-text-dim ring-2 ring-element transition-transform hover:z-20 hover:-translate-y-0.5 hover:text-foreground"
+            className="relative -ml-2 grid size-6 place-items-center rounded-full bg-accent text-[9px] font-semibold text-text-dim ring-2 ring-element transition-transform hover:z-20 hover:-translate-y-0.5 hover:text-foreground"
           >
             +{props.overflow}
           </button>
@@ -130,7 +131,7 @@ function CallParticipantsOverflow(props: { participants: string[]; overflow: num
               data-testid="call-participant-row"
               className="flex items-center gap-2.5 rounded-lg px-2 py-1.5"
             >
-              <Avatar seed={name} label={name} className="size-8" />
+              <Avatar seed={name} label={name} fallback="person" className="size-8" />
               <span className="text-sm text-foreground">{name}</span>
             </li>
           ))}

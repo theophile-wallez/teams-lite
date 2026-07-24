@@ -129,6 +129,7 @@ function NotificationRow(props: { notification: Notification; onOpen: () => void
           seed={n.actor_mri || n.actor_name}
           label={actorLabel(n)}
           photo={n.actor_mri ? { kind: "user", id: n.actor_mri } : undefined}
+          fallback="person"
           className="size-9"
         />
         {emoji && (

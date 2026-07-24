@@ -38,6 +38,7 @@ export function CommandPalette(props: { open: boolean; onOpenChange: (open: bool
                 seed={c.id}
                 label={convLabel(c)}
                 photo={c.avatar_mri ? { kind: "user", id: c.avatar_mri } : undefined}
+                fallback={c.kind === "one_on_one" ? "person" : "initials"}
                 className="size-6 rounded-lg text-[10px]"
               />
               <span className="truncate">{convLabel(c)}</span>
