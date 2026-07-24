@@ -513,11 +513,15 @@ impl Store {
         Ok(n)
     }
 
-    /// Upgrade call/meeting event rows that older builds stored as raw XML into the
-    /// structured `system_event` form the UI renders as a centered line. Finds rows
-    /// whose `content` still looks like a raw call frame and no `system_event` yet,
-    /// re-parses each via [`crate::teams_read::parse_call_event`], then blanks the
-    /// content and stores the parsed event.
+    /// Upgrade call/meeting event rows that older builds stored raw — either the
+    /// `Event/Call` XML frame or the meeting-thread JSON call marker
+    /// (`{…"callId"…"meetingOrganizerId"…}`) — into the structured `system_event`
+    /// form the UI renders as a centered line. Finds rows whose `content` still
+    /// looks like a raw call frame and that have no `system_event` yet, re-parses
+    /// each via [`crate::teams_read::parse_call_event`], then blanks the content and
+    /// stores the parsed event. The `LIKE` clauses are a cheap prefilter;
+    /// `parse_call_event` is the source of truth and skips anything it does not
+    /// recognise (so, e.g., an unrelated JSON body is left untouched).
     ///
     /// Meant to run once at startup (next to `purge_control_frames`); idempotent —
     /// a converted row has empty content and an unparseable one is skipped, so a
@@ -529,7 +533,8 @@ impl Store {
                  WHERE system_event = ''
                    AND (content LIKE '%<callEventType>%'
                      OR content LIKE '<ended%'
-                     OR content LIKE '<started%')",
+                     OR content LIKE '<started%'
+                     OR (content LIKE '%callId%' AND content LIKE '%meetingOrganizerId%'))",
             )?;
             let mapped = stmt.query_map([], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
@@ -1415,12 +1420,14 @@ mod tests {
             thread_root_id: String::new(), thread_subject: String::new(),
         };
 
-        // A legacy call-ended row stored as raw XML, plus a normal chat message.
+        // A legacy call-ended row stored as raw XML, a legacy meeting-thread JSON
+        // call marker (quotes escaped as on the wire), plus a normal chat message.
         s.insert_message(&frame("call1", "<ended/><partlist alt=\"\" count=\"2\"><part><displayName>Alice</displayName><duration>600</duration></part><part><displayName>Bob</displayName><duration>600</duration></part></partlist><callEventType>callEnded</callEventType>")).unwrap();
+        s.insert_message(&frame("call2", "{\\\"callId\\\":\\\"c\\\",\\\"meetingOrganizerId\\\":\\\"8:orgid:x\\\"}")).unwrap();
         s.insert_message(&frame("chat1", "<p>hello</p>")).unwrap();
 
         let converted = s.convert_legacy_call_events().unwrap();
-        assert_eq!(converted, 1, "only the raw call-event row is upgraded");
+        assert_eq!(converted, 2, "both raw call-event rows are upgraded");
 
         let msgs = s.newest_messages("c1", 50).unwrap();
         let call = msgs.iter().find(|m| m.id == "call1").unwrap();
@@ -1428,6 +1435,13 @@ mod tests {
         assert!(call.system_event.contains("\"event\":\"ended\""), "event captured: {}", call.system_event);
         assert!(call.system_event.contains("\"duration_seconds\":600"), "duration captured: {}", call.system_event);
         assert!(call.system_event.contains("\"participant_count\":2"), "participants captured: {}", call.system_event);
+
+        // The meeting-thread JSON marker is upgraded to a `started` event flagged
+        // `meeting`, its raw JSON content cleared.
+        let call2 = msgs.iter().find(|m| m.id == "call2").unwrap();
+        assert_eq!(call2.content, "", "raw JSON content is cleared once structured");
+        assert!(call2.system_event.contains("\"event\":\"started\""), "meeting call captured: {}", call2.system_event);
+        assert!(call2.system_event.contains("\"meeting\":true"), "meeting flag captured: {}", call2.system_event);
 
         // A normal chat message is left completely untouched.
         let chat = msgs.iter().find(|m| m.id == "chat1").unwrap();

@@ -47,6 +47,10 @@ export type SystemEvent = {
    *  means no identity was reported, so that avatar falls back to a coin. Absent
    *  on system events stored before photos were wired in. */
   participant_mris?: string[];
+  /** True for a meeting-thread call marker — a call that started inside a meeting
+   *  chat (`19:meeting_…@thread.v2`). Rendered identically to any other `started`
+   *  event, but the backend never rings for it (it carries no caller identity). */
+  meeting?: boolean;
 };
 
 export type Conversation = {

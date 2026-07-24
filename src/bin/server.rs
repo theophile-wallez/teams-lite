@@ -1289,6 +1289,13 @@ fn call_event_json(m: &Message, self_name: &str, self_mri: &str) -> Option<Value
     if event.get("kind").and_then(Value::as_str) != Some("call") {
         return None;
     }
+    // A meeting-thread call marker (`parse_call_event`'s JSON shape) is surfaced as
+    // a "Call started" line, but it is awareness noise rather than a personal
+    // incoming call — no caller identity, and it can arrive in backfill — so it
+    // must never raise OR clear the incoming-call banner.
+    if event.get("meeting").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
     let kind = event
         .get("event")
         .and_then(Value::as_str)
@@ -1788,6 +1795,18 @@ mod tests {
         // teams-lite must not ring us for our own outgoing call.
         let mut m = call_message("started");
         m.sender_mri = "8:orgid:me".into();
+        assert!(call_event_json(&m, "Alice", "8:orgid:me").is_none());
+    }
+
+    #[test]
+    fn meeting_call_marker_does_not_ring() {
+        // A meeting-thread call marker is surfaced as a "Call started" line, but it
+        // must never raise the incoming-call banner: it has no caller identity and
+        // can arrive in backfill. Even from another member it is silent.
+        let mut m = call_message("started");
+        m.system_event =
+            r#"{"kind":"call","event":"started","duration_seconds":0,"participant_count":0,"participants":[],"meeting":true}"#
+                .into();
         assert!(call_event_json(&m, "Alice", "8:orgid:me").is_none());
     }
 

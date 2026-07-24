@@ -781,22 +781,60 @@ fn is_system_frame_content(content: &str) -> bool {
     ["<partlist", "<meetingpolicyupdated"].iter().any(|root| c.starts_with(root))
 }
 
-/// Parse a Teams call/meeting `Event/Call` frame into the structured `system_event`
-/// payload the UI renders as a centered line, or `None` when the frame is not a
-/// call event.
+/// True when a message body is the JSON call marker Teams posts into a meeting
+/// chat (`19:meeting_…@thread.v2`) when a call starts there, e.g.
+/// `{\"callId\":\"…\",\"meetingOrganizerId\":\"…\",\"iCalUid\":\"…\",…}`. Its quotes are
+/// typically backslash-escaped on the wire, so recognition matches the bare key
+/// substrings (which survive either escaping) rather than parsing the JSON. Both
+/// `callId` and `meetingOrganizerId` are required so an unrelated JSON body cannot
+/// match, and the body must be a JSON object (`{`). Unlike the XML
+/// `<callEventType>` frame this carries no start/end, duration, or participant
+/// detail — [`parse_call_event`] turns it into a plain "Call started" line.
+fn is_meeting_call_json(content: &str) -> bool {
+    content.starts_with('{') && content.contains("callId") && content.contains("meetingOrganizerId")
+}
+
+/// Parse a Teams call/meeting frame into the structured `system_event` payload the
+/// UI renders as a centered line, or `None` when the frame is not a call event.
 ///
-/// A call frame is recognised by its `messagetype` (`Event/Call`) or, when that is
-/// absent/mis-reported (e.g. a legacy stored row, where `messagetype` is passed as
-/// `""`), by its body shape — a `<callEventType>` element or a leading
-/// `<ended>`/`<started>` marker. The Teams body looks like:
-/// `<ended/><partlist count="5"><part><displayName>…</displayName><duration>600</duration></part>…</partlist>…<callEventType>callEnded</callEventType>`.
+/// Two body shapes are recognised:
+///
+/// 1. The `Event/Call` XML frame — recognised by its `messagetype` (`Event/Call`)
+///    or, when that is absent/mis-reported (e.g. a legacy stored row, where
+///    `messagetype` is passed as `""`), by its body shape: a `<callEventType>`
+///    element or a leading `<ended>`/`<started>` marker. It looks like:
+///    `<ended/><partlist count="5"><part><displayName>…</displayName><duration>600</duration></part>…</partlist>…<callEventType>callEnded</callEventType>`
+///    and yields the event type, longest duration, and participant roster.
+///
+/// 2. The meeting-thread JSON call marker (see [`is_meeting_call_json`]) — the
+///    `{…"callId"…"meetingOrganizerId"…}` blob Teams posts into a meeting chat
+///    when a call starts there. It carries no start/end/duration/roster detail, so
+///    it always presents as a bare "Call started" line and is flagged `meeting` so
+///    the live path never rings for it (see `call_event_json` in `server.rs`).
 ///
 /// Returns a JSON object:
-/// `{"kind":"call","event":"ended|missed|started","duration_seconds":<max part duration>,"participant_count":<n>,"participants":["…"]}`.
+/// `{"kind":"call","event":"ended|missed|started","duration_seconds":<max part duration>,"participant_count":<n>,"participants":["…"],"meeting"?:true}`.
 /// A bare `<partlist>` roster (no call marker) is NOT a call event — it returns
 /// `None` and is dropped by [`is_system_frame_content`] instead.
 pub(crate) fn parse_call_event(messagetype: &str, content: &str) -> Option<Value> {
-    let lower = content.trim_start().to_ascii_lowercase();
+    let trimmed = content.trim_start();
+
+    // Shape 2 (the meeting-thread JSON marker) starts with `{`, so it can never
+    // collide with the `<…>` XML shape below. It carries nothing to extract, so
+    // return the fixed "started" event straight away.
+    if is_meeting_call_json(trimmed) {
+        return Some(serde_json::json!({
+            "kind": "call",
+            "event": "started",
+            "duration_seconds": 0,
+            "participant_count": 0,
+            "participants": [],
+            "participant_mris": [],
+            "meeting": true,
+        }));
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
     let is_call = messagetype.eq_ignore_ascii_case("Event/Call")
         || lower.contains("<calleventtype>")
         || lower.starts_with("<ended")
@@ -1647,6 +1685,20 @@ mod tests {
         assert_eq!(ev["duration_seconds"], 0);
         assert_eq!(ev["participant_count"], 0);
 
+        // The meeting-thread JSON call marker flows through the same path: kept as
+        // a `started` system event (flagged `meeting`), never a raw JSON bubble.
+        let meeting = json!({
+            "id": "8", "sequenceId": 8, "composetime": "2026-07-16T16:05:33.000Z",
+            "messagetype": "RichText/Media_Calling",
+            "content": "{\\\"callId\\\":\\\"c\\\",\\\"meetingOrganizerId\\\":\\\"8:orgid:x\\\"}",
+            "from": "8:orgid:x"
+        });
+        let parsed = parse_message(&meeting, "c1").expect("meeting call marker kept as a system message");
+        assert_eq!(parsed.content, "", "raw JSON must not become bubble content");
+        let ev: Value = serde_json::from_str(&parsed.system_event).unwrap();
+        assert_eq!(ev["event"], "started");
+        assert_eq!(ev["meeting"], true);
+
         // A normal chat message never carries a system_event.
         let chat = json!({
             "id": "7", "sequenceId": 7, "composetime": "2026-07-16T16:05:32.000Z",
@@ -1678,6 +1730,24 @@ mod tests {
         // The part carried no `identity` attribute → an empty MRI slot (still
         // present so the array stays aligned; the UI falls back to a coin).
         assert_eq!(ev["participant_mris"], json!([""]));
+
+        // The meeting-thread JSON call marker (quotes backslash-escaped, as on the
+        // wire) becomes a plain "started" event flagged `meeting`, with no roster —
+        // regardless of the reported messagetype.
+        let meeting = parse_call_event(
+            "RichText/Media_Calling",
+            "{\\\"scopeId\\\":\\\"s\\\",\\\"callId\\\":\\\"c\\\",\\\"meetingOrganizerId\\\":\\\"8:orgid:x\\\"}",
+        )
+        .unwrap();
+        assert_eq!(meeting["event"], "started");
+        assert_eq!(meeting["meeting"], true);
+        assert_eq!(meeting["participant_count"], 0);
+        assert_eq!(meeting["participants"].as_array().unwrap().len(), 0);
+        // Plain (unescaped) quotes are recognised too.
+        assert!(parse_call_event("", "{\"callId\":\"c\",\"meetingOrganizerId\":\"o\"}").is_some());
+        // A JSON body missing the meeting keys is NOT a call event.
+        assert!(parse_call_event("RichText/Html", "{\"foo\":1}").is_none());
+        assert!(parse_call_event("", "{\"callId\":\"c\"}").is_none());
     }
 
     #[test]
