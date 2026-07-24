@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS channels (
     id                    TEXT PRIMARY KEY,
     team_id               TEXT NOT NULL DEFAULT '',
     team_name             TEXT NOT NULL DEFAULT '',
+    team_group_id         TEXT NOT NULL DEFAULT '',
     display_name          TEXT NOT NULL DEFAULT '',
     is_general            INTEGER NOT NULL DEFAULT 0,
     is_favorite           INTEGER NOT NULL DEFAULT 0,
@@ -170,6 +171,10 @@ pub struct ConversationRow {
     pub thread_type: String,
     /// Unsent composer text, stored locally and scoped to this conversation.
     pub draft: String,
+    /// For a 1:1 chat, the other party's MRI — used to fetch their profile photo.
+    /// Empty for groups (no single face) and for 1:1s where we hold no message
+    /// from the other party yet; the UI then falls back to tinted initials.
+    pub avatar_mri: String,
 }
 
 /// Rich conversation metadata from a CSA sync, fed to [`Store::upsert_conversation_full`].
@@ -203,6 +208,9 @@ pub struct ChannelRow {
     pub id: String,
     pub team_id: String,
     pub team_name: String,
+    /// The parent team's AAD group id (bare GUID), used to fetch the team photo.
+    /// Empty when CSA omits it; the UI then keeps the tinted `#` glyph.
+    pub team_group_id: String,
     pub display_name: String,
     pub is_general: bool,
     pub is_favorite: bool,
@@ -223,6 +231,8 @@ pub struct ChannelUpdate<'a> {
     pub id: &'a str,
     pub team_id: &'a str,
     pub team_name: &'a str,
+    /// The parent team's AAD group id (bare GUID) for team-photo fetches.
+    pub team_group_id: &'a str,
     pub display_name: &'a str,
     pub is_general: bool,
     pub is_favorite: bool,
@@ -419,6 +429,11 @@ fn migrate(conn: &Connection) -> Result<()> {
     // CSA sync backfills the real positions.
     add_column("ALTER TABLE channels ADD COLUMN team_pos INTEGER NOT NULL DEFAULT 0")?;
     add_column("ALTER TABLE channels ADD COLUMN channel_pos INTEGER NOT NULL DEFAULT 0")?;
+
+    // team_group_id: the parent team's AAD group id, used to fetch the team photo.
+    // Stores created before this column existed get '' (no photo → tinted glyph);
+    // the next CSA sync backfills the real id.
+    add_column("ALTER TABLE channels ADD COLUMN team_group_id TEXT NOT NULL DEFAULT ''")?;
     Ok(())
 }
 
@@ -642,13 +657,16 @@ impl Store {
             "INSERT INTO channels (
                 id, team_id, team_name, display_name, is_general, is_favorite,
                 last_message_time, last_message_preview, last_message_sender,
-                last_message_from_me, is_read, team_pos, channel_pos)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                last_message_from_me, is_read, team_pos, channel_pos, team_group_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                 team_id = excluded.team_id,
                 team_name = CASE
                     WHEN excluded.team_name <> '' THEN excluded.team_name
                     ELSE channels.team_name END,
+                team_group_id = CASE
+                    WHEN excluded.team_group_id <> '' THEN excluded.team_group_id
+                    ELSE channels.team_group_id END,
                 display_name = CASE
                     WHEN excluded.display_name <> '' THEN excluded.display_name
                     ELSE channels.display_name END,
@@ -676,6 +694,7 @@ impl Store {
                 -- identical re-sync emits no `channels_changed`
                 excluded.team_id <> channels.team_id
                 OR (excluded.team_name <> '' AND excluded.team_name <> channels.team_name)
+                OR (excluded.team_group_id <> '' AND excluded.team_group_id <> channels.team_group_id)
                 OR (excluded.display_name <> '' AND excluded.display_name <> channels.display_name)
                 OR excluded.is_general <> channels.is_general
                 OR excluded.is_favorite <> channels.is_favorite
@@ -701,6 +720,7 @@ impl Store {
                 u.is_read as i64,
                 u.team_pos,
                 u.channel_pos,
+                u.team_group_id,
             ],
         )?;
         Ok(changed > 0)
@@ -747,7 +767,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, team_id, team_name, display_name, is_general, is_favorite,
                     last_message_time, last_message_preview, last_message_sender,
-                    last_message_from_me, is_read, draft
+                    last_message_from_me, is_read, draft, team_group_id
              FROM channels
              ORDER BY team_pos ASC, team_name ASC, team_id ASC,
                       is_general DESC, channel_pos ASC, display_name ASC, id ASC",
@@ -766,6 +786,7 @@ impl Store {
                 last_message_from_me: r.get::<_, i64>(9)? != 0,
                 is_read: r.get::<_, i64>(10)? != 0,
                 draft: r.get(11)?,
+                team_group_id: r.get(12)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1004,7 +1025,17 @@ impl Store {
                     c.is_pinned,
                     c.is_hidden,
                     c.thread_type,
-                    c.draft
+                    c.draft,
+                    -- the other party's MRI, for their profile photo. Only for 1:1
+                    -- chats (a group has no single face); the newest message sender
+                    -- that isn't us, mirroring the name-derivation filter above.
+                    CASE WHEN c.kind = 'one_on_one' THEN COALESCE((
+                        SELECT m.sender_mri FROM messages m
+                        WHERE m.conversation_id = c.id
+                          AND m.sender_mri IS NOT NULL AND m.sender_mri <> ''
+                          AND m.sender <> '' AND m.sender <> ?1
+                        ORDER BY m.seq DESC LIMIT 1
+                    ), '') ELSE '' END AS avatar_mri
              FROM conversations c
              -- a channel that leaked into the conversations table (a live post that
              -- landed before the CSA sync classified it) must never show in the chat
@@ -1028,6 +1059,7 @@ impl Store {
                 is_hidden: r.get::<_, i64>(10)? != 0,
                 thread_type: r.get(11)?,
                 draft: r.get(12)?,
+                avatar_mri: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1175,6 +1207,7 @@ mod tests {
             id,
             team_id,
             team_name,
+            team_group_id: "",
             display_name: name,
             is_general: false,
             is_favorite: false,
@@ -1640,6 +1673,39 @@ mod tests {
         }).unwrap();
         assert_eq!(s.other_party_name("dm", me).unwrap(), None);
         assert_eq!(s.conversations(me).unwrap()[0].display_name, "");
+    }
+
+    #[test]
+    fn avatar_mri_is_the_other_party_for_one_on_one_only() {
+        let s = Store::open_in_memory().unwrap();
+        let me = "Théophile WALLEZ";
+
+        // A 1:1: avatar_mri resolves to the other party's most-recent sender_mri.
+        s.upsert_conversation_full(&upd("dm", "", 500, ConversationKind::OneOnOne)).unwrap();
+        s.insert_message(&Message {
+            id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
+            sender: me.into(), sender_mri: "8:orgid:me".into(), content: "salut".into(),
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(),
+        }).unwrap();
+        s.insert_message(&Message {
+            id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
+            sender: "Leonor GROELL".into(), sender_mri: "8:orgid:leonor".into(), content: "hello".into(),
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(),
+        }).unwrap();
+
+        // A group: even though it has non-self senders, a group has no single face.
+        s.upsert_conversation_full(&upd("grp", "Team chat", 400, ConversationKind::Group)).unwrap();
+        s.insert_message(&Message {
+            id: "g1".into(), conversation_id: "grp".into(), seq: 1, compose_time: 1,
+            sender: "Grace HOPPER".into(), sender_mri: "8:orgid:grace".into(), content: "hi all".into(),
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(),
+        }).unwrap();
+
+        let by_id = |id: &str| {
+            s.conversations(me).unwrap().into_iter().find(|c| c.id == id).unwrap()
+        };
+        assert_eq!(by_id("dm").avatar_mri, "8:orgid:leonor");
+        assert_eq!(by_id("grp").avatar_mri, "", "a group has no single-person avatar");
     }
 
     #[test]

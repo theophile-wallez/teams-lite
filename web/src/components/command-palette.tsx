@@ -34,7 +34,12 @@ export function CommandPalette(props: { open: boolean; onOpenChange: (open: bool
                 props.onOpenChange(false);
               }}
             >
-              <Avatar seed={c.id} label={convLabel(c)} className="size-6 rounded-lg text-[10px]" />
+              <Avatar
+                seed={c.id}
+                label={convLabel(c)}
+                photo={c.avatar_mri ? { kind: "user", id: c.avatar_mri } : undefined}
+                className="size-6 rounded-lg text-[10px]"
+              />
               <span className="truncate">{convLabel(c)}</span>
             </CommandItem>
           ))}

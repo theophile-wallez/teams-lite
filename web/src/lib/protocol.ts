@@ -58,6 +58,10 @@ export type Conversation = {
   is_hidden: boolean;
   thread_type: string;
   draft: string;
+  /** For a 1:1 chat, the other party's MRI — used to fetch their real profile
+   *  photo (see `TeamsController.loadAvatar`). Empty/absent for groups and for
+   *  1:1s with no message from the other party yet; the UI falls back to initials. */
+  avatar_mri?: string;
 };
 
 /** One team channel, as returned by the `channels` method (mirrors the Rust
@@ -70,6 +74,9 @@ export type Channel = {
   id: string;
   team_id: string;
   team_name: string;
+  /** The parent team's AAD group id (bare GUID), used to fetch the team's photo.
+   *  Empty/absent when Teams did not report one; the UI keeps the tinted `#` glyph. */
+  team_group_id?: string;
   name: string;
   /** The team's General channel; sorted first within its team. */
   is_general: boolean;
@@ -87,6 +94,8 @@ export type Channel = {
 export type TeamGroup = {
   team_id: string;
   team_name: string;
+  /** The team's AAD group id (bare GUID), for its photo. Empty when unknown. */
+  group_id: string;
   channels: Channel[];
 };
 
@@ -538,10 +547,17 @@ export function groupChannelsByTeam(channels: Channel[]): TeamGroup[] {
   for (const c of channels) {
     let group = byTeam.get(c.team_id);
     if (!group) {
-      group = { team_id: c.team_id, team_name: c.team_name, channels: [] };
+      group = {
+        team_id: c.team_id,
+        team_name: c.team_name,
+        group_id: c.team_group_id ?? "",
+        channels: [],
+      };
       byTeam.set(c.team_id, group);
       groups.push(group);
     }
+    // A later row may carry the group id when the first (e.g. General) lacked it.
+    if (!group.group_id && c.team_group_id) group.group_id = c.team_group_id;
     group.channels.push(c);
   }
   return groups;

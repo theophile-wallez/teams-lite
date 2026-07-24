@@ -10,7 +10,7 @@
 //   event    (server -> client):  { "event": "<name>", "data": {...} }   (no id)
 //
 // Methods: conversations | open | backfill | set_draft | send | edit | react | notifications
-//          | fetch_media | get_settings | set_settings | enrich_link
+//          | fetch_media | fetch_avatar | get_settings | set_settings | enrich_link
 // Events:  status | message | conversations_changed | notifications_changed | typing | update_available
 //
 // No raw tokens are ever logged or sent.
@@ -28,8 +28,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    auth, retry, teams, teams_activity, teams_media, teams_profiles, teams_read, teams_send, trouter,
-    trouter_events,
+    auth, retry, teams, teams_activity, teams_avatars, teams_media, teams_profiles, teams_read,
+    teams_send, trouter, trouter_events,
 };
 use teams_lite::gitlab;
 
@@ -614,6 +614,49 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "content_type": media.content_type, "data_base64": data }))
         }
 
+        // Proxy a real profile photo (a person, or a Teams "team" group) back to
+        // the UI, which can't hold the credentials. The id is charset-validated in
+        // `teams_avatars` before it is put on the URL, and the request only ever
+        // targets a fixed Microsoft host. A subject with no photo answers `found:
+        // false` so the UI falls back to tinted initials (and can negative-cache).
+        "fetch_avatar" => {
+            let kind_str = param_str(params, "kind")?;
+            let kind = teams_avatars::AvatarKind::from_wire(&kind_str)
+                .with_context(|| format!("unknown avatar kind: {kind_str}"))?;
+            let id = param_str(params, "id")?;
+            anyhow::ensure!(
+                teams_avatars::is_valid_avatar_id(&id),
+                "malformed avatar id"
+            );
+            let http = ctx.http.clone();
+            let tokens = ctx.tokens.clone();
+            let media = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let tokens = tokens.clone();
+                    let id = id.clone();
+                    async move {
+                        // The photo endpoints take the profile-audience token, not
+                        // the CSA one `retry_on_auth` supplies. Read it fresh each
+                        // attempt so a 401 refresh in between is picked up.
+                        let profile = tokens.get(teams_profiles::PROFILE_SCOPE).await?;
+                        teams_avatars::fetch_avatar(&http, &session, &profile, kind, &id).await
+                    }
+                })
+                .await?;
+            match media {
+                Some(media) => {
+                    let data = base64::engine::general_purpose::STANDARD.encode(&media.bytes);
+                    Ok(json!({
+                        "found": true,
+                        "content_type": media.content_type,
+                        "data_base64": data,
+                    }))
+                }
+                None => Ok(json!({ "found": false })),
+            }
+        }
+
         "set_draft" => {
             let conv = param_str(params, "conversation")?;
             let text = param_str(params, "text")?;
@@ -937,7 +980,8 @@ fn conversations_json(rows: &[teams_lite::store::ConversationRow]) -> Value {
             "is_pinned": c.is_pinned,
             "is_hidden": c.is_hidden,
             "thread_type": c.thread_type,
-            "draft": c.draft
+            "draft": c.draft,
+            "avatar_mri": c.avatar_mri
         }))
         .collect::<Vec<_>>())
 }
@@ -953,6 +997,7 @@ fn channels_json(rows: &[teams_lite::store::ChannelRow]) -> Value {
             "id": c.id,
             "team_id": c.team_id,
             "team_name": c.team_name,
+            "team_group_id": c.team_group_id,
             "name": c.display_name,
             "is_general": c.is_general,
             "is_favorite": c.is_favorite,
@@ -1417,6 +1462,7 @@ mod tests {
                 id: "19:general@thread.tacv2",
                 team_id: "19:team@thread.tacv2",
                 team_name: "Engineering",
+                team_group_id: "00000000-1111-2222-3333-444444444444",
                 display_name: "General",
                 is_general: true,
                 is_favorite: false,
@@ -1437,6 +1483,7 @@ mod tests {
         assert_eq!(c["id"], "19:general@thread.tacv2");
         assert_eq!(c["team_id"], "19:team@thread.tacv2");
         assert_eq!(c["team_name"], "Engineering");
+        assert_eq!(c["team_group_id"], "00000000-1111-2222-3333-444444444444");
         assert_eq!(c["name"], "General");
         assert_eq!(c["is_general"], true);
         assert_eq!(c["last_message_preview"], "Ship it");

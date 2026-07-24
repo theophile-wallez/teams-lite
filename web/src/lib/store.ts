@@ -166,6 +166,14 @@ export class TeamsController {
   private mediaCache = new Map<string, Promise<string>>();
   private mediaObjectUrls: string[] = [];
 
+  // Avatar cache: "user:<mri>" / "team:<groupId>" -> a promise of a blob object
+  // URL, or null when the subject has NO photo. The null is a deliberate negative
+  // cache — it is kept so a person/team without a photo is asked for only once —
+  // whereas a transient failure is evicted so a later render can retry (mirrors
+  // the media cache). Object URLs are revoked on dispose.
+  private avatarCache = new Map<string, Promise<string | null>>();
+  private avatarObjectUrls: string[] = [];
+
   // GitLab link-enrichment cache: URL -> a promise of its metadata (or null when
   // not enrichable). Deduplicates concurrent/repeat lookups of the same link
   // across message re-renders and scrolling. A failed (transient) lookup is
@@ -242,6 +250,9 @@ export class TeamsController {
     for (const url of this.mediaObjectUrls) URL.revokeObjectURL(url);
     this.mediaObjectUrls = [];
     this.mediaCache.clear();
+    for (const url of this.avatarObjectUrls) URL.revokeObjectURL(url);
+    this.avatarObjectUrls = [];
+    this.avatarCache.clear();
     this.linkCache.clear();
     this.backend.close();
     this.started = false;
@@ -660,6 +671,37 @@ export class TeamsController {
 
     this.mediaCache.set(url, pending);
     pending.catch(() => this.mediaCache.delete(url));
+    return pending;
+  }
+
+  /** Resolve a real profile photo to a local blob object URL, fetching the bytes
+   *  through the backend proxy — a person (`kind: "user"`, `id` = their MRI) or a
+   *  Teams "team" group (`kind: "team"`, `id` = its AAD group id). Resolves to
+   *  `null` when the subject has no photo, so the caller falls back to initials.
+   *  Cached and de-duplicated per identity: a "no photo" miss is cached so it is
+   *  never re-requested, while a transient failure is evicted for a later retry.
+   *  Returns `null` immediately for an empty id. */
+  loadAvatar(kind: "user" | "team", id: string): Promise<string | null> {
+    if (!id) return Promise.resolve(null);
+    const key = `${kind}:${id}`;
+    const cached = this.avatarCache.get(key);
+    if (cached) return cached;
+
+    const pending = (async () => {
+      const res = await this.backend.fetchAvatar(kind, id);
+      if (!res.found || !res.data_base64) return null;
+      const blob = new Blob([base64ToArrayBuffer(res.data_base64)], {
+        type: res.content_type || "application/octet-stream",
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      this.avatarObjectUrls.push(objectUrl);
+      return objectUrl;
+    })();
+
+    this.avatarCache.set(key, pending);
+    // Evict only on a transient failure (network/backend error), so it can retry;
+    // a resolved `null` (no photo) stays cached to avoid re-asking.
+    pending.catch(() => this.avatarCache.delete(key));
     return pending;
   }
 

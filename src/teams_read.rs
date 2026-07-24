@@ -124,6 +124,10 @@ pub fn is_channel_thread_id(id: &str) -> bool {
 pub struct Team {
     pub id: String,
     pub display_name: String,
+    /// The AAD group id (a bare GUID) backing this team, from CSA
+    /// `teamSiteInformation.groupId`. This — NOT the team thread id — is what the
+    /// profile-picture endpoint accepts for a team photo. Empty when CSA omits it.
+    pub group_id: String,
     pub channels: Vec<Channel>,
 }
 
@@ -140,6 +144,10 @@ pub struct Channel {
     /// The parent team's display name, denormalized so the sidebar can group and
     /// label channels without a second lookup.
     pub team_name: String,
+    /// The parent team's AAD group id (bare GUID), denormalized so a channel row
+    /// can request its team's photo without walking back up to the team. Empty
+    /// when CSA omits it; the UI then falls back to a tinted `#` glyph.
+    pub team_group_id: String,
     pub display_name: String,
     /// True for the team's General channel (its id equals the team id, or CSA
     /// flags it `isGeneral`). The UI sorts General first within a team.
@@ -397,6 +405,7 @@ pub fn persist_channels(store: &Store, teams: &[Team]) -> (usize, usize) {
                 id: &c.id,
                 team_id: &c.team_id,
                 team_name: &c.team_name,
+                team_group_id: &c.team_group_id,
                 display_name: &c.display_name,
                 is_general: c.is_general,
                 is_favorite: c.is_favorite,
@@ -643,6 +652,20 @@ fn parse_teams_with_self(v: &Value, _self_mri: &str) -> Vec<Team> {
             continue;
         }
         let team_name = name_of(team);
+        // The AAD group id backing this team — the only id the team-photo endpoint
+        // accepts. It lives under `teamSiteInformation.groupId`; a couple of
+        // fallbacks cover payload variants seen across tenants.
+        // Extract the string at each level *before* falling back, so a present-
+        // but-null or non-string `teamSiteInformation.groupId` still falls through
+        // to the alternatives rather than short-circuiting the chain to empty.
+        let group_id = team
+            .get("teamSiteInformation")
+            .and_then(|s| s.get("groupId"))
+            .and_then(|x| x.as_str())
+            .or_else(|| team.get("groupId").and_then(|x| x.as_str()))
+            .or_else(|| team.get("aadGroupId").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .to_string();
 
         let mut channels = Vec::new();
         for ch in team.get("channels").and_then(|c| c.as_array()).into_iter().flatten() {
@@ -655,6 +678,7 @@ fn parse_teams_with_self(v: &Value, _self_mri: &str) -> Vec<Team> {
                 id: id.to_string(),
                 team_id: team_id.to_string(),
                 team_name: team_name.clone(),
+                team_group_id: group_id.clone(),
                 display_name: name_of(ch),
                 is_general,
                 is_favorite,
@@ -669,7 +693,7 @@ fn parse_teams_with_self(v: &Value, _self_mri: &str) -> Vec<Team> {
             });
         }
 
-        out.push(Team { id: team_id.to_string(), display_name: team_name, channels });
+        out.push(Team { id: team_id.to_string(), display_name: team_name, group_id, channels });
     }
     out
 }
@@ -1874,6 +1898,7 @@ mod tests {
             "teams": [{
                 "id": "19:team-general@thread.tacv2",
                 "displayName": " Platform ",
+                "teamSiteInformation": { "groupId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
                 "channels": [
                     {
                         "id": "19:team-general@thread.tacv2",
@@ -1904,9 +1929,13 @@ mod tests {
         assert_eq!(teams.len(), 1);
         assert_eq!(teams[0].id, "19:team-general@thread.tacv2");
         assert_eq!(teams[0].display_name, "Platform"); // trimmed
+        // The AAD group id (for the team photo) is lifted from teamSiteInformation
+        // and denormalized onto every channel of the team.
+        assert_eq!(teams[0].group_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         assert_eq!(teams[0].channels.len(), 2);
 
         let general = &teams[0].channels[0];
+        assert_eq!(general.team_group_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         assert_eq!(general.display_name, "General");
         assert!(general.is_general, "id == team id -> General");
         assert!(general.is_favorite);
@@ -1924,6 +1953,38 @@ mod tests {
         assert!(ann.is_read); // absent isRead -> read
         assert!(!ann.last_message_from_me);
         assert_eq!(ann.last_message_preview, "ship day");
+    }
+
+    #[test]
+    fn group_id_falls_back_past_a_null_team_site_group_id() {
+        // A team whose `teamSiteInformation.groupId` is present but JSON null must
+        // still resolve its group id from the top-level fallback — the null must
+        // not short-circuit the chain to empty.
+        let v = json!({
+            "teams": [{
+                "id": "19:t@thread.tacv2",
+                "displayName": "Fallbacks",
+                "teamSiteInformation": { "groupId": null },
+                "groupId": "11111111-2222-3333-4444-555555555555",
+                "channels": [{ "id": "19:t@thread.tacv2", "displayName": "General" }]
+            }]
+        });
+        let teams = parse_teams(&v);
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].group_id, "11111111-2222-3333-4444-555555555555");
+        assert_eq!(teams[0].channels[0].team_group_id, "11111111-2222-3333-4444-555555555555");
+
+        // With neither teamSiteInformation nor a top-level groupId, aadGroupId wins.
+        let v2 = json!({
+            "teams": [{
+                "id": "19:t@thread.tacv2",
+                "displayName": "AadOnly",
+                "aadGroupId": "99999999-8888-7777-6666-555555555555",
+                "channels": [{ "id": "19:t@thread.tacv2", "displayName": "General" }]
+            }]
+        });
+        let teams2 = parse_teams(&v2);
+        assert_eq!(teams2[0].group_id, "99999999-8888-7777-6666-555555555555");
     }
 
     #[test]
@@ -1978,6 +2039,7 @@ mod tests {
             id: "19:c@thread.tacv2".into(),
             team_id: "19:t@thread.tacv2".into(),
             team_name: "Ops".into(),
+            team_group_id: "00000000-1111-2222-3333-444444444444".into(),
             display_name: "Standup".into(),
             is_general: false,
             is_favorite: false,
@@ -1991,6 +2053,7 @@ mod tests {
         let teams = vec![Team {
             id: "19:t@thread.tacv2".into(),
             display_name: "Ops".into(),
+            group_id: "00000000-1111-2222-3333-444444444444".into(),
             channels: vec![ch.clone()],
         }];
 
@@ -2012,6 +2075,7 @@ mod tests {
         let empty_teams = vec![Team {
             id: "19:t@thread.tacv2".into(),
             display_name: "Ops".into(),
+            group_id: "00000000-1111-2222-3333-444444444444".into(),
             channels: vec![Channel { id: "19:empty@thread.tacv2".into(), is_empty: true, ..ch.clone() }],
         }];
         assert_eq!(persist_channels(&store, &empty_teams), (0, 0));

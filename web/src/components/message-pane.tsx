@@ -9,7 +9,7 @@ import {
   type Conversation,
 } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
-import { Avatar } from "./avatar";
+import { Avatar, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
 import { CallEventLine } from "./call-event-line";
 import { Composer } from "./composer";
@@ -79,6 +79,13 @@ export function MessagePane(props: { onBack?: () => void }) {
     : openChannel
       ? channelLabel(openChannel)
       : (openId ?? "");
+  // A 1:1 shows the other party's photo; a channel shows its team's group photo;
+  // a group chat has no single face and keeps its tinted initials.
+  const headerPhoto: AvatarPhoto | undefined = openConv?.avatar_mri
+    ? { kind: "user", id: openConv.avatar_mri }
+    : openChannel?.team_group_id
+      ? { kind: "team", id: openChannel.team_group_id }
+      : undefined;
 
   const maybeFill = useCallback(() => {
     const el = viewportRef.current;
@@ -259,7 +266,7 @@ export function MessagePane(props: { onBack?: () => void }) {
           </button>
         )}
         {(openConv || openChannel) && (
-          <Avatar seed={openId} label={headerLabel} className="size-9" />
+          <Avatar seed={openId} label={headerLabel} photo={headerPhoto} className="size-9" />
         )}
         <div className="flex min-w-0 flex-col">
           <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">

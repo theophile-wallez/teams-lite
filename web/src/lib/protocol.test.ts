@@ -507,6 +507,24 @@ describe("groupChannelsByTeam", () => {
   it("returns an empty list for no channels", () => {
     expect(groupChannelsByTeam([])).toEqual([]);
   });
+
+  it("carries the team's group id, backfilling from a later channel if the first lacks it", () => {
+    const channels = [
+      // The first channel of team A has no group id...
+      channel({ id: "a1", team_id: "A", team_name: "Alpha", team_group_id: "" }),
+      // ...but a later one does — the team should adopt it.
+      channel({ id: "a2", team_id: "A", team_name: "Alpha", team_group_id: "group-a" }),
+      channel({ id: "b1", team_id: "B", team_name: "Beta", team_group_id: "group-b" }),
+    ];
+    const groups = groupChannelsByTeam(channels);
+    expect(groups.find((g) => g.team_id === "A")!.group_id).toBe("group-a");
+    expect(groups.find((g) => g.team_id === "B")!.group_id).toBe("group-b");
+  });
+
+  it("leaves the group id empty when no channel of the team reports one", () => {
+    const groups = groupChannelsByTeam([channel({ team_id: "A", team_group_id: undefined })]);
+    expect(groups[0]!.group_id).toBe("");
+  });
 });
 
 describe("channelIsFavorite", () => {

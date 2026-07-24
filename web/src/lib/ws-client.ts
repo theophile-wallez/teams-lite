@@ -249,6 +249,21 @@ export class Backend {
     return this.request<{ content_type: string; data_base64: string }>("fetch_media", { url });
   }
 
+  /** Fetch a real profile photo — a person (`kind: "user"`, `id` = their MRI) or a
+   *  Teams "team" group (`kind: "team"`, `id` = its AAD group id) — through the
+   *  backend, which holds the credentials the browser lacks. `found` is false when
+   *  the subject has no photo set, so the caller can fall back to initials and
+   *  negative-cache the miss. Bytes come back base64-encoded over the same JSON WS. */
+  fetchAvatar(
+    kind: "user" | "team",
+    id: string,
+  ): Promise<{ found: boolean; content_type?: string; data_base64?: string }> {
+    return this.request<{ found: boolean; content_type?: string; data_base64?: string }>(
+      "fetch_avatar",
+      { kind, id },
+    );
+  }
+
   /** Read the non-secret app settings (GitLab host + whether a token is stored). */
   getSettings(): Promise<AppSettings> {
     return this.request<AppSettings>("get_settings");

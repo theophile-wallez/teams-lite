@@ -12,8 +12,8 @@
 //   event    (server -> client):  { "event": "<name>", "data": <v> }   (no id)
 //
 // Methods: ping | conversations | channels | open | backfill | set_draft | send
-//          | edit | react | notifications | fetch_media | get_settings
-//          | set_settings | enrich_link
+//          | edit | react | notifications | fetch_media | fetch_avatar
+//          | get_settings | set_settings | enrich_link
 // Events:  status | realtime_status | message | conversations_changed
 //          | channels_changed | typing
 //
@@ -72,6 +72,7 @@ type Channel = {
   id: string;
   team_id: string;
   team_name: string;
+  team_group_id: string;
   name: string;
   is_general: boolean;
   is_favorite: boolean;
@@ -642,6 +643,9 @@ function seedChannels(): void {
         id,
         team_id: team.id,
         team_name: team.name,
+        // In real tenants this is the AAD group id from the team's site info; the
+        // mock reuses the stable team id so each team resolves a team avatar.
+        team_group_id: team.id,
         name: channelName,
         is_general: isGeneral,
         is_favorite: false,
@@ -1055,6 +1059,36 @@ function mockMedia(url: string): { content_type: string; data_base64: string } {
   };
 }
 
+/** Synthesize a deterministic "profile photo" for an avatar subject, mirroring
+ *  the Rust backend's `fetch_avatar` result shape `{ found, content_type,
+ *  data_base64 }`. We draw a head-and-shoulders silhouette on a per-id gradient
+ *  so a real photo is visibly distinct from the flat tinted initials. Roughly
+ *  one subject in three deterministically has *no* photo (`found: false`), so
+ *  the UI's initials fallback is exercised too — as on a real tenant where many
+ *  people and teams never set a picture. */
+function mockAvatar(
+  kind: "user" | "team",
+  id: string,
+): { found: true; content_type: string; data_base64: string } | { found: false } {
+  if (hashString(`${kind}:${id}`) % 3 === 0) return { found: false };
+  const hue = hashString(id) % 360;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">` +
+    `<defs><radialGradient id="g" cx="35%" cy="28%" r="90%">` +
+    `<stop offset="0%" stop-color="hsl(${hue} 80% 72%)"/>` +
+    `<stop offset="100%" stop-color="hsl(${(hue + 40) % 360} 68% 42%)"/>` +
+    `</radialGradient></defs>` +
+    `<rect width="192" height="192" fill="url(#g)"/>` +
+    `<circle cx="96" cy="76" r="34" fill="rgba(255,255,255,0.92)"/>` +
+    `<rect x="38" y="120" width="116" height="88" rx="44" fill="rgba(255,255,255,0.92)"/>` +
+    `</svg>`;
+  return {
+    found: true,
+    content_type: "image/svg+xml",
+    data_base64: Buffer.from(svg, "utf8").toString("base64"),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // App settings + GitLab link enrichment — stand-in for the Rust store settings
 // table (`get_settings`/`set_settings`) and the `gitlab` module (`enrich_link`).
@@ -1441,6 +1475,13 @@ function dispatch(method: string, params: unknown): unknown {
     case "fetch_media": {
       const url = requireString(params, "url");
       return mockMedia(url);
+    }
+
+    case "fetch_avatar": {
+      const o = asObject(params);
+      const kind = o.kind === "team" ? "team" : "user";
+      const id = requireString(params, "id");
+      return mockAvatar(kind, id);
     }
 
     case "get_settings":

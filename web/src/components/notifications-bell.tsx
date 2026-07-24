@@ -125,7 +125,12 @@ function NotificationRow(props: { notification: Notification; onOpen: () => void
       )}
     >
       <span className="relative shrink-0">
-        <Avatar seed={n.actor_mri || n.actor_name} label={actorLabel(n)} className="size-9" />
+        <Avatar
+          seed={n.actor_mri || n.actor_name}
+          label={actorLabel(n)}
+          photo={n.actor_mri ? { kind: "user", id: n.actor_mri } : undefined}
+          className="size-9"
+        />
         {emoji && (
           <span className="absolute -bottom-1 -right-1 grid size-5 place-items-center rounded-full bg-card text-[11px] shadow-chip">
             {emoji}
