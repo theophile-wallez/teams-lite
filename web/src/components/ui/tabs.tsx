@@ -113,6 +113,7 @@ export function TabsTrigger(props: {
       tabIndex={selected ? 0 : -1}
       data-testid={props["data-testid"]}
       data-state={selected ? "active" : "inactive"}
+      data-cuelume-toggle=""
       onClick={() => ctx.setValue(props.value)}
       className={cn(
         "flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
