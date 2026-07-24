@@ -28,10 +28,11 @@ function draftToHtml(text: string): string {
 }
 
 /**
- * Message composer with two input modes, toggled like Teams: a plain
- * auto-growing textarea (default) and a rich-text editor (bold/italic/underline/
- * strike/code/link/lists, keyboard shortcuts, floating toolbar). Enter sends,
- * Shift+Enter inserts a newline; a reply banner shows the quoted message.
+ * Message composer with two input modes, toggled like Teams: a rich-text editor
+ * (default — bold/italic/underline/strike/code/link/lists via keyboard shortcuts
+ * and a select-to-format menu, no permanent toolbar) and a plain auto-growing
+ * textarea. Enter sends, Shift+Enter inserts a newline; a reply banner shows the
+ * quoted message. The rich editor can be turned off with the format toggle.
  */
 export function Composer(props: { focusToken: unknown }) {
   const controller = useController();
@@ -47,12 +48,15 @@ export function Composer(props: { focusToken: unknown }) {
   const richFocusRef = useRef<(() => void) | null>(null);
 
   // Restore the mode preference on the client (kept out of SSR to avoid a
-  // hydration mismatch — the server always renders the plain textarea).
+  // hydration mismatch — the server always renders the plain textarea, then we
+  // flip to rich here). Rich text is the default: only an explicit opt-out ("0")
+  // drops to the plain textarea, so formatting shortcuts (Ctrl+B/I/U, Ctrl+K) and
+  // the select-to-format menu are available unless the user turned rich off.
   useEffect(() => {
     try {
-      setRich(localStorage.getItem(RICH_MODE_KEY) === "1");
+      setRich(localStorage.getItem(RICH_MODE_KEY) !== "0");
     } catch {
-      /* ignore */
+      setRich(true);
     }
   }, []);
 
@@ -138,8 +142,9 @@ export function Composer(props: { focusToken: unknown }) {
           focusField();
         }}
       >
-        {/* Input field. In rich mode the editor renders its formatting options in
-            the top part of the box; plain mode is a bare auto-growing textarea. */}
+        {/* Input field. Rich mode is a bare-looking editor that formats via
+            keyboard shortcuts and a select-to-format menu; plain mode is a bare
+            auto-growing textarea. Both read as the same lean box. */}
         {rich ? (
           <Suspense
             fallback={
@@ -153,6 +158,9 @@ export function Composer(props: { focusToken: unknown }) {
               submitRef={richSubmitRef}
               focusRef={richFocusRef}
               onEmptyChange={setRichEmpty}
+              // Mirror the editor's text into the plain draft so drafts still
+              // persist per-conversation and toggling back to plain keeps the text.
+              onChangeText={(text) => controller.setDraftText(text)}
               onSubmit={(html) => void controller.sendDraft("", html)}
             />
           </Suspense>

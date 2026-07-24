@@ -5,6 +5,7 @@ import { test as base, expect, type Page } from "@playwright/test";
 // filtered out as noise.
 type Fixtures = {
   consoleErrors: string[];
+  plainComposer: void;
 };
 
 export const test = base.extend<Fixtures>({
@@ -16,6 +17,26 @@ export const test = base.extend<Fixtures>({
     page.on("pageerror", (e) => errors.push(String(e)));
     await use(errors);
   },
+
+  // The app now defaults the composer to the rich-text editor. These specs drive
+  // the plain `[data-testid="composer"]` textarea (fill / toHaveValue), so opt
+  // every test out to the deterministic plain field before it navigates. Specs
+  // that exercise the rich default clear this key themselves (see
+  // rich-composer.spec.ts). Registered as an auto fixture so it also covers the
+  // one spec that calls `page.goto` directly.
+  plainComposer: [
+    async ({ page }, use) => {
+      await page.addInitScript(() => {
+        try {
+          localStorage.setItem("teams-composer-rich", "0");
+        } catch {
+          /* ignore */
+        }
+      });
+      await use();
+    },
+    { auto: true },
+  ],
 });
 
 export { expect };
