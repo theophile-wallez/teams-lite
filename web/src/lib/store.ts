@@ -48,6 +48,14 @@ import {
   type Appearance,
   type ResolvedTheme,
 } from "./appearance";
+import {
+  DEFAULT_SOUNDS_ENABLED,
+  SOUNDS_STORAGE_KEY,
+  bindCues,
+  coerceSoundsEnabled,
+  playCue,
+  setCuesEnabled,
+} from "./sounds";
 
 export type PendingReply = { message: ChatMessage; marker: string | null };
 
@@ -115,6 +123,9 @@ export type AppState = {
   appearance: Appearance;
   /** Concrete theme currently applied to <html> (what CSS keys off). */
   resolvedTheme: ResolvedTheme;
+  /** Whether curated interaction sounds play (client-only preference). Gates the
+   *  cuelume engine globally — imperative cues and `data-cuelume-*` alike. */
+  soundsEnabled: boolean;
   /** Non-secret app settings (GitLab host + whether a token is stored), loaded
    *  from the backend on start. Drives which links get rich previews. */
   settings: AppSettings;
@@ -162,6 +173,7 @@ function initialState(): AppState {
     readReceipts: [],
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
+    soundsEnabled: DEFAULT_SOUNDS_ENABLED,
     settings: { gitlab_host: "gitlab.com", gitlab_token_set: false },
   };
 }
@@ -244,6 +256,7 @@ export class TeamsController {
     this.started = true;
 
     this.applyPersistedAppearance();
+    this.applyPersistedSounds();
     this.applyPersistedFavorites();
     this.wireEvents();
 
@@ -319,6 +332,9 @@ export class TeamsController {
         });
       } else if (shouldNotify(m, this.get().openId)) {
         notifyMessage(m.sender, m.content);
+        // Subtle inbound cue, riding the same gate as the desktop notification —
+        // so the conversation you're looking at never chimes at you.
+        playCue("droplet");
       }
       // Refresh the list the message belongs to so its preview/order updates
       // immediately. A channel post bumps the Channels tab, never the chat list;
@@ -973,6 +989,7 @@ export class TeamsController {
       return true;
     } catch (e) {
       this.set({ status: `edit failed: ${errText(e)}` });
+      playCue("error");
       return false;
     }
   }
@@ -992,6 +1009,7 @@ export class TeamsController {
       return true;
     } catch (e) {
       this.set({ status: `reaction failed: ${errText(e)}` });
+      playCue("error");
       return false;
     }
   }
@@ -1028,9 +1046,12 @@ export class TeamsController {
       await this.backend.send(id, clean, replyTo, richHtml);
     } catch (e) {
       this.set({ status: `send failed: ${errText(e)}` });
+      playCue("error");
       return;
     }
 
+    // Sent — a soft confirmation cue (only reached when the send didn't throw).
+    playCue("success");
     this.draftCache.set(id, "");
     if (this.get().openId === id) this.set({ draft: "", replyingTo: null });
     this.persistDraft(id, "");
@@ -1106,6 +1127,39 @@ export class TeamsController {
   /** Revert a preview back to the committed appearance. */
   revertAppearance(): void {
     this.paintTheme(this.get().resolvedTheme);
+  }
+
+  // ---- interaction sounds (cuelume) ----------------------------------------
+
+  /** Load the persisted sound preference, apply it to the engine, and wire up the
+   *  `data-cuelume-*` delegation for button press/hover/toggle cues. Best-effort
+   *  and SSR-safe: a storage failure just leaves the default (on). */
+  private applyPersistedSounds(): void {
+    let enabled = DEFAULT_SOUNDS_ENABLED;
+    try {
+      enabled = coerceSoundsEnabled(localStorage.getItem(SOUNDS_STORAGE_KEY));
+    } catch {
+      /* ignore — sounds are non-critical */
+    }
+    this.set({ soundsEnabled: enabled });
+    setCuesEnabled(enabled);
+    // Delegate button cues app-wide. The engine gates every cue on the flag set
+    // just above, so this is safe to call even when sounds are off.
+    bindCues();
+  }
+
+  /** Commit and persist the sound preference, and flip the engine's global flag.
+   *  Turning sounds back on plays a short confirmation cue (which turning them
+   *  off deliberately does not). */
+  setSoundsEnabled(enabled: boolean): void {
+    try {
+      localStorage.setItem(SOUNDS_STORAGE_KEY, enabled ? "1" : "0");
+    } catch {
+      /* ignore — a failed persist just doesn't survive reload */
+    }
+    this.set({ soundsEnabled: enabled });
+    setCuesEnabled(enabled);
+    if (enabled) playCue("ready");
   }
 }
 

@@ -33,13 +33,35 @@ export interface ButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof buttonVariants> {
   asChild?: boolean;
+  /** Interaction sound cue, played via cuelume's `data-cuelume-*` delegation
+   *  (see lib/sounds.ts `bindCues`). Defaults to a subtle "press" tick on
+   *  pointer-down; pass "toggle" for on/off controls, or null to stay silent
+   *  (e.g. a button that already plays a semantic cue). The primary variant also
+   *  gets a soft hover accent. */
+  cue?: "press" | "toggle" | null;
 }
 
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
+  ({ className, variant, size, asChild = false, cue = "press", ...props }, ref) => {
     const Comp = asChild ? Slot : "button";
+    // Cue attributes are injected before {...props}, so a caller can still
+    // override them (or pass their own data-cuelume-*) explicitly.
+    const cueProps =
+      cue === "toggle"
+        ? { "data-cuelume-toggle": "" }
+        : cue === "press"
+          ? { "data-cuelume-press": "" }
+          : undefined;
+    const prominent = variant === undefined || variant === "default";
+    const hoverProps = cue !== null && prominent ? { "data-cuelume-hover": "" } : undefined;
     return (
-      <Comp className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...props} />
+      <Comp
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...cueProps}
+        {...hoverProps}
+        {...props}
+      />
     );
   },
 );

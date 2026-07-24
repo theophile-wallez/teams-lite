@@ -119,6 +119,7 @@ export function Composer(props: { focusToken: unknown }) {
             type="button"
             aria-label="Cancel reply"
             data-testid="reply-cancel"
+            data-cuelume-press=""
             onClick={() => controller.cancelReply()}
             className="grid size-6 shrink-0 place-items-center rounded-md text-text-dim transition-colors hover:bg-accent hover:text-foreground"
           >
@@ -186,6 +187,7 @@ export function Composer(props: { focusToken: unknown }) {
             aria-pressed={rich}
             title="Rich text formatting"
             data-testid="composer-format-toggle"
+            data-cuelume-toggle=""
             onClick={toggleRich}
             className={cn(
               "grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground",

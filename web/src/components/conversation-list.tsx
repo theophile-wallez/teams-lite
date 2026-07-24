@@ -85,6 +85,7 @@ export function ConversationList(props: {
           type="button"
           aria-label="Appearance"
           title="Appearance (Ctrl+P)"
+          data-cuelume-press=""
           onClick={props.onOpenSettings}
           className="grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground"
         >
@@ -99,6 +100,7 @@ export function ConversationList(props: {
           aria-label="Settings"
           title="Settings"
           data-testid="open-settings"
+          data-cuelume-press=""
           aria-current={props.settingsActive ? "page" : undefined}
           onClick={props.onOpenSettingsPage}
           className={cn(
@@ -116,6 +118,7 @@ export function ConversationList(props: {
       <div className="px-3 pb-2">
         <button
           type="button"
+          data-cuelume-press=""
           onClick={props.onOpenPalette}
           className="flex w-full items-center gap-2 rounded-lg bg-card px-3 py-2 text-left text-text-faint shadow-chip transition-colors hover:text-text-dim"
         >
@@ -448,6 +451,7 @@ function ChannelRow(props: {
         data-testid="channel-favorite"
         aria-label={props.favorite ? "Unfavorite channel" : "Favorite channel"}
         aria-pressed={props.favorite}
+        data-cuelume-toggle=""
         onClick={props.onToggleFavorite}
         className={cn(
           "absolute right-2 top-1/2 grid size-6 -translate-y-1/2 place-items-center rounded-md",

@@ -9,6 +9,8 @@ import {
   MoonStar,
   Settings as SettingsIcon,
   Sun,
+  Volume2,
+  VolumeX,
   type LucideIcon,
 } from "lucide-react";
 import { APPEARANCES, appearanceLabel, type Appearance } from "~/lib/appearance";
@@ -55,7 +57,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
         </div>
         <div className="flex min-w-0 flex-col">
           <h2 className="truncate text-sm font-medium text-foreground">Settings</h2>
-          <p className="truncate text-[11px] text-text-faint">Integrations and appearance</p>
+          <p className="truncate text-[11px] text-text-faint">Integrations, appearance, and sounds</p>
         </div>
       </header>
 
@@ -63,6 +65,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
         <div className="mx-auto flex max-w-xl flex-col gap-8 pb-[env(safe-area-inset-bottom)]">
           <GitLabSettings />
           <AppearanceSettings />
+          <SoundsSettings />
         </div>
       </div>
     </section>
@@ -241,6 +244,7 @@ function AppearanceSettings() {
               type="button"
               data-testid="appearance-option"
               data-value={pref}
+              data-cuelume-press=""
               aria-pressed={active}
               onClick={() => controller.setAppearance(pref)}
               className={cn(
@@ -264,6 +268,63 @@ function AppearanceSettings() {
             </button>
           );
         })}
+      </div>
+    </section>
+  );
+}
+
+/** Interaction sounds on/off (cuelume). A per-device preference, persisted client
+ *  side; the switch flips the engine's global flag so both message cues and the
+ *  `data-cuelume-*` button feedback go quiet together. */
+function SoundsSettings() {
+  const controller = useController();
+  const enabled = useAppState((s) => s.soundsEnabled);
+
+  return (
+    <section className="flex flex-col gap-4">
+      <div className="flex flex-col">
+        <h3 className="text-[15px] font-medium text-foreground">Sounds</h3>
+        <p className="text-[13px] text-text-faint">
+          Play subtle interaction sounds — sending and receiving messages, and
+          button feedback.
+        </p>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4 shadow-chip">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
+            {enabled ? (
+              <Volume2 className="size-5" strokeWidth={1.5} />
+            ) : (
+              <VolumeX className="size-5" strokeWidth={1.5} />
+            )}
+          </div>
+          <div className="flex min-w-0 flex-col">
+            <span className="text-[13px] font-medium text-foreground">Interaction sounds</span>
+            <span className="text-[11px] text-text-faint">{enabled ? "On" : "Off"}</span>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label="Interaction sounds"
+          data-testid="sounds-toggle"
+          onClick={() => controller.setSoundsEnabled(!enabled)}
+          className={cn(
+            "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+            enabled ? "bg-primary" : "bg-element",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
+              enabled ? "translate-x-[22px]" : "translate-x-0.5",
+            )}
+          />
+        </button>
       </div>
     </section>
   );
