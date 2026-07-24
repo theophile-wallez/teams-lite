@@ -102,6 +102,26 @@ export async function emitReaction(
   expect(res.ok()).toBeTruthy();
 }
 
+/** The mock's seeded channels, via the gated `/__test/channels` endpoint — used
+ *  to assert the Chats list never contains a channel thread. */
+export async function fetchTestChannels(
+  page: Page,
+): Promise<{ id: string; name: string; team_id: string; team_name: string }[]> {
+  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
+  const res = await page.request.get(`http://127.0.0.1:${mockPort}/__test/channels`);
+  expect(res.ok()).toBeTruthy();
+  return res.json();
+}
+
+/** Switch the sidebar to the Channels tab and wait for the tree to populate. */
+export async function openChannelsTab(page: Page): Promise<void> {
+  await page.locator('[data-testid="tab-channels"]').click();
+  // Channels load at startup alongside chats; wait until the tree has rows.
+  await expect
+    .poll(() => page.locator('[data-testid="channel-row"]').count(), { timeout: 10_000 })
+    .toBeGreaterThan(0);
+}
+
 /** Filter out benign console noise so `consoleErrors` only holds real problems. */
 export function realErrors(errors: string[]): string[] {
   return errors.filter(

@@ -447,8 +447,21 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 store.conversations(&self_name)?
             };
             // background sync (does not block the response = instant startup)
-            sync_conversations_bg(ctx.clone());
+            sync_csa_bg(ctx.clone());
             Ok(conversations_json(&rows))
+        }
+
+        // team/channel tree — LOCAL-FIRST, exactly like `conversations`: answer
+        // instantly from the SQLite cache, then sync from the network in the
+        // background and emit `channels_changed` if the tree changed. One CSA
+        // fetch backs both lists, so this triggers the same shared sync.
+        "channels" => {
+            let rows = {
+                let store = ctx.store()?;
+                store.channels()?
+            };
+            sync_csa_bg(ctx.clone());
+            Ok(channels_json(&rows))
         }
 
         // open a conversation — LOCAL-FIRST: answer instantly from the SQLite
@@ -929,6 +942,30 @@ fn conversations_json(rows: &[teams_lite::store::ConversationRow]) -> Value {
         .collect::<Vec<_>>())
 }
 
+/// Serialize the channel tree for the UI. A flat list, pre-sorted by the store
+/// (team, General-first, then name); the web client groups it into team → channel
+/// sections. `team_id`/`team_name` are denormalized onto each row so the grouping
+/// needs no second lookup.
+fn channels_json(rows: &[teams_lite::store::ChannelRow]) -> Value {
+    json!(rows
+        .iter()
+        .map(|c| json!({
+            "id": c.id,
+            "team_id": c.team_id,
+            "team_name": c.team_name,
+            "name": c.display_name,
+            "is_general": c.is_general,
+            "is_favorite": c.is_favorite,
+            "last_message_time": c.last_message_time,
+            "last_message_preview": c.last_message_preview,
+            "last_message_sender": c.last_message_sender,
+            "last_message_from_me": c.last_message_from_me,
+            "is_read": c.is_read,
+            "draft": c.draft
+        }))
+        .collect::<Vec<_>>())
+}
+
 /// Decide whether a message is ours. We match on the sender's MRI (reliable —
 /// it's a stable per-user identifier) whenever both sides have one. We fall back
 /// to comparing display names only for legacy rows stored before we captured the
@@ -1058,31 +1095,45 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
     })
 }
 
-/// Sync the conversation list from the network in the background: fetch, persist,
-/// resolve 1:1 names, and emit `conversations_changed` if anything changed. This
-/// keeps the `conversations` request off the network path (local-first startup).
-fn sync_conversations_bg(ctx: Ctx) {
+/// Sync the chat list AND the channel tree from the network in the background:
+/// one CSA fetch feeds both. Persist each, emit `conversations_changed` and/or
+/// `channels_changed` only when something actually changed, then resolve 1:1
+/// names. This keeps the `conversations`/`channels` requests off the network path
+/// (local-first startup).
+///
+/// Persisting channels also HEALS any channel row that leaked into the chat list:
+/// a channel post arriving live (before the first CSA sync) upserts a conversation
+/// row by id, and `persist_channels` deletes it. When healing happens we must emit
+/// `conversations_changed` too so the sidebar drops the stray chat entry.
+fn sync_csa_bg(ctx: Ctx) {
     tokio::spawn(async move {
         let http = ctx.http.clone();
-        let convs = match ctx
+        let (convs, teams) = match ctx
             .retry_on_auth(|session, csa| {
                 let http = http.clone();
-                async move { teams_read::fetch_conversations(&http, &session, &csa).await }
+                async move { teams_read::fetch_csa(&http, &session, &csa).await }
             })
             .await
         {
             Ok(c) => c,
             Err(_) => return,
         };
-        let inserted = {
+        let (chats_changed, channels_changed) = {
             if let Ok(store) = ctx.store() {
-                teams_read::persist_conversations(&store, &convs)
+                let inserted = teams_read::persist_conversations(&store, &convs);
+                let (changed, healed) = teams_read::persist_channels(&store, &teams);
+                // A healed leak removes a row from the chat list, so it is also a
+                // conversations change.
+                (inserted > 0 || healed > 0, changed > 0)
             } else {
                 return;
             }
         };
-        if inserted > 0 {
+        if chats_changed {
             ctx.emit("conversations_changed", json!({}));
+        }
+        if channels_changed {
+            ctx.emit("channels_changed", json!({}));
         }
         // resolve 1:1 names in the background (emits conversations_changed itself)
         resolve_names_bg(ctx, convs);
@@ -1186,6 +1237,7 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
         while let Some(msgs) = ev_rx.recv().await {
             if let Ok(store) = ctx_msgs.store() {
                 let mut activity_changed = false;
+                let mut channels_changed = false;
                 for m in &msgs {
                     // The activity feed is not a chat: never persist it as a
                     // conversation. Signal the UI to refresh notifications
@@ -1196,7 +1248,26 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
                         activity_changed = true;
                         continue;
                     }
-                    store.upsert_conversation(&m.conversation_id, "", m.compose_time).ok();
+                    // A channel post must NOT create a chat-list row. Bump the
+                    // channel's last-message metadata instead (kept in the
+                    // channels table, surfaced under the Channels tab). The
+                    // message body still lands in the shared `messages` table
+                    // below, so an open channel view updates live. We match on the
+                    // thread-id shape (reliable, covers channels not yet synced)
+                    // and, defensively, on any channel we already know.
+                    let is_channel = teams_read::is_channel_thread_id(&m.conversation_id)
+                        || store.is_channel(&m.conversation_id).unwrap_or(false);
+                    if is_channel {
+                        let from_me = is_self(m, &self_name, &self_mri);
+                        if store
+                            .touch_channel(&m.conversation_id, m.compose_time, from_me)
+                            .unwrap_or(false)
+                        {
+                            channels_changed = true;
+                        }
+                    } else {
+                        store.upsert_conversation(&m.conversation_id, "", m.compose_time).ok();
+                    }
                     let inserted = store.insert_message(m).unwrap_or(false);
                     // Reconcile reactions when this live frame carried an
                     // emotions snapshot. An empty sentinel means the frame said
@@ -1224,6 +1295,9 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
                 }
                 if activity_changed {
                     ctx_msgs.emit("notifications_changed", json!({}));
+                }
+                if channels_changed {
+                    ctx_msgs.emit("channels_changed", json!({}));
                 }
             }
         }
@@ -1333,6 +1407,39 @@ mod tests {
         assert_eq!(v["system_event"]["event"], "ended");
         assert_eq!(v["system_event"]["duration_seconds"], 600);
         assert_eq!(v["content"], "");
+    }
+
+    #[test]
+    fn channels_json_carries_team_grouping_and_read_state() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .upsert_channel_full(&teams_lite::store::ChannelUpdate {
+                id: "19:general@thread.tacv2",
+                team_id: "19:team@thread.tacv2",
+                team_name: "Engineering",
+                display_name: "General",
+                is_general: true,
+                is_favorite: false,
+                last_message_time: 1_700_000_000_000,
+                last_message_preview: "Ship it",
+                last_message_sender: "Alice",
+                last_message_from_me: false,
+                is_read: false,
+            })
+            .unwrap();
+
+        let v = channels_json(&store.channels().unwrap());
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        let c = &arr[0];
+        assert_eq!(c["id"], "19:general@thread.tacv2");
+        assert_eq!(c["team_id"], "19:team@thread.tacv2");
+        assert_eq!(c["team_name"], "Engineering");
+        assert_eq!(c["name"], "General");
+        assert_eq!(c["is_general"], true);
+        assert_eq!(c["last_message_preview"], "Ship it");
+        assert_eq!(c["last_message_sender"], "Alice");
+        assert_eq!(c["is_read"], false);
     }
 
     #[test]

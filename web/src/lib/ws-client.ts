@@ -11,6 +11,7 @@
 
 import type {
   AppSettings,
+  Channel,
   Conversation,
   LinkMetadataResult,
   MessagePage,
@@ -193,6 +194,12 @@ export class Backend {
 
   conversations(): Promise<Conversation[]> {
     return this.request<Conversation[]>("conversations");
+  }
+  /** Fetch the team/channel tree (a flat, pre-sorted list grouped client-side by
+   *  {@link groupChannelsByTeam}). Local-first like `conversations`: answers from
+   *  the cache, then a background sync may push `channels_changed`. */
+  channels(): Promise<Channel[]> {
+    return this.request<Channel[]>("channels");
   }
   open(conversation: string): Promise<MessagePage> {
     return this.request<MessagePage>("open", { conversation });

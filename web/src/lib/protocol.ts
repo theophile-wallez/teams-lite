@@ -60,6 +60,36 @@ export type Conversation = {
   draft: string;
 };
 
+/** One team channel, as returned by the `channels` method (mirrors the Rust
+ *  `ChannelRow` serialization in src/bin/server.rs). A channel is a distinct
+ *  Teams thread (`@thread.tacv2`) whose messages reuse the SAME pipeline as a
+ *  chat — open/backfill/send/edit/react all key on the thread id — so only the
+ *  sidebar grouping (under its team, on a separate tab) differs. `team_id` /
+ *  `team_name` are denormalized onto every row so grouping needs no extra lookup. */
+export type Channel = {
+  id: string;
+  team_id: string;
+  team_name: string;
+  name: string;
+  /** The team's General channel; sorted first within its team. */
+  is_general: boolean;
+  is_favorite: boolean;
+  last_message_time: number;
+  last_message_preview: string;
+  last_message_sender: string;
+  last_message_from_me: boolean;
+  is_read: boolean;
+  draft: string;
+};
+
+/** A team with its channels, the unit the sidebar renders as a collapsible
+ *  section (team header → channel rows). Produced by {@link groupChannelsByTeam}. */
+export type TeamGroup = {
+  team_id: string;
+  team_name: string;
+  channels: Channel[];
+};
+
 export type ChatMessage = {
   id: string;
   conversation_id: string;
@@ -473,6 +503,48 @@ export function previewLine(c: Conversation): string {
   const isGroup = c.kind === "group" || c.kind === "unknown";
   if (isGroup && c.last_message_sender) return `${firstName(c.last_message_sender)}: ${body}`;
   return body;
+}
+
+// ---- channel display helpers -----------------------------------------------
+
+/** The channel's display name, with a safe fallback for an unnamed channel. */
+export function channelLabel(c: Channel): string {
+  return c.name && c.name.length > 0 ? c.name : "(unnamed channel)";
+}
+
+/**
+ * Sidebar preview line for a channel. A channel is always multi-party, so we
+ * show the sender's first name ("Alice: ...") — or "You: ..." when we posted it.
+ * Empty when the channel has no displayable last message.
+ */
+export function channelPreviewLine(c: Channel): string {
+  const body = c.last_message_preview ?? "";
+  if (!body) return "";
+  if (c.last_message_from_me) return `You: ${body}`;
+  if (c.last_message_sender) return `${firstName(c.last_message_sender)}: ${body}`;
+  return body;
+}
+
+/**
+ * Group a flat channel list into teams for the sidebar tree, preserving the
+ * order the backend already sorted the flat list into (team, then General-first,
+ * then channel name). Teams appear in first-seen order and each team keeps its
+ * channels in their incoming order, so the result renders identically whether or
+ * not the caller re-sorts.
+ */
+export function groupChannelsByTeam(channels: Channel[]): TeamGroup[] {
+  const groups: TeamGroup[] = [];
+  const byTeam = new Map<string, TeamGroup>();
+  for (const c of channels) {
+    let group = byTeam.get(c.team_id);
+    if (!group) {
+      group = { team_id: c.team_id, team_name: c.team_name, channels: [] };
+      byTeam.set(c.team_id, group);
+      groups.push(group);
+    }
+    group.channels.push(c);
+  }
+  return groups;
 }
 
 /** Should an incoming message raise a notification? Pure, so it is testable. */

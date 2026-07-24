@@ -20,6 +20,7 @@ import {
   replyToPayload,
   shouldNotify,
   type AppSettings,
+  type Channel,
   type ChatMessage,
   type Conversation,
   type GitLabLinkMetadata,
@@ -44,8 +45,19 @@ import {
 
 export type PendingReply = { message: ChatMessage; marker: string | null };
 
+/** Which sidebar list is showing: normal chats or the team/channel tree. Channel
+ *  messages are kept strictly out of the chat list, so this is a hard switch
+ *  between two distinct sources. */
+export type SidebarTab = "chats" | "channels";
+
 export type AppState = {
   conversations: Conversation[];
+  /** The team/channel tree (flat, pre-sorted; grouped for display by
+   *  `groupChannelsByTeam`). Distinct from `conversations` — a channel never
+   *  appears in the chat list. */
+  channels: Channel[];
+  /** The active sidebar tab (chats vs. channels). */
+  sidebarTab: SidebarTab;
   openId: string | null;
   messages: ChatMessage[];
   loadingMessages: boolean;
@@ -92,6 +104,8 @@ const TYPING_TIMEOUT_MS = 8000;
 function initialState(): AppState {
   return {
     conversations: [],
+    channels: [],
+    sidebarTab: "chats",
     openId: null,
     messages: [],
     loadingMessages: false,
@@ -155,6 +169,7 @@ export class TeamsController {
   private darkListener: ((e: MediaQueryListEvent) => void) | null = null;
 
   private refreshConversations = coalesce(() => this.loadConversations());
+  private refreshChannels = coalesce(() => this.loadChannels());
   private refreshNotifications = coalesce(() => this.loadNotifications());
 
   constructor(url: string = DEFAULT_WS_URL) {
@@ -181,7 +196,9 @@ export class TeamsController {
       this.set({ splashMessage: "connecting" });
       await this.backend.connect();
       this.set({ live: "connected" });
-      await this.refreshConversations();
+      // Chats and channels come from the same backend and share a background CSA
+      // sync; load both before revealing the UI so switching tabs is instant.
+      await Promise.all([this.refreshConversations(), this.refreshChannels()]);
       this.set({ ready: true });
       // The activity feed is best-effort and must never block startup.
       void this.refreshNotifications();
@@ -242,7 +259,15 @@ export class TeamsController {
       } else if (shouldNotify(m, this.get().openId)) {
         notifyMessage(m.sender, m.content);
       }
-      void this.refreshConversations();
+      // Refresh the list the message belongs to so its preview/order updates
+      // immediately. A channel post bumps the Channels tab, never the chat list;
+      // an unknown id (a chat, or a channel not yet synced) refreshes chats, and
+      // a brand-new channel is picked up by the backend's `channels_changed`.
+      if (this.get().channels.some((c) => c.id === m.conversation_id)) {
+        void this.refreshChannels();
+      } else {
+        void this.refreshConversations();
+      }
     });
 
     on("typing", (raw) => this.onTyping(raw as TypingSignal));
@@ -269,6 +294,7 @@ export class TeamsController {
     });
 
     on("conversations_changed", () => void this.refreshConversations());
+    on("channels_changed", () => void this.refreshChannels());
     on("notifications_changed", () => void this.refreshNotifications());
     on("realtime_status", (s) => this.set({ live: s as LiveStatus }));
     on("update_available", (u) => this.set({ update: u as UpdateInfo }));
@@ -362,6 +388,29 @@ export class TeamsController {
     }
   }
 
+  // ---- channels ------------------------------------------------------------
+
+  /** Refresh the team/channel tree from the backend. Best-effort: a failure
+   *  leaves the current tree untouched (channels are a secondary view). Seeds the
+   *  warm draft cache from each channel row, exactly like `loadConversations`, so
+   *  a channel opened before its first live event still restores its draft. */
+  private async loadChannels(): Promise<void> {
+    try {
+      const channels = await this.backend.channels();
+      for (const ch of channels) {
+        if (!this.draftCache.has(ch.id)) this.draftCache.set(ch.id, ch.draft);
+      }
+      this.set({ channels });
+    } catch {
+      // ignore — the channel tree is non-critical; the last good tree stands.
+    }
+  }
+
+  /** Switch the sidebar between the chat list and the channel tree. */
+  setSidebarTab(tab: SidebarTab): void {
+    if (this.get().sidebarTab !== tab) this.set({ sidebarTab: tab });
+  }
+
   // ---- notifications (activity feed) --------------------------------------
 
   // Local "seen" high-water mark (epoch ms). The badge counts unread entries
@@ -433,6 +482,7 @@ export class TeamsController {
     const nextDraft =
       this.draftCache.get(id) ??
       this.get().conversations.find((c) => c.id === id)?.draft ??
+      this.get().channels.find((c) => c.id === id)?.draft ??
       "";
     this.draftCache.set(id, nextDraft);
 

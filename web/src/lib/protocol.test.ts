@@ -14,6 +14,9 @@ import {
   mergeRefreshedHistoryPage,
   previewLine,
   convLabel,
+  channelLabel,
+  channelPreviewLine,
+  groupChannelsByTeam,
   shouldNotify,
   replyToPayload,
   copyableMessageText,
@@ -22,7 +25,7 @@ import {
   formatCallEvent,
   formatCallDuration,
 } from "./protocol";
-import type { ChatMessage, Conversation, MessagePage } from "./protocol";
+import type { ChatMessage, Conversation, MessagePage, Channel } from "./protocol";
 
 function message(
   seq: number,
@@ -428,6 +431,79 @@ describe("convLabel", () => {
 
   it("falls back to '(untitled)' otherwise", () => {
     expect(convLabel(conversation({ name: "", kind: "group" }))).toBe("(untitled)");
+  });
+});
+
+function channel(overrides: Partial<Channel> = {}): Channel {
+  return {
+    id: "19:c@thread.tacv2",
+    team_id: "19:t@thread.tacv2",
+    team_name: "Engineering",
+    name: "General",
+    is_general: true,
+    is_favorite: false,
+    last_message_time: 0,
+    last_message_preview: "",
+    last_message_sender: "",
+    last_message_from_me: false,
+    is_read: true,
+    draft: "",
+    ...overrides,
+  };
+}
+
+describe("channelLabel", () => {
+  it("uses the channel name", () => {
+    expect(channelLabel(channel({ name: "Releases" }))).toBe("Releases");
+  });
+
+  it("falls back for an unnamed channel", () => {
+    expect(channelLabel(channel({ name: "" }))).toBe("(unnamed channel)");
+  });
+});
+
+describe("channelPreviewLine", () => {
+  it("prefixes 'You:' when we posted the last message", () => {
+    const c = channel({ last_message_preview: "deploying now", last_message_from_me: true });
+    expect(channelPreviewLine(c)).toBe("You: deploying now");
+  });
+
+  it("prefixes the sender's first name otherwise (channels are multi-party)", () => {
+    const c = channel({ last_message_preview: "ship it", last_message_sender: "Alice Wonderland" });
+    expect(channelPreviewLine(c)).toBe("Alice: ship it");
+  });
+
+  it("is empty when there is no preview", () => {
+    expect(channelPreviewLine(channel({ last_message_preview: "" }))).toBe("");
+  });
+});
+
+describe("groupChannelsByTeam", () => {
+  it("groups channels under their team, preserving incoming order", () => {
+    const channels = [
+      channel({ id: "a-general", team_id: "A", team_name: "Alpha", name: "General" }),
+      channel({ id: "a-random", team_id: "A", team_name: "Alpha", name: "Random" }),
+      channel({ id: "b-general", team_id: "B", team_name: "Beta", name: "General" }),
+    ];
+    const groups = groupChannelsByTeam(channels);
+    expect(groups.map((g) => g.team_name)).toEqual(["Alpha", "Beta"]);
+    expect(groups[0]!.channels.map((c) => c.id)).toEqual(["a-general", "a-random"]);
+    expect(groups[1]!.channels.map((c) => c.id)).toEqual(["b-general"]);
+  });
+
+  it("keeps a team together even if its channels are not contiguous", () => {
+    const channels = [
+      channel({ id: "a1", team_id: "A", team_name: "Alpha" }),
+      channel({ id: "b1", team_id: "B", team_name: "Beta" }),
+      channel({ id: "a2", team_id: "A", team_name: "Alpha" }),
+    ];
+    const groups = groupChannelsByTeam(channels);
+    expect(groups.map((g) => g.team_id)).toEqual(["A", "B"]);
+    expect(groups[0]!.channels.map((c) => c.id)).toEqual(["a1", "a2"]);
+  });
+
+  it("returns an empty list for no channels", () => {
+    expect(groupChannelsByTeam([])).toEqual([]);
   });
 });
 

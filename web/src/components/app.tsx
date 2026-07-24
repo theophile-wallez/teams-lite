@@ -36,6 +36,7 @@ function AppInner() {
   const fatal = useAppState((s) => s.fatal);
   const splashMessage = useAppState((s) => s.splashMessage);
   const conversations = useAppState((s) => s.conversations);
+  const sidebarTab = useAppState((s) => s.sidebarTab);
   const openId = useAppState((s) => s.openId);
   const replyingTo = useAppState((s) => s.replyingTo);
 
@@ -138,8 +139,9 @@ function AppInner() {
 
       // List navigation is only active when no conversation is open and we're not
       // on settings (otherwise the composer / settings form own the keyboard),
-      // mirroring the TUI.
-      if (routeConversationId || onSettings) return;
+      // mirroring the TUI. It drives the virtualized chat list, so it only applies
+      // while the Chats tab is showing — the Channels tab uses click/Tab focus.
+      if (routeConversationId || onSettings || sidebarTab !== "chats") return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
 
@@ -160,6 +162,7 @@ function AppInner() {
       replyingTo,
       routeConversationId,
       onSettings,
+      sidebarTab,
       conversations,
       selectedIndex,
       controller,

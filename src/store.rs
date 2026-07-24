@@ -47,6 +47,25 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- Team channels, kept SEPARATE from `conversations` so channel posts never mix
+-- into the chat list. A channel's messages still live in the shared `messages`
+-- table keyed by its thread id, so open/backfill/send/react reuse the same
+-- pipeline unchanged. This is a brand-new table, so `CREATE TABLE IF NOT EXISTS`
+-- here (run on every open) is all the migration it needs — no ALTER in migrate().
+CREATE TABLE IF NOT EXISTS channels (
+    id                    TEXT PRIMARY KEY,
+    team_id               TEXT NOT NULL DEFAULT '',
+    team_name             TEXT NOT NULL DEFAULT '',
+    display_name          TEXT NOT NULL DEFAULT '',
+    is_general            INTEGER NOT NULL DEFAULT 0,
+    is_favorite           INTEGER NOT NULL DEFAULT 0,
+    last_message_time     INTEGER NOT NULL DEFAULT 0,
+    last_message_preview  TEXT NOT NULL DEFAULT '',
+    last_message_sender   TEXT NOT NULL DEFAULT '',
+    last_message_from_me  INTEGER NOT NULL DEFAULT 0,
+    is_read               INTEGER NOT NULL DEFAULT 1,
+    draft                 TEXT NOT NULL DEFAULT ''
+);
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +189,44 @@ pub struct ConversationUpdate<'a> {
     pub is_pinned: bool,
     pub is_hidden: bool,
     pub thread_type: &'a str,
+}
+
+/// A channel row for the sidebar's channel tree, carrying the same preview/unread
+/// fields as [`ConversationRow`] plus its team grouping. Its `draft` is stored on
+/// the row (composer text is per-thread, chat or channel alike).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelRow {
+    pub id: String,
+    pub team_id: String,
+    pub team_name: String,
+    pub display_name: String,
+    pub is_general: bool,
+    pub is_favorite: bool,
+    pub last_message_time: i64,
+    pub last_message_preview: String,
+    pub last_message_sender: String,
+    pub last_message_from_me: bool,
+    pub is_read: bool,
+    /// Unsent composer text, stored locally and scoped to this channel.
+    pub draft: String,
+}
+
+/// Rich channel metadata from a CSA sync, fed to [`Store::upsert_channel_full`].
+/// Mirrors [`ConversationUpdate`] but for channels; `draft` is deliberately NOT
+/// here — network syncs never write a local draft (same rule as conversations).
+#[derive(Debug, Clone)]
+pub struct ChannelUpdate<'a> {
+    pub id: &'a str,
+    pub team_id: &'a str,
+    pub team_name: &'a str,
+    pub display_name: &'a str,
+    pub is_general: bool,
+    pub is_favorite: bool,
+    pub last_message_time: i64,
+    pub last_message_preview: &'a str,
+    pub last_message_sender: &'a str,
+    pub last_message_from_me: bool,
+    pub is_read: bool,
 }
 
 pub struct Store {
@@ -547,6 +604,137 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// Upsert a channel with its full CSA metadata. Mirrors
+    /// [`Store::upsert_conversation_full`] — a guarded `WHERE` makes a no-op upsert
+    /// modify 0 rows so the caller emits `channels_changed` ONLY on a real change,
+    /// and message-derived fields (preview/sender/from-me/unread) only take the
+    /// incoming snapshot when it is at least as fresh (`last_message_time`), so an
+    /// out-of-order sync can't regress them. `draft` is never written here (a local
+    /// draft cannot be clobbered by remote metadata). Returns true on a real change.
+    pub fn upsert_channel_full(&self, u: &ChannelUpdate) -> Result<bool> {
+        let changed = self.conn.execute(
+            "INSERT INTO channels (
+                id, team_id, team_name, display_name, is_general, is_favorite,
+                last_message_time, last_message_preview, last_message_sender,
+                last_message_from_me, is_read)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+                team_id = excluded.team_id,
+                team_name = CASE
+                    WHEN excluded.team_name <> '' THEN excluded.team_name
+                    ELSE channels.team_name END,
+                display_name = CASE
+                    WHEN excluded.display_name <> '' THEN excluded.display_name
+                    ELSE channels.display_name END,
+                is_general = excluded.is_general,
+                is_favorite = excluded.is_favorite,
+                last_message_time = MAX(channels.last_message_time, excluded.last_message_time),
+                -- message-derived fields: only take the incoming snapshot when it is
+                -- at least as fresh, so a stale/out-of-order sync can't regress them
+                last_message_preview = CASE
+                    WHEN excluded.last_message_time >= channels.last_message_time
+                    THEN excluded.last_message_preview ELSE channels.last_message_preview END,
+                last_message_sender = CASE
+                    WHEN excluded.last_message_time >= channels.last_message_time
+                    THEN excluded.last_message_sender ELSE channels.last_message_sender END,
+                last_message_from_me = CASE
+                    WHEN excluded.last_message_time >= channels.last_message_time
+                    THEN excluded.last_message_from_me ELSE channels.last_message_from_me END,
+                is_read = CASE
+                    WHEN excluded.last_message_time >= channels.last_message_time
+                    THEN excluded.is_read ELSE channels.is_read END
+             WHERE
+                -- report a change ONLY when a column would actually move, so an
+                -- identical re-sync emits no `channels_changed`
+                excluded.team_id <> channels.team_id
+                OR (excluded.team_name <> '' AND excluded.team_name <> channels.team_name)
+                OR (excluded.display_name <> '' AND excluded.display_name <> channels.display_name)
+                OR excluded.is_general <> channels.is_general
+                OR excluded.is_favorite <> channels.is_favorite
+                OR excluded.last_message_time > channels.last_message_time
+                OR (excluded.last_message_time >= channels.last_message_time AND (
+                       excluded.last_message_preview <> channels.last_message_preview
+                    OR excluded.last_message_sender  <> channels.last_message_sender
+                    OR excluded.last_message_from_me <> channels.last_message_from_me
+                    OR excluded.is_read              <> channels.is_read))",
+            params![
+                u.id,
+                u.team_id,
+                u.team_name,
+                u.display_name,
+                u.is_general as i64,
+                u.is_favorite as i64,
+                u.last_message_time,
+                u.last_message_preview,
+                u.last_message_sender,
+                u.last_message_from_me as i64,
+                u.is_read as i64,
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Bump a channel's `last_message_time` (and mark it unread) from a live post,
+    /// without touching its CSA-owned metadata — the channel analogue of
+    /// [`Store::upsert_conversation`]. Only ever moves the time FORWARD, and marks
+    /// the channel unread when the post is not ours. Returns true on a real change,
+    /// so the caller emits `channels_changed` only when something moved. A no-op
+    /// (unknown id, or an older/equal time with no unread flip) returns false.
+    pub fn touch_channel(&self, id: &str, last_message_time: i64, from_me: bool) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE channels SET
+                last_message_time = MAX(last_message_time, ?2),
+                last_message_from_me = ?3,
+                is_read = CASE WHEN ?3 THEN is_read ELSE 0 END
+             WHERE id = ?1
+               AND (?2 > last_message_time OR (NOT ?3 AND is_read))",
+            params![id, last_message_time, from_me as i64],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// True when a thread id is a known channel (has a row in the `channels`
+    /// table). The live-message path uses this — alongside the id-suffix check —
+    /// to route a post to `touch_channel` instead of leaking it into the chat list.
+    pub fn is_channel(&self, id: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM channels WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// All channels, grouped for the sidebar tree: by team, General first within a
+    /// team, then by channel name. Empty channels are never inserted, so every row
+    /// here has content.
+    pub fn channels(&self) -> Result<Vec<ChannelRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, team_id, team_name, display_name, is_general, is_favorite,
+                    last_message_time, last_message_preview, last_message_sender,
+                    last_message_from_me, is_read, draft
+             FROM channels
+             ORDER BY team_name ASC, team_id ASC, is_general DESC, display_name ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ChannelRow {
+                id: r.get(0)?,
+                team_id: r.get(1)?,
+                team_name: r.get(2)?,
+                display_name: r.get(3)?,
+                is_general: r.get::<_, i64>(4)? != 0,
+                is_favorite: r.get::<_, i64>(5)? != 0,
+                last_message_time: r.get(6)?,
+                last_message_preview: r.get(7)?,
+                last_message_sender: r.get(8)?,
+                last_message_from_me: r.get::<_, i64>(9)? != 0,
+                is_read: r.get::<_, i64>(10)? != 0,
+                draft: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Remove a conversation and all of its messages. Used to purge the
     /// `48:notifications` activity feed, which older builds mis-persisted as a
     /// chat (empty-content bubbles under a raw MRI-URL title) before it was
@@ -557,6 +745,20 @@ impl Store {
         self.conn
             .execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    /// Delete ONLY a conversation's list row, KEEPING its messages. Used to heal a
+    /// channel that a live post leaked into the conversations table before a CSA
+    /// sync identified it as a channel: the row is removed (so it stops showing in
+    /// the Chats list) while its messages stay, since the message pipeline is
+    /// shared by thread id and the channel now owns the same messages. Returns true
+    /// when a row was actually removed, so the caller emits `conversations_changed`
+    /// only on a real change (and the heal converges to a no-op on re-sync).
+    pub fn delete_conversation_row(&self, id: &str) -> Result<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
+        Ok(n > 0)
     }
 
     /// Insert a message, deduplicated by id. Returns true if it was newly
@@ -671,14 +873,24 @@ impl Store {
         self.update_message_reactions(conversation_id, id, &next)
     }
 
-    /// Persist the unsent composer text for one conversation. Network syncs never
-    /// write this column, so a local draft cannot be clobbered by remote metadata.
-    pub fn set_draft(&self, conversation_id: &str, draft: &str) -> Result<()> {
+    /// Persist the unsent composer text for one conversation OR channel. Network
+    /// syncs never write this column, so a local draft cannot be clobbered by
+    /// remote metadata. A thread id is either a chat or a channel, so we try the
+    /// conversations table first and fall through to channels — that way the same
+    /// `set_draft` request works for both without the caller knowing which it is.
+    pub fn set_draft(&self, thread_id: &str, draft: &str) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE conversations SET draft = ?2 WHERE id = ?1",
-            params![conversation_id, draft],
+            params![thread_id, draft],
         )?;
-        anyhow::ensure!(changed == 1, "unknown conversation: {conversation_id}");
+        if changed == 1 {
+            return Ok(());
+        }
+        let changed = self.conn.execute(
+            "UPDATE channels SET draft = ?2 WHERE id = ?1",
+            params![thread_id, draft],
+        )?;
+        anyhow::ensure!(changed == 1, "unknown conversation or channel: {thread_id}");
         Ok(())
     }
 
@@ -758,6 +970,11 @@ impl Store {
                     c.thread_type,
                     c.draft
              FROM conversations c
+             -- a channel that leaked into the conversations table (a live post that
+             -- landed before the CSA sync classified it) must never show in the chat
+             -- list; exclude any id the channels table now owns. persist_channels
+             -- also deletes such rows, so this is belt-and-suspenders.
+             WHERE c.id NOT IN (SELECT id FROM channels)
              ORDER BY c.is_pinned DESC, c.last_message_time DESC, c.id ASC",
         )?;
         let rows = stmt.query_map(params![self_name], |r| {
@@ -906,6 +1123,30 @@ mod tests {
             is_pinned: false,
             is_hidden: false,
             thread_type: "",
+        }
+    }
+
+    /// Minimal `ChannelUpdate` for the channel tests: id/team/name/time/read vary,
+    /// the rest take neutral defaults.
+    fn chan_upd<'a>(
+        id: &'a str,
+        team_id: &'a str,
+        team_name: &'a str,
+        name: &'a str,
+        time: i64,
+    ) -> ChannelUpdate<'a> {
+        ChannelUpdate {
+            id,
+            team_id,
+            team_name,
+            display_name: name,
+            is_general: false,
+            is_favorite: false,
+            last_message_time: time,
+            last_message_preview: "",
+            last_message_sender: "",
+            last_message_from_me: false,
+            is_read: true,
         }
     }
 
@@ -1582,5 +1823,120 @@ mod tests {
             .query_row("SELECT reactions FROM messages WHERE id = 'm1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(reactions, "[]");
+    }
+
+    // ---- channels -----------------------------------------------------------
+
+    #[test]
+    fn channel_upsert_counts_only_real_changes() {
+        let s = Store::open_in_memory().unwrap();
+        let u = chan_upd("19:c@thread.tacv2", "19:t@thread.tacv2", "Ops", "Standup", 100);
+
+        assert!(s.upsert_channel_full(&u).unwrap(), "first insert is a change");
+        assert!(!s.upsert_channel_full(&u).unwrap(), "identical re-sync is a no-op");
+
+        // A newer last_message_time is a real change.
+        let bumped = ChannelUpdate { last_message_time: 200, ..u.clone() };
+        assert!(s.upsert_channel_full(&bumped).unwrap());
+        assert!(!s.upsert_channel_full(&bumped).unwrap());
+
+        // An older snapshot never regresses the row (no change reported).
+        assert!(!s.upsert_channel_full(&u).unwrap());
+        assert_eq!(s.channels().unwrap()[0].last_message_time, 200);
+    }
+
+    #[test]
+    fn channels_are_grouped_general_first_then_by_name() {
+        let s = Store::open_in_memory().unwrap();
+        // Team B, then Team A (inserted out of order); within A, General + two named.
+        s.upsert_channel_full(&chan_upd("19:b1@thread.tacv2", "19:tb@thread.tacv2", "Beta", "Random", 10)).unwrap();
+        s.upsert_channel_full(&ChannelUpdate {
+            is_general: true,
+            ..chan_upd("19:ag@thread.tacv2", "19:ta@thread.tacv2", "Alpha", "General", 5)
+        }).unwrap();
+        s.upsert_channel_full(&chan_upd("19:az@thread.tacv2", "19:ta@thread.tacv2", "Alpha", "Zeta", 20)).unwrap();
+        s.upsert_channel_full(&chan_upd("19:am@thread.tacv2", "19:ta@thread.tacv2", "Alpha", "Meta", 30)).unwrap();
+
+        let rows = s.channels().unwrap();
+        let order: Vec<&str> = rows.iter().map(|c| c.display_name.as_str()).collect();
+        // Alpha's channels first (team_name asc), General before the alphabetical
+        // Meta/Zeta; Beta's channel last. Sort is grouping-based, NOT time-based.
+        assert_eq!(order, ["General", "Meta", "Zeta", "Random"]);
+        assert!(rows[0].is_general);
+    }
+
+    #[test]
+    fn touch_channel_bumps_time_and_unread() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_channel_full(&chan_upd("19:c@thread.tacv2", "19:t@thread.tacv2", "Ops", "Standup", 100)).unwrap();
+
+        // An incoming post from someone else bumps the time and marks it unread.
+        assert!(s.touch_channel("19:c@thread.tacv2", 200, false).unwrap());
+        let row = &s.channels().unwrap()[0];
+        assert_eq!(row.last_message_time, 200);
+        assert!(!row.is_read);
+        assert!(!row.last_message_from_me);
+
+        // An older time with the channel already unread is a no-op.
+        assert!(!s.touch_channel("19:c@thread.tacv2", 150, false).unwrap());
+
+        // Our own post keeps it read and never regresses the time.
+        assert!(s.touch_channel("19:c@thread.tacv2", 300, true).unwrap());
+        let row = &s.channels().unwrap()[0];
+        assert_eq!(row.last_message_time, 300);
+        assert!(row.last_message_from_me);
+
+        // Unknown channel id is a no-op, never an error.
+        assert!(!s.touch_channel("19:missing@thread.tacv2", 999, false).unwrap());
+    }
+
+    #[test]
+    fn is_channel_and_conversations_exclusion() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("19:chat@thread.v2", "Chat", 100).unwrap();
+        // Same id lives in BOTH tables (simulating a leak) — the channel wins.
+        s.upsert_conversation("19:c@thread.tacv2", "leaked", 50).unwrap();
+        s.upsert_channel_full(&chan_upd("19:c@thread.tacv2", "19:t@thread.tacv2", "Ops", "Standup", 60)).unwrap();
+
+        assert!(s.is_channel("19:c@thread.tacv2").unwrap());
+        assert!(!s.is_channel("19:chat@thread.v2").unwrap());
+
+        // The chat list excludes any id owned by the channels table.
+        let convs = s.conversations("").unwrap();
+        assert!(convs.iter().any(|c| c.id == "19:chat@thread.v2"));
+        assert!(convs.iter().all(|c| c.id != "19:c@thread.tacv2"));
+    }
+
+    #[test]
+    fn delete_conversation_row_keeps_messages() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("19:c@thread.tacv2", "leaked", 50).unwrap();
+        s.insert_message(&msg("19:c@thread.tacv2", 1)).unwrap();
+
+        assert!(s.delete_conversation_row("19:c@thread.tacv2").unwrap());
+        // gone from the conversations list...
+        assert!(s.conversations("").unwrap().is_empty());
+        // ...but its messages survive (the channel now owns them by id).
+        assert_eq!(s.newest_messages("19:c@thread.tacv2", 10).unwrap().len(), 1);
+        // idempotent: a second delete removes nothing.
+        assert!(!s.delete_conversation_row("19:c@thread.tacv2").unwrap());
+    }
+
+    #[test]
+    fn set_draft_falls_through_to_channels() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("19:chat@thread.v2", "Chat", 100).unwrap();
+        s.upsert_channel_full(&chan_upd("19:c@thread.tacv2", "19:t@thread.tacv2", "Ops", "Standup", 60)).unwrap();
+
+        // A chat draft writes the conversations row.
+        s.set_draft("19:chat@thread.v2", "chat draft").unwrap();
+        assert_eq!(s.conversations("").unwrap().iter().find(|c| c.id == "19:chat@thread.v2").unwrap().draft, "chat draft");
+
+        // A channel draft falls through to the channels row.
+        s.set_draft("19:c@thread.tacv2", "channel draft").unwrap();
+        assert_eq!(s.channels().unwrap()[0].draft, "channel draft");
+
+        // An unknown thread id is an error.
+        assert!(s.set_draft("19:nope@thread.v2", "x").is_err());
     }
 }

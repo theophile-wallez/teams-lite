@@ -11,9 +11,11 @@
 //   response (server -> client):  { "id": <n>, "result": <v> } | { "id": <n>, "error": "<msg>" }
 //   event    (server -> client):  { "event": "<name>", "data": <v> }   (no id)
 //
-// Methods: ping | conversations | open | backfill | set_draft | send | edit | react
-//          | notifications | fetch_media | get_settings | set_settings | enrich_link
-// Events:  status | realtime_status | message | conversations_changed | typing
+// Methods: ping | conversations | channels | open | backfill | set_draft | send
+//          | edit | react | notifications | fetch_media | get_settings
+//          | set_settings | enrich_link
+// Events:  status | realtime_status | message | conversations_changed
+//          | channels_changed | typing
 //
 // Run it (from the web/ directory):
 //   export PATH="$HOME/.bun/bin:$PATH"
@@ -58,6 +60,26 @@ type Conversation = {
   is_pinned: boolean;
   is_hidden: boolean;
   thread_type: string;
+  draft: string;
+};
+
+// One team channel, as returned by the `channels` method (mirrors protocol.ts
+// `Channel` and the Rust `ChannelRow` serialization). A channel is a distinct
+// Teams thread (`@thread.tacv2`) whose messages reuse the SAME pipeline as a
+// chat — open/backfill/send/edit/react all key on the thread id — so it never
+// appears in the `conversations` list; only the sidebar grouping differs.
+type Channel = {
+  id: string;
+  team_id: string;
+  team_name: string;
+  name: string;
+  is_general: boolean;
+  is_favorite: boolean;
+  last_message_time: number;
+  last_message_preview: string;
+  last_message_sender: string;
+  last_message_from_me: boolean;
+  is_read: boolean;
   draft: string;
 };
 
@@ -299,6 +321,29 @@ const GROUP_NAMES = [
   "Coffee Chat",
 ];
 
+/** Teams and their channels. Each channel gets a full backlog and lives under
+ *  the Channels tab only — never in the Chats list. "General" is the team's
+ *  default channel and always sorts first within its team. `team_id` is any
+ *  stable key (the sidebar groups by it); channel ids end in `@thread.tacv2`,
+ *  the discriminant the backend uses to route a thread to the channel pipeline. */
+const TEAM_SEEDS: { id: string; name: string; channels: string[] }[] = [
+  {
+    id: "team-engineering",
+    name: "Engineering",
+    channels: ["General", "Frontend", "Backend", "Incidents"],
+  },
+  {
+    id: "team-design",
+    name: "Design",
+    channels: ["General", "Research", "Critique"],
+  },
+  {
+    id: "team-product",
+    name: "Product",
+    channels: ["General", "Roadmap"],
+  },
+];
+
 const MESSAGE_POOL = [
   "Morning! Did you get a chance to look at the deploy from last night?",
   "Yeah, it went out clean. No alerts so far.",
@@ -374,6 +419,20 @@ type ConvState = {
 const store = new Map<string, ConvState>();
 /** Insertion order preserved so the seed is reproducible; sidebar sorts by time. */
 const order: string[] = [];
+
+/** A channel mirrors ConvState but tracks a `Channel` summary instead of a
+ *  `Conversation`; its messages reuse the shared pipeline (see {@link threadFor}). */
+type ChannelState = {
+  channel: Channel;
+  messages: ChatMessage[]; // ascending by seq (1..N)
+  /** Non-self participants (channels are always multi-party). */
+  participants: Person[];
+};
+
+/** Channels are kept apart from `store` so they never leak into the Chats list,
+ *  exactly like the Rust core's separate `channels` table. */
+const channelStore = new Map<string, ChannelState>();
+const channelOrder: string[] = [];
 
 /** Milliseconds between two consecutive backlog messages: mostly minutes, with
  *  the occasional multi-hour gap so a 120-message backlog spans several days. */
@@ -472,6 +531,18 @@ function recomputeSummary(cs: ConvState): void {
   cs.conv.last_message_from_me = Boolean(last.is_self) && !last.system_event;
 }
 
+/** Recompute a channel's sidebar summary from its newest message. */
+function recomputeChannelSummary(chs: ChannelState): void {
+  const last = chs.messages.at(-1);
+  if (!last) return;
+  chs.channel.last_message_time = last.compose_time;
+  chs.channel.last_message_preview = last.system_event
+    ? callEventSidebarLabel(last.system_event)
+    : previewOf(last.content);
+  chs.channel.last_message_sender = last.system_event ? "" : last.sender;
+  chs.channel.last_message_from_me = Boolean(last.is_self) && !last.system_event;
+}
+
 /** Create one conversation with its backlog and register it in the store. */
 function addConversation(input: {
   id: string;
@@ -550,6 +621,57 @@ function seed(): void {
     isMuted: false,
     isPinned: false,
   });
+}
+
+/** Seed every team's channels with a full backlog. Called LAST so it never
+ *  perturbs the PRNG sequence the chat seed depends on, keeping the Chats list
+ *  identical for the existing specs. Channels are multi-party (a group backlog)
+ *  and land in `channelStore`, so they surface only under the Channels tab. */
+function seedChannels(): void {
+  for (const team of TEAM_SEEDS) {
+    team.channels.forEach((channelName) => {
+      const teamSlug = team.name.toLowerCase().replace(/[^a-z]+/g, "-");
+      const chanSlug = channelName.toLowerCase().replace(/[^a-z]+/g, "-");
+      const id = `19:${teamSlug}-${chanSlug}-mock@thread.tacv2`;
+      const isGeneral = channelName === "General";
+      const memberCount = 3 + Math.floor(rand() * 3); // 3..5 teammates
+      const participants = sample(PEOPLE, memberCount, rand);
+      const newestTime = Date.now() - Math.floor(rand() * 6 * 24 * 3_600_000);
+      const messages = generateBacklog(id, "group", participants, newestTime);
+      const channel: Channel = {
+        id,
+        team_id: team.id,
+        team_name: team.name,
+        name: channelName,
+        is_general: isGeneral,
+        is_favorite: false,
+        last_message_time: 0,
+        last_message_preview: "",
+        last_message_sender: "",
+        last_message_from_me: false,
+        is_read: rand() >= 0.4,
+        draft: "",
+      };
+      const chs: ChannelState = { channel, messages, participants };
+      recomputeChannelSummary(chs);
+      // A channel whose last message is ours has necessarily been read.
+      if (channel.last_message_from_me) channel.is_read = true;
+      channelStore.set(id, chs);
+      channelOrder.push(id);
+    });
+  }
+}
+
+/** Sort channels for the `channels` result exactly like the Rust `channels()`
+ *  query: team name, then team id, General first, then channel name, then id. */
+function channelSort(a: Channel, b: Channel): number {
+  return (
+    a.team_name.localeCompare(b.team_name) ||
+    a.team_id.localeCompare(b.team_id) ||
+    (a.is_general === b.is_general ? 0 : a.is_general ? -1 : 1) ||
+    a.name.localeCompare(b.name) ||
+    a.id.localeCompare(b.id)
+  );
 }
 
 /** Register a dedicated "Media Gallery" conversation whose messages exercise the
@@ -1110,9 +1232,63 @@ function parseReplyTo(value: unknown): ReplyTo | undefined {
 
 // ---- next sequence / message id for freshly created messages ----
 
-function nextSeqFor(cs: ConvState): number {
-  const last = cs.messages.at(-1);
-  return (last?.seq ?? 0) + 1;
+/** Next seq for an ascending-by-seq message array. */
+function nextSeq(messages: ChatMessage[]): number {
+  return (messages.at(-1)?.seq ?? 0) + 1;
+}
+
+// ---- unified thread accessor (chat conversation OR team channel) ----
+
+/** A message-bearing thread: a chat conversation or a team channel. The message
+ *  pipeline (open/backfill/send/edit/react/set_draft) is shared and keys on the
+ *  thread id, never caring which kind it is — exactly like the Rust core, where
+ *  channel messages live in the same `messages` table. Only the sidebar-summary
+ *  target and the "changed" event that follows a mutation differ per kind. */
+type Thread = {
+  messages: ChatMessage[];
+  participants: Person[];
+  getDraft: () => string;
+  setDraft: (text: string) => void;
+  setRead: (read: boolean) => void;
+  recompute: () => void;
+  changedEvent: "conversations_changed" | "channels_changed";
+};
+
+/** Resolve a thread id to its handle, checking chats first then channels. */
+function threadFor(id: string): Thread | null {
+  const cs = store.get(id);
+  if (cs) {
+    return {
+      messages: cs.messages,
+      participants: cs.participants,
+      getDraft: () => cs.conv.draft,
+      setDraft: (text) => {
+        cs.conv.draft = text;
+      },
+      setRead: (read) => {
+        cs.conv.is_read = read;
+      },
+      recompute: () => recomputeSummary(cs),
+      changedEvent: "conversations_changed",
+    };
+  }
+  const chs = channelStore.get(id);
+  if (chs) {
+    return {
+      messages: chs.messages,
+      participants: chs.participants,
+      getDraft: () => chs.channel.draft,
+      setDraft: (text) => {
+        chs.channel.draft = text;
+      },
+      setRead: (read) => {
+        chs.channel.is_read = read;
+      },
+      recompute: () => recomputeChannelSummary(chs),
+      changedEvent: "channels_changed",
+    };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,11 +1377,23 @@ function dispatch(method: string, params: unknown): unknown {
       return "pong";
 
     case "conversations": {
-      // Newest activity first, exactly like the sidebar expects.
+      // Newest activity first, exactly like the sidebar expects. Channels live
+      // in their own store, so they never appear here — matching the Rust
+      // `conversations()` query that excludes ids present in the channels table.
       return order
         .map((id) => store.get(id)!.conv)
         .slice()
         .sort((a, b) => b.last_message_time - a.last_message_time)
+        .map((c) => ({ ...c }));
+    }
+
+    case "channels": {
+      // Team-grouped, General-first — the exact order the Rust `channels()`
+      // query returns, which the sidebar's `groupChannelsByTeam` relies on.
+      return channelOrder
+        .map((id) => channelStore.get(id)!.channel)
+        .slice()
+        .sort(channelSort)
         .map((c) => ({ ...c }));
     }
 
@@ -1216,24 +1404,24 @@ function dispatch(method: string, params: unknown): unknown {
 
     case "open": {
       const id = requireString(params, "conversation");
-      const cs = store.get(id);
-      if (!cs) return { messages: [], has_more: false };
-      return newestPage(cs.messages);
+      const t = threadFor(id);
+      if (!t) return { messages: [], has_more: false };
+      return newestPage(t.messages);
     }
 
     case "backfill": {
       const id = requireString(params, "conversation");
       const beforeSeq = requireNumber(params, "before_seq");
-      const cs = store.get(id);
-      if (!cs) return { messages: [], has_more: false };
-      return pageBefore(cs.messages, beforeSeq);
+      const t = threadFor(id);
+      if (!t) return { messages: [], has_more: false };
+      return pageBefore(t.messages, beforeSeq);
     }
 
     case "set_draft": {
       const id = requireString(params, "conversation");
       const text = requireString(params, "text");
-      const cs = store.get(id);
-      if (cs) cs.conv.draft = text; // reflected by a later `conversations`
+      const t = threadFor(id);
+      if (t) t.setDraft(text); // reflected by a later `conversations` / `channels`
       return { saved: true };
     }
 
@@ -1314,26 +1502,20 @@ function handleFrame(ws: Socket, raw: string): void {
 // Simulated real-time: sent-message echoes + periodic incoming messages.
 // ---------------------------------------------------------------------------
 
-/** Append a message to a conversation and refresh its summary. */
-function appendMessage(cs: ConvState, msg: ChatMessage): void {
-  cs.messages.push(msg);
-  recomputeSummary(cs);
-}
-
 /** Edit a stored message in place and broadcast the new content, mirroring the
  *  Rust backend: it PUTs the message resource, updates the local row, then emits
  *  a `message` event that the UI reconciles by id (replacing the old bubble). */
 function editMessage(convId: string, messageId: string, text: string): void {
-  const cs = store.get(convId);
-  if (!cs) return;
-  const msg = cs.messages.find((m) => m.id === messageId);
+  const t = threadFor(convId);
+  if (!t) return;
+  const msg = t.messages.find((m) => m.id === messageId);
   if (!msg) return;
   const content = escapeHtml(text);
   if (msg.content === content) return; // no-op edit: nothing to broadcast
   msg.content = content;
-  recomputeSummary(cs);
+  t.recompute();
   broadcast("message", msg);
-  broadcast("conversations_changed", {});
+  broadcast(t.changedEvent, {});
 }
 
 /** Toggle OUR reaction on a message and broadcast it, mirroring the Rust
@@ -1341,9 +1523,9 @@ function editMessage(convId: string, messageId: string, text: string): void {
  *  emotion removes it and any other key replaces it. Returns the resulting on/off
  *  (whether we now react with `key`). */
 function reactMessage(convId: string, messageId: string, key: string): boolean {
-  const cs = store.get(convId);
-  if (!cs) return false;
-  const msg = cs.messages.find((m) => m.id === messageId);
+  const t = threadFor(convId);
+  if (!t) return false;
+  const msg = t.messages.find((m) => m.id === messageId);
   if (!msg) return false;
 
   const list = msg.reactions ?? [];
@@ -1376,9 +1558,9 @@ function scheduleSendEcho(
   contentHtml?: string,
 ): void {
   setTimeout(() => {
-    const cs = store.get(convId);
-    if (!cs) return;
-    const seq = nextSeqFor(cs);
+    const t = threadFor(convId);
+    if (!t) return;
+    const seq = nextSeq(t.messages);
     const msg: ChatMessage = {
       id: `${convId}#${seq}`,
       conversation_id: convId,
@@ -1389,11 +1571,12 @@ function scheduleSendEcho(
       content: composeContent(text, replyTo, contentHtml),
       is_self: true,
     };
-    appendMessage(cs, msg);
-    cs.conv.is_read = true; // it's ours
-    cs.conv.draft = ""; // the accepted send clears the persisted draft
+    t.messages.push(msg);
+    t.recompute();
+    t.setRead(true); // it's ours
+    t.setDraft(""); // the accepted send clears the persisted draft
     broadcast("message", msg);
-    broadcast("conversations_changed", {});
+    broadcast(t.changedEvent, {});
   }, SEND_ECHO_DELAY_MS);
 }
 
@@ -1404,25 +1587,26 @@ function startLiveFeed(): void {
   setInterval(() => {
     if (sockets.size === 0) return; // no listeners → don't grow history pointlessly
 
-    // Pick a random conversation that has someone else who can talk to us.
-    const candidates = order
-      .map((id) => store.get(id)!)
-      .filter((cs) => cs.participants.length > 0);
+    // Pick a random thread (chat OR channel) that has someone else who can talk
+    // to us, so both the Chats and Channels tabs see live traffic.
+    const candidates = [...order, ...channelOrder]
+      .map((id) => ({ id, t: threadFor(id)! }))
+      .filter((c) => c.t.participants.length > 0);
     if (candidates.length === 0) return;
-    const cs = pick(candidates, Math.random);
-    const person = pick(cs.participants, Math.random);
-    const seq = nextSeqFor(cs);
+    const { id, t } = pick(candidates, Math.random);
+    const person = pick(t.participants, Math.random);
+    const seq = nextSeq(t.messages);
 
     // Occasionally reply to the latest message; otherwise a fresh line.
-    const last = cs.messages.at(-1);
+    const last = t.messages.at(-1);
     const content =
       last && Math.random() < 0.2
         ? replyContent(last, pick(REPLY_BODIES, Math.random))
         : escapeHtml(pick(MESSAGE_POOL, Math.random));
 
     const msg: ChatMessage = {
-      id: `${cs.conv.id}#${seq}`,
-      conversation_id: cs.conv.id,
+      id: `${id}#${seq}`,
+      conversation_id: id,
       seq,
       compose_time: Date.now(),
       sender: person.name,
@@ -1430,10 +1614,11 @@ function startLiveFeed(): void {
       content,
       is_self: false,
     };
-    appendMessage(cs, msg);
-    cs.conv.is_read = false; // a new incoming message is unread
+    t.messages.push(msg);
+    t.recompute();
+    t.setRead(false); // a new incoming message is unread
     broadcast("message", msg);
-    broadcast("conversations_changed", {});
+    broadcast(t.changedEvent, {});
   }, LIVE_INTERVAL_MS);
 }
 
@@ -1452,20 +1637,20 @@ function injectMessage(input: {
   isSelf?: boolean;
   reply?: boolean;
 }): ChatMessage | null {
-  const cs = store.get(input.conversation);
-  if (!cs) return null;
+  const t = threadFor(input.conversation);
+  if (!t) return null;
   const isSelf = input.isSelf ?? false;
-  const fallback = cs.participants[0];
+  const fallback = t.participants[0];
   const sender = input.sender ?? (isSelf ? SELF_NAME : (fallback?.name ?? "Someone"));
   const senderMri =
     input.senderMri ?? (isSelf ? SELF_MRI : (fallback?.mri ?? "8:orgid:someone"));
-  const seq = nextSeqFor(cs);
-  const last = cs.messages.at(-1);
+  const seq = nextSeq(t.messages);
+  const last = t.messages.at(-1);
   const content =
     input.reply && last ? replyContent(last, input.content) : escapeHtml(input.content);
   const msg: ChatMessage = {
-    id: `${cs.conv.id}#${seq}`,
-    conversation_id: cs.conv.id,
+    id: `${input.conversation}#${seq}`,
+    conversation_id: input.conversation,
     seq,
     compose_time: Date.now(),
     sender,
@@ -1473,10 +1658,11 @@ function injectMessage(input: {
     content,
     is_self: isSelf,
   };
-  appendMessage(cs, msg);
-  cs.conv.is_read = isSelf; // an incoming message is unread; ours is read
+  t.messages.push(msg);
+  t.recompute();
+  t.setRead(isSelf); // an incoming message is unread; ours is read
   broadcast("message", msg);
-  broadcast("conversations_changed", {});
+  broadcast(t.changedEvent, {});
   return msg;
 }
 
@@ -1565,6 +1751,14 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       }),
     );
   }
+  if (req.method === "GET" && url.pathname === "/__test/channels") {
+    return Response.json(
+      channelOrder.map((id) => {
+        const c = channelStore.get(id)!.channel;
+        return { id: c.id, name: c.name, team_id: c.team_id, team_name: c.team_name };
+      }),
+    );
+  }
   return null;
 }
 
@@ -1576,6 +1770,9 @@ seed();
 seedMediaSamples();
 seedCallEvents();
 seedGitLabSamples();
+// Seed channels LAST so the chat seed's PRNG sequence (and thus the Chats list
+// the existing specs assert on) is left completely unchanged.
+seedChannels();
 
 const server = Bun.serve({
   port: PORT,
@@ -1609,7 +1806,8 @@ const server = Bun.serve({
 startLiveFeed();
 
 console.log(
-  `[mock] teams-lite mock backend on ws://${server.hostname}:${server.port} (${store.size} conversations)` +
+  `[mock] teams-lite mock backend on ws://${server.hostname}:${server.port} ` +
+    `(${store.size} conversations, ${channelStore.size} channels)` +
     (TEST_HOOKS ? " [test-hooks]" : "") +
     (LIVE_INTERVAL_MS <= 0 ? " [no-live-feed]" : ""),
 );

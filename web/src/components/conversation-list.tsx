@@ -1,13 +1,24 @@
 import { useMemo, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { MoonStar, Search, Settings as SettingsIcon, Sun } from "lucide-react";
-import { convLabel, previewLine, typingLabel, type Conversation } from "~/lib/protocol";
+import { Hash, MoonStar, Search, Settings as SettingsIcon, Sun } from "lucide-react";
+import {
+  channelLabel,
+  channelPreviewLine,
+  convLabel,
+  groupChannelsByTeam,
+  previewLine,
+  typingLabel,
+  type Channel,
+  type Conversation,
+} from "~/lib/protocol";
+import type { SidebarTab } from "~/lib/store";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
-import { useAppState } from "./controller-context";
+import { useAppState, useController } from "./controller-context";
 import { NotificationsBell } from "./notifications-bell";
 import { StatusBar } from "./status-bar";
+import { Tabs, TabsList, TabsPanel, TabsTrigger } from "./ui/tabs";
 
 const ROW_HEIGHT = 64;
 
@@ -29,9 +40,10 @@ function formatTime(ms: number): string {
 }
 
 /**
- * The left sidebar: an account header, a ⌘K search field, and a virtualized,
- * keyboard- and mouse-navigable conversation list. The open conversation reads
- * as a subtly elevated card (shadow-as-border); others stay flat and calm.
+ * The left sidebar: an account header, a ⌘K search field, a Chats/Channels tab
+ * switch, and — depending on the tab — a virtualized conversation list or the
+ * team → channel tree. Channel messages live entirely under the Channels tab and
+ * never appear in the chat list, matching the Microsoft Teams separation.
  */
 export function ConversationList(props: {
   selectedIndex: number;
@@ -42,18 +54,9 @@ export function ConversationList(props: {
   settingsActive: boolean;
   chatOpen: boolean;
 }) {
-  const conversations = useAppState((s) => s.conversations);
-  const openId = useAppState((s) => s.openId);
+  const controller = useController();
+  const sidebarTab = useAppState((s) => s.sidebarTab);
   const resolvedTheme = useAppState((s) => s.resolvedTheme);
-  const navigate = useNavigate();
-
-  const parentRef = useRef<HTMLDivElement>(null);
-  const virtualizer = useVirtualizer({
-    count: conversations.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => ROW_HEIGHT,
-    overscan: 12,
-  });
 
   return (
     <aside
@@ -124,47 +127,128 @@ export function ConversationList(props: {
         </button>
       </div>
 
-      <div className="flex items-center px-4 pb-1 pt-1">
-        <span className="text-[11px] font-medium uppercase tracking-wider text-text-faint">
-          Chats
-        </span>
-      </div>
-
-      <div
-        ref={parentRef}
-        data-testid="sidebar-scroll"
-        className="flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2"
+      <Tabs
+        value={sidebarTab}
+        onValueChange={(v) => controller.setSidebarTab(v as SidebarTab)}
+        className="flex min-h-0 flex-1 flex-col"
       >
-        <div className="relative w-full" style={{ height: `${virtualizer.getTotalSize()}px` }}>
-          {virtualizer.getVirtualItems().map((row) => {
-            const c = conversations[row.index];
-            if (!c) return null;
-            return (
-              <div
-                key={c.id}
-                className="absolute left-0 top-0 w-full"
-                style={{ height: `${ROW_HEIGHT}px`, transform: `translateY(${row.start}px)` }}
-              >
-                <ConversationRow
-                  conversation={c}
-                  open={openId === c.id}
-                  selected={props.selectedIndex === row.index}
-                  onClick={() => {
-                    props.onSelect(row.index);
-                    void navigate({
-                      to: "/c/$conversationId",
-                      params: { conversationId: c.id },
-                    });
-                  }}
-                />
-              </div>
-            );
-          })}
+        <div className="px-3 pb-1.5">
+          <TabsList aria-label="Sidebar sections" className="w-full">
+            <TabsTrigger value="chats" data-testid="tab-chats">
+              Chats
+            </TabsTrigger>
+            <TabsTrigger value="channels" data-testid="tab-channels">
+              Channels
+            </TabsTrigger>
+          </TabsList>
         </div>
-      </div>
+
+        <TabsPanel value="chats" className="flex min-h-0 flex-1 flex-col">
+          <ChatList selectedIndex={props.selectedIndex} onSelect={props.onSelect} />
+        </TabsPanel>
+        <TabsPanel value="channels" className="flex min-h-0 flex-1 flex-col">
+          <ChannelTree />
+        </TabsPanel>
+      </Tabs>
 
       <StatusBar />
     </aside>
+  );
+}
+
+/** The virtualized chat list (the Chats tab). Keyboard selection is driven from
+ *  the app shell via `selectedIndex`/`onSelect`. */
+function ChatList(props: { selectedIndex: number; onSelect: (index: number) => void }) {
+  const conversations = useAppState((s) => s.conversations);
+  const openId = useAppState((s) => s.openId);
+  const navigate = useNavigate();
+
+  const parentRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: conversations.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 12,
+  });
+
+  return (
+    <div
+      ref={parentRef}
+      data-testid="sidebar-scroll"
+      className="flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2"
+    >
+      <div className="relative w-full" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+        {virtualizer.getVirtualItems().map((row) => {
+          const c = conversations[row.index];
+          if (!c) return null;
+          return (
+            <div
+              key={c.id}
+              className="absolute left-0 top-0 w-full"
+              style={{ height: `${ROW_HEIGHT}px`, transform: `translateY(${row.start}px)` }}
+            >
+              <ConversationRow
+                conversation={c}
+                open={openId === c.id}
+                selected={props.selectedIndex === row.index}
+                onClick={() => {
+                  props.onSelect(row.index);
+                  void navigate({
+                    to: "/c/$conversationId",
+                    params: { conversationId: c.id },
+                  });
+                }}
+              />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** The team → channel tree (the Channels tab): each team is a titled section, its
+ *  channels listed beneath (General first, courtesy of the backend sort). */
+function ChannelTree() {
+  const channels = useAppState((s) => s.channels);
+  const openId = useAppState((s) => s.openId);
+  const navigate = useNavigate();
+  const teams = useMemo(() => groupChannelsByTeam(channels), [channels]);
+
+  if (teams.length === 0) {
+    return (
+      <div
+        data-testid="channels-empty"
+        className="flex flex-1 items-center justify-center px-6 text-center text-[13px] text-text-faint"
+      >
+        No channels yet.
+      </div>
+    );
+  }
+
+  return (
+    <div
+      data-testid="channels-scroll"
+      className="flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2"
+    >
+      {teams.map((team) => (
+        <section key={team.team_id} data-testid="team-group" data-team-id={team.team_id}>
+          <h3 className="truncate px-2.5 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
+            {team.team_name || "Team"}
+          </h3>
+          {team.channels.map((c) => (
+            <ChannelRow
+              key={c.id}
+              channel={c}
+              open={openId === c.id}
+              onClick={() =>
+                void navigate({ to: "/c/$conversationId", params: { conversationId: c.id } })
+              }
+            />
+          ))}
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -249,12 +333,93 @@ function ConversationRow(props: {
                 props.open ? "text-text-dim" : unread ? "text-text-dim" : "text-text-faint",
               )}
             >
-              {preview || "\u00A0"}
+              {preview || " "}
             </span>
           )}
           {unread && (
             <span className="size-2 shrink-0 rounded-full bg-unread-dot" aria-hidden />
           )}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+/** One channel row under its team. A leading `#` mirrors Teams' channel glyph;
+ *  the preview line and unread dot match the chat rows for a consistent read. */
+function ChannelRow(props: { channel: Channel; open: boolean; onClick: () => void }) {
+  const c = props.channel;
+  const unread = !c.is_read;
+  const preview = channelPreviewLine(c);
+  const label = channelLabel(c);
+  const time = useMemo(() => formatTime(c.last_message_time), [c.last_message_time]);
+  const typers = useAppState((s) => s.typingByConversation[c.id]);
+  const typingText = typers && typers.length > 0 ? typingLabel(typers.map((t) => t.name)) : "";
+  const emphasizeTitle = props.open || unread;
+
+  return (
+    <button
+      type="button"
+      onClick={props.onClick}
+      data-testid="channel-row"
+      data-channel-id={c.id}
+      data-team-id={c.team_id}
+      data-open={props.open ? "true" : undefined}
+      data-unread={unread ? "true" : undefined}
+      aria-current={props.open ? "true" : undefined}
+      className={cn(
+        "my-0.5 flex h-[54px] w-full items-center gap-2.5 rounded-xl px-2.5 text-left transition-all",
+        props.open ? "bg-row-open shadow-card" : "hover:bg-row-hovered",
+      )}
+    >
+      <span
+        className={cn(
+          "grid size-7 shrink-0 place-items-center rounded-lg text-text-dim",
+          props.open ? "bg-primary/15 text-primary" : "bg-element",
+        )}
+        aria-hidden
+      >
+        <Hash className="size-3.5" strokeWidth={1.8} />
+      </span>
+
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="flex items-center gap-2">
+          <span
+            data-testid="channel-name"
+            className={cn(
+              "truncate text-[13px]",
+              emphasizeTitle ? "font-medium text-foreground" : "text-text-dim",
+            )}
+          >
+            {label}
+          </span>
+          {time && (
+            <time className="ml-auto shrink-0 text-[11px] tabular-nums text-text-faint">
+              {time}
+            </time>
+          )}
+        </span>
+        <span className="flex items-center gap-1.5">
+          {typingText ? (
+            <span className="flex flex-1 items-center gap-1.5 truncate text-xs text-primary">
+              <span className="typing-dots" aria-hidden="true">
+                <span className="typing-dot" />
+                <span className="typing-dot" />
+                <span className="typing-dot" />
+              </span>
+              <span className="truncate">{typingText}</span>
+            </span>
+          ) : (
+            <span
+              className={cn(
+                "flex-1 truncate text-xs",
+                unread ? "text-text-dim" : "text-text-faint",
+              )}
+            >
+              {preview || " "}
+            </span>
+          )}
+          {unread && <span className="size-2 shrink-0 rounded-full bg-unread-dot" aria-hidden />}
         </span>
       </span>
     </button>

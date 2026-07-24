@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronLeft, Loader2, MessagesSquare, WifiOff } from "lucide-react";
-import { convLabel, copyableMessageText, type ChatMessage, type Conversation } from "~/lib/protocol";
+import {
+  channelLabel,
+  convLabel,
+  copyableMessageText,
+  type Channel,
+  type ChatMessage,
+  type Conversation,
+} from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
 import { Avatar } from "./avatar";
 import { MessageBubble } from "./message-bubble";
@@ -36,6 +43,7 @@ export function MessagePane(props: { onBack?: () => void }) {
   const openId = useAppState((s) => s.openId);
   const messages = useAppState((s) => s.messages);
   const conversations = useAppState((s) => s.conversations);
+  const channels = useAppState((s) => s.channels);
   const loadingMessages = useAppState((s) => s.loadingMessages);
   const loadingOlder = useAppState((s) => s.loadingOlder);
   const hasMoreOlder = useAppState((s) => s.hasMoreOlder);
@@ -61,7 +69,16 @@ export function MessagePane(props: { onBack?: () => void }) {
   const scrollNonceRef = useRef(-1);
 
   const openConv = conversations.find((c) => c.id === openId) ?? null;
-  const isGroup = openConv?.kind === "group";
+  // A thread the pane opens is either a chat (in `conversations`) or a channel
+  // (in `channels`). The header, subtitle and sender-name display key off which.
+  const openChannel = !openConv ? (channels.find((c) => c.id === openId) ?? null) : null;
+  // Show sender names in any multi-party thread: every channel, and group chats.
+  const isGroup = openChannel !== null || openConv?.kind === "group";
+  const headerLabel = openConv
+    ? convLabel(openConv)
+    : openChannel
+      ? channelLabel(openChannel)
+      : (openId ?? "");
 
   const maybeFill = useCallback(() => {
     const el = viewportRef.current;
@@ -241,14 +258,20 @@ export function MessagePane(props: { onBack?: () => void }) {
             <ChevronLeft className="size-5" strokeWidth={1.6} />
           </button>
         )}
-        {openConv && <Avatar seed={openConv.id} label={convLabel(openConv)} className="size-9" />}
+        {(openConv || openChannel) && (
+          <Avatar seed={openId} label={headerLabel} className="size-9" />
+        )}
         <div className="flex min-w-0 flex-col">
           <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">
-            {openConv ? convLabel(openConv) : openId}
+            {headerLabel}
           </h2>
-          {openConv && (
+          {openConv ? (
             <p className="truncate text-[11px] text-text-faint">{paneSubtitle(openConv)}</p>
-          )}
+          ) : openChannel ? (
+            <p data-testid="channel-subtitle" className="truncate text-[11px] text-text-faint">
+              {channelSubtitle(openChannel)}
+            </p>
+          ) : null}
         </div>
       </header>
 
@@ -339,6 +362,13 @@ function findMessageNode(viewport: HTMLElement, messageId: string): HTMLElement 
     if (node.dataset.messageId === messageId) return node;
   }
   return null;
+}
+
+/** Subtitle for an open channel: its team, as a Teams-style breadcrumb (team ›
+ *  channel), so the header reads "General" over "Engineering · Channel". */
+function channelSubtitle(channel: Channel): string {
+  const team = channel.team_name || "Team";
+  return `${team} · Channel`;
 }
 
 /** A short, calm subtitle describing the open conversation. */

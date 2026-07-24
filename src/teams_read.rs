@@ -108,6 +108,99 @@ impl Conversation {
     }
 }
 
+/// True when a thread id belongs to a team channel. Teams routes channel posts
+/// through `@thread.tacv2` threads, distinct from group chats (`@thread.v2`),
+/// 1:1s (`@unq.gbl.spaces`) and system threads (`48:*`). This is the single
+/// discriminant the live-message path uses to keep a channel post out of the
+/// chat sidebar (see the trouter loop in the server).
+pub fn is_channel_thread_id(id: &str) -> bool {
+    id.ends_with("@thread.tacv2")
+}
+
+/// One team surfaced by the CSA aggregator, with its channels. Teams are the
+/// top level of the channel tree the sidebar renders (team → channels), exactly
+/// like the Microsoft Teams desktop app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Team {
+    pub id: String,
+    pub display_name: String,
+    pub channels: Vec<Channel>,
+}
+
+/// One channel within a team. A channel is a distinct thread (`@thread.tacv2`)
+/// whose messages reuse the SAME message pipeline as chats — only the sidebar
+/// grouping (under its team) and the chat/channel separation differ. The
+/// last-message fields mirror [`Conversation`] so the channel list renders a
+/// faithful preview line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Channel {
+    pub id: String,
+    /// The parent team's id (its General channel / team thread id).
+    pub team_id: String,
+    /// The parent team's display name, denormalized so the sidebar can group and
+    /// label channels without a second lookup.
+    pub team_name: String,
+    pub display_name: String,
+    /// True for the team's General channel (its id equals the team id, or CSA
+    /// flags it `isGeneral`). The UI sorts General first within a team.
+    pub is_general: bool,
+    /// True when the user favorited/followed the channel (`isFavorite`).
+    pub is_favorite: bool,
+    /// Compose time (epoch ms) of the last message, for sort order. 0 if unknown/empty.
+    pub last_message_time: i64,
+    /// True when the channel has never had a (displayable) message.
+    pub is_empty: bool,
+    pub last_message_preview: String,
+    pub last_message_sender: String,
+    pub last_message_from_me: bool,
+    /// False when the channel has unread messages. Drives the unread marker.
+    pub is_read: bool,
+}
+
+/// The last-message fields common to a CSA chat and a CSA channel: both carry a
+/// `lastMessage` sub-object with the SAME camelCase shape (`imDisplayName`,
+/// `composeTime`, `messageType`, `content`). Parsed once here so chats and
+/// channels build an identical, gate-consistent preview line.
+struct LastMessage {
+    time: i64,
+    /// Whether the container has a real last message (`lastMessage.id` present).
+    /// The caller ORs this with any container-specific empty flag.
+    has_message: bool,
+    preview: String,
+    sender: String,
+}
+
+/// Parse the shared `lastMessage` sub-object of a CSA chat or channel container.
+///
+/// The preview mirrors the message-history display gate so a system frame
+/// (typing/presence, a member/topic change) never leaks its raw machine XML into
+/// the sidebar; a call event gets a short human label instead of being blanked.
+fn parse_last_message(container: &Value) -> LastMessage {
+    let has_message = container.pointer("/lastMessage/id").and_then(|x| x.as_str()).is_some();
+    let time = container
+        .pointer("/lastMessage/composeTime")
+        .and_then(|x| x.as_str())
+        .map(parse_iso_ms)
+        .unwrap_or(0);
+    let content = container.pointer("/lastMessage/content").and_then(|x| x.as_str()).unwrap_or("");
+    let message_type = container.pointer("/lastMessage/messageType").and_then(|x| x.as_str()).unwrap_or("");
+    let preview = if let Some(event) = parse_call_event(message_type, content) {
+        call_event_label(&event).to_string()
+    } else if is_displayable_message_type(message_type) && !is_system_frame_content(content) {
+        preview_from_html(content)
+    } else {
+        String::new()
+    };
+    let sender = container
+        .pointer("/lastMessage/imDisplayName")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| container.pointer("/lastMessage/fromDisplayNameInToken").and_then(|x| x.as_str()))
+        .unwrap_or("")
+        .to_string();
+    LastMessage { time, has_message, preview, sender }
+}
+
 /// One page of history, oldest-first (ready to feed the store in seq order).
 pub struct MessagePage {
     pub messages: Vec<Message>,
@@ -118,16 +211,19 @@ pub struct MessagePage {
     pub has_more_older: bool,
 }
 
-/// Fetch the full conversation list from the CSA aggregator.
+/// Fetch the full conversation list AND the team/channel tree from the CSA
+/// aggregator in a SINGLE request. The `users/me` payload carries both `chats`
+/// and `teams`, so parsing both here keeps chats and channels perfectly in sync
+/// (one snapshot, one round-trip) and never double-fetches.
 ///
 /// `csa_token` must be an access token for [`CSA_SCOPE`]; the aggregator 401s on
-/// the ic3 token. Returns conversations best-effort: malformed items are skipped
-/// rather than failing the whole sync.
-pub async fn fetch_conversations(
+/// the ic3 token. Best-effort: malformed items are skipped rather than failing
+/// the whole sync.
+pub async fn fetch_csa(
     http: &reqwest::Client,
     session: &Session,
     csa_token: &str,
-) -> Result<Vec<Conversation>> {
+) -> Result<(Vec<Conversation>, Vec<Team>)> {
     let resp = http
         .get(CSA_URL)
         .bearer_auth(csa_token)
@@ -141,7 +237,22 @@ pub async fn fetch_conversations(
         anyhow::bail!("CSA users/me -> {status}");
     }
     let v: Value = serde_json::from_str(&body).context("parse CSA users/me")?;
-    Ok(parse_conversations_with_self(&v, &session.self_mri))
+    let convs = parse_conversations_with_self(&v, &session.self_mri);
+    let teams = parse_teams_with_self(&v, &session.self_mri);
+    Ok((convs, teams))
+}
+
+/// Fetch just the conversation list from the CSA aggregator. Thin wrapper over
+/// [`fetch_csa`] for callers that don't need the channel tree.
+///
+/// Returns conversations best-effort: malformed items are skipped rather than
+/// failing the whole sync.
+pub async fn fetch_conversations(
+    http: &reqwest::Client,
+    session: &Session,
+    csa_token: &str,
+) -> Result<Vec<Conversation>> {
+    Ok(fetch_csa(http, session, csa_token).await?.0)
 }
 
 /// Fetch one page of a conversation's history, walking into the past.
@@ -250,6 +361,54 @@ pub fn persist_conversations(store: &Store, convs: &[Conversation]) -> usize {
         }
     }
     changed
+}
+
+/// Persist a fetched team/channel tree into the store (pure/sync, no `.await`).
+///
+/// Empty channels are skipped so the list only shows channels that actually have
+/// content, matching the chat path. Also HEALS a channel that a prior live
+/// message leaked into the `conversations` table before we knew it was a channel:
+/// its conversation row is deleted (its messages are kept — the message pipeline
+/// is shared by id), so it can never appear in both the Chats and Channels lists.
+///
+/// Returns `(channels_changed, healed_leaks)`: the first is how many channel rows
+/// were inserted/updated (gates `channels_changed`), the second how many leaked
+/// conversation rows were removed (gates a `conversations_changed`, since the
+/// chat list shrank). Both converge to 0 on a steady re-sync, so a repeated sync
+/// of identical data emits no further change events.
+pub fn persist_channels(store: &Store, teams: &[Team]) -> (usize, usize) {
+    let mut changed = 0;
+    let mut healed = 0;
+    for team in teams {
+        for c in &team.channels {
+            if c.is_empty {
+                continue;
+            }
+            // A channel post that arrived live before this sync may have created a
+            // conversation row (the trouter loop upserts by id). Remove that row so
+            // the channel lives only in the channels table; its messages stay.
+            if store.delete_conversation_row(&c.id).unwrap_or(false) {
+                healed += 1;
+            }
+            let update = crate::store::ChannelUpdate {
+                id: &c.id,
+                team_id: &c.team_id,
+                team_name: &c.team_name,
+                display_name: &c.display_name,
+                is_general: c.is_general,
+                is_favorite: c.is_favorite,
+                last_message_time: c.last_message_time,
+                last_message_preview: &c.last_message_preview,
+                last_message_sender: &c.last_message_sender,
+                last_message_from_me: c.last_message_from_me,
+                is_read: c.is_read,
+            };
+            if store.upsert_channel_full(&update).unwrap_or(false) {
+                changed += 1;
+            }
+        }
+    }
+    (changed, healed)
 }
 
 /// Load the newest page of a conversation into the store (initial open) and record
@@ -384,45 +543,17 @@ fn parse_conversations_with_self(v: &Value, self_mri: &str) -> Vec<Conversation>
             .to_string();
         let chat_type = chat.get("chatType").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let is_one_on_one = chat.get("isOneOnOne").and_then(|x| x.as_bool()).unwrap_or(false);
-        let is_empty = chat.get("isEmptyConversation").and_then(|x| x.as_bool()).unwrap_or(false)
-            || chat.pointer("/lastMessage/id").and_then(|x| x.as_str()).is_none();
-        let last_message_time = chat
-            .pointer("/lastMessage/composeTime")
-            .and_then(|x| x.as_str())
-            .map(parse_iso_ms)
-            .unwrap_or(0);
 
         // Sidebar state, straight from the chat object (see the CSA capture spike).
         // NB: the `lastMessage` sub-object uses camelCase field names
         // (`imDisplayName`, `composeTime`, `messageType`) — NOT the lowercase names
-        // the chatService messages endpoint uses. Do not reuse `parse_message` here.
-        //
-        // Mirror the message-history gate so a system frame (typing/presence, a
-        // member/topic change) never leaks its raw machine XML into the sidebar
-        // preview line. A call event gets a short human label instead of being
-        // blanked, matching the centered line it renders as in the thread.
-        let last_message_content =
-            chat.pointer("/lastMessage/content").and_then(|x| x.as_str()).unwrap_or("");
-        let last_message_type =
-            chat.pointer("/lastMessage/messageType").and_then(|x| x.as_str()).unwrap_or("");
-        let last_message_preview = if let Some(event) =
-            parse_call_event(last_message_type, last_message_content)
-        {
-            call_event_label(&event).to_string()
-        } else if is_displayable_message_type(last_message_type)
-            && !is_system_frame_content(last_message_content)
-        {
-            preview_from_html(last_message_content)
-        } else {
-            String::new()
-        };
-        let last_message_sender = chat
-            .pointer("/lastMessage/imDisplayName")
-            .and_then(|x| x.as_str())
-            .filter(|s| !s.is_empty())
-            .or_else(|| chat.pointer("/lastMessage/fromDisplayNameInToken").and_then(|x| x.as_str()))
-            .unwrap_or("")
-            .to_string();
+        // the chatService messages endpoint uses; `parse_last_message` handles it.
+        let lm = parse_last_message(chat);
+        let is_empty = chat.get("isEmptyConversation").and_then(|x| x.as_bool()).unwrap_or(false)
+            || !lm.has_message;
+        let last_message_time = lm.time;
+        let last_message_preview = lm.preview;
+        let last_message_sender = lm.sender;
         let last_message_from_me = chat.get("isLastMessageFromMe").and_then(|x| x.as_bool()).unwrap_or(false);
         // `isRead` absent -> assume read, so a partial payload never floods the UI
         // with false unread markers.
@@ -465,6 +596,75 @@ fn parse_conversations_with_self(v: &Value, self_mri: &str) -> Vec<Conversation>
             is_hidden,
             thread_type,
         });
+    }
+    out
+}
+
+#[cfg(test)]
+fn parse_teams(v: &Value) -> Vec<Team> {
+    parse_teams_with_self(v, "")
+}
+
+/// Parse the CSA `teams` array into the team → channel tree the sidebar renders.
+///
+/// The shape is tolerant by design — CSA has shipped several spellings for a
+/// team/channel display name (`displayName`, `name`, `title`) and marks the
+/// General channel either with an explicit `isGeneral` flag or by giving it the
+/// same id as the team. `self_mri` is currently unused for channels (their
+/// last-message sender comes straight from `imDisplayName`) but is threaded
+/// through for symmetry with [`parse_conversations_with_self`] and future use.
+///
+/// Best-effort: a team or channel without an id is skipped rather than failing
+/// the whole sync.
+fn parse_teams_with_self(v: &Value, _self_mri: &str) -> Vec<Team> {
+    let name_of = |o: &Value| -> String {
+        ["displayName", "name", "title"]
+            .iter()
+            .find_map(|k| o.get(*k).and_then(|x| x.as_str()))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    let mut out = Vec::new();
+    for team in v.get("teams").and_then(|t| t.as_array()).into_iter().flatten() {
+        let team_id = team
+            .get("id")
+            .or_else(|| team.get("teamId"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        if team_id.is_empty() {
+            continue;
+        }
+        let team_name = name_of(team);
+
+        let mut channels = Vec::new();
+        for ch in team.get("channels").and_then(|c| c.as_array()).into_iter().flatten() {
+            let Some(id) = ch.get("id").and_then(|x| x.as_str()) else { continue };
+            let is_general = ch.get("isGeneral").and_then(|x| x.as_bool()).unwrap_or(false)
+                || id == team_id;
+            let is_favorite = ch.get("isFavorite").and_then(|x| x.as_bool()).unwrap_or(false);
+            let lm = parse_last_message(ch);
+            channels.push(Channel {
+                id: id.to_string(),
+                team_id: team_id.to_string(),
+                team_name: team_name.clone(),
+                display_name: name_of(ch),
+                is_general,
+                is_favorite,
+                last_message_time: lm.time,
+                is_empty: !lm.has_message,
+                last_message_preview: lm.preview,
+                last_message_sender: lm.sender,
+                last_message_from_me: ch.get("isLastMessageFromMe").and_then(|x| x.as_bool()).unwrap_or(false),
+                // `isRead` absent -> assume read, so a partial payload never floods
+                // the UI with false unread markers (mirrors the chat path).
+                is_read: ch.get("isRead").and_then(|x| x.as_bool()).unwrap_or(true),
+            });
+        }
+
+        out.push(Team { id: team_id.to_string(), display_name: team_name, channels });
     }
     out
 }
@@ -1647,5 +1847,169 @@ mod tests {
         persist_backfill_page(&store, "c1", &empty).unwrap();
 
         assert_eq!(store.oldest_cursor("c1").unwrap(), (Some("5000".into()), false));
+    }
+
+    // ---- channels (teams tree) ----------------------------------------------
+
+    #[test]
+    fn is_channel_thread_id_discriminates() {
+        assert!(is_channel_thread_id("19:abc@thread.tacv2"));
+        assert!(!is_channel_thread_id("19:abc@thread.v2")); // group chat
+        assert!(!is_channel_thread_id("19:abc@unq.gbl.spaces")); // 1:1
+        assert!(!is_channel_thread_id("48:notes")); // system thread
+        assert!(!is_channel_thread_id(""));
+    }
+
+    #[test]
+    fn parses_teams_and_channels() {
+        // Mirrors the CSA `teams` shape: a team with a General channel (id ==
+        // team id) plus a named channel, each carrying the same camelCase
+        // `lastMessage` sub-object as a chat.
+        let v = json!({
+            "teams": [{
+                "id": "19:team-general@thread.tacv2",
+                "displayName": " Platform ",
+                "channels": [
+                    {
+                        "id": "19:team-general@thread.tacv2",
+                        "displayName": "General",
+                        "isFavorite": true,
+                        "isRead": false,
+                        "isLastMessageFromMe": true,
+                        "lastMessage": {
+                            "id": "1", "composeTime": "2026-07-16T16:05:26.767Z",
+                            "content": "<p>welcome &amp; hi</p>", "imDisplayName": "Ada",
+                            "messageType": "RichText/Html"
+                        }
+                    },
+                    {
+                        "id": "19:announcements@thread.tacv2",
+                        "name": "Announcements",
+                        "isGeneral": false,
+                        "lastMessage": {
+                            "id": "2", "composeTime": "2026-07-16T17:00:00.000Z",
+                            "content": "<p>ship day</p>", "imDisplayName": "Grace",
+                            "messageType": "RichText/Html"
+                        }
+                    }
+                ]
+            }]
+        });
+        let teams = parse_teams(&v);
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].id, "19:team-general@thread.tacv2");
+        assert_eq!(teams[0].display_name, "Platform"); // trimmed
+        assert_eq!(teams[0].channels.len(), 2);
+
+        let general = &teams[0].channels[0];
+        assert_eq!(general.display_name, "General");
+        assert!(general.is_general, "id == team id -> General");
+        assert!(general.is_favorite);
+        assert!(!general.is_read); // unread
+        assert!(general.last_message_from_me);
+        assert_eq!(general.last_message_preview, "welcome & hi");
+        assert_eq!(general.last_message_sender, "Ada");
+        assert_eq!(general.team_name, "Platform");
+        assert_eq!(general.team_id, "19:team-general@thread.tacv2");
+        assert!(!general.is_empty);
+
+        let ann = &teams[0].channels[1];
+        assert_eq!(ann.display_name, "Announcements"); // `name` fallback
+        assert!(!ann.is_general);
+        assert!(ann.is_read); // absent isRead -> read
+        assert!(!ann.last_message_from_me);
+        assert_eq!(ann.last_message_preview, "ship day");
+    }
+
+    #[test]
+    fn teams_tolerate_missing_ids_and_empty_channels() {
+        let v = json!({
+            "teams": [
+                { "displayName": "no id — skipped" },
+                {
+                    "teamId": "19:t2@thread.tacv2", "title": "Fallback Name",
+                    "channels": [
+                        { "name": "no id — skipped" },
+                        {
+                            "id": "19:empty@thread.tacv2", "displayName": "Empty",
+                            "lastMessage": { "id": null }
+                        }
+                    ]
+                }
+            ]
+        });
+        let teams = parse_teams(&v);
+        assert_eq!(teams.len(), 1, "the id-less team is skipped");
+        assert_eq!(teams[0].id, "19:t2@thread.tacv2"); // teamId fallback
+        assert_eq!(teams[0].display_name, "Fallback Name"); // title fallback
+        assert_eq!(teams[0].channels.len(), 1, "the id-less channel is skipped");
+        assert!(teams[0].channels[0].is_empty, "no lastMessage id -> empty");
+    }
+
+    #[test]
+    fn channel_call_event_last_message_shows_label() {
+        // A channel whose newest frame is a call event shows the short label, not
+        // the raw XML — same gate as the chat path (shared `parse_last_message`).
+        let v = json!({
+            "teams": [{
+                "id": "19:t@thread.tacv2", "displayName": "Ops",
+                "channels": [{
+                    "id": "19:c@thread.tacv2", "displayName": "Standup",
+                    "lastMessage": {
+                        "id": "9", "composeTime": "2026-07-23T13:10:00.000Z",
+                        "messageType": "Event/Call",
+                        "content": "<ended/><callEventType>callEnded</callEventType>"
+                    }
+                }]
+            }]
+        });
+        assert_eq!(parse_teams(&v)[0].channels[0].last_message_preview, "Call ended");
+    }
+
+    #[test]
+    fn persist_channels_heals_leaked_conversation_and_counts_changes() {
+        let store = Store::open_in_memory().unwrap();
+        let ch = Channel {
+            id: "19:c@thread.tacv2".into(),
+            team_id: "19:t@thread.tacv2".into(),
+            team_name: "Ops".into(),
+            display_name: "Standup".into(),
+            is_general: false,
+            is_favorite: false,
+            last_message_time: 100,
+            is_empty: false,
+            last_message_preview: "hi".into(),
+            last_message_sender: "Ada".into(),
+            last_message_from_me: false,
+            is_read: true,
+        };
+        let teams = vec![Team {
+            id: "19:t@thread.tacv2".into(),
+            display_name: "Ops".into(),
+            channels: vec![ch.clone()],
+        }];
+
+        // A live post leaked the channel into the conversations table beforehand.
+        store.upsert_conversation(&ch.id, "", 100).unwrap();
+        assert!(!store.is_channel(&ch.id).unwrap(), "not yet a channel row");
+
+        // First sync: one channel written, one leaked conversation healed.
+        let (changed, healed) = persist_channels(&store, &teams);
+        assert_eq!((changed, healed), (1, 1));
+        assert!(store.is_channel(&ch.id).unwrap(), "now a channel row");
+        // the conversations list no longer surfaces it
+        assert!(store.conversations("").unwrap().iter().all(|c| c.id != ch.id));
+
+        // Identical re-sync converges to no changes (no event storm).
+        assert_eq!(persist_channels(&store, &teams), (0, 0));
+
+        // Empty channels are skipped.
+        let empty_teams = vec![Team {
+            id: "19:t@thread.tacv2".into(),
+            display_name: "Ops".into(),
+            channels: vec![Channel { id: "19:empty@thread.tacv2".into(), is_empty: true, ..ch.clone() }],
+        }];
+        assert_eq!(persist_channels(&store, &empty_teams), (0, 0));
+        assert!(!store.is_channel("19:empty@thread.tacv2").unwrap());
     }
 }
