@@ -15,7 +15,7 @@
 //          | edit | react | notifications | fetch_media | get_settings
 //          | set_settings | enrich_link
 // Events:  status | realtime_status | message | conversations_changed
-//          | channels_changed | typing
+//          | channels_changed | typing | call
 //
 // Run it (from the web/ directory):
 //   export PATH="$HOME/.bun/bin:$PATH"
@@ -1695,6 +1695,22 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         sender_mri: typeof body.sender_mri === "string" ? body.sender_mri : "8:orgid:riley",
         sender: typeof body.sender === "string" ? body.sender : "Riley Carter",
         is_typing: body.is_typing === undefined ? true : Boolean(body.is_typing),
+      });
+      return Response.json({ ok: true }, { status: 200 });
+    }
+    // Broadcast an incoming-call awareness signal, exactly like the Rust backend's
+    // `call` event, so the E2E suite can drive the ringing banner deterministically.
+    // A `started` rings; `ended`/`missed` dismisses it. Awareness only — no media.
+    if (body.kind === "call") {
+      broadcast("call", {
+        conversation_id:
+          typeof body.conversation === "string" ? body.conversation : (order[0] ?? ""),
+        event: typeof body.event === "string" ? body.event : "started",
+        caller: typeof body.caller === "string" ? body.caller : "Riley Carter",
+        caller_mri: typeof body.caller_mri === "string" ? body.caller_mri : "8:orgid:riley",
+        participants: Array.isArray(body.participants) ? body.participants : [],
+        participant_count:
+          typeof body.participant_count === "number" ? body.participant_count : 0,
       });
       return Response.json({ ok: true }, { status: 200 });
     }

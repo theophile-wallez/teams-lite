@@ -34,3 +34,21 @@ export function notifyMessage(sender: string, content: string): Notification | n
     return null;
   }
 }
+
+/**
+ * Fire a desktop notification for an incoming call. Awareness only: teams-lite
+ * has no media stack, so this just tells the user a call is ringing — clicking it
+ * can focus the conversation, but the call can only be answered in Microsoft
+ * Teams. `label` is the group/channel name (omit for a 1:1). No-op if
+ * notifications are unavailable or not granted. Never throws.
+ */
+export function notifyCall(caller: string, label?: string): Notification | null {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return null;
+  const who = caller && caller.length > 0 ? caller : "Someone";
+  const body = label && label.length > 0 ? `${who} · ${label}` : `${who} is calling`;
+  try {
+    return new Notification("Incoming call", { body, tag: "teams-lite-call", silent: false });
+  } catch {
+    return null;
+  }
+}

@@ -26,8 +26,9 @@ import {
   typingLabel,
   formatCallEvent,
   formatCallDuration,
+  incomingCallTitle,
 } from "./protocol";
-import type { ChatMessage, Conversation, MessagePage, Channel } from "./protocol";
+import type { ChatMessage, Conversation, IncomingCall, MessagePage, Channel } from "./protocol";
 
 function message(
   seq: number,
@@ -690,5 +691,32 @@ describe("formatCallEvent", () => {
   it("degrades gracefully when duration is missing or zero", () => {
     expect(formatCallEvent({ kind: "call", event: "ended" })).toBe("Call ended");
     expect(formatCallEvent({ kind: "call", event: "ended", duration_seconds: 0 })).toBe("Call ended");
+  });
+});
+
+describe("incomingCallTitle", () => {
+  const call = (overrides: Partial<IncomingCall> = {}): IncomingCall => ({
+    conversationId: "c1",
+    caller: "Riley Carter",
+    callerMri: "8:orgid:riley",
+    participants: [],
+    participantCount: 0,
+    ...overrides,
+  });
+
+  it("uses the caller's first name for a 1:1 (no conversation name)", () => {
+    expect(incomingCallTitle(call())).toBe("Incoming call · Riley");
+  });
+
+  it("prefers the conversation name for a group or channel call", () => {
+    expect(incomingCallTitle(call(), "Design crew")).toBe("Incoming call · Design crew");
+  });
+
+  it("falls back to the caller when the conversation name is blank", () => {
+    expect(incomingCallTitle(call(), "   ")).toBe("Incoming call · Riley");
+  });
+
+  it("falls back to Someone when neither a name nor a caller is known", () => {
+    expect(incomingCallTitle(call({ caller: "" }))).toBe("Incoming call · Someone");
   });
 });

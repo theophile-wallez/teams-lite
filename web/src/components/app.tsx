@@ -6,6 +6,7 @@ import { MessagePane } from "./message-pane";
 import { SettingsPane } from "./settings-pane";
 import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
+import { IncomingCallBanner } from "./incoming-call-banner";
 import { ImageLightboxProvider } from "./image-lightbox";
 import { Splash } from "./splash";
 import { TooltipProvider } from "./ui/tooltip";
@@ -210,6 +211,8 @@ function AppInner() {
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+
+      <IncomingCallBanner />
 
       {fatal && <FatalOverlay message={fatal} />}
 

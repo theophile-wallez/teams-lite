@@ -11,7 +11,11 @@
 //
 // Methods: conversations | open | backfill | set_draft | send | edit | react | notifications
 //          | fetch_media | get_settings | set_settings | enrich_link
-// Events:  status | message | conversations_changed | notifications_changed | typing | update_available
+// Events:  status | message | conversations_changed | notifications_changed | typing
+//          | call | update_available
+//
+// The `call` event is incoming-call AWARENESS only (ring/dismiss a banner). The
+// client has no media stack: it cannot place, answer, or carry audio/video.
 //
 // No raw tokens are ever logged or sent.
 
@@ -1095,6 +1099,48 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
     })
 }
 
+/// Build the `call` real-time event for a live message that is a call system
+/// event, or `None` when the message is not one (or is our own outgoing call,
+/// which we never ring for).
+///
+/// This is incoming-call *awareness*, not a call itself: Teams posts an
+/// `Event/Call` message to a conversation when a call starts/ends there, and the
+/// backend already turns that into a structured `system_event` (see
+/// [`teams_read::parse_call_event`]). We ride entirely on that already-parsed,
+/// already-tested payload — no new wire parsing — and surface it as an ephemeral
+/// signal (like `typing`) so a UI can raise/dismiss an incoming-call banner. The
+/// system line is still stored and broadcast as a normal `message` alongside it.
+///
+/// - `started` rings (unless we started the call ourselves);
+/// - `ended`/`missed` dismiss any banner the UI is showing for that conversation
+///   (emitted even for our own call, since dismissal is keyed by conversation).
+///
+/// It does NOT place, answer, or carry media — the client has no media stack, and
+/// answering would be a real action performed as the user.
+fn call_event_json(m: &Message, self_name: &str, self_mri: &str) -> Option<Value> {
+    let event: Value = serde_json::from_str(&m.system_event).ok()?;
+    if event.get("kind").and_then(Value::as_str) != Some("call") {
+        return None;
+    }
+    let kind = event
+        .get("event")
+        .and_then(Value::as_str)
+        .unwrap_or("ended");
+    // Never ring for a call we started ourselves (the `started` frame carries us
+    // as the sender). We still surface `ended`/`missed` so the banner clears.
+    if kind == "started" && is_self(m, self_name, self_mri) {
+        return None;
+    }
+    Some(json!({
+        "conversation_id": m.conversation_id,
+        "event": kind,
+        "caller": m.sender,
+        "caller_mri": m.sender_mri,
+        "participants": event.get("participants").cloned().unwrap_or_else(|| json!([])),
+        "participant_count": event.get("participant_count").cloned().unwrap_or_else(|| json!(0)),
+    }))
+}
+
 /// Sync the chat list AND the channel tree from the network in the background:
 /// one CSA fetch feeds both. Persist each, emit `conversations_changed` and/or
 /// `channels_changed` only when something actually changed, then resolve 1:1
@@ -1239,6 +1285,16 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
                 let mut activity_changed = false;
                 let mut channels_changed = false;
                 for m in &msgs {
+                    // Incoming-call awareness: a live `Event/Call` frame in a real
+                    // conversation rings (or dismisses) an incoming-call banner.
+                    // Ephemeral, like `typing` — the frame is still persisted +
+                    // broadcast as a `message` below. Never fires for the activity
+                    // feed (not a chat).
+                    if !teams_activity::is_notifications_thread(&m.conversation_id) {
+                        if let Some(call) = call_event_json(m, &self_name, &self_mri) {
+                            ctx_msgs.emit("call", call);
+                        }
+                    }
                     // The activity feed is not a chat: never persist it as a
                     // conversation. Signal the UI to refresh notifications
                     // instead — the full payload is re-fetched via the
@@ -1407,6 +1463,65 @@ mod tests {
         assert_eq!(v["system_event"]["event"], "ended");
         assert_eq!(v["system_event"]["duration_seconds"], 600);
         assert_eq!(v["content"], "");
+    }
+
+    fn call_message(event: &str) -> Message {
+        let mut m = message(2);
+        m.sender = "Bob".into();
+        m.sender_mri = "8:orgid:bob".into();
+        m.content = String::new();
+        m.system_event = format!(
+            r#"{{"kind":"call","event":"{event}","duration_seconds":0,"participant_count":2,"participants":["Bob","Alice"]}}"#
+        );
+        m
+    }
+
+    #[test]
+    fn call_started_from_other_rings() {
+        let m = call_message("started");
+        let v = call_event_json(&m, "Alice", "8:orgid:me").expect("a started call rings");
+        assert_eq!(v["event"], "started");
+        assert_eq!(v["conversation_id"], "c1");
+        assert_eq!(v["caller"], "Bob");
+        assert_eq!(v["caller_mri"], "8:orgid:bob");
+        assert_eq!(v["participant_count"], 2);
+        assert_eq!(v["participants"][0], "Bob");
+    }
+
+    #[test]
+    fn call_started_from_self_is_not_rung() {
+        // We started the call, so the `started` frame carries us as the sender:
+        // teams-lite must not ring us for our own outgoing call.
+        let mut m = call_message("started");
+        m.sender_mri = "8:orgid:me".into();
+        assert!(call_event_json(&m, "Alice", "8:orgid:me").is_none());
+    }
+
+    #[test]
+    fn call_ended_dismisses_even_from_self() {
+        // Dismissal is keyed by conversation, so an `ended`/`missed` frame is
+        // surfaced regardless of who ended it (it only clears a banner).
+        let mut m = call_message("ended");
+        m.sender_mri = "8:orgid:me".into();
+        let v = call_event_json(&m, "Alice", "8:orgid:me").expect("ended clears the banner");
+        assert_eq!(v["event"], "ended");
+
+        let missed = call_message("missed");
+        assert_eq!(
+            call_event_json(&missed, "Alice", "8:orgid:me").unwrap()["event"],
+            "missed"
+        );
+    }
+
+    #[test]
+    fn non_call_messages_yield_no_call_event() {
+        // A plain chat message (empty system_event) is not a call.
+        assert!(call_event_json(&message(1), "Alice", "8:orgid:me").is_none());
+
+        // A non-call system event (e.g. a member change) is not a call either.
+        let mut other = message(3);
+        other.system_event = r#"{"kind":"member_added","members":["X"]}"#.into();
+        assert!(call_event_json(&other, "Alice", "8:orgid:me").is_none());
     }
 
     #[test]

@@ -83,6 +83,27 @@ export async function emitTyping(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Broadcast an incoming-call awareness signal through the mock's gated test
+ *  hook, mirroring the Rust backend's `call` event. A `started` rings the banner;
+ *  `ended`/`missed` dismisses it. */
+export async function emitCall(
+  page: Page,
+  body: {
+    conversation: string;
+    event?: "started" | "ended" | "missed";
+    caller?: string;
+    caller_mri?: string;
+    participants?: string[];
+    participant_count?: number;
+  },
+): Promise<void> {
+  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
+  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+    data: { kind: "call", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Set a reaction on an existing message through the mock's gated test hook
  *  (from someone else by default), then the mock re-broadcasts the message. */
 export async function emitReaction(

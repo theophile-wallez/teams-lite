@@ -20,10 +20,12 @@ import {
   replyToPayload,
   shouldNotify,
   type AppSettings,
+  type CallSignal,
   type Channel,
   type ChatMessage,
   type Conversation,
   type GitLabLinkMetadata,
+  type IncomingCall,
   type LiveStatus,
   type MessagePage,
   type Notification,
@@ -33,7 +35,7 @@ import {
   type UpdateInfo,
 } from "./protocol";
 import { coalesce } from "./singleflight";
-import { ensureNotificationPermission, notifyMessage } from "./notify";
+import { ensureNotificationPermission, notifyCall, notifyMessage } from "./notify";
 import {
   APPEARANCE_STORAGE_KEY,
   DEFAULT_APPEARANCE,
@@ -91,6 +93,11 @@ export type AppState = {
    *  row preview. Keyed by MRI under the hood so repeats coalesce; each entry
    *  auto-expires. */
   typingByConversation: Record<string, TypingName[]>;
+  /** Calls currently ringing, one per conversation (a `started` call the backend
+   *  surfaced; cleared by its `ended`/`missed`, a manual dismiss, or a safety
+   *  timeout). AWARENESS only — teams-lite has no media stack, so the banner these
+   *  drive can point the user at the chat but never answer or place a call. */
+  incomingCalls: IncomingCall[];
   /** User appearance preference (System follows the OS). */
   appearance: Appearance;
   /** Concrete theme currently applied to <html> (what CSS keys off). */
@@ -105,6 +112,11 @@ const DRAFT_SAVE_DELAY_MS = 150;
 // stopped. Teams re-sends `Control/Typing` every few seconds while someone keeps
 // typing, so this is a safety net for a missed `Control/ClearTyping`.
 const TYPING_TIMEOUT_MS = 8000;
+// How long a ringing-call banner survives without an explicit `ended`/`missed`
+// before we drop it on our own. A safety net only: the backend normally sends a
+// terminal call event, but a missed close (or a client that reconnected mid-call)
+// must not leave a banner ringing forever. Comfortably past Teams' own ring window.
+const CALL_RING_TIMEOUT_MS = 45_000;
 // Where local channel-favorite overrides are persisted (client-only).
 const CHANNEL_FAVORITES_KEY = "teams-lite:channel-favorites";
 
@@ -133,6 +145,7 @@ function initialState(): AppState {
     notificationsUnread: 0,
     pendingScroll: null,
     typingByConversation: {},
+    incomingCalls: [],
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
     settings: { gitlab_host: "gitlab.com", gitlab_token_set: false },
@@ -159,6 +172,11 @@ export class TeamsController {
     string,
     Map<string, { name: string; timer: ReturnType<typeof setTimeout> }>
   >();
+
+  // Safety-timeout handles for ringing calls: convId -> timer. Non-reactive; the
+  // reactive list is `incomingCalls`. Each timer drops a stuck banner if no
+  // terminal `call` event ever arrives (see CALL_RING_TIMEOUT_MS).
+  private callTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   // Media proxy cache: hosted-content URL -> a promise of a blob object URL.
   // Deduplicates concurrent loads of the same image and makes re-mounts/re-opens
@@ -239,6 +257,8 @@ export class TeamsController {
       for (const entry of byMri.values()) clearTimeout(entry.timer);
     }
     this.typingByConv.clear();
+    for (const t of this.callTimers.values()) clearTimeout(t);
+    this.callTimers.clear();
     for (const url of this.mediaObjectUrls) URL.revokeObjectURL(url);
     this.mediaObjectUrls = [];
     this.mediaCache.clear();
@@ -280,6 +300,8 @@ export class TeamsController {
     });
 
     on("typing", (raw) => this.onTyping(raw as TypingSignal));
+
+    on("call", (raw) => this.onCall(raw as CallSignal));
 
     on("messages_updated", (raw) => {
       const d = raw as { conversation: string; messages: ChatMessage[]; has_more: boolean };
@@ -381,6 +403,91 @@ export class TeamsController {
       return;
     }
     this.set({ typingByConversation: { ...prev, [convId]: names } });
+  }
+
+  // ---- incoming calls (awareness only) -------------------------------------
+  //
+  // teams-lite has no media stack: it cannot carry, answer, or place a call.
+  // These handlers turn the backend's `call` event into a ring/dismiss banner so
+  // the user KNOWS a call is happening and can jump to the chat (or answer in
+  // real Teams). A `started` rings; `ended`/`missed` — or a manual dismiss, or a
+  // safety timeout — clears it. The backend already suppresses calls we started
+  // ourselves, so a `started` here is always someone else calling.
+
+  /** Fold a live `call` signal into the ringing-banner list. */
+  private onCall(sig: CallSignal): void {
+    const convId = sig.conversation_id;
+    if (!convId) return;
+    if (sig.event === "started") {
+      this.upsertIncomingCall({
+        conversationId: convId,
+        caller: sig.caller || "",
+        callerMri: sig.caller_mri || "",
+        participants: Array.isArray(sig.participants) ? sig.participants : [],
+        participantCount: sig.participant_count ?? 0,
+      });
+    } else {
+      // A call that ended or was missed is no longer ringing — drop its banner.
+      this.clearIncomingCall(convId);
+    }
+  }
+
+  /** Raise (or refresh) the ringing banner for a conversation and (re)arm its
+   *  safety timeout. Also nudges the desktop when the conversation isn't already
+   *  open in front of the user, mirroring message notifications. */
+  private upsertIncomingCall(call: IncomingCall): void {
+    const convId = call.conversationId;
+    const existing = this.callTimers.get(convId);
+    if (existing) clearTimeout(existing);
+    this.callTimers.set(
+      convId,
+      setTimeout(() => this.expireIncomingCall(convId), CALL_RING_TIMEOUT_MS),
+    );
+
+    const prev = this.get().incomingCalls;
+    const idx = prev.findIndex((c) => c.conversationId === convId);
+    const next =
+      idx === -1 ? [...prev, call] : prev.map((c) => (c.conversationId === convId ? call : c));
+    this.set({ incomingCalls: next });
+
+    if (convId !== this.get().openId) {
+      notifyCall(call.caller, this.callGroupLabel(convId));
+    }
+  }
+
+  /** Remove a conversation's ringing banner (it ended, was dismissed, or timed
+   *  out) and cancel its safety timer. */
+  private clearIncomingCall(convId: string): void {
+    const timer = this.callTimers.get(convId);
+    if (timer) {
+      clearTimeout(timer);
+      this.callTimers.delete(convId);
+    }
+    const prev = this.get().incomingCalls;
+    if (!prev.some((c) => c.conversationId === convId)) return;
+    this.set({ incomingCalls: prev.filter((c) => c.conversationId !== convId) });
+  }
+
+  private expireIncomingCall(convId: string): void {
+    this.clearIncomingCall(convId);
+  }
+
+  /** Dismiss a ringing banner by hand (the user tapped "Dismiss"). Local only —
+   *  it silences the banner here and never touches the call in real Teams. */
+  dismissIncomingCall(convId: string): void {
+    this.clearIncomingCall(convId);
+  }
+
+  /** The group/channel name to show alongside the caller, or undefined for a 1:1
+   *  (whose conversation name is just the other person — already the caller). */
+  private callGroupLabel(convId: string): string | undefined {
+    const conv = this.get().conversations.find((c) => c.id === convId);
+    if (conv) {
+      const isGroup = conv.kind === "group" || conv.kind === "unknown";
+      return isGroup && conv.name ? conv.name : undefined;
+    }
+    const channel = this.get().channels.find((c) => c.id === convId);
+    return channel?.name || undefined;
   }
 
   // ---- conversations -------------------------------------------------------

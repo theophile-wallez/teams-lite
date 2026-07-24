@@ -58,8 +58,8 @@ export function CallEventLine(props: { event: SystemEvent }) {
 
 /** The overlapping avatar stack (capped at {@link MAX_AVATARS}) plus a "+N"
  *  overflow chip. Ringed in the pill's own colour so the avatars read as a clean
- *  cut-out stack. */
-function CallParticipants(props: { participants: string[] }) {
+ *  cut-out stack. Shared by the timeline call line and the incoming-call banner. */
+export function CallParticipants(props: { participants: string[] }) {
   const shown = props.participants.slice(0, MAX_AVATARS);
   const overflow = props.participants.length - shown.length;
   return (

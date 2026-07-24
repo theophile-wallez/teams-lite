@@ -148,6 +148,31 @@ export type TypingSignal = {
  *  same person coalesce. */
 export type TypingName = { mri: string; name: string };
 
+/** Wire shape of the backend `call` event (see src/bin/server.rs). Incoming-call
+ *  AWARENESS only: teams-lite has no media stack, so this can raise or dismiss a
+ *  banner but never carries, answers, or places a call. `started` rings;
+ *  `ended`/`missed` dismiss the banner. `caller` is the display name the backend
+ *  resolved for whoever started/ended the call. */
+export type CallSignal = {
+  conversation_id: string;
+  event: "started" | "ended" | "missed";
+  caller: string;
+  caller_mri: string;
+  participants: string[];
+  participant_count: number;
+};
+
+/** An active incoming-call banner — one per conversation currently ringing. The
+ *  view model the store keeps in reactive state; derived from a `started`
+ *  {@link CallSignal} and cleared by `ended`/`missed` (or a safety timeout). */
+export type IncomingCall = {
+  conversationId: string;
+  caller: string;
+  callerMri: string;
+  participants: string[];
+  participantCount: number;
+};
+
 
 /** One activity-feed entry (from the Teams `48:notifications` thread), decoded
  *  by the backend from `properties.activity`. Mirrors the Rust `Notification`
@@ -419,6 +444,17 @@ export function formatCallEvent(event: SystemEvent): string {
     return `${base} · ${formatCallDuration(event.duration_seconds)}`;
   }
   return base;
+}
+
+/** Headline for the incoming-call banner, e.g. "Incoming call · Riley" for a 1:1
+ *  or "Incoming call · Design crew" for a group/channel. Pass the conversation's
+ *  own name for a group or channel; omit it for a 1:1 (whose name is just the
+ *  caller) so the caller's first name is used instead. Pure and presentational —
+ *  the banner is awareness only; teams-lite cannot answer or place a call. */
+export function incomingCallTitle(call: IncomingCall, conversationName?: string): string {
+  const named = conversationName?.trim();
+  const who = named && named.length > 0 ? named : firstName(call.caller) || "Someone";
+  return `Incoming call · ${who}`;
 }
 
 export function replyToPayload(message: ChatMessage, before: string, after: string): ReplyTo {
