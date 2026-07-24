@@ -275,57 +275,67 @@ export function MessagePane(props: { onBack?: () => void }) {
         </div>
       </header>
 
-      <div
-        ref={viewportRef}
-        onScroll={onScroll}
-        data-testid="message-scroll"
-        className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 md:px-5"
-      >
-        {messages.length === 0 ? (
-          <EmptyState
-            loading={loadingMessages}
-            error={messagesError}
-            onRetry={() => void controller.openConversation(openId)}
-          />
-        ) : (
-          <div className="mx-auto flex max-w-3xl flex-col">
-            {hasMoreOlder && (
-              <div className="flex h-8 items-center justify-center">
-                {loadingOlder ? (
-                  <span className="flex items-center gap-2 text-xs text-text-faint">
-                    <Loader2 className="size-3 animate-spin" strokeWidth={1.6} /> Loading earlier
-                    messages…
-                  </span>
-                ) : olderError ? (
-                  <span className="text-xs text-destructive">
-                    Couldn't load earlier messages — scroll up to retry.
-                  </span>
-                ) : null}
-              </div>
-            )}
-            {messages.map((m, i) =>
-              m.system_event ? (
-                <CallEventLine key={m.id} event={m.system_event} />
-              ) : (
-                <MessageBubble
-                  key={m.id}
-                  message={m}
-                  showSenderName={isGroup}
-                  continuesAbove={sameAuthor(messages[i - 1], m)}
-                  continuesBelow={sameAuthor(m, messages[i + 1])}
-                  editing={editingId === m.id}
-                  highlighted={highlightId === m.id}
-                  onReply={doReply}
-                  onCopy={doCopy}
-                  onReact={doReact}
-                  onStartEdit={doStartEdit}
-                  onSaveEdit={doSaveEdit}
-                  onCancelEdit={() => setEditingId(null)}
-                />
-              ),
-            )}
-          </div>
-        )}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          ref={viewportRef}
+          onScroll={onScroll}
+          data-testid="message-scroll"
+          className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 md:px-5"
+        >
+          {messages.length === 0 ? (
+            <EmptyState
+              loading={loadingMessages}
+              error={messagesError}
+              onRetry={() => void controller.openConversation(openId)}
+            />
+          ) : (
+            <div className="mx-auto flex max-w-3xl flex-col">
+              {hasMoreOlder && (
+                <div className="flex h-8 items-center justify-center">
+                  {loadingOlder ? (
+                    <span className="flex items-center gap-2 text-xs text-text-faint">
+                      <Loader2 className="size-3 animate-spin" strokeWidth={1.6} /> Loading earlier
+                      messages…
+                    </span>
+                  ) : olderError ? (
+                    <span className="text-xs text-destructive">
+                      Couldn't load earlier messages — scroll up to retry.
+                    </span>
+                  ) : null}
+                </div>
+              )}
+              {messages.map((m, i) =>
+                m.system_event ? (
+                  <CallEventLine key={m.id} event={m.system_event} />
+                ) : (
+                  <MessageBubble
+                    key={m.id}
+                    message={m}
+                    showSenderName={isGroup}
+                    continuesAbove={sameAuthor(messages[i - 1], m)}
+                    continuesBelow={sameAuthor(m, messages[i + 1])}
+                    editing={editingId === m.id}
+                    highlighted={highlightId === m.id}
+                    onReply={doReply}
+                    onCopy={doCopy}
+                    onReact={doReact}
+                    onStartEdit={doStartEdit}
+                    onSaveEdit={doSaveEdit}
+                    onCancelEdit={() => setEditingId(null)}
+                  />
+                ),
+              )}
+            </div>
+          )}
+        </div>
+        {/* A soft fade at the bottom of the history so messages dissolve into the
+            page just above the composer instead of clipping against a hard edge.
+            from-background matches the pane and the composer's own backdrop, so the
+            transition into the text bar reads as seamless. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background to-transparent"
+        />
       </div>
 
       {messagesError && messages.length > 0 && (
