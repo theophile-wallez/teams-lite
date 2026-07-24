@@ -974,7 +974,16 @@ export class TeamsController {
 
 function errText(e: unknown): string {
   if (e instanceof Error) return e.message;
-  return String(e);
+  if (typeof e === "string") return e;
+  // Browser WebSocket/DOM failures arrive as opaque Events that stringify to a
+  // useless "[object Event]"; prefer any message they carry, else say something
+  // readable. The final guard rescues plain objects from "[object Object]" too.
+  if (typeof Event !== "undefined" && e instanceof Event) {
+    const msg = (e as { message?: unknown }).message;
+    return typeof msg === "string" && msg ? msg : "connection error";
+  }
+  const s = String(e);
+  return s.startsWith("[object ") ? "unknown error" : s;
 }
 
 /** Decode a base64 string (as returned by the backend media proxy) to an

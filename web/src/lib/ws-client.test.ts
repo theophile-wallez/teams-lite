@@ -51,6 +51,11 @@ class FakeWebSocket {
   simulateMessage(data: string): void {
     this.onmessage?.({ data });
   }
+  // The browser hands onerror an opaque Event with no failure detail; mirror
+  // that here by passing a bare object rather than an Error.
+  simulateError(): void {
+    this.onerror?.({});
+  }
   simulateClose(): void {
     this.readyState = FakeWebSocket.CLOSED;
     this.onclose?.({});
@@ -94,6 +99,18 @@ describe("Backend connect", () => {
     FakeWebSocket.last().simulateOpen();
     await expect(promise).resolves.toBeUndefined();
     expect(backend.connected).toBe(true);
+
+    backend.close();
+  });
+
+  it("rejects connect() with a readable message when the socket errors", async () => {
+    const backend = new Backend("ws://test");
+    const promise = backend.connect();
+
+    FakeWebSocket.last().simulateError();
+
+    // Not the opaque Event that would render as "[object Event]".
+    await expect(promise).rejects.toThrow("could not connect to ws://test");
 
     backend.close();
   });

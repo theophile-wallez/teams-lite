@@ -98,10 +98,13 @@ export class Backend {
       settled = true;
       onOpen?.();
     };
-    ws.onerror = (e) => {
+    ws.onerror = () => {
+      // A browser WebSocket error is an opaque Event with no failure detail (the
+      // reason is deliberately hidden), so reject with an actionable message
+      // instead of the raw Event — which would stringify to "[object Event]".
       if (!settled) {
         settled = true;
-        onFail?.(e);
+        onFail?.(new Error(`could not connect to ${this.url}`));
       }
     };
     ws.onclose = () => {
