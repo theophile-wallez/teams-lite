@@ -1,4 +1,5 @@
-import { useMemo, type JSX } from "react";
+import { useMemo, useState, type JSX } from "react";
+import { Globe } from "lucide-react";
 import { dropLinks, hasVisibleContent, parseRichHtml, type RichNode } from "~/lib/rich-text";
 import { cn } from "~/lib/utils";
 import { MediaImage } from "./media-image";
@@ -30,6 +31,62 @@ export function RichContent(props: { html: string; className?: string; hiddenHre
 // Block-level tags get vertical spacing between siblings (but not before the
 // first child), so paragraphs and lists don't collapse together.
 const BLOCK_SPACING = "[&:not(:first-child)]:mt-1";
+
+/**
+ * A small rounded-square site icon shown inline just before a link's text, as
+ * part of the anchor itself. The favicon is loaded straight from DuckDuckGo's
+ * public favicon service keyed by the link's host — external links are public,
+ * so this needs no media proxy (unlike {@link MediaImage}), and DuckDuckGo is
+ * privacy-respecting (no per-request tracking). Rendered only for absolute
+ * http(s) links; relative/fragment/mailto/tel anchors get no icon.
+ *
+ * Modeled on shadcn/Radix `Avatar`: a fallback — a small globe glyph on the same
+ * rounded chip — shows immediately and holds the space while the favicon loads,
+ * so the link never jumps. The favicon fades in once it decodes; if it never
+ * arrives (offline, blocked, or the site has none) the globe simply stays. The
+ * chip is a fixed `em`-sized box either way, so there is no layout shift and the
+ * icon tracks the surrounding text size.
+ */
+function LinkFavicon({ href }: { href?: string }) {
+  const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const host = useMemo(() => {
+    if (!href) return null;
+    try {
+      const url = new URL(href);
+      return url.protocol === "http:" || url.protocol === "https:" ? url.hostname : null;
+    } catch {
+      return null;
+    }
+  }, [href]);
+  if (!host) return null;
+  const showFavicon = loaded && !failed;
+  return (
+    <span className="relative mr-1 inline-flex size-[1.1em] shrink-0 items-center justify-center overflow-hidden rounded-[0.28em] bg-white/95 align-[-0.22em] text-zinc-500 shadow-chip ring-1 ring-black/5">
+      {/* Fallback globe — visible until (and unless) the favicon paints. */}
+      <Globe
+        className={cn("size-[0.72em] transition-opacity", showFavicon && "opacity-0")}
+        strokeWidth={2}
+        aria-hidden
+      />
+      {!failed && (
+        <img
+          src={`https://icons.duckduckgo.com/ip3/${encodeURIComponent(host)}.ico`}
+          alt=""
+          aria-hidden
+          loading="lazy"
+          decoding="async"
+          onLoad={() => setLoaded(true)}
+          onError={() => setFailed(true)}
+          className={cn(
+            "absolute size-[0.82em] object-contain transition-opacity",
+            showFavicon ? "opacity-100" : "opacity-0",
+          )}
+        />
+      )}
+    </span>
+  );
+}
 
 function renderNode(node: RichNode, key: number): JSX.Element | string | null {
   if (node.type === "text") return node.text;
@@ -122,6 +179,7 @@ function renderNode(node: RichNode, key: number): JSX.Element | string | null {
           rel="noopener noreferrer"
           className="underline underline-offset-2 hover:opacity-80"
         >
+          <LinkFavicon href={node.attrs.href} />
           {children}
         </a>
       );
