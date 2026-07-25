@@ -1,5 +1,7 @@
 # dependencies
-node_modules/
+# No trailing slash, so a `node_modules` SYMLINK — how a worktree borrows the main
+# checkout's install — is ignored too, and can never be staged by mistake.
+node_modules
 
 # build output
 dist/

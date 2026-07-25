@@ -23,12 +23,22 @@ function resolveChromium(): string | undefined {
   return undefined;
 }
 
-const MOCK_PORT = process.env.E2E_MOCK_PORT ?? "8420";
+// The mock's port must NEVER default to 8420: that is the real backend's port, and
+// with `reuseExistingServer` on outside CI the suite would silently "reuse" a
+// running dev backend and send real messages to real people. It did, once.
+const MOCK_PORT = process.env.E2E_MOCK_PORT ?? "8461";
 const WEB_PORT = process.env.E2E_WEB_PORT ?? "4399";
+// The app's WebSocket target is baked at BUILD time, so it must be derived from
+// MOCK_PORT here. Moving the mock's port without this is exactly how the suite
+// ended up driving a real account: the mock moved, the app kept dialing 8420.
+const MOCK_WS_URL = `ws://127.0.0.1:${MOCK_PORT}`;
 const executablePath = resolveChromium();
 
 export default defineConfig({
   testDir: "./e2e",
+  // Hard gate: abort the run if anything other than the mock answers on
+  // MOCK_PORT (i.e. the real backend), before a single spec can send a message.
+  globalSetup: "./e2e/global-setup.ts",
   // The mock backend is a single shared, stateful process, so run serially to
   // keep injected live-events and drafts isolated between tests.
   fullyParallel: false,
@@ -72,7 +82,9 @@ export default defineConfig({
       url: `http://127.0.0.1:${WEB_PORT}/`,
       reuseExistingServer: !process.env.CI,
       timeout: 180_000,
-      env: { PORT: WEB_PORT, HOST: "127.0.0.1" },
+      // VITE_TEAMS_WS_URL is consumed by the BUILD (baked into the client bundle),
+      // which is why it must be set here and not just for the mock process.
+      env: { PORT: WEB_PORT, HOST: "127.0.0.1", VITE_TEAMS_WS_URL: MOCK_WS_URL },
       stdout: "ignore",
       stderr: "pipe",
     },

@@ -23,6 +23,11 @@
 // frames from the calling trouter workers, forwarded verbatim for a live capture.
 // No media is placed/answered without an explicit user action.
 //
+// `TEAMS_LITE_READ_ONLY=1` refuses every outward-facing method (send | edit |
+// react) at the dispatch choke point — the backend's own safety catch for any
+// session where the UI is driven by tooling rather than by a human. See
+// `read_only`, and the "Automation safety" section of AGENTS.md.
+//
 // No raw tokens are ever logged or sent.
 
 use anyhow::{Context, Result};
@@ -57,6 +62,191 @@ const DISCONNECTED_CLIENT_GRACE: Duration = Duration::from_secs(10);
 /// personal access token drive rich link previews (see `gitlab`).
 const SETTING_GITLAB_HOST: &str = "gitlab_host";
 const SETTING_GITLAB_TOKEN: &str = "gitlab_token";
+
+/// The RPC methods that act OUTWARD — they change what other people see in the
+/// user's real Teams account (a message posted, edited, or reacted to). Every
+/// other method only reads, or writes to the local store.
+const OUTWARD_METHODS: [&str; 3] = ["send", "edit", "react"];
+
+/// Read-only mode (`TEAMS_LITE_READ_ONLY=1`): refuse every {@link OUTWARD_METHODS}
+/// call before it can reach the network.
+///
+/// This exists because the backend is the LAST line of defense against an
+/// accidental outward action: automated tooling (screenshot scripts, E2E-style
+/// drivers, an agent debugging the UI) is meant to talk to `web/mock/server.ts`,
+/// but a single missing `VITE_TEAMS_WS_URL` is enough to point it at this server
+/// instead — and then a scripted keypress posts to a real colleague's chat. It
+/// has happened. Anything that drives the UI without a human reading each
+/// keystroke should run the backend with this flag set, so the worst outcome of a
+/// misconfiguration is a refused request instead of a real message.
+///
+/// Read once: the mode is a property of the process, and re-reading the
+/// environment per request would let it drift mid-session.
+fn read_only() -> bool {
+    static READ_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *READ_ONLY.get_or_init(|| std::env::var("TEAMS_LITE_READ_ONLY").as_deref() == Ok("1"))
+}
+
+/// Environment variable a launcher can use to pin the write token itself (rather
+/// than letting the backend generate one), so a parent process can hand the same
+/// value to the backend and to the frontend it spawns.
+const WRITE_TOKEN_ENV: &str = "TEAMS_LITE_WRITE_TOKEN";
+
+/// THE WRITE LOCK.
+///
+/// Reading this backend is open: any local client may list conversations and read
+/// history, which is what makes it useful to work against. WRITING is not — a
+/// `send`/`edit`/`react` posts to real people as the user, and an automated client
+/// that reached this backend by accident must not be able to do it. (It happened:
+/// a screenshot script drove the real app and posted three messages to two
+/// colleagues' chats.)
+///
+/// So every outward-facing call must present a capability token that only the
+/// user's own frontends are given: the backend mints one per process and
+/// publishes it to a 0600 file in the runtime directory (see
+/// `write_token_path`), where `web/server.ts`, the Vite dev server and the TUI
+/// read it. A client that was not handed the token — an ad-hoc script, a stray
+/// browser tab, an agent's driver — gets a refusal, not a message on the wire.
+///
+/// `None` means writes are refused outright: read-only mode.
+///
+/// Threat model, stated honestly: this stops ACCIDENTS, not a determined local
+/// process. Anything running as the user can read the token file, exactly as it
+/// can read the SQLite store. What it buys is that no client writes *without
+/// having deliberately gone to fetch a secret it was never given* — and every
+/// path that would do so is forbidden by AGENTS.md and blocked by
+/// `.claude/hooks/guard-live-automation.sh`.
+fn write_token() -> Option<&'static str> {
+    static TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TOKEN
+        .get_or_init(|| {
+            if read_only() {
+                return None;
+            }
+            let token = std::env::var(WRITE_TOKEN_ENV)
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(mint_write_token);
+            if let Err(e) = publish_write_token(&token) {
+                // Enforce anyway. A lock that quietly opens itself when it can't
+                // publish is the failure we are fixing; a frontend that cannot
+                // send until this is resolved is loud, and recoverable.
+                eprintln!(
+                    "[write-lock] could not publish the write token ({e}) — writes will be \
+                     refused until a frontend can read it. Set {WRITE_TOKEN_ENV} in both the \
+                     backend and the frontend to work around a read-only runtime directory."
+                );
+            }
+            Some(token)
+        })
+        .as_deref()
+}
+
+/// A fresh 256-bit token, hex, from the OS CSPRNG (`uuid` v4 twice over).
+fn mint_write_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// Every directory the token is published to, most volatile first: the runtime
+/// directory (tmpfs, wiped on logout) and the data directory.
+///
+/// BOTH, deliberately. A frontend does not necessarily see the same environment as
+/// the backend — a service unit may have `XDG_RUNTIME_DIR` while a shell-launched
+/// dev server does not — and a token only one side can find would leave the user's
+/// own app unable to send. The frontends (`web/write-token.ts`, `ui/src/client.ts`)
+/// search the same list in the same order.
+fn write_token_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let candidates = [
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("XDG_DATA_HOME"),
+        std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share").into()),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let path = std::path::PathBuf::from(candidate);
+        if path.is_absolute() && !dirs.contains(&path) {
+            dirs.push(path);
+        }
+    }
+    dirs.into_iter().map(|base| base.join("teams-lite")).collect()
+}
+
+/// The first place a frontend will look for the token (used for the startup log).
+fn write_token_path() -> Result<std::path::PathBuf> {
+    write_token_dirs()
+        .into_iter()
+        .next()
+        .map(|dir| dir.join("write-token"))
+        .context("cannot resolve a runtime or data directory for the write token")
+}
+
+/// Write the token where our frontends can read it, owner-only (0600), replacing
+/// any token left behind by a previous process. Succeeds if at least one location
+/// took it; reports the last error when none did.
+fn publish_write_token(token: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let mut last_error: Option<anyhow::Error> = None;
+    let mut published = 0usize;
+    for dir in write_token_dirs() {
+        let write_one = || -> Result<()> {
+            std::fs::create_dir_all(&dir).with_context(|| format!("create dir {}", dir.display()))?;
+            let path = dir.join("write-token");
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .with_context(|| format!("open {}", path.display()))?;
+            // An existing file keeps its old mode, so set it explicitly too.
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            file.write_all(token.as_bytes())?;
+            Ok(())
+        };
+        match write_one() {
+            Ok(()) => published += 1,
+            Err(e) => last_error = Some(e),
+        }
+    }
+    if published > 0 {
+        return Ok(());
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no writable location for the write token")))
+}
+
+/// Gate one request against the write lock. Reads always pass; an outward-facing
+/// method must carry a `write_token` matching this process's own.
+///
+/// Pure (token injected) so the policy is unit-testable without a live backend.
+fn check_write_allowed(method: &str, params: &Value, token: Option<&str>) -> Result<(), String> {
+    if !OUTWARD_METHODS.contains(&method) {
+        return Ok(());
+    }
+    let Some(token) = token else {
+        return Err(format!(
+            "refused: `{method}` acts on the real Teams account and this server runs read-only \
+             (TEAMS_LITE_READ_ONLY=1). Restart it without that variable to allow writes, or \
+             point the client at web/mock/server.ts to exercise the flow."
+        ));
+    };
+    match params.get("write_token").and_then(Value::as_str) {
+        Some(presented) if presented == token => Ok(()),
+        _ => Err(format!(
+            "refused: `{method}` needs the write token this backend published for the user's own \
+             frontends. A client that was not given it (an ad-hoc script, an automated driver) \
+             may read everything here, but must not post as the user. If you are a frontend, \
+             read the token from {WRITE_TOKEN_ENV} or from the file the backend logged at \
+             startup; if you are automation, drive web/mock/server.ts instead."
+        )),
+    }
+}
 
 /// Tracks established WebSocket clients. Raw TCP readiness probes do not count:
 /// the lease is acquired only after the WebSocket handshake succeeds.
@@ -358,6 +548,18 @@ async fn main() -> Result<()> {
 
     let listener = TcpListener::bind(ADDR).await.with_context(|| format!("bind {ADDR}"))?;
     eprintln!("[ok] server ws://{ADDR} — ready");
+    // Say which write policy is in force, and where a frontend can pick up the
+    // token — never the token itself (it must not land in a log or a scrollback).
+    match write_token() {
+        None => eprintln!("[write-lock] read-only: {OUTWARD_METHODS:?} are refused"),
+        Some(_) => match write_token_path() {
+            Ok(path) => eprintln!(
+                "[write-lock] armed: {OUTWARD_METHODS:?} require the token at {}",
+                path.display()
+            ),
+            Err(e) => eprintln!("[write-lock] armed: token published nowhere ({e})"),
+        },
+    }
     let clients = ClientTracker::new();
     let no_idle_exit = idle_exit_disabled();
     if no_idle_exit {
@@ -459,6 +661,12 @@ async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTrac
 
 /// Route a request method to backend logic and return its JSON result.
 async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
+    // The write lock, at the single choke point every request passes through —
+    // rather than trusting each handler, or each client, to check. Reads are
+    // unaffected. See `write_token` / `check_write_allowed`.
+    if let Err(refusal) = check_write_allowed(method, params, write_token()) {
+        anyhow::bail!(refusal);
+    }
     match method {
         "ping" => Ok(json!("pong")),
 
@@ -1825,6 +2033,56 @@ fn call_capture_line(ts_ms: u64, url: &str, call_id: &str, body: &Value) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the write lock ----------------------------------------------------
+    // Reads stay open (the point: tooling may inspect real data); writes need the
+    // capability token, so a client that merely found the socket cannot post.
+
+    #[test]
+    fn reads_never_need_the_write_token() {
+        for method in ["conversations", "open", "backfill", "read_receipts", "set_draft"] {
+            assert!(check_write_allowed(method, &json!({}), Some("tok")).is_ok(), "{method}");
+            assert!(check_write_allowed(method, &json!({}), None).is_ok(), "{method}");
+        }
+    }
+
+    #[test]
+    fn outward_methods_are_refused_without_the_token() {
+        for method in OUTWARD_METHODS {
+            let err = check_write_allowed(method, &json!({ "conversation": "c1" }), Some("tok"))
+                .expect_err("must refuse a tokenless write");
+            assert!(err.contains("write token"), "{err}");
+        }
+    }
+
+    #[test]
+    fn outward_methods_are_refused_with_a_wrong_token() {
+        let params = json!({ "conversation": "c1", "write_token": "not-the-token" });
+        assert!(check_write_allowed("send", &params, Some("tok")).is_err());
+    }
+
+    #[test]
+    fn outward_methods_pass_with_the_published_token() {
+        let params = json!({ "conversation": "c1", "write_token": "tok" });
+        for method in OUTWARD_METHODS {
+            assert!(check_write_allowed(method, &params, Some("tok")).is_ok(), "{method}");
+        }
+    }
+
+    #[test]
+    fn read_only_mode_refuses_even_a_correct_token() {
+        let params = json!({ "conversation": "c1", "write_token": "tok" });
+        let err = check_write_allowed("send", &params, None).expect_err("read-only must refuse");
+        assert!(err.contains("read-only"), "{err}");
+    }
+
+    #[test]
+    fn minted_tokens_are_long_and_unique() {
+        let (a, b) = (mint_write_token(), mint_write_token());
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 
     fn message(seq: i64) -> Message {
         Message {

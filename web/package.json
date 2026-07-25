@@ -3,8 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite dev",
+    "dev": "VITE_TEAMS_WS_URL=ws://127.0.0.1:8420 vite dev",
+    "dev:mock": "PORT=8455 MOCK_TEST_HOOKS=1 bun run mock/server.ts & MOCK_PID=$!; trap 'kill $MOCK_PID' EXIT; VITE_TEAMS_WS_URL=ws://127.0.0.1:8455 vite dev --port 4455",
     "dev:server": "../bin/teams-dev-server.sh",
+    "preview": "bun run scripts/preview.ts",
     "build": "vite build",
     "start": "bun run server.ts",
     "mock": "bun run mock/server.ts",

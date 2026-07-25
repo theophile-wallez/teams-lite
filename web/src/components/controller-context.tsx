@@ -7,7 +7,7 @@ import {
 } from "react";
 import { useStore } from "@tanstack/react-store";
 import { TeamsController, type AppState } from "~/lib/store";
-import { DEFAULT_WS_URL } from "~/lib/ws-client";
+import { defaultWsUrl } from "~/lib/ws-client";
 
 const ControllerContext = createContext<TeamsController | null>(null);
 
@@ -16,7 +16,7 @@ const ControllerContext = createContext<TeamsController | null>(null);
  * created lazily (client-only — it owns the WebSocket) and started once mounted.
  */
 export function ControllerProvider(props: { children: ReactNode; url?: string }) {
-  const [controller] = useState(() => new TeamsController(props.url ?? DEFAULT_WS_URL));
+  const [controller] = useState(() => new TeamsController(props.url ?? defaultWsUrl()));
 
   useEffect(() => {
     void controller.start();

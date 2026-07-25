@@ -8,6 +8,41 @@
 // The UI only talks to the backend through this — it never touches the network
 // or the SQLite store directly (local-first is enforced server-side).
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+/// Env var a launcher may use to pin the backend's write token.
+const WRITE_TOKEN_ENV = "TEAMS_LITE_WRITE_TOKEN";
+
+/// The backend's write-lock token, from the environment or the 0600 file the
+/// backend publishes at startup. Mirrors `write_token_path()` in
+/// src/bin/server.rs (runtime dir first, then the data dir) and
+/// web/write-token.ts, which does the same for the browser app.
+///
+/// Returns null when there is nothing to read; writes then get the backend's
+/// refusal, which is the correct outcome for a client that was never handed the
+/// capability (see AGENTS.md § Automation safety).
+function readWriteToken(): string | null {
+  const fromEnv = process.env[WRITE_TOKEN_ENV]?.trim();
+  if (fromEnv) return fromEnv;
+  const bases = [
+    process.env.XDG_RUNTIME_DIR,
+    process.env.XDG_DATA_HOME,
+    process.env.HOME ? join(process.env.HOME, ".local", "share") : undefined,
+  ].filter((base): base is string => !!base && base.startsWith("/"));
+  for (const base of bases) {
+    const path = join(base, "teams-lite", "write-token");
+    if (!existsSync(path)) continue;
+    try {
+      const token = readFileSync(path, "utf8").trim();
+      if (token) return token;
+    } catch {
+      // Unreadable (ownership, or a race with a backend restart): try the next.
+    }
+  }
+  return null;
+}
+
 // Mirrors the Rust `ConversationKind` (see src/store.rs). "unknown" is the safe
 // fallback for legacy rows or a chat type the backend doesn't map yet.
 export type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
@@ -250,11 +285,21 @@ export class Backend {
   setDraft(conversation: string, text: string): Promise<{ saved: boolean }> {
     return this.request("set_draft", { conversation, text });
   }
+  /// A request for an outward-facing method, carrying the backend's write token.
+  ///
+  /// The backend refuses `send`/`edit`/`react` without it: reading is open to any
+  /// local client, writing posts to real people as the user (see the write lock in
+  /// `src/bin/server.rs`). We are one of the user's own frontends, so we read the
+  /// token the backend published — freshly each time, so a backend restart with a
+  /// new token is picked up without restarting the TUI.
+  private writeRequest<T = any>(method: string, params: Record<string, unknown>): Promise<T> {
+    return this.request<T>(method, { ...params, write_token: readWriteToken() ?? undefined });
+  }
   send(conversation: string, text: string, replyTo?: ReplyTo): Promise<{ sent: boolean }> {
-    return this.request("send", { conversation, text, reply_to: replyTo });
+    return this.writeRequest("send", { conversation, text, reply_to: replyTo });
   }
   edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {
-    return this.request("edit", { conversation, message_id: messageId, text });
+    return this.writeRequest("edit", { conversation, message_id: messageId, text });
   }
 
   // ---- events -------------------------------------------------------------

@@ -12,7 +12,7 @@
 // plain fields — they must not trigger renders on their own.
 
 import { Store } from "@tanstack/store";
-import { Backend, DEFAULT_WS_URL } from "./ws-client";
+import { Backend, defaultWsUrl } from "./ws-client";
 import {
   appendLiveMessage,
   mergeOlderHistoryPage,
@@ -88,6 +88,11 @@ export type AppState = {
   messagesError: string | null;
   status: string;
   live: LiveStatus;
+  /** Whether the connected backend identified itself as `web/mock/server.ts`
+   *  (its `backend_info` sentinel). False until proven otherwise — including
+   *  while disconnected — so nothing ever treats the real backend as the mock.
+   *  Surfaced by the dev-only badge in the status bar. */
+  backendIsMock: boolean;
   ready: boolean;
   splashMessage: string;
   fatal: string | null;
@@ -167,6 +172,7 @@ function initialState(): AppState {
     messagesError: null,
     status: "connecting…",
     live: "connecting",
+    backendIsMock: false,
     ready: false,
     splashMessage: "connecting",
     fatal: null,
@@ -261,7 +267,7 @@ export class TeamsController {
   // first connect (no prior drop) does not. See `handleLiveRecovery`.
   private connectionDropped = false;
 
-  constructor(url: string = DEFAULT_WS_URL) {
+  constructor(url: string = defaultWsUrl()) {
     this.backend = new Backend(url);
   }
 
@@ -282,6 +288,11 @@ export class TeamsController {
     this.applyPersistedSounds();
     this.applyPersistedFavorites();
     this.wireEvents();
+
+    // Pick up the backend's write token from our own server before connecting, so
+    // the first send of the session already carries it. Reads never need it; a
+    // failure here just leaves this client read-only (see loadWriteToken).
+    await this.loadWriteToken();
 
     try {
       this.set({ splashMessage: "connecting" });
@@ -309,6 +320,28 @@ export class TeamsController {
     // Best-effort: ask for notification permission after connect (a user
     // gesture may be required; the browser handles that).
     void ensureNotificationPermission();
+  }
+
+  /**
+   * Fetch the backend's write-lock token from the server that served this app
+   * (`/__write-token`, see `web/write-token.ts`) and hand it to the client.
+   *
+   * The backend refuses `send`/`edit`/`react` without it: reading is open to any
+   * local client, writing posts to real people as the user. Only the app's own
+   * server can read the token file, so this hop is how the browser gets it. When
+   * there is none — the mock backend, or a server that cannot read the file — we
+   * stay read-only and let the backend's own refusal surface if a send is tried.
+   */
+  private async loadWriteToken(): Promise<void> {
+    if (typeof window === "undefined") return; // SSR: no writes happen there
+    try {
+      const res = await fetch("/__write-token");
+      if (!res.ok) return;
+      const body = (await res.json()) as { token?: string };
+      if (body.token) this.backend.setWriteToken(body.token);
+    } catch {
+      /* offline or no endpoint: leave the client read-only */
+    }
   }
 
   dispose(): void {
@@ -370,6 +403,16 @@ export class TeamsController {
       } else {
         void this.refreshConversations();
       }
+    });
+
+    // Backend identity. `web/mock/server.ts` announces itself on every fresh
+    // connection; the real Rust backend never does. So a missing sentinel means
+    // LIVE — the safe reading, since the risk we are guarding against is
+    // mistaking the real account for the mock, never the reverse. Drives the
+    // dev-only MOCK/LIVE badge and the assertion automation makes before typing.
+    on("backend_info", (raw) => {
+      const info = raw as { mock?: boolean } | null;
+      this.set({ backendIsMock: info?.mock === true });
     });
 
     on("typing", (raw) => this.onTyping(raw as TypingSignal));

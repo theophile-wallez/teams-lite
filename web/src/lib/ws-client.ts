@@ -25,9 +25,42 @@ import type {
 type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
 type EventHandler = (data: unknown) => void;
 
-/** Default backend URL. Overridable via VITE_TEAMS_WS_URL for dev/mock setups. */
-export const DEFAULT_WS_URL =
-  (import.meta.env?.VITE_TEAMS_WS_URL as string | undefined) ?? "ws://127.0.0.1:8420";
+/** Where a production build looks for the local Rust backend. */
+const PRODUCTION_WS_URL = "ws://127.0.0.1:8420";
+
+/**
+ * The backend URL to use when a caller does not name one.
+ *
+ * In a production build this is the local Rust backend — the whole point of
+ * `teams --web`. In DEV there is deliberately **no default**: a dev server must
+ * state its target through `VITE_TEAMS_WS_URL`, or this throws.
+ *
+ * That asymmetry is a safety catch, not pedantry. A dev server that silently
+ * falls back to the real backend means any tooling driving the UI — a screenshot
+ * script, an E2E-style driver, an agent poking at a component — is one forgotten
+ * environment variable away from typing into the user's real Teams account and
+ * posting to a real colleague. It happened: three test phrases went out to two
+ * 1:1 chats because a restarted `vite dev` lost its `VITE_TEAMS_WS_URL`. Failing
+ * loudly at startup costs one variable; the silent fallback costs a real message.
+ *
+ * Resolved lazily (a function, not a module constant) so importing this module
+ * stays side-effect-free — unit tests construct `Backend` with an explicit URL
+ * and must not need the variable at all.
+ */
+export function defaultWsUrl(): string {
+  const configured = (import.meta.env?.VITE_TEAMS_WS_URL as string | undefined)?.trim();
+  if (configured) return configured;
+  if (import.meta.env?.DEV) {
+    throw new Error(
+      "VITE_TEAMS_WS_URL is not set. A dev server must name its backend explicitly — " +
+        "there is no default in dev, so that nothing can reach the real Teams account by " +
+        `accident. Use the mock (bun run dev:mock, or VITE_TEAMS_WS_URL=ws://127.0.0.1:8455) ` +
+        `for anything automated; pass VITE_TEAMS_WS_URL=${PRODUCTION_WS_URL} only for hands-on ` +
+        "work against your own account.",
+    );
+  }
+  return PRODUCTION_WS_URL;
+}
 
 const RECONNECT_GIVE_UP_MS = 30_000;
 const RECONNECT_MAX_DELAY_MS = 10_000;
@@ -54,12 +87,14 @@ export class Backend {
   // from a reconnect, so it emits `reconnected` only on the latter — the signal
   // the store uses to re-sync state that may have drifted while we were away.
   private everConnected = false;
+  // The backend's write-lock capability token, when the app's server gave us one.
+  private writeToken: string | null = null;
   private firstFailureAt: number | null = null;
   private readonly giveUpMs: number;
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
 
-  constructor(url: string = DEFAULT_WS_URL, opts: BackendOptions = {}) {
+  constructor(url: string = defaultWsUrl(), opts: BackendOptions = {}) {
     this.url = url;
     this.giveUpMs = opts.giveUpMs ?? RECONNECT_GIVE_UP_MS;
     this.initialDelayMs = opts.initialDelayMs ?? RECONNECT_INITIAL_DELAY_MS;
@@ -205,6 +240,32 @@ export class Backend {
     });
   }
 
+  /**
+   * A request for an outward-facing method (`send`/`edit`/`react`), carrying the
+   * backend's write token.
+   *
+   * The backend refuses these without it — reading is open to any local client,
+   * writing is not, because a write posts to real people as the user (see the
+   * write lock in `src/bin/server.rs`). Only the app's own server hands us the
+   * token; if we have none, the request goes out anyway so the backend's own
+   * refusal message surfaces in the UI rather than a silently different failure.
+   */
+  private writeRequest<T = unknown>(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<T> {
+    return this.request<T>(method, { ...params, write_token: this.writeToken ?? undefined });
+  }
+
+  /**
+   * Hand this client the write token published by the backend for the user's own
+   * frontends (fetched from the app's own server — see `web/write-token.ts`).
+   * Passing `null` clears it, which leaves the client read-only.
+   */
+  setWriteToken(token: string | null): void {
+    this.writeToken = token;
+  }
+
   // ---- typed API ----------------------------------------------------------
 
   conversations(): Promise<Conversation[]> {
@@ -231,7 +292,7 @@ export class Backend {
     replyTo?: ReplyTo,
     contentHtml?: string,
   ): Promise<{ sent: boolean }> {
-    return this.request<{ sent: boolean }>("send", {
+    return this.writeRequest<{ sent: boolean }>("send", {
       conversation,
       text,
       reply_to: replyTo,
@@ -239,14 +300,18 @@ export class Backend {
     });
   }
   edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {
-    return this.request<{ edited: boolean }>("edit", { conversation, message_id: messageId, text });
+    return this.writeRequest<{ edited: boolean }>("edit", {
+      conversation,
+      message_id: messageId,
+      text,
+    });
   }
   /** React to a message with an emoji (Teams "emotion"), or toggle ours off.
    *  `key` is the emotion (e.g. "like", "heart"). The backend toggles — clicking
    *  our current reaction removes it — and re-broadcasts the message, so state
    *  reconciles via the `message` event; `reacted` is the resulting on/off. */
   react(conversation: string, messageId: string, key: string): Promise<{ reacted: boolean }> {
-    return this.request<{ reacted: boolean }>("react", {
+    return this.writeRequest<{ reacted: boolean }>("react", {
       conversation,
       message_id: messageId,
       key,

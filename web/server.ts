@@ -13,6 +13,7 @@
 
 import { existsSync } from "node:fs";
 import { join, normalize } from "node:path";
+import { WRITE_TOKEN_ROUTE, writeTokenResponse } from "./write-token";
 
 const here = import.meta.dir;
 const clientDir = join(here, "dist", "client");
@@ -48,6 +49,9 @@ const server = Bun.serve({
   idleTimeout: 60,
   async fetch(request) {
     const url = new URL(request.url);
+    // The app's page cannot read the backend's write token from disk, so hand it
+    // over here. Without it the client is read-only (see write-token.ts).
+    if (url.pathname === WRITE_TOKEN_ROUTE) return writeTokenResponse();
     // Browsers request /favicon.ico unconditionally; map it to our SVG so it
     // never falls through to the SSR handler as a 404.
     if (url.pathname === "/favicon.ico") {

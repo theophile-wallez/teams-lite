@@ -6,7 +6,11 @@ import { test as base, expect, type Page } from "@playwright/test";
 type Fixtures = {
   consoleErrors: string[];
   plainComposer: void;
+  mockBackendOnly: void;
 };
+
+/** The port the mock is expected on — mirrors `playwright.config.ts`. */
+const MOCK_PORT = process.env.E2E_MOCK_PORT ?? "8461";
 
 export const test = base.extend<Fixtures>({
   consoleErrors: async ({ page }, use) => {
@@ -17,6 +21,32 @@ export const test = base.extend<Fixtures>({
     page.on("pageerror", (e) => errors.push(String(e)));
     await use(errors);
   },
+
+  // The suite sends, edits and reacts. If the app under test is talking to the
+  // real backend, those are real messages to real colleagues — it has happened:
+  // moving E2E_MOCK_PORT without rebuilding the app's baked WebSocket URL left the
+  // app dialing 127.0.0.1:8420, and four test strings landed in a 1:1 chat.
+  //
+  // This is an AUTO fixture, and it watches the socket rather than the DOM, for one
+  // reason: it must be impossible to bypass. The previous guard lived in `gotoApp`,
+  // so every spec that called `page.goto` directly walked straight past it. Here,
+  // any WebSocket the page opens to anywhere but the mock closes the page
+  // immediately, which fails the spec on its very next action — before it can type.
+  mockBackendOnly: [
+    async ({ page }, use) => {
+      page.on("websocket", (ws) => {
+        if (ws.url().includes(`:${MOCK_PORT}`)) return;
+        console.error(
+          `[e2e] REFUSING: the app opened a WebSocket to ${ws.url()}, not the mock on ` +
+            `port ${MOCK_PORT}. Closing the page before this spec can write anything. ` +
+            `The app's target is baked at build time — see VITE_TEAMS_WS_URL in playwright.config.ts.`,
+        );
+        void page.close();
+      });
+      await use();
+    },
+    { auto: true },
+  ],
 
   // The app now defaults the composer to the rich-text editor. These specs drive
   // the plain `[data-testid="composer"]` textarea (fill / toHaveValue), so opt
@@ -49,6 +79,14 @@ export async function gotoApp(page: Page): Promise<void> {
   await expect
     .poll(() => page.locator('[data-testid="conversation-row"]').count(), { timeout: 15_000 })
     .toBeGreaterThan(3);
+  // Per-page confirmation that we are on the mock, from the backend's own
+  // `backend_info` sentinel: `e2e/global-setup.ts` checks the port once up front,
+  // this catches a client that ended up pointed somewhere else entirely. Specs
+  // send, edit and react freely, so this must hold before any of them run.
+  await expect(page.locator('[data-testid="backend-badge"]')).toHaveAttribute(
+    "data-backend",
+    "mock",
+  );
 }
 
 /** Open the conversation at the given sidebar index and wait for its messages. */
@@ -68,8 +106,7 @@ export async function emitLive(
   page: Page,
   body: { conversation: string; content: string; sender?: string; is_self?: boolean; reply?: boolean },
 ): Promise<void> {
-  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
-  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, { data: body });
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, { data: body });
   expect(res.ok()).toBeTruthy();
 }
 
@@ -85,8 +122,7 @@ export async function emitNotification(
     preview?: string;
   } = {},
 ): Promise<void> {
-  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
-  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "notification", ...body },
   });
   expect(res.ok()).toBeTruthy();
@@ -97,8 +133,7 @@ export async function emitTyping(
   page: Page,
   body: { conversation: string; sender?: string; sender_mri?: string; is_typing?: boolean },
 ): Promise<void> {
-  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
-  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "typing", ...body },
   });
   expect(res.ok()).toBeTruthy();
@@ -118,8 +153,7 @@ export async function emitCall(
     participant_count?: number;
   },
 ): Promise<void> {
-  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
-  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "call", ...body },
   });
   expect(res.ok()).toBeTruthy();
@@ -138,8 +172,7 @@ export async function emitReadReceipt(
     read_time_ms?: number;
   },
 ): Promise<void> {
-  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
-  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "read_receipt", ...body },
   });
   expect(res.ok()).toBeTruthy();
@@ -148,8 +181,7 @@ export async function emitReadReceipt(
 /** Clear every injected read position on the shared mock, so "seen by" avatars
  *  from one spec never leak into the next. */
 export async function clearReadReceipts(page: Page): Promise<void> {
-  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
-  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "read_receipt", clear: true },
   });
   expect(res.ok()).toBeTruthy();
@@ -167,8 +199,7 @@ export async function emitReaction(
     mine?: boolean;
   },
 ): Promise<void> {
-  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
-  const res = await page.request.post(`http://127.0.0.1:${mockPort}/__test/emit`, {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "reaction", ...body },
   });
   expect(res.ok()).toBeTruthy();
@@ -179,8 +210,7 @@ export async function emitReaction(
 export async function fetchTestChannels(
   page: Page,
 ): Promise<{ id: string; name: string; team_id: string; team_name: string }[]> {
-  const mockPort = process.env.E2E_MOCK_PORT ?? "8420";
-  const res = await page.request.get(`http://127.0.0.1:${mockPort}/__test/channels`);
+  const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/channels`);
   expect(res.ok()).toBeTruthy();
   return res.json();
 }

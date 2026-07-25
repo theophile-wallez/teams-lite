@@ -2389,7 +2389,13 @@ const server = Bun.serve({
   websocket: {
     open(ws) {
       sockets.add(ws);
-      // Greet exactly like the Rust backend does on a fresh connection.
+      // Identify ourselves FIRST, before anything else on the wire: this is the
+      // sentinel the app turns into its MOCK/LIVE badge, and the one automation
+      // must see before it is allowed to type (see web/scripts/preview.ts). The
+      // real Rust backend never emits this event, so "no sentinel" reads as
+      // LIVE — the fail-safe direction. Never make this conditional.
+      sendJson(ws, { event: "backend_info", data: { mock: true, name: "web/mock/server.ts" } });
+      // Then greet exactly like the Rust backend does on a fresh connection.
       sendJson(ws, { event: "status", data: "connected" });
       sendJson(ws, { event: "realtime_status", data: "connected" });
     },
