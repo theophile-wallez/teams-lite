@@ -62,7 +62,7 @@ function LinkFavicon({ href }: { href?: string }) {
   if (!host) return null;
   const showFavicon = loaded && !failed;
   return (
-    <span className="relative mr-1 inline-flex size-[1.05em] shrink-0 items-center justify-center overflow-hidden rounded-[0.25em] bg-white/95 align-middle text-zinc-500 shadow-chip ring-1 ring-black/5">
+    <span className="relative mr-1 inline-flex size-[1.05em] shrink-0 items-center justify-center overflow-hidden rounded-[0.25em] align-middle text-zinc-500 ring-1 ring-black/5">
       {/* Fallback globe — visible until (and unless) the favicon paints. */}
       <Globe
         className={cn("size-[0.72em] transition-opacity", showFavicon && "opacity-0")}
