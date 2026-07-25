@@ -374,61 +374,53 @@ export function MessagePane(props: { onBack?: () => void }) {
         </div>
       </header>
 
-      <div className="relative flex min-h-0 flex-1 flex-col">
-        <div
-          ref={viewportRef}
-          onScroll={onScroll}
-          data-testid="message-scroll"
-          className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 md:px-5"
-        >
-          {messages.length === 0 ? (
-            <EmptyState
-              loading={loadingMessages}
-              error={messagesError}
-              onRetry={() => void controller.openConversation(openId)}
-            />
-          ) : (
-            <div className="mx-auto flex max-w-3xl flex-col">
-              {hasMoreOlder && (
-                <div className="flex h-8 items-center justify-center">
-                  {loadingOlder ? (
-                    <span className="flex items-center gap-2 text-xs text-text-faint">
-                      <Loader2 className="size-3 animate-spin" strokeWidth={1.6} /> Loading earlier
-                      messages…
-                    </span>
-                  ) : olderError ? (
-                    <span className="text-xs text-destructive">
-                      Couldn't load earlier messages — scroll up to retry.
-                    </span>
-                  ) : null}
-                </div>
-              )}
-              {threads
-                ? threads.map((t) => (
-                    <ThreadGroup
-                      key={t.rootId}
-                      thread={t}
-                      expanded={expandedThreads.has(t.rootId)}
-                      onToggle={() => toggleThread(t.rootId)}
-                      renderMsg={renderMsg}
-                    />
-                  ))
-                : messages.map((m, i) => renderMsg(m, messages[i - 1], messages[i + 1]))}
-            </div>
-          )}
-        </div>
-        {/* A soft fade at the bottom of the history so messages dissolve into the
-            page just above the composer instead of clipping against a hard edge.
-            from-background matches the pane and the composer's own backdrop, so the
-            transition into the text bar reads as seamless. */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background to-transparent"
-        />
+      <div
+        ref={viewportRef}
+        onScroll={onScroll}
+        data-testid="message-scroll"
+        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 md:px-5"
+      >
+        {messages.length === 0 ? (
+          <EmptyState
+            loading={loadingMessages}
+            error={messagesError}
+            onRetry={() => void controller.openConversation(openId)}
+          />
+        ) : (
+          <div className="mx-auto flex max-w-3xl flex-col">
+            {hasMoreOlder && (
+              <div className="flex h-8 items-center justify-center">
+                {loadingOlder ? (
+                  <span className="flex items-center gap-2 text-xs text-text-faint">
+                    <Loader2 className="size-3 animate-spin" strokeWidth={1.6} /> Loading earlier
+                    messages…
+                  </span>
+                ) : olderError ? (
+                  <span className="text-xs text-destructive">
+                    Couldn't load earlier messages — scroll up to retry.
+                  </span>
+                ) : null}
+              </div>
+            )}
+            {threads
+              ? threads.map((t) => (
+                  <ThreadGroup
+                    key={t.rootId}
+                    thread={t}
+                    expanded={expandedThreads.has(t.rootId)}
+                    onToggle={() => toggleThread(t.rootId)}
+                    renderMsg={renderMsg}
+                  />
+                ))
+              : messages.map((m, i) => renderMsg(m, messages[i - 1], messages[i + 1]))}
+          </div>
+        )}
       </div>
 
+      {/* The composer's fade overlay reaches up over this row and the typing line,
+          so both stack above it (z-10) to stay fully legible. */}
       {messagesError && messages.length > 0 && (
-        <div className="border-t border-border-subtle bg-destructive/10 px-5 py-2 text-center text-xs text-destructive">
+        <div className="relative z-10 border-t border-border-subtle bg-destructive/10 px-5 py-2 text-center text-xs text-destructive">
           {messagesError}
         </div>
       )}

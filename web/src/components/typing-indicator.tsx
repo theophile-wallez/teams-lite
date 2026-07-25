@@ -17,7 +17,9 @@ export function TypingIndicator() {
       data-testid="typing-indicator"
       role="status"
       aria-live="polite"
-      className="flex items-center gap-2 px-5 pb-1.5 text-xs text-text-faint duration-200 animate-in fade-in slide-in-from-bottom-1"
+      // `relative z-10` keeps the line above the composer's fade overlay, which
+      // hangs up over this row from the bar below.
+      className="relative z-10 flex items-center gap-2 px-5 pb-1.5 text-xs text-text-faint duration-200 animate-in fade-in slide-in-from-bottom-1"
     >
       <span className="typing-dots" aria-hidden="true">
         <span className="typing-dot" />

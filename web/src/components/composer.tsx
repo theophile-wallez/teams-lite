@@ -105,7 +105,15 @@ export function Composer(props: { focusToken: unknown }) {
   };
 
   return (
-    <div className="shrink-0 bg-background px-4 pt-2 pb-[calc(1rem+env(safe-area-inset-bottom))]">
+    <div className="relative shrink-0 bg-background px-4 pb-[calc(1rem+env(safe-area-inset-bottom))]">
+      {/* The history dissolves into the page immediately above the bar. The overlay
+          hangs off the composer's own top edge (bottom-full) rather than the bottom
+          of the scroll area, so no unfaded strip of padding is left between the two
+          — the fade lands exactly where the bar (or its reply banner) begins. */}
+      <div
+        aria-hidden
+        className="composer-fade pointer-events-none absolute inset-x-0 bottom-full h-14"
+      />
       {replyingTo && (
         <div
           data-testid="reply-banner"

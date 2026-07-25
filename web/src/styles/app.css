@@ -162,6 +162,28 @@
   }
 }
 
+/* The fade that dissolves the tail of the history into the page right where the
+   composer begins. A two-stop gradient ramps alpha linearly, which reads as a
+   flat grey band hanging over the messages; this one follows a curve instead
+   (roughly alpha ≈ (1 - y)^2, sampled as stops): barely there on the message
+   side, then bending up fast near the bar, where a short opaque plateau finishes
+   the job so a bubble sliding under the composer dissolves rather than being
+   clipped mid-line. Messages stay legible far longer than under a linear ramp. */
+.composer-fade {
+  background-image: linear-gradient(
+    to top,
+    var(--background) 0%,
+    var(--background) 14%,
+    color-mix(in srgb, var(--background) 72%, transparent) 24%,
+    color-mix(in srgb, var(--background) 50%, transparent) 34%,
+    color-mix(in srgb, var(--background) 33%, transparent) 45%,
+    color-mix(in srgb, var(--background) 19%, transparent) 57%,
+    color-mix(in srgb, var(--background) 9%, transparent) 70%,
+    color-mix(in srgb, var(--background) 3%, transparent) 84%,
+    transparent 100%
+  );
+}
+
 /* A lone image (a message that is only a picture) sits on a soft "atelier" mat
    instead of floating in the void: one neutral card — the same on both sides of
    the conversation — carrying a faint diagonal hatch. The card's few px of
