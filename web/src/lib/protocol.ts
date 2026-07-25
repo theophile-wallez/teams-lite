@@ -687,6 +687,24 @@ export function mergeOlderHistoryPage(
   };
 }
 
+/** How many of the newest messages a conversation keeps in the session cache once
+ *  the user has moved on. Paging far back in a long thread can load thousands of
+ *  messages; keeping every one of them for every conversation visited is what made
+ *  a long session grow heavier and heavier. Re-opening still lands on plenty of
+ *  history instantly, and scrolling up simply backfills again. */
+export const RETAINED_MESSAGES = 400;
+
+/**
+ * Drop all but the newest `keep` messages of a cached page. `has_more` becomes
+ * true whenever anything was dropped — older messages provably exist, so the pane
+ * must offer to page back to them again. A page already within the budget is
+ * returned unchanged (same reference), so trimming is free in the common case.
+ */
+export function trimHistoryPage(page: MessagePage, keep: number = RETAINED_MESSAGES): MessagePage {
+  if (page.messages.length <= keep) return page;
+  return { messages: page.messages.slice(-keep), has_more: true };
+}
+
 export function mergeRefreshedHistoryPage(
   current: MessagePage | undefined,
   incoming: MessagePage,

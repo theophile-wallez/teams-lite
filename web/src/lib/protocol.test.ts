@@ -12,6 +12,7 @@ import {
   appendLiveMessage,
   mergeOlderHistoryPage,
   mergeRefreshedHistoryPage,
+  trimHistoryPage,
   previewLine,
   convLabel,
   channelLabel,
@@ -449,6 +450,30 @@ describe("mergeRefreshedHistoryPage", () => {
 
     expect(merged.messages.map((m) => m.seq)).toEqual([9]);
     expect(merged.has_more).toBe(true);
+  });
+});
+
+describe("trimHistoryPage", () => {
+  it("keeps the newest messages and reports that older ones exist", () => {
+    const page = { messages: [message(1), message(2), message(3), message(4)], has_more: false };
+
+    const trimmed = trimHistoryPage(page, 2);
+
+    expect(trimmed.messages.map((m) => m.seq)).toEqual([3, 4]);
+    expect(trimmed.has_more).toBe(true);
+  });
+
+  it("returns the same page untouched when it is within the budget", () => {
+    const page = { messages: [message(1), message(2)], has_more: false };
+
+    expect(trimHistoryPage(page, 2)).toBe(page);
+    expect(trimHistoryPage(page, 5)).toBe(page);
+  });
+
+  it("preserves an already-true has_more", () => {
+    const page = { messages: [message(1), message(2), message(3)], has_more: true };
+
+    expect(trimHistoryPage(page, 1).has_more).toBe(true);
   });
 });
 

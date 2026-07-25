@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Ban, Copy, Eye, EyeOff, MoreHorizontal, Pencil, Reply, X } from "lucide-react";
 import {
@@ -136,7 +136,17 @@ function useEnrichedLinks(urls: string[]): LinkResults {
  * diagonal hatch that peeks around the picture's padded edges. On an incoming
  * image-only message the sender name still shows, floating above the mat.
  */
-export function MessageBubble(props: {
+/**
+ * Memoized: the pane renders one of these per visible message, and a single live
+ * message (or any other pane-level state change) would otherwise re-render every
+ * mounted bubble — parsing its HTML and reconciling its whole subtree. The pane
+ * keeps every callback prop stable (see its `useCallback`s) so this actually
+ * bails out; `message` is reference-stable because the store replaces a message
+ * object only when it really changed.
+ */
+export const MessageBubble = memo(MessageBubbleImpl);
+
+function MessageBubbleImpl(props: {
   message: ChatMessage;
   showSenderName: boolean;
   editing: boolean;

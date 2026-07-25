@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronLeft, ChevronRight, Loader2, MessagesSquare, WifiOff } from "lucide-react";
 import {
   channelLabel,
@@ -26,7 +27,20 @@ import { cn } from "~/lib/utils";
 // look-ahead is expressed in viewport heights (with a px floor for short panes).
 const PREPEND_TRIGGER_SCREENS = 2;
 const PREPEND_TRIGGER_MIN_PX = 600;
-const STICKY_BOTTOM_PX = 80;
+
+// The history is virtualized: only the rows near the viewport are mounted, so a
+// deep backlog costs a bounded number of bubbles (and, with them, a bounded
+// amount of DOM, Radix menus and document listeners) instead of growing without
+// limit as older pages stream in. `ROW_ESTIMATE_PX` is only the pre-measurement
+// guess — every row reports its real height through `measureElement` — but a
+// sane value keeps the scrollbar honest while off-screen rows are still
+// estimated. `OVERSCAN_ROWS` renders a little beyond the viewport so ordinary
+// scrolling never shows a blank band.
+const ROW_ESTIMATE_PX = 64;
+const OVERSCAN_ROWS = 8;
+// Height reserved at the top of the list for the "loading earlier messages"
+// row, so reserving (and releasing) it doesn't shift the rows below.
+const HISTORY_LOADER_PX = 32;
 
 /** How close to the top (in px) the viewport must get before older history is
  *  prefetched — a couple of screens ahead so loading stays invisible. */
@@ -38,9 +52,15 @@ function prependTriggerPx(el: HTMLElement): number {
 const MAX_SCROLL_PAGES = 20;
 const HIGHLIGHT_MS = 1600;
 
+/** One row of the virtualized history: a single chat message, or a whole channel
+ *  thread (its root post plus its collapsible replies). */
+type HistoryRow =
+  | { kind: "message"; key: string; message: ChatMessage; prev?: ChatMessage; next?: ChatMessage }
+  | { kind: "thread"; key: string; thread: Thread };
+
 /**
- * The right pane: conversation title, the scrolling message history (with
- * infinite upward loading + scroll anchoring + sticky-to-bottom), and the
+ * The right pane: conversation title, the scrolling message history (virtualized,
+ * with infinite upward loading + scroll anchoring + sticky-to-bottom), and the
  * composer. Mirrors the TUI's MessagePane (ui/src/app.tsx).
  */
 export function MessagePane(props: { onBack?: () => void }) {
@@ -55,6 +75,7 @@ export function MessagePane(props: { onBack?: () => void }) {
   const messagesError = useAppState((s) => s.messagesError);
   const olderError = useAppState((s) => s.olderError);
   const pendingScroll = useAppState((s) => s.pendingScroll);
+  const scrollToBottomNonce = useAppState((s) => s.scrollToBottomNonce);
   const readReceipts = useAppState((s) => s.readReceipts);
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -73,17 +94,14 @@ export function MessagePane(props: { onBack?: () => void }) {
   }, []);
 
   const viewportRef = useRef<HTMLDivElement>(null);
-  const atBottomRef = useRef(true);
-  const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const prevOpenIdRef = useRef<string | null>(null);
-  // Track the oldest message id + count across renders so we can tell an actual
-  // older-history prepend apart from intermediate re-renders (e.g. the loading
-  // flag toggling) or a live append at the bottom.
-  const prevOldestIdRef = useRef<string | null>(null);
-  const prevMessageCountRef = useRef(0);
   // Bounded paging budget for the current deep-link target, reset per nonce.
   const scrollAttemptsRef = useRef(0);
   const scrollNonceRef = useRef(-1);
+  // Last consumed "jump to the newest message" request (see the store's
+  // `scrollToBottomNonce`), so the jump happens once per send and never on the
+  // unrelated re-renders that share this effect's dependencies.
+  const bottomNonceRef = useRef(0);
 
   // Which message each other member has read up to → their "seen by" avatar row.
   // Recomputed only when the messages or receipts change (cheap, but this is the
@@ -133,111 +151,144 @@ export function MessagePane(props: { onBack?: () => void }) {
     }
   }, [replyRootOf, pendingScroll, openId]);
 
+  // The rows the virtualizer works in: one per message for a chat, one per whole
+  // thread for a channel (a thread's root post and its replies are measured and
+  // scrolled as a single block, so expanding one just makes its row taller).
+  // `rowOfMessage` maps a message id to the row that renders it, for deep links.
+  const { rows, rowOfMessage } = useMemo(() => {
+    const rowOfMessage = new Map<string, number>();
+    if (threads) {
+      const rows: HistoryRow[] = threads.map((thread, i) => {
+        rowOfMessage.set(thread.lead.id, i);
+        for (const reply of thread.replies) rowOfMessage.set(reply.id, i);
+        return { kind: "thread", key: thread.rootId, thread };
+      });
+      return { rows, rowOfMessage };
+    }
+    const rows: HistoryRow[] = messages.map((message, i) => {
+      rowOfMessage.set(message.id, i);
+      return {
+        kind: "message",
+        key: message.id,
+        message,
+        prev: messages[i - 1],
+        next: messages[i + 1],
+      };
+    });
+    return { rows, rowOfMessage };
+  }, [threads, messages]);
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => viewportRef.current,
+    estimateSize: () => ROW_ESTIMATE_PX,
+    getItemKey: (index) => rows[index]?.key ?? index,
+    overscan: OVERSCAN_ROWS,
+    // Chat semantics, straight from the virtualizer: `anchorTo: "end"` keeps the
+    // row the user is reading pinned when older pages are prepended above it (it
+    // re-anchors on the item at the current offset, which is what the old manual
+    // scrollHeight arithmetic did by hand), and `followOnAppend` sticks to the
+    // bottom on a live message only when we were already at the bottom.
+    anchorTo: "end",
+    followOnAppend: true,
+    paddingStart: hasMoreOlder ? HISTORY_LOADER_PX : 0,
+  });
+  const virtualRows = virtualizer.getVirtualItems();
+
   const maybeFill = useCallback(() => {
     const el = viewportRef.current;
-    if (!el) return;
-    if (el.scrollHeight <= el.clientHeight + 4 && hasMoreOlder && !loadingOlder) {
-      prependAnchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+    // A pane that hasn't been laid out yet reports no height, which would look
+    // like "the history doesn't fill the viewport" and pull a page nobody needs.
+    if (!el || el.clientHeight === 0) return;
+    if (virtualizer.getTotalSize() <= el.clientHeight + 4 && hasMoreOlder && !loadingOlder) {
       void controller.loadOlderMessages();
     }
-  }, [controller, hasMoreOlder, loadingOlder]);
+  }, [controller, hasMoreOlder, loadingOlder, virtualizer]);
 
   const onScroll = () => {
     const el = viewportRef.current;
     if (!el) return;
-    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    atBottomRef.current = distanceToBottom < STICKY_BOTTOM_PX;
     if (el.scrollTop < prependTriggerPx(el) && hasMoreOlder && !loadingOlder && !olderError) {
-      prependAnchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
       void controller.loadOlderMessages();
     }
   };
 
-  // Keep the viewport anchored: a pending deep-link target wins (scroll to that
-  // message, paging older until it loads); otherwise jump to bottom on open,
-  // preserve position when older messages are prepended, and stick to bottom
-  // when already at bottom.
+  // Opening a conversation starts at its newest message. Every other anchoring
+  // case (prepends, live appends) is the virtualizer's job — see its options.
+  useLayoutEffect(() => {
+    if (prevOpenIdRef.current === openId) return;
+    prevOpenIdRef.current = openId;
+    if (rows.length > 0) virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
+  }, [openId, rows.length, virtualizer]);
+
+  // Sending takes the sender to their own message: jump to the newest row, which
+  // also leaves the view at the bottom so the send's echo is followed in.
+  useLayoutEffect(() => {
+    if (bottomNonceRef.current === scrollToBottomNonce) return;
+    bottomNonceRef.current = scrollToBottomNonce;
+    if (rows.length > 0) virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
+  }, [scrollToBottomNonce, rows.length, virtualizer]);
+
+  // A conversation whose loaded history doesn't fill the viewport can't be
+  // scrolled, so nothing would ever trigger a backfill: pull the next page until
+  // there is something to scroll (or history runs out).
+  useLayoutEffect(() => {
+    maybeFill();
+  }, [maybeFill, rows.length]);
+
+  // A pending deep-link target: center that message, paging older until it
+  // loads. The node is only in the DOM once its row is inside the virtual
+  // window, so an off-screen target is first scrolled to by row index and
+  // centered exactly on the next render.
   useLayoutEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
-    const openChanged = prevOpenIdRef.current !== openId;
-    prevOpenIdRef.current = openId;
-
-    // A real older-history prepend is the only change that must re-anchor the
-    // viewport: the list grew *and* its oldest message changed. Intermediate
-    // re-renders (the loading flag flipping) and live appends at the bottom
-    // leave the oldest id untouched, so they must not consume the anchor — doing
-    // so before the prepended rows actually mount is what made the view jump to
-    // the top of the freshly loaded page.
-    const oldestId = messages[0]?.id ?? null;
-    const prepended =
-      !openChanged &&
-      messages.length > prevMessageCountRef.current &&
-      oldestId !== null &&
-      oldestId !== prevOldestIdRef.current;
-    prevOldestIdRef.current = oldestId;
-    prevMessageCountRef.current = messages.length;
-
     const target = pendingScroll && pendingScroll.convId === openId ? pendingScroll : null;
-    if (target) {
-      // Fresh target -> reset the paging budget.
-      if (scrollNonceRef.current !== target.nonce) {
-        scrollNonceRef.current = target.nonce;
-        scrollAttemptsRef.current = 0;
-      }
-      const node = findMessageNode(el, target.messageId);
-      if (node) {
-        node.scrollIntoView({ block: "center" });
-        atBottomRef.current = false;
-        prependAnchorRef.current = null;
-        setHighlightId(target.messageId);
-        controller.clearScrollTarget(target.nonce);
-        return;
-      }
-      // The first page (or an older page) is still in flight — keep the target
-      // pending and wait for the next render rather than giving up early.
-      if (loadingMessages || loadingOlder) return;
-      // Not loaded yet — page older toward it, bounded so a missing id (e.g. a
-      // channel activity that doesn't map to a stored message) can't loop.
-      if (hasMoreOlder && scrollAttemptsRef.current < MAX_SCROLL_PAGES) {
-        scrollAttemptsRef.current += 1;
-        prependAnchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
-        void controller.loadOlderMessages();
-        return;
-      }
-      // Give up: fall through to normal anchoring and drop the request.
+    if (!target) return;
+
+    // Fresh target -> reset the paging budget.
+    if (scrollNonceRef.current !== target.nonce) {
+      scrollNonceRef.current = target.nonce;
+      scrollAttemptsRef.current = 0;
+    }
+
+    const node = findMessageNode(el, target.messageId);
+    if (node) {
+      node.scrollIntoView({ block: "center" });
+      setHighlightId(target.messageId);
       controller.clearScrollTarget(target.nonce);
-    }
-
-    if (openChanged) {
-      el.scrollTop = el.scrollHeight;
-      prependAnchorRef.current = null;
-      atBottomRef.current = true;
-      maybeFill();
       return;
     }
-
-    const anchor = prependAnchorRef.current;
-    if (prepended && anchor) {
-      // Older history just mounted above the viewport. Restore the exact prior
-      // offset plus the height added on top so the message the user was reading
-      // stays put. An absolute offset (not `+=`) is deliberate: at the very top
-      // the browser suppresses its own scroll anchoring, so this is the only
-      // thing keeping the view from snapping to the top of the new page.
-      el.scrollTop = anchor.scrollTop + (el.scrollHeight - anchor.scrollHeight);
-      prependAnchorRef.current = null;
-      maybeFill();
+    // Loaded, but its row is outside the rendered window — bring the row into
+    // view; the next render mounts the node and the branch above centers it.
+    const row = rowOfMessage.get(target.messageId);
+    if (row !== undefined) {
+      virtualizer.scrollToIndex(row, { align: "center" });
       return;
     }
-
-    // A backfill settled without prepending (empty page or error): drop the now
-    // stale anchor so a later bottom append can't get wrongly repositioned.
-    if (anchor && !loadingOlder) prependAnchorRef.current = null;
-
-    if (atBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
+    // The first page (or an older page) is still in flight — keep the target
+    // pending and wait for the next render rather than giving up early.
+    if (loadingMessages || loadingOlder) return;
+    // Not loaded yet — page older toward it, bounded so a missing id (e.g. a
+    // channel activity that doesn't map to a stored message) can't loop.
+    if (hasMoreOlder && scrollAttemptsRef.current < MAX_SCROLL_PAGES) {
+      scrollAttemptsRef.current += 1;
+      void controller.loadOlderMessages();
+      return;
     }
-  }, [messages, openId, maybeFill, pendingScroll, hasMoreOlder, loadingOlder, loadingMessages, controller]);
+    // Give up and drop the request; the view stays where it is.
+    controller.clearScrollTarget(target.nonce);
+  }, [
+    pendingScroll,
+    openId,
+    rowOfMessage,
+    virtualRows,
+    virtualizer,
+    hasMoreOlder,
+    loadingOlder,
+    loadingMessages,
+    controller,
+  ]);
 
   // Fade out the deep-link highlight after a short beat.
   useEffect(() => {
@@ -246,12 +297,12 @@ export function MessagePane(props: { onBack?: () => void }) {
     return () => clearTimeout(t);
   }, [highlightId]);
 
-  const doReply = (m: ChatMessage) => {
+  const doReply = useCallback((m: ChatMessage) => {
     controller.startReply(m);
     setFocusToken((t) => t + 1);
-  };
+  }, [controller]);
 
-  const doCopy = async (m: ChatMessage) => {
+  const doCopy = useCallback(async (m: ChatMessage) => {
     const text = copyableMessageText(m);
     try {
       await navigator.clipboard.writeText(text);
@@ -259,20 +310,22 @@ export function MessagePane(props: { onBack?: () => void }) {
     } catch {
       controller.setStatus("Copy failed: clipboard unavailable");
     }
-  };
+  }, [controller]);
 
-  const doStartEdit = (m: ChatMessage) => {
+  const doStartEdit = useCallback((m: ChatMessage) => {
     setEditingId(m.id);
-  };
+  }, []);
 
-  const doSaveEdit = async (m: ChatMessage, text: string) => {
+  const doSaveEdit = useCallback(async (m: ChatMessage, text: string) => {
     setEditingId(null);
     await controller.editMessage(m.id, text);
-  };
+  }, [controller]);
 
-  const doReact = (m: ChatMessage, key: string) => {
+  const doReact = useCallback((m: ChatMessage, key: string) => {
     void controller.reactToMessage(m.id, key);
-  };
+  }, [controller]);
+
+  const doCancelEdit = useCallback(() => setEditingId(null), []);
 
   // One rendered row: a system-event line or a message bubble, with its optional
   // "seen by" receipts underneath. `prev`/`next` drive avatar/name chaining and
@@ -297,7 +350,7 @@ export function MessagePane(props: { onBack?: () => void }) {
             onReact={doReact}
             onStartEdit={doStartEdit}
             onSaveEdit={doSaveEdit}
-            onCancelEdit={() => setEditingId(null)}
+            onCancelEdit={doCancelEdit}
           />
         )}
         {seenBy && <ReadReceipts receipts={seenBy} />}
@@ -378,6 +431,9 @@ export function MessagePane(props: { onBack?: () => void }) {
         ref={viewportRef}
         onScroll={onScroll}
         data-testid="message-scroll"
+        // How much history is loaded, which the rendered row count no longer
+        // reveals now that the list is virtualized (used by the E2E suite).
+        data-loaded-count={messages.length}
         className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 md:px-5"
       >
         {messages.length === 0 ? (
@@ -387,9 +443,15 @@ export function MessagePane(props: { onBack?: () => void }) {
             onRetry={() => void controller.openConversation(openId)}
           />
         ) : (
-          <div className="mx-auto flex max-w-3xl flex-col">
+          <div
+            className="relative mx-auto w-full max-w-3xl"
+            style={{ height: `${virtualizer.getTotalSize()}px` }}
+          >
             {hasMoreOlder && (
-              <div className="flex h-8 items-center justify-center">
+              <div
+                className="absolute inset-x-0 top-0 flex items-center justify-center"
+                style={{ height: `${HISTORY_LOADER_PX}px` }}
+              >
                 {loadingOlder ? (
                   <span className="flex items-center gap-2 text-xs text-text-faint">
                     <Loader2 className="size-3 animate-spin" strokeWidth={1.6} /> Loading earlier
@@ -402,17 +464,34 @@ export function MessagePane(props: { onBack?: () => void }) {
                 ) : null}
               </div>
             )}
-            {threads
-              ? threads.map((t) => (
-                  <ThreadGroup
-                    key={t.rootId}
-                    thread={t}
-                    expanded={expandedThreads.has(t.rootId)}
-                    onToggle={() => toggleThread(t.rootId)}
-                    renderMsg={renderMsg}
-                  />
-                ))
-              : messages.map((m, i) => renderMsg(m, messages[i - 1], messages[i + 1]))}
+            {virtualRows.map((virtualRow) => {
+              const row = rows[virtualRow.index];
+              if (!row) return null;
+              return (
+                <div
+                  key={virtualRow.key}
+                  data-index={virtualRow.index}
+                  ref={virtualizer.measureElement}
+                  // `flex flex-col` is load-bearing: the rows inside carry
+                  // vertical margins, and a flex container keeps them inside its
+                  // own box (no margin collapsing) so `measureElement` reports a
+                  // height that includes the spacing.
+                  className="absolute inset-x-0 top-0 flex flex-col"
+                  style={{ transform: `translateY(${virtualRow.start}px)` }}
+                >
+                  {row.kind === "thread" ? (
+                    <ThreadGroup
+                      thread={row.thread}
+                      expanded={expandedThreads.has(row.thread.rootId)}
+                      onToggle={() => toggleThread(row.thread.rootId)}
+                      renderMsg={renderMsg}
+                    />
+                  ) : (
+                    renderMsg(row.message, row.prev, row.next)
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

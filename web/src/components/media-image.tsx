@@ -29,8 +29,12 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
     let cancelled = false;
     setObjectUrl(null);
     setFailed(false);
+    // Hold the blob for as long as this view displays it, so the media cache's
+    // byte budget can't revoke it from under us (see `evictMedia`).
+    const src = props.src;
+    controller.retainMedia(src);
     controller
-      .loadMedia(props.src)
+      .loadMedia(src)
       .then((url) => {
         if (!cancelled) setObjectUrl(url);
       })
@@ -39,6 +43,7 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
       });
     return () => {
       cancelled = true;
+      controller.releaseMedia(src);
     };
   }, [controller, props.src, proxied]);
 
@@ -170,8 +175,10 @@ export function RecordingAttachment(props: { attachment: Attachment }) {
     let cancelled = false;
     setPoster(null);
     setPosterFailed(false);
+    const thumb = thumbnail_url!;
+    controller.retainMedia(thumb);
     controller
-      .loadMedia(thumbnail_url!)
+      .loadMedia(thumb)
       .then((u) => {
         if (!cancelled) setPoster(u);
       })
@@ -180,6 +187,7 @@ export function RecordingAttachment(props: { attachment: Attachment }) {
       });
     return () => {
       cancelled = true;
+      controller.releaseMedia(thumb);
     };
   }, [controller, thumbnail_url, hasThumb, proxied]);
 

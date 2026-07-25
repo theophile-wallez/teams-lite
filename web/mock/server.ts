@@ -152,7 +152,7 @@ const HOST = "127.0.0.1";
 /** Matches teams_read::DEFAULT_PAGE_SIZE (see src/bin/server.rs tests). */
 const PAGE_SIZE = 40;
 /** Backlog per conversation so infinite scroll + backfill are well exercised. */
-const BACKLOG = 120;
+const BACKLOG = Number(process.env.MOCK_BACKLOG ?? 120);
 /** Fixed seed for the PRNG → deterministic content/structure across runs. */
 const SEED = 0x7ea115;
 /** How often to inject a live incoming message. Set MOCK_LIVE_MS=0 to disable

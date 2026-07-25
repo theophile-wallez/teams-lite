@@ -80,12 +80,25 @@ test.describe("notifications", () => {
     await expect(page).toHaveURL(/\/c\//);
     await expect(page.locator('[data-testid="conversation-title"]')).not.toBeEmpty();
 
-    // The mock's first notification targets a specific, non-bottom message
-    // (`<convId>#100`); opening it must scroll that message into view.
     const convId = decodeURIComponent(page.url().split("/c/")[1] ?? "");
     expect(convId).not.toEqual("");
-    const target = page.locator(`[data-message-id="${convId}#100"]`);
-    await expect(target).toBeInViewport();
+
+    // The pane highlights the message a deep link landed on, so that is the
+    // targeted one — the notification's own target, whichever message the mock
+    // (or an earlier injected activity) pointed at. Asserting on the highlight
+    // rather than a hard-coded id also means the message list has genuinely
+    // scrolled to it: only the rows around the viewport are mounted.
+    // Read the id in one shot: the highlight is a brief pulse, so waiting for the
+    // element and then querying it separately can miss it as it fades.
+    const targetId = await page
+      .waitForFunction(() => {
+        const node = document.querySelector('[data-message-id][data-highlighted="true"]');
+        return node ? node.getAttribute("data-message-id") : null;
+      })
+      .then((handle) => handle.jsonValue());
+    expect(targetId).toBeTruthy();
+    expect(targetId).toContain(convId);
+    await expect(page.locator(`[data-message-id="${targetId}"]`)).toBeInViewport();
   });
 
   test("a live activity re-badges the bell after it was seen", async ({ page }) => {

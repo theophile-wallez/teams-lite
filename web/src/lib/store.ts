@@ -19,6 +19,7 @@ import {
   mergeRefreshedHistoryPage,
   replyToPayload,
   shouldNotify,
+  trimHistoryPage,
   type AppSettings,
   type CallSignal,
   type CallSignalFrame,
@@ -111,6 +112,11 @@ export type AppState = {
    *  (set when a notification is opened). The pane consumes it, paging older if
    *  needed, then clears it. `nonce` lets the same target retrigger. */
   pendingScroll: { convId: string; messageId: string; nonce: number } | null;
+  /** Bumped whenever the user sends something, asking the pane to jump to the
+   *  newest message. Sending while reading further up would otherwise drop the
+   *  message off-screen — you'd have no idea it went out. The jump also puts the
+   *  view at the bottom, so the send's own echo then follows naturally. */
+  scrollToBottomNonce: number;
   /** People currently typing, per conversation id (a key is present only while
    *  someone is typing there). Drives both the message-pane hint and the sidebar
    *  row preview. Keyed by MRI under the hood so repeats coalesce; each entry
@@ -156,6 +162,17 @@ const CALL_RING_TIMEOUT_MS = 45_000;
 const PRESENCE_TTL_MS = 30_000;
 // Where local channel-favorite overrides are persisted (client-only).
 const CHANNEL_FAVORITES_KEY = "teams-lite:channel-favorites";
+// How many conversations keep a cached message page at all. Re-opening one of
+// these is instant; beyond that the least-recently-opened page is dropped, so a
+// long session spent hopping between dozens of chats doesn't accumulate their
+// whole backlogs. The open conversation is never evicted.
+const RETAINED_CONVERSATIONS = 8;
+// Ceiling on the decoded image/file bytes held as blob object URLs. Proxied media
+// is cached so re-mounts and re-opens are instant, but scrolling back through a
+// long thread can pull in hundreds of pictures — past this budget the
+// least-recently-used blob that nothing is displaying is revoked and dropped (a
+// later render simply re-fetches it).
+const MEDIA_CACHE_BYTES = 48 * 1024 * 1024;
 
 function initialState(): AppState {
   return {
@@ -182,6 +199,7 @@ function initialState(): AppState {
     notifications: { activity: [], mentions: [], following: [] },
     notificationsUnread: 0,
     pendingScroll: null,
+    scrollToBottomNonce: 0,
     typingByConversation: {},
     incomingCalls: [],
     readReceipts: [],
@@ -199,7 +217,10 @@ export class TeamsController {
   private disposers: Array<() => void> = [];
 
   // Per-conversation message cache: re-opening a conversation is instant and
-  // stays current as live/refresh events reconcile into it.
+  // stays current as live/refresh events reconcile into it. Bounded on both axes
+  // (see `cacheMessages` / `trimCachedHistory`): at most RETAINED_CONVERSATIONS
+  // pages, each at most RETAINED_MESSAGES long once the user has moved on.
+  // Insertion order doubles as the LRU order — `cacheMessages` re-inserts.
   private messageCache = new Map<string, MessagePage>();
   // Warm draft cache keyed by conversation (SQLite remains the durable source).
   private draftCache = new Map<string, string>();
@@ -226,9 +247,17 @@ export class TeamsController {
 
   // Media proxy cache: hosted-content URL -> a promise of a blob object URL.
   // Deduplicates concurrent loads of the same image and makes re-mounts/re-opens
-  // instant. The created object URLs are revoked on dispose.
+  // instant. Insertion order is the LRU order (`loadMedia` re-inserts on a hit)
+  // and the resolved blobs are held to MEDIA_CACHE_BYTES; everything still alive
+  // is revoked on dispose.
   private mediaCache = new Map<string, Promise<string>>();
-  private mediaObjectUrls: string[] = [];
+  // Resolved blobs, for the byte budget: URL -> its object URL + decoded size.
+  private mediaBlobs = new Map<string, { objectUrl: string; bytes: number }>();
+  // How many mounted views are currently displaying each URL. A blob that is on
+  // screen is never revoked out from under it (that would break the picture);
+  // only idle entries are evicted. See `retainMedia` / `releaseMedia`.
+  private mediaRetained = new Map<string, number>();
+  private mediaBytes = 0;
 
   // Avatar cache: "user:<mri>" / "team:<groupId>" -> a promise of a blob object
   // URL, or null when the subject has NO photo. The null is a deliberate negative
@@ -276,6 +305,33 @@ export class TeamsController {
   }
   private get(): AppState {
     return this.store.state;
+  }
+
+  // ---- message cache (bounded) ---------------------------------------------
+
+  /** Store a conversation's page, marking it most-recently-used, then drop the
+   *  least-recently-used pages beyond RETAINED_CONVERSATIONS. The open
+   *  conversation is never evicted — its page backs what is on screen. */
+  private cacheMessages(id: string, page: MessagePage): void {
+    this.messageCache.delete(id); // re-insert so Map order stays the LRU order
+    this.messageCache.set(id, page);
+    if (this.messageCache.size <= RETAINED_CONVERSATIONS) return;
+    const openId = this.get().openId;
+    for (const key of this.messageCache.keys()) {
+      if (this.messageCache.size <= RETAINED_CONVERSATIONS) break;
+      if (key === openId) continue;
+      this.messageCache.delete(key);
+    }
+  }
+
+  /** Cut a conversation we are leaving back to the newest RETAINED_MESSAGES, so
+   *  the pages someone scrolled far back through aren't held for the whole
+   *  session. Keeps its LRU position (this is not a fresh use). */
+  private trimCachedHistory(id: string): void {
+    const cached = this.messageCache.get(id);
+    if (!cached) return;
+    const trimmed = trimHistoryPage(cached);
+    if (trimmed !== cached) this.messageCache.set(id, trimmed);
   }
 
   // ---- lifecycle -----------------------------------------------------------
@@ -357,8 +413,10 @@ export class TeamsController {
     for (const t of this.callTimers.values()) clearTimeout(t);
     this.callTimers.clear();
     this.receiptsByConv.clear();
-    for (const url of this.mediaObjectUrls) URL.revokeObjectURL(url);
-    this.mediaObjectUrls = [];
+    for (const blob of this.mediaBlobs.values()) URL.revokeObjectURL(blob.objectUrl);
+    this.mediaBlobs.clear();
+    this.mediaRetained.clear();
+    this.mediaBytes = 0;
     this.mediaCache.clear();
     for (const url of this.avatarObjectUrls) URL.revokeObjectURL(url);
     this.avatarObjectUrls = [];
@@ -378,7 +436,7 @@ export class TeamsController {
     on("message", (raw) => {
       const m = raw as ChatMessage;
       const cached = this.messageCache.get(m.conversation_id);
-      this.messageCache.set(m.conversation_id, appendLiveMessage(cached, m));
+      this.cacheMessages(m.conversation_id, appendLiveMessage(cached, m));
       // A message from a sender means they stopped typing — clear their hint.
       if (m.sender_mri) {
         this.clearTyping(m.conversation_id, m.sender_mri);
@@ -434,7 +492,7 @@ export class TeamsController {
     on("messages_updated", (raw) => {
       const d = raw as { conversation: string; messages: ChatMessage[]; has_more: boolean };
       const history = mergeRefreshedHistoryPage(this.messageCache.get(d.conversation), d);
-      this.messageCache.set(d.conversation, history);
+      this.cacheMessages(d.conversation, history);
       if (d.conversation === this.get().openId) {
         this.set({
           messages: history.messages,
@@ -848,7 +906,12 @@ export class TeamsController {
 
   async openConversation(id: string): Promise<void> {
     const previousId = this.get().openId;
-    if (previousId && previousId !== id) this.flushDraft(previousId);
+    if (previousId && previousId !== id) {
+      this.flushDraft(previousId);
+      // Whatever backlog was paged into the conversation we're leaving is no
+      // longer on screen — keep a generous slice of it, not all of it.
+      this.trimCachedHistory(previousId);
+    }
 
     const nextDraft =
       this.draftCache.get(id) ??
@@ -881,7 +944,7 @@ export class TeamsController {
     try {
       const res = await this.backend.open(id);
       const history = mergeRefreshedHistoryPage(this.messageCache.get(id), res);
-      this.messageCache.set(id, history);
+      this.cacheMessages(id, history);
       if (this.get().openId === id) {
         this.set({ messages: history.messages, hasMoreOlder: history.has_more });
       }
@@ -918,7 +981,7 @@ export class TeamsController {
     try {
       const res = await this.backend.open(id);
       const history = mergeRefreshedHistoryPage(this.messageCache.get(id), res);
-      this.messageCache.set(id, history);
+      this.cacheMessages(id, history);
       if (this.get().openId === id) {
         this.set({ messages: history.messages, hasMoreOlder: history.has_more });
       }
@@ -931,7 +994,10 @@ export class TeamsController {
 
   closeConversation(): void {
     const id = this.get().openId;
-    if (id) this.flushDraft(id);
+    if (id) {
+      this.flushDraft(id);
+      this.trimCachedHistory(id);
+    }
     // The read-receipts slice is single-conversation — drop it when nothing is open.
     this.set({ openId: null, replyingTo: null, readReceipts: [] });
   }
@@ -949,7 +1015,7 @@ export class TeamsController {
       const page = await this.backend.backfill(conversation, oldest.seq);
       if (this.get().openId !== conversation) return;
       const history = mergeOlderHistoryPage(this.messageCache.get(conversation), page);
-      this.messageCache.set(conversation, history);
+      this.cacheMessages(conversation, history);
       this.set({ messages: history.messages, hasMoreOlder: history.has_more });
     } catch (e) {
       if (this.get().openId === conversation) {
@@ -1013,7 +1079,12 @@ export class TeamsController {
    *  The returned object URL stays valid until the controller is disposed. */
   loadMedia(url: string): Promise<string> {
     const cached = this.mediaCache.get(url);
-    if (cached) return cached;
+    if (cached) {
+      // Re-insert so Map order stays the least-recently-used order.
+      this.mediaCache.delete(url);
+      this.mediaCache.set(url, cached);
+      return cached;
+    }
 
     const pending = (async () => {
       const res = await this.backend.fetchMedia(url);
@@ -1021,13 +1092,47 @@ export class TeamsController {
         type: res.content_type || "application/octet-stream",
       });
       const objectUrl = URL.createObjectURL(blob);
-      this.mediaObjectUrls.push(objectUrl);
+      this.mediaBlobs.set(url, { objectUrl, bytes: blob.size });
+      this.mediaBytes += blob.size;
+      this.evictMedia();
       return objectUrl;
     })();
 
     this.mediaCache.set(url, pending);
     pending.catch(() => this.mediaCache.delete(url));
     return pending;
+  }
+
+  /** Mark a media URL as being displayed, so the byte budget never revokes a blob
+   *  out from under a mounted view (which would break the picture on screen).
+   *  Paired with {@link releaseMedia} on unmount — see `MediaImage`. */
+  retainMedia(url: string): void {
+    this.mediaRetained.set(url, (this.mediaRetained.get(url) ?? 0) + 1);
+  }
+
+  /** Drop one display reference to a media URL, making it evictable again. */
+  releaseMedia(url: string): void {
+    const count = (this.mediaRetained.get(url) ?? 0) - 1;
+    if (count > 0) this.mediaRetained.set(url, count);
+    else this.mediaRetained.delete(url);
+  }
+
+  /** Bring the media cache back under MEDIA_CACHE_BYTES by revoking the
+   *  least-recently-used blobs that nothing is currently displaying. Stops early
+   *  when everything left is on screen — a bounded set, since only the visible
+   *  slice of a conversation is mounted. */
+  private evictMedia(): void {
+    if (this.mediaBytes <= MEDIA_CACHE_BYTES) return;
+    for (const url of [...this.mediaCache.keys()]) {
+      if (this.mediaBytes <= MEDIA_CACHE_BYTES) break;
+      if (this.mediaRetained.has(url)) continue;
+      const blob = this.mediaBlobs.get(url);
+      if (!blob) continue; // still in flight — it has no bytes to reclaim yet
+      URL.revokeObjectURL(blob.objectUrl);
+      this.mediaBlobs.delete(url);
+      this.mediaCache.delete(url);
+      this.mediaBytes -= blob.bytes;
+    }
   }
 
   /** Resolve a real profile photo to a local blob object URL, fetching the bytes
@@ -1229,7 +1334,14 @@ export class TeamsController {
     // Sent — a soft confirmation cue (only reached when the send didn't throw).
     playCue("success");
     this.draftCache.set(id, "");
-    if (this.get().openId === id) this.set({ draft: "", replyingTo: null });
+    if (this.get().openId === id) {
+      this.set({
+        draft: "",
+        replyingTo: null,
+        // Take the sender to their message, wherever they were reading.
+        scrollToBottomNonce: this.get().scrollToBottomNonce + 1,
+      });
+    }
     this.persistDraft(id, "");
   }
 
