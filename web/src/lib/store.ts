@@ -31,6 +31,8 @@ import {
   type MessagePage,
   type Notification,
   type NotificationTab,
+  type PersonPresence,
+  type PersonProfile,
   type ReadReceipt,
   type ReadReceiptSignal,
   type ReplyTo,
@@ -141,6 +143,12 @@ const TYPING_TIMEOUT_MS = 8000;
 // terminal call event, but a missed close (or a client that reconnected mid-call)
 // must not leave a banner ringing forever. Comfortably past Teams' own ring window.
 const CALL_RING_TIMEOUT_MS = 45_000;
+
+/** How long a fetched presence is trusted before the next person card refetches
+ *  it. Short enough that a colleague who just joined a meeting reads as busy on
+ *  the next hover, long enough that re-hovering the same name (or several
+ *  mentions of the same person in one thread) costs a single round-trip. */
+const PRESENCE_TTL_MS = 30_000;
 // Where local channel-favorite overrides are persisted (client-only).
 const CHANNEL_FAVORITES_KEY = "teams-lite:channel-favorites";
 
@@ -230,6 +238,15 @@ export class TeamsController {
   // evicted so a later render can retry, matching the media cache.
   private linkCache = new Map<string, Promise<GitLabLinkMetadata | null>>();
 
+  // Person-card caches, both keyed by MRI. A directory card barely changes, so it
+  // is cached for the whole session (a "not found" too — asking again would answer
+  // the same). Presence is the opposite: it is only trusted for PRESENCE_TTL_MS,
+  // after which the next card open refetches it, so a hovered name never shows a
+  // stale "Available". Transient failures are evicted from both so a later hover
+  // retries.
+  private profileCache = new Map<string, Promise<PersonProfile | null>>();
+  private presenceCache = new Map<string, { at: number; value: Promise<PersonPresence | null> }>();
+
   // Live OS dark-mode query, watched only while appearance === "system".
   private darkQuery: MediaQueryList | null = null;
   private darkListener: ((e: MediaQueryListEvent) => void) | null = null;
@@ -314,6 +331,8 @@ export class TeamsController {
     this.avatarObjectUrls = [];
     this.avatarCache.clear();
     this.linkCache.clear();
+    this.profileCache.clear();
+    this.presenceCache.clear();
     this.backend.close();
     this.started = false;
   }
@@ -996,6 +1015,43 @@ export class TeamsController {
     // Evict only on a transient failure (network/backend error), so it can retry;
     // a resolved `null` (no photo) stays cached to avoid re-asking.
     pending.catch(() => this.avatarCache.delete(key));
+    return pending;
+  }
+
+  // ---- people (profile card + presence) -----------------------------------
+
+  /** Resolve one person's directory card (name, job title, department, email, work
+   *  location), going through the backend. Resolves to `null` when the directory
+   *  knows nobody by this MRI, so the caller falls back to the name it already has.
+   *  Cached for the session and de-duplicated per MRI — a card barely changes —
+   *  while a transient failure is evicted so a later hover can retry. Returns
+   *  `null` immediately for an empty MRI. */
+  loadProfile(mri: string): Promise<PersonProfile | null> {
+    if (!mri) return Promise.resolve(null);
+    const cached = this.profileCache.get(mri);
+    if (cached) return cached;
+
+    const pending = this.backend.profile(mri).then((p) => (p.found ? p : null));
+    this.profileCache.set(mri, pending);
+    pending.catch(() => this.profileCache.delete(mri));
+    return pending;
+  }
+
+  /** Resolve one person's live presence. Cached only briefly (see PRESENCE_TTL_MS):
+   *  a stale presence is worse than a slightly slower card, so once the entry ages
+   *  out the next lookup refetches. Resolves to `null` when the service has no
+   *  answer for this person. A transient failure is evicted so a later hover
+   *  retries. */
+  loadPresence(mri: string): Promise<PersonPresence | null> {
+    if (!mri) return Promise.resolve(null);
+    const cached = this.presenceCache.get(mri);
+    if (cached && Date.now() - cached.at < PRESENCE_TTL_MS) return cached.value;
+
+    const pending = this.backend
+      .presence([mri])
+      .then((res) => res.presences.find((p) => p.mri === mri) ?? null);
+    this.presenceCache.set(mri, { at: Date.now(), value: pending });
+    pending.catch(() => this.presenceCache.delete(mri));
     return pending;
   }
 

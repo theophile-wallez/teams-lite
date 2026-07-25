@@ -5,6 +5,7 @@ pub mod teams;
 pub mod teams_activity;
 pub mod teams_avatars;
 pub mod teams_media;
+pub mod teams_presence;
 pub mod teams_read;
 pub mod teams_readstate;
 pub mod teams_profiles;

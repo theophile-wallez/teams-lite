@@ -18,7 +18,7 @@
 // store lives in the caller. No raw tokens are ever logged.
 
 use anyhow::{Context, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::store::{ConversationKind, Message};
 use crate::teams::Session;
@@ -514,8 +514,9 @@ pub fn persist_page(store: &Store, conversation_id: &str, page: &MessagePage) ->
             inserted += 1;
         } else {
             // Existing row (INSERT skipped it): heal a legacy row that was
-            // stored before we captured the sender MRI.
+            // stored before we captured the sender MRI or the message's mentions.
             store.backfill_sender_mri(&m.conversation_id, &m.id, &m.sender_mri)?;
+            store.backfill_mentions(&m.conversation_id, &m.id, &m.mentions)?;
         }
         // Reconcile reactions when this frame carried an emotions snapshot (an
         // empty sentinel means the frame said nothing about reactions). This lets
@@ -1132,6 +1133,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             thread_root_id: String::new(),
             thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".to_string(),
         });
     }
 
@@ -1160,6 +1162,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 thread_root_id,
                 thread_subject,
                 deleted: false,
+                mentions: "[]".to_string(),
             });
         }
         Some(CallRecording::Pending) => return None,
@@ -1198,6 +1201,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         thread_root_id,
         thread_subject,
         deleted,
+        mentions: parse_mentions(m),
     })
 }
 
@@ -1255,6 +1259,66 @@ fn parse_thread(m: &Value) -> (String, String) {
     };
     let subject = props.get("subject").and_then(|x| x.as_str()).unwrap_or_default().to_string();
     (root_id, subject)
+}
+
+/// Extract a message's @mentions from its `properties` into the wire shape the UI
+/// renders: a JSON array string `[{itemid, mri, kind, display_name}]`.
+///
+/// A mention in the body is an empty-ish span that carries ONLY an index —
+/// `<span itemtype="…/Mention" itemid="2">James</span>` — while who was mentioned
+/// lives in `properties.mentions`, keyed by that same `itemid` (proven by recon):
+/// `[{"@type":"…/Mention","itemid":0,"mri":"8:orgid:<guid>","mentionType":"person",
+///    "displayName":"James"}]`. Joining the two is the only way back from the
+/// rendered "@James" to the person, which is what lets the UI show their card.
+///
+/// `mentionType` is kept as `kind`: a mention can point at a person, a channel, a
+/// team or a tag (a channel mention's mri is the THREAD, not a human), and only a
+/// person is cardable. Unknown kinds are passed through rather than dropped.
+///
+/// `properties` and `mentions` may each arrive as a JSON-encoded STRING instead of
+/// a nested value (the same double-encoding as `files`/`emotions`), so we parse a
+/// level deeper when needed. Best-effort: an absent or malformed shape yields
+/// `"[]"`, never an error, so a surprising mention payload cannot break ingestion.
+fn parse_mentions(m: &Value) -> String {
+    let props = match m.get("properties") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        _ => Value::Null,
+    };
+    let raw = match props.get("mentions") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        _ => Value::Null,
+    };
+    let list: Vec<Value> = raw
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            // `itemid` is a number on the wire but has shown up as a string on
+            // adjacent properties (`links`), so accept either.
+            let itemid = entry.get("itemid").and_then(|x| {
+                x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse::<i64>().ok()))
+            })?;
+            let mri = entry.get("mri").and_then(|x| x.as_str()).filter(|s| !s.is_empty())?;
+            let kind = entry
+                .get("mentionType")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("unknown");
+            let display_name = entry
+                .get("displayName")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default();
+            Some(json!({
+                "itemid": itemid,
+                "mri": mri,
+                "kind": kind,
+                "display_name": display_name,
+            }))
+        })
+        .collect();
+    Value::Array(list).to_string()
 }
 
 /// Extract file attachments from a message's `properties` into the wire shape the
@@ -1770,6 +1834,61 @@ mod tests {
         assert_eq!(normalize_mri("8:orgid:abc-123"), "8:orgid:abc-123");
         // a URL is reduced to its last segment
         assert_eq!(normalize_mri(".../contacts/8:orgid:xyz"), "8:orgid:xyz");
+    }
+
+    /// A message body whose mention spans are addressed by `itemid`, exactly as
+    /// the tenant delivers them (`properties.mentions` is a JSON-encoded STRING).
+    fn mention_message() -> Value {
+        json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-25T09:00:00.000Z",
+            "messagetype": "RichText/Html", "imdisplayname": "James BASSE",
+            "content": "<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"0\">Leonor</span> and <span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"1\">[Run]</span></p>",
+            "properties": {
+                "mentions": "[{\"@type\":\"http://schema.skype.com/Mention\",\"itemid\":0,\"mri\":\"8:orgid:6f44df20\",\"mentionType\":\"person\",\"displayName\":\"Leonor\"},{\"@type\":\"http://schema.skype.com/Mention\",\"itemid\":1,\"mri\":\"19:yf2-R9Z4M9@thread.tacv2\",\"mentionType\":\"channel\",\"displayName\":\"[Run]\"}]"
+            }
+        })
+    }
+
+    #[test]
+    fn parses_mentions_with_their_itemid_and_kind() {
+        let parsed = parse_message(&mention_message(), "c1").unwrap();
+        let mentions: Value = serde_json::from_str(&parsed.mentions).unwrap();
+        assert_eq!(
+            mentions,
+            json!([
+                { "itemid": 0, "mri": "8:orgid:6f44df20", "kind": "person", "display_name": "Leonor" },
+                { "itemid": 1, "mri": "19:yf2-R9Z4M9@thread.tacv2", "kind": "channel", "display_name": "[Run]" }
+            ]),
+            "a channel mention is kept but marked, so only people get a person card",
+        );
+    }
+
+    #[test]
+    fn mentions_accept_a_nested_properties_object_and_a_string_itemid() {
+        // `properties` un-encoded, `mentions` an array, `itemid` a string.
+        let m = json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-25T09:00:00.000Z",
+            "messagetype": "RichText/Html", "content": "<p>hi</p>",
+            "properties": { "mentions": [
+                { "itemid": "3", "mri": "8:orgid:aaa", "mentionType": "person", "displayName": "Ada" }
+            ]}
+        });
+        let mentions: Value =
+            serde_json::from_str(&parse_message(&m, "c1").unwrap().mentions).unwrap();
+        assert_eq!(mentions, json!([{ "itemid": 3, "mri": "8:orgid:aaa", "kind": "person", "display_name": "Ada" }]));
+    }
+
+    #[test]
+    fn messages_without_mentions_carry_an_empty_list() {
+        for m in [
+            json!({ "id": "1", "messagetype": "RichText/Html", "content": "<p>hi</p>" }),
+            json!({ "id": "1", "messagetype": "RichText/Html", "content": "<p>hi</p>", "properties": { "mentions": "[]" } }),
+            // Malformed / unexpected shapes degrade to "no mentions", never an error.
+            json!({ "id": "1", "messagetype": "RichText/Html", "content": "<p>hi</p>", "properties": { "mentions": "not json" } }),
+            json!({ "id": "1", "messagetype": "RichText/Html", "content": "<p>hi</p>", "properties": { "mentions": [{ "displayName": "no mri" }] } }),
+        ] {
+            assert_eq!(parse_message(&m, "c1").unwrap().mentions, "[]");
+        }
     }
 
     #[test]
@@ -2321,6 +2440,7 @@ mod tests {
                 system_event: String::new(),
                 thread_root_id: String::new(), thread_subject: String::new(),
                 deleted: false,
+                mentions: "[]".into(),
             })
             .collect();
         MessagePage { messages, next_before_ms: Some(oldest_ms), has_more_older: has_more }

@@ -1,0 +1,78 @@
+import { Check, Clock, Minus, X } from "lucide-react";
+import type { PersonPresence } from "~/lib/protocol";
+import { presenceLabel, presenceTone, type PresenceTone } from "~/lib/presence";
+import { cn } from "~/lib/utils";
+
+/**
+ * The presence dot Teams puts on a person: a small coloured disc whose glyph
+ * says *which* state it is, so the meaning survives colour-blindness and greyscale
+ * — a check for available, a dash for busy, a clock for away, a hollow ring for
+ * offline, a cross-arrow for out of office.
+ *
+ * Sizing comes from the caller through `className` (defaults to 10px, the size
+ * that sits well on the 36–44px avatars used across the app). Used standalone in
+ * the person card's status line and as an overlay on the card's avatar.
+ */
+
+/** Per-tone fill and glyph colour. The two "not here" states are hollow — an
+ *  outlined ring rather than a filled disc — which is how Teams distinguishes
+ *  offline from every reachable state at a glance. Out of office borrows violet
+ *  (Teams' own colour for it); the rest map to the theme's semantic roles. */
+const TONE_STYLES: Record<PresenceTone, string> = {
+  available: "bg-success text-white",
+  busy: "bg-destructive text-white",
+  away: "bg-warning text-white",
+  oof: "bg-violet-500 text-white dark:bg-violet-400",
+  offline: "bg-transparent text-text-dim ring-1 ring-inset ring-current",
+  unknown: "bg-transparent text-text-faint ring-1 ring-inset ring-current",
+};
+
+/** The glyph inside the dot, per tone (`null` = an empty ring, for offline). */
+function ToneGlyph({ tone }: { tone: PresenceTone }) {
+  const glyph = "size-[0.62em]";
+  switch (tone) {
+    case "available":
+      return <Check className={glyph} strokeWidth={4} aria-hidden />;
+    case "busy":
+      return <Minus className={glyph} strokeWidth={4} aria-hidden />;
+    case "away":
+      return <Clock className={glyph} strokeWidth={3.5} aria-hidden />;
+    case "oof":
+      return <X className={glyph} strokeWidth={4} aria-hidden />;
+    default:
+      return null;
+  }
+}
+
+export function PresenceBadge(props: {
+  presence: PersonPresence | null;
+  /** Sizing/positioning overrides; merged last. Defaults to a 10px dot. */
+  className?: string;
+  /** Add an outline in the surface colour, so the badge stays legible when it
+   *  overlaps an avatar photo. */
+  ring?: boolean;
+  /** Expose the state to assistive tech (the card's status line already says it in
+   *  words, so the overlay badge stays decorative). */
+  labelled?: boolean;
+}) {
+  const tone = presenceTone(props.presence);
+  const label = presenceLabel(props.presence);
+  return (
+    <span
+      data-testid="presence-badge"
+      data-tone={tone}
+      role={props.labelled ? "img" : undefined}
+      aria-label={props.labelled ? label : undefined}
+      aria-hidden={props.labelled ? undefined : true}
+      title={props.labelled ? undefined : label}
+      className={cn(
+        "grid size-2.5 shrink-0 place-items-center rounded-full text-[10px] leading-none",
+        TONE_STYLES[tone],
+        props.ring && "outline-2 outline-background",
+        props.className,
+      )}
+    >
+      <ToneGlyph tone={tone} />
+    </span>
+  );
+}

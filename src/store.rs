@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS messages (
     thread_root_id  TEXT NOT NULL DEFAULT '',
     thread_subject  TEXT NOT NULL DEFAULT '',
     deleted         INTEGER NOT NULL DEFAULT 0,
+    mentions        TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (conversation_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_msg_conv_seq ON messages(conversation_id, seq);
@@ -134,6 +135,13 @@ pub struct Message {
     /// deletion that arrives for a message we never stored yields a row with
     /// `deleted: true` and empty `content` (nothing to reveal).
     pub deleted: bool,
+    /// The @mentions the message body points at, as a JSON array string:
+    /// `[{"itemid":0,"mri":"8:orgid:…","kind":"person","display_name":"James"}]`.
+    /// A mention span in `content` carries only its `itemid`, so this is the ONLY
+    /// way back from the rendered "@James" to WHO was mentioned — which is what
+    /// lets the UI show a person card for a mention. Defaults to `"[]"` for
+    /// messages without mentions and for legacy rows.
+    pub mentions: String,
 }
 
 /// The nature of a conversation. Modeled as an enum (not a bool) because there
@@ -296,10 +304,14 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
         thread_root_id: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
         thread_subject: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
         deleted: row.get::<_, Option<i64>>(12)?.unwrap_or(0) != 0,
+        mentions: row
+            .get::<_, Option<String>>(13)?
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "[]".to_string()),
     })
 }
 
-const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted";
+const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions";
 
 /// Canonicalize an MRI for identity comparison: keep only the last path segment
 /// (so a `.../contacts/8:orgid:<guid>` URL becomes a bare MRI) and drop a leading
@@ -441,6 +453,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     // carried a `deletetime`). Legacy rows default to 0 (not deleted); the flag
     // is set in place on the next sync/live update that carries the deletion.
     add_column("ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")?;
+    // mentions: who the body's @mention spans point at, as a JSON array string.
+    // Legacy rows and messages without mentions carry the empty-array default;
+    // `backfill_mentions` heals a legacy row on the next sync that carries them.
+    add_column("ALTER TABLE messages ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]'")?;
 
     // Sidebar-fidelity columns (last-message preview + unread/muted/pinned/hidden
     // state), all sourced from the CSA `users/me` sync. Legacy rows get the
@@ -933,17 +949,22 @@ impl Store {
     /// existing reaction set. The empty-string sentinel on `m.reactions` ("frame
     /// carried no emotions info") is coerced to `"[]"` here so the column never
     /// stores it.
+    ///
+    /// Mentions travel WITH the body — a mention span is addressed by an `itemid`
+    /// into this list — so they are rewritten exactly when the content is (an edit
+    /// can add or drop a mention), and left alone by a frame that carries no body.
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
         let reactions = if m.reactions.is_empty() { "[]" } else { m.reactions.as_str() };
         let n = self.conn.execute(
-            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(conversation_id, id) DO UPDATE SET
                  content = CASE WHEN excluded.content = '' THEN messages.content ELSE excluded.content END,
+                 mentions = CASE WHEN excluded.content = '' THEN messages.mentions ELSE excluded.mentions END,
                  deleted = MAX(messages.deleted, excluded.deleted)
                  WHERE (excluded.content <> '' AND messages.content <> excluded.content)
                     OR (excluded.deleted = 1 AND messages.deleted = 0)",
-            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments, reactions, m.system_event, m.thread_root_id, m.thread_subject, m.deleted as i64],
+            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments, reactions, m.system_event, m.thread_root_id, m.thread_subject, m.deleted as i64, m.mentions],
         )?;
         Ok(n == 1)
     }
@@ -1098,6 +1119,25 @@ impl Store {
              WHERE conversation_id = ?1 AND id = ?2
                AND (sender_mri IS NULL OR sender_mri = '')",
             params![conversation_id, id, sender_mri],
+        )?;
+        Ok(())
+    }
+
+    /// Backfill `mentions` on an existing row that has none recorded — either a
+    /// legacy row stored before the column existed, or one ingested by a frame
+    /// whose body was unchanged (`insert_message` only rewrites mentions when it
+    /// rewrites content). This is what makes already-synced history show person
+    /// cards on its @mentions after a refresh. No-op when the row already lists
+    /// mentions or the incoming list is empty.
+    pub fn backfill_mentions(&self, conversation_id: &str, id: &str, mentions: &str) -> Result<()> {
+        if mentions.is_empty() || mentions == "[]" {
+            return Ok(());
+        }
+        self.conn.execute(
+            "UPDATE messages SET mentions = ?3
+             WHERE conversation_id = ?1 AND id = ?2
+               AND (mentions IS NULL OR mentions = '' OR mentions = '[]')",
+            params![conversation_id, id, mentions],
         )?;
         Ok(())
     }
@@ -1293,6 +1333,7 @@ mod tests {
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".into(),
         }
     }
 
@@ -1512,6 +1553,7 @@ mod tests {
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".into(),
         };
 
         // Real chat messages that must survive — including one that merely mentions
@@ -1565,6 +1607,7 @@ mod tests {
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".into(),
         };
 
         // A legacy call-ended row stored as raw XML, a legacy meeting-thread JSON
@@ -1617,6 +1660,7 @@ mod tests {
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".into(),
         };
 
         // A finished recording (upgraded to a media card), an in-progress notice
@@ -1913,6 +1957,7 @@ mod tests {
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".into(),
         }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
@@ -1921,6 +1966,7 @@ mod tests {
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".into(),
         }).unwrap();
 
         // direct derivation
@@ -1943,6 +1989,7 @@ mod tests {
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".into(),
         }).unwrap();
         assert_eq!(s.other_party_name("dm", me).unwrap(), None);
         assert_eq!(s.conversations(me).unwrap()[0].display_name, "");
@@ -1958,18 +2005,18 @@ mod tests {
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: "8:orgid:me".into(), content: "salut".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false,        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: "8:orgid:leonor".into(), content: "hello".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false,        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
 
         // A group: even though it has non-self senders, a group has no single face.
         s.upsert_conversation_full(&upd("grp", "Team chat", 400, ConversationKind::Group)).unwrap();
         s.insert_message(&Message {
             id: "g1".into(), conversation_id: "grp".into(), seq: 1, compose_time: 1,
             sender: "Grace HOPPER".into(), sender_mri: "8:orgid:grace".into(), content: "hi all".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false,        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
 
         let by_id = |id: &str| {
             s.conversations(me).unwrap().into_iter().find(|c| c.id == id).unwrap()
@@ -1990,6 +2037,7 @@ mod tests {
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".into(),
         }).unwrap();
 
         // backfill fills the empty MRI
@@ -2018,6 +2066,7 @@ mod tests {
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".into(),
         }).unwrap();
         // a message without attachments keeps the empty-array default
         s.insert_message(&Message {
@@ -2028,6 +2077,7 @@ mod tests {
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".into(),
         }).unwrap();
 
         let msgs = s.newest_messages("c1", 10).unwrap();
@@ -2063,6 +2113,71 @@ mod tests {
         m.reactions = r#"[{"key":"like","users":[{"mri":"8:a","time":1}]}]"#.into();
         s.insert_message(&m).unwrap();
         assert!(s.newest_messages("c1", 1).unwrap()[0].reactions.contains("like"));
+    }
+
+    #[test]
+    fn mentions_roundtrip_and_follow_an_edited_body() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        let leonor = r#"[{"itemid":0,"mri":"8:orgid:leonor","kind":"person","display_name":"Leonor"}]"#;
+        let mut m = msg("c1", 1);
+        m.content = "<p>hi @Leonor</p>".into();
+        m.mentions = leonor.into();
+        s.insert_message(&m).unwrap();
+        assert_eq!(s.newest_messages("c1", 1).unwrap()[0].mentions, leonor);
+
+        // An edit rewrites the body AND who it mentions (they are addressed by
+        // position in that body, so they must never drift apart).
+        let ada = r#"[{"itemid":0,"mri":"8:orgid:ada","kind":"person","display_name":"Ada"}]"#;
+        let mut edited = m.clone();
+        edited.content = "<p>hi @Ada</p>".into();
+        edited.mentions = ada.into();
+        assert!(s.insert_message(&edited).unwrap());
+        assert_eq!(s.newest_messages("c1", 1).unwrap()[0].mentions, ada);
+
+        // A frame with no body (a deletion, a reaction-only update) leaves them be.
+        let mut bodiless = m.clone();
+        bodiless.content = String::new();
+        bodiless.mentions = "[]".into();
+        s.insert_message(&bodiless).unwrap();
+        assert_eq!(s.newest_messages("c1", 1).unwrap()[0].mentions, ada);
+    }
+
+    #[test]
+    fn backfill_mentions_heals_rows_without_any() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        s.insert_message(&msg("c1", 1)).unwrap(); // legacy row: no mentions
+        let list = r#"[{"itemid":0,"mri":"8:orgid:leonor","kind":"person","display_name":"Leonor"}]"#;
+
+        s.backfill_mentions("c1", "m1", list).unwrap();
+        assert_eq!(s.newest_messages("c1", 1).unwrap()[0].mentions, list);
+
+        // Never overwrites a row that already lists mentions, and an empty
+        // incoming list is a no-op.
+        s.backfill_mentions("c1", "m1", r#"[{"itemid":9,"mri":"8:orgid:x"}]"#).unwrap();
+        s.backfill_mentions("c1", "m1", "[]").unwrap();
+        s.backfill_mentions("c1", "m1", "").unwrap();
+        assert_eq!(s.newest_messages("c1", 1).unwrap()[0].mentions, list);
+    }
+
+    #[test]
+    fn migration_backfills_mentions_default_on_legacy_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+                PRIMARY KEY (conversation_id, id));
+             INSERT INTO messages (id, conversation_id) VALUES ('m1', 'c1');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let mentions: String = conn
+            .query_row("SELECT mentions FROM messages WHERE id = 'm1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mentions, "[]");
     }
 
     #[test]

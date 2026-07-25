@@ -32,6 +32,11 @@ export type RichAttrs = {
   href?: string;
   src?: string;
   alt?: string;
+  /** Mentions only: the `itemid` the Teams mention span carries — an index into
+   *  the message's `mentions` list, which is where the mentioned person's identity
+   *  actually lives (the span itself only holds their display text). Kept so the
+   *  renderer can look them up and offer their person card. */
+  itemid?: string;
 };
 
 export type RichNode =
@@ -230,7 +235,12 @@ export function parseRichHtml(html: string): RichNode[] {
     const attrs = parseAttributes(m[2] ?? "");
 
     if (rawName === "span" && isMention(attrs)) {
-      const frame: OpenFrame & { attrs: RichAttrs } = { tag: "mention", attrs: {}, children: [] };
+      const itemid = attrs["itemid"];
+      const frame: OpenFrame & { attrs: RichAttrs } = {
+        tag: "mention",
+        attrs: itemid ? { itemid: decodeEntities(itemid).trim() } : {},
+        children: [],
+      };
       stack.push(frame);
       continue;
     }

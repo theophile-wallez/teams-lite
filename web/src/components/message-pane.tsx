@@ -14,6 +14,7 @@ import { Avatar, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
 import { CallEventLine } from "./call-event-line";
 import { ReadReceipts } from "./read-receipts";
+import { PersonHoverCard } from "./person-card";
 import { groupThreads, type Thread } from "~/lib/threads";
 import { Composer } from "./composer";
 import { TypingIndicator } from "./typing-indicator";
@@ -351,9 +352,18 @@ export function MessagePane(props: { onBack?: () => void }) {
           />
         )}
         <div className="flex min-w-0 flex-col">
-          <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">
-            {headerLabel}
-          </h2>
+          {/* In a 1:1 the title IS a person, so it offers their card on hover —
+              like every other name in the app. A group/channel title names no
+              single human, so it stays plain text (no MRI, no trigger). */}
+          <PersonHoverCard
+            mri={openConv?.kind === "one_on_one" ? openConv.avatar_mri : undefined}
+            name={headerLabel}
+            className="min-w-0"
+          >
+            <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">
+              {headerLabel}
+            </h2>
+          </PersonHoverCard>
           {openConv ? (
             <p className="truncate text-[11px] text-text-faint">{paneSubtitle(openConv)}</p>
           ) : openChannel ? (

@@ -130,6 +130,10 @@ export type ChatMessage = {
   /** Reactions on the message (absent or empty when none). Aggregated per emotion
    *  by the backend; the UI maps each `key` to an emoji and shows a chip. */
   reactions?: Reaction[];
+  /** Who the body's @mention spans point at, keyed by the span's `itemid` (absent
+   *  or empty when the message mentions nobody). Lets a mention show the mentioned
+   *  person's card on hover — see {@link mentionsByItemId}. */
+  mentions?: MessageMention[];
   /** When present, this message is a system/activity event (e.g. a call ended) and
    *  is rendered as a centered line, not a chat bubble; `content` is empty. */
   system_event?: SystemEvent;
@@ -244,6 +248,68 @@ export type ReadReceipt = {
 
 /** Result of the `read_receipts` method: every OTHER member's read position. */
 export type ReadReceiptsResult = { receipts: ReadReceipt[] };
+
+/** One @mention in a message body (mirrors the Rust `parse_mentions` in
+ *  src/teams_read.rs). A mention span in `content` carries only its `itemid`, so
+ *  this list is what maps the rendered "@James" back to WHO was mentioned.
+ *
+ *  `kind` is Teams' own `mentionType`: only `"person"` names a human (a
+ *  `"channel"`/`"team"`/`"tag"` mention's `mri` is a thread, not someone we can
+ *  show a card for). Unknown kinds are passed through, never dropped. */
+export type MessageMention = {
+  itemid: number;
+  mri: string;
+  kind: "person" | "channel" | "team" | "tag" | (string & {});
+  display_name: string;
+};
+
+/** A person's directory card, as the `profile` method returns it (mirrors the Rust
+ *  `Profile` in src/teams_profiles.rs). Every field but `mri` may be empty — a
+ *  guest or a service account has little in the directory — so the card renders
+ *  only what is actually there. `found` is false when the directory knows nobody
+ *  by this identity, and then no other field is meaningful. */
+export type PersonProfile = {
+  found: boolean;
+  mri: string;
+  object_id: string;
+  display_name: string;
+  given_name: string;
+  surname: string;
+  email: string;
+  user_principal_name: string;
+  job_title: string;
+  department: string;
+  company_name: string;
+  /** The office/site the directory lists — Teams' "work location". */
+  office_location: string;
+  tenant_name: string;
+  /** "Member" or "Guest" (empty when unreported). */
+  user_type: string;
+};
+
+/** One person's live presence, as the `presence` method returns it (mirrors the
+ *  Rust `Presence` in src/teams_presence.rs).
+ *
+ *  `availability` is the coarse state the badge is coloured by; `activity` is the
+ *  finer reason it is labelled with. Both are Teams' own strings rather than a
+ *  closed union: Teams keeps adding activities, and an unknown one degrades to its
+ *  availability colour instead of disappearing. See `presenceLabel` /
+ *  `presenceTone` in lib/presence.ts. */
+export type PersonPresence = {
+  mri: string;
+  availability: string;
+  activity: string;
+  /** When they were last active (epoch ms), or 0 when unreported. */
+  last_active_ms: number;
+  out_of_office: boolean;
+  out_of_office_note: string;
+  /** Their custom status message, empty when unset. */
+  note: string;
+};
+
+/** Result of the `presence` method: one entry per person the service answered
+ *  for (a person it knows nothing about is simply absent). */
+export type PresenceResult = { presences: PersonPresence[] };
 
 /** Wire shape of the `read_receipt` live event: one member's read position moved. */
 export type ReadReceiptSignal = ReadReceipt & { conversation_id: string };
@@ -448,6 +514,10 @@ export function mediaNeedsProxy(url: string): boolean {
 const REPLY_BLOCKQUOTE =
   /<blockquote\b[^>]*itemtype="http:\/\/schema\.skype\.com\/Reply"[^>]*>([\s\S]*?)<\/blockquote>/i;
 const QUOTED_AUTHOR = /<strong\b[^>]*itemprop="mri"[^>]*>([\s\S]*?)<\/strong>/i;
+/** The quoted author's MRI, which Teams puts in the same `<strong>`'s `itemid`
+ *  (see `reply_quote` in src/teams_send.rs) — so a quoted name can offer that
+ *  person's card too. */
+const QUOTED_AUTHOR_MRI = /<strong\b[^>]*itemprop="mri"[^>]*itemid="([^"]*)"/i;
 const QUOTED_PREVIEW = /<p\b[^>]*itemprop="preview"[^>]*>([\s\S]*?)<\/p>/i;
 
 /** Split a raw Teams message HTML into an optional quote plus the body text. */
@@ -474,6 +544,9 @@ export function parseMessageContent(html: string): ParsedMessage {
 
 export type RichQuote = {
   sender: string;
+  /** The quoted author's MRI, when the quote carries one (it does for every reply
+   *  Teams composes). Empty otherwise; the UI then shows the name without a card. */
+  senderMri: string;
   html: string;
 };
 
@@ -495,6 +568,7 @@ export function parseRichMessage(html: string): ParsedRichMessage {
   if (inner === undefined) return { bodyHtml: html };
 
   const sender = plain(inner.match(QUOTED_AUTHOR)?.[1] ?? "");
+  const senderMri = decodeEntities(inner.match(QUOTED_AUTHOR_MRI)?.[1] ?? "").trim();
   const previewHtml = inner.match(QUOTED_PREVIEW)?.[1];
   const quoteHtml = previewHtml ?? inner.replace(QUOTED_AUTHOR, "");
 
@@ -507,10 +581,23 @@ export function parseRichMessage(html: string): ParsedRichMessage {
     return { bodyHtml: [beforeHtml, afterHtml].filter((s) => plain(s)).join("") };
   }
   return {
-    quote: { sender, html: quoteHtml },
+    quote: { sender, senderMri, html: quoteHtml },
     beforeHtml,
     bodyHtml: afterHtml,
   };
+}
+
+/** Index a message's @mentions by the `itemid` its body spans carry, so rendering
+ *  a mention can look up who it names in one step. People only: a channel/team/tag
+ *  mention points at a thread, and hovering it must not offer a person's card.
+ *  Returns an empty map for a message that mentions nobody. */
+export function mentionsByItemId(message: ChatMessage): Map<number, MessageMention> {
+  const map = new Map<number, MessageMention>();
+  for (const mention of message.mentions ?? []) {
+    if (mention.kind !== "person" || !mention.mri) continue;
+    map.set(mention.itemid, mention);
+  }
+  return map;
 }
 
 /** The plain text a "Copy"/"Reply" action should use for a message. */

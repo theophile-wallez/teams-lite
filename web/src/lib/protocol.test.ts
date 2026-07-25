@@ -22,6 +22,7 @@ import {
   shouldNotify,
   replyToPayload,
   copyableMessageText,
+  mentionsByItemId,
   parseRichMessage,
   typingLabel,
   formatCallEvent,
@@ -244,6 +245,56 @@ describe("parseRichMessage", () => {
     expect(parsed.beforeHtml).toContain("before the quote");
     expect(parsed.bodyHtml).toContain("after the quote");
     expect(parsed.quote?.sender).toBe("Bob");
+  });
+
+  it("carries the quoted author's MRI, so their name can offer their card", () => {
+    expect(parseRichMessage(REPLY_AFTER_ONLY).quote?.senderMri).toBe("8:orgid:abc");
+  });
+
+  it("leaves the quoted MRI empty when the quote carries none", () => {
+    const noMri =
+      `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="1">` +
+      `<strong itemprop="mri">Someone</strong>` +
+      `<p itemprop="preview">quoted</p></blockquote><p>reply</p>`;
+    const parsed = parseRichMessage(noMri);
+    expect(parsed.quote?.sender).toBe("Someone");
+    expect(parsed.quote?.senderMri).toBe("");
+  });
+});
+
+describe("mentionsByItemId", () => {
+  it("indexes person mentions by the itemid their span carries", () => {
+    const map = mentionsByItemId(
+      message(1, {
+        mentions: [
+          { itemid: 0, mri: "8:orgid:leonor", kind: "person", display_name: "Leonor" },
+          { itemid: 2, mri: "8:orgid:ada", kind: "person", display_name: "Ada" },
+        ],
+      }),
+    );
+    expect(map.get(0)?.mri).toBe("8:orgid:leonor");
+    expect(map.get(2)?.display_name).toBe("Ada");
+    expect(map.get(1)).toBeUndefined();
+  });
+
+  it("keeps out everything that is not a person", () => {
+    // A channel/team/tag mention points at a thread, so hovering it must not
+    // offer somebody's card; a person entry without an MRI is unusable too.
+    const map = mentionsByItemId(
+      message(1, {
+        mentions: [
+          { itemid: 0, mri: "19:abc@thread.tacv2", kind: "channel", display_name: "[Run]" },
+          { itemid: 1, mri: "19:team@thread.tacv2", kind: "team", display_name: "Platform" },
+          { itemid: 2, mri: "", kind: "person", display_name: "Nobody" },
+        ],
+      }),
+    );
+    expect(map.size).toBe(0);
+  });
+
+  it("is empty for a message that mentions nobody", () => {
+    expect(mentionsByItemId(message(1)).size).toBe(0);
+    expect(mentionsByItemId(message(1, { mentions: [] })).size).toBe(0);
   });
 });
 

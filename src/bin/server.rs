@@ -10,7 +10,8 @@
 //   event    (server -> client):  { "event": "<name>", "data": {...} }   (no id)
 //
 // Methods: conversations | open | backfill | set_draft | send | edit | react | notifications
-//          | fetch_media | fetch_avatar | get_settings | set_settings | enrich_link
+//          | fetch_media | fetch_avatar | profile | presence | get_settings
+//          | set_settings | enrich_link
 // Events:  status | message | conversations_changed | notifications_changed | typing
 //          | read_receipt | call | call_signal | update_available
 //
@@ -37,8 +38,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    auth, retry, teams, teams_activity, teams_avatars, teams_media, teams_profiles, teams_read,
-    teams_readstate, teams_send, trouter, trouter_events,
+    auth, retry, teams, teams_activity, teams_avatars, teams_media, teams_presence, teams_profiles,
+    teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
 use teams_lite::gitlab;
 
@@ -960,6 +961,61 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "metadata": metadata }))
         }
 
+        // One person's directory card — name, job title, department, email, work
+        // location — for the card the UI shows on hovering a sender or an @mention.
+        // `found` is false when the directory has nothing for this identity (a
+        // service account, a removed guest), so the UI can fall back to the name it
+        // already has. Only PERSON mris are accepted; a channel/team mri is refused
+        // rather than sent upstream.
+        "profile" => {
+            let mri = param_str(params, "mri")?;
+            anyhow::ensure!(teams_profiles::is_person_mri(&mri), "not a person mri");
+            let http = ctx.http.clone();
+            let tokens = ctx.tokens.clone();
+            let profiles = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let tokens = tokens.clone();
+                    let mris = vec![mri.clone()];
+                    async move {
+                        // The short-profile endpoint takes the profile-audience
+                        // token, not the CSA one `retry_on_auth` supplies.
+                        let profile = tokens.get(teams_profiles::PROFILE_SCOPE).await?;
+                        teams_profiles::fetch_profiles(&http, &session, &profile, &mris).await
+                    }
+                })
+                .await?;
+            Ok(match profiles.into_iter().next() {
+                Some(p) => profile_json(&p),
+                None => json!({ "found": false }),
+            })
+        }
+
+        // Live presence ("Available", "Busy", "In a meeting", "Offline", …) for one
+        // or more people, read the same way the Teams client reads it. Volatile by
+        // nature, so it is never cached server-side: every call hits the presence
+        // service and the UI decides how long to trust the answer. A person the
+        // service has no answer for is simply absent from the result.
+        "presence" => {
+            let mris = presence_mris(params)?;
+            let http = ctx.http.clone();
+            let tokens = ctx.tokens.clone();
+            let presences = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let tokens = tokens.clone();
+                    let mris = mris.clone();
+                    async move {
+                        let profile = tokens.get(teams_profiles::PROFILE_SCOPE).await?;
+                        teams_presence::fetch_presence(&http, &session, &profile, &mris).await
+                    }
+                })
+                .await?;
+            Ok(json!({
+                "presences": presences.iter().map(presence_json).collect::<Vec<Value>>(),
+            }))
+        }
+
         other => anyhow::bail!("unknown method: {other}"),
     }
 }
@@ -979,6 +1035,63 @@ fn parse_reply_to(value: &Value) -> Result<teams_send::ReplyTo> {
         preview: param_str(value, "preview")?,
         before: param_str(value, "before")?,
         after: param_str(value, "after")?,
+    })
+}
+
+/// The people a `presence` request asks about: either a single `mri` or an `mris`
+/// array. Every entry must be a person mri, and the batch is capped, so nothing
+/// unbounded or unexpected is ever forwarded to the presence service.
+fn presence_mris(params: &Value) -> Result<Vec<String>> {
+    let mris: Vec<String> = match params.get("mris") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => vec![param_str(params, "mri")?],
+    };
+    anyhow::ensure!(!mris.is_empty(), "missing param: mri");
+    anyhow::ensure!(
+        mris.len() <= teams_presence::MAX_BATCH,
+        "too many mris in one presence request"
+    );
+    anyhow::ensure!(
+        mris.iter().all(|m| teams_profiles::is_person_mri(m)),
+        "not a person mri"
+    );
+    Ok(mris)
+}
+
+/// Wire shape of a person's directory card (see the `profile` method).
+fn profile_json(p: &teams_profiles::Profile) -> Value {
+    json!({
+        "found": true,
+        "mri": p.mri,
+        "object_id": p.object_id,
+        "display_name": p.display_name,
+        "given_name": p.given_name,
+        "surname": p.surname,
+        "email": p.email,
+        "user_principal_name": p.user_principal_name,
+        "job_title": p.job_title,
+        "department": p.department,
+        "company_name": p.company_name,
+        "office_location": p.office_location,
+        "tenant_name": p.tenant_name,
+        "user_type": p.user_type,
+    })
+}
+
+/// Wire shape of one person's presence (see the `presence` method).
+fn presence_json(p: &teams_presence::Presence) -> Value {
+    json!({
+        "mri": p.mri,
+        "availability": p.availability,
+        "activity": p.activity,
+        "last_active_ms": p.last_active_ms,
+        "out_of_office": p.out_of_office,
+        "out_of_office_note": p.out_of_office_note,
+        "note": p.note,
     })
 }
 
@@ -1130,6 +1243,14 @@ fn attachments_value(m: &Message) -> Value {
     serde_json::from_str(&m.attachments).unwrap_or_else(|_| json!([]))
 }
 
+/// Decode a message's stored @mentions (a JSON array string) for the wire, so the
+/// UI can map each mention span's `itemid` back to the person it names — and show
+/// their card on hover. A legacy/blank/malformed value degrades to an empty array
+/// so one bad row can never break serialization.
+fn mentions_value(m: &Message) -> Value {
+    serde_json::from_str(&m.mentions).unwrap_or_else(|_| json!([]))
+}
+
 /// Decode a message's structured system event (a JSON object string) for the wire,
 /// or `null` when the message is a normal chat message (empty `system_event`) or
 /// the stored value is malformed. The UI renders a centered system line when this
@@ -1268,6 +1389,7 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
         "compose_time": m.compose_time, "sender": m.sender, "sender_mri": m.sender_mri,
         "content": m.content,
         "attachments": attachments_value(m),
+        "mentions": mentions_value(m),
         "reactions": reactions_value(m, self_mri),
         "system_event": system_event_value(m),
         "is_self": is_self(m, self_name, self_mri),
@@ -1718,6 +1840,7 @@ mod tests {
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            mentions: "[]".into(),
         }
     }
 
@@ -1757,6 +1880,83 @@ mod tests {
         // `mine` is false when our MRI is not among the reactors
         let v = reactions_value(&m, "8:someone_else");
         assert_eq!(v.as_array().unwrap()[0]["mine"], false);
+    }
+
+    #[test]
+    fn mentions_ride_the_wire_as_a_decoded_list() {
+        let mut m = message(1);
+        m.mentions =
+            r#"[{"itemid":0,"mri":"8:orgid:leonor","kind":"person","display_name":"Leonor"}]"#.into();
+        let v = message_json(&m, "Alice", "8:me");
+        assert_eq!(v["mentions"][0]["itemid"], 0);
+        assert_eq!(v["mentions"][0]["mri"], "8:orgid:leonor");
+        assert_eq!(v["mentions"][0]["kind"], "person");
+
+        // A message with none, and a row whose value is unusable, both serialize
+        // as an empty list — never as a string, and never as an error.
+        assert_eq!(message_json(&message(2), "Alice", "8:me")["mentions"], json!([]));
+        let mut broken = message(3);
+        broken.mentions = "{not json".into();
+        assert_eq!(message_json(&broken, "Alice", "8:me")["mentions"], json!([]));
+    }
+
+    #[test]
+    fn presence_params_accept_one_or_many_and_refuse_the_rest() {
+        // A single mri, or a batch.
+        assert_eq!(
+            presence_mris(&json!({ "mri": "8:orgid:aaa" })).unwrap(),
+            vec!["8:orgid:aaa".to_string()]
+        );
+        assert_eq!(
+            presence_mris(&json!({ "mris": ["8:orgid:aaa", "8:orgid:bbb"] })).unwrap().len(),
+            2
+        );
+        // A thread/channel mri is not a person: refused before it reaches the
+        // presence service, as is an empty or over-large batch.
+        assert!(presence_mris(&json!({ "mri": "19:abc@thread.tacv2" })).is_err());
+        assert!(presence_mris(&json!({ "mris": [] })).is_err());
+        assert!(presence_mris(&json!({})).is_err());
+        let too_many: Vec<String> = (0..teams_presence::MAX_BATCH + 1)
+            .map(|i| format!("8:orgid:{i}"))
+            .collect();
+        assert!(presence_mris(&json!({ "mris": too_many })).is_err());
+    }
+
+    #[test]
+    fn profile_and_presence_serialize_every_card_field() {
+        let p = teams_profiles::Profile {
+            mri: "8:orgid:aaa".into(),
+            display_name: "Ada LOVELACE".into(),
+            job_title: "Analyst".into(),
+            email: "ada@example.com".into(),
+            office_location: "London".into(),
+            ..Default::default()
+        };
+        let v = profile_json(&p);
+        assert_eq!(v["found"], true);
+        assert_eq!(v["display_name"], "Ada LOVELACE");
+        assert_eq!(v["job_title"], "Analyst");
+        assert_eq!(v["email"], "ada@example.com");
+        assert_eq!(v["office_location"], "London");
+        // Unreported fields are present but empty, so the UI can just skip them.
+        assert_eq!(v["department"], "");
+
+        let pres = teams_presence::Presence {
+            mri: "8:orgid:aaa".into(),
+            availability: "Busy".into(),
+            activity: "InAMeeting".into(),
+            last_active_ms: 1_700_000_000_000,
+            out_of_office: true,
+            out_of_office_note: "Back Monday".into(),
+            note: "Heads down".into(),
+        };
+        let v = presence_json(&pres);
+        assert_eq!(v["availability"], "Busy");
+        assert_eq!(v["activity"], "InAMeeting");
+        assert_eq!(v["last_active_ms"], 1_700_000_000_000i64);
+        assert_eq!(v["out_of_office"], true);
+        assert_eq!(v["out_of_office_note"], "Back Monday");
+        assert_eq!(v["note"], "Heads down");
     }
 
     #[test]

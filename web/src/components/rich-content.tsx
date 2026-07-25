@@ -1,8 +1,10 @@
 import { useMemo, useState, type JSX } from "react";
 import { Globe } from "lucide-react";
 import { dropLinks, hasVisibleContent, parseRichHtml, type RichNode } from "~/lib/rich-text";
+import type { MessageMention } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { MediaImage } from "./media-image";
+import { PersonHoverCard } from "./person-card";
 
 /**
  * Renders a Teams HTML fragment as safe React elements. The HTML is parsed into
@@ -13,8 +15,18 @@ import { MediaImage } from "./media-image";
  *
  * `hiddenHrefs` drops anchors with those hrefs from the output — used when a link
  * is surfaced as a rich preview card instead, so it is never shown twice.
+ *
+ * `mentions` maps each mention span's `itemid` to the person it names (see
+ * `mentionsByItemId`): given one, a mention of a person becomes hoverable and
+ * reveals their card. Without it — or for a mention of a channel/team/tag — the
+ * mention still renders, just as inert accent text.
  */
-export function RichContent(props: { html: string; className?: string; hiddenHrefs?: Set<string> }) {
+export function RichContent(props: {
+  html: string;
+  className?: string;
+  hiddenHrefs?: Set<string>;
+  mentions?: Map<number, MessageMention>;
+}) {
   const { html, hiddenHrefs } = props;
   const nodes = useMemo(() => {
     const parsed = parseRichHtml(html);
@@ -23,7 +35,7 @@ export function RichContent(props: { html: string; className?: string; hiddenHre
   if (!hasVisibleContent(nodes)) return null;
   return (
     <div className={cn("whitespace-pre-wrap break-words", props.className)}>
-      {nodes.map((node, i) => renderNode(node, i))}
+      {nodes.map((node, i) => renderNode(node, i, props.mentions))}
     </div>
   );
 }
@@ -89,10 +101,14 @@ function LinkFavicon({ href }: { href?: string }) {
   );
 }
 
-function renderNode(node: RichNode, key: number): JSX.Element | string | null {
+function renderNode(
+  node: RichNode,
+  key: number,
+  mentions?: Map<number, MessageMention>,
+): JSX.Element | string | null {
   if (node.type === "text") return node.text;
 
-  const children = node.children.map((child, i) => renderNode(child, i));
+  const children = node.children.map((child, i) => renderNode(child, i, mentions));
 
   switch (node.tag) {
     case "br":
@@ -198,12 +214,20 @@ function renderNode(node: RichNode, key: number): JSX.Element | string | null {
           className="my-1"
         />
       );
-    case "mention":
+    case "mention": {
+      // The span carries only an index; who it names lives in the message's
+      // mention list. A person we can identify gets their card on hover; a
+      // channel/team/tag mention (or an unmapped one) stays plain accent text.
+      const itemid = Number(node.attrs.itemid);
+      const mention = Number.isInteger(itemid) ? mentions?.get(itemid) : undefined;
+      const text = <span className="font-semibold text-sender-name">{children}</span>;
+      if (!mention) return <span key={key}>{text}</span>;
       return (
-        <span key={key} className="font-semibold text-sender-name">
-          {children}
-        </span>
+        <PersonHoverCard key={key} mri={mention.mri} name={mention.display_name}>
+          {text}
+        </PersonHoverCard>
       );
+    }
     default:
       return <span key={key}>{children}</span>;
   }

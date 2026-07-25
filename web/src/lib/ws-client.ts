@@ -16,6 +16,8 @@ import type {
   LinkMetadataResult,
   MessagePage,
   NotificationFeeds,
+  PersonProfile,
+  PresenceResult,
   ReadReceiptsResult,
   ReplyTo,
 } from "./protocol";
@@ -283,6 +285,22 @@ export class Backend {
       "fetch_avatar",
       { kind, id },
     );
+  }
+
+  /** Fetch one person's directory card — name, job title, department, email, work
+   *  location — for the card shown on hovering their name. `found` is false when
+   *  the directory knows nobody by this MRI, so the caller keeps the name it has.
+   *  Only person MRIs are accepted; the backend refuses a channel/team MRI. */
+  profile(mri: string): Promise<PersonProfile> {
+    return this.request<PersonProfile>("profile", { mri });
+  }
+
+  /** Read live presence ("Available", "In a meeting", "Offline", …) for one or
+   *  more people. Volatile: the backend never caches it, so the caller decides how
+   *  long an answer is good for. Someone the service has no answer for is simply
+   *  absent from `presences`. */
+  presence(mris: string[]): Promise<PresenceResult> {
+    return this.request<PresenceResult>("presence", { mris });
   }
 
   /** Read the non-secret app settings (GitLab host + whether a token is stored). */

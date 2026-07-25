@@ -13,6 +13,7 @@
 //
 // Methods: ping | conversations | channels | open | backfill | set_draft | send
 //          | edit | react | notifications | read_receipts | fetch_media | fetch_avatar
+//          | profile | presence
 //          | get_settings | set_settings | enrich_link
 // Events:  status | realtime_status | message | conversations_changed
 //          | channels_changed | typing | call | read_receipt
@@ -96,6 +97,7 @@ type ChatMessage = {
   content: string; // HTML-ish, as Teams sends it
   attachments?: Attachment[]; // file/card attachments (inline images live in content)
   reactions?: Reaction[]; // aggregated per emotion (key + count + whether ours)
+  mentions?: MessageMention[]; // who the body's @mention spans point at, by itemid
   system_event?: SystemEvent; // when set, rendered as a centered system line
   is_self?: boolean;
   thread_root_id?: string; // channel only: id of the thread's root post
@@ -117,6 +119,16 @@ type SystemEvent = {
 // Aggregated reaction on a message (mirrors protocol.ts Reaction / the Rust
 // `reactions_value` wire shape).
 type Reaction = { key: string; count: number; mine: boolean };
+
+// One @mention in a message body (mirrors protocol.ts MessageMention / the Rust
+// `parse_mentions` wire shape). The body's span carries only `itemid`; this is
+// where the mentioned identity lives. Only `kind: "person"` names a human.
+type MessageMention = {
+  itemid: number;
+  mri: string;
+  kind: "person" | "channel" | "team" | "tag";
+  display_name: string;
+};
 
 type MessagePage = { messages: ChatMessage[]; has_more: boolean };
 
@@ -1086,6 +1098,100 @@ function seedDeletedMessages(): void {
   store.set(convId, cs);
   order.push(convId);
 }
+
+/** Register a dedicated "Mention Demo" group whose messages exercise the person
+ *  card: an @mention of a person (hoverable), an @mention of the channel itself
+ *  (which must stay inert — a thread is not a person), and a reply quoting someone
+ *  (whose quoted name is hoverable too). A mention span carries only an `itemid`;
+ *  the identities ride alongside in `mentions`, exactly as the real backend sends
+ *  them. Standalone and dated in the past, so tests reach it by name via the
+ *  command palette without disturbing the specs that assume a full backlog at the
+ *  top of the sidebar. */
+function seedMentionSamples(): void {
+  const convId = "19:mention-demo@thread.v2";
+  const [ava, liam] = [PEOPLE[0]!, PEOPLE[1]!];
+  const base = Date.now() - 25 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  let seq = 0;
+
+  const push = (
+    msg: Omit<ChatMessage, "id" | "conversation_id" | "seq" | "compose_time">,
+    offsetMs: number,
+  ): void => {
+    seq += 1;
+    messages.push({
+      id: `${convId}#${seq}`,
+      conversation_id: convId,
+      seq,
+      compose_time: base + offsetMs,
+      ...msg,
+    });
+  };
+
+  const mentionSpan = (itemid: number, text: string) =>
+    `<span itemscope itemtype="http://schema.skype.com/Mention" itemid="${itemid}">${escapeHtml(text)}</span>`;
+
+  // A person mention (card on hover) next to a channel mention (inert).
+  push(
+    {
+      sender: ava.name,
+      sender_mri: ava.mri,
+      content: `<p>${mentionSpan(0, liam.name)} could you take a look? ${mentionSpan(1, "Platform Team")} FYI.</p>`,
+      is_self: false,
+      mentions: [
+        { itemid: 0, mri: liam.mri, kind: "person", display_name: liam.name },
+        { itemid: 1, mri: convId, kind: "channel", display_name: "Platform Team" },
+      ],
+    },
+    0,
+  );
+  // A mention of us, and one of the same person again — repeat mentions of one
+  // person must share a single lookup.
+  push(
+    {
+      sender: liam.name,
+      sender_mri: liam.mri,
+      content: `<p>On it ${mentionSpan(0, SELF_NAME)} — ${mentionSpan(1, ava.name)} I'll ping you after.</p>`,
+      is_self: false,
+      mentions: [
+        { itemid: 0, mri: SELF_MRI, kind: "person", display_name: SELF_NAME },
+        { itemid: 1, mri: ava.mri, kind: "person", display_name: ava.name },
+      ],
+    },
+    60_000,
+  );
+  // A reply: the quoted author's name carries their MRI, so it is hoverable too.
+  push(
+    {
+      sender: ava.name,
+      sender_mri: ava.mri,
+      content: replyContent(messages[1]!, "Perfect, thanks!"),
+      is_self: false,
+    },
+    120_000,
+  );
+
+  const conv: Conversation = {
+    id: convId,
+    name: "Mention Demo",
+    last_message_time: 0,
+    kind: "group",
+    last_message_preview: "",
+    last_message_sender: "",
+    last_message_from_me: false,
+    is_read: true,
+    is_muted: false,
+    is_pinned: false,
+    is_hidden: false,
+    thread_type: "chat",
+    draft: "",
+  };
+  const cs: ConvState = { conv, messages, participants: [ava, liam] };
+  recomputeSummary(cs);
+  store.set(convId, cs);
+  order.push(convId);
+}
+
 function seedGitLabSamples(): void {
   const convId = "19:gitlab-links-demo@thread.v2";
   const other = PEOPLE[1]!;
@@ -1252,6 +1358,105 @@ function mockAvatar(
     found: true,
     content_type: "image/svg+xml",
     data_base64: Buffer.from(svg, "utf8").toString("base64"),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// People — stand-in for the Rust `profile` (fetchShortProfile) and `presence`
+// (unified presence service) methods that back the person card.
+// ---------------------------------------------------------------------------
+
+type MockProfile = {
+  found: boolean;
+  mri: string;
+  object_id: string;
+  display_name: string;
+  given_name: string;
+  surname: string;
+  email: string;
+  user_principal_name: string;
+  job_title: string;
+  department: string;
+  company_name: string;
+  office_location: string;
+  tenant_name: string;
+  user_type: string;
+};
+
+type MockPresence = {
+  mri: string;
+  availability: string;
+  activity: string;
+  last_active_ms: number;
+  out_of_office: boolean;
+  out_of_office_note: string;
+  note: string;
+};
+
+const JOB_TITLES = [
+  "Senior Consultant",
+  "Staff Engineer",
+  "Product Manager",
+  "Data Scientist",
+  "Engineering Manager",
+];
+const DEPARTMENTS = ["Platform (Engineering)", "Data & AI", "Design", "Delivery", "Security"];
+const OFFICES = ["Paris (FIM)", "London", "Montreal (NA)", "Berlin", "Remote"];
+
+/** A person's directory card, derived deterministically from their MRI so a given
+ *  identity always answers the same. One MRI in seven is deliberately unknown to
+ *  the directory (`found: false`), exercising the card's name-only fallback the way
+ *  a service account or a removed guest does on a real tenant. */
+function mockProfile(mri: string): MockProfile | { found: false } {
+  const person = PEOPLE.find((p) => p.mri === mri);
+  const name = person?.name ?? (mri === SELF_MRI ? SELF_NAME : "");
+  const h = hashString(mri);
+  if (!name || h % 7 === 0) return { found: false };
+  const [given = name, surname = ""] = name.split(" ");
+  const email = `${name.toLowerCase().replace(/[^a-z]+/g, ".")}@example.com`;
+  return {
+    found: true,
+    mri,
+    object_id: mri.replace(/^8:orgid:/, ""),
+    display_name: name,
+    given_name: given,
+    surname,
+    email,
+    user_principal_name: email,
+    job_title: JOB_TITLES[h % JOB_TITLES.length]!,
+    department: DEPARTMENTS[(h >>> 3) % DEPARTMENTS.length]!,
+    company_name: "Example Group",
+    office_location: OFFICES[(h >>> 5) % OFFICES.length]!,
+    tenant_name: "EXAMPLE",
+    user_type: "Member",
+  };
+}
+
+/** The presence states the mock cycles through, one per MRI, so every badge tone
+ *  and label is reachable in dev: reachable, in a meeting, away, offline (with a
+ *  "last seen"), out of office (with an auto-reply note), and unknown. */
+const MOCK_PRESENCES: ReadonlyArray<Omit<MockPresence, "mri" | "last_active_ms">> = [
+  { availability: "Available", activity: "Available", out_of_office: false, out_of_office_note: "", note: "" },
+  { availability: "Busy", activity: "InAMeeting", out_of_office: false, out_of_office_note: "", note: "Heads down until noon" },
+  { availability: "Busy", activity: "InACall", out_of_office: false, out_of_office_note: "", note: "" },
+  { availability: "DoNotDisturb", activity: "Presenting", out_of_office: false, out_of_office_note: "", note: "" },
+  { availability: "Away", activity: "Away", out_of_office: false, out_of_office_note: "", note: "" },
+  { availability: "Offline", activity: "Offline", out_of_office: false, out_of_office_note: "", note: "" },
+  { availability: "Offline", activity: "Offline", out_of_office: true, out_of_office_note: "On leave, back Monday.", note: "" },
+  { availability: "PresenceUnknown", activity: "PresenceUnknown", out_of_office: false, out_of_office_note: "", note: "" },
+];
+
+/** One person's presence, derived deterministically from their MRI. `last_active_ms`
+ *  is only meaningful for someone who isn't reachable, which is exactly when the
+ *  card shows "Last seen …". */
+function mockPresence(mri: string): MockPresence {
+  const h = hashString(`presence:${mri}`);
+  const base = MOCK_PRESENCES[h % MOCK_PRESENCES.length]!;
+  const away = base.availability === "Offline" || base.availability === "Away";
+  return {
+    mri,
+    ...base,
+    last_active_ms: away ? Date.now() - ((h % 20) + 3) * 60_000 : 0,
   };
 }
 
@@ -1799,6 +2004,19 @@ function dispatch(method: string, params: unknown): unknown {
       return mockAvatar(kind, id);
     }
 
+    case "profile": {
+      const mri = requireString(params, "mri");
+      return mockProfile(mri);
+    }
+
+    case "presence": {
+      const o = asObject(params);
+      const mris = Array.isArray(o.mris)
+        ? o.mris.filter((m): m is string => typeof m === "string")
+        : [requireString(params, "mri")];
+      return { presences: mris.map(mockPresence) };
+    }
+
     case "get_settings":
       return settingsView();
 
@@ -2159,6 +2377,7 @@ seed();
 seedMediaSamples();
 seedCallEvents();
 seedDeletedMessages();
+seedMentionSamples();
 seedGitLabSamples();
 // Seed channels LAST so the chat seed's PRNG sequence (and thus the Chats list
 // the existing specs assert on) is left completely unchanged.

@@ -207,6 +207,21 @@ describe("parseRichHtml — mentions", () => {
     expect(text(parseRichHtml(html))).toBe("Alice Smith");
   });
 
+  it("keeps the span's itemid, which is what identifies who was mentioned", () => {
+    // The span carries only an index into the message's `mentions` list; without
+    // it there is no way back from "@Alice" to Alice, so no person card.
+    const [m] = parseRichHtml(
+      `<span itemscope itemtype="http://schema.skype.com/Mention" itemid="3">Alice</span>`,
+    );
+    expect(m).toMatchObject({ tag: "mention", attrs: { itemid: "3" } });
+
+    // A mention without one still renders, just unidentifiable.
+    const [plain] = parseRichHtml(
+      `<span itemscope itemtype="http://schema.skype.com/Mention">Alice</span>`,
+    );
+    expect(plain).toMatchObject({ tag: "mention", attrs: {} });
+  });
+
   it("closes the mention at its </span> so trailing text is not swallowed", () => {
     // Regression: a mention's </span> was ignored (span isn't in TAG_MAP), so
     // the mention frame stayed open and every following sibling became its child

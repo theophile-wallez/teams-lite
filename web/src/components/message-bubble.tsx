@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Ban, Copy, Eye, EyeOff, MoreHorizontal, Pencil, Reply, X } from "lucide-react";
 import {
   copyableMessageText,
+  mentionsByItemId,
   parseRichMessage,
   urlHost,
   type ChatMessage,
@@ -30,6 +31,7 @@ import {
 } from "./ui/dropdown-menu";
 import { FileAttachment, MediaImage, RecordingAttachment } from "./media-image";
 import { GitLabLinkCard } from "./gitlab-link-card";
+import { PersonHoverCard } from "./person-card";
 import { useAppState, useController } from "./controller-context";
 
 /** Dwell before the hover reaction picker appears, the way Teams reveals its
@@ -150,6 +152,10 @@ export function MessageBubble(props: {
 }) {
   const mine = props.message.is_self === true;
   const parsed = useMemo(() => parseRichMessage(props.message.content), [props.message.content]);
+  // Who the body's @mention spans point at, so each mention of a person can offer
+  // their card on hover (the span itself only carries an index — see
+  // `mentionsByItemId`).
+  const mentions = useMemo(() => mentionsByItemId(props.message), [props.message]);
   // Candidate GitLab links in the authored body (not the quoted reply) that
   // target the configured host. Filtering by host keeps enrichment to real
   // GitLab links; the backend is authoritative on whether one is enrichable.
@@ -288,7 +294,7 @@ export function MessageBubble(props: {
   const mediaBody = (
     <>
       {parsed.beforeHtml ? (
-        <RichContent html={parsed.beforeHtml} hiddenHrefs={hiddenHrefs} />
+        <RichContent html={parsed.beforeHtml} hiddenHrefs={hiddenHrefs} mentions={mentions} />
       ) : null}
 
       {parsed.quote ? (
@@ -301,11 +307,15 @@ export function MessageBubble(props: {
           {parsed.quote.sender ? (
             <div
               className={cn(
-                "text-xs font-semibold",
+                "flex text-xs font-semibold",
                 mine ? "text-sender-name-mine" : "text-sender-name",
               )}
             >
-              {parsed.quote.sender}
+              {/* The quoted author is a person too — their card is a hover away
+                  whenever the quote carried their MRI. */}
+              <PersonHoverCard mri={parsed.quote.senderMri} name={parsed.quote.sender}>
+                <span data-testid="quote-sender">{parsed.quote.sender}</span>
+              </PersonHoverCard>
             </div>
           ) : null}
           <RichContent
@@ -315,7 +325,9 @@ export function MessageBubble(props: {
         </div>
       ) : null}
 
-      {parsed.bodyHtml ? <RichContent html={parsed.bodyHtml} hiddenHrefs={hiddenHrefs} /> : null}
+      {parsed.bodyHtml ? (
+        <RichContent html={parsed.bodyHtml} hiddenHrefs={hiddenHrefs} mentions={mentions} />
+      ) : null}
 
       {hasAttachments ? (
         <div className="mt-1.5 flex flex-col gap-1.5">
@@ -413,11 +425,10 @@ export function MessageBubble(props: {
         )}
 
         {nameShown && (
-          <div
-            data-testid="sender-name"
-            className="mb-0.5 text-xs font-semibold text-sender-name"
-          >
-            {props.message.sender}
+          <div className="mb-0.5 flex text-xs font-semibold text-sender-name">
+            <PersonHoverCard mri={props.message.sender_mri} name={props.message.sender}>
+              <span data-testid="sender-name">{props.message.sender}</span>
+            </PersonHoverCard>
           </div>
         )}
 
