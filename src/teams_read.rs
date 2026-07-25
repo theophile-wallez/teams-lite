@@ -1098,6 +1098,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         .and_then(|x| x.as_str())
         .unwrap_or("");
     let content = m.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let deleted = is_deleted(m);
     let seq = m.get("sequenceId").and_then(|x| x.as_i64()).unwrap_or(0);
     let compose_time = m.get("composetime").and_then(|x| x.as_str()).map(parse_iso_ms).unwrap_or(0);
     let sender = m
@@ -1130,6 +1131,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             system_event: event.to_string(),
             thread_root_id: String::new(),
             thread_subject: String::new(),
+            deleted: false,
         });
     }
 
@@ -1157,6 +1159,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 system_event: String::new(),
                 thread_root_id,
                 thread_subject,
+                deleted: false,
             });
         }
         Some(CallRecording::Pending) => return None,
@@ -1167,12 +1170,18 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
     // system frames (typing/presence, member & topic changes) onto the SAME
     // message channel — notably as live `NewMessage` resources — so gate on
     // `messagetype`, with a content backstop for a system frame that arrives
-    // untyped (see `is_system_frame_content`).
-    if !is_displayable_message_type(messagetype) {
-        return None;
-    }
-    if is_system_frame_content(&content) {
-        return None;
+    // untyped (see `is_system_frame_content`). A DELETION frame is exempt from
+    // both gates: it carries a `deletetime`, an empty body (never a system-frame
+    // shape), and a `messagetype` we don't want to depend on — dropping it would
+    // leave the previously-visible bubble stranded, so it must always reach the
+    // store to flip the `deleted` flag on the existing row.
+    if !deleted {
+        if !is_displayable_message_type(messagetype) {
+            return None;
+        }
+        if is_system_frame_content(&content) {
+            return None;
+        }
     }
     let (thread_root_id, thread_subject) = parse_thread(m);
     Some(Message {
@@ -1188,7 +1197,28 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         system_event: String::new(),
         thread_root_id,
         thread_subject,
+        deleted,
     })
+}
+
+/// Whether a message resource represents a message the sender has DELETED. Teams
+/// marks a deletion by setting `properties.deletetime` (an epoch-ms timestamp)
+/// and blanking the body — the `messagetype` is otherwise unchanged. `properties`
+/// may arrive as a nested object OR a JSON-encoded string (the same double
+/// encoding as `files`/`emotions`/`subject`), so decode a level deeper when
+/// needed. Best-effort: a surprising shape reads as "not deleted" rather than
+/// erroring, so it can never break message ingestion.
+fn is_deleted(m: &Value) -> bool {
+    let props = match m.get("properties") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        _ => Value::Null,
+    };
+    match props.get("deletetime") {
+        Some(Value::String(s)) => !s.is_empty() && s != "0",
+        Some(Value::Number(n)) => n.as_i64().map(|v| v > 0).unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// Extract the channel-thread linkage from a message resource: the thread ROOT's
@@ -1743,6 +1773,37 @@ mod tests {
     }
 
     #[test]
+    fn detects_a_deleted_message_by_its_deletetime() {
+        // A deletion: the body is blanked and `properties.deletetime` is set. The
+        // frame must survive parsing (so the store can flag the existing row) and
+        // carry `deleted = true` with empty content.
+        let m = json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-16T16:05:26.767Z",
+            "content": "", "imdisplayname": "Alice", "messagetype": "RichText/Html",
+            "properties": { "deletetime": "1752684326767" }
+        });
+        let parsed = parse_message(&m, "c1").expect("a deletion frame must not be dropped");
+        assert!(parsed.deleted);
+        assert_eq!(parsed.content, "");
+
+        // `properties` double-encoded as a JSON string is decoded a level deeper,
+        // like files/emotions/subject.
+        let encoded = json!({
+            "id": "2", "sequenceId": 2, "composetime": "2026-07-16T16:05:26.767Z",
+            "content": "", "imdisplayname": "Alice", "messagetype": "RichText/Html",
+            "properties": "{\"deletetime\":\"1752684326767\"}"
+        });
+        assert!(parse_message(&encoded, "c1").unwrap().deleted);
+
+        // A normal message is not deleted; a zero/empty deletetime is not a deletion.
+        let live = json!({
+            "id": "3", "sequenceId": 3, "composetime": "2026-07-16T16:05:26.767Z",
+            "content": "<p>hi</p>", "imdisplayname": "Alice", "messagetype": "RichText/Html"
+        });
+        assert!(!parse_message(&live, "c1").unwrap().deleted);
+    }
+
+    #[test]
     fn skips_control_and_system_frames() {
         // A displayable chat body is kept regardless of casing, and an absent
         // messagetype defaults to displayable (real frames always carry one).
@@ -2259,6 +2320,7 @@ mod tests {
                 reactions: "[]".into(),
                 system_event: String::new(),
                 thread_root_id: String::new(), thread_subject: String::new(),
+                deleted: false,
             })
             .collect();
         MessagePage { messages, next_before_ms: Some(oldest_ms), has_more_older: has_more }

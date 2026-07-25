@@ -100,6 +100,7 @@ type ChatMessage = {
   is_self?: boolean;
   thread_root_id?: string; // channel only: id of the thread's root post
   thread_subject?: string; // channel only: thread title, present on the root
+  deleted?: boolean; // sender deleted it; content (if kept) is revealable
 };
 
 // A structured system/activity event (mirrors protocol.ts SystemEvent and the Rust
@@ -984,6 +985,92 @@ function seedCallEvents(): void {
     name: "Call Events",
     last_message_time: 0,
     kind: "group",
+    last_message_preview: "",
+    last_message_sender: "",
+    last_message_from_me: false,
+    is_read: true,
+    is_muted: false,
+    is_pinned: false,
+    is_hidden: false,
+    thread_type: "chat",
+    draft: "",
+  };
+  const cs: ConvState = { conv, messages, participants: [other] };
+  recomputeSummary(cs);
+  store.set(convId, cs);
+  order.push(convId);
+}
+
+/** Register a dedicated "Deleted Messages" conversation exercising the
+ *  deleted-message UI: a message the sender deleted whose original text we had
+ *  cached (revealable with the invisible-ink unveil), one of mine I deleted (also
+ *  cached), and a pure tombstone we only ever saw as deleted (nothing to reveal).
+ *  A couple of live bubbles sit around them so the ghosts read in context.
+ *  Reached by name via the command palette. */
+function seedDeletedMessages(): void {
+  const convId = "19:deleted-messages-demo@thread.v2";
+  const other = PEOPLE[0]!;
+  const base = Date.now() - 10 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  let seq = 0;
+
+  const push = (
+    msg: Omit<ChatMessage, "id" | "conversation_id" | "seq" | "compose_time">,
+    offsetMs: number,
+  ): void => {
+    seq += 1;
+    messages.push({
+      id: `${convId}#${seq}`,
+      conversation_id: convId,
+      seq,
+      compose_time: base + offsetMs,
+      ...msg,
+    });
+  };
+
+  push(
+    { sender: other.name, sender_mri: other.mri, content: escapeHtml("Merci!"), is_self: false },
+    0,
+  );
+  // A message the sender deleted, but which we had already cached — its original
+  // text survives so it can be revealed with the unveil animation.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: escapeHtml("Déso j'ai du décaler notre point de prepa sprint je suis en interview et ça va déborder"),
+      is_self: false,
+      deleted: true,
+    },
+    60_000,
+  );
+  // One of mine that I deleted, also cached — shows the first-person label.
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content: escapeHtml("Oups, message envoyé trop vite 😅"),
+      is_self: true,
+      deleted: true,
+    },
+    120_000,
+  );
+  // A pure tombstone: deleted before we ever cached it, so there is nothing to
+  // reveal — just the placeholder.
+  push(
+    { sender: other.name, sender_mri: other.mri, content: "", is_self: false, deleted: true },
+    180_000,
+  );
+  push(
+    { sender: other.name, sender_mri: other.mri, content: escapeHtml("Pas de souci, on cale ça demain 👍"), is_self: false },
+    240_000,
+  );
+
+  const conv: Conversation = {
+    id: convId,
+    name: "Deleted Messages",
+    last_message_time: 0,
+    kind: "one_on_one",
     last_message_preview: "",
     last_message_sender: "",
     last_message_from_me: false,
@@ -2071,6 +2158,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
 seed();
 seedMediaSamples();
 seedCallEvents();
+seedDeletedMessages();
 seedGitLabSamples();
 // Seed channels LAST so the chat seed's PRNG sequence (and thus the Chats list
 // the existing specs assert on) is left completely unchanged.

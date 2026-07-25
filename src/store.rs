@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS messages (
     system_event    TEXT NOT NULL DEFAULT '',
     thread_root_id  TEXT NOT NULL DEFAULT '',
     thread_subject  TEXT NOT NULL DEFAULT '',
+    deleted         INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (conversation_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_msg_conv_seq ON messages(conversation_id, seq);
@@ -124,6 +125,15 @@ pub struct Message {
     /// `properties.subject`), shown as the thread heading. Empty for replies,
     /// chats, and legacy rows.
     pub thread_subject: String,
+    /// Whether the sender has DELETED this message on Teams (its `properties`
+    /// carried a `deletetime`). A deleted message keeps whatever `content` we had
+    /// already stored — the ingestion path never blanks it (see
+    /// [`Store::insert_message`]) — so the UI can render a "message deleted"
+    /// placeholder and still offer to reveal the cached original. `false` for a
+    /// live message and for legacy rows stored before this column existed. A
+    /// deletion that arrives for a message we never stored yields a row with
+    /// `deleted: true` and empty `content` (nothing to reveal).
+    pub deleted: bool,
 }
 
 /// The nature of a conversation. Modeled as an enum (not a bool) because there
@@ -285,10 +295,11 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
         system_event: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
         thread_root_id: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
         thread_subject: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+        deleted: row.get::<_, Option<i64>>(12)?.unwrap_or(0) != 0,
     })
 }
 
-const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject";
+const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted";
 
 /// Canonicalize an MRI for identity comparison: keep only the last path segment
 /// (so a `.../contacts/8:orgid:<guid>` URL becomes a bare MRI) and drop a leading
@@ -426,6 +437,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     // back to ungrouped rendering until the next network sync re-inserts them.
     add_column("ALTER TABLE messages ADD COLUMN thread_root_id TEXT NOT NULL DEFAULT ''")?;
     add_column("ALTER TABLE messages ADD COLUMN thread_subject TEXT NOT NULL DEFAULT ''")?;
+    // deleted: set when the sender deletes a message on Teams (its `properties`
+    // carried a `deletetime`). Legacy rows default to 0 (not deleted); the flag
+    // is set in place on the next sync/live update that carries the deletion.
+    add_column("ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")?;
 
     // Sidebar-fidelity columns (last-message preview + unread/muted/pinned/hidden
     // state), all sourced from the CSA `users/me` sync. Legacy rows get the
@@ -894,9 +909,22 @@ impl Store {
     }
 
     /// Insert a message, deduplicated by id. Returns true if it was newly
-    /// inserted OR its content changed (an edit). When the same id arrives again
-    /// with identical content, this is a no-op and returns false, so re-fetches
-    /// stay cheap while genuine edits — from us or anyone else — propagate.
+    /// inserted OR something the UI must re-render changed (an edit, or a newly
+    /// deleted message). When the same id arrives again unchanged, this is a
+    /// no-op and returns false, so re-fetches stay cheap while genuine edits —
+    /// from us or anyone else — propagate.
+    ///
+    /// Deletion handling: a Teams deletion arrives as a `MessageUpdate` (or a
+    /// history row) with `deleted == true` and EMPTY `content`. Two rules keep
+    /// the original text revealable rather than destroying it:
+    ///   - Content is NEVER overwritten with an empty string. An update whose
+    ///     `content` is empty (a deletion, or any frame that simply omits the
+    ///     body) keeps whatever we already stored, so a message we saw before it
+    ///     was deleted can still be revealed in the UI.
+    ///   - `deleted` is monotonic — once set it stays set (`MAX`). The transition
+    ///     `0 -> 1` counts as a change so the deletion propagates to the open view.
+    /// A deletion for a message we never stored inserts a tombstone row (empty
+    /// content, `deleted = 1`) — nothing to reveal, just the placeholder.
     ///
     /// Reactions are stored on a fresh INSERT but left untouched on conflict:
     /// they change independently of content (a reaction is not an edit), so the
@@ -908,11 +936,14 @@ impl Store {
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
         let reactions = if m.reactions.is_empty() { "[]" } else { m.reactions.as_str() };
         let n = self.conn.execute(
-            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-             ON CONFLICT(conversation_id, id) DO UPDATE SET content = excluded.content
-                 WHERE messages.content <> excluded.content",
-            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments, reactions, m.system_event, m.thread_root_id, m.thread_subject],
+            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(conversation_id, id) DO UPDATE SET
+                 content = CASE WHEN excluded.content = '' THEN messages.content ELSE excluded.content END,
+                 deleted = MAX(messages.deleted, excluded.deleted)
+                 WHERE (excluded.content <> '' AND messages.content <> excluded.content)
+                    OR (excluded.deleted = 1 AND messages.deleted = 0)",
+            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments, reactions, m.system_event, m.thread_root_id, m.thread_subject, m.deleted as i64],
         )?;
         Ok(n == 1)
     }
@@ -1261,6 +1292,7 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
+            deleted: false,
         }
     }
 
@@ -1401,6 +1433,68 @@ mod tests {
     }
 
     #[test]
+    fn deletion_flags_the_row_but_keeps_the_cached_content() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+
+        // A message we saw before it was deleted.
+        let mut original = msg("c1", 1);
+        original.content = "the original body".into();
+        assert!(s.insert_message(&original).unwrap());
+
+        // The deletion arrives as the SAME id with empty content + deleted = true.
+        let mut deletion = msg("c1", 1);
+        deletion.content = String::new();
+        deletion.deleted = true;
+        assert!(
+            s.insert_message(&deletion).unwrap(),
+            "the 0 -> 1 deletion transition counts as a change to broadcast"
+        );
+
+        let row = &s.newest_messages("c1", 10).unwrap()[0];
+        assert!(row.deleted, "the row is now flagged deleted");
+        assert_eq!(
+            row.content, "the original body",
+            "the cached content survives the deletion so it can be revealed"
+        );
+
+        // A repeat deletion frame is a no-op (already deleted, content unchanged).
+        assert!(!s.insert_message(&deletion).unwrap());
+    }
+
+    #[test]
+    fn deletion_of_an_unseen_message_is_a_tombstone() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+
+        // A deletion for a message we never stored: a tombstone, nothing to reveal.
+        let mut deletion = msg("c1", 1);
+        deletion.content = String::new();
+        deletion.deleted = true;
+        assert!(s.insert_message(&deletion).unwrap());
+
+        let row = &s.newest_messages("c1", 10).unwrap()[0];
+        assert!(row.deleted);
+        assert_eq!(row.content, "", "no prior content to reveal");
+    }
+
+    #[test]
+    fn an_empty_update_never_blanks_existing_content() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        let mut original = msg("c1", 1);
+        original.content = "keep me".into();
+        assert!(s.insert_message(&original).unwrap());
+
+        // An update carrying empty content (no deletion flag) must not wipe the
+        // stored body — it is treated as "this frame said nothing new".
+        let mut blank = msg("c1", 1);
+        blank.content = String::new();
+        assert!(!s.insert_message(&blank).unwrap());
+        assert_eq!(s.newest_messages("c1", 10).unwrap()[0].content, "keep me");
+    }
+
+    #[test]
     fn purge_removes_control_frames_only() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_conversation("c1", "Chat", 100).unwrap();
@@ -1417,6 +1511,7 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
+            deleted: false,
         };
 
         // Real chat messages that must survive — including one that merely mentions
@@ -1469,6 +1564,7 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
+            deleted: false,
         };
 
         // A legacy call-ended row stored as raw XML, a legacy meeting-thread JSON
@@ -1520,6 +1616,7 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
+            deleted: false,
         };
 
         // A finished recording (upgraded to a media card), an in-progress notice
@@ -1815,6 +1912,7 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
+            deleted: false,
         }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
@@ -1822,6 +1920,7 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
+            deleted: false,
         }).unwrap();
 
         // direct derivation
@@ -1843,6 +1942,7 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
+            deleted: false,
         }).unwrap();
         assert_eq!(s.other_party_name("dm", me).unwrap(), None);
         assert_eq!(s.conversations(me).unwrap()[0].display_name, "");
@@ -1858,18 +1958,18 @@ mod tests {
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: "8:orgid:me".into(), content: "salut".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(),        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false,        }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: "8:orgid:leonor".into(), content: "hello".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(),        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false,        }).unwrap();
 
         // A group: even though it has non-self senders, a group has no single face.
         s.upsert_conversation_full(&upd("grp", "Team chat", 400, ConversationKind::Group)).unwrap();
         s.insert_message(&Message {
             id: "g1".into(), conversation_id: "grp".into(), seq: 1, compose_time: 1,
             sender: "Grace HOPPER".into(), sender_mri: "8:orgid:grace".into(), content: "hi all".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(),        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false,        }).unwrap();
 
         let by_id = |id: &str| {
             s.conversations(me).unwrap().into_iter().find(|c| c.id == id).unwrap()
@@ -1889,6 +1989,7 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
+            deleted: false,
         }).unwrap();
 
         // backfill fills the empty MRI
@@ -1916,6 +2017,7 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
+            deleted: false,
         }).unwrap();
         // a message without attachments keeps the empty-array default
         s.insert_message(&Message {
@@ -1925,6 +2027,7 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
+            deleted: false,
         }).unwrap();
 
         let msgs = s.newest_messages("c1", 10).unwrap();

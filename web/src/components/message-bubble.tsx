@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Copy, MoreHorizontal, Pencil, Reply, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { Ban, Copy, Eye, EyeOff, MoreHorizontal, Pencil, Reply, X } from "lucide-react";
 import {
   copyableMessageText,
   parseRichMessage,
@@ -224,10 +225,19 @@ export function MessageBubble(props: {
     !bodyHasContent &&
     recordingAttachments.length === attachments.length;
 
+  // A message the sender has deleted on Teams. It always renders as a plain
+  // bubble (a muted "message deleted" placeholder), never as a bare image/link/
+  // recording surface — so the media-only treatments are suppressed below. It is
+  // revealable only when we cached the original before it was deleted (its body
+  // or an attachment survived in our store); a deletion we only ever saw as a
+  // tombstone has nothing to reveal.
+  const isDeleted = props.message.deleted === true;
+  const revealable = isDeleted && (bodyHasContent || hasAttachments);
+
   // Media- and link-only messages render without the standard rounded, colored
   // bubble — an image gets the atelier mat, a recording its video card, a link
-  // just its preview card.
-  const bare = linkOnly || imageOnly || recordingOnly;
+  // just its preview card. A deleted message keeps the standard bubble chrome.
+  const bare = !isDeleted && (linkOnly || imageOnly || recordingOnly);
 
   // Only label the first message of a same-author run; continuations are clearly
   // from the same person. A message with no sender (e.g. a meeting recording,
@@ -252,7 +262,8 @@ export function MessageBubble(props: {
     hoverTimer.current = null;
   };
   const openPickerSoon = () => {
-    if (props.editing || menuOpen) return;
+    // A deleted message has no reaction/actions affordances — the message is gone.
+    if (props.editing || menuOpen || isDeleted) return;
     clearHoverTimer();
     hoverTimer.current = setTimeout(() => setPickerOpen(true), REACTION_HOVER_MS);
   };
@@ -342,6 +353,7 @@ export function MessageBubble(props: {
         data-link-only={linkOnly ? "true" : undefined}
         data-image-only={imageOnly ? "true" : undefined}
         data-recording-only={recordingOnly ? "true" : undefined}
+        data-deleted={isDeleted ? "true" : undefined}
         className={cn(
           "relative text-sm leading-relaxed",
           // Media- and link-only messages drop the standard bubble chrome; the
@@ -354,7 +366,12 @@ export function MessageBubble(props: {
           !bare &&
             cn(
               "max-w-[76%] rounded-2xl px-3.5 py-2",
-              mine
+              // A deleted message drops the accent fill for a muted, dashed
+              // "ghost" bubble (the same on both sides) so it reads as absent
+              // rather than as a real message — until it is revealed.
+              isDeleted
+                ? "border border-dashed border-border bg-transparent text-text-dim shadow-none"
+                : mine
                 ? "bg-bubble-mine text-bubble-mine-foreground shadow-chip"
                 : "bg-bubble-incoming text-bubble-incoming-foreground shadow-card",
               // Chained messages (same author, adjacent) flatten the touching
@@ -370,11 +387,12 @@ export function MessageBubble(props: {
             "ring-2 ring-primary/70 ring-offset-2 ring-offset-background transition-shadow",
         )}
         onContextMenu={(e) => {
+          if (isDeleted) return; // no actions menu on a deleted message
           e.preventDefault();
           setMenuOpen(true);
         }}
       >
-        {!props.editing && pickerOpen && (
+        {!props.editing && !isDeleted && pickerOpen && (
           <div
             className={cn(
               // Float just above the bubble on the author's anchor side. The
@@ -409,6 +427,14 @@ export function MessageBubble(props: {
             onSave={(text) => props.onSaveEdit(props.message, text)}
             onCancel={props.onCancelEdit}
           />
+        ) : isDeleted ? (
+          // A deleted message: a muted placeholder that, when the original was
+          // cached, unveils it with an "invisible ink" reveal. No reaction chips,
+          // link cards, or actions menu — the message is gone; only its ghost (and
+          // optionally the cached text) remains.
+          <DeletedContent mine={mine} revealable={revealable}>
+            {mediaBody}
+          </DeletedContent>
         ) : (
           <>
             {linkOnly ? null : imageOnly ? (
@@ -502,6 +528,97 @@ export function MessageBubble(props: {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The body of a deleted message. Collapsed, it is a muted "Message supprimé"
+ * placeholder (a slashed icon + italic label). When the original was cached
+ * before the sender deleted it (`revealable`), a "Révéler" affordance unveils it
+ * with an "invisible ink" reveal — the text materializes out of a blur while a
+ * single accent shimmer sweeps across, echoing iMessage's hidden-message effect —
+ * and a "Masquer" control hides it again. Honors reduced-motion (the content just
+ * appears, no blur or shimmer). When there is nothing cached to reveal, only the
+ * placeholder shows.
+ */
+function DeletedContent(props: { mine: boolean; revealable: boolean; children: ReactNode }) {
+  const [revealed, setRevealed] = useState(false);
+  const [shimmerDone, setShimmerDone] = useState(false);
+  const reduce = useReducedMotion();
+
+  const reveal = () => {
+    setShimmerDone(false);
+    setRevealed(true);
+  };
+  const hide = () => setRevealed(false);
+
+  return (
+    <div data-testid="deleted-message" className="min-w-0">
+      <AnimatePresence mode="wait" initial={false}>
+        {revealed ? (
+          <motion.div
+            key="revealed"
+            className="min-w-0 text-foreground"
+            initial={reduce ? { opacity: 0 } : { opacity: 0, filter: "blur(12px)" }}
+            animate={reduce ? { opacity: 1 } : { opacity: 1, filter: "blur(0px)" }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: reduce ? 0.15 : 0.7, ease: [0.2, 0.65, 0.3, 0.9] }}
+          >
+            {/* The unveiled original, with a one-shot shimmer sweeping over it. */}
+            <div className="relative min-w-0">
+              {props.children}
+              {!reduce && !shimmerDone ? (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 overflow-hidden rounded-md"
+                >
+                  <motion.span
+                    className="absolute inset-y-0 -left-1/2 w-1/2 bg-gradient-to-r from-transparent via-primary/30 to-transparent"
+                    initial={{ x: "0%" }}
+                    animate={{ x: "400%" }}
+                    transition={{ duration: 0.9, ease: "easeInOut" }}
+                    onAnimationComplete={() => setShimmerDone(true)}
+                  />
+                </span>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              data-testid="deleted-hide"
+              onClick={hide}
+              className="mt-1 inline-flex items-center gap-1 text-xs text-text-dim transition-colors hover:text-foreground"
+            >
+              <EyeOff className="size-3" strokeWidth={1.6} />
+              Masquer
+            </button>
+          </motion.div>
+        ) : (
+          <motion.div
+            key="placeholder"
+            className="flex items-center gap-2"
+            initial={false}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+          >
+            <Ban className="size-3.5 shrink-0" strokeWidth={1.6} aria-hidden />
+            <span className="italic">
+              {props.mine ? "Vous avez supprimé ce message" : "Ce message a été supprimé"}
+            </span>
+            {props.revealable ? (
+              <button
+                type="button"
+                data-testid="deleted-reveal"
+                onClick={reveal}
+                className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-xs not-italic text-primary transition-colors hover:bg-primary/10"
+              >
+                <Eye className="size-3" strokeWidth={1.6} />
+                Révéler
+              </button>
+            ) : null}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

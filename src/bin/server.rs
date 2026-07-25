@@ -1272,7 +1272,8 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
         "system_event": system_event_value(m),
         "is_self": is_self(m, self_name, self_mri),
         "thread_root_id": m.thread_root_id,
-        "thread_subject": m.thread_subject
+        "thread_subject": m.thread_subject,
+        "deleted": m.deleted
     })
 }
 
@@ -1716,6 +1717,7 @@ mod tests {
             reactions: "[]".into(),
             system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
+            deleted: false,
         }
     }
 

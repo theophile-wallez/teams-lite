@@ -140,6 +140,11 @@ export type ChatMessage = {
   /** Team-channel only: the thread title (Teams `properties.subject`), present on
    *  the thread's ROOT post; empty on replies and on non-channel messages. */
   thread_subject?: string;
+  /** True when the sender has DELETED this message on Teams. The bubble renders a
+   *  "message deleted" placeholder instead of the body; when `content` is still
+   *  non-empty (we had cached the message before it was deleted), the placeholder
+   *  offers to reveal the original with an "invisible ink" unveil animation. */
+  deleted?: boolean;
 };
 
 export type ReplyTo = {
