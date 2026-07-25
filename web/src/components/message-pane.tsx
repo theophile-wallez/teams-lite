@@ -205,9 +205,21 @@ export function MessagePane(props: { onBack?: () => void }) {
     }
   }, [controller, hasMoreOlder, loadingOlder, virtualizer]);
 
+  // A deep-link scroll in flight for the open conversation. While one is pending
+  // the effect below owns paging, and the prefetch must stay out of its way.
+  const deepLinkPending = pendingScroll !== null && pendingScroll.convId === openId;
+
   const onScroll = () => {
     const el = viewportRef.current;
     if (!el) return;
+    // Never prefetch while a deep link is settling. Centering an off-screen row
+    // scrolls through a list whose off-window rows are still estimated, so the
+    // viewport can pass through the trigger zone on its way to the target —
+    // prepending a page there shifts every row index under the scroll, which
+    // re-targets the effect, which scrolls again: the jump can end up parked at
+    // the top of the history with the target never reached. The deep-link effect
+    // pages older itself, deliberately and with a budget, when it has to.
+    if (deepLinkPending) return;
     if (el.scrollTop < prependTriggerPx(el) && hasMoreOlder && !loadingOlder && !olderError) {
       void controller.loadOlderMessages();
     }
