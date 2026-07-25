@@ -62,7 +62,7 @@ function LinkFavicon({ href }: { href?: string }) {
   if (!host) return null;
   const showFavicon = loaded && !failed;
   return (
-    <span className="relative mr-1 inline-flex size-[1.1em] shrink-0 items-center justify-center overflow-hidden rounded-[0.28em] bg-white/95 align-[-0.22em] text-zinc-500 shadow-chip ring-1 ring-black/5">
+    <span className="relative mr-1 inline-flex size-[1.05em] shrink-0 items-center justify-center overflow-hidden rounded-[0.25em] bg-white/95 align-middle text-zinc-500 shadow-chip ring-1 ring-black/5">
       {/* Fallback globe — visible until (and unless) the favicon paints. */}
       <Globe
         className={cn("size-[0.72em] transition-opacity", showFavicon && "opacity-0")}
@@ -70,6 +70,7 @@ function LinkFavicon({ href }: { href?: string }) {
         aria-hidden
       />
       {!failed && (
+        // Fills the chip edge-to-edge — the favicon is the tile, no padding.
         <img
           src={`https://icons.duckduckgo.com/ip3/${encodeURIComponent(host)}.ico`}
           alt=""
@@ -79,7 +80,7 @@ function LinkFavicon({ href }: { href?: string }) {
           onLoad={() => setLoaded(true)}
           onError={() => setFailed(true)}
           className={cn(
-            "absolute size-[0.82em] object-contain transition-opacity",
+            "absolute inset-0 size-full object-cover transition-opacity",
             showFavicon ? "opacity-100" : "opacity-0",
           )}
         />
@@ -177,7 +178,12 @@ function renderNode(node: RichNode, key: number): JSX.Element | string | null {
           href={node.attrs.href}
           target="_blank"
           rel="noopener noreferrer"
-          className="underline underline-offset-2 hover:opacity-80"
+          // `break-all` makes a long, spaceless URL start filling the line
+          // right after the favicon rather than jumping to the next line whole
+          // (which strands the favicon alone above the text). `overflow-wrap`
+          // alone won't do this — it only breaks a word as a last resort, after
+          // first bumping it to a fresh line.
+          className="underline underline-offset-2 break-all hover:opacity-80"
         >
           <LinkFavicon href={node.attrs.href} />
           {children}
