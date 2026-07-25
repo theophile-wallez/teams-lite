@@ -238,6 +238,12 @@ export class TeamsController {
   private refreshChannels = coalesce(() => this.loadChannels());
   private refreshNotifications = coalesce(() => this.loadNotifications());
 
+  // Whether the connection has dropped since the last successful reconcile. Set
+  // when either the live feed (trouter) or the backend socket reports a drop,
+  // and consulted when we reconnect: a genuine recovery re-syncs, but the very
+  // first connect (no prior drop) does not. See `handleLiveRecovery`.
+  private connectionDropped = false;
+
   constructor(url: string = DEFAULT_WS_URL) {
     this.backend = new Backend(url);
   }
@@ -387,9 +393,32 @@ export class TeamsController {
     on("conversations_changed", () => void this.refreshConversations());
     on("channels_changed", () => void this.refreshChannels());
     on("notifications_changed", () => void this.refreshNotifications());
-    on("realtime_status", (s) => this.set({ live: s as LiveStatus }));
+    on("realtime_status", (s) => {
+      const status = s as LiveStatus;
+      if (status === "disconnected") this.connectionDropped = true;
+      this.set({ live: status });
+      // The live feed came back after a drop — reconcile what we may have missed
+      // while it was down (most importantly, a message deleted server-side).
+      if (status === "connected" && this.connectionDropped) {
+        this.connectionDropped = false;
+        void this.handleLiveRecovery();
+      }
+    });
     on("update_available", (u) => this.set({ update: u as UpdateInfo }));
-    on("disconnected", () => this.set({ live: "disconnected" }));
+    on("disconnected", () => {
+      this.connectionDropped = true;
+      this.set({ live: "disconnected" });
+    });
+    // The backend socket came back (the backend itself, unlike the live feed, may
+    // not re-announce a `realtime_status` when only the browser↔backend link
+    // blipped) — treat it as a recovery and reconcile the same way.
+    on("reconnected", () => {
+      this.set({ live: "connected" });
+      if (this.connectionDropped) {
+        this.connectionDropped = false;
+        void this.handleLiveRecovery();
+      }
+    });
     on("backend_lost", () =>
       this.set({
         live: "disconnected",
@@ -799,6 +828,42 @@ export class TeamsController {
       this.set({ status: `open error: ${errText(e)}` });
     } finally {
       if (this.get().openId === id) this.set({ loadingMessages: false });
+    }
+  }
+
+  /** Re-sync after the connection recovers from a drop. While disconnected we may
+   *  have missed live updates — most importantly a message being deleted (Teams
+   *  sends deletions as a `MessageUpdate`, which never arrives while the feed is
+   *  down, so a since-deleted message would otherwise stay visible until the next
+   *  manual re-open). Reconcile the open conversation against the server's newest
+   *  page and refresh the sidebar lists so their previews/ordering catch up.
+   *  Best-effort and guarded on `ready` so it never races startup. */
+  private async handleLiveRecovery(): Promise<void> {
+    if (!this.get().ready) return;
+    const openId = this.get().openId;
+    if (openId) void this.reconcileOpen(openId);
+    void this.refreshConversations();
+    void this.refreshChannels();
+  }
+
+  /** Re-fetch a conversation's newest page and reconcile it into the cache and (if
+   *  still open) the view — without the disruptive parts of `openConversation` (no
+   *  draft swap, no reply reset, no loading flash). Used on live-feed recovery to
+   *  pull in changes missed while disconnected. The backend's `open` re-persists
+   *  the newest page, flipping a since-deleted message's `deleted` flag, and the
+   *  merge (replacing by id) swaps the stale bubble for its tombstone. */
+  private async reconcileOpen(id: string): Promise<void> {
+    try {
+      const res = await this.backend.open(id);
+      const history = mergeRefreshedHistoryPage(this.messageCache.get(id), res);
+      this.messageCache.set(id, history);
+      if (this.get().openId === id) {
+        this.set({ messages: history.messages, hasMoreOlder: history.has_more });
+      }
+      // Read positions may also have advanced while we were away.
+      void this.loadReadReceipts(id);
+    } catch {
+      // Best-effort — a later live event or manual re-open will reconcile.
     }
   }
 

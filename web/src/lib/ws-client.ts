@@ -48,6 +48,10 @@ export class Backend {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnecting = false;
   private closed = false;
+  // Whether a socket has ever opened. Lets `onopen` tell the FIRST connect apart
+  // from a reconnect, so it emits `reconnected` only on the latter — the signal
+  // the store uses to re-sync state that may have drifted while we were away.
+  private everConnected = false;
   private firstFailureAt: number | null = null;
   private readonly giveUpMs: number;
   private readonly initialDelayMs: number;
@@ -96,6 +100,11 @@ export class Backend {
       this.firstFailureAt = null;
       this.reconnecting = false;
       settled = true;
+      // A reopen (not the first connect) means we dropped and came back: the
+      // backend is live again but our state may have drifted while offline.
+      // Signal it so the store can reconcile; the first connect stays silent.
+      if (this.everConnected) this.emit("reconnected", {});
+      this.everConnected = true;
       onOpen?.();
     };
     ws.onerror = () => {

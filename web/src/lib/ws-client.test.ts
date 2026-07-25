@@ -289,4 +289,26 @@ describe("Backend reconnect", () => {
 
     backend.close();
   });
+
+  it("emits reconnected on a reopen but stays silent on the first connect", async () => {
+    const backend = new Backend("ws://test", { giveUpMs: 10_000, initialDelayMs: 50 });
+    let reconnects = 0;
+    backend.on("reconnected", () => {
+      reconnects += 1;
+    });
+
+    // First open: this is the initial connect, not a recovery.
+    const promise = backend.connect();
+    FakeWebSocket.last().simulateOpen();
+    await promise;
+    expect(reconnects).toBe(0);
+
+    // Drop, let the backoff fire a fresh socket, and open it — now it's a reopen.
+    FakeWebSocket.last().simulateClose();
+    vi.advanceTimersByTime(50);
+    FakeWebSocket.last().simulateOpen();
+    expect(reconnects).toBe(1);
+
+    backend.close();
+  });
 });
