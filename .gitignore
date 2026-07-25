@@ -6,3 +6,6 @@
 # git worktree copies created for parallel sessions
 .worktrees/
 
+
+# Working notes/audits kept out of the repo (see the file header).
+/TODO*.md
