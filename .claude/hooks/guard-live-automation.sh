@@ -159,8 +159,11 @@ launched by tooling is how an accidental message reaches a colleague:
 
   TEAMS_LITE_READ_ONLY=1 cargo run --bin server
 
-That refuses send/edit/react at the dispatch choke point (src/bin/server.rs). If you
-genuinely need a send-capable backend, ask the user to start it themselves."
+That refuses send/edit/react at the dispatch choke point (src/bin/server.rs) AND
+listens on 8430 instead of 8420, so it never takes the port the user's own backend
+wants — they can keep \`teams-back\`/\`teams-web\` running while you inspect real data
+on ws://127.0.0.1:8430. If you genuinely need a send-capable backend, ask the user
+to start it themselves."
   fi
 fi
 

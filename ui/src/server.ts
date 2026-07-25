@@ -7,7 +7,11 @@ import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const PORT = 8420;
+/// The backend's port. `TEAMS_LITE_PORT` is honored so this UI can own a backend
+/// on a port of its own — the same variable the Rust server reads (see
+/// `resolve_port` in src/bin/server.rs), which is also how a read-only backend
+/// steps aside to 8430 instead of taking the port the real one wants.
+const PORT = Number(process.env.TEAMS_LITE_PORT) || 8420;
 const HOST = "127.0.0.1";
 
 /// Are we running as a `bun build --compile` standalone binary? In that mode the

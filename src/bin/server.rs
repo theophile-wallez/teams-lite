@@ -48,7 +48,16 @@ use teams_lite::{
 };
 use teams_lite::gitlab;
 
-const ADDR: &str = "127.0.0.1:8420";
+/// The port the user's own backend owns: what `teams`, `teams-web` and the TUI
+/// dial by default.
+const DEFAULT_PORT: u16 = 8420;
+/// Where a READ-ONLY backend listens instead, unless `TEAMS_LITE_PORT` says
+/// otherwise. A separate port by default so a read-only instance — the one tooling
+/// is allowed to start — can never take the port the real one wants, and the two
+/// can run side by side: the user keeps their live app on 8420 while an agent
+/// inspects real data on 8430. They share the SQLite store safely (WAL +
+/// busy_timeout, see `store::Store::open`).
+const READ_ONLY_PORT: u16 = 8430;
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) teams-lite/0.1";
 /// Give the UI ample time to connect after the server becomes ready. Authentication
@@ -85,6 +94,28 @@ const OUTWARD_METHODS: [&str; 3] = ["send", "edit", "react"];
 fn read_only() -> bool {
     static READ_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *READ_ONLY.get_or_init(|| std::env::var("TEAMS_LITE_READ_ONLY").as_deref() == Ok("1"))
+}
+
+/// Resolve the port to listen on: an explicit `TEAMS_LITE_PORT` wins, else
+/// read-only mode moves aside to {@link READ_ONLY_PORT} and a normal backend takes
+/// {@link DEFAULT_PORT}.
+///
+/// Pure (both inputs injected) so the precedence is unit-tested.
+fn resolve_port(configured: Option<&str>, read_only: bool) -> u16 {
+    if let Some(port) = configured.and_then(|v| v.trim().parse::<u16>().ok()).filter(|p| *p > 0) {
+        return port;
+    }
+    if read_only {
+        READ_ONLY_PORT
+    } else {
+        DEFAULT_PORT
+    }
+}
+
+/// The address this process binds, from the environment.
+fn bind_addr() -> String {
+    let configured = std::env::var("TEAMS_LITE_PORT").ok();
+    format!("127.0.0.1:{}", resolve_port(configured.as_deref(), read_only()))
 }
 
 /// Environment variable a launcher can use to pin the write token itself (rather
@@ -546,8 +577,9 @@ async fn main() -> Result<()> {
     // one-shot, best-effort: is a newer rolling `latest` build available?
     spawn_update_check(ctx.clone());
 
-    let listener = TcpListener::bind(ADDR).await.with_context(|| format!("bind {ADDR}"))?;
-    eprintln!("[ok] server ws://{ADDR} — ready");
+    let addr = bind_addr();
+    let listener = TcpListener::bind(&addr).await.with_context(|| format!("bind {addr}"))?;
+    eprintln!("[ok] server ws://{addr} — ready");
     // Say which write policy is in force, and where a frontend can pick up the
     // token — never the token itself (it must not land in a log or a scrollback).
     match write_token() {
@@ -2074,6 +2106,22 @@ mod tests {
         let params = json!({ "conversation": "c1", "write_token": "tok" });
         let err = check_write_allowed("send", &params, None).expect_err("read-only must refuse");
         assert!(err.contains("read-only"), "{err}");
+    }
+
+    #[test]
+    fn read_only_listens_on_its_own_port_so_it_never_takes_the_real_one() {
+        assert_eq!(resolve_port(None, false), DEFAULT_PORT);
+        assert_eq!(resolve_port(None, true), READ_ONLY_PORT);
+        assert_ne!(READ_ONLY_PORT, DEFAULT_PORT);
+    }
+
+    #[test]
+    fn an_explicit_port_wins_over_both_defaults() {
+        assert_eq!(resolve_port(Some("8500"), true), 8500);
+        assert_eq!(resolve_port(Some(" 8500 "), false), 8500);
+        // Junk falls back to the mode's default rather than panicking.
+        assert_eq!(resolve_port(Some("nope"), false), DEFAULT_PORT);
+        assert_eq!(resolve_port(Some("0"), true), READ_ONLY_PORT);
     }
 
     #[test]

@@ -71,7 +71,12 @@ user. Two independent mechanisms enforce that split:
   backend in dev (see `defaultWsUrl` in `web/src/lib/ws-client.ts`).
 - **Start the backend read-only, or let the user start it.**
   `TEAMS_LITE_READ_ONLY=1` refuses `send`/`edit`/`react` at the dispatch choke
-  point (`src/bin/server.rs`).
+  point (`src/bin/server.rs`) *and* binds **8430** instead of 8420, so it never
+  competes for the port the user's own backend owns. The two run side by side on
+  the same SQLite store (WAL): the user keeps `teams-back` + `teams-web` on 8420
+  while you read real data on `ws://127.0.0.1:8430` — point a client at it with
+  `VITE_TEAMS_WS_URL=ws://127.0.0.1:8430`. `TEAMS_LITE_PORT` overrides either
+  default.
 - **Check the port before running the E2E suite.** Its mock defaults to 8420 — the
   real backend's port — and `reuseExistingServer` is on outside CI, so a running
   dev backend gets "reused" and the specs send for real. `e2e/global-setup.ts`
