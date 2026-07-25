@@ -143,6 +143,9 @@ const MAX_LABELS = 4;
  * author, branches, milestone, labels, and a short description, and is itself the
  * clickable link to the resource. Enrichment (and its caching) is owned by the
  * caller (see MessageBubble), so this component is pure and always renders.
+ *
+ * The card spans its container: alongside text it fills the bubble's width so it
+ * lines up with the message body, and on its own the bubble's cap sizes it.
  */
 export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
   const meta = props.metadata;
@@ -161,7 +164,7 @@ export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
       rel="noopener noreferrer"
       data-testid="gitlab-link-card"
       data-kind={meta.kind}
-      className="block max-w-md rounded-xl bg-card px-3 py-2.5 text-foreground shadow-chip transition-shadow hover:shadow-card"
+      className="block w-full rounded-xl bg-card px-3 py-2.5 text-foreground shadow-chip transition-shadow hover:shadow-card"
     >
       <div className="flex items-start gap-2.5">
         <Icon
