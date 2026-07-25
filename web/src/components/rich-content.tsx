@@ -1,10 +1,11 @@
-import { useMemo, useState, type JSX } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Globe } from "lucide-react";
 import { dropLinks, hasVisibleContent, parseRichHtml, type RichNode } from "~/lib/rich-text";
 import type { MessageMention } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { MediaImage } from "./media-image";
 import { PersonHoverCard } from "./person-card";
+import { renderSparkleWords } from "./sparkle-word";
 
 /**
  * Renders a Teams HTML fragment as safe React elements. The HTML is parsed into
@@ -101,14 +102,20 @@ function LinkFavicon({ href }: { href?: string }) {
   );
 }
 
+/**
+ * @param verbatim Inside a `code`/`pre` subtree, where text is shown exactly as
+ * written — no easter-egg decoration (see {@link renderSparkleWords}).
+ */
 function renderNode(
   node: RichNode,
   key: number,
   mentions?: Map<number, MessageMention>,
-): JSX.Element | string | null {
-  if (node.type === "text") return node.text;
+  verbatim = false,
+): ReactNode {
+  if (node.type === "text") return verbatim ? node.text : renderSparkleWords(node.text, key);
 
-  const children = node.children.map((child, i) => renderNode(child, i, mentions));
+  const isVerbatim = verbatim || node.tag === "code" || node.tag === "pre";
+  const children = node.children.map((child, i) => renderNode(child, i, mentions, isVerbatim));
 
   switch (node.tag) {
     case "br":
