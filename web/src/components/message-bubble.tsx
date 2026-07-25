@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Ban, Copy, Eye, EyeOff, MoreHorizontal, Pencil, Reply, X } from "lucide-react";
+import { Ban, Copy, Eye, EyeOff, MoreHorizontal, Pencil, Reply } from "lucide-react";
 import {
   copyableMessageText,
   mentionsByItemId,
@@ -38,6 +38,15 @@ import { useAppState, useController } from "./controller-context";
  *  reaction bar — long enough that merely passing the cursor over a message
  *  doesn't flash it, short enough to feel responsive. */
 const REACTION_HOVER_MS = 350;
+
+/** Room reserved below a bubble that carries reactions. The chip row straddles
+ *  the bubble's bottom edge — a third of a pill inside it, the rest hanging out
+ *  (see {@link ReactionChips}) — and is positioned absolutely, so it takes no
+ *  layout space of its own. This margin is that overhang (~17px of a 26px pill)
+ *  plus enough air that the chips read as belonging to their own message rather
+ *  than crowding whatever follows: the next message, or this message's "seen by"
+ *  line. */
+const REACTION_OVERHANG = "mb-6";
 
 /** Resolved enrichment for a set of links, keyed by URL: `undefined` while a
  *  lookup is in flight, `null` when the link is not an enrichable integration,
@@ -267,6 +276,9 @@ function MessageBubbleImpl(props: {
   // highlights our chip and lets a click on it toggle the reaction off.
   const reactions = props.message.reactions ?? [];
   const myReactionKey = reactions.find((r) => r.mine)?.key;
+  // Chips only show on a live, non-edited message, so only then is there an
+  // overhang to reserve room for.
+  const chipsShown = reactions.length > 0 && !props.editing && !isDeleted;
 
   // Hover reaction picker: revealed after a short dwell, dismissed on leave. The
   // whole bubble row is the hover target; the picker floats just above it and,
@@ -365,6 +377,8 @@ function MessageBubbleImpl(props: {
         // Tighten the spacing within a same-author run; keep a wider gap between
         // different authors.
         props.continuesAbove ? "mt-0.5" : "mt-2",
+        // Reactions hang below the bubble — grow the gap so they have room.
+        chipsShown && REACTION_OVERHANG,
       )}
     >
       <div
@@ -482,7 +496,7 @@ function MessageBubbleImpl(props: {
               </div>
             ) : null}
 
-            {reactions.length > 0 ? (
+            {chipsShown ? (
               <ReactionChips reactions={reactions} mine={mine} onToggle={react} />
             ) : null}
 
@@ -649,11 +663,12 @@ function DeletedContent(props: { mine: boolean; revealable: boolean; children: R
  * both as the floating hover picker and as the reaction bar at the top of the ⋯
  * menu. The caller supplies chrome via `className` (a translucent, frosted
  * rounded bar for the hover picker; flat inside the menu). `activeKey` marks our
- * current reaction with a distinct highlight so re-picking it reads as "remove".
+ * current reaction with a distinct highlight; clicking it removes the reaction,
+ * which the highlight and the label ("Remove … reaction") already say — no extra
+ * badge needed on top of the emoji.
  *
- * `floating` (the hover picker) adds the pop-scale on hover and, on our active
- * emoji, a small × badge on hover to signal that clicking removes the reaction —
- * effects that would be clipped inside the menu's `overflow-hidden` surface.
+ * `floating` (the hover picker) adds the pop-scale on hover, which would be
+ * clipped inside the menu's `overflow-hidden` surface.
  */
 function ReactionPicker(props: {
   onPick: (key: string) => void;
@@ -681,22 +696,12 @@ function ReactionPicker(props: {
             data-testid={`reaction-option-${key}`}
             onClick={() => props.onPick(key)}
             className={cn(
-              "group/opt relative grid size-7 place-items-center rounded-full text-base leading-none transition-transform",
+              "grid size-7 place-items-center rounded-full text-base leading-none transition-transform",
               props.floating && "hover:scale-125",
-              active
-                ? "bg-primary/20 ring-1 ring-inset ring-primary/50"
-                : "hover:bg-accent",
+              active ? "bg-primary/20 ring-1 ring-inset ring-primary/50" : "hover:bg-accent",
             )}
           >
             <span aria-hidden>{emoji}</span>
-            {props.floating && active ? (
-              <span
-                aria-hidden
-                className="pointer-events-none absolute -right-1 -top-1 grid size-3.5 place-items-center rounded-full bg-destructive text-destructive-foreground opacity-0 shadow-sm transition-opacity group-hover/opt:opacity-100"
-              >
-                <X className="size-2.5" strokeWidth={3} />
-              </span>
-            ) : null}
           </button>
         );
       })}
@@ -705,10 +710,18 @@ function ReactionPicker(props: {
 }
 
 /**
- * The reaction chips shown under a message: one per emotion with a count, our
- * own reaction highlighted. Clicking a chip toggles that reaction (removing ours
- * when it is already ours, otherwise adding/replacing it). Aligned to the
- * author's side so it reads as belonging to the bubble.
+ * The reaction chips of a message: one pill per emotion with a count, our own
+ * reaction highlighted. Clicking a chip toggles that reaction (removing ours
+ * when it is already ours, otherwise adding/replacing it).
+ *
+ * Placed the way Messenger and Teams place theirs: the row *straddles* the
+ * bubble's bottom edge on the author's side — about a third of a pill tucked
+ * inside the bubble, the remaining two thirds hanging below it — so the
+ * reactions read as attached to the message without eating into its text. It is
+ * absolutely positioned so it never widens the bubble; the bubble row reserves
+ * the overhang below itself instead (see {@link REACTION_OVERHANG}). That
+ * straddling is also why the pills carry an opaque fill and a drop shadow: they
+ * sit *on top of* the bubble's edge rather than beside it.
  */
 function ReactionChips(props: {
   reactions: Reaction[];
@@ -718,7 +731,13 @@ function ReactionChips(props: {
   return (
     <div
       data-testid="message-reactions"
-      className={cn("mt-1 flex flex-wrap gap-1", props.mine ? "justify-end" : "justify-start")}
+      className={cn(
+        // `top-full` + `-translate-y-1/3` puts a third of the row's height back
+        // inside the bubble; `w-max` lets it extend outward from its anchored
+        // side instead of being folded into the bubble's width.
+        "absolute top-full z-10 flex w-max -translate-y-1/3 items-center gap-1",
+        props.mine ? "right-2" : "left-2",
+      )}
     >
       {props.reactions.map((r) => (
         <button
@@ -730,14 +749,18 @@ function ReactionChips(props: {
           aria-label={`${r.mine ? "Remove your" : "Add"} ${r.key} reaction`}
           onClick={() => props.onToggle(r.key)}
           className={cn(
-            "flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs leading-none transition-colors",
+            "flex cursor-pointer items-center gap-1 rounded-full border px-2 py-1 leading-none shadow-card transition-colors",
             r.mine
-              ? "border-primary/50 bg-primary/15 text-foreground"
-              : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground",
+              ? "border-primary/40 bg-reaction-chip-mine text-foreground"
+              : "border-reaction-chip-border bg-reaction-chip text-muted-foreground hover:bg-accent hover:text-foreground",
           )}
         >
-          <span aria-hidden>{reactionEmoji(r.key)}</span>
-          <span className="tabular-nums">{r.count}</span>
+          {/* Emoji at message-text size (not label size) — the reaction, not its
+              count, is what the eye should land on. */}
+          <span aria-hidden className="text-base leading-none">
+            {reactionEmoji(r.key)}
+          </span>
+          <span className="text-[11px] font-medium tabular-nums">{r.count}</span>
         </button>
       ))}
     </div>

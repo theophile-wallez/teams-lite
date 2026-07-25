@@ -74,6 +74,15 @@
   --sender-name: #3849dc; /* indigo-600 for legibility on white */
   --sender-name-mine: rgba(255, 255, 255, 0.92);
 
+  /* Reaction pills straddle the bubble's bottom edge, so their fill must be
+   * opaque — a translucent one would let the bubble's edge show through the
+   * chip. `-mine` is the same pill tinted toward the accent. */
+  --reaction-chip: #ffffff;
+  --reaction-chip-mine: #eceffc;
+  /* Crisper than `--border`: the neutral pill is white on a white incoming
+   * bubble, so its edge is the only thing separating the two. */
+  --reaction-chip-border: #dedee3;
+
   /* Image-only messages sit on a soft "atelier" mat — one neutral surface for
    * both sides — with a barely-there diagonal hatch showing at the picture's
    * padded edges, framing a lone image like a matted print. */
@@ -144,6 +153,10 @@
   --quote-text-incoming: #a1a1a1;
   --sender-name: #97a2fc; /* indigo-300 */
   --sender-name-mine: rgba(255, 255, 255, 0.92);
+
+  --reaction-chip: #2e2e2e;
+  --reaction-chip-mine: #3a4180;
+  --reaction-chip-border: #3d3d3d;
 
   --image-mat: #242424;
   --image-mat-line: rgba(255, 255, 255, 0.055);

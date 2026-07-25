@@ -69,6 +69,9 @@
   --color-quote-text-incoming: var(--quote-text-incoming);
   --color-sender-name: var(--sender-name);
   --color-sender-name-mine: var(--sender-name-mine);
+  --color-reaction-chip: var(--reaction-chip);
+  --color-reaction-chip-mine: var(--reaction-chip-mine);
+  --color-reaction-chip-border: var(--reaction-chip-border);
 
   /* Elevation — shadow-as-border utilities (shadow-chip / -card / -pop). */
   --shadow-chip: var(--elev-chip);
