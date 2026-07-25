@@ -109,7 +109,7 @@ export function Composer(props: { focusToken: unknown }) {
       {replyingTo && (
         <div
           data-testid="reply-banner"
-          className="mb-2 flex items-start gap-2 rounded-xl border-l-2 border-primary bg-card px-3 py-2 shadow-chip"
+          className="mb-2 flex items-start gap-2 rounded-xl border-l-2 border-primary bg-card px-3 py-2 shadow-chip animate-in fade-in slide-in-from-bottom-1 duration-150 ease-out"
         >
           <div className="min-w-0 flex-1">
             <div className="text-xs font-semibold text-primary">

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronLeft, ChevronRight, Loader2, MessagesSquare, WifiOff } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, MessagesSquare, WifiOff } from "lucide-react";
 import {
   channelLabel,
   computeReadReceiptAnchors,
@@ -18,6 +18,7 @@ import { groupThreads, type Thread } from "~/lib/threads";
 import { Composer } from "./composer";
 import { TypingIndicator } from "./typing-indicator";
 import { Button } from "./ui/button";
+import { cn } from "~/lib/utils";
 
 // Start prefetching older history well before the user reaches the very top, so
 // pages stream in off-screen and a gap in the backlog is rarely perceived. The
@@ -438,7 +439,6 @@ function ThreadGroup(props: {
 }) {
   const { thread, expanded, onToggle, renderMsg } = props;
   const { subject, lead, replies } = thread;
-  const Chevron = expanded ? ChevronDown : ChevronRight;
   return (
     <div className="mb-3 rounded-2xl border border-border-subtle/60 bg-element/20 px-2 py-2">
       {subject && (
@@ -454,11 +454,14 @@ function ThreadGroup(props: {
             data-testid="thread-toggle"
             className="mt-1 flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
           >
-            <Chevron className="size-3.5" strokeWidth={1.8} />
+            <ChevronRight
+              className={cn("size-3.5 transition-transform duration-200 ease-out", expanded && "rotate-90")}
+              strokeWidth={1.8}
+            />
             {replies.length} {replies.length === 1 ? "reply" : "replies"}
           </button>
           {expanded && (
-            <div className="mt-1 border-l-2 border-border-subtle/60 pl-2">
+            <div className="mt-1 border-l-2 border-border-subtle/60 pl-2 animate-in fade-in slide-in-from-top-1 duration-200 ease-out">
               {replies.map((r, i) => renderMsg(r, replies[i - 1], replies[i + 1]))}
             </div>
           )}

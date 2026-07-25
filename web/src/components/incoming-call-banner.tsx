@@ -1,4 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Phone, X } from "lucide-react";
 import { incomingCallTitle, type Channel, type Conversation, type IncomingCall } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
@@ -18,12 +19,17 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
  */
 export function IncomingCallBanner() {
   const calls = useAppState((s) => s.incomingCalls);
-  if (calls.length === 0) return null;
+  // Always render the (empty, pointer-events-none) container so AnimatePresence
+  // stays mounted — otherwise dismissing the last call unmounts it before the
+  // exit animation can play, and the common single-call case would pop out with
+  // no transition at all.
   return (
     <div className="pointer-events-none fixed inset-x-0 top-4 z-[90] flex flex-col items-center gap-2 px-4">
-      {calls.map((call) => (
-        <IncomingCallCard key={call.conversationId} call={call} />
-      ))}
+      <AnimatePresence>
+        {calls.map((call) => (
+          <IncomingCallCard key={call.conversationId} call={call} />
+        ))}
+      </AnimatePresence>
     </div>
   );
 }
@@ -48,6 +54,7 @@ function IncomingCallCard(props: { call: IncomingCall }) {
   const { call } = props;
   const controller = useController();
   const navigate = useNavigate();
+  const reduce = useReducedMotion();
   const conversations = useAppState((s) => s.conversations);
   const channels = useAppState((s) => s.channels);
 
@@ -59,11 +66,15 @@ function IncomingCallCard(props: { call: IncomingCall }) {
   };
 
   return (
-    <div
+    <motion.div
       data-testid="incoming-call-banner"
       data-conversation-id={call.conversationId}
       role="alert"
-      className="pointer-events-auto flex w-full max-w-sm flex-col gap-3 rounded-2xl border border-border bg-card p-4 shadow-pop duration-200 animate-in fade-in slide-in-from-top-2"
+      initial={{ opacity: 0, y: reduce ? 0 : -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: reduce ? 0 : -8 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
+      className="pointer-events-auto flex w-full max-w-sm flex-col gap-3 rounded-2xl border border-border bg-card p-4 shadow-pop"
     >
       <div className="flex items-center gap-3">
         <span className="grid size-10 shrink-0 place-items-center rounded-full bg-success/10 text-success">
@@ -115,6 +126,6 @@ function IncomingCallCard(props: { call: IncomingCall }) {
           Open chat
         </Button>
       </div>
-    </div>
+    </motion.div>
   );
 }

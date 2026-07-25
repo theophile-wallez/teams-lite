@@ -205,7 +205,7 @@ function GitLabSettings() {
           {save.kind === "saved" && (
             <span
               data-testid="gitlab-save-status"
-              className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400"
+              className="flex items-center gap-1 text-xs text-emerald-600 animate-in fade-in-0 zoom-in-95 duration-200 ease-out dark:text-emerald-400"
             >
               <Check className="size-3.5" strokeWidth={2} /> Saved
             </span>
