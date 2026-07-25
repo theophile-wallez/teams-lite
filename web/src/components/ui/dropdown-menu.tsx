@@ -9,15 +9,20 @@ export const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
  * A menu that opens anchored to its trigger (not a centered modal), portaled to
  * the body so it escapes overflow/stacking contexts. Styling mirrors the app's
  * popover surfaces (bg-popover + shadow-pop) and the floating rich-text menu.
+ *
+ * `collisionPadding` keeps a wide menu that gets shifted back into view (a
+ * trigger near a window edge) from ending up flush against that edge — Radix
+ * pads by 0 by default, which reads as the panel being glued to the window.
  */
 export const DropdownMenuContent = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
->(({ className, sideOffset = 6, ...props }, ref) => (
+>(({ className, sideOffset = 6, collisionPadding = 12, ...props }, ref) => (
   <DropdownMenuPrimitive.Portal>
     <DropdownMenuPrimitive.Content
       ref={ref}
       sideOffset={sideOffset}
+      collisionPadding={collisionPadding}
       className={cn(
         "z-50 min-w-[9rem] overflow-hidden rounded-xl bg-popover p-1 shadow-pop",
         "origin-[var(--radix-dropdown-menu-content-transform-origin)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
