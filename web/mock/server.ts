@@ -1041,7 +1041,7 @@ function seedDeletedMessages(): void {
   };
 
   push(
-    { sender: other.name, sender_mri: other.mri, content: escapeHtml("Merci!"), is_self: false },
+    { sender: other.name, sender_mri: other.mri, content: escapeHtml("Thanks!"), is_self: false },
     0,
   );
   // A message the sender deleted, but which we had already cached — its original
@@ -1050,7 +1050,7 @@ function seedDeletedMessages(): void {
     {
       sender: other.name,
       sender_mri: other.mri,
-      content: escapeHtml("Déso j'ai du décaler notre point de prepa sprint je suis en interview et ça va déborder"),
+      content: escapeHtml("Sorry, I had to move our sprint prep — I'm in an interview and it's running over"),
       is_self: false,
       deleted: true,
     },
@@ -1061,7 +1061,7 @@ function seedDeletedMessages(): void {
     {
       sender: SELF_NAME,
       sender_mri: SELF_MRI,
-      content: escapeHtml("Oups, message envoyé trop vite 😅"),
+      content: escapeHtml("Oops, sent that too soon 😅"),
       is_self: true,
       deleted: true,
     },
@@ -1074,7 +1074,7 @@ function seedDeletedMessages(): void {
     180_000,
   );
   push(
-    { sender: other.name, sender_mri: other.mri, content: escapeHtml("Pas de souci, on cale ça demain 👍"), is_self: false },
+    { sender: other.name, sender_mri: other.mri, content: escapeHtml("No worries, let's lock it in tomorrow 👍"), is_self: false },
     240_000,
   );
 

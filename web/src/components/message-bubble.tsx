@@ -544,12 +544,12 @@ export function MessageBubble(props: {
 }
 
 /**
- * The body of a deleted message. Collapsed, it is a muted "Message supprimé"
+ * The body of a deleted message. Collapsed, it is a muted "Message deleted"
  * placeholder (a slashed icon + italic label). When the original was cached
- * before the sender deleted it (`revealable`), a "Révéler" affordance unveils it
+ * before the sender deleted it (`revealable`), a "Reveal" affordance unveils it
  * with an "invisible ink" reveal — the text materializes out of a blur while a
  * single accent shimmer sweeps across, echoing iMessage's hidden-message effect —
- * and a "Masquer" control hides it again. Honors reduced-motion (the content just
+ * and a "Hide" control hides it again. Honors reduced-motion (the content just
  * appears, no blur or shimmer). When there is nothing cached to reveal, only the
  * placeholder shows.
  */
@@ -601,7 +601,7 @@ function DeletedContent(props: { mine: boolean; revealable: boolean; children: R
               className="mt-1 inline-flex items-center gap-1 text-xs text-text-dim transition-colors hover:text-foreground"
             >
               <EyeOff className="size-3" strokeWidth={1.6} />
-              Masquer
+              Hide
             </button>
           </motion.div>
         ) : (
@@ -614,7 +614,7 @@ function DeletedContent(props: { mine: boolean; revealable: boolean; children: R
           >
             <Ban className="size-3.5 shrink-0" strokeWidth={1.6} aria-hidden />
             <span className="italic">
-              {props.mine ? "Vous avez supprimé ce message" : "Ce message a été supprimé"}
+              {props.mine ? "You deleted this message" : "This message was deleted"}
             </span>
             {props.revealable ? (
               <button
@@ -624,7 +624,7 @@ function DeletedContent(props: { mine: boolean; revealable: boolean; children: R
                 className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-xs not-italic text-primary transition-colors hover:bg-primary/10"
               >
                 <Eye className="size-3" strokeWidth={1.6} />
-                Révéler
+                Reveal
               </button>
             ) : null}
           </motion.div>
