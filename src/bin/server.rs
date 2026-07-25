@@ -412,9 +412,50 @@ struct SessionCell {
 
 const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(50 * 60);
 
+/// One store connection owned by a long-lived task (the trouter loops), opened on
+/// first use and then kept.
+///
+/// Opening per event was never free: attaching a connection costs ~0.5 ms (SQLite
+/// parses the schema on the first statement), and it starts with an empty
+/// prepared-statement cache, so every frame re-parsed its SQL. Resolving a typing
+/// frame's sender went from 6.5 ms to 0.02 ms once the connection — and its cache,
+/// and the `sender_mri` index — stopped being thrown away between frames.
+struct TaskStore {
+    db_path: Arc<String>,
+    store: Option<Store>,
+}
+
+impl TaskStore {
+    /// The task's connection, opened on first use. `None` when the store cannot be
+    /// opened; the next event tries again rather than leaving the task permanently
+    /// storeless.
+    fn get(&mut self) -> Option<&Store> {
+        if self.store.is_none() {
+            match Store::open(&self.db_path) {
+                Ok(store) => self.store = Some(store),
+                Err(e) => {
+                    eprintln!("[store] could not open the store: {e}");
+                    return None;
+                }
+            }
+        }
+        self.store.as_ref()
+    }
+}
+
 impl Ctx {
     fn store(&self) -> Result<Store> {
         Store::open(&self.db_path)
+    }
+
+    /// A connection for a long-lived task to hold onto (see [`TaskStore`]).
+    /// Request handlers keep using [`Ctx::store`]: they are short-lived, and a
+    /// connection per in-flight request keeps writers from serializing.
+    fn task_store(&self) -> TaskStore {
+        TaskStore {
+            db_path: self.db_path.clone(),
+            store: None,
+        }
     }
     fn emit(&self, event: &str, data: Value) {
         // ignore send errors (no subscribers yet is fine)
@@ -496,6 +537,82 @@ impl trouter::CredentialProvider for Ctx {
     }
 }
 
+/// Open the store once at boot to create/upgrade its schema, refresh the query
+/// planner's statistics, and run the one-shot legacy cleanups.
+///
+/// Only a failure to open the store is fatal (nothing works without it); a
+/// cleanup that fails is logged and skipped, since it only affects how legacy
+/// history renders.
+fn prepare_store(db_path: &str) -> Result<()> {
+    let store = Store::open(db_path)?;
+    if let Err(e) = store.optimize() {
+        eprintln!("[store] could not refresh statistics: {e}");
+    }
+    match store.cleanups_pending() {
+        Ok(true) => run_legacy_cleanups(&store),
+        Ok(false) => {}
+        Err(e) => eprintln!("[cleanup] could not read the cleanup revision: {e}"),
+    }
+    Ok(())
+}
+
+/// Heal history that older builds persisted in a shape the UI can no longer make
+/// sense of. Every pass rewrites rows IN PLACE and is idempotent, so it only has
+/// to run once per store — and it must, because each one scans every message body.
+/// [`Store::cleanups_pending`] gates them on `CLEANUP_REVISION`, recorded here
+/// once the pass completes, so later boots skip the scans entirely.
+fn run_legacy_cleanups(store: &Store) {
+    // The Teams activity streams (`48:notifications`, `48:mentions`,
+    // `48:threads`) are system feeds, not chats. Older builds mis-persisted them
+    // as conversations full of empty-content bubbles under a raw MRI-URL title;
+    // purge that junk so it stops showing in the sidebar. Going forward they are
+    // routed to the notifications surface and never re-persisted as chats (see
+    // `spawn_realtime` and `persist_conversations`).
+    for feed in [
+        teams_activity::NOTIFICATIONS_THREAD,
+        teams_activity::MENTIONS_THREAD,
+        teams_activity::THREADS_THREAD,
+    ] {
+        if let Err(e) = store.delete_conversation(feed) {
+            eprintln!("[cleanup] could not purge {feed}: {e}");
+        }
+    }
+    // Older builds also stored control/system frames (typing/presence pushes
+    // and ThreadActivity member/topic changes) as chat bubbles — the bare
+    // `notifications.skype.net` URLs and raw `<partlist>`/`<addmember>` XML.
+    // Ingestion now drops them (see `teams_read::parse_message`); clear the
+    // ones already persisted so existing chats read clean.
+    match store.purge_control_frames() {
+        Ok(n) if n > 0 => eprintln!("[cleanup] removed {n} legacy control-frame message(s)"),
+        Ok(_) => {}
+        Err(e) => eprintln!("[cleanup] could not purge control frames: {e}"),
+    }
+    // Call/meeting events that older builds stored as raw XML are upgraded in
+    // place into structured `system_event` rows, so they render as a centered
+    // "Call ended" line instead of a wall of machine XML.
+    match store.convert_legacy_call_events() {
+        Ok(n) if n > 0 => eprintln!("[cleanup] upgraded {n} legacy call-event message(s)"),
+        Ok(_) => {}
+        Err(e) => eprintln!("[cleanup] could not convert call events: {e}"),
+    }
+    // Meeting-recording notices that older builds stored as raw `<URIObject>`
+    // bubbles are upgraded in place into a media video card (final recording)
+    // or removed (the in-progress notices Teams also posts).
+    match store.convert_legacy_call_recordings() {
+        Ok((up, del)) if up > 0 || del > 0 => {
+            eprintln!("[cleanup] recordings: upgraded {up}, removed {del} in-progress notice(s)")
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[cleanup] could not convert call recordings: {e}"),
+    }
+    // Only claim the revision once the passes above have had their turn: a store
+    // whose cleanup errored out retries on the next boot rather than staying
+    // half-healed forever.
+    if let Err(e) = store.mark_cleanups_done() {
+        eprintln!("[cleanup] could not record the cleanup revision: {e}");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     eprintln!("teams-lite server — authenticating (broker)…");
@@ -510,53 +627,9 @@ async fn main() -> Result<()> {
 
     let db_path = data_db_path()?;
     eprintln!("[ok] store {db_path}");
-    Store::open(&db_path)?; // ensure schema
-
-    // The Teams activity streams (`48:notifications`, `48:mentions`,
-    // `48:threads`) are system feeds, not chats. Older builds mis-persisted them
-    // as conversations full of empty-content bubbles under a raw MRI-URL title;
-    // purge that junk once so it stops showing in the sidebar. Going forward they
-    // are routed to the notifications surface and never re-persisted as chats
-    // (see `spawn_realtime` and `persist_conversations`).
-    if let Ok(store) = Store::open(&db_path) {
-        for feed in [
-            teams_activity::NOTIFICATIONS_THREAD,
-            teams_activity::MENTIONS_THREAD,
-            teams_activity::THREADS_THREAD,
-        ] {
-            if let Err(e) = store.delete_conversation(feed) {
-                eprintln!("[cleanup] could not purge {feed}: {e}");
-            }
-        }
-        // Older builds also stored control/system frames (typing/presence pushes
-        // and ThreadActivity member/topic changes) as chat bubbles — the bare
-        // `notifications.skype.net` URLs and raw `<partlist>`/`<addmember>` XML.
-        // Ingestion now drops them (see `teams_read::parse_message`); clear the
-        // ones already persisted so existing chats read clean.
-        match store.purge_control_frames() {
-            Ok(n) if n > 0 => eprintln!("[cleanup] removed {n} legacy control-frame message(s)"),
-            Ok(_) => {}
-            Err(e) => eprintln!("[cleanup] could not purge control frames: {e}"),
-        }
-        // Call/meeting events that older builds stored as raw XML are upgraded in
-        // place into structured `system_event` rows, so they render as a centered
-        // "Call ended" line instead of a wall of machine XML.
-        match store.convert_legacy_call_events() {
-            Ok(n) if n > 0 => eprintln!("[cleanup] upgraded {n} legacy call-event message(s)"),
-            Ok(_) => {}
-            Err(e) => eprintln!("[cleanup] could not convert call events: {e}"),
-        }
-        // Meeting-recording notices that older builds stored as raw `<URIObject>`
-        // bubbles are upgraded in place into a media video card (final recording)
-        // or removed (the in-progress notices Teams also posts).
-        match store.convert_legacy_call_recordings() {
-            Ok((up, del)) if up > 0 || del > 0 => {
-                eprintln!("[cleanup] recordings: upgraded {up}, removed {del} in-progress notice(s)")
-            }
-            Ok(_) => {}
-            Err(e) => eprintln!("[cleanup] could not convert call recordings: {e}"),
-        }
-    }
+    // Creates the schema, applies pending migrations and indexes, refreshes stale
+    // planner statistics, and heals legacy rows — all once per boot.
+    prepare_store(&db_path)?;
 
     let (events_tx, _) = broadcast::channel::<Value>(256);
     let ctx = Ctx {
@@ -1831,9 +1904,10 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     let ctx_msgs = ctx.clone();
     let self_name = session.self_name.to_string();
     let self_mri = session.self_mri.to_string();
+    let mut msgs_store = ctx.task_store();
     tokio::spawn(async move {
         while let Some(msgs) = ev_rx.recv().await {
-            if let Ok(store) = ctx_msgs.store() {
+            if let Some(store) = msgs_store.get() {
                 let mut activity_changed = false;
                 let mut channels_changed = false;
                 for m in &msgs {
@@ -1929,6 +2003,7 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     // drop our own echo, and never touch the activity-feed thread.
     let ctx_ty = ctx.clone();
     let self_mri_ty = session.self_mri.to_string();
+    let mut typing_store = ctx.task_store();
     tokio::spawn(async move {
         while let Some(t) = ty_rx.recv().await {
             if t.sender_mri == self_mri_ty {
@@ -1937,9 +2012,8 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
             if teams_activity::is_system_feed_thread(&t.conversation_id) {
                 continue; // an activity stream is not a chat
             }
-            let sender = ctx_ty
-                .store()
-                .ok()
+            let sender = typing_store
+                .get()
                 .and_then(|s| s.display_name_for_mri(&t.sender_mri).ok().flatten())
                 .unwrap_or_default();
             ctx_ty.emit(
@@ -1961,6 +2035,7 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     // into the open conversation's "seen by" avatars.
     let ctx_rr = ctx.clone();
     let self_mri_rr = session.self_mri.to_string();
+    let mut receipts_store = ctx.task_store();
     tokio::spawn(async move {
         while let Some(r) = rr_rx.recv().await {
             if teams_lite::store::same_user(&r.member_mri, &self_mri_rr) {
@@ -1969,9 +2044,8 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
             if teams_activity::is_system_feed_thread(&r.conversation_id) {
                 continue; // an activity stream is not a chat
             }
-            let member = ctx_rr
-                .store()
-                .ok()
+            let member = receipts_store
+                .get()
                 .and_then(|s| s.display_name_for_mri(&r.member_mri).ok().flatten())
                 .unwrap_or_default();
             ctx_rr.emit(

@@ -7,9 +7,13 @@
 //   - ordering key is `seq` (Teams sequenceId), monotonic within a conversation.
 //   - pagination state per conversation: `oldest_cursor` (server cursor to fetch
 //     messages older than what we hold) + `has_more_older`.
+//
+// Performance shape (see `tune`, `INDEXES` and [`Store::transaction`]): every
+// statement goes through the connection's prepared-statement cache, batches commit
+// once instead of once per row, and no read path is allowed to scan `messages`.
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row, ToSql};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS conversations (
@@ -46,7 +50,6 @@ CREATE TABLE IF NOT EXISTS messages (
     mentions        TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (conversation_id, id)
 );
-CREATE INDEX IF NOT EXISTS idx_msg_conv_seq ON messages(conversation_id, seq);
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -76,6 +79,44 @@ CREATE TABLE IF NOT EXISTS channels (
     channel_pos           INTEGER NOT NULL DEFAULT 0
 );
 "#;
+
+/// Indexes, applied AFTER [`migrate`] because several of them cover columns that a
+/// legacy store only grows once the guarded ALTERs have run (`sender_mri`,
+/// `is_pinned`). Every one of them exists to keep a hot read path off a table scan
+/// — the plans they enforce are asserted by the tests at the bottom of this file.
+const INDEXES: &str = r#"
+-- Serves the message pages (`conversation_id` + `seq` ordering) AND makes the two
+-- correlated lookups in `conversations()` (1:1 title, avatar MRI) index-only, so
+-- listing the sidebar never touches the messages table itself.
+CREATE INDEX IF NOT EXISTS idx_msg_conv_seq_sender ON messages(conversation_id, seq, sender, sender_mri);
+-- Superseded by the index above: same leading columns, so it only cost writes.
+DROP INDEX IF EXISTS idx_msg_conv_seq;
+-- `display_name_for_mri` runs on every typing frame and once per read receipt;
+-- without this it scanned every message row and sorted the matches.
+CREATE INDEX IF NOT EXISTS idx_msg_sender_mri ON messages(sender_mri, seq);
+-- The sidebar's exact ORDER BY, so listing conversations needs no temp b-tree.
+CREATE INDEX IF NOT EXISTS idx_conv_sidebar_order ON conversations(is_pinned DESC, last_message_time DESC, id ASC);
+"#;
+
+/// Version of everything the file must physically contain: `SCHEMA`, [`migrate`]
+/// and `INDEXES`. Recorded in SQLite's `user_version` header field so that pass
+/// runs ONCE per store instead of on every open — which is what makes it safe to
+/// put index DDL and `ANALYZE` in it (re-running those per open would be a real
+/// regression, whereas re-running the schema batch and ~25 ALTERs that all fail
+/// with "duplicate column" was merely pointless). Bump it whenever any of the
+/// three change.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Revision of the one-shot legacy cleanups the server runs at startup
+/// ([`Store::purge_control_frames`], [`Store::convert_legacy_call_events`],
+/// [`Store::convert_legacy_call_recordings`]). Each is a full scan of `content`,
+/// so they are gated on this revision — recorded in `settings` once they have run
+/// — instead of being replayed on every boot. Bump it when a cleanup is added or
+/// broadened, and every store runs the new pass exactly once.
+pub const CLEANUP_REVISION: i64 = 1;
+
+/// Key under which [`CLEANUP_REVISION`] is recorded once the pass has run.
+const CLEANUP_SETTING: &str = "cleanup_revision";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
@@ -487,23 +528,119 @@ fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Settings that live on the CONNECTION and must therefore be re-applied by every
+/// opener. `journal_mode` deliberately is not among them: it is a persistent
+/// property of the file, so it is set once in [`initialize`].
+fn tune(conn: &Connection) -> Result<()> {
+    // Wait for a concurrent writer instead of failing outright.
+    conn.pragma_update(None, "busy_timeout", 5000)?;
+    // In WAL mode `NORMAL` stops fsync-ing on every commit (the WAL is still
+    // fsynced at checkpoints), which is what makes batched ingestion viable:
+    // under the default `FULL`, one commit per row cost ~3.6 ms, so a 50-message
+    // history page took 184 ms and a full conversation sync 2.2 s. The trade is
+    // bounded and acceptable here: an OS crash or power loss can lose the newest
+    // commits but can NEVER corrupt the file, and everything stored is a cache
+    // that re-syncs from Teams.
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // Every statement in this file goes through the cache (see `Store::exec` /
+    // `Store::query_one`), so it must be large enough to hold them all: the hot
+    // paths reuse one connection, and re-parsing the multi-kilobyte upserts cost
+    // more than executing them (604 conversation upserts: 28 ms -> 5.4 ms).
+    conn.set_prepared_statement_cache_capacity(64);
+    Ok(())
+}
+
+/// Bring the file up to [`SCHEMA_VERSION`]: tables, additive column migrations,
+/// indexes, planner statistics. Runs on a fresh store and once after an upgrade,
+/// never on a steady-state open.
+fn initialize(conn: &Connection) -> Result<()> {
+    // WAL lets a reader (UI thread) and a writer (network thread) use separate
+    // connections to the same file concurrently without blocking each other.
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.execute_batch(SCHEMA)?;
+    migrate(conn)?;
+    conn.execute_batch(INDEXES)?;
+    // Give the planner real statistics for the freshly created indexes; without
+    // them it falls back on guesses for the sidebar's correlated subqueries.
+    conn.execute_batch("ANALYZE")?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
 impl Store {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
-        // WAL lets a reader (UI thread) and a writer (network thread) use separate
-        // connections to the same file concurrently without blocking each other.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "busy_timeout", 5000)?;
-        conn.execute_batch(SCHEMA)?;
-        migrate(&conn)?;
+        tune(&conn)?;
+        // Self-healing rather than order-dependent: any opener may be the first
+        // one, so a store that is missing the current schema gets it here.
+        if conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? != SCHEMA_VERSION {
+            initialize(&conn)?;
+        }
         Ok(Self { conn })
     }
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        tune(&conn)?;
+        // A fresh in-memory database is never initialized, so skip the version
+        // probe and build the schema outright (WAL is a no-op on `:memory:`).
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
+        conn.execute_batch(INDEXES)?;
         Ok(Self { conn })
+    }
+
+    /// Run `f` as ONE transaction: a single commit instead of one per statement.
+    /// Every store method `f` calls joins it (they all share `self.conn`), and an
+    /// `Err` rolls the whole batch back — so a caller ingesting a page either
+    /// persists all of it or none of it.
+    ///
+    /// This is the difference between 184 ms and 1.6 ms for a 50-message page:
+    /// autocommit made every row its own WAL commit.
+    pub fn transaction<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let tx = self.conn.unchecked_transaction()?;
+        let out = f()?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// Refresh stale planner statistics. `PRAGMA optimize` only does work for
+    /// tables whose contents have drifted far from the last `ANALYZE`, so the
+    /// server can call it once per boot for the cost of a few reads.
+    pub fn optimize(&self) -> Result<()> {
+        self.conn.execute_batch("PRAGMA optimize")?;
+        Ok(())
+    }
+
+    /// Whether the one-shot legacy cleanups still need to run on this store (see
+    /// [`CLEANUP_REVISION`]). True on a store that has never recorded a revision,
+    /// or recorded an older one.
+    pub fn cleanups_pending(&self) -> Result<bool> {
+        let done = self
+            .get_setting(CLEANUP_SETTING)?
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        Ok(done < CLEANUP_REVISION)
+    }
+
+    /// Record that the one-shot legacy cleanups have run, so later boots skip them.
+    pub fn mark_cleanups_done(&self) -> Result<()> {
+        self.set_setting(CLEANUP_SETTING, &CLEANUP_REVISION.to_string())
+    }
+
+    /// Execute a write through the prepared-statement cache; returns rows changed.
+    fn exec(&self, sql: &str, params: &[&dyn ToSql]) -> rusqlite::Result<usize> {
+        self.conn.prepare_cached(sql)?.execute(params)
+    }
+
+    /// Read a single row through the prepared-statement cache.
+    fn query_one<T>(
+        &self,
+        sql: &str,
+        params: &[&dyn ToSql],
+        f: impl FnOnce(&Row) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        self.conn.prepare_cached(sql)?.query_row(params, f)
     }
 
     /// Delete control/system frames that older builds persisted as chat messages,
@@ -526,7 +663,7 @@ impl Store {
     /// on a later run. Returns rows removed. `LIKE` is ASCII case-insensitive in
     /// SQLite, so tag casing needs no extra patterns.
     pub fn purge_control_frames(&self) -> Result<usize> {
-        let n = self.conn.execute(
+        let n = self.exec(
             "DELETE FROM messages WHERE
                  content LIKE 'https://notifications.skype.net/%'
               OR content LIKE '<partlist%'
@@ -539,7 +676,7 @@ impl Store {
               OR content LIKE '<joiningenabledupdate%'
               OR content LIKE '<memberjoined%'
               OR content LIKE '<meetingpolicyupdated%'",
-            [],
+            &[],
         )?;
         Ok(n)
     }
@@ -559,7 +696,7 @@ impl Store {
     /// later run converts nothing. Returns the number of rows upgraded.
     pub fn convert_legacy_call_events(&self) -> Result<usize> {
         let rows: Vec<(String, String, String)> = {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = self.conn.prepare_cached(
                 "SELECT id, conversation_id, content FROM messages
                  WHERE system_event = ''
                    AND (content LIKE '%<callEventType>%'
@@ -578,7 +715,7 @@ impl Store {
             let Some(event) = crate::teams_read::parse_call_event("", &content) else {
                 continue;
             };
-            self.conn.execute(
+            self.exec(
                 "UPDATE messages SET content = '', system_event = ?3
                  WHERE conversation_id = ?1 AND id = ?2",
                 params![conversation_id, id, event.to_string()],
@@ -603,7 +740,7 @@ impl Store {
     /// a later run matches nothing. Returns `(upgraded, deleted)`.
     pub fn convert_legacy_call_recordings(&self) -> Result<(usize, usize)> {
         let rows: Vec<(String, String, String)> = {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = self.conn.prepare_cached(
                 "SELECT id, conversation_id, content FROM messages
                  WHERE content LIKE '%CallRecording%'",
             )?;
@@ -617,7 +754,7 @@ impl Store {
             match crate::teams_read::parse_call_recording("", &content) {
                 Some(crate::teams_read::CallRecording::Ready(attachment)) => {
                     let attachments = serde_json::Value::Array(vec![attachment]).to_string();
-                    self.conn.execute(
+                    self.exec(
                         "UPDATE messages SET content = '', sender = '', attachments = ?3
                          WHERE conversation_id = ?1 AND id = ?2",
                         params![conversation_id, id, attachments],
@@ -625,7 +762,7 @@ impl Store {
                     upgraded += 1;
                 }
                 Some(crate::teams_read::CallRecording::Pending) => {
-                    self.conn.execute(
+                    self.exec(
                         "DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2",
                         params![conversation_id, id],
                     )?;
@@ -645,7 +782,7 @@ impl Store {
     /// change. Without this, a repeated sync of unchanged data reports a change
     /// every time and drives an endless refresh->sync->event->refresh loop.
     pub fn upsert_conversation(&self, id: &str, display_name: &str, last_message_time: i64) -> Result<bool> {
-        let changed = self.conn.execute(
+        let changed = self.exec(
             "INSERT INTO conversations (id, display_name, last_message_time)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET
@@ -681,7 +818,7 @@ impl Store {
     /// settings (muted/pinned/hidden/thread_type) take the latest value, since
     /// CSA always returns a full current snapshot.
     pub fn upsert_conversation_full(&self, u: &ConversationUpdate) -> Result<bool> {
-        let changed = self.conn.execute(
+        let changed = self.exec(
             "INSERT INTO conversations (
                 id, display_name, last_message_time, kind,
                 last_message_preview, last_message_sender, last_message_from_me,
@@ -759,7 +896,7 @@ impl Store {
     /// out-of-order sync can't regress them. `draft` is never written here (a local
     /// draft cannot be clobbered by remote metadata). Returns true on a real change.
     pub fn upsert_channel_full(&self, u: &ChannelUpdate) -> Result<bool> {
-        let changed = self.conn.execute(
+        let changed = self.exec(
             "INSERT INTO channels (
                 id, team_id, team_name, display_name, is_general, is_favorite,
                 last_message_time, last_message_preview, last_message_sender,
@@ -839,7 +976,7 @@ impl Store {
     /// so the caller emits `channels_changed` only when something moved. A no-op
     /// (unknown id, or an older/equal time with no unread flip) returns false.
     pub fn touch_channel(&self, id: &str, last_message_time: i64, from_me: bool) -> Result<bool> {
-        let changed = self.conn.execute(
+        let changed = self.exec(
             "UPDATE channels SET
                 last_message_time = MAX(last_message_time, ?2),
                 last_message_from_me = ?3,
@@ -855,7 +992,7 @@ impl Store {
     /// table). The live-message path uses this — alongside the id-suffix check —
     /// to route a post to `touch_channel` instead of leaking it into the chat list.
     pub fn is_channel(&self, id: &str) -> Result<bool> {
-        let n: i64 = self.conn.query_row(
+        let n: i64 = self.query_one(
             "SELECT COUNT(*) FROM channels WHERE id = ?1",
             params![id],
             |r| r.get(0),
@@ -870,7 +1007,7 @@ impl Store {
     /// existed, which all default to 0). Empty channels are never inserted, so every
     /// row here has content.
     pub fn channels(&self) -> Result<Vec<ChannelRow>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, team_id, team_name, display_name, is_general, is_favorite,
                     last_message_time, last_message_preview, last_message_sender,
                     last_message_from_me, is_read, draft, team_group_id
@@ -903,10 +1040,8 @@ impl Store {
     /// chat (empty-content bubbles under a raw MRI-URL title) before it was
     /// recognized as a system feed. Idempotent: a no-op when the id is absent.
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM messages WHERE conversation_id = ?1", params![id])?;
-        self.conn
-            .execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
+        self.exec("DELETE FROM messages WHERE conversation_id = ?1", params![id])?;
+        self.exec("DELETE FROM conversations WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -918,9 +1053,7 @@ impl Store {
     /// when a row was actually removed, so the caller emits `conversations_changed`
     /// only on a real change (and the heal converges to a no-op on re-sync).
     pub fn delete_conversation_row(&self, id: &str) -> Result<bool> {
-        let n = self
-            .conn
-            .execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
+        let n = self.exec("DELETE FROM conversations WHERE id = ?1", params![id])?;
         Ok(n > 0)
     }
 
@@ -955,7 +1088,7 @@ impl Store {
     /// can add or drop a mention), and left alone by a frame that carries no body.
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
         let reactions = if m.reactions.is_empty() { "[]" } else { m.reactions.as_str() };
-        let n = self.conn.execute(
+        let n = self.exec(
             "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(conversation_id, id) DO UPDATE SET
@@ -978,7 +1111,7 @@ impl Store {
         id: &str,
         content: &str,
     ) -> Result<Option<Message>> {
-        let changed = self.conn.execute(
+        let changed = self.exec(
             "UPDATE messages SET content = ?3
              WHERE conversation_id = ?1 AND id = ?2 AND content <> ?3",
             params![conversation_id, id, content],
@@ -989,7 +1122,7 @@ impl Store {
         let sql = format!(
             "SELECT {SELECT_COLS} FROM messages WHERE conversation_id = ?1 AND id = ?2"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let msg = stmt.query_row(params![conversation_id, id], row_to_msg)?;
         Ok(Some(msg))
     }
@@ -1001,7 +1134,7 @@ impl Store {
         let sql = format!(
             "SELECT {SELECT_COLS} FROM messages WHERE conversation_id = ?1 AND id = ?2"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let msg = stmt
             .query_row(params![conversation_id, id], row_to_msg)
             .optional()?;
@@ -1022,7 +1155,7 @@ impl Store {
         id: &str,
         reactions: &str,
     ) -> Result<Option<Message>> {
-        let changed = self.conn.execute(
+        let changed = self.exec(
             "UPDATE messages SET reactions = ?3
              WHERE conversation_id = ?1 AND id = ?2 AND reactions <> ?3",
             params![conversation_id, id, reactions],
@@ -1063,14 +1196,14 @@ impl Store {
     /// conversations table first and fall through to channels — that way the same
     /// `set_draft` request works for both without the caller knowing which it is.
     pub fn set_draft(&self, thread_id: &str, draft: &str) -> Result<()> {
-        let changed = self.conn.execute(
+        let changed = self.exec(
             "UPDATE conversations SET draft = ?2 WHERE id = ?1",
             params![thread_id, draft],
         )?;
         if changed == 1 {
             return Ok(());
         }
-        let changed = self.conn.execute(
+        let changed = self.exec(
             "UPDATE channels SET draft = ?2 WHERE id = ?1",
             params![thread_id, draft],
         )?;
@@ -1084,8 +1217,7 @@ impl Store {
     /// that is neither a conversation nor a message. Network syncs never touch it.
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self
-            .conn
-            .query_row(
+            .query_one(
                 "SELECT value FROM settings WHERE key = ?1",
                 params![key],
                 |row| row.get::<_, String>(0),
@@ -1097,7 +1229,7 @@ impl Store {
     /// An empty string is a valid stored value (e.g. "token explicitly cleared"),
     /// distinct from an absent key.
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
-        self.conn.execute(
+        self.exec(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, value],
@@ -1114,7 +1246,7 @@ impl Store {
         if sender_mri.is_empty() {
             return Ok(());
         }
-        self.conn.execute(
+        self.exec(
             "UPDATE messages SET sender_mri = ?3
              WHERE conversation_id = ?1 AND id = ?2
                AND (sender_mri IS NULL OR sender_mri = '')",
@@ -1133,7 +1265,7 @@ impl Store {
         if mentions.is_empty() || mentions == "[]" {
             return Ok(());
         }
-        self.conn.execute(
+        self.exec(
             "UPDATE messages SET mentions = ?3
              WHERE conversation_id = ?1 AND id = ?2
                AND (mentions IS NULL OR mentions = '' OR mentions = '[]')",
@@ -1149,7 +1281,7 @@ impl Store {
     /// may be empty (then no derivation happens).
     pub fn conversations(&self, self_name: &str) -> Result<Vec<ConversationRow>> {
         // Correlated subquery fills the blank 1:1 titles in a single pass.
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT c.id,
                     CASE
                         WHEN c.display_name IS NOT NULL AND c.display_name <> ''
@@ -1230,8 +1362,7 @@ impl Store {
     /// Returns None when we hold no message from the other party yet.
     pub fn other_party_name(&self, conversation_id: &str, self_name: &str) -> Result<Option<String>> {
         let name: Option<String> = self
-            .conn
-            .query_row(
+            .query_one(
                 "SELECT sender FROM messages
                  WHERE conversation_id = ?1 AND sender <> '' AND sender <> ?2
                  ORDER BY seq DESC LIMIT 1",
@@ -1252,8 +1383,7 @@ impl Store {
             return Ok(None);
         }
         let name: Option<String> = self
-            .conn
-            .query_row(
+            .query_one(
                 "SELECT sender FROM messages
                  WHERE sender_mri = ?1 AND sender <> ''
                  ORDER BY seq DESC LIMIT 1",
@@ -1269,7 +1399,7 @@ impl Store {
         let sql = format!(
             "SELECT {SELECT_COLS} FROM messages WHERE conversation_id = ?1 ORDER BY seq DESC LIMIT ?2"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![conversation_id, limit], row_to_msg)?;
         let mut v: Vec<Message> = rows.collect::<rusqlite::Result<_>>()?;
         v.reverse(); // oldest -> newest
@@ -1284,7 +1414,7 @@ impl Store {
             "SELECT {SELECT_COLS} FROM messages
              WHERE conversation_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![conversation_id, before_seq, limit], row_to_msg)?;
         let mut v: Vec<Message> = rows.collect::<rusqlite::Result<_>>()?;
         v.reverse();
@@ -1293,7 +1423,7 @@ impl Store {
 
     /// Record how far back we have synced from the server for a conversation.
     pub fn set_oldest_cursor(&self, conversation_id: &str, cursor: Option<&str>, has_more: bool) -> Result<()> {
-        self.conn.execute(
+        self.exec(
             "UPDATE conversations SET oldest_cursor = ?2, has_more_older = ?3 WHERE id = ?1",
             params![conversation_id, cursor, has_more as i64],
         )?;
@@ -1302,7 +1432,7 @@ impl Store {
 
     /// (server cursor for the next older page, whether more history exists).
     pub fn oldest_cursor(&self, conversation_id: &str) -> Result<(Option<String>, bool)> {
-        let row = self.conn.query_row(
+        let row = self.query_one(
             "SELECT oldest_cursor, has_more_older FROM conversations WHERE id = ?1",
             params![conversation_id],
             |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)? != 0)),
@@ -1381,6 +1511,205 @@ mod tests {
             team_pos: 0,
             channel_pos: 0,
         }
+    }
+
+    /// A unique on-disk path: `user_version`, WAL and the schema-skip path only
+    /// exist for a real file, so these cannot use `:memory:`.
+    fn temp_db(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("teams-lite-store-{tag}-{}.sqlite", std::process::id()));
+        remove_db(&p);
+        p
+    }
+
+    fn remove_db(path: &std::path::Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = path.as_os_str().to_owned();
+            p.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(p));
+        }
+    }
+
+    /// The planner's chosen plan for `sql`, one step per line.
+    fn query_plan(s: &Store, sql: &str) -> String {
+        let mut stmt = s.conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let steps: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        steps.join("\n")
+    }
+
+    #[test]
+    fn open_records_the_schema_version_and_reopens_without_rebuilding() {
+        let path = temp_db("version");
+        let p = path.to_str().unwrap();
+        {
+            let s = Store::open(p).unwrap();
+            s.upsert_conversation("c1", "Chat", 100).unwrap();
+            s.insert_message(&msg("c1", 1)).unwrap();
+            assert_eq!(
+                s.conn
+                    .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION
+            );
+        }
+        // Re-opening an initialized store skips the schema pass and keeps the data.
+        let s = Store::open(p).unwrap();
+        assert_eq!(s.newest_messages("c1", 10).unwrap().len(), 1);
+        assert_eq!(s.conversations("").unwrap().len(), 1);
+        // WAL is a property of the file, so it survives an open that never sets it.
+        let mode: String = s
+            .conn
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        // ...whereas durability is per-connection and must be re-applied: WAL +
+        // NORMAL (1) is what keeps a commit from fsync-ing.
+        let sync: i64 = s
+            .conn
+            .pragma_query_value(None, "synchronous", |r| r.get(0))
+            .unwrap();
+        assert_eq!(sync, 1, "expected synchronous=NORMAL");
+        drop(s);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn open_upgrades_a_store_that_predates_the_schema_version() {
+        let path = temp_db("legacy");
+        let p = path.to_str().unwrap();
+        // A store as an older build left it: no `user_version`, the narrow message
+        // index, and none of the columns the guarded ALTERs add.
+        {
+            let conn = Connection::open(p).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversations (id TEXT PRIMARY KEY, display_name TEXT, last_message_time INTEGER NOT NULL DEFAULT 0, oldest_cursor TEXT, has_more_older INTEGER NOT NULL DEFAULT 1);
+                 CREATE TABLE messages (id TEXT NOT NULL, conversation_id TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, compose_time INTEGER NOT NULL DEFAULT 0, sender TEXT, content TEXT, PRIMARY KEY (conversation_id, id));
+                 CREATE INDEX idx_msg_conv_seq ON messages(conversation_id, seq);
+                 INSERT INTO conversations (id, display_name) VALUES ('c1', 'Chat');
+                 INSERT INTO messages (id, conversation_id, seq, sender, content) VALUES ('m1', 'c1', 1, 'alice', 'hello');",
+            )
+            .unwrap();
+        }
+
+        let s = Store::open(p).unwrap();
+
+        // The legacy rows survive, now readable through the current column set.
+        let stored = s.newest_messages("c1", 10).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].content, "hello");
+        assert_eq!(stored[0].mentions, "[]", "legacy row gets the column default");
+
+        let indexes: Vec<String> = {
+            let mut stmt = s
+                .conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        for expected in [
+            "idx_conv_sidebar_order",
+            "idx_msg_conv_seq_sender",
+            "idx_msg_sender_mri",
+        ] {
+            assert!(indexes.iter().any(|i| i == expected), "missing {expected} in {indexes:?}");
+        }
+        assert!(
+            !indexes.iter().any(|i| i == "idx_msg_conv_seq"),
+            "the narrow index is superseded and must be dropped: {indexes:?}"
+        );
+        drop(s);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn hot_read_paths_never_scan_the_messages_table() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "", 100).unwrap();
+        for i in 1..=20 {
+            let mut m = msg("c1", i);
+            m.sender_mri = "8:orgid:alice".into();
+            s.insert_message(&m).unwrap();
+        }
+
+        // The typing indicator / read-receipt name lookup, once per frame.
+        let plan = query_plan(
+            &s,
+            "SELECT sender FROM messages WHERE sender_mri = '8:orgid:alice' AND sender <> '' ORDER BY seq DESC LIMIT 1",
+        );
+        assert!(plan.contains("idx_msg_sender_mri"), "plan was:\n{plan}");
+        assert!(!plan.contains("SCAN messages"), "plan was:\n{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "plan was:\n{plan}");
+
+        // A message page.
+        let plan = query_plan(
+            &s,
+            "SELECT content FROM messages WHERE conversation_id = 'c1' ORDER BY seq DESC LIMIT 51",
+        );
+        assert!(plan.contains("idx_msg_conv_seq_sender"), "plan was:\n{plan}");
+        assert!(!plan.contains("SCAN messages"), "plan was:\n{plan}");
+
+        // The sidebar list: ordered by index (no sort pass) and its correlated
+        // name/avatar lookups served entirely from the covering index.
+        let plan = query_plan(
+            &s,
+            "SELECT c.id, COALESCE((SELECT m.sender FROM messages m WHERE m.conversation_id = c.id AND m.sender <> '' AND m.sender <> 'me' ORDER BY m.seq DESC LIMIT 1), '')
+             FROM conversations c WHERE c.id NOT IN (SELECT id FROM channels)
+             ORDER BY c.is_pinned DESC, c.last_message_time DESC, c.id ASC",
+        );
+        assert!(plan.contains("idx_conv_sidebar_order"), "plan was:\n{plan}");
+        assert!(plan.contains("COVERING INDEX idx_msg_conv_seq_sender"), "plan was:\n{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "plan was:\n{plan}");
+    }
+
+    #[test]
+    fn transaction_commits_the_batch_and_rolls_back_on_error() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+
+        let inserted = s
+            .transaction(|| {
+                let mut n = 0;
+                for i in 1..=10 {
+                    if s.insert_message(&msg("c1", i))? {
+                        n += 1;
+                    }
+                }
+                Ok(n)
+            })
+            .unwrap();
+        assert_eq!(inserted, 10);
+        assert_eq!(s.newest_messages("c1", 50).unwrap().len(), 10);
+
+        // A failure part-way through leaves the store exactly as it was.
+        let failed: Result<()> = s.transaction(|| {
+            s.insert_message(&msg("c1", 11))?;
+            anyhow::bail!("halfway failure")
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            s.newest_messages("c1", 50).unwrap().len(),
+            10,
+            "a rolled-back batch must not leave partial rows behind"
+        );
+    }
+
+    #[test]
+    fn cleanups_run_once_per_revision() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.cleanups_pending().unwrap(), "a fresh store has never cleaned");
+        s.mark_cleanups_done().unwrap();
+        assert!(!s.cleanups_pending().unwrap(), "the recorded revision skips the scans");
+        // A store that recorded an older revision runs the new pass again.
+        s.set_setting("cleanup_revision", &(CLEANUP_REVISION - 1).to_string())
+            .unwrap();
+        assert!(s.cleanups_pending().unwrap());
     }
 
     #[test]
