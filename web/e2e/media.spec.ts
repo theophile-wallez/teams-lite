@@ -130,6 +130,40 @@ test.describe("media (images + attachments)", () => {
     await expect(incoming.locator('[data-testid="sender-name"]')).toBeVisible();
   });
 
+  test("frames an image-only message with an even mat on all four sides", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    // Two image-only messages: one from an attachment, one from an inline
+    // <p><img></p> (how Teams delivers a pasted screenshot). Both must show the
+    // same few px of hatch on every side — the media's in-bubble vertical margins
+    // are neutralized inside the mat no matter how deep the picture sits.
+    const mats = page.locator('[data-testid="image-mat"]');
+    await expect.poll(() => mats.count(), { timeout: 10_000 }).toBe(2);
+
+    for (let i = 0; i < 2; i++) {
+      const mat = mats.nth(i);
+      const image = mat.locator('[data-testid="message-image"]');
+      await expect(image).toBeVisible();
+      const gaps = await mat.evaluate((el) => {
+        const img = el.querySelector("img")!;
+        const outer = el.getBoundingClientRect();
+        const inner = img.getBoundingClientRect();
+        const round = (n: number) => Math.round(n * 100) / 100;
+        return {
+          top: round(inner.top - outer.top),
+          right: round(outer.right - inner.right),
+          bottom: round(outer.bottom - inner.bottom),
+          left: round(inner.left - outer.left),
+        };
+      });
+      expect(gaps.top).toBeCloseTo(gaps.left, 1);
+      expect(gaps.bottom).toBeCloseTo(gaps.left, 1);
+      expect(gaps.right).toBeCloseTo(gaps.left, 1);
+      expect(gaps.left).toBeGreaterThan(0);
+    }
+  });
+
   test("renders a meeting recording as a video card without a bubble", async ({ page }) => {
     await gotoApp(page);
     await openByPalette(page, "Media Gallery");

@@ -770,8 +770,8 @@ function seedMediaSamples(): void {
       sender_mri: other.mri,
       content:
         `<div>Here's the screenshot from the incident:</div>` +
-        `<img itemtype="http://schema.skype.com/AMSImage" ` +
-        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-1/views/imgo" alt="incident graph"/>`,
+        `<div><img itemtype="http://schema.skype.com/AMSImage" ` +
+        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-1/views/imgo" alt="incident graph"/></div>`,
       is_self: false,
     },
     60_000,
@@ -834,13 +834,17 @@ function seedMediaSamples(): void {
   // 5. An inline image someone sent with no text. Following my message above, it
   //    starts a fresh incoming run, so the sender name shows — floating in the
   //    void above the picture rather than inside a bubble.
+  //    The <p> wrapper is not decoration: Teams always delivers a pasted
+  //    screenshot inside a block (`<p><img></p>` or `<div><img></div>`), never as a
+  //    bare <img>, which pushes the image one level deeper in the rendered tree.
+  //    A bare-<img> fixture hid a mat-padding bug that every real message had.
   push(
     {
       sender: other.name,
       sender_mri: other.mri,
       content:
-        `<img itemtype="http://schema.skype.com/AMSImage" ` +
-        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-2/views/imgo" alt="whiteboard"/>`,
+        `<p><img itemtype="http://schema.skype.com/AMSImage" ` +
+        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-2/views/imgo" alt="whiteboard"/></p>`,
       is_self: false,
     },
     300_000,

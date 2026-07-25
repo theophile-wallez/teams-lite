@@ -199,11 +199,16 @@
     transparent 8px
   );
 }
-/* Neutralize the media's own in-bubble vertical margins (the inline image's
-   `my-1`, the attachment stack's `mt-1.5`) so the hatch border is even on every
-   side; the mat's own flex gap spaces any stacked images instead. */
-.image-mat > *,
-.image-mat > * > * {
+/* Inside the mat, the mat's own padding and flex gap are the ONLY spacing: strip
+   every vertical margin the media carries for its in-bubble life (the inline
+   image's `my-1`, the attachment stack's `mt-1.5`), at any depth. Depth matters
+   because Teams wraps a pasted screenshot in a block: `<p><img></p>` puts the
+   image's `my-1` three levels down (mat > RichContent > p > span.my-1), where a
+   `>`-scoped reset never reached it — the hatch then measured 6px + 4px of margin
+   top and bottom against 6px left and right, reading as a border twice as thick
+   vertically. An image-only message holds nothing but pictures, so there is no
+   intentional vertical margin in here to preserve. */
+.image-mat * {
   margin-top: 0;
   margin-bottom: 0;
 }
