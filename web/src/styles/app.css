@@ -306,15 +306,18 @@
 }
 
 /* Sparkle words — the nickname easter egg (see lib/sparkle-words.ts). The word
-   becomes a candy chip: a pastel gradient pill with a soft pink glow, a slow
-   shimmer sweeping across it, one color per letter from a six-stop ramp, and two
-   sparkles twinkling at opposite corners. Because the chip paints its own
-   background, the letter colors keep their contrast whatever bubble the word
-   lands in (white, dark grey, or the indigo "mine" bubble) — only the theme
-   swaps the ramp. The sparkles are pseudo-elements, so they decorate the word
+   stays part of the sentence — no chip, no pill, the bubble's own background
+   shows through — and only the letters are dressed up: one color per letter from
+   a six-stop ramp, each bobbing and brightening on a staggered delay so the
+   shimmer travels through the word, with two sparkles twinkling at opposite
+   corners. With no chip to guarantee contrast, the ramp follows the *surface*
+   the word lands on rather than the theme alone: the deep ramp on the white
+   incoming bubble, the bright one on anything dark (the indigo "mine" bubble,
+   and both bubbles in the dark theme) where the letters also carry a halo of
+   their own color. The sparkles are pseudo-elements, so they decorate the word
    without joining the text on selection or copy. Every animation here is
-   neutralized by the global prefers-reduced-motion rule above; the colors, the
-   chip and the sparkles stay. */
+   neutralized by the global prefers-reduced-motion rule above; the colors and
+   the sparkles stay. */
 .sparkle-word {
   --sparkle-1: #e11d74;
   --sparkle-2: #c026d3;
@@ -322,45 +325,36 @@
   --sparkle-4: #2563eb;
   --sparkle-5: #0e9488;
   --sparkle-6: #ea580c;
-  --sparkle-chip: linear-gradient(100deg, #fff0f7 0%, #fdf1ff 40%, #eef4ff 70%, #fff0f7 100%);
-  --sparkle-ring: rgb(244 114 182 / 0.45);
-  --sparkle-glow: rgb(236 72 153 / 0.35);
+  /* How much of a letter's own color bleeds around it. Off on a light surface,
+     where a halo would just read as blurry text. */
+  --sparkle-halo: 0%;
   position: relative;
   display: inline-block;
-  padding-inline: 0.3em;
-  border-radius: 9999px;
-  /* Two chip-widths of gradient, panned back and forth by the shimmer. */
-  background-image: var(--sparkle-chip);
-  background-size: 220% 100%;
-  box-shadow:
-    0 0 0 1px var(--sparkle-ring),
-    0 1px 10px -2px var(--sparkle-glow);
+  /* Room for the corner sparkles, so they never land on the neighboring word. */
+  padding-inline: 0.16em;
   font-weight: 600;
-  animation: teams-sparkle-shimmer 7s ease-in-out infinite;
 }
+[data-mine="true"] .sparkle-word,
 [data-theme="dark"] .sparkle-word {
-  /* Brighter letters on a translucent chip, so the egg glows out of a dark
-     bubble instead of punching a white hole in it. */
+  /* Brighter letters, plus a halo, so the egg glows out of a dark bubble
+     instead of sinking into it. */
   --sparkle-1: #ff8ac4;
   --sparkle-2: #e879f9;
   --sparkle-3: #a78bfa;
   --sparkle-4: #60a5fa;
   --sparkle-5: #34d399;
   --sparkle-6: #fbbf24;
-  --sparkle-chip: linear-gradient(
-    100deg,
-    rgb(255 205 235 / 0.16) 0%,
-    rgb(226 214 255 / 0.16) 40%,
-    rgb(205 226 255 / 0.16) 70%,
-    rgb(255 205 235 / 0.16) 100%
-  );
-  --sparkle-ring: rgb(244 114 182 / 0.4);
-  --sparkle-glow: rgb(236 72 153 / 0.3);
+  --sparkle-halo: 45%;
 }
 .sparkle-word-letter {
   /* inline-block so each letter can be transformed on its own. */
   display: inline-block;
-  animation: teams-sparkle-bob 2.6s ease-in-out infinite;
+  text-shadow: 0 0 0.4em color-mix(in oklab, currentColor var(--sparkle-halo), transparent);
+  animation:
+    teams-sparkle-bob 2.6s ease-in-out infinite,
+    teams-sparkle-shimmer 7s ease-in-out infinite;
+  /* One delay for both animations: the same stagger that ripples the bob also
+     walks the shimmer across the letters. */
   animation-delay: calc(var(--sparkle-index, 0) * 90ms);
 }
 .sparkle-word-letter:nth-child(6n + 1) {
@@ -391,29 +385,31 @@
   /* Visible at rest, so the sparkles still frame the word when the animation is
      off (reduced motion); the keyframes only dim and re-brighten them. */
   opacity: 0.9;
-  /* A halo of their own color: the sparkles sit outside the chip, on whatever
-     bubble the word landed in, so they need to carry their own contrast. */
+  /* A halo of their own color, always on: unlike the letters, a sparkle is a
+     tiny glyph that has to hold up against a light or a dark bubble alike. */
   text-shadow: 0 0 5px currentColor;
   animation: teams-sparkle-twinkle 3s ease-in-out infinite;
 }
 .sparkle-word::before {
   top: -0.42em;
-  left: -0.22em;
+  left: -0.24em;
   color: var(--sparkle-1);
 }
 .sparkle-word::after {
-  right: -0.22em;
+  right: -0.24em;
   bottom: -0.38em;
   color: var(--sparkle-3);
   animation-delay: 1.4s;
 }
+/* The shimmer that used to sweep the chip's gradient now lives in the letters:
+   each one saturates and brightens in turn, on the bob's stagger. */
 @keyframes teams-sparkle-shimmer {
   0%,
   100% {
-    background-position: 0% 50%;
+    filter: saturate(1) brightness(1);
   }
   50% {
-    background-position: 100% 50%;
+    filter: saturate(1.4) brightness(1.12);
   }
 }
 @keyframes teams-sparkle-bob {

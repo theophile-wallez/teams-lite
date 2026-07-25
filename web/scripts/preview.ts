@@ -32,6 +32,7 @@
 //
 //   bun run web/scripts/preview.ts --out /tmp/preview
 //   bun run web/scripts/preview.ts --out /tmp/preview --type "hey bébou" --send
+//   bun run web/scripts/preview.ts --out /tmp/preview --incoming "hey bébou"
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -159,10 +160,18 @@ export async function typeInComposer(
   }
 }
 
-/** Open the first conversation and wait for its messages to render. */
-export async function openFirstConversation(page: Page): Promise<void> {
-  await page.locator('[data-testid="conversation-row"]').first().click();
+/**
+ * Open the first conversation and wait for its messages to render. Returns its
+ * id, so callers can aim `emit` at the thread that is actually on screen — the
+ * mock defaults injected messages to its *own* first thread, which is not the
+ * top row once the list is sorted by recency.
+ */
+export async function openFirstConversation(page: Page): Promise<string> {
+  const row = page.locator('[data-testid="conversation-row"]').first();
+  const id = (await row.getAttribute("data-conversation-id")) ?? "";
+  await row.click();
   await page.waitForSelector('[data-testid="message"]');
+  return id;
 }
 
 // ---- setup helpers ---------------------------------------------------------
@@ -265,9 +274,16 @@ if (import.meta.main) {
   const out = flag("--out") ?? "/tmp/preview";
   const text = flag("--type");
   const send = args.includes("--send");
+  const incoming = flag("--incoming");
 
-  await withPreview(async ({ page, shot, setTheme }) => {
-    await openFirstConversation(page);
+  await withPreview(async ({ page, shot, setTheme, emit }) => {
+    const conversation = await openFirstConversation(page);
+    // Inject the other side's message first, so a `--type` draft (or the message
+    // it sends) stays the last thing in the thread.
+    if (incoming !== undefined) {
+      await emit({ conversation, content: incoming });
+      await page.waitForTimeout(500);
+    }
     if (text) await typeInComposer(page, text, { send });
     await shot(`${out}-light.png`);
     await setTheme("dark");

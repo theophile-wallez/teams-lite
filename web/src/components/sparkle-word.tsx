@@ -3,9 +3,10 @@ import { splitSparkleWords } from "~/lib/sparkle-words";
 
 /**
  * One nickname, dressed up: every letter gets its own color from a candy ramp
- * and bobs on a staggered delay, on a softly glowing chip with sparkles at the
- * corners. All of the look lives in `.sparkle-word` (app.css) so the palette can
- * follow the light/dark theme and the global `prefers-reduced-motion` rule can
+ * and bobs and shimmers on a staggered delay, with sparkles twinkling at the
+ * corners — no chip behind it, the message's own background shows through. All
+ * of the look lives in `.sparkle-word` (app.css) so the palette can follow the
+ * surface the word lands on and the global `prefers-reduced-motion` rule can
  * still the whole thing; here we only emit the per-letter spans and the stagger
  * index each one animates on.
  *

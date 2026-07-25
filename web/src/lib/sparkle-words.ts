@@ -1,7 +1,7 @@
 // Sparkle words — a small easter egg in the message renderer.
 //
-// A handful of affectionate nicknames are rendered as a candy chip (one color
-// per letter, a soft glow, twinkling sparkles) instead of plain text. This
+// A handful of affectionate nicknames are dressed up as candy text (one color
+// per letter, a bobbing shimmer, twinkling sparkles) instead of plain text. This
 // module owns only the *detection*: splitting a run of text into plain and
 // sparkling segments. It is pure (no DOM, no React), so it unit-tests in the
 // node environment alongside the other rich-text logic.
