@@ -1,13 +1,26 @@
 import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Ban, Copy, Eye, EyeOff, MoreHorizontal, Pencil, Reply, SmilePlus } from "lucide-react";
 import {
+  Ban,
+  Copy,
+  Eye,
+  EyeOff,
+  Forward,
+  MessageSquareDashed,
+  MoreHorizontal,
+  Pencil,
+  Reply,
+  SmilePlus,
+} from "lucide-react";
+import {
+  bodyFormat,
   copyableMessageText,
   mentionsByItemId,
   parseRichMessage,
   urlHost,
   type ChatMessage,
   type GitLabLinkMetadata,
+  type ParsedRichMessage,
   type Reaction,
 } from "~/lib/protocol";
 import { reactionEmoji, REACTION_PICKER } from "~/lib/teams-emoji";
@@ -18,8 +31,9 @@ import {
   extractLinks,
   hasNonImageContent,
   hasVisibleContent,
-  parseRichHtml,
+  parseMessageBody,
 } from "~/lib/rich-text";
+import { CardAttachment } from "~/components/card-attachment";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
 import {
@@ -176,7 +190,17 @@ function MessageBubbleImpl(props: {
   onCancelEdit: () => void;
 }) {
   const mine = props.message.is_self === true;
-  const parsed = useMemo(() => parseRichMessage(props.message.content), [props.message.content]);
+  // How this body must be read. A `Text` message is plain text: it carries no Teams
+  // markup at all, so there is no quote to split out of it and nothing to parse —
+  // the whole body IS the body, shown verbatim.
+  const format = bodyFormat(props.message.message_type);
+  const parsed = useMemo<ParsedRichMessage>(
+    () =>
+      format === "text"
+        ? { bodyHtml: props.message.content }
+        : parseRichMessage(props.message.content),
+    [props.message.content, format],
+  );
   // Who the body's @mention spans point at, so each mention of a person can offer
   // their card on hover (the span itself only carries an index — see
   // `mentionsByItemId`).
@@ -188,9 +212,9 @@ function MessageBubbleImpl(props: {
   const candidateLinks = useMemo(() => {
     const host = gitlabHost.trim().toLowerCase();
     if (!host) return [];
-    const html = `${parsed.beforeHtml ?? ""}\n${parsed.bodyHtml}`;
-    return extractLinks(html).filter((u) => urlHost(u) === host);
-  }, [parsed, gitlabHost]);
+    const body = `${parsed.beforeHtml ?? ""}\n${parsed.bodyHtml}`;
+    return extractLinks(body, format).filter((u) => urlHost(u) === host);
+  }, [parsed, format, gitlabHost]);
 
   const enrichment = useEnrichedLinks(candidateLinks);
 
@@ -210,9 +234,10 @@ function MessageBubbleImpl(props: {
   // to a node tree with carded links removed. Computed once so we can ask
   // several questions of it (has text? has an image?) without re-parsing.
   const bodyParts = useMemo(() => {
-    const parse = (html?: string) => (html ? dropLinks(parseRichHtml(html), hiddenHrefs) : []);
+    const parse = (body?: string) =>
+      body ? dropLinks(parseMessageBody(body, format), hiddenHrefs) : [];
     return [parse(parsed.beforeHtml), parse(parsed.bodyHtml)];
-  }, [parsed, hiddenHrefs]);
+  }, [parsed, format, hiddenHrefs]);
   // Any renderable content (text, links, lists, OR images) once carded links go.
   const bodyHasContent = useMemo(() => bodyParts.some(hasVisibleContent), [bodyParts]);
   // Real, non-image content — a text-free image body reads as empty here.
@@ -224,6 +249,7 @@ function MessageBubbleImpl(props: {
   const hasAttachments = attachments.length > 0;
   const imageAttachments = attachments.filter((a) => a.kind === "image");
   const recordingAttachments = attachments.filter((a) => a.kind === "recording");
+  const cardAttachments = attachments.filter((a) => a.kind === "card");
 
   // When the message is *only* an integration link (a card, no quote, no
   // attachments, no other body content), the bubble chrome is dropped and just
@@ -235,6 +261,11 @@ function MessageBubbleImpl(props: {
   // quote, no link card, and any attachments are images too. Such messages swap
   // the bubble chrome for the "atelier" mat below (mine and incoming alike); an
   // incoming one still shows the sender's name above the mat.
+  //
+  // A Teams emoji is *not* an image here even though it arrives as an `<img>`:
+  // the parser turns it into its own character (see `isEmojiImage`), so an
+  // emoji-only message counts as text and keeps its ordinary bubble instead of
+  // being framed on the mat like a 20 px photo.
   const hasImage = bodyHasImage || imageAttachments.length > 0;
   const imageOnly =
     !props.editing &&
@@ -243,6 +274,18 @@ function MessageBubbleImpl(props: {
     hasImage &&
     !bodyHasText &&
     imageAttachments.length === attachments.length;
+
+  // A card-only message: an app/bot card and nothing else — which is what a whole
+  // notifications channel (GitHub, Figma, Sentry, n-Alerts) consists of. The card
+  // brings its own surface, so wrapping it in a coloured bubble would frame it
+  // twice; like a link card it becomes the message.
+  const cardOnly =
+    !props.editing &&
+    !parsed.quote &&
+    cards.length === 0 &&
+    cardAttachments.length > 0 &&
+    !bodyHasContent &&
+    cardAttachments.length === attachments.length;
 
   // A recording-only message: a meeting recording and nothing else (the backend
   // clears the body and any sender for these, so they always arrive this way).
@@ -265,10 +308,33 @@ function MessageBubbleImpl(props: {
   const isDeleted = props.message.deleted === true;
   const revealable = isDeleted && (bodyHasContent || hasAttachments);
 
+  // A message with NO visible payload at all: an empty body, no attachment, no
+  // quote, no link card — and not a deletion, which has its own placeholder. Such a
+  // message is either a Teams payload this client cannot show (a voice memo, a form
+  // response) or a machine frame that should never have been stored. Rendering it as
+  // it was — a blank coloured pill — tells the reader nothing; dropping it silently
+  // hides that anything was sent, which reads as a hole in the conversation the
+  // next message then replies into. So it says so, once, quietly, the way Teams
+  // itself owns up to a message type it cannot render.
+  const isUnsupported =
+    !isDeleted &&
+    !props.editing &&
+    !bodyHasContent &&
+    !hasAttachments &&
+    !parsed.quote &&
+    cards.length === 0;
+
+  // A message nobody can act on: gone (deleted) or unshowable (unsupported). There
+  // is nothing to reply to, copy, edit or react to, so neither the hover picker nor
+  // the actions menu appears on it. Reactions already on it still show — they are
+  // information the reader would otherwise lose.
+  const inert = isDeleted || isUnsupported;
+
   // Media- and link-only messages render without the standard rounded, colored
-  // bubble — an image gets the atelier mat, a recording its video card, a link
-  // just its preview card. A deleted message keeps the standard bubble chrome.
-  const bare = !isDeleted && (linkOnly || imageOnly || recordingOnly);
+  // bubble — an image gets the atelier mat, a recording its video card, a link or
+  // app card just the card. A deleted or unsupported message keeps a bubble: its
+  // placeholder is the body.
+  const bare = !isDeleted && (linkOnly || imageOnly || recordingOnly || cardOnly);
 
   // Only label the first message of a same-author run; continuations are clearly
   // from the same person. A message with no sender (e.g. a meeting recording,
@@ -301,8 +367,9 @@ function MessageBubbleImpl(props: {
     hoverTimer.current = null;
   };
   const openPickerSoon = () => {
-    // A deleted message has no reaction/actions affordances — the message is gone.
-    if (props.editing || menuOpen || emojiPickerOpen || isDeleted) return;
+    // Nothing to react to on a message that is gone (deleted) or that has no
+    // payload to show (see `inert`).
+    if (props.editing || menuOpen || emojiPickerOpen || inert) return;
     clearHoverTimer();
     hoverTimer.current = setTimeout(() => setPickerOpen(true), REACTION_HOVER_MS);
   };
@@ -336,7 +403,13 @@ function MessageBubbleImpl(props: {
   const mediaBody = (
     <>
       {parsed.beforeHtml ? (
-        <RichContent html={parsed.beforeHtml} hiddenHrefs={hiddenHrefs} mentions={mentions} />
+        <RichContent
+          html={parsed.beforeHtml}
+          format={format}
+          hiddenHrefs={hiddenHrefs}
+          mentions={mentions}
+          cardShownSeparately={cardAttachments.length > 0}
+        />
       ) : null}
 
       {parsed.quote ? (
@@ -346,6 +419,21 @@ function MessageBubbleImpl(props: {
             mine ? "border-sender-name-mine bg-quote-mine" : "border-sender-name bg-quote-incoming",
           )}
         >
+          {/* A forward carries no author at all — Teams sends the forwarded content
+              and nothing else — so the block says what it is instead of standing
+              there as an unattributed quote. */}
+          {parsed.quote.kind === "forward" ? (
+            <div
+              data-testid="quote-forwarded"
+              className={cn(
+                "flex items-center gap-1 text-xs font-semibold",
+                mine ? "text-sender-name-mine" : "text-sender-name",
+              )}
+            >
+              <Forward className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
+              Forwarded
+            </div>
+          ) : null}
           {parsed.quote.sender ? (
             <div
               className={cn(
@@ -368,16 +456,24 @@ function MessageBubbleImpl(props: {
       ) : null}
 
       {parsed.bodyHtml ? (
-        <RichContent html={parsed.bodyHtml} hiddenHrefs={hiddenHrefs} mentions={mentions} />
+        <RichContent
+          html={parsed.bodyHtml}
+          format={format}
+          hiddenHrefs={hiddenHrefs}
+          mentions={mentions}
+          cardShownSeparately={cardAttachments.length > 0}
+        />
       ) : null}
 
       {hasAttachments ? (
-        <div className="mt-1.5 flex flex-col gap-1.5">
+        <div className={cn("flex flex-col gap-1.5", !cardOnly && "mt-1.5")}>
           {attachments.map((att, i) =>
             att.kind === "image" ? (
               <MediaImage key={`att-${i}-${att.url}`} src={att.url} alt={att.name} />
             ) : att.kind === "recording" ? (
               <RecordingAttachment key={`att-${i}-${att.url}`} attachment={att} />
+            ) : att.kind === "card" ? (
+              <CardAttachment key={`att-${i}-${att.name}`} attachment={att} />
             ) : (
               <FileAttachment key={`att-${i}-${att.url}`} attachment={att} />
             ),
@@ -409,7 +505,9 @@ function MessageBubbleImpl(props: {
         data-link-only={linkOnly ? "true" : undefined}
         data-image-only={imageOnly ? "true" : undefined}
         data-recording-only={recordingOnly ? "true" : undefined}
+        data-card-only={cardOnly ? "true" : undefined}
         data-deleted={isDeleted ? "true" : undefined}
+        data-unsupported={isUnsupported ? "true" : undefined}
         className={cn(
           "relative text-sm leading-relaxed",
           // Media- and link-only messages drop the standard bubble chrome; the
@@ -417,15 +515,16 @@ function MessageBubbleImpl(props: {
           // A link card gets a tighter max width; the mat is capped at the usual
           // bubble one; a recording card sizes itself (max-w-sm).
           linkOnly && "max-w-md",
+          cardOnly && "w-full max-w-md",
           imageOnly && "max-w-[76%]",
           recordingOnly && "w-full max-w-sm",
           !bare &&
             cn(
               "max-w-[76%] rounded-2xl px-3.5 py-2",
-              // A deleted message drops the accent fill for a muted, dashed
-              // "ghost" bubble (the same on both sides) so it reads as absent
-              // rather than as a real message — until it is revealed.
-              isDeleted
+              // A deleted message — and one with nothing to show — drops the accent
+              // fill for a muted, dashed "ghost" bubble (the same on both sides) so
+              // it reads as absent rather than as a real message.
+              isDeleted || isUnsupported
                 ? "border border-dashed border-border bg-transparent text-text-dim shadow-none"
                 : mine
                 ? "bg-bubble-mine text-bubble-mine-foreground shadow-chip"
@@ -443,12 +542,12 @@ function MessageBubbleImpl(props: {
             "ring-2 ring-primary/70 ring-offset-2 ring-offset-background transition-shadow",
         )}
         onContextMenu={(e) => {
-          if (isDeleted) return; // no actions menu on a deleted message
+          if (inert) return; // nothing to act on
           e.preventDefault();
           setMenuOpen(true);
         }}
       >
-        {!props.editing && !isDeleted && pickerOpen && (
+        {!props.editing && !inert && pickerOpen && (
           <div
             className={cn(
               // Float just above the bubble on the author's anchor side. The
@@ -522,7 +621,9 @@ function MessageBubbleImpl(props: {
           </DeletedContent>
         ) : (
           <>
-            {linkOnly ? null : imageOnly ? (
+            {isUnsupported ? (
+              <UnsupportedContent />
+            ) : linkOnly ? null : imageOnly ? (
               // A lone picture: frame it on the atelier mat — a neutral card
               // with a faint diagonal hatch peeking around a few px of padding.
               // `w-fit` hugs the image; `max-w-full` keeps it within the row cap.
@@ -550,70 +651,113 @@ function MessageBubbleImpl(props: {
               <ReactionChips reactions={reactions} mine={mine} onToggle={react} />
             ) : null}
 
-            <DropdownMenu
-              open={menuOpen}
-              onOpenChange={(open) => {
-                setMenuOpen(open);
-                // The menu and the hover picker are alternative reaction
-                // surfaces; never show both at once.
-                if (open) cancelPicker();
-              }}
-            >
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  aria-label="Message actions"
-                  data-testid="message-actions"
-                  className={cn(
-                    // Hidden until hover on a mouse, but always visible on touch
-                    // (coarse pointer) where there is no hover — otherwise the
-                    // reply/react/copy/edit menu would be unreachable on mobile.
-                    "absolute top-1/2 grid size-7 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-text-dim opacity-0 transition hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:bg-accent data-[state=open]:text-foreground data-[state=open]:opacity-100 [@media(pointer:coarse)]:opacity-100",
-                    mine ? "-left-9" : "-right-9",
-                  )}
-                >
-                  <MoreHorizontal className="size-4" strokeWidth={1.6} />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align={mine ? "start" : "end"}>
-                {/* Reaction bar — the same emojis as the hover picker, so
-                    reacting is also reachable from the ⋯ menu (and by keyboard). */}
-                <ReactionPicker
-                  data-testid="menu-reaction-picker"
-                  activeKey={myReactionKey}
-                  onPick={react}
-                  onMore={openEmojiPicker}
-                  className="justify-between px-1 pb-1"
-                />
-                <DropdownMenuSeparator />
-                {mine && (
-                  <DropdownMenuItem
-                    data-testid="action-edit"
-                    onSelect={() => props.onStartEdit(props.message)}
-                  >
-                    <Pencil className="size-4" strokeWidth={1.6} />
-                    Edit
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem
-                  data-testid="action-reply"
-                  onSelect={() => props.onReply(props.message)}
-                >
-                  <Reply className="size-4" strokeWidth={1.6} />
-                  Reply
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  data-testid="action-copy"
-                  onSelect={() => props.onCopy(props.message)}
-                >
-                  <Copy className="size-4" strokeWidth={1.6} />
-                  Copy
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            {/* A message nobody can act on gets no actions surface at all. */}
+            {inert ? null : (
+              <MessageActionsMenu
+                mine={mine}
+                open={menuOpen}
+                onOpenChange={(open) => {
+                  setMenuOpen(open);
+                  // The menu and the hover picker are alternative reaction
+                  // surfaces; never show both at once.
+                  if (open) cancelPicker();
+                }}
+                activeReactionKey={myReactionKey}
+                onReact={react}
+                onMore={openEmojiPicker}
+                onEdit={() => props.onStartEdit(props.message)}
+                onReply={() => props.onReply(props.message)}
+                onCopy={() => props.onCopy(props.message)}
+              />
+            )}
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The ⋯ actions surface of a bubble: a hover-revealed trigger on the author's
+ * outer side, opening a menu that leads with the reaction bar (the same emojis as
+ * the hover picker, so reacting is reachable by keyboard too) and then Edit (mine
+ * only), Reply and Copy. Rendered only for a message there is something to do with
+ * — see `inert` in the bubble.
+ */
+function MessageActionsMenu(props: {
+  mine: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  activeReactionKey?: string;
+  onReact: (key: string) => void;
+  /** Hand off to the full emoji picker — the quick row's "more" affordance. */
+  onMore: () => void;
+  onEdit: () => void;
+  onReply: () => void;
+  onCopy: () => void;
+}) {
+  return (
+    <DropdownMenu open={props.open} onOpenChange={props.onOpenChange}>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label="Message actions"
+          data-testid="message-actions"
+          className={cn(
+            // Hidden until hover on a mouse, but always visible on touch
+            // (coarse pointer) where there is no hover — otherwise the
+            // reply/react/copy/edit menu would be unreachable on mobile.
+            "absolute top-1/2 grid size-7 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-text-dim opacity-0 transition hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:bg-accent data-[state=open]:text-foreground data-[state=open]:opacity-100 [@media(pointer:coarse)]:opacity-100",
+            props.mine ? "-left-9" : "-right-9",
+          )}
+        >
+          <MoreHorizontal className="size-4" strokeWidth={1.6} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align={props.mine ? "start" : "end"}>
+        <ReactionPicker
+          data-testid="menu-reaction-picker"
+          activeKey={props.activeReactionKey}
+          onPick={props.onReact}
+          onMore={props.onMore}
+          className="justify-between px-1 pb-1"
+        />
+        <DropdownMenuSeparator />
+        {props.mine && (
+          <DropdownMenuItem data-testid="action-edit" onSelect={props.onEdit}>
+            <Pencil className="size-4" strokeWidth={1.6} />
+            Edit
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuItem data-testid="action-reply" onSelect={props.onReply}>
+          <Reply className="size-4" strokeWidth={1.6} />
+          Reply
+        </DropdownMenuItem>
+        <DropdownMenuItem data-testid="action-copy" onSelect={props.onCopy}>
+          <Copy className="size-4" strokeWidth={1.6} />
+          Copy
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * The body of a message with nothing to show: an empty body, no attachment, no
+ * quote, not a deletion (see `isUnsupported`). One muted line inside the same ghost
+ * bubble a deletion gets — enough for the reader to see that something was sent
+ * here and that this client cannot show it, without pretending to know what it was.
+ *
+ * The alternative, skipping the row entirely, was rejected: it leaves a silent gap
+ * that the next message replies into ("did you get the file?" with nothing above
+ * it), and it hides a whole class of payloads we would like to hear about rather
+ * than quietly swallow.
+ */
+function UnsupportedContent() {
+  return (
+    <div data-testid="unsupported-message" className="flex items-center gap-2">
+      <MessageSquareDashed className="size-3.5 shrink-0" strokeWidth={1.6} aria-hidden />
+      <span className="italic">Unsupported message</span>
     </div>
   );
 }

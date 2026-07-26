@@ -8,16 +8,47 @@
 // Mirrors the Rust `ConversationKind` (src/store.rs).
 export type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
 
+/** One label/value pair of a card's fact list (an Adaptive Card `FactSet`, a
+ *  connector card's `sections[].facts`). */
+export type CardFact = { title: string; value: string };
+
+/** One action a card offers. `url` is empty for an action that is not a link — a
+ *  poll vote, a bot `Action.Submit` — which the UI must therefore NOT render as
+ *  something clickable: acting on it would mean posting as the user. */
+export type CardAction = { title: string; url: string };
+
+/** An adaptive / connector card, already flattened by the backend (see
+ *  src/teams_cards.rs) into the four presentation-free parts a chat bubble can
+ *  show. `text` is PLAIN text — never HTML — with `\n` between the card's blocks,
+ *  so it is printed verbatim (block breaks preserved), never parsed. */
+export type CardPayload = {
+  title: string;
+  text: string;
+  facts: CardFact[];
+  actions: CardAction[];
+  /** Link-unfurl cards only (see `parse_link_unfurl_cards` in src/teams_unfurl.rs):
+   *  the app that produced the preview — "GitHub Notifications", "Figma" — which
+   *  Teams shows as a source chip above the card body. Absent on a card posted
+   *  directly by a bot, whose title already names it. */
+  app_name?: string;
+  /** That app's icon, an ordinary public CDN URL (NOT hosted content, so it needs
+   *  no media proxy). Empty/absent when the app reported none. */
+  app_icon?: string;
+};
+
 /** A file/card attachment shared in a message (surfaced from Teams `properties`
  *  by the backend). `url` is an authenticated hosted-content URL — it must be
  *  loaded through the backend media proxy (see `TeamsController.loadMedia`),
  *  never fetched directly by the browser. */
-export type AttachmentKind = "image" | "file" | "recording";
+export type AttachmentKind = "image" | "file" | "recording" | "card";
 export type Attachment = {
   name: string;
   content_type: string;
   url: string;
   kind: AttachmentKind;
+  /** Card only (`kind: "card"`): the decoded card the bubble renders. Absent on
+   *  every other kind; a card entry without it has nothing to show. */
+  card?: CardPayload;
   /** Meeting-recording only (`kind: "recording"`): a poster frame for the video,
    *  itself an authenticated hosted-content URL loaded through the media proxy.
    *  Empty/absent when Teams reported no thumbnail (the card shows a play glyph). */
@@ -37,10 +68,8 @@ export type Reaction = {
   mine: boolean;
 };
 
-/** A structured system/activity event a message represents, rendered by the UI as
- *  a centered line instead of a chat bubble (see `system_event_value` in
- *  src/bin/server.rs and `CallEventLine`). Currently only call/meeting events. */
-export type SystemEvent = {
+/** A call/meeting event, rendered as a centered line by `CallEventLine`. */
+export type CallSystemEvent = {
   kind: "call";
   /** "ended" (a completed call), "missed", or "started". */
   event: "ended" | "missed" | "started";
@@ -59,6 +88,83 @@ export type SystemEvent = {
    *  event, but the backend never rings for it (it carries no caller identity). */
   meeting?: boolean;
 };
+
+/** A Teams `ThreadActivity` frame — a membership or pin change in a chat/meeting
+ *  thread (see `parse_thread_activity` in src/teams_read.rs) — rendered as a
+ *  centered line by `ThreadActivityLine`.
+ *
+ *  `event` is left open-ended: the backend only emits the three below today, and an
+ *  operation it learns to decode later must degrade to "render nothing" rather
+ *  than to a broken line. */
+export type ThreadActivityEvent = {
+  kind: "thread_activity";
+  event: "member_added" | "pinned" | "unpinned" | (string & {});
+  /** When it happened (epoch ms). */
+  time_ms?: number;
+  /** Who did it (added the members, pinned the message); empty when unreported. */
+  actor_mri?: string;
+  /** The members the activity is about (empty for a pin/unpin). Display names, and
+   *  Teams routinely sends them EMPTY — the MRI below is then the only identity, so
+   *  the UI resolves the name from it (see `ThreadActivityLine`). */
+  members?: string[];
+  /** Those members' MRIs, aligned index-for-index with {@link members} exactly like
+   *  the call event's `participant_mris`. */
+  member_mris?: string[];
+};
+
+/** A scheduled-meeting activity — Teams' "Scheduled a meeting" / "The meeting … is
+ *  cancelled" frames, keyed off `properties.meeting["@type"]` by the backend (see
+ *  `parse_meeting_activity` in src/teams_read.rs) rather than off their localised
+ *  body text — rendered as a centered line by `MeetingEventLine`.
+ *
+ *  `event` is left open-ended for the same reason as {@link ThreadActivityEvent}: an
+ *  `@type` the backend learns later must degrade to "render nothing". */
+export type MeetingSystemEvent = {
+  kind: "meeting";
+  event: "scheduled" | "cancelled" | "updated" | (string & {});
+  /** The meeting's title; may be empty when Teams reported none. */
+  title?: string;
+  /** Start/end of the meeting (epoch ms), 0 or absent when unknown. */
+  start_ms?: number;
+  end_ms?: number;
+  /** Where it happens, usually "Microsoft Teams Meeting"; empty when unreported. */
+  location?: string;
+  /** Who scheduled it, resolvable to a name; empty when unreported. */
+  organizer_mri?: string;
+  /** The meeting's join link. Opening it hands off to real Teams — teams-lite
+   *  cannot join a meeting itself. */
+  join_url?: string;
+};
+
+/** A structured system/activity event a message represents, rendered by the UI as
+ *  a centered line instead of a chat bubble (see `system_event_value` in
+ *  src/bin/server.rs and `SystemEventLine`).
+ *
+ *  The union stays OPEN — a bare `{ kind }` is a valid member — because the backend
+ *  may start emitting a kind this client predates. Such an event must render
+ *  nothing at all (never its raw payload), which is what the {@link isCallEvent} /
+ *  {@link isThreadActivityEvent} / {@link isMeetingEvent} guards leave as the
+ *  remaining case. */
+export type SystemEvent =
+  | CallSystemEvent
+  | ThreadActivityEvent
+  | MeetingSystemEvent
+  | { kind: string };
+
+/** Is this system event a call/meeting event? */
+export function isCallEvent(event: SystemEvent): event is CallSystemEvent {
+  return event.kind === "call";
+}
+
+/** Is this system event a thread activity (member added, message pinned)? */
+export function isThreadActivityEvent(event: SystemEvent): event is ThreadActivityEvent {
+  return event.kind === "thread_activity";
+}
+
+/** Is this system event a scheduled-meeting activity? */
+export function isMeetingEvent(event: SystemEvent): event is MeetingSystemEvent {
+  return event.kind === "meeting";
+}
 
 export type Conversation = {
   id: string;
@@ -122,6 +228,12 @@ export type ChatMessage = {
   compose_time: number;
   sender: string;
   sender_mri?: string;
+  /** Teams' own `messagetype`, verbatim ("Text", "RichText/Html",
+   *  "RichText/Media_Card", "Event/Call", …). It decides how `content` must be READ:
+   *  a `Text` body is plain text and must be escaped, not parsed as HTML (see
+   *  {@link bodyFormat}). Empty or absent means UNKNOWN — a row stored before the
+   *  backend persisted the type — and keeps the historical HTML behaviour. */
+  message_type?: string;
   content: string;
   /** File/card attachments (absent or empty when the message has none). Inline
    *  images embedded in `content` as `<img>` are NOT here — they are extracted
@@ -414,8 +526,59 @@ export type LinkMetadataResult = { metadata: GitLabLinkMetadata | null };
 
 // ---- message content parsing (ported from ui/src/message-content.ts) -------
 
-export type MessageQuote = {
+/** How a message body must be read: as the bounded Teams HTML subset, or verbatim
+ *  as plain text (escaped, never parsed as markup). */
+export type BodyFormat = "html" | "text";
+
+/** The Teams `messagetype` whose body is PLAIN text. Compared case-insensitively:
+ *  the wire says "Text", but the type is Teams' own string and we never want a
+ *  casing change to silently turn a body back into HTML. */
+const PLAIN_TEXT_MESSAGE_TYPE = "text";
+
+/**
+ * How the body of a message with this `messagetype` must be read.
+ *
+ * Only `Text` is plain: everything else Teams sends as a body is either HTML
+ * (`RichText/*`) or has no body at all (`Event/*`), so it keeps the HTML path. An
+ * empty/absent type is a legacy row whose type we never stored — "unknown", which
+ * must keep behaving exactly as it did before the type rode the wire (HTML), since
+ * guessing "text" would strip the formatting off years of stored messages.
+ *
+ * This matters because a plain body is NOT markup: parsed as HTML, `Vec<String>`
+ * renders as `Vec`, and `pour moi c'est <yyyy>-<id>` as `pour moi c'est -`.
+ */
+export function bodyFormat(messageType: string | undefined): BodyFormat {
+  return messageType?.trim().toLowerCase() === PLAIN_TEXT_MESSAGE_TYPE ? "text" : "html";
+}
+
+/** Which Teams blockquote a quote came out of: a reply to a message in the same
+ *  conversation (`http://schema.skype.com/Reply`), or a message forwarded in from
+ *  somewhere else (`http://schema.skype.com/Forward`). Teams attributes a reply
+ *  but sends a forward with no author at all, so this is what lets the UI label a
+ *  forwarded block explicitly instead of showing an unattributed quote. */
+export type QuoteKind = "reply" | "forward";
+
+/** Attribution of a quoted message, shared by the plain-text ({@link MessageQuote})
+ *  and rich ({@link RichQuote}) quote shapes so both parsers agree on it.
+ *
+ *  Teams only fills these in for a `Reply` blockquote: a `Forward` blockquote
+ *  carries the forwarded content and nothing else, so `sender`/`senderMri` are
+ *  empty and `time` is absent for a forward — `kind` is the only attribution the
+ *  payload provides. */
+export type QuoteAttribution = {
+  kind: QuoteKind;
+  /** Display name of the quoted author, or "" when the payload carries none. */
   sender: string;
+  /** The quoted author's MRI, when the quote carries one (it does for every reply
+   *  Teams composes). Empty otherwise; the UI then shows the name without a card. */
+  senderMri: string;
+  /** Compose time of the quoted message, in milliseconds since the Unix epoch, as
+   *  Teams reports it on a reply (`<span itemprop="time" itemid>`, else the
+   *  blockquote's own `itemid`). Absent when the payload carries no time. */
+  time?: number;
+};
+
+export type MessageQuote = QuoteAttribution & {
   text: string;
 };
 
@@ -511,42 +674,122 @@ export function mediaNeedsProxy(url: string): boolean {
   return PROXY_MEDIA_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
 }
 
-const REPLY_BLOCKQUOTE =
-  /<blockquote\b[^>]*itemtype="http:\/\/schema\.skype\.com\/Reply"[^>]*>([\s\S]*?)<\/blockquote>/i;
+/** The two Teams quote blockquotes, captured together so a reply and a forward are
+ *  split out of the body the same way. The `itemtype` word is captured to tell them
+ *  apart (see {@link QuoteKind}). */
+const QUOTE_BLOCKQUOTE =
+  /<blockquote\b[^>]*itemtype="http:\/\/schema\.skype\.com\/(Reply|Forward)"[^>]*>([\s\S]*?)<\/blockquote>/i;
 const QUOTED_AUTHOR = /<strong\b[^>]*itemprop="mri"[^>]*>([\s\S]*?)<\/strong>/i;
 /** The quoted author's MRI, which Teams puts in the same `<strong>`'s `itemid`
  *  (see `reply_quote` in src/teams_send.rs) — so a quoted name can offer that
  *  person's card too. */
 const QUOTED_AUTHOR_MRI = /<strong\b[^>]*itemprop="mri"[^>]*itemid="([^"]*)"/i;
+/** The OLDER author markup, on replies composed by earlier Teams clients:
+ *  `<p><b><span itemprop="mri" itemid="8:orgid:…">Name</span>…</b></p>` instead of a
+ *  `<strong itemprop="mri">`. Same microdata, different element — so it is read the
+ *  same way rather than leaving the quote unattributed. Only consulted when the
+ *  modern shape is absent, which keeps a modern reply's parse untouched. */
+const QUOTED_AUTHOR_LEGACY = /<span\b[^>]*itemprop="mri"[^>]*>([\s\S]*?)<\/span>/i;
+const QUOTED_AUTHOR_LEGACY_MRI = /<span\b[^>]*itemprop="mri"[^>]*itemid="([^"]*)"/i;
 const QUOTED_PREVIEW = /<p\b[^>]*itemprop="preview"[^>]*>([\s\S]*?)<\/p>/i;
+/** Compose time of the quoted message: Teams puts it in the `itemid` of an empty
+ *  `<span itemprop="time">` inside a reply blockquote. */
+const QUOTED_TIME = /<span\b[^>]*itemprop="time"[^>]*itemid="([^"]*)"/i;
+/** A reply blockquote repeats the quoted message's id — which is its ms-epoch
+ *  compose time — in its own `itemid`; used as a fallback for {@link QUOTED_TIME}. */
+const QUOTE_BLOCKQUOTE_ITEMID = /<blockquote\b[^>]*\bitemid="([^"]*)"/i;
+
+/** A quote blockquote located inside a message body: its attribution, the HTML of
+ *  the quoted content, and where the whole blockquote sits in the message so the
+ *  surrounding body can be sliced out around it. */
+type QuoteMatch = {
+  attribution: QuoteAttribution;
+  /** HTML of the quoted content itself: the reply's `itemprop="preview"` (or the
+   *  blockquote minus its author line), or the forward's whole blockquote body. */
+  quoteHtml: string;
+  /** Offset of the blockquote in the message HTML, and of the first character
+   *  after it. */
+  start: number;
+  end: number;
+};
+
+/** Who a reply blockquote attributes its quote to: the display name, the MRI, and
+ *  the exact author-line markup, so a quote with no `itemprop="preview"` wrapper can
+ *  have that line removed from its body instead of showing it as quoted text.
+ *
+ *  Teams has composed this line in two shapes over the years (see
+ *  {@link QUOTED_AUTHOR} and {@link QUOTED_AUTHOR_LEGACY}); the modern one is tried
+ *  first, so a reply that carries it parses exactly as it always did. */
+function quotedAuthor(inner: string): { sender: string; senderMri: string; authorHtml: string } {
+  const modern = inner.match(QUOTED_AUTHOR);
+  const line = modern ?? inner.match(QUOTED_AUTHOR_LEGACY);
+  const mri = (modern ? inner.match(QUOTED_AUTHOR_MRI) : inner.match(QUOTED_AUTHOR_LEGACY_MRI))?.[1];
+  return {
+    sender: plain(line?.[1] ?? ""),
+    senderMri: decodeEntities(mri ?? "").trim(),
+    authorHtml: line?.[0] ?? "",
+  };
+}
+
+/** Locate the reply/forward blockquote of a Teams message, or `null` when it has
+ *  none. Pure string work, shared by {@link parseMessageContent} and
+ *  {@link parseRichMessage} so the plain-text and rich paths never disagree on
+ *  what the quote is. */
+function matchQuote(html: string): QuoteMatch | null {
+  const match = html.match(QUOTE_BLOCKQUOTE);
+  const inner = match?.[2];
+  if (!match || inner === undefined) return null;
+
+  const kind: QuoteKind = match[1]?.toLowerCase() === "forward" ? "forward" : "reply";
+  // A forward carries only the forwarded content: no author line and no preview
+  // wrapper, so the whole blockquote body is the quote.
+  const author = kind === "reply" ? quotedAuthor(inner) : null;
+  const previewHtml = kind === "reply" ? inner.match(QUOTED_PREVIEW)?.[1] : undefined;
+  const quoteHtml =
+    author === null ? inner : (previewHtml ?? inner.replace(author.authorHtml, ""));
+  const rawTime = inner.match(QUOTED_TIME)?.[1] ?? match[0].match(QUOTE_BLOCKQUOTE_ITEMID)?.[1];
+  const time = Number(rawTime);
+
+  const start = match.index ?? 0;
+  return {
+    attribution: {
+      kind,
+      sender: author?.sender ?? "",
+      senderMri: author?.senderMri ?? "",
+      ...(rawTime && Number.isFinite(time) && time > 0 ? { time } : {}),
+    },
+    quoteHtml,
+    start,
+    end: start + match[0].length,
+  };
+}
+
+/** True when a quote blockquote holds something worth rendering: text, or an image
+ *  (a forwarded screenshot is often the whole quoted message). An empty one is
+ *  dropped rather than rendered as a blank recessed block. */
+function quoteHasContent(quoteHtml: string): boolean {
+  return plain(quoteHtml) !== "" || extractImages(quoteHtml).length > 0;
+}
 
 /** Split a raw Teams message HTML into an optional quote plus the body text. */
 export function parseMessageContent(html: string): ParsedMessage {
-  const match = html.match(REPLY_BLOCKQUOTE);
-  const inner = match?.[1];
-  if (inner === undefined) return { body: plain(html), images: extractImages(html) };
+  const match = matchQuote(html);
+  if (!match) return { body: plain(html), images: extractImages(html) };
 
-  const sender = plain(inner.match(QUOTED_AUTHOR)?.[1] ?? "");
-  const previewHtml = inner.match(QUOTED_PREVIEW)?.[1];
-  const text = plain(previewHtml ?? inner.replace(QUOTED_AUTHOR, ""));
+  const { attribution, quoteHtml, start, end } = match;
+  const text = plain(quoteHtml);
 
-  const quoteIndex = match?.index ?? 0;
-  const quoteEnd = quoteIndex + (match?.[0].length ?? 0);
-  const beforeQuote = plain(html.slice(0, quoteIndex));
-  const afterQuote = plain(html.slice(quoteEnd));
+  const beforeQuote = plain(html.slice(0, start));
+  const afterQuote = plain(html.slice(end));
   const body = [beforeQuote, afterQuote].filter(Boolean).join("\n");
   // Inline images live in the body, never inside the quoted preview.
-  const images = extractImages(html.slice(0, quoteIndex) + html.slice(quoteEnd));
+  const images = extractImages(html.slice(0, start) + html.slice(end));
 
-  if (!sender && !text) return { body, images };
-  return { quote: { sender, text }, body, beforeQuote, afterQuote, images };
+  if (!attribution.sender && !quoteHasContent(quoteHtml)) return { body, images };
+  return { quote: { ...attribution, text }, body, beforeQuote, afterQuote, images };
 }
 
-export type RichQuote = {
-  sender: string;
-  /** The quoted author's MRI, when the quote carries one (it does for every reply
-   *  Teams composes). Empty otherwise; the UI then shows the name without a card. */
-  senderMri: string;
+export type RichQuote = QuoteAttribution & {
   html: string;
 };
 
@@ -559,29 +802,23 @@ export type ParsedRichMessage = {
 /**
  * Like {@link parseMessageContent}, but preserves the raw Teams HTML of each
  * part instead of flattening it to plain text, so the web UI can render inbound
- * formatting (bold, links, lists, code, mentions, images). The reply quote is
- * still split out so it can be shown in its recessed block.
+ * formatting (bold, links, lists, code, mentions, images). The quoted block — a
+ * reply or a forward — is still split out so it can be shown in its recessed
+ * block, labelled from `quote.kind`.
  */
 export function parseRichMessage(html: string): ParsedRichMessage {
-  const match = html.match(REPLY_BLOCKQUOTE);
-  const inner = match?.[1];
-  if (inner === undefined) return { bodyHtml: html };
+  const match = matchQuote(html);
+  if (!match) return { bodyHtml: html };
 
-  const sender = plain(inner.match(QUOTED_AUTHOR)?.[1] ?? "");
-  const senderMri = decodeEntities(inner.match(QUOTED_AUTHOR_MRI)?.[1] ?? "").trim();
-  const previewHtml = inner.match(QUOTED_PREVIEW)?.[1];
-  const quoteHtml = previewHtml ?? inner.replace(QUOTED_AUTHOR, "");
+  const { attribution, quoteHtml, start, end } = match;
+  const beforeHtml = html.slice(0, start);
+  const afterHtml = html.slice(end);
 
-  const quoteIndex = match?.index ?? 0;
-  const quoteEnd = quoteIndex + (match?.[0].length ?? 0);
-  const beforeHtml = html.slice(0, quoteIndex);
-  const afterHtml = html.slice(quoteEnd);
-
-  if (!sender && plain(quoteHtml) === "") {
+  if (!attribution.sender && !quoteHasContent(quoteHtml)) {
     return { bodyHtml: [beforeHtml, afterHtml].filter((s) => plain(s)).join("") };
   }
   return {
-    quote: { sender, senderMri, html: quoteHtml },
+    quote: { ...attribution, html: quoteHtml },
     beforeHtml,
     bodyHtml: afterHtml,
   };
@@ -600,8 +837,11 @@ export function mentionsByItemId(message: ChatMessage): Map<number, MessageMenti
   return map;
 }
 
-/** The plain text a "Copy"/"Reply" action should use for a message. */
+/** The plain text a "Copy"/"Reply" action should use for a message. A `Text` body
+ *  IS that text already — running it through the tag stripper would eat any angle
+ *  brackets the author typed (`Vec<String>`), so it is used verbatim. */
 export function copyableMessageText(message: ChatMessage): string {
+  if (bodyFormat(message.message_type) === "text") return message.content;
   const parsed = parseMessageContent(message.content);
   return parsed.body || parsed.quote?.text || "";
 }
@@ -620,7 +860,7 @@ export function formatCallDuration(seconds: number): string {
  *  "Call ended · 10 min". Duration is shown only for a completed call. The
  *  participants are rendered separately as an avatar stack by `CallEventLine`,
  *  so they are not part of this label. Pure and presentational. */
-export function formatCallEvent(event: SystemEvent): string {
+export function formatCallEvent(event: CallSystemEvent): string {
   const base =
     event.event === "missed"
       ? "Missed call"
@@ -631,6 +871,101 @@ export function formatCallEvent(event: SystemEvent): string {
     return `${base} · ${formatCallDuration(event.duration_seconds)}`;
   }
   return base;
+}
+
+/** How many names a thread-activity line spells out before rolling the rest into
+ *  "N others" — enough to be informative, short enough to stay one quiet line. */
+const MAX_ACTIVITY_NAMES = 3;
+
+/** "Alice", "Alice and Bob", "Alice, Bob and Carol", "Alice, Bob, Carol and 2
+ *  others". `total` is how many people the activity is about, which can exceed the
+ *  names we know (Teams often sends none), so the remainder is counted, not named. */
+function listPeople(names: string[], total: number): string {
+  const shown = names.slice(0, MAX_ACTIVITY_NAMES);
+  const rest = Math.max(total - shown.length, 0);
+  const parts = rest > 0 ? [...shown, rest === 1 ? "1 other" : `${rest} others`] : shown;
+  if (parts.length <= 1) return parts[0] ?? "";
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * A one-line label for a thread-activity system event, Teams-style: "Nathan CAPIAUX
+ * was added to the chat", "A message was pinned".
+ *
+ * `names` overrides the event's own `members`: Teams sends those empty far more
+ * often than not, so the UI resolves them from the MRIs first (see
+ * `ThreadActivityLine`) and passes the result here. Whatever is still unknown is
+ * counted rather than named, so the line never reads as if fewer people were added.
+ *
+ * Returns `null` for an activity we have no words for — a kind of operation the
+ * backend learns to decode later — so it renders nothing at all rather than a line
+ * saying "unknown". Pure and presentational.
+ */
+export function formatThreadActivity(event: ThreadActivityEvent, names?: string[]): string | null {
+  switch (event.event) {
+    case "member_added": {
+      const known = (names ?? event.members ?? []).map((n) => n.trim()).filter(Boolean);
+      const total = Math.max(
+        event.members?.length ?? 0,
+        event.member_mris?.length ?? 0,
+        known.length,
+      );
+      const who = known.length > 0 ? listPeople(known, total) : total === 1 ? "Someone" : `${total} people`;
+      return `${who} ${total === 1 ? "was" : "were"} added to the chat`;
+    }
+    case "pinned":
+      return "A message was pinned";
+    case "unpinned":
+      return "A message was unpinned";
+    default:
+      return null;
+  }
+}
+
+/**
+ * A one-line label for a scheduled-meeting event: "Meeting scheduled · Weekly sync",
+ * "Meeting cancelled" when Teams reported no title.
+ *
+ * Returns `null` for an `@type` we have no words for, so an unrecognised meeting
+ * activity renders nothing rather than a line saying "meeting something". The
+ * schedule and the join link are rendered separately by `MeetingEventLine`, so they
+ * are not part of this label. Pure and presentational.
+ */
+export function formatMeetingEvent(event: MeetingSystemEvent): string | null {
+  const verb =
+    event.event === "scheduled"
+      ? "Meeting scheduled"
+      : event.event === "cancelled"
+        ? "Meeting cancelled"
+        : event.event === "updated"
+          ? "Meeting updated"
+          : null;
+  if (!verb) return null;
+  const title = event.title?.trim();
+  return title ? `${verb} · ${title}` : verb;
+}
+
+/**
+ * The meeting's local date and time range, e.g. "Mon 4 May, 14:30 – 15:30", or just
+ * the date when only a start is known. Returns "" when Teams reported no start time
+ * (the line then carries its label alone).
+ *
+ * An end on a different day than the start is spelled out in full on both sides, so
+ * an all-day or overnight meeting never reads as ending before it began. The
+ * viewer's own locale and zone format it — the wire carries epoch ms.
+ */
+export function formatMeetingSchedule(event: MeetingSystemEvent): string {
+  const start = event.start_ms && event.start_ms > 0 ? new Date(event.start_ms) : null;
+  if (!start) return "";
+  const end = event.end_ms && event.end_ms > 0 ? new Date(event.end_ms) : null;
+  const day = (d: Date) =>
+    d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  const time = (d: Date) => d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  if (!end) return `${day(start)}, ${time(start)}`;
+  const sameDay = start.toDateString() === end.toDateString();
+  return sameDay
+    ? `${day(start)}, ${time(start)} – ${time(end)}`
+    : `${day(start)}, ${time(start)} – ${day(end)}, ${time(end)}`;
 }
 
 /** Headline for the incoming-call banner, e.g. "Incoming call · Riley" for a 1:1

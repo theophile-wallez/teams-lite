@@ -13,7 +13,7 @@ import {
 import { useAppState, useController } from "./controller-context";
 import { Avatar, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
-import { CallEventLine } from "./call-event-line";
+import { SystemEventLine } from "./system-event-line";
 import { ReadReceipts } from "./read-receipts";
 import { PersonHoverCard } from "./person-card";
 import { groupThreads, type Thread } from "~/lib/threads";
@@ -348,7 +348,7 @@ export function MessagePane(props: { onBack?: () => void }) {
     return (
       <div key={m.id} className="contents">
         {m.system_event ? (
-          <CallEventLine event={m.system_event} />
+          <SystemEventLine event={m.system_event} />
         ) : (
           <MessageBubble
             message={m}

@@ -9,34 +9,59 @@
 //
 // The parser is pure (no DOM, no network, no runtime-specific API), so it runs
 // identically under SSR and in node-environment unit tests.
+//
+// Not every body is HTML: a `messagetype: Text` message is plain text, and parsing
+// it as HTML eats anything in angle brackets. `parseMessageBody` is the choke point
+// that reads each body the way its `BodyFormat` says it must be read.
+
+import type { BodyFormat } from "./protocol";
 
 /** A semantic element tag we know how to render. */
 export type RichTag =
   | "p"
   | "br"
+  | "hr"
+  | "h1"
+  | "h2"
+  | "h3"
   | "strong"
   | "em"
   | "u"
   | "s"
+  | "small"
   | "code"
   | "pre"
   | "blockquote"
   | "ul"
   | "ol"
   | "li"
+  | "table"
+  | "thead"
+  | "tbody"
+  | "tr"
+  | "td"
+  | "th"
   | "a"
   | "img"
-  | "mention";
+  | "mention"
+  /** An app link-unfurl card (`span itemtype=".../InputExtension"`). */
+  | "card";
 
 export type RichAttrs = {
   href?: string;
   src?: string;
   alt?: string;
-  /** Mentions only: the `itemid` the Teams mention span carries — an index into
-   *  the message's `mentions` list, which is where the mentioned person's identity
-   *  actually lives (the span itself only holds their display text). Kept so the
-   *  renderer can look them up and offer their person card. */
+  /** Mentions and app cards only: the `itemid` the Teams span carries. For a
+   *  mention it is an index into the message's `mentions` list, which is where
+   *  the mentioned person's identity actually lives (the span itself only holds
+   *  their display text) — kept so the renderer can look them up and offer their
+   *  person card. For a card it is the card's own id. */
   itemid?: string;
+  /** Table cells only: how many columns/rows the cell spans, when it spans more
+   *  than one. Bounded (see {@link cellSpan}) so a hostile value can't ask the
+   *  browser for a million columns. */
+  colspan?: number;
+  rowspan?: number;
 };
 
 export type RichNode =
@@ -49,6 +74,16 @@ const TAG_MAP: Record<string, RichTag> = {
   p: "p",
   div: "p",
   br: "br",
+  hr: "hr",
+  // Headings keep their level (h4-h6 collapse into the smallest one): a message
+  // body is a bubble, not a document, so three sizes are all the hierarchy that
+  // is worth rendering.
+  h1: "h1",
+  h2: "h2",
+  h3: "h3",
+  h4: "h3",
+  h5: "h3",
+  h6: "h3",
   b: "strong",
   strong: "strong",
   i: "em",
@@ -57,18 +92,38 @@ const TAG_MAP: Record<string, RichTag> = {
   s: "s",
   strike: "s",
   del: "s",
+  small: "small",
   code: "code",
   pre: "pre",
   blockquote: "blockquote",
   ul: "ul",
   ol: "ol",
   li: "li",
+  table: "table",
+  thead: "thead",
+  tbody: "tbody",
+  // A footer row group is rare in Teams tables and reads the same as a body one.
+  tfoot: "tbody",
+  tr: "tr",
+  td: "td",
+  th: "th",
   a: "a",
   img: "img",
 };
 
-// Tags whose entire subtree is discarded (never rendered).
-const DROP_SUBTREE = new Set(["script", "style", "head", "title", "iframe", "object", "embed"]);
+// Tags whose entire subtree is discarded (never rendered). `colgroup` holds only
+// `<col>` sizing hints, and we drop presentational attributes, so it can carry
+// nothing renderable.
+const DROP_SUBTREE = new Set([
+  "script",
+  "style",
+  "head",
+  "title",
+  "iframe",
+  "object",
+  "embed",
+  "colgroup",
+]);
 
 // Void elements never have children / a closing tag.
 const VOID_TAGS = new Set(["br", "img", "hr", "wbr", "col", "area", "input"]);
@@ -144,7 +199,47 @@ function isMention(attrs: RawAttrs): boolean {
   return /schema\.skype\.com\/Mention/i.test(itemtype);
 }
 
+/** An app link-unfurl card: a span carrying the Skype InputExtension itemtype. */
+function isInputExtension(attrs: RawAttrs): boolean {
+  return /schema\.skype\.com\/InputExtension/i.test(attrs["itemtype"] ?? "");
+}
+
+/**
+ * A Teams inline emoji: not a picture but a glyph, sent as a 20 px `<img>` off
+ * the "personal expressions" CDN and carrying the emoji itself in `alt`. Both
+ * signals are accepted — the Skype `Emoji` itemtype, and the CDN path for the
+ * (older) markup that omits it — because rendering one as an image breaks the
+ * line, frames it like a photo, and makes it click-to-zoom.
+ */
+function isEmojiImage(attrs: RawAttrs): boolean {
+  if (/schema\.skype\.com\/Emoji/i.test(attrs["itemtype"] ?? "")) return true;
+  return /\/personal-expressions\//i.test(decodeEntities(attrs["src"] ?? ""));
+}
+
+/**
+ * Was this element hidden by its author? Relayed HTML emails open with a
+ * "preheader" — a `display:none` div holding the inbox teaser line ("New issue
+ * from internal.") — and hide tracking pixels the same way. No mail client shows
+ * those, so neither do we: the element's whole subtree is discarded.
+ */
+function isHidden(attrs: RawAttrs): boolean {
+  if (attrs["hidden"] !== undefined && attrs["hidden"].toLowerCase() !== "false") return true;
+  const style = decodeEntities(attrs["style"] ?? "");
+  return /(^|[;\s])(display\s*:\s*none|visibility\s*:\s*hidden)/i.test(style);
+}
+
+/** A `colspan`/`rowspan` value, kept only when it is a sane multi-cell span. */
+function cellSpan(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const value = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(value) || value < 2 || value > 64) return undefined;
+  return value;
+}
+
 type OpenFrame = { tag: RichTag | null; children: RichNode[] };
+
+/** The semantic tags a `<span>` can open, and that its `</span>` closes. */
+const SPAN_FRAME_TAGS: readonly RichTag[] = ["mention", "card"];
 
 /**
  * Parse a Teams HTML fragment into a safe rich-node tree.
@@ -156,19 +251,45 @@ type OpenFrame = { tag: RichTag | null; children: RichNode[] };
 export function parseRichHtml(html: string): RichNode[] {
   const root: OpenFrame = { tag: null, children: [] };
   const stack: OpenFrame[] = [root];
-  // Depth of an open drop-subtree tag (e.g. <script>); >0 means skip everything.
-  let dropDepth = 0;
-  const dropStack: string[] = [];
+  // Open tags inside a discarded subtree (a <script>, or an element its author
+  // hid — see isHidden). Non-empty means "skip everything": the region ends at
+  // the close tag matching its first entry, so nested tags of the same name — an
+  // email preheader is a hidden <div> full of <div>s — cannot end it early.
+  const dropped: string[] = [];
+  // Open <span> tags, and whether each opened a frame (a mention or an app card)
+  // or was unwrapped. A </span> closes the innermost span that opened a frame,
+  // and only that one: without this bookkeeping a plain <span> nested inside a
+  // mention would, on its closing tag, close the mention around it — spilling
+  // the rest of the message into the mention's accent color.
+  const spans: ("frame" | "plain")[] = [];
 
   const top = (): OpenFrame => stack[stack.length - 1]!;
   const pushChild = (node: RichNode) => top().children.push(node);
+
+  // Close the nearest open frame carrying one of `targets`, emitting any frame
+  // left open inside it (malformed input) on the way out.
+  const closeFrame = (targets: readonly RichTag[]) => {
+    for (let i = stack.length - 1; i > 0; i--) {
+      if (!targets.includes(stack[i]!.tag!)) continue;
+      while (stack.length - 1 >= i) {
+        const frame = stack.pop()!;
+        top().children.push({
+          type: "element",
+          tag: frame.tag!,
+          attrs: (frame as OpenFrame & { attrs?: RichAttrs }).attrs ?? {},
+          children: frame.children,
+        });
+      }
+      return;
+    }
+  };
 
   const tagRe = /<\/?([a-zA-Z][a-zA-Z0-9]*)((?:[^<>"']|"[^"]*"|'[^']*')*)\/?>|<!--[\s\S]*?-->/g;
   let lastIndex = 0;
   let m: RegExpExecArray | null;
 
   const emitText = (rawText: string) => {
-    if (dropDepth > 0 || rawText.length === 0) return;
+    if (dropped.length > 0 || rawText.length === 0) return;
     const text = decodeEntities(rawText);
     if (text.length > 0) pushChild({ type: "text", text });
   };
@@ -184,76 +305,82 @@ export function parseRichHtml(html: string): RichNode[] {
     if (!rawName) continue;
     const isClose = whole[1] === "/";
 
-    // ---- inside a dropped subtree: only track matching open/close ----------
-    if (dropDepth > 0) {
-      if (!isClose && DROP_SUBTREE.has(rawName) && !VOID_TAGS.has(rawName)) {
-        dropStack.push(rawName);
-        dropDepth++;
-      } else if (isClose && dropStack[dropStack.length - 1] === rawName) {
-        dropStack.pop();
-        dropDepth--;
+    // ---- inside a discarded subtree: track nesting until it closes ----------
+    if (dropped.length > 0) {
+      if (isClose) {
+        // Closing the tag that opened the region ends it; a close tag for
+        // something never opened is ignored, and one that skips over tags the
+        // subtree left open unwinds them too.
+        const at = dropped.lastIndexOf(rawName);
+        if (at >= 0) dropped.length = at;
+      } else if (!VOID_TAGS.has(rawName) && !whole.endsWith("/>")) {
+        dropped.push(rawName);
       }
       continue;
     }
 
     if (isClose) {
-      // A mention is opened as a <span> but recorded under its semantic
-      // "mention" tag, so its closing </span> must target that frame — otherwise
-      // it would be ignored (span isn't in TAG_MAP) and the mention would swallow
-      // every following sibling, tinting the rest of the message its accent color.
-      // Non-mention spans are unwrapped (no frame), so a stray </span> matches
-      // nothing and is harmlessly skipped by the unwinding loop below.
-      const mapped = rawName === "span" ? "mention" : TAG_MAP[rawName];
-      if (!mapped || VOID_TAGS.has(rawName)) continue;
-      // Close the nearest matching open frame, unwinding any that stayed open.
-      for (let i = stack.length - 1; i > 0; i--) {
-        if (stack[i]!.tag === mapped) {
-          while (stack.length - 1 >= i) {
-            const frame = stack.pop()!;
-            top().children.push({
-              type: "element",
-              tag: frame.tag!,
-              attrs: (frame as OpenFrame & { attrs?: RichAttrs }).attrs ?? {},
-              children: frame.children,
-            });
-          }
-          break;
-        }
+      // A mention or an app card is opened as a <span> but recorded under its own
+      // semantic tag, so its closing </span> must target that frame — `spans`
+      // says which span opened one. Unwrapped spans have no frame, so their
+      // closing tag is harmlessly skipped.
+      if (rawName === "span") {
+        if (spans.pop() === "frame") closeFrame(SPAN_FRAME_TAGS);
+        continue;
       }
+      const mapped = TAG_MAP[rawName];
+      if (!mapped || VOID_TAGS.has(rawName)) continue;
+      closeFrame([mapped]);
       continue;
     }
 
     // ---- opening tag -------------------------------------------------------
-    if (DROP_SUBTREE.has(rawName)) {
-      if (!VOID_TAGS.has(rawName)) {
-        dropStack.push(rawName);
-        dropDepth++;
-      }
+    const attrs = parseAttributes(m[2] ?? "");
+    const isSelfClosing = whole.endsWith("/>");
+
+    // Never-rendered subtrees, and anything the author hid: both are skipped
+    // whole, so hidden text (an email preheader) never reaches the reader.
+    if (DROP_SUBTREE.has(rawName) || isHidden(attrs)) {
+      if (!VOID_TAGS.has(rawName) && !isSelfClosing) dropped.push(rawName);
       continue;
     }
 
-    const attrs = parseAttributes(m[2] ?? "");
-
-    if (rawName === "span" && isMention(attrs)) {
-      const itemid = attrs["itemid"];
-      const frame: OpenFrame & { attrs: RichAttrs } = {
-        tag: "mention",
-        attrs: itemid ? { itemid: decodeEntities(itemid).trim() } : {},
-        children: [],
-      };
-      stack.push(frame);
+    if (rawName === "span") {
+      const frameTag: RichTag | null = isMention(attrs)
+        ? "mention"
+        : isInputExtension(attrs)
+        ? "card"
+        : null;
+      if (!isSelfClosing) spans.push(frameTag ? "frame" : "plain");
+      if (frameTag) {
+        const itemid = attrs["itemid"];
+        const frame: OpenFrame & { attrs: RichAttrs } = {
+          tag: frameTag,
+          attrs: itemid ? { itemid: decodeEntities(itemid).trim() } : {},
+          children: [],
+        };
+        if (!isSelfClosing) stack.push(frame);
+        else pushChild({ type: "element", tag: frameTag, attrs: frame.attrs, children: [] });
+      }
       continue;
     }
 
     const mapped = TAG_MAP[rawName];
     if (!mapped) continue; // unknown tag: unwrap (children handled inline)
 
-    if (mapped === "br") {
-      pushChild({ type: "element", tag: "br", attrs: {}, children: [] });
+    if (mapped === "br" || mapped === "hr") {
+      pushChild({ type: "element", tag: mapped, attrs: {}, children: [] });
       continue;
     }
 
     if (mapped === "img") {
+      // A Teams emoji is a glyph wearing an <img>'s clothes: emit the character
+      // it carries as inline text instead of a picture (see isEmojiImage).
+      if (isEmojiImage(attrs)) {
+        const glyph = decodeEntities(attrs["alt"] ?? attrs["title"] ?? "").trim();
+        if (glyph) pushChild({ type: "text", text: glyph });
+        continue;
+      }
       const src = safeSrc(attrs["src"]);
       if (src) {
         const alt = attrs["alt"] ? decodeEntities(attrs["alt"]) : undefined;
@@ -267,8 +394,13 @@ export function parseRichHtml(html: string): RichNode[] {
       const href = safeHref(attrs["href"]);
       if (href) richAttrs.href = href;
     }
+    if (mapped === "td" || mapped === "th") {
+      const colspan = cellSpan(attrs["colspan"]);
+      const rowspan = cellSpan(attrs["rowspan"]);
+      if (colspan) richAttrs.colspan = colspan;
+      if (rowspan) richAttrs.rowspan = rowspan;
+    }
 
-    const isSelfClosing = whole.endsWith("/>");
     if (isSelfClosing) {
       pushChild({ type: "element", tag: mapped, attrs: richAttrs, children: [] });
       continue;
@@ -291,13 +423,93 @@ export function parseRichHtml(html: string): RichNode[] {
     });
   }
 
-  return normalize(root.children);
+  return reshapeTables(normalize(root.children), "flow");
+}
+
+// ---- plain-text bodies ----------------------------------------------------
+
+/** A bare URL inside plain text. Stops at whitespace and at the characters that
+ *  are almost always punctuation around a link rather than part of it. */
+const BARE_URL = /https?:\/\/[^\s<>"']+/g;
+
+/** Trailing punctuation that belongs to the sentence, not to the URL — "see
+ *  https://example.com." links to `example.com`, not to `example.com.`. A closing
+ *  bracket is only trimmed when the URL has no matching opener. */
+function trimUrlPunctuation(url: string): string {
+  let end = url.length;
+  while (end > 0) {
+    const ch = url[end - 1]!;
+    if (".,;:!?".includes(ch)) end -= 1;
+    else if (ch === ")" && !url.slice(0, end).includes("(")) end -= 1;
+    else if (ch === "]" && !url.slice(0, end).includes("[")) end -= 1;
+    else break;
+  }
+  return url.slice(0, end);
+}
+
+/**
+ * Parse a PLAIN-text message body (Teams `messagetype: Text`) into the same node
+ * tree the HTML path produces, so everything downstream — rendering, emptiness
+ * checks, link extraction — works on it unchanged.
+ *
+ * The text is taken verbatim: nothing is entity-decoded and nothing is treated as
+ * markup, because it is not markup. That is the whole point — a body like
+ * `pour moi c'est <yyyy>-<id>` or `Vec<String>` loses its angle-bracketed parts the
+ * moment it goes through an HTML parser. Newlines survive as text (the renderer
+ * wraps bodies in `whitespace-pre-wrap`), and a bare URL becomes a real link so a
+ * pasted link stays clickable, the way it is in an HTML body.
+ */
+export function parsePlainText(text: string): RichNode[] {
+  const nodes: RichNode[] = [];
+  let at = 0;
+  for (const match of text.matchAll(BARE_URL)) {
+    const raw = match[0];
+    const href = trimUrlPunctuation(raw);
+    // A "URL" that is nothing but scheme and punctuation is left as text.
+    if (!/^https?:\/\/\S/i.test(href)) continue;
+    const start = match.index ?? 0;
+    if (start > at) nodes.push({ type: "text", text: text.slice(at, start) });
+    nodes.push({ type: "element", tag: "a", attrs: { href }, children: [{ type: "text", text: href }] });
+    at = start + href.length;
+  }
+  if (at < text.length) nodes.push({ type: "text", text: text.slice(at) });
+  return nodes.filter((node) => node.type !== "text" || node.text.length > 0);
+}
+
+/** Parse a message body the way its {@link BodyFormat} says it must be read: the
+ *  bounded Teams HTML subset, or verbatim plain text. The single choke point every
+ *  caller goes through, so no path can accidentally read a `Text` body as HTML. */
+export function parseMessageBody(body: string, format: BodyFormat): RichNode[] {
+  return format === "text" ? parsePlainText(body) : parseRichHtml(body);
 }
 
 // Block-level tags: whitespace in the source HTML that merely separates these
 // is insignificant (a browser collapses it). Whitespace between inline elements
 // is significant and must be preserved.
-const BLOCK_TAGS = new Set<RichTag>(["p", "ul", "ol", "li", "pre", "blockquote", "br", "img"]);
+const BLOCK_TAGS = new Set<RichTag>([
+  "p",
+  "h1",
+  "h2",
+  "h3",
+  "ul",
+  "ol",
+  "li",
+  "pre",
+  "blockquote",
+  "br",
+  "hr",
+  "img",
+  "table",
+  "thead",
+  "tbody",
+  "tr",
+  "td",
+  "th",
+  "card",
+]);
+
+/** Tags that render as a heading — a block whose emptiness makes it droppable. */
+const HEADING_TAGS = new Set<RichTag>(["h1", "h2", "h3"]);
 
 function isBlockElement(node: RichNode): boolean {
   return node.type === "element" && BLOCK_TAGS.has(node.tag);
@@ -323,24 +535,184 @@ function normalize(nodes: RichNode[]): RichNode[] {
       continue;
     }
     node.children = normalize(node.children);
-    if (node.tag === "p" && !hasVisibleContent(node.children)) continue;
+    // Empty paragraphs and headings are spacers, never content: Teams' `<p></p>`
+    // reply spacer, or the `<p itemtype=".../CodeBlockEditor">&nbsp;</p>` marker
+    // it puts in front of a code block, would otherwise show as a blank line.
+    if ((node.tag === "p" || HEADING_TAGS.has(node.tag)) && !hasVisibleContent(node.children))
+      continue;
     cleaned.push(node);
   }
+  // Whitespace-only text is insignificant at a fragment edge and between block
+  // elements. Neighbouring whitespace is looked *through*, so the newlines left
+  // behind by the spacer paragraphs dropped above collapse with them instead of
+  // surviving as a run of blank lines.
+  const isSpace = (node: RichNode | undefined): boolean =>
+    node !== undefined && node.type === "text" && node.text.trim().length === 0;
+  const neighbour = (from: number, step: number): RichNode | undefined => {
+    for (let i = from + step; i >= 0 && i < cleaned.length; i += step) {
+      if (!isSpace(cleaned[i])) return cleaned[i];
+    }
+    return undefined;
+  };
   return cleaned.filter((node, i) => {
     if (node.type !== "text" || node.text.trim().length > 0) return true;
-    const prev = cleaned[i - 1];
-    const next = cleaned[i + 1];
+    const prev = neighbour(i, -1);
+    const next = neighbour(i, 1);
     if (prev === undefined || next === undefined) return false; // edge whitespace
     return !isBlockElement(prev) && !isBlockElement(next);
   });
+}
+
+// ---- tables ---------------------------------------------------------------
+
+const TABLE_SECTION_TAGS = new Set<RichTag>(["thead", "tbody"]);
+const TABLE_TAGS = new Set<RichTag>(["table", "thead", "tbody", "tr", "td", "th"]);
+
+/** Which table slot a node sits in: table structure is only valid in its own. */
+type TableSlot = "flow" | "table" | "section" | "row";
+
+type RichElement = Extract<RichNode, { type: "element" }>;
+
+function element(tag: RichTag, children: RichNode[]): RichElement {
+  return { type: "element", tag, attrs: {}, children };
+}
+
+/**
+ * Make every table in the tree structurally valid, so the renderer can emit real
+ * `<table>` DOM instead of flattening each cell onto its own line.
+ *
+ * Real-world table HTML — Teams' own editor, and the layout tables in relayed
+ * emails — is only loosely nested, and our tolerant parser preserves whatever it
+ * was given, so this pass restores the invariants a renderer needs:
+ *  - a `table` holds only `thead`/`tbody`; bare rows get an implicit `tbody`;
+ *  - a section holds only rows; bare cells get an implicit `tr`;
+ *  - a row holds only cells; anything else in one is wrapped into a cell;
+ *  - a stray row/cell/section *outside* a table is unwrapped, keeping its text;
+ *  - an empty cell keeps its slot but not its `&nbsp;` filler, an all-empty row
+ *    is dropped, and a table with nothing left in it disappears entirely.
+ */
+function reshapeTables(nodes: RichNode[], slot: TableSlot): RichNode[] {
+  const out: RichNode[] = [];
+  // Content that is not valid in this slot and must be wrapped to become valid
+  // (text sitting directly in a row, a nested layout table in a section, …).
+  let stray: RichNode[] = [];
+  // Consecutive rows found straight inside a table, or cells straight inside a
+  // section: each run shares one implicit wrapper.
+  let implicit: RichNode[] = [];
+
+  const flushStray = () => {
+    if (stray.length === 0) return;
+    const run = stray;
+    stray = [];
+    if (!hasVisibleContent(run)) return; // layout whitespace between rows/cells
+    if (slot === "row") out.push(element("td", run));
+    else if (slot === "section") out.push(element("tr", [element("td", run)]));
+    else if (slot === "table") out.push(element("tbody", [element("tr", [element("td", run)])]));
+  };
+  const flushImplicit = () => {
+    if (implicit.length === 0) return;
+    const run = implicit;
+    implicit = [];
+    out.push(element(slot === "table" ? "tbody" : "tr", run));
+  };
+  const emit = (node: RichNode) => {
+    flushStray();
+    flushImplicit();
+    out.push(node);
+  };
+  const addStray = (node: RichNode) => {
+    flushImplicit();
+    stray.push(node);
+  };
+  const addImplicit = (node: RichNode) => {
+    flushStray();
+    implicit.push(node);
+  };
+
+  for (const node of nodes) {
+    if (node.type === "text") {
+      if (slot === "flow") emit(node);
+      else addStray(node);
+      continue;
+    }
+    if (!TABLE_TAGS.has(node.tag)) {
+      node.children = reshapeTables(node.children, "flow");
+      if (slot === "flow") emit(node);
+      else addStray(node);
+      continue;
+    }
+    if (node.tag === "table") {
+      const table = reshapeTable(node);
+      if (!table) continue; // an empty layout table: nothing to render
+      if (slot === "flow") emit(table);
+      else addStray(table);
+      continue;
+    }
+    if (TABLE_SECTION_TAGS.has(node.tag)) {
+      if (slot === "table") {
+        node.children = reshapeTables(node.children, "section");
+        emit(node);
+      } else {
+        // A section outside a table: unwrap it into this slot, keeping content.
+        for (const child of reshapeTables(node.children, slot)) emit(child);
+      }
+      continue;
+    }
+    if (node.tag === "tr") {
+      if (slot === "section" || slot === "table") {
+        node.children = reshapeTables(node.children, "row");
+        if (slot === "section") emit(node);
+        else addImplicit(node);
+      } else {
+        for (const child of reshapeTables(node.children, slot)) emit(child);
+      }
+      continue;
+    }
+    // A cell.
+    if (slot === "row" || slot === "section") {
+      node.children = reshapeTables(node.children, "flow");
+      if (slot === "row") emit(node);
+      else addImplicit(node);
+    } else {
+      for (const child of reshapeTables(node.children, slot)) emit(child);
+    }
+  }
+
+  flushStray();
+  flushImplicit();
+  return out;
+}
+
+/** Reshape a table's contents and prune what is not worth rendering. */
+function reshapeTable(table: RichElement): RichElement | null {
+  const sections: RichNode[] = [];
+  for (const section of reshapeTables(table.children, "table")) {
+    if (section.type !== "element") continue;
+    section.children = section.children.filter((row) => {
+      if (row.type !== "element") return false;
+      for (const cell of row.children) {
+        // An empty cell keeps its slot — dropping it would shift every following
+        // column — but not its `&nbsp;` filler, which would render a blank line.
+        if (cell.type === "element" && !hasVisibleContent(cell.children)) cell.children = [];
+      }
+      return row.children.some((cell) => cell.type === "element" && cell.children.length > 0);
+    });
+    if (section.children.length > 0) sections.push(section);
+  }
+  if (sections.length === 0) return null;
+  table.children = sections;
+  return table;
 }
 
 /** Does this fragment contain any renderable content? (used to hide empties) */
 export function hasVisibleContent(nodes: RichNode[]): boolean {
   return nodes.some((node) => {
     if (node.type === "text") return node.text.trim().length > 0;
-    if (node.tag === "br") return false;
+    if (node.tag === "br" || node.tag === "hr") return false;
     if (node.tag === "img") return true;
+    // An app card always renders something, even when the payload never made it
+    // into the HTML (the renderer says so explicitly).
+    if (node.tag === "card") return true;
     return hasVisibleContent(node.children);
   });
 }
@@ -353,9 +725,147 @@ export function hasVisibleContent(nodes: RichNode[]): boolean {
 export function hasNonImageContent(nodes: RichNode[]): boolean {
   return nodes.some((node) => {
     if (node.type === "text") return node.text.trim().length > 0;
-    if (node.tag === "br" || node.tag === "img") return false;
+    if (node.tag === "br" || node.tag === "hr" || node.tag === "img") return false;
+    if (node.tag === "card") return true;
     return hasNonImageContent(node.children);
   });
+}
+
+// ---- relayed HTML emails --------------------------------------------------
+
+/**
+ * A line pulled out of a relayed email: a heading's text, plus the link it wraps
+ * when it has one (a Sentry digest makes every issue title a link).
+ */
+export type EmailHeadline = { text: string; href?: string };
+
+/**
+ * The gist of an HTML email relayed into a channel, enough to render a compact
+ * summary instead of the email itself. See {@link parseRelayedEmail}.
+ */
+export type RelayedEmail = {
+  /** The email's subject: its first heading with visible text (or, failing that,
+   *  its first short paragraph). Empty only for an email with no text at all. */
+  subject: string;
+  /** The headings under the subject — a digest's issue titles, in order. */
+  headlines: EmailHeadline[];
+  /** The email's call to action ("View on Sentry", …), when it has one. */
+  action?: { label: string; href: string };
+};
+
+// Markers that identify a relayed email rather than a Teams-composed message:
+// the schema.org microdata Outlook attaches, and the `mso-hide` rule that hides
+// an email's preheader. A message Teams' own composer produced has neither.
+const RELAYED_EMAIL_MARKERS = [/schema\.org\/EmailMessage/i, /mso-hide\s*:\s*all/i];
+
+/** An action link's label reads like an invitation to open the thing. */
+const ACTION_LABEL = /^(view|open|see|read|go to|show|review)\b/i;
+
+/** How many headlines a summary lists, and how long a single line may get. */
+const MAX_HEADLINES = 6;
+const MAX_LINE = 160;
+
+/** Is this HTML body an email relayed into a channel rather than a chat message? */
+export function isRelayedEmail(html: string): boolean {
+  return RELAYED_EMAIL_MARKERS.some((marker) => marker.test(html));
+}
+
+/** The visible text of a fragment, with `<br>` counting as a space. */
+function nodeText(nodes: RichNode[]): string {
+  let out = "";
+  for (const node of nodes) {
+    if (node.type === "text") out += node.text;
+    else if (node.tag === "br") out += " ";
+    else out += nodeText(node.children);
+  }
+  return out;
+}
+
+function oneLine(text: string): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  return collapsed.length > MAX_LINE ? `${collapsed.slice(0, MAX_LINE - 1).trimEnd()}…` : collapsed;
+}
+
+/** The first `http(s)` link in a fragment, used to make a headline clickable. */
+function firstHref(nodes: RichNode[]): string | undefined {
+  for (const node of nodes) {
+    if (node.type !== "element") continue;
+    if (node.tag === "a" && node.attrs.href && /^https?:\/\//i.test(node.attrs.href))
+      return node.attrs.href;
+    const nested = firstHref(node.children);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+/**
+ * Summarize a relayed HTML email: its subject, the headings beneath it, and its
+ * call-to-action link. Returns `null` for anything that is not a relayed email
+ * (see {@link isRelayedEmail}), so an ordinary message renders normally.
+ *
+ * Full marketing-grade email HTML — nested layout tables, a logo, a tracking
+ * pixel, a footer of unsubscribe links — is a wall of text inside a chat bubble.
+ * The parts worth reading are the headings and the one link that goes back to the
+ * source, so that is all a summary keeps: no images (so no logo or tracking pixel
+ * becomes a zoomable picture card) and no layout tables. The hidden preheader
+ * never even reaches here — {@link parseRichHtml} drops `display:none` subtrees.
+ */
+export function parseRelayedEmail(html: string): RelayedEmail | null {
+  if (!isRelayedEmail(html)) return null;
+
+  const headings: EmailHeadline[] = [];
+  const actions: { label: string; href: string }[] = [];
+  // Fallback subject for an email that has no headings at all: its first short
+  // block of text. Long blocks are the layout wrappers around it, so they lose.
+  let firstBlock = "";
+
+  const walk = (nodes: RichNode[]): void => {
+    for (const node of nodes) {
+      if (node.type !== "element") continue;
+      if (HEADING_TAGS.has(node.tag)) {
+        const text = oneLine(nodeText([node]));
+        const href = firstHref(node.children);
+        // A logo-only heading has no text; there is nothing to show for it.
+        if (text) headings.push(href ? { text, href } : { text });
+        continue; // a heading's own links belong to it, not to the action
+      }
+      if (node.tag === "a") {
+        const label = oneLine(nodeText(node.children));
+        const href = node.attrs.href;
+        if (label && href && /^https?:\/\//i.test(href) && ACTION_LABEL.test(label))
+          actions.push({ label, href });
+        continue;
+      }
+      if (node.tag === "p" && !firstBlock) {
+        const text = oneLine(nodeText([node]));
+        if (text.length >= 3 && text.length < MAX_LINE) firstBlock = text;
+      }
+      walk(node.children);
+    }
+  };
+  walk(parseRichHtml(html));
+
+  const [subject, ...rest] = headings;
+  const seen = new Set<string>();
+  const unique = rest.filter((line) => {
+    if (seen.has(line.text) || line.text === subject?.text) return false;
+    seen.add(line.text);
+    return true;
+  });
+  // A digest links every item it lists, and its remaining headings are just
+  // section labels ("Exception", "Tags") — so when any headline is a link, those
+  // are the ones worth listing. An email whose headings link nowhere keeps them.
+  const linked = unique.filter((line) => line.href !== undefined);
+  const headlines = (linked.length > 0 ? linked : unique).slice(0, MAX_HEADLINES);
+  const summary: RelayedEmail = {
+    subject: subject?.text ?? firstBlock,
+    headlines,
+    ...(actions[0] ? { action: actions[0] } : {}),
+  };
+  // Nothing to summarize (an email of nothing but images, say): let the body
+  // render the ordinary way rather than showing an empty summary card.
+  if (!summary.subject && headlines.length === 0 && !summary.action) return null;
+  return summary;
 }
 
 /** Whether the fragment contains at least one inline `<img>`. */
@@ -366,12 +876,13 @@ export function containsImage(nodes: RichNode[]): boolean {
 }
 
 /**
- * Collect every `http(s)` anchor href in a Teams HTML fragment, in document
- * order and de-duplicated. Reuses the same safe allowlist parser used to render,
- * so only real `<a href>` links are returned (never a URL that merely appears in
- * text). Used to detect link-preview candidates (e.g. GitLab links) in a message.
+ * Collect every `http(s)` link in a message body, in document order and
+ * de-duplicated. Reuses the same parser used to render, so an HTML body yields only
+ * its real `<a href>` links (never a URL that merely appears in text) and a plain
+ * body yields the bare URLs it does render as links. Used to detect link-preview
+ * candidates (e.g. GitLab links) in a message.
  */
-export function extractLinks(html: string): string[] {
+export function extractLinks(body: string, format: BodyFormat = "html"): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   const walk = (nodes: RichNode[]): void => {
@@ -387,7 +898,7 @@ export function extractLinks(html: string): string[] {
       walk(node.children);
     }
   };
-  walk(parseRichHtml(html));
+  walk(parseMessageBody(body, format));
   return out;
 }
 
@@ -466,7 +977,12 @@ function serializeNodes(nodes: RichNode[]): string {
       continue;
     }
     const tag = SIMPLE_TAGS[node.tag];
-    if (tag) out += `<${tag}>${serializeNodes(node.children)}</${tag}>`;
+    // Anything outside the Teams-safe *outbound* subset (a heading, a table cell,
+    // an app card) is unwrapped rather than dropped: what we send loses the
+    // structure Teams' composer can't express, never the words.
+    out += tag
+      ? `<${tag}>${serializeNodes(node.children)}</${tag}>`
+      : serializeNodes(node.children);
   }
   return out;
 }

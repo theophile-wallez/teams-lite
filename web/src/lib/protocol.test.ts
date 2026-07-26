@@ -40,11 +40,20 @@ import {
   mergeRefreshedMailPage,
   mergeOlderMailPage,
   type MailHeader,
+  formatThreadActivity,
+  formatMeetingEvent,
+  formatMeetingSchedule,
+  bodyFormat,
+  isCallEvent,
+  isThreadActivityEvent,
+  isMeetingEvent,
   incomingCallTitle,
   computeReadReceiptAnchors,
 } from "./protocol";
 import type {
   ChatMessage,
+  ThreadActivityEvent,
+  MeetingSystemEvent,
   Conversation,
   IncomingCall,
   MessagePage,
@@ -104,6 +113,34 @@ const REPLY_BEFORE_AND_AFTER =
   `</blockquote>` +
   `<p>after the quote</p>`;
 
+// A real forwarded message captured from the tenant (message 1784304655568): the
+// forwarder's own line, then the forwarded content in a Forward blockquote. Teams
+// sends no author, no MRI and no time for a forward — the blockquote carries the
+// content and nothing else.
+const FORWARD_WITH_INTRO =
+  `<p>ouh lala&nbsp;</p>\n` +
+  `<blockquote itemtype="http://schema.skype.com/Forward">\n` +
+  `<p>For clarification our current issue is they're being logged out.&nbsp;</p>\n` +
+  `</blockquote>`;
+
+// A real reply captured from the tenant (message 1774023047032) using the OLDER
+// author markup: `<p><b><span itemprop="mri">` instead of `<strong itemprop="mri">`.
+const REPLY_LEGACY_AUTHOR =
+  `<div>\n` +
+  `<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1774023003842">\n` +
+  `<p><b><span itemprop="mri" itemid="8:orgid:788646fd" style="font-size:small">` +
+  `Nathan CAPIAUX&nbsp;</span>` +
+  `<span itemprop="time" itemid="1774023003842"></span></b></p>\n` +
+  `<p itemprop="preview">&#128247; Image Douchin qui commence</p>\n` +
+  `</blockquote>\n` +
+  `imagine s’il voyait notre board</div>`;
+
+// A forward with no accompanying text of its own (message 1784217579552).
+const FORWARD_ONLY =
+  `<blockquote itemtype="http://schema.skype.com/Forward">` +
+  `<p>it has to be sia.partners&nbsp;</p>` +
+  `</blockquote>`;
+
 describe("parseMessageContent", () => {
   it("returns a bare body with HTML stripped and entities decoded when there is no quote", () => {
     const html = `<p>&quot;A&quot; &amp; &#39;B&#39; &lt;c&gt;&nbsp;end</p>`;
@@ -136,6 +173,27 @@ describe("parseMessageContent", () => {
     expect(parsed.beforeQuote).toBe("before the quote");
     expect(parsed.afterQuote).toBe("after the quote");
     expect(parsed.body).toBe("before the quote\nafter the quote");
+  });
+
+  it("tags a reply quote as a reply, with the quoted message's compose time", () => {
+    const parsed = parseMessageContent(REPLY_AFTER_ONLY);
+
+    expect(parsed.quote?.kind).toBe("reply");
+    expect(parsed.quote?.senderMri).toBe("8:orgid:abc");
+    expect(parsed.quote?.time).toBe(1);
+  });
+
+  it("splits a forwarded message into an unattributed forward quote and the intro", () => {
+    const parsed = parseMessageContent(FORWARD_WITH_INTRO);
+
+    expect(parsed.quote?.kind).toBe("forward");
+    expect(parsed.quote?.text).toBe("For clarification our current issue is they're being logged out.");
+    // Teams attributes nothing on a forward, so there is no author and no time.
+    expect(parsed.quote?.sender).toBe("");
+    expect(parsed.quote?.senderMri).toBe("");
+    expect(parsed.quote?.time).toBeUndefined();
+    expect(parsed.body).toBe("ouh lala");
+    expect(parsed.body).not.toContain("logged out");
   });
 
   it("exposes an empty image list for a plain text message", () => {
@@ -272,6 +330,267 @@ describe("parseRichMessage", () => {
     const parsed = parseRichMessage(noMri);
     expect(parsed.quote?.sender).toBe("Someone");
     expect(parsed.quote?.senderMri).toBe("");
+  });
+
+  it("tags a reply quote as a reply and carries the quoted message's compose time", () => {
+    const parsed = parseRichMessage(REPLY_AFTER_ONLY);
+    expect(parsed.quote?.kind).toBe("reply");
+    expect(parsed.quote?.time).toBe(1);
+  });
+
+  it("falls back to the blockquote's own itemid for the quoted compose time", () => {
+    const noTimeSpan =
+      `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="1784623715932">` +
+      `<strong itemprop="mri" itemid="8:orgid:abc">Clement BOSLE</strong>` +
+      `<p itemprop="preview">quoted</p></blockquote><p>reply</p>`;
+    expect(parseRichMessage(noTimeSpan).quote?.time).toBe(1784623715932);
+  });
+
+  it("splits a forward into a forward-tagged quote, keeping the forwarded HTML", () => {
+    const parsed = parseRichMessage(FORWARD_WITH_INTRO);
+
+    expect(parsed.quote?.kind).toBe("forward");
+    expect(parsed.quote?.html).toContain("logged out");
+    // Nothing to attribute it to: the UI labels it "Forwarded" from `kind` alone.
+    expect(parsed.quote?.sender).toBe("");
+    expect(parsed.quote?.senderMri).toBe("");
+    expect(parsed.quote?.time).toBeUndefined();
+    expect(parsed.beforeHtml).toContain("ouh lala");
+    expect(parsed.bodyHtml).not.toContain("logged out");
+  });
+
+  it("keeps an unaccompanied forward as a quote instead of an unlabelled body", () => {
+    const parsed = parseRichMessage(FORWARD_ONLY);
+
+    expect(parsed.quote?.kind).toBe("forward");
+    expect(parsed.quote?.html).toContain("sia.partners");
+    expect(parsed.beforeHtml).toBe("");
+    expect(parsed.bodyHtml).toBe("");
+  });
+
+  it("keeps an image-only forward, whose quoted content has no text at all", () => {
+    const imageOnly =
+      `<blockquote itemtype="http://schema.skype.com/Forward">` +
+      `<p><img itemtype="http://schema.skype.com/AMSImage" ` +
+      `src="https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/abc/views/imgo" alt=""></p>` +
+      `</blockquote>`;
+    const parsed = parseRichMessage(imageOnly);
+
+    expect(parsed.quote?.kind).toBe("forward");
+    expect(parsed.quote?.html).toContain("views/imgo");
+  });
+
+  it("drops an empty quote blockquote rather than rendering a blank block", () => {
+    const empty =
+      `<p>look</p><blockquote itemtype="http://schema.skype.com/Forward">&nbsp;</blockquote>`;
+    const parsed = parseRichMessage(empty);
+
+    expect(parsed.quote).toBeUndefined();
+    expect(parsed.bodyHtml).toBe("<p>look</p>");
+  });
+
+  // 8 of the 696 replies in the tenant snapshot use the older author markup below.
+  describe("legacy Reply author markup", () => {
+    it("attributes a quote whose author is a <span itemprop=mri> inside <p><b>", () => {
+      const parsed = parseRichMessage(REPLY_LEGACY_AUTHOR);
+
+      expect(parsed.quote?.kind).toBe("reply");
+      expect(parsed.quote?.sender).toBe("Nathan CAPIAUX");
+      expect(parsed.quote?.senderMri).toBe("8:orgid:788646fd");
+      expect(parsed.quote?.time).toBe(1774023003842);
+      expect(parsed.quote?.html).toContain("qui commence");
+      // The author line is the attribution, never part of the quoted text.
+      expect(parsed.quote?.html).not.toContain("Nathan CAPIAUX");
+      expect(parsed.bodyHtml).toContain("imagine s");
+    });
+
+    it("removes the legacy author line from a quote that carries no preview wrapper", () => {
+      const noPreview =
+        `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="7">` +
+        `<p><b><span itemprop="mri" itemid="8:orgid:abc">Dana</span></b></p>` +
+        `<p>the quoted line</p>` +
+        `</blockquote><p>my reply</p>`;
+      const parsed = parseRichMessage(noPreview);
+
+      expect(parsed.quote?.sender).toBe("Dana");
+      expect(parsed.quote?.html).toContain("the quoted line");
+      expect(parsed.quote?.html).not.toContain("Dana");
+    });
+
+    it("leaves the modern <strong> shape parsed exactly as before", () => {
+      // Byte-identical output for the shape 688 of the 696 replies use.
+      expect(parseRichMessage(REPLY_AFTER_ONLY)).toEqual({
+        quote: {
+          kind: "reply",
+          sender: "Clement BOSLE",
+          senderMri: "8:orgid:abc",
+          time: 1,
+          html: "the original line",
+        },
+        beforeHtml: "",
+        bodyHtml: "<p>my actual reply</p>",
+      });
+    });
+  });
+});
+
+describe("bodyFormat", () => {
+  it("reads a Text body as plain text", () => {
+    expect(bodyFormat("Text")).toBe("text");
+  });
+
+  it("ignores the casing of the Teams type", () => {
+    expect(bodyFormat("text")).toBe("text");
+    expect(bodyFormat(" TEXT ")).toBe("text");
+  });
+
+  it("reads every other known type as HTML", () => {
+    expect(bodyFormat("RichText/Html")).toBe("html");
+    expect(bodyFormat("RichText/Media_Card")).toBe("html");
+    expect(bodyFormat("Event/Call")).toBe("html");
+  });
+
+  it("treats an unknown/legacy type as HTML, keeping the historical behaviour", () => {
+    expect(bodyFormat("")).toBe("html");
+    expect(bodyFormat(undefined)).toBe("html");
+  });
+});
+
+describe("formatThreadActivity", () => {
+  const activity = (over: Partial<ThreadActivityEvent> = {}): ThreadActivityEvent => ({
+    kind: "thread_activity",
+    event: "member_added",
+    time_ms: 1781160917613,
+    actor_mri: "8:orgid:actor",
+    members: [],
+    member_mris: [],
+    ...over,
+  });
+
+  it("names a single added member", () => {
+    const event = activity({ members: ["Nathan CAPIAUX"], member_mris: ["8:orgid:n"] });
+    expect(formatThreadActivity(event)).toBe("Nathan CAPIAUX was added to the chat");
+  });
+
+  it("joins two and three names, then counts the rest", () => {
+    expect(formatThreadActivity(activity({ members: ["Ada", "Bo"] }))).toBe(
+      "Ada and Bo were added to the chat",
+    );
+    expect(formatThreadActivity(activity({ members: ["Ada", "Bo", "Cy"] }))).toBe(
+      "Ada, Bo and Cy were added to the chat",
+    );
+    expect(formatThreadActivity(activity({ members: ["Ada", "Bo", "Cy", "Di", "Ed"] }))).toBe(
+      "Ada, Bo, Cy and 2 others were added to the chat",
+    );
+  });
+
+  it("counts the members Teams did not name instead of dropping them", () => {
+    // The common real shape: `friendlyname` empty, only MRIs.
+    const event = activity({ members: ["", ""], member_mris: ["8:orgid:a", "8:orgid:b"] });
+    expect(formatThreadActivity(event)).toBe("2 people were added to the chat");
+    expect(formatThreadActivity(activity({ members: [""], member_mris: ["8:orgid:a"] }))).toBe(
+      "Someone was added to the chat",
+    );
+  });
+
+  it("prefers the names resolved from the MRIs over the empty ones Teams sent", () => {
+    const event = activity({ members: ["", ""], member_mris: ["8:orgid:a", "8:orgid:b"] });
+    expect(formatThreadActivity(event, ["Ada", ""])).toBe(
+      "Ada and 1 other were added to the chat",
+    );
+    expect(formatThreadActivity(event, ["Ada", "Bo"])).toBe("Ada and Bo were added to the chat");
+  });
+
+  it("labels a pin and an unpin", () => {
+    expect(formatThreadActivity(activity({ event: "pinned" }))).toBe("A message was pinned");
+    expect(formatThreadActivity(activity({ event: "unpinned" }))).toBe("A message was unpinned");
+  });
+
+  it("returns null for an activity it has no words for, so nothing is rendered", () => {
+    expect(formatThreadActivity(activity({ event: "topic_updated" }))).toBeNull();
+  });
+});
+
+describe("isCallEvent / isThreadActivityEvent / isMeetingEvent", () => {
+  it("recognises each known kind", () => {
+    expect(isCallEvent({ kind: "call", event: "ended" })).toBe(true);
+    expect(isThreadActivityEvent({ kind: "thread_activity", event: "pinned" })).toBe(true);
+    expect(isMeetingEvent({ kind: "meeting", event: "scheduled" })).toBe(true);
+  });
+
+  it("claims nothing for a kind this client predates", () => {
+    const unknown = { kind: "thread_renamed" };
+    expect(isCallEvent(unknown)).toBe(false);
+    expect(isThreadActivityEvent(unknown)).toBe(false);
+    expect(isMeetingEvent(unknown)).toBe(false);
+  });
+});
+
+describe("formatMeetingEvent", () => {
+  const meeting = (over: Partial<MeetingSystemEvent> = {}): MeetingSystemEvent => ({
+    kind: "meeting",
+    event: "scheduled",
+    ...over,
+  });
+
+  it("names the meeting when Teams sent a title", () => {
+    expect(formatMeetingEvent(meeting({ title: "Weekly sync" }))).toBe(
+      "Meeting scheduled · Weekly sync",
+    );
+  });
+
+  it("stands alone when there is no title, rather than trailing a separator", () => {
+    expect(formatMeetingEvent(meeting({ title: "   " }))).toBe("Meeting scheduled");
+    expect(formatMeetingEvent(meeting())).toBe("Meeting scheduled");
+  });
+
+  it("labels a cancellation and an update", () => {
+    expect(formatMeetingEvent(meeting({ event: "cancelled", title: "Retro" }))).toBe(
+      "Meeting cancelled · Retro",
+    );
+    expect(formatMeetingEvent(meeting({ event: "updated" }))).toBe("Meeting updated");
+  });
+
+  it("returns null for an activity it has no words for, so nothing is rendered", () => {
+    expect(formatMeetingEvent(meeting({ event: "reminded" }))).toBeNull();
+  });
+});
+
+describe("formatMeetingSchedule", () => {
+  // Fixed instants, formatted in the runner's own locale/zone — the assertions ask
+  // about STRUCTURE (one date, both times, or two dates) rather than about wording,
+  // so they hold wherever the suite runs.
+  const start = new Date("2026-05-04T12:30:00Z");
+  const end = new Date("2026-05-04T13:30:00Z");
+  const schedule = (over: Partial<MeetingSystemEvent>): string =>
+    formatMeetingSchedule({ kind: "meeting", event: "scheduled", ...over });
+
+  const timeOf = (d: Date) =>
+    d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const dayOf = (d: Date) =>
+    d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+
+  it("spells out a same-day meeting as one date and a time range", () => {
+    const out = schedule({ start_ms: start.getTime(), end_ms: end.getTime() });
+    expect(out).toBe(`${dayOf(start)}, ${timeOf(start)} – ${timeOf(end)}`);
+  });
+
+  it("repeats the date when the meeting ends on another day", () => {
+    const overnight = new Date("2026-05-05T01:00:00Z");
+    const out = schedule({ start_ms: start.getTime(), end_ms: overnight.getTime() });
+    expect(out).toBe(`${dayOf(start)}, ${timeOf(start)} – ${dayOf(overnight)}, ${timeOf(overnight)}`);
+  });
+
+  it("shows the start alone when no end was reported", () => {
+    expect(schedule({ start_ms: start.getTime() })).toBe(`${dayOf(start)}, ${timeOf(start)}`);
+    expect(schedule({ start_ms: start.getTime(), end_ms: 0 })).toBe(
+      `${dayOf(start)}, ${timeOf(start)}`,
+    );
+  });
+
+  it("is empty when Teams reported no start at all", () => {
+    expect(schedule({})).toBe("");
+    expect(schedule({ start_ms: 0, end_ms: end.getTime() })).toBe("");
   });
 });
 
@@ -711,6 +1030,13 @@ describe("copyableMessageText / replyToPayload", () => {
       `<p itemprop="preview">quoted only</p>` +
       `</blockquote>`;
     expect(copyableMessageText(message(1, { content: quoteOnly }))).toBe("quoted only");
+  });
+
+  it("copies a plain-text body verbatim, angle brackets and all", () => {
+    // Stripping tags out of a body that is not HTML would eat the author's own
+    // text — and then Copy, Reply and Edit would all lose it.
+    const plain = message(2, { message_type: "Text", content: "pour moi c'est <yyyy>-<id>" });
+    expect(copyableMessageText(plain)).toBe("pour moi c'est <yyyy>-<id>");
   });
 
   it("builds a reply payload with body-derived preview and passthrough before/after", () => {

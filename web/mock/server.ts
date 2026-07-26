@@ -41,7 +41,7 @@ import type { ServerWebSocket } from "bun";
 
 type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
 
-type AttachmentKind = "image" | "file" | "recording";
+type AttachmentKind = "image" | "file" | "recording" | "card";
 
 type Attachment = {
   name: string;
@@ -50,6 +50,22 @@ type Attachment = {
   kind: AttachmentKind;
   thumbnail_url?: string;
   duration_seconds?: number;
+  card?: CardPayload; // card only: the decoded adaptive/connector card
+};
+
+// An adaptive / connector card, flattened the way the Rust backend decodes it out
+// of a `SWIFT.1` body (mirrors protocol.ts CardPayload and src/teams_cards.rs).
+// `text` is PLAIN text with `\n` between blocks; an action with an empty `url` is
+// not a link (a poll vote) and must not render as something clickable.
+type CardPayload = {
+  title: string;
+  text: string;
+  facts: { title: string; value: string }[];
+  actions: { title: string; url: string }[];
+  // Link unfurls only (see src/teams_unfurl.rs): which app produced the preview,
+  // shown as a source chip above the card body, and its public icon URL.
+  app_name?: string;
+  app_icon?: string;
 };
 
 type Conversation = {
@@ -96,7 +112,8 @@ type ChatMessage = {
   compose_time: number; // epoch MILLISECONDS
   sender: string;
   sender_mri?: string;
-  content: string; // HTML-ish, as Teams sends it
+  message_type?: string; // Teams `messagetype`: "Text" bodies are PLAIN, not HTML
+  content: string; // HTML-ish, as Teams sends it (unless message_type is "Text")
   attachments?: Attachment[]; // file/card attachments (inline images live in content)
   reactions?: Reaction[]; // aggregated per emotion (key + count + whether ours)
   mentions?: MessageMention[]; // who the body's @mention spans point at, by itemid
@@ -108,15 +125,37 @@ type ChatMessage = {
 };
 
 // A structured system/activity event (mirrors protocol.ts SystemEvent and the Rust
-// `system_event_value` wire shape). Currently only call/meeting events.
-type SystemEvent = {
-  kind: "call";
-  event: "ended" | "missed" | "started";
-  duration_seconds?: number;
-  participant_count?: number;
-  participants?: string[];
-  participant_mris?: string[]; // aligned with participants, for real profile photos
-};
+// `system_event_value` wire shape): a call/meeting event, or a thread activity
+// (someone added to the thread, a message pinned).
+type SystemEvent =
+  | {
+      kind: "call";
+      event: "ended" | "missed" | "started";
+      duration_seconds?: number;
+      participant_count?: number;
+      participants?: string[];
+      participant_mris?: string[]; // aligned with participants, for real profile photos
+    }
+  | {
+      kind: "thread_activity";
+      event: "member_added" | "pinned" | "unpinned";
+      time_ms: number;
+      actor_mri: string;
+      members: string[]; // display names; Teams routinely sends these EMPTY
+      member_mris: string[]; // aligned with members — the identity that always arrives
+    }
+  | {
+      // A scheduled meeting, keyed off `properties.meeting["@type"]` by the backend
+      // (never off the localised body text) — see parse_meeting_activity.
+      kind: "meeting";
+      event: "scheduled" | "cancelled" | "updated";
+      title: string;
+      start_ms: number;
+      end_ms: number;
+      location: string;
+      organizer_mri: string;
+      join_url: string;
+    };
 
 // Aggregated reaction on a message (mirrors protocol.ts Reaction / the Rust
 // `reactions_value` wire shape).
@@ -576,9 +615,17 @@ function generateBacklog(
 }
 
 /** Recompute the sidebar summary fields from the newest message. */
-/** Short sidebar label for a call/meeting system event (mirrors the backend's
+/** Short sidebar label for a system event (mirrors the backend's
  *  `call_event_label` in src/teams_read.rs). */
-function callEventSidebarLabel(event: SystemEvent): string {
+function systemEventSidebarLabel(event: SystemEvent): string {
+  if (event.kind === "thread_activity") {
+    if (event.event === "member_added") return "Added to the chat";
+    return event.event === "pinned" ? "Pinned a message" : "Unpinned a message";
+  }
+  if (event.kind === "meeting") {
+    if (event.event === "cancelled") return "Meeting cancelled";
+    return event.event === "updated" ? "Meeting updated" : "Meeting scheduled";
+  }
   if (event.event === "missed") return "Missed call";
   if (event.event === "started") return "Call started";
   return "Call ended";
@@ -589,7 +636,7 @@ function recomputeSummary(cs: ConvState): void {
   if (!last) return;
   cs.conv.last_message_time = last.compose_time;
   cs.conv.last_message_preview = last.system_event
-    ? callEventSidebarLabel(last.system_event)
+    ? systemEventSidebarLabel(last.system_event)
     : previewOf(last.content);
   cs.conv.last_message_sender = last.system_event ? "" : last.sender;
   cs.conv.last_message_from_me = Boolean(last.is_self) && !last.system_event;
@@ -601,7 +648,7 @@ function recomputeChannelSummary(chs: ChannelState): void {
   if (!last) return;
   chs.channel.last_message_time = last.compose_time;
   chs.channel.last_message_preview = last.system_event
-    ? callEventSidebarLabel(last.system_event)
+    ? systemEventSidebarLabel(last.system_event)
     : previewOf(last.content);
   chs.channel.last_message_sender = last.system_event ? "" : last.sender;
   chs.channel.last_message_from_me = Boolean(last.is_self) && !last.system_event;
@@ -1289,6 +1336,412 @@ function seedGitLabSamples(): void {
   recomputeSummary(cs);
   store.set(convId, cs);
   order.push(convId);
+}
+
+/** Push helper shared by the fixture seeds below: assigns ids/seq/compose_time so a
+ *  seed only states what a message IS. */
+function pusher(convId: string, base: number, messages: ChatMessage[]) {
+  let seq = 0;
+  return (
+    msg: Omit<ChatMessage, "id" | "conversation_id" | "seq" | "compose_time">,
+    offsetMs: number,
+  ): void => {
+    seq += 1;
+    messages.push({
+      id: `${convId}#${seq}`,
+      conversation_id: convId,
+      seq,
+      compose_time: base + offsetMs,
+      ...msg,
+    });
+  };
+}
+
+/** Register a fixture conversation from an already-built message list. Dated in the
+ *  past by its caller so it never sorts to the top of the sidebar; specs reach it
+ *  by name through the command palette. */
+function addFixtureConversation(convId: string, name: string, messages: ChatMessage[]): void {
+  const conv: Conversation = {
+    id: convId,
+    name,
+    last_message_time: 0,
+    kind: "group",
+    last_message_preview: "",
+    last_message_sender: "",
+    last_message_from_me: false,
+    is_read: true,
+    is_muted: false,
+    is_pinned: false,
+    is_hidden: false,
+    thread_type: "chat",
+    draft: "",
+  };
+  const cs: ConvState = { conv, messages, participants: [PEOPLE[0]!] };
+  recomputeSummary(cs);
+  store.set(convId, cs);
+  order.push(convId);
+}
+
+/** Register an "App Cards" conversation made of the adaptive/connector cards apps
+ *  and bots post — what the GitHub / Figma / Sentry / n-Alerts channels consist of.
+ *  The backend decodes these out of a `SWIFT.1` body into a `kind: "card"`
+ *  attachment (see src/teams_cards.rs); this exercises every part of one: title,
+ *  multi-block text, facts, a link action, and a NON-link action (a poll vote),
+ *  which must never look clickable. */
+function seedAppCards(): void {
+  const convId = "19:app-cards-demo@thread.v2";
+  const base = Date.now() - 21 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+
+  // A monitoring alert (connector card): title, text, facts, one link action.
+  push(
+    {
+      sender: "n-Alerts",
+      content: "",
+      attachments: [
+        {
+          name: "Filebeat error(s)",
+          content_type: "application/vnd.microsoft.teams.card.o365connector",
+          url: "",
+          kind: "card",
+          card: {
+            title: "Filebeat error(s)",
+            text: "3 fatal log lines in the last hour.\nCluster: eu-central-1",
+            facts: [
+              { title: "level", value: "error" },
+              { title: "service", value: "ingest-worker" },
+              { title: "count", value: "3" },
+            ],
+            actions: [{ title: "View in Kibana", url: "https://kibana.example.com/app/discover" }],
+          },
+        },
+      ],
+      is_self: false,
+    },
+    0,
+  );
+  // A poll (adaptive card): its only action is a vote, which is NOT a link — no
+  // URL to open, and voting would post as the user.
+  push(
+    {
+      sender: PEOPLE[1]!.name,
+      sender_mri: PEOPLE[1]!.mri,
+      content: "",
+      attachments: [
+        {
+          name: `${PEOPLE[1]!.name} sent a poll`,
+          content_type: "application/vnd.microsoft.card.adaptive",
+          url: "",
+          kind: "card",
+          card: {
+            title: `${PEOPLE[1]!.name} sent a poll`,
+            text: "Poll\nNames are recorded; results shared\nLaser game availability",
+            facts: [],
+            actions: [{ title: "Submit vote", url: "" }],
+          },
+        },
+      ],
+      is_self: false,
+    },
+    60_000,
+  );
+  // A card alongside real text: the bubble keeps its chrome and the card sits in it.
+  push(
+    {
+      sender: PEOPLE[0]!.name,
+      sender_mri: PEOPLE[0]!.mri,
+      content: "<p>This one needs a look:</p>",
+      attachments: [
+        {
+          name: "Sentry",
+          content_type: "application/vnd.microsoft.card.adaptive",
+          url: "",
+          kind: "card",
+          card: {
+            title: "New issue: TypeError in checkout",
+            text: "internal · production",
+            facts: [{ title: "events", value: "12" }],
+            actions: [{ title: "Open in Sentry", url: "https://sentry.io/issues/1" }],
+          },
+        },
+      ],
+      is_self: false,
+    },
+    120_000,
+  );
+
+  // A link unfurl: the app that produced the preview is named (and iconed) beside
+  // the card, and the body keeps the link the unfurl is about. The `InputExtension`
+  // span Teams leaves in the body renders as nothing now that the real card arrived
+  // (see `cardShownSeparately` in RichContent).
+  push(
+    {
+      sender: PEOPLE[2]!.name,
+      sender_mri: PEOPLE[2]!.mri,
+      content:
+        '<p><a href="https://github.com/acme/webapp">https://github.com/acme/webapp</a>' +
+        '<span itemscope="" itemtype="http://schema.skype.com/InputExtension" itemid="c1"></span></p>',
+      attachments: [
+        {
+          name: "acme/webapp",
+          content_type: "application/vnd.microsoft.card.adaptive",
+          url: "",
+          kind: "card",
+          card: {
+            title: "acme/webapp",
+            text: "Repository | acme/webapp\nRust\n•\n12 Stars",
+            facts: [],
+            actions: [{ title: "View Repository", url: "https://github.com/acme/webapp" }],
+            app_name: "GitHub Notifications",
+            app_icon: "",
+          },
+        },
+      ],
+      is_self: false,
+    },
+    180_000,
+  );
+
+  addFixtureConversation(convId, "App Cards", messages);
+}
+
+/** Register a "Thread Activity" conversation whose messages are system events rather
+ *  than chat: the membership and pin frames Teams posts into a thread, plus a
+ *  scheduled meeting and its cancellation. Teams sends `friendlyname` EMPTY on nearly
+ *  all membership frames, so one fixture carries names and the others carry only
+ *  MRIs, which is what makes the UI resolve the name from the MRI instead of saying
+ *  "Someone". */
+function seedThreadActivity(): void {
+  const convId = "19:thread-activity-demo@thread.v2";
+  const base = Date.now() - 22 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const [alice, bob, carol] = PEOPLE;
+
+  push(
+    {
+      sender: alice!.name,
+      sender_mri: alice!.mri,
+      content: "<p>Adding a couple of people to this thread.</p>",
+      is_self: false,
+    },
+    0,
+  );
+  // One member added, named by Teams.
+  push(
+    {
+      sender: "",
+      content: "",
+      system_event: {
+        kind: "thread_activity",
+        event: "member_added",
+        time_ms: base + 60_000,
+        actor_mri: alice!.mri,
+        members: [bob!.name],
+        member_mris: [bob!.mri],
+      },
+    },
+    60_000,
+  );
+  // Two members added with NO names — only MRIs, the common real-world shape.
+  push(
+    {
+      sender: "",
+      content: "",
+      system_event: {
+        kind: "thread_activity",
+        event: "member_added",
+        time_ms: base + 120_000,
+        actor_mri: alice!.mri,
+        members: ["", ""],
+        member_mris: [carol!.mri, PEOPLE[3]!.mri],
+      },
+    },
+    120_000,
+  );
+  push(
+    {
+      sender: "",
+      content: "",
+      system_event: {
+        kind: "thread_activity",
+        event: "pinned",
+        time_ms: base + 180_000,
+        actor_mri: bob!.mri,
+        members: [],
+        member_mris: [],
+      },
+    },
+    180_000,
+  );
+  push(
+    {
+      sender: "",
+      content: "",
+      system_event: {
+        kind: "thread_activity",
+        event: "unpinned",
+        time_ms: base + 240_000,
+        actor_mri: bob!.mri,
+        members: [],
+        member_mris: [],
+      },
+    },
+    240_000,
+  );
+
+  // A scheduled meeting and its cancellation. Teams posts these as ordinary-looking
+  // messages whose localised body ("Scheduled a meeting") was attributed to a raw
+  // contacts URL; the backend keys them off `properties.meeting["@type"]` instead, so
+  // they arrive as their own system-event kind with the real schedule attached.
+  // Rounded to the hour so the fixture reads like a real invite, not a timestamp.
+  const meetingStart =
+    Math.floor((base + 3 * 24 * 60 * 60_000) / (60 * 60_000)) * 60 * 60_000 + 10 * 60 * 60_000;
+  push(
+    {
+      sender: "",
+      content: "",
+      system_event: {
+        kind: "meeting",
+        event: "scheduled",
+        title: "Quarterly planning",
+        start_ms: meetingStart,
+        end_ms: meetingStart + 60 * 60_000,
+        location: "Microsoft Teams Meeting",
+        organizer_mri: alice!.mri,
+        join_url: "https://teams.microsoft.com/l/meetup-join/quarterly-planning",
+      },
+    },
+    300_000,
+  );
+  push(
+    {
+      sender: "",
+      content: "",
+      system_event: {
+        kind: "meeting",
+        event: "cancelled",
+        title: "Quarterly planning",
+        start_ms: meetingStart,
+        end_ms: meetingStart + 60 * 60_000,
+        location: "Microsoft Teams Meeting",
+        organizer_mri: alice!.mri,
+        join_url: "https://teams.microsoft.com/l/meetup-join/quarterly-planning",
+      },
+    },
+    360_000,
+  );
+
+  addFixtureConversation(convId, "Thread Activity", messages);
+}
+
+/** Register a "Forwarded Messages" conversation: a message forwarded in with an
+ *  intro line, one forwarded on its own, and an image-only forward. Teams sends a
+ *  `Forward` blockquote with NO author, no MRI and no time, so the UI has nothing to
+ *  attribute it to and labels the block "Forwarded" instead. */
+function seedForwardedMessages(): void {
+  const convId = "19:forwarded-messages-demo@thread.v2";
+  const base = Date.now() - 24 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const other = PEOPLE[4]!;
+
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        `<p>ouh lala&nbsp;</p>\n` +
+        `<blockquote itemtype="http://schema.skype.com/Forward">\n` +
+        `<p>For clarification our current issue is they're being logged out during ` +
+        `activity — as soon as they perform their next action they're signed out.</p>\n` +
+        `</blockquote>`,
+      is_self: false,
+    },
+    0,
+  );
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content:
+        `<blockquote itemtype="http://schema.skype.com/Forward">` +
+        `<p>it has to be sia.partners&nbsp;</p>` +
+        `</blockquote>`,
+      is_self: true,
+    },
+    60_000,
+  );
+  // An image-only forward: the quote block holds the picture, so this is NOT the
+  // frameless image-only treatment (which has no room for a "Forwarded" label).
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        `<blockquote itemtype="http://schema.skype.com/Forward">` +
+        `<p><img itemtype="http://schema.skype.com/AMSImage" ` +
+        `src="https://eu-prod.asyncgw.teams.microsoft.com/v1/objects/mock-forward-1/views/imgo" ` +
+        `alt="forwarded screenshot"></p>` +
+        `</blockquote>`,
+      is_self: false,
+    },
+    120_000,
+  );
+
+  addFixtureConversation(convId, "Forwarded Messages", messages);
+}
+
+/** Register a "Plain Text" conversation of `messagetype: Text` bodies — which are
+ *  NOT HTML. Every fixture here renders wrong the moment something parses it as
+ *  markup: the angle-bracketed parts simply disappear. The last message is the
+ *  payload-less shape that used to render as a blank coloured pill. */
+function seedPlainTextSamples(): void {
+  const convId = "19:plain-text-demo@thread.v2";
+  const base = Date.now() - 23 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const other = PEOPLE[2]!;
+
+  // The repro from the audit: a placeholder in angle brackets must survive.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      message_type: "Text",
+      content: "pour moi c'est <yyyy>-<id>",
+      is_self: false,
+    },
+    0,
+  );
+  // Generics, and a tag that is text rather than markup.
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      message_type: "Text",
+      content: "Vec<String> works, and so does <b>not bold</b>",
+      is_self: true,
+    },
+    60_000,
+  );
+  // Newlines are the only structure a plain body has — and a bare URL still links.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      message_type: "Text",
+      content: "two lines:\nsecond one, see https://example.com/docs.",
+      is_self: false,
+    },
+    120_000,
+  );
+  // A message with no visible payload at all: empty body, no attachment, no system
+  // event, not deleted. It must not render as a blank bubble.
+  push({ sender: other.name, sender_mri: other.mri, content: "", is_self: false }, 180_000);
+
+  addFixtureConversation(convId, "Plain Text", messages);
 }
 
 // ---------------------------------------------------------------------------
@@ -2910,6 +3363,10 @@ seedCallEvents();
 seedDeletedMessages();
 seedMentionSamples();
 seedGitLabSamples();
+seedAppCards();
+seedThreadActivity();
+seedForwardedMessages();
+seedPlainTextSamples();
 // Seed channels LAST so the chat seed's PRNG sequence (and thus the Chats list
 // the existing specs assert on) is left completely unchanged.
 seedChannels();

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Phone, PhoneMissed } from "lucide-react";
-import { formatCallEvent, type SystemEvent } from "~/lib/protocol";
+import { formatCallEvent, type CallSystemEvent } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { Avatar, type AvatarPhoto } from "./avatar";
+import { SystemLine } from "./system-line";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import {
   Dialog,
@@ -22,39 +23,28 @@ function firstInitial(name: string): string {
 }
 
 /**
- * A centered, muted system line for a call/meeting event — e.g. "Call ended ·
- * 10 min" followed by an overlapping stack of participant avatars — rendered in
- * the timeline in place of a chat bubble. Mirrors Teams' inline call notices: no
- * sender, no mine/theirs side. Each avatar reveals the participant on hover; when
- * there are more than five, a "+N" chip opens a dialog with the full roster.
+ * A system line for a call/meeting event — e.g. "Call ended · 10 min" followed by an
+ * overlapping stack of participant avatars — rendered in the timeline in place of a
+ * chat bubble (see {@link SystemLine} for the pill it sits in). Each avatar reveals
+ * the participant on hover; when there are more than five, a "+N" chip opens a
+ * dialog with the full roster.
  */
-export function CallEventLine(props: { event: SystemEvent }) {
+export function CallEventLine(props: { event: CallSystemEvent }) {
   const { event } = props;
   const missed = event.event === "missed";
-  const Icon = missed ? PhoneMissed : Phone;
   const participants = event.participants ?? [];
   return (
-    <div
-      data-testid="system-event"
-      data-system-event={event.kind}
-      data-call-event={event.event}
-      className="my-2 flex justify-center"
+    <SystemLine
+      kind={event.kind}
+      icon={missed ? PhoneMissed : Phone}
+      label={formatCallEvent(event)}
+      alert={missed}
+      data={{ "data-call-event": event.event }}
     >
-      <span
-        className={cn(
-          "flex items-center gap-2 rounded-full bg-element px-3 py-1 text-xs",
-          missed ? "text-destructive" : "text-text-faint",
-        )}
-      >
-        <span className="flex items-center gap-1.5">
-          <Icon className="size-3 shrink-0" strokeWidth={1.8} />
-          {formatCallEvent(event)}
-        </span>
-        {participants.length > 0 && (
-          <CallParticipants participants={participants} mris={event.participant_mris} />
-        )}
-      </span>
-    </div>
+      {participants.length > 0 && (
+        <CallParticipants participants={participants} mris={event.participant_mris} />
+      )}
+    </SystemLine>
   );
 }
 

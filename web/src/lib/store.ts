@@ -15,6 +15,7 @@ import { Store } from "@tanstack/store";
 import { Backend, defaultWsUrl } from "./ws-client";
 import {
   appendLiveMessage,
+  copyableMessageText,
   mergeOlderHistoryPage,
   mergeOlderMailPage,
   mergeRefreshedHistoryPage,
@@ -504,7 +505,9 @@ export class TeamsController {
           messages: this.messageCache.get(m.conversation_id)!.messages,
         });
       } else if (shouldNotify(m, this.get().openId)) {
-        notifyMessage(m.sender, m.content);
+        // The message's own text, read the way its type says it must be (a `Text`
+        // body is plain, not HTML) — so a notification never eats what it quotes.
+        notifyMessage(m.sender, copyableMessageText(m));
         // Subtle inbound cue, riding the same gate as the desktop notification —
         // so the conversation you're looking at never chimes at you.
         playCue("droplet");

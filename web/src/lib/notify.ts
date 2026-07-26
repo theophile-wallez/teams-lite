@@ -4,8 +4,6 @@
 // thin, best-effort side-effect layer: it never throws, and the decision of
 // *whether* to notify lives in the caller (see shouldNotify in ./protocol).
 
-import { plain } from "./protocol";
-
 /** Ask for notification permission once, lazily. Safe to call repeatedly. */
 export async function ensureNotificationPermission(): Promise<boolean> {
   if (typeof Notification === "undefined") return false;
@@ -23,11 +21,15 @@ export async function ensureNotificationPermission(): Promise<boolean> {
  * Fire a desktop notification for an incoming message. No-op if notifications
  * are unavailable or not granted. Never throws. Returns the Notification so the
  * caller can wire a click handler (e.g. focus the conversation).
+ *
+ * `body` is already PLAIN text: how a message body is read depends on its Teams
+ * `messagetype` (a `Text` body is not HTML — see `bodyFormat`), and that decision
+ * belongs to the caller, which has the whole message. Stripping tags here would eat
+ * the angle brackets out of a plain body all over again.
  */
-export function notifyMessage(sender: string, content: string): Notification | null {
+export function notifyMessage(sender: string, body: string): Notification | null {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return null;
   const title = sender && sender.length > 0 ? sender : "New message";
-  const body = plain(content);
   try {
     return new Notification(title, { body, tag: "teams-lite", silent: false });
   } catch {
