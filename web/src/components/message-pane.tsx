@@ -192,6 +192,20 @@ export function MessagePane(props: { onBack?: () => void }) {
     anchorTo: "end",
     followOnAppend: true,
     paddingStart: hasMoreOlder ? HISTORY_LOADER_PX : 0,
+    // Why the rows are positioned by the virtualizer instead of by React (see
+    // `containerRef` and the absence of a `transform` style below): a row's real
+    // height only becomes known when it is mounted and measured, and a row that
+    // measures differently from `ROW_ESTIMATE_PX` shifts every row after it. The
+    // virtualizer compensates by writing `scrollTop`, and it does so
+    // *synchronously*, inside the measurement — but the new row positions are a
+    // React re-render, which paints a frame later. For that one frame the
+    // viewport is corrected while the rows are still where they were: the history
+    // visibly twitches, once per newly measured row, which is constant while
+    // scrolling up through freshly prefetched pages. `directDomUpdates` closes the
+    // gap by writing the row transforms and the container height in the same
+    // synchronous block as the scroll correction, so the two can never paint out
+    // of step.
+    directDomUpdates: true,
   });
   const virtualRows = virtualizer.getVirtualItems();
 
@@ -456,6 +470,17 @@ export function MessagePane(props: { onBack?: () => void }) {
           />
         ) : (
           <div
+            // The virtualizer positions the rows itself (see `directDomUpdates`),
+            // so they carry no `transform` from React. The *height* stays here on
+            // purpose: prepending a page re-anchors the reader by writing
+            // `scrollTop`, and that write happens in the virtualizer's own layout
+            // effect — which runs before it would set this height itself. A
+            // scroller that hasn't grown yet clamps the write, and the reader ends
+            // up thrown back into the page that just loaded. Sizing this element
+            // during React's own DOM mutation keeps the growth ahead of the
+            // re-anchor; `containerRef` then keeps it in sync when a measurement
+            // changes the total without a re-render.
+            ref={virtualizer.containerRef}
             className="relative mx-auto w-full max-w-3xl"
             style={{ height: `${virtualizer.getTotalSize()}px` }}
           >
@@ -489,7 +514,6 @@ export function MessagePane(props: { onBack?: () => void }) {
                   // own box (no margin collapsing) so `measureElement` reports a
                   // height that includes the spacing.
                   className="absolute inset-x-0 top-0 flex flex-col"
-                  style={{ transform: `translateY(${virtualRow.start}px)` }}
                 >
                   {row.kind === "thread" ? (
                     <ThreadGroup

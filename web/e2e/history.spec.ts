@@ -34,6 +34,89 @@ async function settled(page: import("@playwright/test").Page) {
     .toBeGreaterThan(0);
 }
 
+/**
+ * Sample the history once per animation frame while wheeling it upward, and
+ * report how far the content moved on frames the wheel did *not* drive.
+ *
+ * Following one message's on-screen position is the only honest measure of
+ * smoothness: `scrollTop` legitimately jumps when a page is prepended (the
+ * viewport is moved down by the height that appeared above it), and what the eye
+ * notices is the message under it moving when nothing asked it to.
+ */
+async function wheelUpAndMeasure(
+  page: import("@playwright/test").Page,
+  opts: { notches: number; intervalMs: number; cpuThrottle?: number },
+) {
+  // The defect this measures is a race between two paints: the virtualizer
+  // corrects `scrollTop` inside a row measurement, and the row positions that
+  // correction accounts for arrive with the next render. On an idle machine with
+  // a 40-message fixture that render usually still makes the same frame, so the
+  // race has to be forced — which is exactly what a real conversation does to it
+  // (taller rows, avatars, receipts, a busier main thread).
+  const cdp = opts.cpuThrottle ? await page.context().newCDPSession(page) : null;
+  await cdp?.send("Emulation.setCPUThrottlingRate", { rate: opts.cpuThrottle! });
+
+  await page.evaluate(`(() => {
+    const el = document.querySelector('[data-testid="message-scroll"]');
+    const probe = { frames: [], notches: [] };
+    window.__scrollProbe = probe;
+    const anchorAt = () => {
+      const box = el.getBoundingClientRect();
+      const middle = box.top + box.height / 2;
+      let best = null;
+      let bestDistance = Infinity;
+      for (const node of el.querySelectorAll("[data-message-id]")) {
+        const distance = Math.abs(node.getBoundingClientRect().top - middle);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = { id: node.dataset.messageId, y: node.getBoundingClientRect().top };
+        }
+      }
+      return best;
+    };
+    const tick = () => {
+      const anchor = anchorAt();
+      probe.frames.push({
+        t: performance.now(),
+        anchor: anchor ? anchor.id : null,
+        y: anchor ? anchor.y : 0,
+      });
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  })()`);
+
+  await page.mouse.move(700, 450);
+  for (let i = 0; i < opts.notches; i++) {
+    await page.evaluate(`window.__scrollProbe.notches.push(performance.now())`);
+    await page.mouse.wheel(0, -90);
+    await page.waitForTimeout(opts.intervalMs);
+  }
+  await page.waitForTimeout(400);
+  await cdp?.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+  await cdp?.detach();
+
+  // A notch keeps the content moving for a while (Chromium animates wheel
+  // scrolling), so only frames well clear of one count as idle.
+  return page.evaluate(`(() => {
+    const { frames, notches } = window.__scrollProbe;
+    const driven = (t) => notches.some((n) => t >= n - 20 && t <= n + 120);
+    let worst = 0;
+    let total = 0;
+    let idle = 0;
+    for (let i = 1; i < frames.length; i++) {
+      const prev = frames[i - 1];
+      const frame = frames[i];
+      if (frame.anchor === null || frame.anchor !== prev.anchor || driven(frame.t)) continue;
+      idle++;
+      const moved = Math.abs(frame.y - prev.y);
+      total += moved;
+      worst = Math.max(worst, moved);
+    }
+    return { idleFrames: idle, worst: Math.round(worst), total: Math.round(total) };
+  })()`) as Promise<{ idleFrames: number; worst: number; total: number }>;
+}
+
 test.describe("history (infinite scroll)", () => {
   test("loads older messages when scrolling up, and reaches the start", async ({ page }) => {
     await gotoApp(page);
@@ -95,6 +178,33 @@ test.describe("history (infinite scroll)", () => {
     // And we are neither pinned to the very bottom nor sitting at the raw top.
     expect(after.top).toBeGreaterThan(4);
     expect(after.height - after.top - after.client).toBeGreaterThan(4);
+  });
+
+  test("scrolls up without the content twitching as older pages are measured", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    await settled(page);
+
+    // Wheel up through the backlog: pages are prefetched and their rows are
+    // measured for the first time as they enter the window, which is when the
+    // virtualizer corrects `scrollTop`. That correction used to paint a frame
+    // before the row positions it compensates, jerking the history by the
+    // estimate error (up to ~40px) over and over on the way up.
+    // One notch every 150ms: fast enough to keep pulling pages, slow enough that
+    // most frames are idle and can be held to "nothing moved".
+    const motion = await wheelUpAndMeasure(page, {
+      notches: 30,
+      intervalMs: 150,
+      cpuThrottle: 8,
+    });
+
+    // Enough idle frames for the measurement to mean something.
+    expect(motion.idleFrames).toBeGreaterThan(20);
+    // Nothing may move while the wheel is idle. A pixel or two of tolerance
+    // covers sub-pixel layout rounding; the regression is an order of magnitude
+    // above that.
+    expect(motion.worst).toBeLessThanOrEqual(4);
+    expect(motion.total).toBeLessThanOrEqual(12);
   });
 
   test("prefetches older history a couple of screens before the top", async ({ page }) => {
