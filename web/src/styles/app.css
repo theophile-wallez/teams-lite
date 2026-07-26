@@ -313,86 +313,114 @@
   }
 }
 
-/* Sparkle words — the nickname easter egg (see lib/sparkle-words.ts). The word
-   stays part of the sentence — no chip, no pill, the bubble's own background
-   shows through — and only the letters are dressed up: one color per letter from
-   a six-stop ramp, each bobbing and brightening on a staggered delay so the
-   shimmer travels through the word, with two sparkles twinkling at opposite
-   corners. With no chip to guarantee contrast, the ramp follows the *surface*
-   the word lands on rather than the theme alone: the deep ramp on the white
-   incoming bubble, the bright one on anything dark (the indigo "mine" bubble,
-   and both bubbles in the dark theme) where the letters also carry a halo of
-   their own color. The sparkles are pseudo-elements, so they decorate the word
-   without joining the text on selection or copy. Every animation here is
-   neutralized by the global prefers-reduced-motion rule above; the colors and
-   the sparkles stay. */
-.sparkle-word {
-  --sparkle-1: #e11d74;
-  --sparkle-2: #c026d3;
-  --sparkle-3: #7c3aed;
-  --sparkle-4: #2563eb;
-  --sparkle-5: #0e9488;
-  --sparkle-6: #ea580c;
+/* Word effects — the easter egg on a handful of words (see lib/word-effects.ts).
+   The word stays part of the sentence — no chip, no pill, the bubble's own
+   background shows through — and only the letters are dressed up: one color per
+   letter from a six-stop ramp, each animating on a staggered delay so the motion
+   travels through the word, with a pair of glyphs at opposite corners. This
+   block holds what every effect shares; the ramp, the motion and the glyphs come
+   from the per-effect classes below.
+
+   With no chip to guarantee contrast, a ramp follows the *surface* the word
+   lands on rather than the theme alone: the deep ramp on the white incoming
+   bubble, the bright one on anything dark (the indigo "mine" bubble, and both
+   bubbles in the dark theme) where the letters also carry a halo of their own
+   color. The glyphs are pseudo-elements, so they decorate the word without
+   joining the text on selection or copy. Every animation here is neutralized by
+   the global prefers-reduced-motion rule above; since none of them fill forwards,
+   the letters and glyphs simply settle into their resting look. */
+.effect-word {
   /* How much of a letter's own color bleeds around it. Off on a light surface,
      where a halo would just read as blurry text. */
-  --sparkle-halo: 0%;
+  --effect-halo: 0%;
+  /* How far apart two neighboring letters animate — the speed at which the
+     motion walks through the word. */
+  --effect-stagger: 90ms;
   position: relative;
   display: inline-block;
-  /* Room for the corner sparkles, so they never land on the neighboring word. */
+  /* Room for the corner glyphs, so they never land on the neighboring word. */
   padding-inline: 0.16em;
   font-weight: 600;
 }
-[data-mine="true"] .sparkle-word,
-[data-theme="dark"] .sparkle-word {
-  /* Brighter letters, plus a halo, so the egg glows out of a dark bubble
-     instead of sinking into it. */
-  --sparkle-1: #ff8ac4;
-  --sparkle-2: #e879f9;
-  --sparkle-3: #a78bfa;
-  --sparkle-4: #60a5fa;
-  --sparkle-5: #34d399;
-  --sparkle-6: #fbbf24;
-  --sparkle-halo: 45%;
+[data-mine="true"] .effect-word,
+[data-theme="dark"] .effect-word {
+  /* A halo, so the egg glows out of a dark bubble instead of sinking into it. */
+  --effect-halo: 45%;
 }
-.sparkle-word-letter {
+.effect-word-letter {
   /* inline-block so each letter can be transformed on its own. */
   display: inline-block;
-  text-shadow: 0 0 0.4em color-mix(in oklab, currentColor var(--sparkle-halo), transparent);
+  text-shadow: 0 0 0.4em color-mix(in oklab, currentColor var(--effect-halo), transparent);
+  /* One delay for every animation on the letter, so a single stagger ripples
+     through all of them at once. */
+  animation-delay: calc(var(--effect-index, 0) * var(--effect-stagger));
+}
+.effect-word-letter:nth-child(6n + 1) {
+  color: var(--effect-1);
+}
+.effect-word-letter:nth-child(6n + 2) {
+  color: var(--effect-2);
+}
+.effect-word-letter:nth-child(6n + 3) {
+  color: var(--effect-3);
+}
+.effect-word-letter:nth-child(6n + 4) {
+  color: var(--effect-4);
+}
+.effect-word-letter:nth-child(6n + 5) {
+  color: var(--effect-5);
+}
+.effect-word-letter:nth-child(6n + 6) {
+  color: var(--effect-6);
+}
+.effect-word::before,
+.effect-word::after {
+  position: absolute;
+  line-height: 1;
+  pointer-events: none;
+  /* Visible at rest, so the glyphs still frame the word when the animation is
+     off (reduced motion); the keyframes only play with them. */
+  opacity: 0.9;
+}
+/* Each letter saturates and brightens in turn, on the letters' stagger. */
+@keyframes teams-effect-shimmer {
+  0%,
+  100% {
+    filter: saturate(1) brightness(1);
+  }
+  50% {
+    filter: saturate(1.4) brightness(1.12);
+  }
+}
+
+/* Sparkle — the affectionate nicknames, as candy text: a bobbing shimmer over a
+   pink-to-orange ramp, between two sparkles twinkling at opposite corners. */
+.sparkle-word {
+  --effect-1: #e11d74;
+  --effect-2: #c026d3;
+  --effect-3: #7c3aed;
+  --effect-4: #2563eb;
+  --effect-5: #0e9488;
+  --effect-6: #ea580c;
+}
+[data-mine="true"] .sparkle-word,
+[data-theme="dark"] .sparkle-word {
+  --effect-1: #ff8ac4;
+  --effect-2: #e879f9;
+  --effect-3: #a78bfa;
+  --effect-4: #60a5fa;
+  --effect-5: #34d399;
+  --effect-6: #fbbf24;
+}
+.sparkle-word .effect-word-letter {
   animation:
     teams-sparkle-bob 2.6s ease-in-out infinite,
-    teams-sparkle-shimmer 7s ease-in-out infinite;
-  /* One delay for both animations: the same stagger that ripples the bob also
-     walks the shimmer across the letters. */
-  animation-delay: calc(var(--sparkle-index, 0) * 90ms);
-}
-.sparkle-word-letter:nth-child(6n + 1) {
-  color: var(--sparkle-1);
-}
-.sparkle-word-letter:nth-child(6n + 2) {
-  color: var(--sparkle-2);
-}
-.sparkle-word-letter:nth-child(6n + 3) {
-  color: var(--sparkle-3);
-}
-.sparkle-word-letter:nth-child(6n + 4) {
-  color: var(--sparkle-4);
-}
-.sparkle-word-letter:nth-child(6n + 5) {
-  color: var(--sparkle-5);
-}
-.sparkle-word-letter:nth-child(6n + 6) {
-  color: var(--sparkle-6);
+    teams-effect-shimmer 7s ease-in-out infinite;
 }
 .sparkle-word::before,
 .sparkle-word::after {
   content: "✦";
-  position: absolute;
   font-size: 0.58em;
-  line-height: 1;
-  pointer-events: none;
-  /* Visible at rest, so the sparkles still frame the word when the animation is
-     off (reduced motion); the keyframes only dim and re-brighten them. */
-  opacity: 0.9;
   /* A halo of their own color, always on: unlike the letters, a sparkle is a
      tiny glyph that has to hold up against a light or a dark bubble alike. */
   text-shadow: 0 0 5px currentColor;
@@ -401,24 +429,13 @@
 .sparkle-word::before {
   top: -0.42em;
   left: -0.24em;
-  color: var(--sparkle-1);
+  color: var(--effect-1);
 }
 .sparkle-word::after {
   right: -0.24em;
   bottom: -0.38em;
-  color: var(--sparkle-3);
+  color: var(--effect-3);
   animation-delay: 1.4s;
-}
-/* The shimmer that used to sweep the chip's gradient now lives in the letters:
-   each one saturates and brightens in turn, on the bob's stagger. */
-@keyframes teams-sparkle-shimmer {
-  0%,
-  100% {
-    filter: saturate(1) brightness(1);
-  }
-  50% {
-    filter: saturate(1.4) brightness(1.12);
-  }
 }
 @keyframes teams-sparkle-bob {
   0%,
@@ -439,5 +456,80 @@
   45% {
     opacity: 1;
     transform: scale(1) rotate(90deg);
+  }
+}
+
+/* Football — the babyfoot words, as a game: a grass-and-leather ramp (pitch
+   greens alternating with the white-and-black of a ball), letters kicked up one
+   after another so a bounce dribbles through the word, and a ball spinning at
+   each corner. The tighter stagger keeps the bounce reading as one ball
+   travelling rather than a row of letters hopping together. */
+.football-word {
+  --effect-1: #166534;
+  --effect-2: #1f2937;
+  --effect-3: #15803d;
+  --effect-4: #0f766e;
+  --effect-5: #3f6212;
+  --effect-6: #334155;
+  --effect-stagger: 70ms;
+  /* Wider than the sparkles: a ball is a chunkier glyph. */
+  padding-inline: 0.24em;
+}
+[data-mine="true"] .football-word,
+[data-theme="dark"] .football-word {
+  --effect-1: #86efac;
+  --effect-2: #f1f5f9;
+  --effect-3: #4ade80;
+  --effect-4: #5eead4;
+  --effect-5: #bef264;
+  --effect-6: #cbd5e1;
+}
+.football-word .effect-word-letter {
+  /* The squash lands on the baseline, like a ball hitting the ground. */
+  transform-origin: bottom center;
+  animation:
+    teams-football-kick 2.2s cubic-bezier(0.3, 0, 0.4, 1) infinite,
+    teams-effect-shimmer 7s ease-in-out infinite;
+}
+.football-word::before,
+.football-word::after {
+  content: "⚽";
+  font-size: 0.62em;
+  /* Emoji carry their own colors, so the ball gets its lift from a cast shadow
+     rather than the colored halo the sparkles use. */
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.35));
+  animation: teams-football-spin 3.6s linear infinite;
+}
+.football-word::before {
+  top: -0.52em;
+  left: -0.3em;
+}
+.football-word::after {
+  right: -0.3em;
+  bottom: -0.44em;
+  /* The far ball spins the other way, out of phase, so the two never look like
+     one animation played twice. */
+  animation-direction: reverse;
+  animation-delay: -1.8s;
+}
+@keyframes teams-football-kick {
+  0%,
+  62%,
+  100% {
+    transform: translateY(0) scaleY(1);
+  }
+  18% {
+    transform: translateY(-0.26em) scaleY(1.05);
+  }
+  46% {
+    transform: translateY(0) scaleY(0.9);
+  }
+}
+@keyframes teams-football-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
   }
 }

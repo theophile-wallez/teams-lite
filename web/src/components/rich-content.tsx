@@ -5,7 +5,7 @@ import type { MessageMention } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { MediaImage } from "./media-image";
 import { PersonHoverCard } from "./person-card";
-import { renderSparkleWords } from "./sparkle-word";
+import { renderWordEffects } from "./word-effect";
 
 /**
  * Renders a Teams HTML fragment as safe React elements. The HTML is parsed into
@@ -104,7 +104,7 @@ function LinkFavicon({ href }: { href?: string }) {
 
 /**
  * @param verbatim Inside a `code`/`pre` subtree, where text is shown exactly as
- * written — no easter-egg decoration (see {@link renderSparkleWords}).
+ * written — no easter-egg decoration (see {@link renderWordEffects}).
  */
 function renderNode(
   node: RichNode,
@@ -112,7 +112,7 @@ function renderNode(
   mentions?: Map<number, MessageMention>,
   verbatim = false,
 ): ReactNode {
-  if (node.type === "text") return verbatim ? node.text : renderSparkleWords(node.text, key);
+  if (node.type === "text") return verbatim ? node.text : renderWordEffects(node.text, key);
 
   const isVerbatim = verbatim || node.tag === "code" || node.tag === "pre";
   const children = node.children.map((child, i) => renderNode(child, i, mentions, isVerbatim));
