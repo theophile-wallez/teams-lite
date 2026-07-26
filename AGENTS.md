@@ -87,6 +87,9 @@ user. Two independent mechanisms enforce that split:
   /tmp/shot`, or import `withPreview` / `typeInComposer` / `openFirstConversation`
   from it. For the mail surface: `bun run preview -- --out /tmp/mail --mail`, or
   `openMailTab` / `openFirstMail` / `openMailAt` from the same file.
+  `web/scripts/scroll-probe.ts` is what a diagnostic built on top of it looks like
+  (it measures history scroll smoothness frame by frame): a tracked script that
+  drives the app *through* `withPreview`, never around it.
 - **Never type into the composer without proof the backend is fake.** The proof is
   `[data-testid="backend-badge"][data-backend="mock"]`, which comes from the
   backend's own `backend_info` sentinel (only `web/mock/server.ts` emits it). No
