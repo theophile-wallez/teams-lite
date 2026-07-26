@@ -34,6 +34,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/preview --type "hey bébou" --send
 //   bun run web/scripts/preview.ts --out /tmp/preview --incoming "hey bébou"
 //   bun run web/scripts/preview.ts --out /tmp/mail --mail        # the Mail surface
+//   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -214,6 +215,33 @@ export async function openMailAt(page: Page, index: number): Promise<string> {
   return id;
 }
 
+/**
+ * Hover the last message until its quick reaction row appears (it is revealed
+ * after a dwell, see REACTION_HOVER_MS in message-bubble.tsx).
+ *
+ * Reaction surfaces only *offer* a reaction — nothing leaves until an emoji is
+ * clicked — but they are still write affordances, so these helpers re-assert the
+ * mock sentinel like every other one here.
+ */
+export async function revealReactionRow(page: Page): Promise<void> {
+  await assertMockBackend(page);
+  await page.locator('[data-testid="message"]').last().hover();
+  await page.waitForSelector('[data-testid="reaction-picker"]');
+  await page.waitForTimeout(300); // let the row's reveal animation settle
+}
+
+/**
+ * Open the full emoji picker from a revealed quick row. Returns once emoji-mart
+ * has mounted and its Apple images (served from our own origin) have had a beat
+ * to arrive, so a capture isn't of a half-loaded grid.
+ */
+export async function openReactionPicker(page: Page): Promise<void> {
+  await assertMockBackend(page);
+  await page.locator('[data-testid="reaction-picker"] [data-testid="reaction-more"]').click();
+  await page.waitForSelector('[data-testid="emoji-picker"]');
+  await page.waitForTimeout(800);
+}
+
 // ---- setup helpers ---------------------------------------------------------
 
 /** Belt and braces: never let a misconfigured port aim this at the real backend. */
@@ -315,6 +343,7 @@ if (import.meta.main) {
   const text = flag("--type");
   const send = args.includes("--send");
   const incoming = flag("--incoming");
+  const react = args.includes("--react");
 
   // The Mail surface: the sidebar's Mail tab plus the reading pane, in both themes.
   if (args.includes("--mail")) {
@@ -346,6 +375,28 @@ if (import.meta.main) {
       await page.waitForTimeout(500);
     }
     if (text) await typeInComposer(page, text, { send });
+    if (react) {
+      // Chips first (from the mock, not from us clicking): one classic key and one
+      // of the extended ones a real tenant sends, so a capture shows both paths.
+      const messages = page.locator("[data-message-id]");
+      const count = await messages.count();
+      for (const [index, key] of [
+        [Math.max(0, count - 4), "1f389_partypopper"],
+        [Math.max(0, count - 3), "heart"],
+      ] as const) {
+        const id = await messages.nth(index).getAttribute("data-message-id");
+        if (id) await emit({ kind: "reaction", conversation, message_id: id, key, count: 2 });
+      }
+      await page.waitForTimeout(400);
+      // Three states worth reviewing: chips, the quick row, then the full picker.
+      await shot(`${out}-chips-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-chips-dark.png`);
+      await setTheme("light");
+      await revealReactionRow(page);
+      await shot(`${out}-row-light.png`);
+      await openReactionPicker(page);
+    }
     await shot(`${out}-light.png`);
     await setTheme("dark");
     await shot(`${out}-dark.png`);

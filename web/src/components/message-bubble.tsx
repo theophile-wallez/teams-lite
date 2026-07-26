@@ -1,6 +1,6 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Ban, Copy, Eye, EyeOff, MoreHorizontal, Pencil, Reply } from "lucide-react";
+import { Ban, Copy, Eye, EyeOff, MoreHorizontal, Pencil, Reply, SmilePlus } from "lucide-react";
 import {
   copyableMessageText,
   mentionsByItemId,
@@ -10,7 +10,7 @@ import {
   type GitLabLinkMetadata,
   type Reaction,
 } from "~/lib/protocol";
-import { reactionEmoji, REACTION_PICKER } from "~/lib/notifications";
+import { reactionEmoji, REACTION_PICKER } from "~/lib/teams-emoji";
 import { hasActivePipeline } from "~/lib/gitlab-pipeline";
 import {
   containsImage,
@@ -29,10 +29,16 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
+import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
 import { FileAttachment, MediaImage, RecordingAttachment } from "./media-image";
 import { GitLabLinkCard } from "./gitlab-link-card";
 import { PersonHoverCard } from "./person-card";
+import { Emoji } from "./emoji";
 import { useAppState, useController } from "./controller-context";
+
+// emoji-mart and its dataset are ~1.5 MB and only needed once someone reaches
+// past the six quick reactions, so the full picker is a lazy chunk.
+const EmojiPicker = lazy(() => import("./emoji-picker"));
 
 /** Dwell before the hover reaction picker appears, the way Teams reveals its
  *  reaction bar — long enough that merely passing the cursor over a message
@@ -284,6 +290,11 @@ function MessageBubbleImpl(props: {
   // whole bubble row is the hover target; the picker floats just above it and,
   // being a descendant, keeps the hover alive when the cursor moves onto it.
   const [pickerOpen, setPickerOpen] = useState(false);
+  // The full emoji picker (all ~1550 Teams reactions), anchored to the bubble so
+  // it survives the transient surface it was opened from — moving the cursor into
+  // it leaves the bubble, which would dismiss a hover-owned popover.
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  const emojiTheme = useAppState((s) => s.resolvedTheme);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clearHoverTimer = () => {
     if (hoverTimer.current) clearTimeout(hoverTimer.current);
@@ -291,7 +302,7 @@ function MessageBubbleImpl(props: {
   };
   const openPickerSoon = () => {
     // A deleted message has no reaction/actions affordances — the message is gone.
-    if (props.editing || menuOpen || isDeleted) return;
+    if (props.editing || menuOpen || emojiPickerOpen || isDeleted) return;
     clearHoverTimer();
     hoverTimer.current = setTimeout(() => setPickerOpen(true), REACTION_HOVER_MS);
   };
@@ -301,11 +312,20 @@ function MessageBubbleImpl(props: {
   };
   useEffect(() => clearHoverTimer, []);
 
-  // Apply a reaction from either surface (hover picker, menu bar, or a chip),
-  // then close both transient surfaces. The backend toggles server-side.
+  // Hand off from a quick surface to the full picker: the quick row and the ⋯
+  // menu both step aside, since all three are the same one-reaction decision.
+  const openEmojiPicker = () => {
+    cancelPicker();
+    setMenuOpen(false);
+    setEmojiPickerOpen(true);
+  };
+
+  // Apply a reaction from any surface (hover picker, menu bar, emoji picker, or a
+  // chip), then close every transient surface. The backend toggles server-side.
   const react = (key: string) => {
     cancelPicker();
     setMenuOpen(false);
+    setEmojiPickerOpen(false);
     props.onReact(props.message, key);
   };
 
@@ -442,11 +462,41 @@ function MessageBubbleImpl(props: {
               data-testid="reaction-picker"
               activeKey={myReactionKey}
               onPick={react}
+              onMore={openEmojiPicker}
               floating
               className="rounded-full border border-border/50 bg-popover/70 p-1 shadow-pop backdrop-blur-md"
             />
           </div>
         )}
+
+        {/* The full picker, opened from either quick surface. Anchored to an
+            invisible stand-in for the bubble's own box rather than to the button
+            that opened it: both of those are transient (the hover row dismisses
+            when the cursor leaves the bubble, the ⋯ menu closes on select), and a
+            popover outlives them. Only mounted while open, so the lazy chunk is
+            fetched on first use. */}
+        <Popover open={emojiPickerOpen} onOpenChange={setEmojiPickerOpen}>
+          <PopoverAnchor aria-hidden className="pointer-events-none absolute inset-0" />
+          <PopoverContent
+            side="top"
+            align={mine ? "end" : "start"}
+            className="overflow-hidden"
+            // Reacting is a pointer gesture on a hovered message; pulling focus
+            // back to the bubble on close would scroll the pane to it.
+            onCloseAutoFocus={(e) => e.preventDefault()}
+          >
+            <Suspense
+              fallback={
+                <div
+                  data-testid="emoji-picker-loading"
+                  className="h-[420px] w-[338px] animate-pulse rounded-xl bg-element"
+                />
+              }
+            >
+              <EmojiPicker onPick={react} theme={emojiTheme} />
+            </Suspense>
+          </PopoverContent>
+        </Popover>
 
         {nameShown && (
           <div className="mb-0.5 flex text-xs font-semibold text-sender-name">
@@ -532,6 +582,7 @@ function MessageBubbleImpl(props: {
                   data-testid="menu-reaction-picker"
                   activeKey={myReactionKey}
                   onPick={react}
+                  onMore={openEmojiPicker}
                   className="justify-between px-1 pb-1"
                 />
                 <DropdownMenuSeparator />
@@ -659,19 +710,21 @@ function DeletedContent(props: { mine: boolean; revealable: boolean; children: R
 }
 
 /**
- * A row of emoji buttons for adding a reaction, in Teams' canonical order. Used
- * both as the floating hover picker and as the reaction bar at the top of the ⋯
- * menu. The caller supplies chrome via `className` (a translucent, frosted
- * rounded bar for the hover picker; flat inside the menu). `activeKey` marks our
- * current reaction with a distinct highlight; clicking it removes the reaction,
- * which the highlight and the label ("Remove … reaction") already say — no extra
- * badge needed on top of the emoji.
+ * A row of emoji buttons for adding a reaction, in Teams' canonical order,
+ * followed by the affordance that opens the full emoji picker. Used both as the
+ * floating hover picker and as the reaction bar at the top of the ⋯ menu. The
+ * caller supplies chrome via `className` (a translucent, frosted rounded bar for
+ * the hover picker; flat inside the menu). `activeKey` marks our current reaction
+ * with a distinct highlight; clicking it removes the reaction, which the
+ * highlight and the label ("Remove … reaction") already say — no extra badge
+ * needed on top of the emoji.
  *
  * `floating` (the hover picker) adds the pop-scale on hover, which would be
  * clipped inside the menu's `overflow-hidden` surface.
  */
 function ReactionPicker(props: {
   onPick: (key: string) => void;
+  onMore: () => void;
   activeKey?: string;
   floating?: boolean;
   className?: string;
@@ -696,15 +749,29 @@ function ReactionPicker(props: {
             data-testid={`reaction-option-${key}`}
             onClick={() => props.onPick(key)}
             className={cn(
-              "grid size-7 place-items-center rounded-full text-base leading-none transition-transform",
+              "grid size-7 place-items-center rounded-full leading-none transition-transform",
               props.floating && "hover:scale-125",
               active ? "bg-primary/20 ring-1 ring-inset ring-primary/50" : "hover:bg-accent",
             )}
           >
-            <span aria-hidden>{emoji}</span>
+            <Emoji emoji={emoji} className="size-[18px]" />
           </button>
         );
       })}
+      {/* The six above are the shortcuts; the other ~1500 reactions Teams accepts
+          are one click away in the full picker. */}
+      <button
+        type="button"
+        aria-label="More reactions"
+        data-testid="reaction-more"
+        onClick={props.onMore}
+        className={cn(
+          "grid size-7 place-items-center rounded-full text-text-dim transition-transform hover:bg-accent hover:text-foreground",
+          props.floating && "hover:scale-110",
+        )}
+      >
+        <SmilePlus className="size-[18px]" strokeWidth={1.6} />
+      </button>
     </div>
   );
 }
@@ -757,9 +824,7 @@ function ReactionChips(props: {
         >
           {/* Emoji at message-text size (not label size) — the reaction, not its
               count, is what the eye should land on. */}
-          <span aria-hidden className="text-base leading-none">
-            {reactionEmoji(r.key)}
-          </span>
+          <Emoji emoji={reactionEmoji(r.key)} className="size-4" />
           <span className="text-[11px] font-medium tabular-nums">{r.count}</span>
         </button>
       ))}

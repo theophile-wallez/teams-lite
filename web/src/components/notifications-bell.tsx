@@ -15,6 +15,7 @@ import {
   sourceContext,
 } from "~/lib/notifications";
 import { Avatar } from "./avatar";
+import { Emoji } from "./emoji";
 import { useAppState, useController } from "./controller-context";
 import {
   DropdownMenu,
@@ -199,8 +200,8 @@ function NotificationRow(props: { notification: Notification; onOpen: () => void
           className="size-9"
         />
         {emoji && (
-          <span className="absolute -bottom-1 -right-1 grid size-5 place-items-center rounded-full bg-card text-[11px] shadow-chip">
-            {emoji}
+          <span className="absolute -bottom-1 -right-1 grid size-5 place-items-center rounded-full bg-card shadow-chip">
+            <Emoji emoji={emoji} className="size-3" />
           </span>
         )}
       </span>

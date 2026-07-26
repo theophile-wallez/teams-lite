@@ -1,40 +1,13 @@
 // Pure presentation helpers for the activity feed (the notifications panel).
 //
-// The backend passes Teams' raw activity fields through untouched; all phrasing,
-// emoji mapping, and time formatting lives here so it is testable without a DOM
-// and stays out of the wire protocol. Nothing here touches the DOM or network.
+// The backend passes Teams' raw activity fields through untouched; all phrasing
+// and time formatting lives here so it is testable without a DOM and stays out of
+// the wire protocol. Reaction keys are resolved to emoji by teams-emoji.ts, the
+// single place that knows Microsoft's reaction catalog. Nothing here touches the
+// DOM or network.
 
+import { reactionEmoji } from "./teams-emoji";
 import type { Notification } from "./protocol";
-
-/** Teams reaction subtype -> emoji. Unknown subtypes fall back to a neutral
- *  reaction glyph so a newly-added Teams reaction never renders blank. */
-const REACTION_EMOJI: Record<string, string> = {
-  like: "👍",
-  heart: "❤️",
-  laugh: "😂",
-  surprised: "😮",
-  sad: "😢",
-  angry: "😡",
-  handshake: "🤝",
-  confused: "😕",
-};
-
-export function reactionEmoji(subtype: string): string {
-  return REACTION_EMOJI[subtype.toLowerCase()] ?? "👍";
-}
-
-/** The emojis offered in the hover reaction picker, in Teams' canonical order.
- *  A subset of `REACTION_EMOJI` (the six classic reactions) so it stays DRY and
- *  consistent with inbound reactions; a received reaction outside this set still
- *  renders as a chip via `reactionEmoji()`. */
-export const REACTION_PICKER: ReadonlyArray<{ key: string; emoji: string }> = [
-  "like",
-  "heart",
-  "laugh",
-  "surprised",
-  "sad",
-  "angry",
-].map((key) => ({ key, emoji: REACTION_EMOJI[key]! }));
 
 /** Whether this activity is a reaction (drives the leading reaction glyph). */
 export function isReaction(n: Notification): boolean {

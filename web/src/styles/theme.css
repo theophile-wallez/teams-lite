@@ -89,6 +89,14 @@
   --image-mat: #f3f3f5;
   --image-mat-line: rgba(17, 17, 17, 0.05);
 
+  /* The emoji picker (emoji-mart) composes its surfaces with `rgb()`, so it
+   * needs its palette as bare RGB triplets. Mirrors --popover / --foreground /
+   * --primary / --element above; keep the pairs in step. */
+  --emoji-picker-background: 255, 255, 255;
+  --emoji-picker-color: 41, 41, 41;
+  --emoji-picker-accent: 104, 117, 230;
+  --emoji-picker-input: 244, 244, 245;
+
   /* Elevation — "shadow as a border": a crisp 1px ring + a 1–2px micro-drop.
    * Elevation scales by opacity + tiny offset, never by wide blur. */
   --elev-chip: 0 0 0 1px rgba(17, 17, 17, 0.04), 0 1px 1px rgba(17, 17, 17, 0.04);
@@ -160,6 +168,11 @@
 
   --image-mat: #242424;
   --image-mat-line: rgba(255, 255, 255, 0.055);
+
+  --emoji-picker-background: 31, 31, 31;
+  --emoji-picker-color: 229, 229, 229;
+  --emoji-picker-accent: 120, 133, 248;
+  --emoji-picker-input: 38, 38, 38;
 
   /* Dark: shadows barely show — separate surfaces with a hairline inset ring
    * (lightness step) plus a soft drop for popovers. */

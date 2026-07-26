@@ -6,9 +6,7 @@ import {
   isReaction,
   leadingEmoji,
   notificationHeadline,
-  reactionEmoji,
   sourceContext,
-  REACTION_PICKER,
 } from "./notifications";
 import type { Notification } from "./protocol";
 
@@ -29,42 +27,6 @@ function notification(over: Partial<Notification> = {}): Notification {
     ...over,
   };
 }
-
-describe("reactionEmoji", () => {
-  it("maps every known Teams reaction subtype", () => {
-    expect(reactionEmoji("like")).toBe("👍");
-    expect(reactionEmoji("heart")).toBe("❤️");
-    expect(reactionEmoji("laugh")).toBe("😂");
-    expect(reactionEmoji("surprised")).toBe("😮");
-    expect(reactionEmoji("sad")).toBe("😢");
-    expect(reactionEmoji("angry")).toBe("😡");
-    expect(reactionEmoji("handshake")).toBe("🤝");
-    expect(reactionEmoji("confused")).toBe("😕");
-  });
-
-  it("is case-insensitive and falls back for unknown subtypes", () => {
-    expect(reactionEmoji("LAUGH")).toBe("😂");
-    expect(reactionEmoji("someNewReaction")).toBe("👍");
-    expect(reactionEmoji("")).toBe("👍");
-  });
-});
-
-describe("REACTION_PICKER", () => {
-  it("offers the six classic reactions in Teams order, each with an emoji", () => {
-    expect(REACTION_PICKER.map((r) => r.key)).toEqual([
-      "like",
-      "heart",
-      "laugh",
-      "surprised",
-      "sad",
-      "angry",
-    ]);
-    // every picker emoji agrees with reactionEmoji for the same key (DRY)
-    for (const { key, emoji } of REACTION_PICKER) {
-      expect(emoji).toBe(reactionEmoji(key));
-    }
-  });
-});
 
 describe("activityVerb / headline", () => {
   it("phrases a reaction with its emoji", () => {
@@ -108,7 +70,7 @@ describe("sourceContext", () => {
 describe("isReaction / leadingEmoji", () => {
   it("returns the reaction emoji for reactions and null otherwise", () => {
     expect(isReaction(notification())).toBe(true);
-    expect(leadingEmoji(notification({ activity_subtype: "sad" }))).toBe("😢");
+    expect(leadingEmoji(notification({ activity_subtype: "sad" }))).toBe("🙁");
     expect(isReaction(notification({ activity_type: "mention" }))).toBe(false);
     expect(leadingEmoji(notification({ activity_type: "mention" }))).toBeNull();
   });

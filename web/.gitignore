@@ -3,6 +3,10 @@
 # checkout's install — is ignored too, and can never be staged by mistake.
 node_modules
 
+# Apple emoji images, copied out of the emoji-datasource-apple dependency by
+# scripts/sync-emoji-assets.ts (~3800 files) instead of committed.
+public/emoji/
+
 # build output
 dist/
 .output/

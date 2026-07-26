@@ -76,6 +76,90 @@ test.describe("message reactions", () => {
     await expect(bubble.locator('[data-testid="reaction-chip-like"]')).toHaveCount(0);
   });
 
+  test("reacts with any Teams emoji from the full picker, served locally", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+
+    const original = `emoji-picker-${Date.now()}`;
+    const composer = page.locator('[data-testid="composer"]');
+    await composer.click();
+    await composer.fill(original);
+    await composer.press("Enter");
+
+    const bubble = page.locator('[data-testid="message"]', { hasText: original });
+    await expect(bubble).toBeVisible();
+
+    // Every emoji image must come from our own origin — and actually be served
+    // there. The Apple set is synced into public/emoji at install time precisely
+    // so the app never depends on a CDN (see scripts/sync-emoji-assets.ts), which
+    // only holds if the build ships those files too.
+    const external: string[] = [];
+    const missing: string[] = [];
+    page.on("request", (r) => {
+      if (/jsdelivr|unpkg|emoji-datasource/i.test(r.url())) external.push(r.url());
+    });
+    page.on("response", (r) => {
+      if (r.url().includes("/emoji/apple/") && !r.ok()) missing.push(`${r.status()} ${r.url()}`);
+    });
+
+    // The quick row offers six reactions; the rest are behind "More reactions".
+    await bubble.hover();
+    await expect(page.locator('[data-testid="reaction-picker"]')).toBeVisible({ timeout: 5_000 });
+    await page.locator('[data-testid="reaction-picker"] [data-testid="reaction-more"]').click();
+
+    // Search narrows to one emoji, Enter picks it — emoji-mart lives in a shadow
+    // root, so drive it the way a user does rather than by internal markup.
+    const picker = page.locator('[data-testid="emoji-picker"]');
+    await expect(picker).toBeVisible({ timeout: 15_000 });
+    const search = picker.locator('input[type="search"]');
+    await search.fill("fire");
+    await search.press("Enter");
+
+    // 🔥 is `fire` in Microsoft's reaction catalog — the key that reaches Teams.
+    const chip = bubble.locator('[data-testid="reaction-chip-fire"]');
+    await expect(chip).toBeVisible();
+    await expect(chip).toHaveAttribute("data-mine", "true");
+    await expect(chip.locator("img")).toHaveAttribute("src", "/emoji/apple/64/1f525.png");
+    // Picking closes the picker.
+    await expect(picker).toHaveCount(0);
+    expect(external).toEqual([]);
+    expect(missing).toEqual([]);
+
+    // The ⋯ menu is the other way in (and the only one on touch, where nothing
+    // hovers): it hands off to the same picker and closes behind it.
+    await bubble.hover();
+    await bubble.locator('[data-testid="message-actions"]').click();
+    await page.locator('[data-testid="menu-reaction-picker"] [data-testid="reaction-more"]').click();
+    await expect(picker).toBeVisible();
+    await expect(page.locator('[data-testid="menu-reaction-picker"]')).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+  });
+
+  test("renders an extended reaction key received from Teams", async ({ page }) => {
+    await gotoApp(page);
+    const conv = await openConversationAt(page, 0);
+
+    const target = page.locator('[data-testid="message"]').first();
+    const messageId = await target.getAttribute("data-message-id");
+
+    // Real tenants send far more than the six classic keys: Teams' own animated
+    // names (`rofl`) and its `<code points>_<name>` form for plain Unicode.
+    await emitReaction(page, {
+      conversation: conv,
+      message_id: messageId!,
+      key: "1f389_partypopper",
+      count: 2,
+      mine: false,
+    });
+
+    const chip = target.locator('[data-testid="reaction-chip-1f389_partypopper"]');
+    await expect(chip).toBeVisible();
+    await expect(chip).toContainText("2");
+    // 🎉, not the neutral 👍 fallback.
+    await expect(chip.locator("img")).toHaveAttribute("src", "/emoji/apple/64/1f389.png");
+  });
+
   test("shows a reaction received on a message from someone else", async ({ page }) => {
     await gotoApp(page);
     const conv = await openConversationAt(page, 0);

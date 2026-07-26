@@ -1812,8 +1812,11 @@ function buildNotificationFeeds(): {
     },
     {
       id: "act-sample-3",
+      // An extended reaction key, the `<code points>_<name>` form real tenants
+      // send for emoji Teams has no animation for — so the fixture covers more
+      // than the six classic subtypes.
       activity_type: "reactionInChat",
-      activity_subtype: "like",
+      activity_subtype: "1f389_partypopper",
       actor_name: "Jordan Blake",
       actor_mri: "8:orgid:jordan",
       source_thread_id: thread(2),
