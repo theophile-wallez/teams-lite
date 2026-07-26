@@ -19,7 +19,12 @@
 #   3. `vite dev` without an explicit VITE_TEAMS_WS_URL (a dev server with no
 #      declared backend is exactly how the incident started);
 #   4. starting the Rust backend without TEAMS_LITE_READ_ONLY=1 — an agent has no
-#      reason to run a send-capable backend; the user starts that one.
+#      reason to run a send-capable backend; the user starts that one;
+#   5. anything that would send MAIL. The mailbox is read-only here and has no
+#      sandbox equivalent (see AGENTS.md § Mail is READ-ONLY): the broker token
+#      already carries `Mail.Send`, so the only thing standing between this
+#      environment and a mail leaving the user's personal address is that nothing
+#      names the endpoint. This hook refuses to be the first thing that does.
 #
 # The backend enforces the same boundary independently: writes require a capability
 # token it publishes only for the user's own frontends (see `write_token` in
@@ -85,11 +90,18 @@ ad_hoc_scripts() {
 
 scripts_driving_a_browser=""
 scripts_writing_to_the_backend=""
+scripts_sending_mail=""
 if ! sanctioned_automation; then
   while IFS= read -r script; do
     [ -z "$script" ] && continue
     if grep -qiE 'playwright|puppeteer|chrome-linux64/chrome|chromium' "$script"; then
       scripts_driving_a_browser="$scripts_driving_a_browser $script"
+    fi
+    # Mail: reading the mailbox is the whole point of the feature, so only the
+    # WRITE endpoints are matched — Graph exposes sending as `sendMail` (and `/send`
+    # on a draft), and moving/deleting as `move`/`DELETE` on a message.
+    if grep -qiE 'sendMail|/messages/[^"'\'' ]*/send|graph\.microsoft\.com[^"'\'' ]*/(move|copy)' "$script"; then
+      scripts_sending_mail="$scripts_sending_mail $script"
     fi
     # READING the live backend is fine and often the point (inspecting real data
     # beats guessing). WRITING is not: `send`/`edit`/`react` post as the user. So
@@ -113,6 +125,29 @@ without the capability token it publishes for the user's own frontends (see the
 write lock in src/bin/server.rs), and this hook refuses to run the attempt at all.
 
 Exercise write flows against the mock: cd web && bun run preview."
+fi
+
+# --- 1b. no mail may ever be sent, moved or deleted ---------------------------
+# Checked on the command line AND inside ad-hoc scripts, and deliberately WITHOUT a
+# sanctioned-path exemption: unlike Teams, mail has no sandbox mailbox, so there is
+# no context in which this is allowed.
+if printf '%s' "$command_line" | grep -qiE 'sendMail|graph\.microsoft\.com[^ ]*/(sendMail|send|move)' ||
+  [ -n "$scripts_sending_mail" ]; then
+  [ -n "$scripts_sending_mail" ] &&
+    printf 'note: a mail write was found inside%s\n' "$scripts_sending_mail" >&2
+  block "This command would WRITE to the user's mailbox (send, move, or delete a mail).
+
+Mail is read-only in this project, with NO exception — there is no sandbox mailbox
+the way there is a sandbox Teams channel. A mail leaves the user's personal address,
+reaches people who never agreed to be part of a test, and cannot be recalled.
+
+The broker token this app holds already carries Mail.Send, so nothing at the API
+level stops you: the guarantee is that no code names the endpoint (src/mail.rs
+issues GET only, and two tests in it enforce that on the source). Keep it that way.
+
+Reading is fine and is what the feature is for: list folders, read messages, render
+bodies. If mail SENDING is genuinely wanted, it is a deliberate feature with its own
+consent gate — ask the user, do not improvise it here."
 fi
 
 if printf '%s' "$command_line" | grep -qiE 'playwright|puppeteer|chrome-linux64/chrome|chromium' ||
@@ -152,7 +187,15 @@ earlier, before a dev server exists that something could drive.)"
 fi
 
 # --- 3. the backend an agent starts must be read-only ------------------------
-if printf '%s' "$command_line" | grep -qE 'cargo run.*--bin server|teams-dev-server\.sh|target/(debug|release)/server'; then
+# STARTING one is what matters. Stopping one (`kill`, `pkill`, `pgrep`) names the
+# same binary but cannot send anything, and blocking it would only teach the next
+# agent to phrase its cleanup around this hook — which is the habit that caused the
+# incident in the first place.
+stopping_a_process() {
+  printf '%s' "$command_line" | grep -qE '(^|[;&|[:space:]])(p?kill|pgrep|killall)([[:space:]]|$)'
+}
+if ! stopping_a_process &&
+  printf '%s' "$command_line" | grep -qE 'cargo run.*--bin server|teams-dev-server\.sh|target/(debug|release)/server'; then
   if ! printf '%s' "$command_line" | grep -q 'TEAMS_LITE_READ_ONLY=1'; then
     block "Start the backend read-only, or let the user start it. A send-capable backend
 launched by tooling is how an accidental message reaches a colleague:

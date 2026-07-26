@@ -6,6 +6,7 @@ import {
   channelIsFavorite,
   channelLabel,
   convLabel,
+  mailUnreadBadge,
   organizeChannels,
   previewLine,
   typingLabel,
@@ -16,6 +17,7 @@ import type { SidebarTab } from "~/lib/store";
 import { cn } from "~/lib/utils";
 import { Avatar, tintFor } from "./avatar";
 import { useAppState, useController } from "./controller-context";
+import { MailList } from "./mail-list";
 import { NotificationsBell } from "./notifications-bell";
 import { StatusBar } from "./status-bar";
 import { Tabs, TabsList, TabsPanel, TabsTrigger } from "./ui/tabs";
@@ -143,6 +145,12 @@ export function ConversationList(props: {
             <TabsTrigger value="channels" data-testid="tab-channels">
               Channels
             </TabsTrigger>
+            <TabsTrigger value="mail" data-testid="tab-mail">
+              <span className="flex items-center justify-center gap-1.5">
+                Mail
+                <MailUnreadBadge />
+              </span>
+            </TabsTrigger>
           </TabsList>
         </div>
 
@@ -152,10 +160,31 @@ export function ConversationList(props: {
         <TabsPanel value="channels" className="flex min-h-0 flex-1 flex-col">
           <ChannelTree />
         </TabsPanel>
+        <TabsPanel value="mail" className="flex min-h-0 flex-1 flex-col">
+          <MailList />
+        </TabsPanel>
       </Tabs>
 
       <StatusBar />
     </aside>
+  );
+}
+
+/** Unread count on the Mail tab. Counts the INBOX only: it is the folder whose
+ *  unread state a person acts on, whereas Junk and Deleted are noise (this mailbox
+ *  carries 1558 unread messages in Deleted alone). Renders nothing at zero, and
+ *  nothing at all until Mail has been opened once — mail loads lazily. */
+function MailUnreadBadge() {
+  const folders = useAppState((s) => s.mailFolders);
+  const unread = mailUnreadBadge(folders);
+  if (unread <= 0) return null;
+  return (
+    <span
+      data-testid="mail-unread-badge"
+      className="rounded-full bg-primary/12 px-1.5 text-[10px] font-semibold tabular-nums text-primary"
+    >
+      {unread > 99 ? "99+" : unread}
+    </span>
   );
 }
 

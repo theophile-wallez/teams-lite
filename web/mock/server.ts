@@ -15,8 +15,10 @@
 //          | edit | react | notifications | read_receipts | fetch_media | fetch_avatar
 //          | profile | presence
 //          | get_settings | set_settings | enrich_link
+//          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 // Events:  status | realtime_status | message | conversations_changed
 //          | channels_changed | typing | call | read_receipt
+//          | mail_folders_changed | mail_list_updated
 //
 // Run it (from the web/ directory):
 //   export PATH="$HOME/.bun/bin:$PATH"
@@ -1902,6 +1904,465 @@ function toFeed(items: MockNotification[]): MockFeed {
   return { unread: items.filter((n) => !n.is_read).length, items };
 }
 
+// ---------------------------------------------------------------------------
+// Mail — stands in for the READ-ONLY Outlook surface (src/mail.rs + src/mail_html.rs).
+//
+// Two things this mock must get right, because the UI's behaviour depends on them:
+//
+//   1. Bodies arrive ALREADY SANITIZED. The real backend runs every mail through
+//      ammonia before it reaches a client: no scripts, no remote references, inline
+//      images embedded as `data:` URIs, and a count of what was dropped. The
+//      fixtures below are written in exactly that shape (table layouts, inline
+//      styles, a data-URI logo, a newsletter reporting blocked remote images), so
+//      the web renderer is exercised against realistic input.
+//   2. There is no way to send. No `mail_send`/`mail_reply`/`mail_delete` case
+//      exists here, mirroring a backend where the capability is absent rather than
+//      merely ungated.
+// ---------------------------------------------------------------------------
+
+type MailAddress = { name: string; address: string };
+
+type MailFolder = {
+  id: string;
+  display_name: string;
+  well_known: string;
+  total_count: number;
+  unread_count: number;
+  position: number;
+};
+
+type MailAttachment = {
+  id: string;
+  name: string;
+  content_type: string;
+  size: number;
+  is_inline: boolean;
+};
+
+type MailHeader = {
+  id: string;
+  folder_id: string;
+  conversation_id: string;
+  subject: string;
+  from: MailAddress;
+  to: MailAddress[];
+  cc: MailAddress[];
+  /** ISO 8601 UTC, whole seconds — the ordering and paging key. */
+  received: string;
+  is_read: boolean;
+  has_attachments: boolean;
+  importance: string;
+  preview: string;
+};
+
+type MailBody = {
+  html: string;
+  blocked_remote_images: number;
+  truncated: boolean;
+  attachments: MailAttachment[];
+  /** The mail's header, which the real backend reads in the same Graph request as
+   *  the body so a deep link needs no second round-trip. Filled in by the
+   *  `mail_body` handler from the folder's own list. */
+  header?: MailHeader | null;
+};
+
+/** How many mails the inbox holds, so the list virtualizes and pages. */
+const MAIL_BACKLOG = Number(process.env.MOCK_MAIL_BACKLOG ?? 64);
+
+/** The mock mailbox's own address, for `to`/`from` on mail we "received"/"sent". */
+const SELF_ADDRESS: MailAddress = { name: "You", address: "you@example.com" };
+
+const MAIL_FOLDER_SEEDS: { id: string; display_name: string; well_known: string }[] = [
+  // These localized display names are DATA UNDER TEST, not UI strings — the one
+  // deliberate exception to the English-only rule in this file. Graph returns a
+  // mailbox's folder names in the tenant's language ("Boîte de réception"), which is
+  // exactly why the sidebar labels well-known folders from `well_known` and orders
+  // them by `position` instead. Translating these fixtures to English would silently
+  // delete the coverage for that.
+  { id: "mf-inbox", display_name: "Boîte de réception", well_known: "Inbox" },
+  { id: "mf-archive", display_name: "Archive", well_known: "Archive" },
+  { id: "mf-sent", display_name: "Éléments envoyés", well_known: "Sent" },
+  { id: "mf-drafts", display_name: "Brouillons", well_known: "Drafts" },
+  { id: "mf-deleted", display_name: "Éléments supprimés", well_known: "Deleted" },
+  // A user folder: no stable label, sorted after every well-known one.
+  { id: "mf-projects", display_name: "Projects", well_known: "" },
+];
+
+const MAIL_SUBJECTS = [
+  "Quarterly platform review — deck attached",
+  "Re: Trouter reconnect backoff",
+  "Your build finished: teams-lite #4821",
+  "Weekly digest: what shipped last week",
+  "Invitation: architecture guild, Thursday 14:00",
+  "Access request approved",
+  "Re: SQLite WAL checkpointing under load",
+  "Reminder: submit your timesheet",
+  "New sign-in from a Linux device",
+  "Re: mail rendering — sanitizer or iframe?",
+  "Offsite logistics (please read)",
+  "Security advisory: rotate your PAT",
+  "Design review notes",
+  "Re: read receipts endpoint",
+  "Monthly platform costs",
+];
+
+const MAIL_PREVIEWS = [
+  "Thanks for the quick turnaround on this — a couple of comments inline before we ship.",
+  "I had a look at the traces this morning and the reconnect storm is coming from the registrar, not us.",
+  "The pipeline is green. Artifacts are attached to the run and expire in 30 days.",
+  "Here is what landed: the virtualized history, the read-only backend, and the sparkle nickname.",
+  "Agenda: local-first storage, the write lock, and what we do about calling.",
+  "Your request has been approved. No further action is needed on your side.",
+];
+
+/** Deterministic mail ids that look like Graph's (base64-ish, padded). */
+function mailId(folderId: string, index: number): string {
+  return `AAMk-${folderId}-${String(index).padStart(4, "0")}==`;
+}
+
+/** ISO 8601 UTC, whole seconds — the exact shape the Rust backend normalizes to. */
+function isoSeconds(ms: number): string {
+  return `${new Date(ms).toISOString().slice(0, 19)}Z`;
+}
+
+const mailFolders: MailFolder[] = [];
+/** Every mail header by folder, newest first (the order the backend serves). */
+const mailByFolder = new Map<string, MailHeader[]>();
+/** Bodies by mail id, in the sanitized shape the backend returns. */
+const mailBodies = new Map<string, MailBody>();
+
+/** A small SVG as a `data:` URI — stands in for an inline (`cid:`) image the
+ *  backend embedded after fetching the attachment. */
+function inlineLogoDataUri(): string {
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40" viewBox="0 0 120 40">` +
+    `<rect width="120" height="40" rx="6" fill="#2d6cdf"/>` +
+    `<text x="60" y="21" font-family="system-ui,sans-serif" font-size="13" fill="white" ` +
+    `text-anchor="middle" dominant-baseline="middle">teams-lite</text></svg>`;
+  return `data:image/svg+xml;base64,${Buffer.from(svg, "utf8").toString("base64")}`;
+}
+
+/** A plain, sanitized HTML body for an ordinary mail. */
+function simpleMailBody(sender: string, paragraphs: string[]): MailBody {
+  const body =
+    `<div style="font-family: Arial, sans-serif; font-size: 14px; color: #1f1f1f">` +
+    paragraphs.map((p) => `<p style="margin: 0 0 12px">${escapeHtml(p)}</p>`).join("") +
+    `<p style="margin: 16px 0 0; color: #666666">— ${escapeHtml(sender)}</p>` +
+    `</div>`;
+  return { html: body, blocked_remote_images: 0, truncated: false, attachments: [] };
+}
+
+/** Seed the mail folders and their contents. Deterministic: same fixtures every
+ *  run, so screenshots and E2E assertions are stable. */
+function seedMail(): void {
+  const now = Date.now();
+  for (const [position, seed] of MAIL_FOLDER_SEEDS.entries()) {
+    mailFolders.push({
+      id: seed.id,
+      display_name: seed.display_name,
+      well_known: seed.well_known,
+      total_count: 0,
+      unread_count: 0,
+      position,
+    });
+    mailByFolder.set(seed.id, []);
+  }
+
+  // ---- the inbox, including the cases the renderer must handle --------------
+  const inbox: MailHeader[] = [];
+  const hour = 60 * 60 * 1000;
+
+  /** Add one inbox mail with an explicit body. */
+  const add = (
+    index: number,
+    header: Partial<MailHeader> & { subject: string; from: MailAddress; preview: string },
+    body: MailBody,
+  ) => {
+    const id = mailId("mf-inbox", index);
+    const mail: MailHeader = {
+      id,
+      folder_id: "mf-inbox",
+      conversation_id: `mc-${index}`,
+      subject: header.subject,
+      from: header.from,
+      to: header.to ?? [SELF_ADDRESS],
+      cc: header.cc ?? [],
+      received: isoSeconds(now - index * hour),
+      is_read: header.is_read ?? true,
+      has_attachments: body.attachments.some((a) => !a.is_inline),
+      importance: header.importance ?? "normal",
+      preview: header.preview,
+    };
+    inbox.push(mail);
+    mailBodies.set(id, body);
+  };
+
+  // A table-based newsletter whose remote images were all blocked: the case that
+  // must render as a notice plus whatever text survived, never as a blank pane.
+  add(
+    0,
+    {
+      subject: "Weekly digest: what shipped last week",
+      from: { name: "Platform Digest", address: "digest@example.com" },
+      preview: MAIL_PREVIEWS[3]!,
+      is_read: false,
+    },
+    {
+      html:
+        `<table cellpadding="0" cellspacing="0" border="0" width="600" style="font-family: Arial, sans-serif">` +
+        `<tr><td bgcolor="#f4f6fb" style="padding: 16px; font-size: 18px; color: #1f1f1f">` +
+        `Platform weekly</td></tr>` +
+        `<tr><td style="padding: 16px; font-size: 14px; color: #333333">` +
+        `<p style="margin: 0 0 10px">Three things shipped last week:</p>` +
+        `<ul style="margin: 0 0 12px; padding-left: 20px">` +
+        `<li style="margin-bottom: 6px">A virtualized message history</li>` +
+        `<li style="margin-bottom: 6px">A read-only backend on its own port</li>` +
+        `<li>The sparkled nickname in the web UI</li></ul>` +
+        // An image whose source the sanitizer removed: the tag survives, the
+        // reference does not (exactly what ammonia leaves behind).
+        `<img alt="Sponsor banner" width="560" height="80">` +
+        `<p style="margin: 12px 0 0"><a href="https://example.com/digest/47">Read it on the web</a></p>` +
+        `</td></tr></table>`,
+      blocked_remote_images: 7,
+      truncated: false,
+      attachments: [],
+    },
+  );
+
+  // A mail with real file attachments plus an embedded inline logo.
+  add(
+    1,
+    {
+      subject: "Quarterly platform review — deck attached",
+      from: personAddress("Lucas Silva"),
+      cc: [personAddress("Mia Chen"), personAddress("Noah Kim")],
+      preview: MAIL_PREVIEWS[0]!,
+      is_read: false,
+      importance: "high",
+    },
+    {
+      html:
+        `<div style="font-family: Arial, sans-serif; font-size: 14px; color: #1f1f1f">` +
+        `<p style="margin: 0 0 12px">Hi,</p>` +
+        `<p style="margin: 0 0 12px">The deck for Thursday is attached, along with the cost model. ` +
+        `The short version: storage is flat, egress is not.</p>` +
+        `<blockquote style="margin: 12px 0; padding-left: 12px; border-left: 2px solid #dddddd; color: #555555">` +
+        `&gt; Can we get the numbers before the guild?</blockquote>` +
+        `<p style="margin: 0 0 12px">Yes — slide 4.</p>` +
+        `<img src="${inlineLogoDataUri()}" alt="teams-lite" width="120" height="40">` +
+        `</div>`,
+      blocked_remote_images: 0,
+      truncated: false,
+      attachments: [
+        {
+          id: "att-deck",
+          name: "platform-review-q3.pdf",
+          content_type: "application/pdf",
+          size: 2_418_133,
+          is_inline: false,
+        },
+        {
+          id: "att-costs",
+          name: "cost-model.xlsx",
+          content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          size: 48_210,
+          is_inline: false,
+        },
+        {
+          id: "att-logo",
+          name: "logo.svg",
+          content_type: "image/svg+xml",
+          size: 812,
+          is_inline: true,
+        },
+      ],
+    },
+  );
+
+  // A plain-text mail: escaped, line breaks preserved, nothing invented.
+  add(
+    2,
+    {
+      subject: "Your build finished: teams-lite #4821",
+      from: { name: "CI", address: "ci@example.com" },
+      preview: MAIL_PREVIEWS[2]!,
+    },
+    {
+      html:
+        `<div style="white-space: pre-wrap">Pipeline #4821 succeeded.<br><br>` +
+        `  cargo test ... ok (248 tests)<br>  bun run test ... ok (228 tests)<br><br>` +
+        `Artifacts expire in 30 days.</div>`,
+      blocked_remote_images: 0,
+      truncated: false,
+      attachments: [],
+    },
+  );
+
+  // An unusually large mail, so the "shortened" notice has a fixture.
+  add(
+    3,
+    {
+      subject: "Re: mail rendering — sanitizer or iframe?",
+      from: personAddress("Ava Thompson"),
+      preview: "Both, and in that order: sanitize server-side, then isolate what is left.",
+    },
+    {
+      html:
+        `<div style="font-family: Arial, sans-serif; font-size: 14px">` +
+        `<p>Both, and in that order.</p>` +
+        `${"<p>A very long thread of quoted history.</p>".repeat(40)}` +
+        `</div>`,
+      blocked_remote_images: 2,
+      truncated: true,
+      attachments: [],
+    },
+  );
+
+  // The rest of the backlog: ordinary mail, so the list pages and virtualizes.
+  for (let index = 4; index < MAIL_BACKLOG; index++) {
+    const person = PEOPLE[index % PEOPLE.length]!;
+    const subject = MAIL_SUBJECTS[index % MAIL_SUBJECTS.length]!;
+    const preview = MAIL_PREVIEWS[index % MAIL_PREVIEWS.length]!;
+    add(
+      index,
+      {
+        subject,
+        from: personAddress(person.name),
+        preview,
+        // A deterministic scattering of unread mail near the top of the list.
+        is_read: index % 7 !== 0,
+      },
+      simpleMailBody(person.name, [preview, "Let me know if that works for you."]),
+    );
+  }
+  mailByFolder.set("mf-inbox", inbox);
+
+  // ---- the other folders: small, but real enough to browse -----------------
+  const sent: MailHeader[] = [];
+  for (let index = 0; index < 8; index++) {
+    const person = PEOPLE[(index * 3) % PEOPLE.length]!;
+    const id = mailId("mf-sent", index);
+    sent.push({
+      id,
+      folder_id: "mf-sent",
+      conversation_id: `ms-${index}`,
+      subject: `Re: ${MAIL_SUBJECTS[(index * 5) % MAIL_SUBJECTS.length]!}`,
+      from: SELF_ADDRESS,
+      to: [personAddress(person.name)],
+      cc: [],
+      received: isoSeconds(now - (index + 1) * 5 * hour),
+      is_read: true,
+      has_attachments: false,
+      importance: "normal",
+      preview: "Sounds good — I'll take a look this afternoon.",
+    });
+    mailBodies.set(
+      id,
+      simpleMailBody("You", ["Sounds good — I'll take a look this afternoon."]),
+    );
+  }
+  mailByFolder.set("mf-sent", sent);
+
+  const archive: MailHeader[] = [];
+  for (let index = 0; index < 12; index++) {
+    const person = PEOPLE[(index * 7) % PEOPLE.length]!;
+    const id = mailId("mf-archive", index);
+    archive.push({
+      id,
+      folder_id: "mf-archive",
+      conversation_id: `ma-${index}`,
+      subject: MAIL_SUBJECTS[(index * 2) % MAIL_SUBJECTS.length]!,
+      from: personAddress(person.name),
+      to: [SELF_ADDRESS],
+      cc: [],
+      received: isoSeconds(now - (index + 2) * 26 * hour),
+      is_read: index % 4 !== 0,
+      has_attachments: false,
+      importance: "normal",
+      preview: MAIL_PREVIEWS[(index * 3) % MAIL_PREVIEWS.length]!,
+    });
+    mailBodies.set(id, simpleMailBody(person.name, ["Archived for reference."]));
+  }
+  mailByFolder.set("mf-archive", archive);
+
+  // Drafts / Deleted / a user folder exist and are simply empty here: an empty
+  // folder is a state the UI has to render, and this is the cheapest fixture for it.
+  recomputeMailCounts();
+}
+
+/** A mail address for one of the mock's people. */
+function personAddress(name: string): MailAddress {
+  const slug = name.toLowerCase().replace(/[^a-z]+/g, ".").replace(/(^\.|\.$)/g, "");
+  return { name, address: `${slug}@example.com` };
+}
+
+/** Refresh every folder's total/unread counts from its contents. */
+function recomputeMailCounts(): void {
+  for (const folder of mailFolders) {
+    const mail = mailByFolder.get(folder.id) ?? [];
+    folder.total_count = mail.length;
+    folder.unread_count = mail.filter((m) => !m.is_read).length;
+  }
+}
+
+/** One mail's header, wherever it lives, or null. */
+function mailHeaderById(id: string): MailHeader | null {
+  for (const mail of mailByFolder.values()) {
+    const found = mail.find((m) => m.id === id);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** A folder's page, newest first, optionally starting before a timestamp. */
+function mailPage(folderId: string, before: string | null, limit: number): {
+  messages: MailHeader[];
+  has_more: boolean;
+} {
+  const all = mailByFolder.get(folderId) ?? [];
+  const filtered = before ? all.filter((m) => m.received < before) : all;
+  const page = filtered.slice(0, limit);
+  return { messages: page, has_more: filtered.length > page.length };
+}
+
+/** Inject a new mail at the top of a folder and broadcast it, mirroring what the
+ *  Rust backend emits after its newest-window poll finds something. */
+function injectMail(input: {
+  folderId: string;
+  subject?: string;
+  sender?: string;
+  preview?: string;
+}): MailHeader | null {
+  const folder = mailFolders.find((f) => f.id === input.folderId);
+  const all = mailByFolder.get(input.folderId);
+  if (!folder || !all) return null;
+
+  const sender = input.sender ?? "Riley Carter";
+  const id = mailId(input.folderId, 9000 + all.length);
+  const mail: MailHeader = {
+    id,
+    folder_id: input.folderId,
+    conversation_id: `mc-live-${all.length}`,
+    subject: input.subject ?? "A new message",
+    from: personAddress(sender),
+    to: [SELF_ADDRESS],
+    cc: [],
+    received: isoSeconds(Date.now()),
+    is_read: false,
+    has_attachments: false,
+    importance: "normal",
+    preview: input.preview ?? "This just arrived.",
+  };
+  all.unshift(mail);
+  mailBodies.set(id, simpleMailBody(sender, [mail.preview]));
+  recomputeMailCounts();
+
+  const page = mailPage(input.folderId, null, PAGE_SIZE);
+  broadcast("mail_list_updated", { folder: input.folderId, ...page });
+  broadcast("mail_folders_changed", {});
+  return mail;
+}
+
 function dispatch(method: string, params: unknown): unknown {
   switch (method) {
     case "ping":
@@ -2034,6 +2495,47 @@ function dispatch(method: string, params: unknown): unknown {
     case "enrich_link": {
       const url = requireString(params, "url");
       return { metadata: mockGitLabMetadata(url) };
+    }
+
+    // ---- mail (read-only) --------------------------------------------------
+
+    case "mail_folders":
+      return mailFolders;
+
+    case "mail_list": {
+      const folder = requireString(params, "folder");
+      const o = asObject(params);
+      const limit = typeof o.limit === "number" ? o.limit : PAGE_SIZE;
+      return mailPage(folder, null, limit);
+    }
+
+    case "mail_backfill": {
+      const folder = requireString(params, "folder");
+      const before = requireString(params, "before");
+      const o = asObject(params);
+      const limit = typeof o.limit === "number" ? o.limit : PAGE_SIZE;
+      return mailPage(folder, before, limit);
+    }
+
+    case "mail_body": {
+      const id = requireString(params, "id");
+      const body = mailBodies.get(id);
+      if (!body) throw new Error(`unknown mail: ${id}`);
+      // The header rides along, exactly as the Rust backend sends it (it reads both
+      // in one Graph request) — so a deep link renders subject and sender with no
+      // list to take them from.
+      return { ...body, header: mailHeaderById(id) };
+    }
+
+    case "mail_attachment": {
+      const messageId = requireString(params, "message_id");
+      const attachmentId = requireString(params, "attachment_id");
+      const body = mailBodies.get(messageId);
+      const attachment = body?.attachments.find((a) => a.id === attachmentId);
+      if (!attachment) throw new Error(`unknown attachment: ${attachmentId}`);
+      // Deterministic stand-in bytes, like `fetch_media` does for chat media.
+      const media = mockMedia(`mail/${messageId}/${attachmentId}`);
+      return { ...media, name: attachment.name };
     }
 
     default:
@@ -2322,6 +2824,17 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       broadcast("read_receipt", { conversation_id: conversation, ...receipt });
       return Response.json({ ok: true, receipt }, { status: 200 });
     }
+    // Deliver a new mail into a folder and broadcast the refreshed window, exactly
+    // like the Rust backend does after its newest-window poll notices one.
+    if (body.kind === "mail") {
+      const mail = injectMail({
+        folderId: typeof body.folder === "string" ? body.folder : "mf-inbox",
+        subject: typeof body.subject === "string" ? body.subject : undefined,
+        sender: typeof body.sender === "string" ? body.sender : undefined,
+        preview: typeof body.preview === "string" ? body.preview : undefined,
+      });
+      return Response.json({ ok: mail !== null, mail }, { status: mail ? 200 : 404 });
+    }
     // Set a reaction on an existing message (from someone else by default), then
     // re-broadcast it — exercises the received-reaction chips deterministically.
     if (body.kind === "reaction") {
@@ -2362,6 +2875,17 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       }),
     );
   }
+  if (req.method === "GET" && url.pathname === "/__test/mail") {
+    return Response.json({
+      folders: mailFolders,
+      inbox: (mailByFolder.get("mf-inbox") ?? []).map((m) => ({
+        id: m.id,
+        subject: m.subject,
+        is_read: m.is_read,
+        received: m.received,
+      })),
+    });
+  }
   if (req.method === "GET" && url.pathname === "/__test/channels") {
     return Response.json(
       channelOrder.map((id) => {
@@ -2386,6 +2910,9 @@ seedGitLabSamples();
 // Seed channels LAST so the chat seed's PRNG sequence (and thus the Chats list
 // the existing specs assert on) is left completely unchanged.
 seedChannels();
+// Mail draws no random numbers at all (its fixtures are fully deterministic), so
+// its position here cannot disturb any existing spec either.
+seedMail();
 
 const server = Bun.serve({
   port: PORT,

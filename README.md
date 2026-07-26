@@ -50,6 +50,7 @@ type a name, and you're in the conversation.
 - **🔔 Desktop notifications** — get a native Linux notification when a message lands in a conversation you're not looking at.
 - **📴 Local-first** — conversations open instantly from a local cache, then refresh from the network in the background.
 - **🌐 Terminal or browser** — the same fast client, two front-ends: a keyboard-first TUI, or a modern web UI (`teams --web`) that opens in your browser and talks to the same local backend.
+- **📬 Your mail, read-only** — the web UI has a Mail tab next to Chats and Channels: the same account's Outlook mailbox over Microsoft Graph, cached locally like everything else. Bodies are sanitized server-side and **no remote image is ever loaded**, so reading a message tells its sender nothing. It cannot send, reply, delete or move — by construction, not by configuration.
 - **🔐 Compliant sign-in** — authenticates silently through the Microsoft Identity Broker, so it satisfies your tenant's "compliant device" policies. No passwords are stored, and no raw tokens are ever logged.
 - **🪶 Tiny footprint** — a Rust backend and a terminal UI. That's it.
 

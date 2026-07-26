@@ -21,6 +21,31 @@
   to send one message is not permission to send others. When in doubt, draft it and
   ask first.
 
+## Mail is READ-ONLY (MANDATORY — no exception, not even a sandbox)
+
+The app reads the user's Outlook mailbox over Microsoft Graph (`src/mail.rs`). It
+must never write to it.
+
+- **Never send, reply to, forward, delete, move, or mark-as-read a mail.** There is
+  no sandbox mailbox and no pre-authorized recipient: unlike the Teams sandbox
+  channel, mail has *no* standing exception at all. A mail leaves the user's personal
+  address, reaches people who never agreed to be part of a test, and cannot be
+  recalled.
+- The broker token this app already holds carries **`Mail.ReadWrite` and
+  `Mail.Send`** (verified — see `examples/graph_mail_scopes.rs`). So nothing at the
+  API level stops a send. What stops it is that **no code names the endpoint**:
+  `src/mail.rs` issues GET requests only, and two tests enforce that mechanically —
+  one scans the module for any other verb, the other scans the whole crate for the
+  Graph mail-send endpoint. Do not weaken, skip, or work around either.
+- Reading, searching, and rendering mail are fine and are what the feature is for.
+  If mail *sending* is ever wanted, it is a deliberate feature: its own consent gate,
+  its own entry in `OUTWARD_METHODS`, its own write-lock coverage — never a quiet
+  addition to the read path.
+- Mail bodies are sanitized server-side and stripped of every remote reference, so
+  **displaying a mail makes no network request**. That is a privacy guarantee (a
+  remote image is a read receipt for its sender), not an optimization: never add a
+  "load remote images" action, and never let a body reach a browser unsanitized.
+
 ## Automation safety (MANDATORY — read before driving the UI)
 
 **This section exists because of a real incident.** An agent was screenshotting a
@@ -60,7 +85,8 @@ user. Two independent mechanisms enforce that split:
   server at it, and asserts the `MOCK` sentinel badge before it types — and again
   immediately before every keystroke. Use `cd web && bun run preview -- --out
   /tmp/shot`, or import `withPreview` / `typeInComposer` / `openFirstConversation`
-  from it.
+  from it. For the mail surface: `bun run preview -- --out /tmp/mail --mail`, or
+  `openMailTab` / `openFirstMail` / `openMailAt` from the same file.
 - **Never type into the composer without proof the backend is fake.** The proof is
   `[data-testid="backend-badge"][data-backend="mock"]`, which comes from the
   backend's own `backend_info` sentinel (only `web/mock/server.ts` emits it). No
@@ -108,7 +134,8 @@ to fix in the same change, not a note for later.
 ## Project shape
 
 - Backend: Rust (`src/`, binary `server` in `src/bin/server.rs`) — auth broker over
-  D-Bus, real-time trouter client, local-first SQLite store, send, name resolution.
+  D-Bus, real-time trouter client, local-first SQLite store, send, name resolution,
+  and the READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`).
   Exposed over a local WebSocket (`ws://127.0.0.1:8420`).
 - Two front-ends, both talking to the backend only through that WebSocket. Local-first
   is enforced server-side; neither front-end touches the network or SQLite directly.

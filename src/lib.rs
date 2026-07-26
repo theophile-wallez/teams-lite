@@ -1,5 +1,7 @@
 pub mod auth;
 pub mod gitlab;
+pub mod mail;
+pub mod mail_html;
 pub mod retry;
 pub mod teams;
 pub mod teams_activity;

@@ -13,6 +13,7 @@ import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
 import { Route as AppSettingsRouteImport } from './routes/_app.settings'
 import { Route as AppCConversationIdRouteImport } from './routes/_app.c.$conversationId'
+import { Route as AppMMailIdRouteImport } from './routes/_app.m.$mailId'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -33,16 +34,23 @@ const AppCConversationIdRoute = AppCConversationIdRouteImport.update({
   path: '/c/$conversationId',
   getParentRoute: () => AppRoute,
 } as any)
+const AppMMailIdRoute = AppMMailIdRouteImport.update({
+  id: '/m/$mailId',
+  path: '/m/$mailId',
+  getParentRoute: () => AppRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/settings': typeof AppSettingsRoute
   '/c/$conversationId': typeof AppCConversationIdRoute
+  '/m/$mailId': typeof AppMMailIdRoute
 }
 export interface FileRoutesByTo {
   '/settings': typeof AppSettingsRoute
   '/': typeof AppIndexRoute
   '/c/$conversationId': typeof AppCConversationIdRoute
+  '/m/$mailId': typeof AppMMailIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -50,18 +58,20 @@ export interface FileRoutesById {
   '/_app/settings': typeof AppSettingsRoute
   '/_app/': typeof AppIndexRoute
   '/_app/c/$conversationId': typeof AppCConversationIdRoute
+  '/_app/m/$mailId': typeof AppMMailIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/settings' | '/c/$conversationId'
+  fullPaths: '/' | '/settings' | '/c/$conversationId' | '/m/$mailId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/settings' | '/' | '/c/$conversationId'
+  to: '/settings' | '/' | '/c/$conversationId' | '/m/$mailId'
   id:
     | '__root__'
     | '/_app'
     | '/_app/settings'
     | '/_app/'
     | '/_app/c/$conversationId'
+    | '/_app/m/$mailId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -98,6 +108,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppCConversationIdRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/m/$mailId': {
+      id: '/_app/m/$mailId'
+      path: '/m/$mailId'
+      fullPath: '/m/$mailId'
+      preLoaderRoute: typeof AppMMailIdRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
@@ -105,12 +122,14 @@ interface AppRouteChildren {
   AppSettingsRoute: typeof AppSettingsRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCConversationIdRoute: typeof AppCConversationIdRoute
+  AppMMailIdRoute: typeof AppMMailIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppSettingsRoute: AppSettingsRoute,
   AppIndexRoute: AppIndexRoute,
   AppCConversationIdRoute: AppCConversationIdRoute,
+  AppMMailIdRoute: AppMMailIdRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)

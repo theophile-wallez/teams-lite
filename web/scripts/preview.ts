@@ -33,6 +33,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/preview
 //   bun run web/scripts/preview.ts --out /tmp/preview --type "hey bébou" --send
 //   bun run web/scripts/preview.ts --out /tmp/preview --incoming "hey bébou"
+//   bun run web/scripts/preview.ts --out /tmp/mail --mail        # the Mail surface
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -174,6 +175,45 @@ export async function openFirstConversation(page: Page): Promise<string> {
   return id;
 }
 
+/**
+ * Switch the sidebar to the Mail tab and wait for the list to populate.
+ *
+ * Mail loads lazily — the folder list is only fetched when this tab is first shown
+ * — so a caller must go through here rather than assuming rows exist.
+ */
+export async function openMailTab(page: Page): Promise<void> {
+  await page.locator('[data-testid="tab-mail"]').click();
+  await page.waitForSelector('[data-testid="mail-row"]', { timeout: APP_READY_TIMEOUT_MS });
+}
+
+/**
+ * Open the first mail in the list and wait for its body frame. Returns its id.
+ *
+ * Reading a mail is a pure read on any backend — there is no mail send/reply path
+ * at all (see src/mail.rs) — so unlike the composer helpers this one has no
+ * keystroke gate to re-assert. It still only ever runs inside `withPreview`, which
+ * proved the backend was the mock before handing over the page.
+ */
+export async function openFirstMail(page: Page): Promise<string> {
+  return openMailAt(page, 0);
+}
+
+/** Open the mail at `index` in the list and wait for its body frame. See
+ *  {@link openFirstMail} for the read-only note. */
+export async function openMailAt(page: Page, index: number): Promise<string> {
+  const row = page.locator('[data-testid="mail-row"]').nth(index);
+  const id = (await row.getAttribute("data-mail-id")) ?? "";
+  await row.click();
+  await page.waitForSelector('[data-testid="mail-heading"]');
+  // The body arrives in a second round-trip; wait for the frame (or the notice
+  // shown for a mail that sanitized down to nothing).
+  await page
+    .locator('[data-testid="mail-body"], [data-testid="mail-body-empty"]')
+    .first()
+    .waitFor({ timeout: APP_READY_TIMEOUT_MS });
+  return id;
+}
+
 // ---- setup helpers ---------------------------------------------------------
 
 /** Belt and braces: never let a misconfigured port aim this at the real backend. */
@@ -275,6 +315,27 @@ if (import.meta.main) {
   const text = flag("--type");
   const send = args.includes("--send");
   const incoming = flag("--incoming");
+
+  // The Mail surface: the sidebar's Mail tab plus the reading pane, in both themes.
+  if (args.includes("--mail")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openMailTab(page);
+      await shot(`${out}-list-light.png`);
+      await openFirstMail(page);
+      await shot(`${out}-light.png`);
+      // The second fixture is the interesting one to look at: file attachments
+      // plus an inline image the backend embedded.
+      await openMailAt(page, 1);
+      await shot(`${out}-attachments-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-list-light.png, ${out}-light.png, ` +
+          `${out}-attachments-light.png and ${out}-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
 
   await withPreview(async ({ page, shot, setTheme, emit }) => {
     const conversation = await openFirstConversation(page);

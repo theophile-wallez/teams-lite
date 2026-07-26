@@ -18,6 +18,10 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 futures-util = "0.3"
 urlencoding = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# html5ever-based sanitizer for mail bodies (see src/mail_html.rs). A mail body is
+# a foreign document: it is reduced to an inert, self-contained fragment before it
+# ever reaches a browser.
+ammonia = "4"
 flate2 = "1.1.9"
 ratatui = "0.30.2"
 crossterm = { version = "0.29", features = ["event-stream"] }

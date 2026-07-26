@@ -919,3 +919,199 @@ export function typingLabel(names: string[]): string {
       return `${a}, ${b} and ${unique.length - 2} more are typing`;
   }
 }
+
+// ---- mail (read-only Outlook surface) --------------------------------------
+//
+// Mirrors the Rust backend's `mail_*` methods (see src/mail.rs and the mail
+// serializers in src/bin/server.rs). The mail surface is strictly read-only: there
+// is no send/reply/delete/move here, and none exists in the backend either.
+//
+// Ordering note: mail is keyed by `received`, an ISO 8601 UTC timestamp truncated
+// to whole seconds by the backend. Fixed-width UTC text compares chronologically,
+// so every sort and page boundary below uses plain string comparison — the same key
+// SQLite and Graph order on, which is what keeps the three views consistent.
+
+/** One address on a mail. `name` is often empty (a machine sender); `address` is
+ *  the reliable identity. */
+export type MailAddress = {
+  name: string;
+  address: string;
+};
+
+/** A mail folder in the sidebar. `well_known` is a stable English label ("Inbox",
+ *  "Sent", …) for the folders Graph exposes under a fixed alias, and is empty for a
+ *  user-created folder — whose `display_name` is then the only name it has, in
+ *  whatever language the mailbox uses. */
+export type MailFolder = {
+  id: string;
+  display_name: string;
+  well_known: string;
+  total_count: number;
+  unread_count: number;
+  position: number;
+};
+
+/** One attachment on a mail. `is_inline` ones are embedded in the body by the
+ *  backend and are not listed as files (see {@link mailFileAttachments}). */
+export type MailAttachment = {
+  id: string;
+  name: string;
+  content_type: string;
+  size: number;
+  is_inline: boolean;
+};
+
+/** A mail as the list shows it — no body (bodies are fetched per mail and can be
+ *  ~135 KB each). */
+export type MailHeader = {
+  id: string;
+  folder_id: string;
+  conversation_id: string;
+  subject: string;
+  from: MailAddress;
+  to: MailAddress[];
+  cc: MailAddress[];
+  /** ISO 8601 UTC, whole seconds. The ordering and paging key. */
+  received: string;
+  is_read: boolean;
+  has_attachments: boolean;
+  importance: string;
+  preview: string;
+};
+
+/** A page of a folder's mail, newest first. */
+export type MailPage = {
+  messages: MailHeader[];
+  has_more: boolean;
+};
+
+/** A rendered mail body, as the backend sanitized it.
+ *
+ *  `html` is inert and self-contained: no scripts, no styles, no frames, and no
+ *  remote references at all — inline images are already embedded as `data:` URIs.
+ *  `blocked_remote_images` says how many remote references were dropped, so the UI
+ *  can explain a mail it is not showing in full. Displaying a body makes NO network
+ *  request, which is also why its sender cannot tell it was read. */
+export type MailBody = {
+  html: string;
+  blocked_remote_images: number;
+  truncated: boolean;
+  attachments: MailAttachment[];
+  /** The mail's own header, sent alongside the body so opening `/m/<id>` cold — a
+   *  deep link, a reload, a restored tab — renders the subject and sender without a
+   *  second round-trip. Null only when the backend could not key the message. A
+   *  client that already has the header from its list ignores this. */
+  header?: MailHeader | null;
+};
+
+/** The folder's display label: the stable English name for a well-known folder,
+ *  else the mailbox's own (localized) name, else a neutral fallback. */
+export function mailFolderLabel(folder: MailFolder): string {
+  return folder.well_known || folder.display_name || "(folder)";
+}
+
+/** Who a mail is from, for the list and the reading pane: the display name when
+ *  the sender has one, else the bare address. */
+export function mailSenderLabel(mail: Pick<MailHeader, "from">): string {
+  return mail.from.name || mail.from.address || "(unknown sender)";
+}
+
+/** A mail's subject, with the placeholder every mail client shows for an empty one. */
+export function mailSubjectLabel(mail: Pick<MailHeader, "subject">): string {
+  return mail.subject || "(no subject)";
+}
+
+/** `received` as epoch milliseconds, for date formatting. 0 when unparseable, which
+ *  the formatters render as no date rather than "Invalid Date". */
+export function mailReceivedMs(mail: Pick<MailHeader, "received">): number {
+  const ms = Date.parse(mail.received);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+/** A compact recipient line ("Alice, Bob and 2 others"). Names are preferred over
+ *  addresses; an empty list yields "". */
+export function mailRecipientsLabel(addresses: MailAddress[], max = 2): string {
+  const labels = addresses.map((a) => a.name || a.address).filter((l) => l.length > 0);
+  if (labels.length === 0) return "";
+  if (labels.length <= max) return labels.join(", ");
+  const shown = labels.slice(0, max).join(", ");
+  const rest = labels.length - max;
+  return `${shown} and ${rest} ${rest === 1 ? "other" : "others"}`;
+}
+
+/** The attachments worth showing as files: the inline ones are already rendered
+ *  inside the body, so listing them again would duplicate the mail's own images. */
+export function mailFileAttachments(attachments: MailAttachment[]): MailAttachment[] {
+  return attachments.filter((a) => !a.is_inline);
+}
+
+/** Human-readable size for an attachment chip. */
+export function formatAttachmentSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  const rounded = value >= 10 || unit === 0 ? Math.round(value) : Math.round(value * 10) / 10;
+  return `${rounded} ${units[unit]}`;
+}
+
+/** Unread count for the sidebar's Mail badge: the inbox's, since that is the only
+ *  folder whose unread state a user acts on (Junk and Deleted are noise — this
+ *  mailbox has 1558 unread in Deleted alone). Falls back to the first folder when
+ *  no inbox is present. */
+export function mailUnreadBadge(folders: MailFolder[]): number {
+  const inbox = folders.find((f) => f.well_known === "Inbox") ?? folders[0];
+  return inbox?.unread_count ?? 0;
+}
+
+/** Sort mail newest first, with the id as a deterministic tie-breaker so two mails
+ *  received in the same second never swap places between renders. */
+function compareMailDesc(a: MailHeader, b: MailHeader): number {
+  if (a.received !== b.received) return a.received < b.received ? 1 : -1;
+  return a.id.localeCompare(b.id);
+}
+
+/** Merge mail lists by id (newest first). Later entries win, so a refreshed header
+ *  (one that has since been read elsewhere) replaces the stale copy. */
+export function mergeMail(current: MailHeader[], incoming: MailHeader[]): MailHeader[] {
+  const byId = new Map(current.map((mail) => [mail.id, mail]));
+  for (const mail of incoming) byId.set(mail.id, mail);
+  return [...byId.values()].sort(compareMailDesc);
+}
+
+/**
+ * Fold a freshly-fetched newest page into what we already hold.
+ *
+ * The backend re-reads only the newest window, so a merge must not truncate a list
+ * the user has scrolled far back through: everything older than the incoming page
+ * is kept, and `has_more` stays whatever the deeper local list said. Mail the server
+ * no longer lists WITHIN the incoming window is dropped, which is how a mail deleted
+ * in real Outlook disappears here too.
+ */
+export function mergeRefreshedMailPage(current: MailPage | undefined, incoming: MailPage): MailPage {
+  const held = current?.messages ?? [];
+  if (incoming.messages.length === 0) {
+    return { messages: held, has_more: held.length > 0 ? (current?.has_more ?? false) : incoming.has_more };
+  }
+  // The window the server just described, and therefore the range it is
+  // authoritative over: everything at or after its oldest entry.
+  const windowOldest = incoming.messages[incoming.messages.length - 1]!.received;
+  const olderThanWindow = held.filter((mail) => mail.received < windowOldest);
+  const extendsFurtherBack = olderThanWindow.length > 0;
+  return {
+    messages: mergeMail(olderThanWindow, incoming.messages),
+    has_more: extendsFurtherBack ? (current?.has_more ?? incoming.has_more) : incoming.has_more,
+  };
+}
+
+/** Fold a page of OLDER mail (a scroll-up) into what we hold. */
+export function mergeOlderMailPage(current: MailPage | undefined, incoming: MailPage): MailPage {
+  return {
+    messages: mergeMail(current?.messages ?? [], incoming.messages),
+    has_more: incoming.has_more,
+  };
+}

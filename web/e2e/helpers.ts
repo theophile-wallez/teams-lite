@@ -224,6 +224,51 @@ export async function openChannelsTab(page: Page): Promise<void> {
     .toBeGreaterThan(0);
 }
 
+/** Switch the sidebar to the Mail tab and wait for the list to populate. Mail loads
+ *  lazily — the folder list is fetched only when this tab is first shown — so specs
+ *  must go through here rather than assume rows exist. */
+export async function openMailTab(page: Page): Promise<void> {
+  await page.locator('[data-testid="tab-mail"]').click();
+  await expect
+    .poll(() => page.locator('[data-testid="mail-row"]').count(), { timeout: 15_000 })
+    .toBeGreaterThan(0);
+}
+
+/** Open the mail at `index` and wait for its reading pane + body to render. */
+export async function openMailAt(page: Page, index = 0): Promise<string> {
+  const row = page.locator('[data-testid="mail-row"]').nth(index);
+  const id = (await row.getAttribute("data-mail-id")) ?? "";
+  await row.click();
+  await expect(page.locator('[data-testid="mail-heading"]')).toBeVisible();
+  await expect(
+    page.locator('[data-testid="mail-body"], [data-testid="mail-body-empty"]').first(),
+  ).toBeVisible();
+  return id;
+}
+
+/** Deliver a new mail through the mock's gated test hook, then the mock broadcasts
+ *  `mail_list_updated` + `mail_folders_changed` — mirroring what the Rust backend
+ *  emits when its newest-window poll notices one. */
+export async function emitMail(
+  page: Page,
+  body: { folder?: string; subject?: string; sender?: string; preview?: string } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "mail", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** The mock's seeded mailbox, via the gated `/__test/mail` endpoint. */
+export async function fetchTestMail(page: Page): Promise<{
+  folders: { id: string; display_name: string; well_known: string; unread_count: number }[];
+  inbox: { id: string; subject: string; is_read: boolean; received: string }[];
+}> {
+  const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/mail`);
+  expect(res.ok()).toBeTruthy();
+  return res.json();
+}
+
 /** Filter out benign console noise so `consoleErrors` only holds real problems. */
 export function realErrors(errors: string[]): string[] {
   return errors.filter(

@@ -16,7 +16,9 @@ import { Backend, defaultWsUrl } from "./ws-client";
 import {
   appendLiveMessage,
   mergeOlderHistoryPage,
+  mergeOlderMailPage,
   mergeRefreshedHistoryPage,
+  mergeRefreshedMailPage,
   replyToPayload,
   shouldNotify,
   trimHistoryPage,
@@ -29,6 +31,10 @@ import {
   type GitLabLinkMetadata,
   type IncomingCall,
   type LiveStatus,
+  type MailBody,
+  type MailFolder,
+  type MailHeader,
+  type MailPage,
   type MessagePage,
   type Notification,
   type NotificationTab,
@@ -62,10 +68,16 @@ import {
 
 export type PendingReply = { message: ChatMessage; marker: string | null };
 
-/** Which sidebar list is showing: normal chats or the team/channel tree. Channel
- *  messages are kept strictly out of the chat list, so this is a hard switch
- *  between two distinct sources. */
-export type SidebarTab = "chats" | "channels";
+/** Which sidebar list is showing: normal chats, the team/channel tree, or the
+ *  mailbox. Each is a distinct source — a channel never appears in the chat list,
+ *  and mail is a different backend surface entirely — so this is a hard switch. */
+export type SidebarTab = "chats" | "channels" | "mail";
+
+/** The cache key a mail attachment's proxied bytes are stored under. Namespaced so
+ *  it can never collide with a Teams hosted-content URL in the shared media cache. */
+function mailAttachmentKey(messageId: string, attachmentId: string): string {
+  return `mail-attachment:${messageId}:${attachmentId}`;
+}
 
 export type AppState = {
   conversations: Conversation[];
@@ -142,6 +154,32 @@ export type AppState = {
   /** Non-secret app settings (GitLab host + whether a token is stored), loaded
    *  from the backend on start. Drives which links get rich previews. */
   settings: AppSettings;
+
+  // ---- mail (read-only Outlook surface) ------------------------------------
+
+  /** The mailbox's folders, in sidebar order. Empty until the Mail tab is first
+   *  opened — mail is loaded lazily, so a user who never opens it pays nothing. */
+  mailFolders: MailFolder[];
+  /** The selected folder's id, or null before one is chosen (the inbox is selected
+   *  automatically once folders load). */
+  mailFolderId: string | null;
+  /** The selected folder's mail, newest first. */
+  mailMessages: MailHeader[];
+  mailLoading: boolean;
+  mailLoadingOlder: boolean;
+  mailHasMoreOlder: boolean;
+  /** Why the mail list could not be loaded, or null. Mail failing must never break
+   *  the chat surfaces, so this is scoped to the mail pane. */
+  mailError: string | null;
+  /** The open mail's id (mirrors the `/m/<id>` route), or null. */
+  openMailId: string | null;
+  /** The open mail's header. Held separately from the list so a deep link to a mail
+   *  that is not in the loaded page still renders its metadata. */
+  openMail: MailHeader | null;
+  /** The open mail's rendered body, or null while it loads. */
+  mailBody: MailBody | null;
+  mailBodyLoading: boolean;
+  mailBodyError: string | null;
 };
 
 const DRAFT_SAVE_DELAY_MS = 150;
@@ -173,6 +211,11 @@ const RETAINED_CONVERSATIONS = 8;
 // least-recently-used blob that nothing is displaying is revoked and dropped (a
 // later render simply re-fetches it).
 const MEDIA_CACHE_BYTES = 48 * 1024 * 1024;
+// How many rendered mail bodies stay in the session cache. A body is up to ~135 KB
+// of sanitized HTML (plus any embedded inline images), so reading through an inbox
+// would otherwise accumulate megabytes of markup. The backend caches every body
+// durably in SQLite, so re-opening an evicted mail is a local round-trip.
+const RETAINED_MAIL_BODIES = 12;
 
 function initialState(): AppState {
   return {
@@ -207,6 +250,18 @@ function initialState(): AppState {
     resolvedTheme: "light",
     soundsEnabled: DEFAULT_SOUNDS_ENABLED,
     settings: { gitlab_host: "gitlab.com", gitlab_token_set: false },
+    mailFolders: [],
+    mailFolderId: null,
+    mailMessages: [],
+    mailLoading: false,
+    mailLoadingOlder: false,
+    mailHasMoreOlder: false,
+    mailError: null,
+    openMailId: null,
+    openMail: null,
+    mailBody: null,
+    mailBodyLoading: false,
+    mailBodyError: null,
   };
 }
 
@@ -424,6 +479,8 @@ export class TeamsController {
     this.linkCache.clear();
     this.profileCache.clear();
     this.presenceCache.clear();
+    this.mailPageCache.clear();
+    this.mailBodyCache.clear();
     this.backend.close();
     this.started = false;
   }
@@ -513,6 +570,41 @@ export class TeamsController {
     on("conversations_changed", () => void this.refreshConversations());
     on("channels_changed", () => void this.refreshChannels());
     on("notifications_changed", () => void this.refreshNotifications());
+
+    // Mail folder metadata moved (new mail, something read elsewhere): refresh the
+    // list so the unread badge and counts follow — but only once mail has been
+    // opened at least once, so a user who never looks at Mail is never made to load
+    // it by a background event.
+    on("mail_folders_changed", () => {
+      if (this.get().mailFolders.length > 0) void this.refreshMailFolders();
+    });
+
+    // The backend reconciled a folder's newest window against the server. Fold it
+    // into what we hold: new mail appears, mail read elsewhere updates, and mail
+    // deleted elsewhere disappears — without truncating a list scrolled far back.
+    on("mail_list_updated", (raw) => {
+      const d = raw as MailPage & { folder: string };
+      const merged = mergeRefreshedMailPage(this.mailPageCache.get(d.folder), {
+        messages: d.messages ?? [],
+        has_more: d.has_more ?? false,
+      });
+      this.mailPageCache.set(d.folder, merged);
+      if (this.get().mailFolderId === d.folder) {
+        this.set({
+          mailMessages: merged.messages,
+          mailHasMoreOlder: merged.has_more,
+          mailError: null,
+          mailLoading: false,
+        });
+      }
+    });
+
+    on("mail_list_error", (raw) => {
+      const d = raw as { folder: string; error: string };
+      if (this.get().mailFolderId === d.folder && this.get().mailMessages.length === 0) {
+        this.set({ mailError: d.error || "Couldn't load mail", mailLoading: false });
+      }
+    });
     on("realtime_status", (s) => {
       const status = s as LiveStatus;
       if (status === "disconnected") this.connectionDropped = true;
@@ -781,9 +873,171 @@ export class TeamsController {
     }
   }
 
-  /** Switch the sidebar between the chat list and the channel tree. */
+  /** Switch the sidebar between the chat list, the channel tree and the mailbox.
+   *  Opening Mail for the first time is what loads it — see `loadMailFolders`. */
   setSidebarTab(tab: SidebarTab): void {
     if (this.get().sidebarTab !== tab) this.set({ sidebarTab: tab });
+    if (tab === "mail") void this.ensureMailLoaded();
+  }
+
+  // ---- mail (read-only Outlook surface) ------------------------------------
+  //
+  // Local-first, exactly like chat: every list and body is served from the
+  // backend's SQLite mirror first, then reconciled from Graph in the background.
+  // Read-only end to end — there is no send/reply/delete/move here, and none in the
+  // backend either (see src/mail.rs).
+
+  /** Per-folder mail pages, so switching folders is instant and a background
+   *  refresh reconciles into what is already on screen. Bounded by the number of
+   *  folders a mailbox has (a handful), unlike the message cache. */
+  private mailPageCache = new Map<string, MailPage>();
+  /** Rendered bodies by mail id, bounded LRU: a body is up to ~135 KB of HTML, so a
+   *  session spent reading through an inbox must not accumulate all of them. The
+   *  backend caches them durably anyway, so a re-fetch is cheap. */
+  private mailBodyCache = new Map<string, MailBody>();
+
+  private refreshMailFolders = coalesce(() => this.loadMailFolders());
+
+  /** Load the folder list (and select the inbox) the first time Mail is shown. */
+  private async ensureMailLoaded(): Promise<void> {
+    if (this.get().mailFolders.length === 0) await this.refreshMailFolders();
+    if (!this.get().mailFolderId) {
+      const folders = this.get().mailFolders;
+      const inbox = folders.find((f) => f.well_known === "Inbox") ?? folders[0];
+      if (inbox) void this.selectMailFolder(inbox.id);
+    }
+  }
+
+  /** Refresh the folder list. Best-effort: on failure the last good list stands and
+   *  the error is surfaced in the mail pane only, never as a fatal. */
+  private async loadMailFolders(): Promise<void> {
+    try {
+      const folders = await this.backend.mailFolders();
+      this.set({ mailFolders: folders, mailError: null });
+    } catch (e) {
+      // Only report it when there is nothing to show — a failed refresh behind a
+      // populated sidebar is noise.
+      if (this.get().mailFolders.length === 0) this.set({ mailError: errText(e) });
+    }
+  }
+
+  /** Select a folder and show its mail: the cached page immediately, then the
+   *  backend's own local-first answer, which a background sync may follow with a
+   *  `mail_list_updated` event. */
+  async selectMailFolder(folderId: string): Promise<void> {
+    const cached = this.mailPageCache.get(folderId);
+    this.set({
+      mailFolderId: folderId,
+      mailMessages: cached?.messages ?? [],
+      mailHasMoreOlder: cached?.has_more ?? false,
+      mailLoading: !cached,
+      mailLoadingOlder: false,
+      mailError: null,
+    });
+
+    try {
+      const page = await this.backend.mailList(folderId);
+      const merged = mergeRefreshedMailPage(this.mailPageCache.get(folderId), page);
+      this.mailPageCache.set(folderId, merged);
+      if (this.get().mailFolderId === folderId) {
+        this.set({ mailMessages: merged.messages, mailHasMoreOlder: merged.has_more });
+      }
+    } catch (e) {
+      if (this.get().mailFolderId === folderId && !cached) this.set({ mailError: errText(e) });
+    } finally {
+      if (this.get().mailFolderId === folderId) this.set({ mailLoading: false });
+    }
+  }
+
+  /** Page further back in the selected folder (scroll-up in the mail list). */
+  async loadOlderMail(): Promise<void> {
+    const folderId = this.get().mailFolderId;
+    if (!folderId) return;
+    const state = this.get();
+    if (state.mailLoadingOlder || !state.mailHasMoreOlder) return;
+    const oldest = state.mailMessages[state.mailMessages.length - 1];
+    if (!oldest) return;
+
+    this.set({ mailLoadingOlder: true });
+    try {
+      const page = await this.backend.mailBackfill(folderId, oldest.received);
+      if (this.get().mailFolderId !== folderId) return;
+      const merged = mergeOlderMailPage(this.mailPageCache.get(folderId), page);
+      this.mailPageCache.set(folderId, merged);
+      this.set({ mailMessages: merged.messages, mailHasMoreOlder: merged.has_more });
+    } catch (e) {
+      if (this.get().mailFolderId === folderId) this.set({ mailError: errText(e) });
+    } finally {
+      if (this.get().mailFolderId === folderId) this.set({ mailLoadingOlder: false });
+    }
+  }
+
+  /** Open one mail: show its header from the list at once, then its body (from the
+   *  session cache when we already rendered it, else fetched — the backend keeps its
+   *  own durable copy, so even a cold fetch is usually local to it). */
+  async openMail(id: string): Promise<void> {
+    const header = this.get().mailMessages.find((m) => m.id === id) ?? null;
+    const cachedBody = this.mailBodyCache.get(id) ?? null;
+    this.set({
+      openMailId: id,
+      // Prefer the list's header, then the cached body's own copy (a deep link has
+      // no list). Keep the previous header only when re-opening the same mail, so
+      // switching mails never shows the old sender against the new body.
+      openMail:
+        header ??
+        cachedBody?.header ??
+        (this.get().openMailId === id ? this.get().openMail : null),
+      mailBody: cachedBody,
+      mailBodyLoading: !cachedBody,
+      mailBodyError: null,
+    });
+    if (cachedBody) return;
+
+    try {
+      const body = await this.backend.mailBody(id);
+      this.cacheMailBody(id, body);
+      if (this.get().openMailId === id) {
+        // The body carries the header, which is what makes a deep link (or a
+        // reload) show the subject and sender: there is no list to read them from.
+        this.set({ mailBody: body, openMail: this.get().openMail ?? body.header ?? null });
+      }
+    } catch (e) {
+      if (this.get().openMailId === id) this.set({ mailBodyError: errText(e) });
+    } finally {
+      if (this.get().openMailId === id) this.set({ mailBodyLoading: false });
+    }
+  }
+
+  /** Store a rendered body, dropping the least-recently-opened one past the budget. */
+  private cacheMailBody(id: string, body: MailBody): void {
+    this.mailBodyCache.delete(id); // re-insert so Map order is the LRU order
+    this.mailBodyCache.set(id, body);
+    while (this.mailBodyCache.size > RETAINED_MAIL_BODIES) {
+      const oldest = this.mailBodyCache.keys().next();
+      if (oldest.done) break;
+      if (oldest.value === this.get().openMailId) break; // never evict what is on screen
+      this.mailBodyCache.delete(oldest.value);
+    }
+  }
+
+  closeMail(): void {
+    this.set({ openMailId: null, openMail: null, mailBody: null, mailBodyError: null });
+  }
+
+  /** Download one attachment: resolve its bytes to a blob URL and hand it to the
+   *  browser under the attachment's own filename. */
+  async downloadMailAttachment(messageId: string, attachmentId: string, name: string): Promise<void> {
+    try {
+      const objectUrl = await this.loadMailAttachment(messageId, attachmentId);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = name || "attachment";
+      link.rel = "noopener";
+      link.click();
+    } catch (e) {
+      this.set({ status: `attachment failed: ${errText(e)}` });
+      playCue("error");
+    }
   }
 
   /** Load the persisted local channel-favorite overrides into state. Best-effort
@@ -969,6 +1223,13 @@ export class TeamsController {
     if (openId) void this.reconcileOpen(openId);
     void this.refreshConversations();
     void this.refreshChannels();
+    // Mail too, but only if it has been opened: its own reconcile is the backend's
+    // newest-window re-read, which `selectMailFolder` triggers.
+    if (this.get().mailFolders.length > 0) {
+      void this.refreshMailFolders();
+      const folderId = this.get().mailFolderId;
+      if (folderId) void this.selectMailFolder(folderId);
+    }
   }
 
   /** Re-fetch a conversation's newest page and reconcile it into the cache and (if
@@ -1078,28 +1339,51 @@ export class TeamsController {
    *  deduplicated per URL; a failed load is evicted so a later retry can refetch.
    *  The returned object URL stays valid until the controller is disposed. */
   loadMedia(url: string): Promise<string> {
-    const cached = this.mediaCache.get(url);
+    return this.loadBlob(url, () => this.backend.fetchMedia(url));
+  }
+
+  /** Resolve one mail attachment to a local blob object URL, for downloading or
+   *  previewing it. Shares the media cache — and therefore its LRU order and byte
+   *  budget — so a mailbox full of attachments cannot grow the page without bound.
+   *  Inline images need no call: the backend already embedded them in the body. */
+  loadMailAttachment(messageId: string, attachmentId: string): Promise<string> {
+    return this.loadBlob(mailAttachmentKey(messageId, attachmentId), () =>
+      this.backend.mailAttachment(messageId, attachmentId),
+    );
+  }
+
+  /** Fetch bytes through the backend once per `key`, hand back a blob object URL,
+   *  and keep it under the shared byte budget.
+   *
+   *  The one place proxied bytes become an object URL, for chat media and mail
+   *  attachments alike: one cache, one LRU order, one eviction policy. A failed load
+   *  is evicted so a later render can retry. */
+  private loadBlob(
+    key: string,
+    fetch: () => Promise<{ content_type: string; data_base64: string }>,
+  ): Promise<string> {
+    const cached = this.mediaCache.get(key);
     if (cached) {
       // Re-insert so Map order stays the least-recently-used order.
-      this.mediaCache.delete(url);
-      this.mediaCache.set(url, cached);
+      this.mediaCache.delete(key);
+      this.mediaCache.set(key, cached);
       return cached;
     }
 
     const pending = (async () => {
-      const res = await this.backend.fetchMedia(url);
+      const res = await fetch();
       const blob = new Blob([base64ToArrayBuffer(res.data_base64)], {
         type: res.content_type || "application/octet-stream",
       });
       const objectUrl = URL.createObjectURL(blob);
-      this.mediaBlobs.set(url, { objectUrl, bytes: blob.size });
+      this.mediaBlobs.set(key, { objectUrl, bytes: blob.size });
       this.mediaBytes += blob.size;
       this.evictMedia();
       return objectUrl;
     })();
 
-    this.mediaCache.set(url, pending);
-    pending.catch(() => this.mediaCache.delete(url));
+    this.mediaCache.set(key, pending);
+    pending.catch(() => this.mediaCache.delete(key));
     return pending;
   }
 

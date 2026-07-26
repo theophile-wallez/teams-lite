@@ -14,6 +14,9 @@ import type {
   Channel,
   Conversation,
   LinkMetadataResult,
+  MailBody as MailBodyResult,
+  MailFolder,
+  MailPage,
   MessagePage,
   NotificationFeeds,
   PersonProfile,
@@ -366,6 +369,57 @@ export class Backend {
    *  absent from `presences`. */
   presence(mris: string[]): Promise<PresenceResult> {
     return this.request<PresenceResult>("presence", { mris });
+  }
+
+  // ---- mail (read-only) ---------------------------------------------------
+  //
+  // Every method here is a READ, so none uses `writeRequest`: the write token
+  // exists to gate acts that other people see, and the mail surface has none. The
+  // backend cannot send, reply to, delete or move a mail — the capability is absent
+  // from the crate, not merely ungranted (see src/mail.rs).
+
+  /** The mailbox's folders, in sidebar order. Local-first on the backend: answers
+   *  from its cache, then a background sync may push `mail_folders_changed`. */
+  mailFolders(): Promise<MailFolder[]> {
+    return this.request<MailFolder[]>("mail_folders");
+  }
+
+  /** A folder's newest page of mail. Local-first: returns the cached page at once,
+   *  and the backend reconciles it against the server in the background, pushing
+   *  `mail_list_updated` when anything moved (new mail, read elsewhere, deleted
+   *  elsewhere). Opening a folder also puts it under the backend's live poll. */
+  mailList(folder: string, limit?: number): Promise<MailPage> {
+    return this.request<MailPage>("mail_list", { folder, ...(limit ? { limit } : {}) });
+  }
+
+  /** The page of mail older than `before` (an ISO timestamp from the oldest row
+   *  currently shown) — the scroll-up path. */
+  mailBackfill(folder: string, before: string, limit?: number): Promise<MailPage> {
+    return this.request<MailPage>("mail_backfill", {
+      folder,
+      before,
+      ...(limit ? { limit } : {}),
+    });
+  }
+
+  /** One mail's sanitized body. Cached by the backend after the first read, so
+   *  re-opening a mail costs no network. The HTML contains no remote references —
+   *  rendering it never phones home — and is still displayed inside a sandboxed
+   *  iframe (see `MailBody`). */
+  mailBody(id: string): Promise<MailBodyResult> {
+    return this.request<MailBodyResult>("mail_body", { id });
+  }
+
+  /** One attachment's bytes, base64 over this same socket (the browser holds no
+   *  Graph token, so it cannot fetch them itself). */
+  mailAttachment(
+    messageId: string,
+    attachmentId: string,
+  ): Promise<{ content_type: string; name: string; data_base64: string }> {
+    return this.request("mail_attachment", {
+      message_id: messageId,
+      attachment_id: attachmentId,
+    });
   }
 
   /** Read the non-secret app settings (GitLab host + whether a token is stored). */

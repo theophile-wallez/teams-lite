@@ -28,6 +28,18 @@ import {
   typingLabel,
   formatCallEvent,
   formatCallDuration,
+  mailFolderLabel,
+  mailSenderLabel,
+  mailSubjectLabel,
+  mailReceivedMs,
+  mailRecipientsLabel,
+  mailFileAttachments,
+  formatAttachmentSize,
+  mailUnreadBadge,
+  mergeMail,
+  mergeRefreshedMailPage,
+  mergeOlderMailPage,
+  type MailHeader,
   incomingCallTitle,
   computeReadReceiptAnchors,
 } from "./protocol";
@@ -899,5 +911,212 @@ describe("computeReadReceiptAnchors", () => {
   it("returns nothing for an empty conversation or no receipts", () => {
     expect(computeReadReceiptAnchors([], [receipt("a", 100, 1)]).size).toBe(0);
     expect(computeReadReceiptAnchors(numberedMessages([100]), []).size).toBe(0);
+  });
+});
+
+// ---- mail (read-only Outlook surface) --------------------------------------
+
+describe("mail display helpers", () => {
+  const address = (name: string, addr: string) => ({ name, address: addr });
+
+  it("labels a folder by its stable name, falling back to the mailbox's own", () => {
+    // A well-known folder reads the same in any tenant language…
+    expect(
+      mailFolderLabel({
+        id: "f",
+        display_name: "Boîte de réception",
+        well_known: "Inbox",
+        total_count: 0,
+        unread_count: 0,
+        position: 0,
+      }),
+    ).toBe("Inbox");
+    // …while a user folder has only the (localized) name Outlook shows.
+    expect(
+      mailFolderLabel({
+        id: "f",
+        display_name: "Projets",
+        well_known: "",
+        total_count: 0,
+        unread_count: 0,
+        position: 9,
+      }),
+    ).toBe("Projets");
+  });
+
+  it("names a sender by display name, then address, then a placeholder", () => {
+    expect(mailSenderLabel({ from: address("Lucas Silva", "lucas@example.com") })).toBe("Lucas Silva");
+    expect(mailSenderLabel({ from: address("", "noreply@example.com") })).toBe("noreply@example.com");
+    expect(mailSenderLabel({ from: address("", "") })).toBe("(unknown sender)");
+  });
+
+  it("shows the conventional placeholder for an empty subject", () => {
+    expect(mailSubjectLabel({ subject: "Quarterly review" })).toBe("Quarterly review");
+    expect(mailSubjectLabel({ subject: "" })).toBe("(no subject)");
+  });
+
+  it("parses the received timestamp, and refuses to invent one", () => {
+    expect(mailReceivedMs({ received: "2026-06-30T14:20:16Z" })).toBe(
+      Date.UTC(2026, 5, 30, 14, 20, 16),
+    );
+    // An unparseable value yields 0, which the formatters render as no date at all
+    // rather than "Invalid Date".
+    expect(mailReceivedMs({ received: "" })).toBe(0);
+    expect(mailReceivedMs({ received: "not a date" })).toBe(0);
+  });
+
+  it("summarizes recipients and overflows into a count", () => {
+    expect(mailRecipientsLabel([])).toBe("");
+    expect(mailRecipientsLabel([address("Ada", "ada@example.com")])).toBe("Ada");
+    // An address with no display name still identifies the person.
+    expect(mailRecipientsLabel([address("", "ops@example.com")])).toBe("ops@example.com");
+    expect(
+      mailRecipientsLabel([address("Ada", "a@x"), address("Bob", "b@x"), address("Cy", "c@x")]),
+    ).toBe("Ada, Bob and 1 other");
+    expect(
+      mailRecipientsLabel([
+        address("Ada", "a@x"),
+        address("Bob", "b@x"),
+        address("Cy", "c@x"),
+        address("Dee", "d@x"),
+      ]),
+    ).toBe("Ada, Bob and 2 others");
+  });
+
+  it("lists only file attachments, since inline ones are already in the body", () => {
+    const attachments = [
+      { id: "1", name: "deck.pdf", content_type: "application/pdf", size: 100, is_inline: false },
+      { id: "2", name: "logo.png", content_type: "image/png", size: 10, is_inline: true },
+    ];
+    expect(mailFileAttachments(attachments).map((a) => a.id)).toEqual(["1"]);
+  });
+
+  it("formats attachment sizes", () => {
+    expect(formatAttachmentSize(0)).toBe("");
+    expect(formatAttachmentSize(512)).toBe("512 B");
+    expect(formatAttachmentSize(1942)).toBe("1.9 KB");
+    expect(formatAttachmentSize(20 * 1024)).toBe("20 KB");
+    expect(formatAttachmentSize(3 * 1024 * 1024)).toBe("3 MB");
+  });
+
+  it("badges the inbox's unread count, not the whole mailbox's", () => {
+    const folder = (well_known: string, unread: number, position: number) => ({
+      id: `f-${well_known}`,
+      display_name: well_known,
+      well_known,
+      total_count: 0,
+      unread_count: unread,
+      position,
+    });
+    // Deleted items carry thousands of unread messages nobody acts on; badging them
+    // would make the count meaningless.
+    expect(mailUnreadBadge([folder("Inbox", 12, 0), folder("Deleted", 1558, 6)])).toBe(12);
+    // With no inbox at all, the first folder stands in.
+    expect(mailUnreadBadge([folder("Archive", 3, 1)])).toBe(3);
+    expect(mailUnreadBadge([])).toBe(0);
+  });
+});
+
+describe("mail page merging", () => {
+  const mail = (id: string, received: string, is_read = true): MailHeader => ({
+    id,
+    folder_id: "f",
+    conversation_id: "c",
+    subject: `Subject ${id}`,
+    from: { name: "Lucas Silva", address: "lucas@example.com" },
+    to: [],
+    cc: [],
+    received,
+    is_read,
+    has_attachments: false,
+    importance: "normal",
+    preview: "preview",
+  });
+
+  it("sorts merged mail newest first, deduplicating by id", () => {
+    const merged = mergeMail(
+      [mail("a", "2026-07-01T09:00:00Z"), mail("b", "2026-07-03T09:00:00Z")],
+      [mail("c", "2026-07-02T09:00:00Z"), mail("a", "2026-07-01T09:00:00Z")],
+    );
+    expect(merged.map((m) => m.id)).toEqual(["b", "c", "a"]);
+  });
+
+  it("lets a refreshed header replace the stale copy", () => {
+    const merged = mergeMail(
+      [mail("a", "2026-07-01T09:00:00Z", false)],
+      [mail("a", "2026-07-01T09:00:00Z", true)],
+    );
+    expect(merged).toHaveLength(1);
+    // Read in real Outlook, so the row must stop showing as unread here.
+    expect(merged[0]!.is_read).toBe(true);
+  });
+
+  it("orders mail received in the same second deterministically", () => {
+    const same = "2026-07-01T09:00:00Z";
+    const first = mergeMail([], [mail("b", same), mail("a", same)]);
+    const second = mergeMail([mail("a", same)], [mail("b", same)]);
+    expect(first.map((m) => m.id)).toEqual(second.map((m) => m.id));
+  });
+
+  it("keeps mail older than a refreshed window instead of truncating the list", () => {
+    // The backend only re-reads the newest window, so a merge must not throw away
+    // the pages the user scrolled back through.
+    const held = {
+      messages: [
+        mail("new", "2026-07-05T09:00:00Z"),
+        mail("mid", "2026-07-03T09:00:00Z"),
+        mail("old", "2026-06-01T09:00:00Z"),
+      ],
+      has_more: true,
+    };
+    const merged = mergeRefreshedMailPage(held, {
+      messages: [mail("newest", "2026-07-06T09:00:00Z"), mail("new", "2026-07-05T09:00:00Z")],
+      has_more: true,
+    });
+    expect(merged.messages.map((m) => m.id)).toEqual(["newest", "new", "mid", "old"]);
+    expect(merged.has_more).toBe(true);
+  });
+
+  it("drops mail the server no longer lists inside the refreshed window", () => {
+    // This is how a mail deleted or moved in real Outlook disappears here.
+    const held = {
+      messages: [
+        mail("gone", "2026-07-05T09:00:00Z"),
+        mail("kept", "2026-07-04T09:00:00Z"),
+        mail("older", "2026-06-01T09:00:00Z"),
+      ],
+      has_more: true,
+    };
+    const merged = mergeRefreshedMailPage(held, {
+      messages: [mail("kept", "2026-07-04T09:00:00Z")],
+      has_more: true,
+    });
+    expect(merged.messages.map((m) => m.id)).toEqual(["kept", "older"]);
+  });
+
+  it("keeps what we hold when a refresh comes back empty", () => {
+    // An empty window must never be read as "the folder is empty now".
+    const held = { messages: [mail("a", "2026-07-01T09:00:00Z")], has_more: true };
+    const merged = mergeRefreshedMailPage(held, { messages: [], has_more: false });
+    expect(merged.messages.map((m) => m.id)).toEqual(["a"]);
+    expect(merged.has_more).toBe(true);
+  });
+
+  it("takes the server's has_more when it holds nothing older", () => {
+    const merged = mergeRefreshedMailPage(undefined, {
+      messages: [mail("a", "2026-07-01T09:00:00Z")],
+      has_more: true,
+    });
+    expect(merged.messages.map((m) => m.id)).toEqual(["a"]);
+    expect(merged.has_more).toBe(true);
+  });
+
+  it("appends an older page and adopts its has_more", () => {
+    const merged = mergeOlderMailPage(
+      { messages: [mail("new", "2026-07-05T09:00:00Z")], has_more: true },
+      { messages: [mail("old", "2026-06-01T09:00:00Z")], has_more: false },
+    );
+    expect(merged.messages.map((m) => m.id)).toEqual(["new", "old"]);
+    expect(merged.has_more).toBe(false);
   });
 });

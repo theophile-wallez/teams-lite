@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Outlet, useMatchRoute, useNavigate, useParams } from "@tanstack/react-router";
 import { ControllerProvider, useAppState, useController } from "./controller-context";
 import { ConversationList } from "./conversation-list";
+import { MailPane } from "./mail-pane";
 import { MessagePane } from "./message-pane";
 import { SettingsPane } from "./settings-pane";
 import { CommandPalette } from "./command-palette";
@@ -37,12 +38,15 @@ function AppInner() {
   const sidebarTab = useAppState((s) => s.sidebarTab);
   const openId = useAppState((s) => s.openId);
   const replyingTo = useAppState((s) => s.replyingTo);
+  const mailMessages = useAppState((s) => s.mailMessages);
+  const openMailId = useAppState((s) => s.openMailId);
 
-  // The URL is the source of truth for which conversation is open. `/` means no
-  // conversation; `/c/<id>` means that conversation. `strict: false` lets this
-  // shell read the param whether or not a conversation route is matched.
-  const { conversationId } = useParams({ strict: false });
+  // The URL is the source of truth for what is open. `/` means nothing; `/c/<id>` a
+  // conversation; `/m/<id>` a mail. `strict: false` lets this shell read either
+  // param whether or not its route is the matched one.
+  const { conversationId, mailId } = useParams({ strict: false });
   const routeConversationId = conversationId ?? null;
+  const routeMailId = mailId ?? null;
 
   // Whether the settings route is active. When it is, the right pane shows the
   // settings surface instead of a conversation; the sidebar stays put.
@@ -54,7 +58,7 @@ function AppInner() {
   // "page", Teams-style. `paneOpen` drives that slide. On desktop both columns are
   // always on screen, so it only feeds the subtle parallax on the list.
   const isMobile = useIsMobile();
-  const paneOpen = !!routeConversationId || onSettings;
+  const paneOpen = !!routeConversationId || !!routeMailId || onSettings;
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -63,6 +67,12 @@ function AppInner() {
   const goToConversation = useCallback(
     (id: string) => {
       void navigate({ to: "/c/$conversationId", params: { conversationId: id } });
+    },
+    [navigate],
+  );
+  const goToMail = useCallback(
+    (id: string) => {
+      void navigate({ to: "/m/$mailId", params: { mailId: id } });
     },
     [navigate],
   );
@@ -93,6 +103,18 @@ function AppInner() {
     if (openId && (onSettings || !isMobile)) controller.closeConversation();
   }, [ready, routeConversationId, onSettings, openId, isMobile, controller]);
 
+  // The same reconciliation for mail: `/m/<id>` opens that message through the
+  // controller, and leaving the route closes it. Mail bodies are cached (locally and
+  // in the backend), so moving between messages and back is instant.
+  useEffect(() => {
+    if (!ready) return;
+    if (routeMailId) {
+      if (openMailId !== routeMailId) void controller.openMail(routeMailId);
+      return;
+    }
+    if (openMailId && (onSettings || !isMobile)) controller.closeMail();
+  }, [ready, routeMailId, onSettings, openMailId, isMobile, controller]);
+
   // Mobile only: once the detail pane has slid fully out of view (paneOpen went
   // false) close the still-open conversation. The delay matches the slide so the
   // messages stay put throughout the animation; a timeout (rather than
@@ -104,10 +126,27 @@ function AppInner() {
     return () => clearTimeout(timer);
   }, [isMobile, paneOpen, openId, controller]);
 
-  // Keep the selection in range as the conversation list changes.
+  // Same deferred close for a mail slid out of view on mobile.
   useEffect(() => {
-    setSelectedIndex((i) => Math.min(i, Math.max(0, conversations.length - 1)));
-  }, [conversations.length]);
+    if (!isMobile || paneOpen || !openMailId) return;
+    const timer = setTimeout(() => controller.closeMail(), PANE_SLIDE_MS + 40);
+    return () => clearTimeout(timer);
+  }, [isMobile, paneOpen, openMailId, controller]);
+
+  // The keyboard-navigable list is whichever the active tab shows: chats or mail.
+  // (The channel tree is a tree, not a flat list, and uses click/Tab focus.)
+  const keyboardList = sidebarTab === "mail" ? mailMessages : conversations;
+
+  // Keep the selection in range as the active list changes.
+  useEffect(() => {
+    setSelectedIndex((i) => Math.min(i, Math.max(0, keyboardList.length - 1)));
+  }, [keyboardList.length]);
+
+  // Switching tabs starts the selection over: index 3 of the chat list means
+  // nothing in the mail list.
+  useEffect(() => {
+    setSelectedIndex(0);
+  }, [sidebarTab]);
 
   const onKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -129,29 +168,32 @@ function AppInner() {
           controller.cancelReply();
           return;
         }
-        if (routeConversationId || onSettings) {
+        if (routeConversationId || routeMailId || onSettings) {
           goToList();
           return;
         }
       }
 
-      // List navigation is only active when no conversation is open and we're not
-      // on settings (otherwise the composer / settings form own the keyboard),
-      // mirroring the TUI. It drives the virtualized chat list, so it only applies
-      // while the Chats tab is showing — the Channels tab uses click/Tab focus.
-      if (routeConversationId || onSettings || sidebarTab !== "chats") return;
+      // List navigation is only active when nothing is open and we're not on
+      // settings (otherwise the composer / settings form own the keyboard),
+      // mirroring the TUI. It drives whichever virtualized list the active tab
+      // shows — Chats or Mail; the Channels tab is a tree and uses click/Tab focus.
+      if (routeConversationId || routeMailId || onSettings) return;
+      if (sidebarTab === "channels") return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
 
       if (e.key === "ArrowDown" || e.key === "j") {
         e.preventDefault();
-        setSelectedIndex((i) => Math.min(i + 1, conversations.length - 1));
+        setSelectedIndex((i) => Math.min(i + 1, keyboardList.length - 1));
       } else if (e.key === "ArrowUp" || e.key === "k") {
         e.preventDefault();
         setSelectedIndex((i) => Math.max(i - 1, 0));
       } else if (e.key === "Enter") {
-        const c = conversations[selectedIndex];
-        if (c) goToConversation(c.id);
+        const item = keyboardList[selectedIndex];
+        if (!item) return;
+        if (sidebarTab === "mail") goToMail(item.id);
+        else goToConversation(item.id);
       }
     },
     [
@@ -159,12 +201,14 @@ function AppInner() {
       settingsOpen,
       replyingTo,
       routeConversationId,
+      routeMailId,
       onSettings,
       sidebarTab,
-      conversations,
+      keyboardList,
       selectedIndex,
       controller,
       goToConversation,
+      goToMail,
       goToList,
     ],
   );
@@ -202,7 +246,16 @@ function AppInner() {
             paneOpen ? "translate-x-0" : "translate-x-full",
           )}
         >
-          {onSettings ? <SettingsPane onBack={goToList} /> : <MessagePane onBack={goToList} />}
+          {/* Which surface the detail pane shows. Settings wins; then a mail —
+              either one addressed by the URL, or the Mail tab's own empty state, so
+              switching to Mail does not leave a chat's empty state on the right. */}
+          {onSettings ? (
+            <SettingsPane onBack={goToList} />
+          ) : routeMailId || (sidebarTab === "mail" && !routeConversationId) ? (
+            <MailPane onBack={goToList} />
+          ) : (
+            <MessagePane onBack={goToList} />
+          )}
         </div>
       </div>
 

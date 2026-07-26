@@ -12,8 +12,17 @@
 // Methods: conversations | open | backfill | set_draft | send | edit | react | notifications
 //          | fetch_media | fetch_avatar | profile | presence | get_settings
 //          | set_settings | enrich_link
+//          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 // Events:  status | message | conversations_changed | notifications_changed | typing
 //          | read_receipt | call | call_signal | update_available
+//          | mail_folders_changed | mail_list_updated | mail_list_error
+//
+// The `mail_*` methods are the READ-ONLY Outlook surface (see `mail`): the same
+// broker identity carries the mailbox, and the app lists folders, reads messages and
+// renders bodies. It cannot send, reply, delete, move or mark as read — no such path
+// exists in the crate, and `mail::tests` enforce that on the source. Mail bodies are
+// sanitized server-side and stripped of every remote reference, so displaying one
+// makes no network request of its own.
 //
 // The `call` event is incoming-call AWARENESS only (ring/dismiss a banner) — it
 // rides on the after-the-fact `Event/Call` chat system message.
@@ -43,8 +52,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    auth, retry, teams, teams_activity, teams_avatars, teams_media, teams_presence, teams_profiles,
-    teams_read, teams_readstate, teams_send, trouter, trouter_events,
+    auth, mail, retry, teams, teams_activity, teams_avatars, teams_media, teams_presence,
+    teams_profiles, teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
 use teams_lite::gitlab;
 
@@ -401,6 +410,11 @@ struct Ctx {
     /// release, else `None`. Cached so a UI that connects AFTER the one-shot
     /// broadcast fired still learns about the update on its greeting.
     update: Arc<std::sync::Mutex<Option<Value>>>,
+    /// Mail folders the live poll watches (see `spawn_mail_sync`). Seeded with the
+    /// inbox and extended whenever a UI opens a folder, so the poll costs one
+    /// request per folder the user actually looks at rather than one per folder the
+    /// mailbox happens to have.
+    mail_watch: Arc<Mutex<std::collections::BTreeSet<String>>>,
 }
 
 /// The session plus when it was minted, so we can rebuild it before the
@@ -498,6 +512,43 @@ impl Ctx {
         cell.session = fresh.clone();
         cell.minted = std::time::Instant::now();
         Ok(fresh)
+    }
+
+    /// A valid Microsoft Graph token, for the read-only mail surface.
+    async fn graph(&self) -> Result<String> {
+        self.tokens.get(mail::MAIL_SCOPE).await
+    }
+
+    /// Mark a mail folder as one the live poll should watch.
+    fn watch_mail_folder(&self, folder_id: &str) {
+        if folder_id.is_empty() {
+            return;
+        }
+        if let Ok(mut watch) = self.mail_watch.lock() {
+            watch.insert(folder_id.to_string());
+        }
+    }
+
+    /// Run a Graph (mail) operation under the shared retry policy.
+    ///
+    /// The mail sibling of [`Ctx::retry_on_auth`]: `op` gets a freshly-read Graph
+    /// token per attempt, and a 401 refreshes THAT token only — the Teams session
+    /// and its skypetoken are unrelated to the mailbox, so refreshing them here
+    /// would be noise (and would rebuild a session for nothing).
+    async fn retry_graph<T, F, Fut>(&self, op: F) -> Result<T>
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let attempt = || async {
+            let token = self.graph().await?;
+            op(token).await
+        };
+        let on_auth = || async {
+            eprintln!("[auth] 401 from Graph — refreshing the mail token before retry");
+            self.tokens.refresh(mail::MAIL_SCOPE).await.map(|_| ())
+        };
+        retry::with_retry(retry::RetryPolicy::default(), Some(on_auth), attempt).await
     }
 
     /// Run a network operation under the shared retry policy (see `retry`).
@@ -642,10 +693,15 @@ async fn main() -> Result<()> {
         db_path: Arc::new(db_path.clone()),
         events: events_tx,
         update: Arc::new(std::sync::Mutex::new(None)),
+        mail_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
     };
 
     // real-time: run the trouter, persist each live message, broadcast an event.
     spawn_realtime(ctx.clone(), session, db_path);
+
+    // mail: poll whichever folders a client opens (read-only, and idle until one
+    // does — see `spawn_mail_sync`).
+    spawn_mail_sync(ctx.clone());
 
     // one-shot, best-effort: is a newer rolling `latest` build available?
     spawn_update_check(ctx.clone());
@@ -1329,8 +1385,423 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }))
         }
 
+        // ---- mail (READ-ONLY Outlook surface, see `mail`) --------------------
+        //
+        // Every method below only reads. None of them is in `OUTWARD_METHODS`
+        // because none can act on the mailbox: there is no send/reply/delete/move/
+        // mark-as-read anywhere in the crate (`mail::tests` enforce it). What the
+        // write lock protects is Teams; what protects the mailbox is that the
+        // capability does not exist.
+
+        // The mail folder list — LOCAL-FIRST like `conversations`: answer instantly
+        // from SQLite, then sync from Graph in the background and emit
+        // `mail_folders_changed` if any folder's name or counts moved.
+        //
+        // Except on a COLD store, where "local-first" would mean handing back an
+        // empty mailbox: there is nothing to be instant about, so the first call
+        // waits for the network. Without this, the very first time Mail is opened the
+        // sidebar would come up empty and only fill in on a second visit.
+        "mail_folders" => {
+            let rows = {
+                let store = ctx.store()?;
+                store.mail_folders()?
+            };
+            if !rows.is_empty() {
+                sync_mail_folders_bg(ctx.clone());
+                return Ok(json!(rows.iter().map(mail_folder_json).collect::<Vec<Value>>()));
+            }
+
+            let http = ctx.http.clone();
+            let folders = ctx
+                .retry_graph(move |token| {
+                    let http = http.clone();
+                    async move { mail::fetch_folders(&http, &token).await }
+                })
+                .await?;
+            let store = ctx.store()?;
+            mail::persist_folders(&store, &folders)?;
+            // The inbox is what the unread badge counts, so it joins the live poll
+            // as soon as the mailbox is known.
+            if let Some(inbox) = folders.iter().find(|f| f.well_known == "Inbox") {
+                ctx.watch_mail_folder(&inbox.id);
+            }
+            let rows = store.mail_folders()?;
+            Ok(json!(rows.iter().map(mail_folder_json).collect::<Vec<Value>>()))
+        }
+
+        // A folder's newest page — LOCAL-FIRST: the cached page answers immediately
+        // (0 network round-trips on a re-open), then a background fetch reconciles
+        // it against the server and emits `mail_list_updated` when anything moved.
+        // Opening a folder also puts it under the live poll.
+        "mail_list" => {
+            let folder = param_str(params, "folder")?;
+            let limit = page_limit(params, mail::DEFAULT_PAGE_SIZE);
+            ctx.watch_mail_folder(&folder);
+
+            let (cached, has_more, never_synced) = {
+                let store = ctx.store()?;
+                let page = store.mail_page(&folder, None, limit as i64)?;
+                let has_more = mail_has_more_older(&store, &folder, &page)?;
+                // An empty page with no recorded frontier means this folder has never
+                // been fetched — as opposed to a folder we know to be empty.
+                let never_synced = page.is_empty() && store.mail_frontier(&folder)?.0.is_empty();
+                (page, has_more, never_synced)
+            };
+
+            // Cold folder: wait for the network rather than answering "no mail", which
+            // a client cannot tell apart from an empty folder (see `mail_folders`).
+            if never_synced {
+                refresh_mail_folder(ctx, &folder, limit).await?;
+                let store = ctx.store()?;
+                let page = store.mail_page(&folder, None, limit as i64)?;
+                let has_more = mail_has_more_older(&store, &folder, &page)?;
+                return Ok(mail_list_json(&page, has_more));
+            }
+
+            // Background refresh: never blocks the response, so switching folders is
+            // instant once the folder has been seen at least once.
+            let ctx_bg = ctx.clone();
+            let folder_bg = folder.clone();
+            tokio::spawn(async move {
+                match refresh_mail_folder(&ctx_bg, &folder_bg, limit).await {
+                    Ok(true) => emit_mail_list(&ctx_bg, &folder_bg),
+                    Ok(false) => {}
+                    Err(e) => ctx_bg.emit(
+                        "mail_list_error",
+                        json!({ "folder": folder_bg, "error": e.to_string() }),
+                    ),
+                }
+            });
+            Ok(mail_list_json(&cached, has_more))
+        }
+
+        // Older mail for scroll-up. Answers from the cache when it already holds the
+        // page, else fetches it — the same shape as the chat `backfill`.
+        "mail_backfill" => {
+            let folder = param_str(params, "folder")?;
+            let before = param_str(params, "before")?;
+            let limit = page_limit(params, mail::DEFAULT_PAGE_SIZE);
+
+            let (cached, frontier) = {
+                let store = ctx.store()?;
+                (
+                    store.mail_page(&folder, Some(&before), limit as i64)?,
+                    store.mail_frontier(&folder)?,
+                )
+            };
+            if !cached.is_empty() {
+                let has_more = mail_has_more_older(&ctx.store()?, &folder, &cached)?;
+                return Ok(mail_list_json(&cached, has_more));
+            }
+            // Nothing cached older than `before`: if the server has nothing either,
+            // say so instead of asking it again.
+            if !frontier.1 {
+                return Ok(mail_list_json(&[], false));
+            }
+
+            let http = ctx.http.clone();
+            let folder_op = folder.clone();
+            let before_op = before.clone();
+            let page = ctx
+                .retry_graph(move |token| {
+                    let http = http.clone();
+                    let folder = folder_op.clone();
+                    let before = before_op.clone();
+                    async move { mail::fetch_older(&http, &token, &folder, &before, limit).await }
+                })
+                .await?;
+            let store = ctx.store()?;
+            mail::persist_headers(&store, &page)?;
+            mail::persist_frontier(&store, &folder, &page, limit)?;
+            let rows = store.mail_page(&folder, Some(&before), limit as i64)?;
+            let has_more = mail_has_more_older(&store, &folder, &rows)?;
+            Ok(mail_list_json(&rows, has_more))
+        }
+
+        // One mail's rendered body. Cached after the first read, so re-opening a
+        // mail — or reading it offline — costs nothing.
+        //
+        // The HTML handed back is inert and self-contained: scripts, styles, frames
+        // and forms removed, remote images dropped and counted, inline images
+        // embedded as data URIs (see `mail_html`). The UI still renders it inside a
+        // sandboxed iframe under a `default-src 'none'` CSP.
+        "mail_body" => {
+            let id = param_str(params, "id")?;
+            if let Some(row) = ctx.store()?.mail_message(&id)? {
+                if row.body_loaded {
+                    return Ok(mail_body_json(&row));
+                }
+            }
+
+            let http = ctx.http.clone();
+            let id_op = id.clone();
+            let fetched = ctx
+                .retry_graph(move |token| {
+                    let http = http.clone();
+                    let id = id_op.clone();
+                    async move { mail::fetch_body(&http, &token, &id).await }
+                })
+                .await?;
+            let store = ctx.store()?;
+            // The fetch carried the header too, so a mail reached by a DEEP LINK —
+            // one that was never in a list — becomes a proper row here instead of a
+            // body with no sender or subject. Its folder is watched from now on, so
+            // the poll keeps it current like any other.
+            if let Some(header) = &fetched.header {
+                mail::persist_headers(&store, std::slice::from_ref(header))?;
+                ctx.watch_mail_folder(&header.folder_id);
+            }
+            mail::persist_body(&store, &id, &fetched)?;
+            match store.mail_message(&id)? {
+                Some(row) if row.body_loaded => Ok(mail_body_json(&row)),
+                // No row: the mail exists on the server but Graph gave us nothing we
+                // could key it by. Return the body alone rather than failing the open.
+                _ => Ok(json!({
+                    "html": fetched.body.html,
+                    "blocked_remote_images": fetched.body.blocked_remote_images,
+                    "truncated": fetched.body.truncated,
+                    "attachments": serde_json::from_str::<Value>(
+                        &mail::attachments_json(&fetched.attachments)
+                    ).unwrap_or_else(|_| json!([])),
+                    "header": Value::Null,
+                })),
+            }
+        }
+
+        // One attachment's bytes, base64 over the same WebSocket as every other
+        // proxied media object. The browser cannot fetch these itself (they need the
+        // Graph token), and the UI never touches the network directly.
+        "mail_attachment" => {
+            let message_id = param_str(params, "message_id")?;
+            let attachment_id = param_str(params, "attachment_id")?;
+            let http = ctx.http.clone();
+            let attachment = ctx
+                .retry_graph(move |token| {
+                    let http = http.clone();
+                    let message_id = message_id.clone();
+                    let attachment_id = attachment_id.clone();
+                    async move {
+                        mail::fetch_attachment(&http, &token, &message_id, &attachment_id).await
+                    }
+                })
+                .await?;
+            let data = base64::engine::general_purpose::STANDARD.encode(&attachment.bytes);
+            Ok(json!({
+                "content_type": attachment.content_type,
+                "name": attachment.name,
+                "data_base64": data,
+            }))
+        }
+
         other => anyhow::bail!("unknown method: {other}"),
     }
+}
+
+/// A bounded page size from `params.limit`, defaulting to `default`. Clamped so a
+/// client cannot ask Graph for an unbounded page.
+fn page_limit(params: &Value, default: u32) -> u32 {
+    params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|n| n.clamp(1, 100) as u32)
+        .unwrap_or(default)
+}
+
+/// Whether a folder has mail older than the page just read.
+///
+/// True when the server is known to hold more (`has_more_older`) OR the page stops
+/// short of the oldest row we hold locally — the latter is what makes scrolling a
+/// long cached folder work without a network round-trip per page.
+fn mail_has_more_older(
+    store: &Store,
+    folder_id: &str,
+    page: &[teams_lite::store::MailMessageRow],
+) -> Result<bool> {
+    let (oldest_held, server_has_more) = store.mail_frontier(folder_id)?;
+    match page.last() {
+        // An empty page: only the server can still have something.
+        None => Ok(server_has_more),
+        Some(last) => Ok(server_has_more || last.received > oldest_held),
+    }
+}
+
+/// Refresh a folder's newest window from Graph and reconcile it into the store.
+///
+/// Returns whether anything changed (so the caller only emits an event when it
+/// did). The window is re-read in full rather than asked for incrementally, which is
+/// what lets [`Store::prune_mail_window`] notice mail deleted or moved in real
+/// Outlook — see [`mail::POLL_WINDOW`].
+async fn refresh_mail_folder(ctx: &Ctx, folder_id: &str, limit: u32) -> Result<bool> {
+    let http = ctx.http.clone();
+    let folder = folder_id.to_string();
+    let window = limit.max(mail::POLL_WINDOW);
+    let page = ctx
+        .retry_graph(move |token| {
+            let http = http.clone();
+            let folder = folder.clone();
+            async move { mail::fetch_newest(&http, &token, &folder, window).await }
+        })
+        .await?;
+
+    let store = ctx.store()?;
+    let changed = mail::persist_headers(&store, &page)? > 0;
+    mail::persist_frontier(&store, folder_id, &page, window)?;
+    let pruned = match (page.last(), page.iter().map(|h| h.id.clone()).collect::<Vec<_>>()) {
+        (Some(oldest), ids) => store.prune_mail_window(folder_id, &oldest.received, &ids)?,
+        (None, _) => 0,
+    };
+    Ok(changed || pruned > 0)
+}
+
+/// Broadcast a folder's current newest page to every connected UI.
+fn emit_mail_list(ctx: &Ctx, folder_id: &str) {
+    let Ok(store) = ctx.store() else { return };
+    let Ok(page) = store.mail_page(folder_id, None, mail::DEFAULT_PAGE_SIZE as i64) else {
+        return;
+    };
+    let has_more = mail_has_more_older(&store, folder_id, &page).unwrap_or(false);
+    let mut payload = mail_list_json(&page, has_more);
+    payload["folder"] = json!(folder_id);
+    ctx.emit("mail_list_updated", payload);
+}
+
+/// Sync the mail folder list from Graph in the background, emitting
+/// `mail_folders_changed` when any folder's metadata moved. Best-effort: mail is a
+/// secondary surface, so a failure is logged and the cached list stands.
+///
+/// Also the point at which the inbox joins the live poll: whatever folder the user
+/// browses, the inbox is the one whose unread count the UI badges.
+fn sync_mail_folders_bg(ctx: Ctx) {
+    tokio::spawn(async move {
+        let http = ctx.http.clone();
+        let folders = ctx
+            .retry_graph(move |token| {
+                let http = http.clone();
+                async move { mail::fetch_folders(&http, &token).await }
+            })
+            .await;
+        match folders {
+            Ok(folders) => {
+                // Whatever the user reads first, the inbox is always worth watching:
+                // it is where new mail lands and what the badge counts.
+                if let Some(inbox) = folders.iter().find(|f| f.well_known == "Inbox") {
+                    ctx.watch_mail_folder(&inbox.id);
+                }
+                let changed = ctx
+                    .store()
+                    .and_then(|store| mail::persist_folders(&store, &folders));
+                match changed {
+                    Ok(true) => ctx.emit("mail_folders_changed", json!({})),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[mail] could not persist folders: {e}"),
+                }
+            }
+            Err(e) => eprintln!("[mail] folder sync failed: {e}"),
+        }
+    });
+}
+
+/// How often the watched mail folders are re-read. Mail is not chat: a minute of
+/// latency on a new mail is unremarkable, and this is one request per watched
+/// folder.
+const MAIL_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The mail live loop: re-read each watched folder's newest window on a timer and
+/// broadcast what changed.
+///
+/// This is a poll, not a push. Trouter is registered against the Teams registrar and
+/// carries no mailbox traffic, and Graph's change notifications need a public
+/// webhook — neither is available to a local-first app, so the honest mechanism is a
+/// cheap periodic read (see the `mail` module doc).
+///
+/// LAZY BY DESIGN: the watch set starts empty, so this loop makes NO requests until
+/// a client actually opens the mail surface (`mail_folders` triggers the folder sync,
+/// `mail_list` registers the folder it opened). A user who only ever uses chat — or
+/// the terminal UI, which has no mail surface — pays nothing for mail at all. Once
+/// Mail has been opened, the poll keeps its folders and the unread badge current for
+/// the rest of the session.
+fn spawn_mail_sync(ctx: Ctx) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(MAIL_POLL_INTERVAL).await;
+            let folders: Vec<String> = match ctx.mail_watch.lock() {
+                Ok(watch) => watch.iter().cloned().collect(),
+                Err(_) => continue,
+            };
+            for folder in folders {
+                match refresh_mail_folder(&ctx, &folder, mail::POLL_WINDOW).await {
+                    Ok(true) => {
+                        emit_mail_list(&ctx, &folder);
+                        // Counts moved with the mail, so refresh the folder list too.
+                        sync_mail_folders_bg(ctx.clone());
+                    }
+                    Ok(false) => {}
+                    // A transient failure is not worth telling the UI about: the
+                    // cached list is still valid and the next tick retries.
+                    Err(e) => eprintln!("[mail] poll of a watched folder failed: {e}"),
+                }
+            }
+        }
+    });
+}
+
+/// Serialize a mail folder for the sidebar.
+fn mail_folder_json(folder: &teams_lite::store::MailFolderRow) -> Value {
+    json!({
+        "id": folder.id,
+        // The UI shows `well_known` when set (stable English) and falls back to the
+        // mailbox's own, localized name for a user folder.
+        "display_name": folder.display_name,
+        "well_known": folder.well_known,
+        "total_count": folder.total_count,
+        "unread_count": folder.unread_count,
+        "position": folder.position,
+    })
+}
+
+/// Serialize one mail's list fields. The body is never included here — see
+/// `mail_body`.
+fn mail_header_json(mail: &teams_lite::store::MailMessageRow) -> Value {
+    let addresses = |raw: &str| serde_json::from_str::<Value>(raw).unwrap_or_else(|_| json!([]));
+    json!({
+        "id": mail.id,
+        "folder_id": mail.folder_id,
+        "conversation_id": mail.conversation_id,
+        "subject": mail.subject,
+        "from": { "name": mail.from_name, "address": mail.from_address },
+        "to": addresses(&mail.to_addresses),
+        "cc": addresses(&mail.cc_addresses),
+        "received": mail.received,
+        "is_read": mail.is_read,
+        "has_attachments": mail.has_attachments,
+        "importance": mail.importance,
+        "preview": mail.preview,
+    })
+}
+
+fn mail_list_json(page: &[teams_lite::store::MailMessageRow], has_more: bool) -> Value {
+    json!({
+        "messages": page.iter().map(mail_header_json).collect::<Vec<Value>>(),
+        "has_more": has_more,
+    })
+}
+
+/// Serialize a cached body, including what the sanitizer had to remove so the UI can
+/// explain a mail that is not rendered in full.
+///
+/// The mail's `header` rides along so opening `/m/<id>` cold — a deep link, a
+/// reload, a restored tab — renders the subject, sender and recipients without a
+/// second round-trip. A client that already has the header from its list simply
+/// ignores it.
+fn mail_body_json(mail: &teams_lite::store::MailMessageRow) -> Value {
+    json!({
+        "html": mail.body_html,
+        "blocked_remote_images": mail.blocked_remote_images,
+        "truncated": mail.body_truncated,
+        "attachments": serde_json::from_str::<Value>(&mail.attachments)
+            .unwrap_or_else(|_| json!([])),
+        "header": mail_header_json(mail),
+    })
 }
 
 fn parse_reply_to(value: &Value) -> Result<teams_send::ReplyTo> {
@@ -2584,5 +3055,100 @@ mod lifecycle_tests {
         }
 
         assert_eq!(tracker.snapshot().0, 0);
+    }
+
+    // ---- mail (read-only Outlook surface) ----------------------------------
+
+    /// No mail method may ever join the write lock's list — not because mail writes
+    /// are gated, but because none exists. If someone adds one, this test is where
+    /// they have to come and think about it (and about consent) first.
+    #[test]
+    fn no_mail_method_is_outward_facing() {
+        for method in OUTWARD_METHODS {
+            assert!(
+                !method.starts_with("mail"),
+                "`{method}` suggests the mail surface can act outward. It cannot: the backend \
+                 has no send/reply/delete/move path at all (see src/mail.rs). Adding one is a \
+                 deliberate feature needing its own consent gate."
+            );
+        }
+        // And every mail method reads, so none of them needs the token.
+        for method in [
+            "mail_folders",
+            "mail_list",
+            "mail_backfill",
+            "mail_body",
+            "mail_attachment",
+        ] {
+            assert!(check_write_allowed(method, &json!({}), Some("tok")).is_ok(), "{method}");
+            assert!(check_write_allowed(method, &json!({}), None).is_ok(), "{method}");
+        }
+    }
+
+    #[test]
+    fn page_limit_is_bounded_and_defaults() {
+        assert_eq!(page_limit(&json!({}), 40), 40);
+        assert_eq!(page_limit(&json!({ "limit": 10 }), 40), 10);
+        // A client cannot ask the server (and thus Graph) for an unbounded page.
+        assert_eq!(page_limit(&json!({ "limit": 100_000 }), 40), 100);
+        assert_eq!(page_limit(&json!({ "limit": 0 }), 40), 1);
+        // A nonsensical value falls back to the default rather than erroring.
+        assert_eq!(page_limit(&json!({ "limit": "many" }), 40), 40);
+    }
+
+    #[test]
+    fn mail_has_more_older_reads_both_the_cache_and_the_server() {
+        let store = Store::open_in_memory().expect("in-memory store");
+        store
+            .upsert_mail_folder(&teams_lite::store::MailFolderUpdate {
+                id: "f",
+                display_name: "Inbox",
+                well_known: "Inbox",
+                total_count: 0,
+                unread_count: 0,
+                position: 0,
+            })
+            .unwrap();
+
+        fn mail<'a>(id: &'a str, received: &'a str) -> teams_lite::store::MailMessageUpdate<'a> {
+            teams_lite::store::MailMessageUpdate {
+                id,
+                folder_id: "f",
+                conversation_id: "c",
+                subject: "s",
+                from_name: "n",
+                from_address: "a@b",
+                to_addresses: "[]",
+                cc_addresses: "[]",
+                received,
+                is_read: true,
+                has_attachments: false,
+                importance: "normal",
+                preview: "p",
+            }
+        }
+        store.upsert_mail_message(&mail("m1", "2026-07-01T09:00:00Z")).unwrap();
+        store.upsert_mail_message(&mail("m2", "2026-07-05T09:00:00Z")).unwrap();
+        // History reaches back to m1, and the server holds nothing older.
+        store.set_mail_frontier("f", "2026-07-01T09:00:00Z", false).unwrap();
+
+        // A page stopping above the local frontier still has cached mail behind it,
+        // so the UI must offer to page further WITHOUT a network round-trip.
+        let head = store.mail_page("f", None, 1).unwrap();
+        assert!(mail_has_more_older(&store, "f", &head).unwrap());
+
+        // A page that reaches the frontier, with nothing older on the server, is the
+        // end of the folder.
+        let all = store.mail_page("f", None, 10).unwrap();
+        assert!(!mail_has_more_older(&store, "f", &all).unwrap());
+
+        // Once the server reports more, the end of the cache is not the end.
+        store.set_mail_frontier("f", "2026-07-01T09:00:00Z", true).unwrap();
+        assert!(mail_has_more_older(&store, "f", &all).unwrap());
+
+        // An empty page defers entirely to the server.
+        assert!(mail_has_more_older(&store, "f", &[]).unwrap());
+        store.set_mail_frontier("f", "2026-07-01T09:00:00Z", false).unwrap();
+        assert!(!mail_has_more_older(&store, "f", &[]).unwrap());
     }
 }

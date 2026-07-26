@@ -78,6 +78,51 @@ CREATE TABLE IF NOT EXISTS channels (
     team_pos              INTEGER NOT NULL DEFAULT 0,
     channel_pos           INTEGER NOT NULL DEFAULT 0
 );
+-- Outlook mail (READ-ONLY mirror; see src/mail.rs). Kept in its own tables rather
+-- than folded into conversations/messages: mail is ordered by an ISO timestamp
+-- instead of a Teams `seq`, addressed by folder instead of thread, and carries
+-- recipients and a rendered body. Sharing the chat tables would have meant a dozen
+-- nullable columns and two meanings per row.
+CREATE TABLE IF NOT EXISTS mail_folders (
+    id               TEXT PRIMARY KEY,
+    -- The folder's own, LOCALIZED name as Outlook shows it ("Boîte de réception").
+    display_name     TEXT NOT NULL DEFAULT '',
+    -- Stable English label for a well-known folder ("Inbox", "Sent"), else empty.
+    -- Graph has no `wellKnownName` here, so this comes from the path alias.
+    well_known       TEXT NOT NULL DEFAULT '',
+    total_count      INTEGER NOT NULL DEFAULT 0,
+    unread_count     INTEGER NOT NULL DEFAULT 0,
+    position         INTEGER NOT NULL DEFAULT 0,
+    -- History frontier: the oldest message we hold for this folder, and whether the
+    -- server has anything older (the mail analogue of `conversations.oldest_cursor`).
+    oldest_received  TEXT NOT NULL DEFAULT '',
+    has_more_older   INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS mail_messages (
+    id                     TEXT PRIMARY KEY,
+    folder_id              TEXT NOT NULL,
+    conversation_id        TEXT NOT NULL DEFAULT '',
+    subject                TEXT NOT NULL DEFAULT '',
+    from_name              TEXT NOT NULL DEFAULT '',
+    from_address           TEXT NOT NULL DEFAULT '',
+    -- Recipients as JSON arrays of {name, address}.
+    to_addresses           TEXT NOT NULL DEFAULT '[]',
+    cc_addresses           TEXT NOT NULL DEFAULT '[]',
+    -- ISO 8601 UTC, whole seconds. Fixed-width, so ordering and keyset paging run
+    -- on the text directly (see mail::normalize_timestamp).
+    received               TEXT NOT NULL DEFAULT '',
+    is_read                INTEGER NOT NULL DEFAULT 1,
+    has_attachments        INTEGER NOT NULL DEFAULT 0,
+    importance             TEXT NOT NULL DEFAULT 'normal',
+    preview                TEXT NOT NULL DEFAULT '',
+    -- The sanitized, self-contained body, cached on first open. `body_loaded`
+    -- distinguishes "not fetched yet" from "fetched and genuinely empty".
+    body_html              TEXT NOT NULL DEFAULT '',
+    body_loaded            INTEGER NOT NULL DEFAULT 0,
+    blocked_remote_images  INTEGER NOT NULL DEFAULT 0,
+    body_truncated         INTEGER NOT NULL DEFAULT 0,
+    attachments            TEXT NOT NULL DEFAULT '[]'
+);
 "#;
 
 /// Indexes, applied AFTER [`migrate`] because several of them cover columns that a
@@ -96,6 +141,10 @@ DROP INDEX IF EXISTS idx_msg_conv_seq;
 CREATE INDEX IF NOT EXISTS idx_msg_sender_mri ON messages(sender_mri, seq);
 -- The sidebar's exact ORDER BY, so listing conversations needs no temp b-tree.
 CREATE INDEX IF NOT EXISTS idx_conv_sidebar_order ON conversations(is_pinned DESC, last_message_time DESC, id ASC);
+-- The mail list's exact ORDER BY and its keyset paging predicate, so neither the
+-- first page nor a scroll-up ever scans the folder. `body_html` is deliberately not
+-- covered: a list read never touches it (bodies are up to ~135 KB each).
+CREATE INDEX IF NOT EXISTS idx_mail_folder_received ON mail_messages(folder_id, received DESC, id ASC);
 "#;
 
 /// Version of everything the file must physically contain: `SCHEMA`, [`migrate`]
@@ -105,7 +154,12 @@ CREATE INDEX IF NOT EXISTS idx_conv_sidebar_order ON conversations(is_pinned DES
 /// regression, whereas re-running the schema batch and ~25 ALTERs that all fail
 /// with "duplicate column" was merely pointless). Bump it whenever any of the
 /// three change.
-const SCHEMA_VERSION: i64 = 1;
+///
+/// v2 adds the read-only Outlook mirror (`mail_folders`, `mail_messages` and their
+/// index). Bumping the version is what makes an existing store grow them: `open`
+/// re-runs `initialize`, whose `CREATE TABLE IF NOT EXISTS` batch adds the new
+/// tables and leaves every existing one untouched.
+const SCHEMA_VERSION: i64 = 2;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::purge_control_frames`], [`Store::convert_legacy_call_events`],
@@ -320,6 +374,98 @@ pub struct ChannelUpdate<'a> {
     pub channel_pos: i64,
 }
 
+/// A mail folder row for the sidebar, in `position` order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailFolderRow {
+    pub id: String,
+    /// The folder's own, localized name (what Outlook shows).
+    pub display_name: String,
+    /// Stable English label for a well-known folder ("Inbox", …), else empty.
+    pub well_known: String,
+    pub total_count: i64,
+    pub unread_count: i64,
+    pub position: i64,
+    /// Oldest message held locally (ISO 8601 UTC), or empty when the folder has
+    /// never been paged. The keyset from which a scroll-up continues.
+    pub oldest_received: String,
+    /// Whether the server has anything older than [`Self::oldest_received`].
+    pub has_more_older: bool,
+}
+
+/// Folder metadata from a network sync, fed to [`Store::upsert_mail_folder`].
+/// Grouped like [`ConversationUpdate`] so callers cannot transpose fields. The
+/// history frontier is deliberately absent: it is local paging state, and a folder
+/// sync must never reset it (see [`Store::set_mail_frontier`]).
+#[derive(Debug, Clone)]
+pub struct MailFolderUpdate<'a> {
+    pub id: &'a str,
+    pub display_name: &'a str,
+    pub well_known: &'a str,
+    pub total_count: i64,
+    pub unread_count: i64,
+    pub position: i64,
+}
+
+/// One mail as the store holds it: the list fields, plus the cached body once it
+/// has been opened. `body_loaded` is what separates "never fetched" from "fetched
+/// and empty" — a real case (a mail whose entire content was remote images).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailMessageRow {
+    pub id: String,
+    pub folder_id: String,
+    pub conversation_id: String,
+    pub subject: String,
+    pub from_name: String,
+    pub from_address: String,
+    /// JSON array of `{name, address}`.
+    pub to_addresses: String,
+    /// JSON array of `{name, address}`.
+    pub cc_addresses: String,
+    /// ISO 8601 UTC, whole seconds — the ordering and paging key.
+    pub received: String,
+    pub is_read: bool,
+    pub has_attachments: bool,
+    pub importance: String,
+    pub preview: String,
+    pub body_html: String,
+    pub body_loaded: bool,
+    pub blocked_remote_images: i64,
+    pub body_truncated: bool,
+    /// JSON array of `{id, name, content_type, size, is_inline}`.
+    pub attachments: String,
+}
+
+/// One mail's list fields from a network fetch, fed to
+/// [`Store::upsert_mail_message`]. The body is NOT here: it is fetched separately
+/// and written by [`Store::set_mail_body`], so re-syncing a list never discards a
+/// body we already rendered and cached.
+#[derive(Debug, Clone)]
+pub struct MailMessageUpdate<'a> {
+    pub id: &'a str,
+    pub folder_id: &'a str,
+    pub conversation_id: &'a str,
+    pub subject: &'a str,
+    pub from_name: &'a str,
+    pub from_address: &'a str,
+    pub to_addresses: &'a str,
+    pub cc_addresses: &'a str,
+    pub received: &'a str,
+    pub is_read: bool,
+    pub has_attachments: bool,
+    pub importance: &'a str,
+    pub preview: &'a str,
+}
+
+/// A rendered body to cache, from [`crate::mail_html::SanitizedBody`] plus the
+/// message's attachment list.
+#[derive(Debug, Clone)]
+pub struct MailBodyUpdate<'a> {
+    pub html: &'a str,
+    pub blocked_remote_images: i64,
+    pub truncated: bool,
+    pub attachments: &'a str,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -353,6 +499,31 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
 }
 
 const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions";
+
+fn row_to_mail(row: &Row) -> rusqlite::Result<MailMessageRow> {
+    Ok(MailMessageRow {
+        id: row.get(0)?,
+        folder_id: row.get(1)?,
+        conversation_id: row.get(2)?,
+        subject: row.get(3)?,
+        from_name: row.get(4)?,
+        from_address: row.get(5)?,
+        to_addresses: row.get(6)?,
+        cc_addresses: row.get(7)?,
+        received: row.get(8)?,
+        is_read: row.get::<_, i64>(9)? != 0,
+        has_attachments: row.get::<_, i64>(10)? != 0,
+        importance: row.get(11)?,
+        preview: row.get(12)?,
+        body_html: row.get(13)?,
+        body_loaded: row.get::<_, i64>(14)? != 0,
+        blocked_remote_images: row.get(15)?,
+        body_truncated: row.get::<_, i64>(16)? != 0,
+        attachments: row.get(17)?,
+    })
+}
+
+const MAIL_SELECT_COLS: &str = "id, folder_id, conversation_id, subject, from_name, from_address, to_addresses, cc_addresses, received, is_read, has_attachments, importance, preview, body_html, body_loaded, blocked_remote_images, body_truncated, attachments";
 
 /// Canonicalize an MRI for identity comparison: keep only the last path segment
 /// (so a `.../contacts/8:orgid:<guid>` URL becomes a bare MRI) and drop a leading
@@ -1033,6 +1204,274 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ---- mail (read-only Outlook mirror) ------------------------------------
+
+    /// Upsert one mail folder's metadata from a network sync. Returns true when a
+    /// column actually moved, so the caller emits `mail_folders_changed` only on a
+    /// real change. Local paging state (`oldest_received` / `has_more_older`) is
+    /// never touched here.
+    pub fn upsert_mail_folder(&self, u: &MailFolderUpdate) -> Result<bool> {
+        let changed = self.exec(
+            "INSERT INTO mail_folders (id, display_name, well_known, total_count, unread_count, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                display_name = excluded.display_name,
+                well_known   = excluded.well_known,
+                total_count  = excluded.total_count,
+                unread_count = excluded.unread_count,
+                position     = excluded.position
+             WHERE excluded.display_name <> mail_folders.display_name
+                OR excluded.well_known   <> mail_folders.well_known
+                OR excluded.total_count  <> mail_folders.total_count
+                OR excluded.unread_count <> mail_folders.unread_count
+                OR excluded.position     <> mail_folders.position",
+            params![
+                u.id,
+                u.display_name,
+                u.well_known,
+                u.total_count,
+                u.unread_count,
+                u.position,
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Every known mail folder, in sidebar order: well-known folders first (Inbox,
+    /// Archive, Sent, …) then the user's own, with the name as a deterministic
+    /// tie-breaker.
+    pub fn mail_folders(&self) -> Result<Vec<MailFolderRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, display_name, well_known, total_count, unread_count, position,
+                    oldest_received, has_more_older
+             FROM mail_folders
+             ORDER BY position ASC, display_name ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(MailFolderRow {
+                id: r.get(0)?,
+                display_name: r.get(1)?,
+                well_known: r.get(2)?,
+                total_count: r.get(3)?,
+                unread_count: r.get(4)?,
+                position: r.get(5)?,
+                oldest_received: r.get(6)?,
+                has_more_older: r.get::<_, i64>(7)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Record how far back a folder's local history reaches, and whether the server
+    /// has more.
+    ///
+    /// `oldest` only ever moves BACKWARDS (a page of older mail extends the
+    /// frontier); a newer value is ignored, so an out-of-order sync cannot pretend
+    /// the backlog is shorter than it is. An EMPTY `oldest` means "this page had no
+    /// rows" and leaves the frontier alone — it must not read as "history starts at
+    /// the beginning of time", which would erase what we know.
+    pub fn set_mail_frontier(&self, folder_id: &str, oldest: &str, has_more: bool) -> Result<()> {
+        self.exec(
+            "UPDATE mail_folders
+                SET oldest_received = CASE
+                        WHEN ?2 = '' THEN oldest_received
+                        WHEN oldest_received = '' OR ?2 < oldest_received THEN ?2
+                        ELSE oldest_received END,
+                    has_more_older = ?3
+              WHERE id = ?1",
+            params![folder_id, oldest, has_more as i64],
+        )?;
+        Ok(())
+    }
+
+    /// A folder's history frontier: the oldest message held locally (empty when
+    /// none) and whether anything older exists on the server.
+    pub fn mail_frontier(&self, folder_id: &str) -> Result<(String, bool)> {
+        self.query_one(
+            "SELECT oldest_received, has_more_older FROM mail_folders WHERE id = ?1",
+            params![folder_id],
+            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+        )
+        .optional()
+        // An unknown folder has no history and may have more: the caller then
+        // fetches its newest page from the network.
+        .map(|row| row.unwrap_or_else(|| (String::new(), true)))
+        .map_err(Into::into)
+    }
+
+    /// The newest message timestamp held for a folder, or `None` when it is empty.
+    /// This is the watermark the live poll asks the server to beat (see
+    /// `mail::fetch_since`).
+    pub fn newest_mail_received(&self, folder_id: &str) -> Result<Option<String>> {
+        let newest: Option<String> = self.query_one(
+            "SELECT received FROM mail_messages
+              WHERE folder_id = ?1 ORDER BY received DESC, id ASC LIMIT 1",
+            params![folder_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+        Ok(newest.filter(|s| !s.is_empty()))
+    }
+
+    /// Upsert one mail's list fields. Returns true when something actually changed
+    /// (a new mail, or one whose read state / metadata moved), so a re-sync that
+    /// reports the same state emits no event.
+    ///
+    /// The cached body is preserved: this statement never writes `body_html`,
+    /// `body_loaded`, `blocked_remote_images`, `body_truncated` or `attachments`.
+    pub fn upsert_mail_message(&self, u: &MailMessageUpdate) -> Result<bool> {
+        let changed = self.exec(
+            "INSERT INTO mail_messages (
+                id, folder_id, conversation_id, subject, from_name, from_address,
+                to_addresses, cc_addresses, received, is_read, has_attachments,
+                importance, preview)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(id) DO UPDATE SET
+                folder_id       = excluded.folder_id,
+                conversation_id = excluded.conversation_id,
+                subject         = excluded.subject,
+                from_name       = excluded.from_name,
+                from_address    = excluded.from_address,
+                to_addresses    = excluded.to_addresses,
+                cc_addresses    = excluded.cc_addresses,
+                received        = excluded.received,
+                is_read         = excluded.is_read,
+                has_attachments = excluded.has_attachments,
+                importance      = excluded.importance,
+                preview         = excluded.preview
+             WHERE excluded.folder_id       <> mail_messages.folder_id
+                OR excluded.subject         <> mail_messages.subject
+                OR excluded.from_name       <> mail_messages.from_name
+                OR excluded.from_address    <> mail_messages.from_address
+                OR excluded.to_addresses    <> mail_messages.to_addresses
+                OR excluded.cc_addresses    <> mail_messages.cc_addresses
+                OR excluded.received        <> mail_messages.received
+                OR excluded.is_read         <> mail_messages.is_read
+                OR excluded.has_attachments <> mail_messages.has_attachments
+                OR excluded.importance      <> mail_messages.importance
+                OR excluded.preview         <> mail_messages.preview",
+            params![
+                u.id,
+                u.folder_id,
+                u.conversation_id,
+                u.subject,
+                u.from_name,
+                u.from_address,
+                u.to_addresses,
+                u.cc_addresses,
+                u.received,
+                u.is_read as i64,
+                u.has_attachments as i64,
+                u.importance,
+                u.preview,
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Cache one mail's rendered body and attachment list. Idempotent, and the only
+    /// writer of the body columns.
+    pub fn set_mail_body(&self, id: &str, body: &MailBodyUpdate) -> Result<()> {
+        self.exec(
+            "UPDATE mail_messages
+                SET body_html = ?2,
+                    body_loaded = 1,
+                    blocked_remote_images = ?3,
+                    body_truncated = ?4,
+                    attachments = ?5
+              WHERE id = ?1",
+            params![
+                id,
+                body.html,
+                body.blocked_remote_images,
+                body.truncated as i64,
+                body.attachments,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// One mail by id, body included when it has been fetched.
+    pub fn mail_message(&self, id: &str) -> Result<Option<MailMessageRow>> {
+        self.query_one(
+            &format!("SELECT {MAIL_SELECT_COLS} FROM mail_messages WHERE id = ?1"),
+            params![id],
+            row_to_mail,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// A page of a folder's mail, newest first. `before` (an ISO timestamp from the
+    /// oldest row already shown) pages further back; `None` returns the newest page.
+    ///
+    /// Ordered and filtered on `received` alone, which the covering index serves
+    /// directly — `id` only breaks ties so the order is total and paging cannot
+    /// repeat or skip a row.
+    pub fn mail_page(
+        &self,
+        folder_id: &str,
+        before: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<MailMessageRow>> {
+        match before {
+            Some(before) => {
+                let mut stmt = self.conn.prepare_cached(&format!(
+                    "SELECT {MAIL_SELECT_COLS} FROM mail_messages
+                      WHERE folder_id = ?1 AND received < ?2
+                      ORDER BY received DESC, id ASC LIMIT ?3"
+                ))?;
+                let rows = stmt.query_map(params![folder_id, before, limit], row_to_mail)?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            }
+            None => {
+                let mut stmt = self.conn.prepare_cached(&format!(
+                    "SELECT {MAIL_SELECT_COLS} FROM mail_messages
+                      WHERE folder_id = ?1
+                      ORDER BY received DESC, id ASC LIMIT ?2"
+                ))?;
+                let rows = stmt.query_map(params![folder_id, limit], row_to_mail)?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            }
+        }
+    }
+
+    /// Reconcile a folder's newest window against the server's own view of it.
+    ///
+    /// Deletes every locally-held mail in `folder_id` that is at least as recent as
+    /// `oldest_in_window` but absent from `keep_ids` — i.e. mail that has since been
+    /// deleted, archived or moved in real Outlook. Bounded on purpose: the window
+    /// the user is looking at mirrors the server exactly, while older mail is
+    /// reconciled whenever it is re-fetched. Returns how many rows were removed.
+    ///
+    /// A no-op when the window is empty, so a failed or empty fetch can never be
+    /// mistaken for "the folder is now empty" and wipe the cache.
+    pub fn prune_mail_window(
+        &self,
+        folder_id: &str,
+        oldest_in_window: &str,
+        keep_ids: &[String],
+    ) -> Result<usize> {
+        if keep_ids.is_empty() || oldest_in_window.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = std::iter::repeat_n("?", keep_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "DELETE FROM mail_messages
+              WHERE folder_id = ?1 AND received >= ?2 AND id NOT IN ({placeholders})"
+        );
+        let mut args: Vec<&dyn ToSql> = Vec::with_capacity(keep_ids.len() + 2);
+        args.push(&folder_id);
+        args.push(&oldest_in_window);
+        for id in keep_ids {
+            args.push(id);
+        }
+        Ok(self.exec(&sql, &args)?)
     }
 
     /// Remove a conversation and all of its messages. Used to purge the
@@ -2815,5 +3254,249 @@ mod tests {
 
         // An unknown thread id is an error.
         assert!(s.set_draft("19:nope@thread.v2", "x").is_err());
+    }
+
+    // ---- mail (read-only Outlook mirror) ------------------------------------
+
+    /// Minimal `MailFolderUpdate`: id/name/label/position vary, counts default.
+    fn folder<'a>(id: &'a str, name: &'a str, well_known: &'a str, position: i64) -> MailFolderUpdate<'a> {
+        MailFolderUpdate {
+            id,
+            display_name: name,
+            well_known,
+            total_count: 0,
+            unread_count: 0,
+            position,
+        }
+    }
+
+    /// Minimal `MailMessageUpdate`: id/folder/received/read vary, the rest are
+    /// neutral defaults.
+    fn mail<'a>(id: &'a str, folder_id: &'a str, received: &'a str, is_read: bool) -> MailMessageUpdate<'a> {
+        MailMessageUpdate {
+            id,
+            folder_id,
+            conversation_id: "conv",
+            subject: "Subject",
+            from_name: "Lucas Silva",
+            from_address: "lucas@example.com",
+            to_addresses: "[]",
+            cc_addresses: "[]",
+            received,
+            is_read,
+            has_attachments: false,
+            importance: "normal",
+            preview: "preview",
+        }
+    }
+
+    #[test]
+    fn mail_folders_sort_well_known_first_then_user_folders() {
+        let s = Store::open_in_memory().unwrap();
+        // Inserted out of order, and with a localized display name — the sidebar
+        // order must come from `position`, never from the (translated) name.
+        s.upsert_mail_folder(&folder("f-user", "Projets", "", 7)).unwrap();
+        s.upsert_mail_folder(&folder("f-sent", "Éléments envoyés", "Sent", 2)).unwrap();
+        s.upsert_mail_folder(&folder("f-inbox", "Boîte de réception", "Inbox", 0)).unwrap();
+
+        let ids: Vec<String> = s.mail_folders().unwrap().into_iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec!["f-inbox", "f-sent", "f-user"]);
+        assert_eq!(s.mail_folders().unwrap()[0].display_name, "Boîte de réception");
+        assert_eq!(s.mail_folders().unwrap()[0].well_known, "Inbox");
+    }
+
+    #[test]
+    fn upserting_a_folder_reports_only_real_changes() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap());
+        // An identical re-sync must not emit `mail_folders_changed`.
+        assert!(!s.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap());
+        // A moved unread count is a real change.
+        let mut update = folder("f", "Inbox", "Inbox", 0);
+        update.unread_count = 3;
+        assert!(s.upsert_mail_folder(&update).unwrap());
+        assert_eq!(s.mail_folders().unwrap()[0].unread_count, 3);
+    }
+
+    #[test]
+    fn mail_pages_newest_first_and_keyset_pages_older() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
+        for (id, received) in [
+            ("m1", "2026-07-01T09:00:00Z"),
+            ("m2", "2026-07-02T09:00:00Z"),
+            ("m3", "2026-07-03T09:00:00Z"),
+            ("m4", "2026-07-04T09:00:00Z"),
+        ] {
+            s.upsert_mail_message(&mail(id, "f", received, true)).unwrap();
+        }
+        // Another folder's mail never leaks into the page.
+        s.upsert_mail_folder(&folder("other", "Archive", "Archive", 1)).unwrap();
+        s.upsert_mail_message(&mail("x1", "other", "2026-07-05T09:00:00Z", true)).unwrap();
+
+        let newest: Vec<String> = s.mail_page("f", None, 2).unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(newest, vec!["m4", "m3"]);
+
+        // Paging before the oldest row shown continues exactly where it left off:
+        // no repeat, no gap.
+        let older: Vec<String> = s
+            .mail_page("f", Some("2026-07-03T09:00:00Z"), 10)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(older, vec!["m2", "m1"]);
+    }
+
+    #[test]
+    fn a_re_synced_list_never_discards_a_cached_body() {
+        // The property that makes re-opening a mail free: the list upsert and the
+        // body write own different columns.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", false)).unwrap();
+        s.set_mail_body(
+            "m1",
+            &MailBodyUpdate {
+                html: "<p>body</p>",
+                blocked_remote_images: 4,
+                truncated: false,
+                attachments: r#"[{"id":"a1"}]"#,
+            },
+        )
+        .unwrap();
+
+        // The mail is re-synced (it was read elsewhere, so its metadata moved).
+        assert!(s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", true)).unwrap());
+
+        let row = s.mail_message("m1").unwrap().expect("still there");
+        assert!(row.is_read, "the list field updated");
+        assert_eq!(row.body_html, "<p>body</p>", "the cached body survived");
+        assert!(row.body_loaded);
+        assert_eq!(row.blocked_remote_images, 4);
+        assert_eq!(row.attachments, r#"[{"id":"a1"}]"#);
+    }
+
+    #[test]
+    fn body_loaded_distinguishes_never_fetched_from_fetched_and_empty() {
+        // A real case: a mail whose entire content was remote images sanitizes to
+        // nothing. Without this flag the UI would re-fetch it forever.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", true)).unwrap();
+        assert!(!s.mail_message("m1").unwrap().unwrap().body_loaded);
+
+        s.set_mail_body(
+            "m1",
+            &MailBodyUpdate { html: "", blocked_remote_images: 7, truncated: false, attachments: "[]" },
+        )
+        .unwrap();
+        let row = s.mail_message("m1").unwrap().unwrap();
+        assert!(row.body_loaded);
+        assert_eq!(row.body_html, "");
+        assert_eq!(row.blocked_remote_images, 7);
+    }
+
+    #[test]
+    fn the_history_frontier_only_ever_moves_backwards() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
+        // Unknown folder: no history, and more may exist.
+        assert_eq!(s.mail_frontier("nope").unwrap(), (String::new(), true));
+
+        s.set_mail_frontier("f", "2026-07-03T09:00:00Z", true).unwrap();
+        assert_eq!(
+            s.mail_frontier("f").unwrap(),
+            ("2026-07-03T09:00:00Z".to_string(), true)
+        );
+
+        // A page of older mail extends the frontier.
+        s.set_mail_frontier("f", "2026-07-01T09:00:00Z", false).unwrap();
+        assert_eq!(
+            s.mail_frontier("f").unwrap(),
+            ("2026-07-01T09:00:00Z".to_string(), false)
+        );
+
+        // An out-of-order sync reporting a NEWER oldest must not shrink the backlog.
+        s.set_mail_frontier("f", "2026-07-09T09:00:00Z", true).unwrap();
+        assert_eq!(s.mail_frontier("f").unwrap().0, "2026-07-01T09:00:00Z");
+
+        // An EMPTY page reports "nothing older", and must leave the frontier we
+        // already know intact rather than resetting it to the epoch.
+        s.set_mail_frontier("f", "", false).unwrap();
+        assert_eq!(
+            s.mail_frontier("f").unwrap(),
+            ("2026-07-01T09:00:00Z".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn newest_received_is_the_live_poll_watermark() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.newest_mail_received("f").unwrap(), None);
+        s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", true)).unwrap();
+        s.upsert_mail_message(&mail("m2", "f", "2026-07-04T09:00:00Z", true)).unwrap();
+        s.upsert_mail_message(&mail("x", "other", "2026-07-09T09:00:00Z", true)).unwrap();
+        assert_eq!(
+            s.newest_mail_received("f").unwrap().as_deref(),
+            Some("2026-07-04T09:00:00Z")
+        );
+    }
+
+    #[test]
+    fn pruning_the_newest_window_removes_mail_deleted_elsewhere() {
+        let s = Store::open_in_memory().unwrap();
+        for (id, received) in [
+            ("old", "2026-07-01T09:00:00Z"),
+            ("gone", "2026-07-03T09:00:00Z"),
+            ("kept", "2026-07-04T09:00:00Z"),
+        ] {
+            s.upsert_mail_message(&mail(id, "f", received, true)).unwrap();
+        }
+        // The server's newest window holds only `kept`, from 07-03 onwards.
+        let removed = s
+            .prune_mail_window("f", "2026-07-03T09:00:00Z", &["kept".to_string()])
+            .unwrap();
+        assert_eq!(removed, 1);
+        let ids: Vec<String> = s.mail_page("f", None, 10).unwrap().into_iter().map(|m| m.id).collect();
+        // `gone` was deleted in Outlook; `old` predates the window and is untouched.
+        assert_eq!(ids, vec!["kept", "old"]);
+    }
+
+    #[test]
+    fn pruning_with_an_empty_window_is_a_no_op() {
+        // A failed or empty fetch must never be read as "the folder is empty now",
+        // which would wipe the local cache the UI is showing.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", true)).unwrap();
+        assert_eq!(s.prune_mail_window("f", "2026-07-01T09:00:00Z", &[]).unwrap(), 0);
+        assert_eq!(s.prune_mail_window("f", "", &["m1".to_string()]).unwrap(), 0);
+        assert_eq!(s.mail_page("f", None, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_mail_list_page_never_scans_the_table() {
+        // The mail equivalent of the chat query-plan assertions above: the covering
+        // index must serve both the ORDER BY and the keyset predicate, or a mailbox
+        // with thousands of messages makes every keystroke in the list expensive.
+        let s = Store::open_in_memory().unwrap();
+        let plan = query_plan(
+            &s,
+            &format!(
+                "SELECT {MAIL_SELECT_COLS} FROM mail_messages
+                  WHERE folder_id = 'f' AND received < '2026-07-03T09:00:00Z'
+                  ORDER BY received DESC, id ASC LIMIT 40"
+            ),
+        );
+        assert!(
+            plan.contains("USING INDEX idx_mail_folder_received"),
+            "the mail page must use its covering index, got: {plan}"
+        );
+        assert!(
+            !plan.contains("SCAN mail_messages"),
+            "the mail page must not scan the table, got: {plan}"
+        );
+        assert!(
+            !plan.contains("TEMP B-TREE"),
+            "the mail page must not sort in a temp b-tree, got: {plan}"
+        );
     }
 }
