@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS messages (
     compose_time    INTEGER NOT NULL DEFAULT 0,
     sender          TEXT,
     sender_mri      TEXT,
+    messagetype     TEXT NOT NULL DEFAULT '',
     content         TEXT,
     attachments     TEXT NOT NULL DEFAULT '[]',
     reactions       TEXT NOT NULL DEFAULT '[]',
@@ -159,15 +160,26 @@ CREATE INDEX IF NOT EXISTS idx_mail_folder_received ON mail_messages(folder_id, 
 /// index). Bumping the version is what makes an existing store grow them: `open`
 /// re-runs `initialize`, whose `CREATE TABLE IF NOT EXISTS` batch adds the new
 /// tables and leaves every existing one untouched.
-const SCHEMA_VERSION: i64 = 2;
+///
+/// v3 adds `messages.messagetype`, so a `Text` body can be told apart from HTML.
+/// A store that already sat at v2 has to run the pass again to grow the column,
+/// which is exactly what a fresh bump buys.
+const SCHEMA_VERSION: i64 = 3;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
-/// ([`Store::purge_control_frames`], [`Store::convert_legacy_call_events`],
-/// [`Store::convert_legacy_call_recordings`]). Each is a full scan of `content`,
-/// so they are gated on this revision — recorded in `settings` once they have run
-/// — instead of being replayed on every boot. Bump it when a cleanup is added or
+/// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
+/// [`Store::purge_payloadless_control_frames`],
+/// [`Store::convert_legacy_call_events`], [`Store::convert_legacy_call_recordings`],
+/// [`Store::convert_legacy_thread_activities`], [`Store::convert_legacy_cards`],
+/// [`Store::blank_identity_senders`]). Each is a full scan of `content`, so they
+/// are gated on this revision — recorded in `settings` once they have run —
+/// instead of being replayed on every boot. Bump it when a cleanup is added or
 /// broadened, and every store runs the new pass exactly once.
-pub const CLEANUP_REVISION: i64 = 1;
+///
+/// They REWRITE message rows, so a backend that must not write to the user's store
+/// (`TEAMS_LITE_READ_ONLY=1`) skips them entirely — see `prepare_store` in
+/// `src/bin/server.rs`.
+pub const CLEANUP_REVISION: i64 = 3;
 
 /// Key under which [`CLEANUP_REVISION`] is recorded once the pass has run.
 const CLEANUP_SETTING: &str = "cleanup_revision";
@@ -184,12 +196,30 @@ pub struct Message {
     /// `sender` (a display name) is fragile. May be empty for legacy rows stored
     /// before this column existed, or for system frames without a `from`.
     pub sender_mri: String,
+    /// The Teams `messagetype` of the frame this row came from, verbatim
+    /// (`Text`, `RichText/Html`, `RichText/Media_Card`, `Event/Call`, …). Two jobs:
+    ///
+    ///   - RENDERING. A `Text` body is plain text, NOT HTML, so parsing it as HTML
+    ///     eats any angle-bracketed text the sender typed (`Vec<String>` renders as
+    ///     `Vec`). The front-end needs the type to escape instead of parse.
+    ///   - PROVENANCE. It is the first thing to look at when a stored row makes no
+    ///     sense (an empty bubble from a real sender), and the store kept no trace
+    ///     of it before.
+    ///
+    /// Empty for legacy rows stored before this column existed; the next sync or
+    /// live update that carries the message heals it (see [`Store::insert_message`]).
+    pub message_type: String,
     pub content: String,
     /// File/card attachments shared in the message, as a JSON array string (the
     /// same shape the UI receives: `[{name, content_type, url, kind}]`). Inline
     /// images embedded in `content` as `<img>` are NOT recorded here — the UI
     /// extracts and renders those from the content HTML directly. Defaults to
     /// `"[]"` for messages without attachments and for legacy rows.
+    ///
+    /// `kind` is `"image"`/`"file"` for a shared file, `"recording"` for a meeting
+    /// recording, and `"card"` for an adaptive/connector card — which carries one
+    /// extra key, `card`: `{title, text, facts:[{title,value}], actions:[{title,url}]}`
+    /// (see [`crate::teams_cards`]).
     pub attachments: String,
     /// Reactions (Teams "emotions") on the message, as a JSON array string in the
     /// Teams shape: `[{"key":"like","users":[{"mri":"8:...","time":<ms>}]}]`. A
@@ -205,11 +235,20 @@ pub struct Message {
     pub reactions: String,
     /// The system/activity event this message represents, as a JSON object string,
     /// or `""` for a normal chat message. When set, the UI renders a centered
-    /// system line (not a chat bubble) and `content` is empty. Currently only call
-    /// events, shape:
-    /// `{"kind":"call","event":"ended|missed|started","duration_seconds":600,"participant_count":5,"participants":["…"]}`.
+    /// system line (not a chat bubble) and `content` is empty. Two kinds, each
+    /// tagged by `kind`:
+    ///
+    ///   - a call/meeting event —
+    ///     `{"kind":"call","event":"ended|missed|started","duration_seconds":600,"participant_count":5,"participants":["…"],"participant_mris":["…"]}`;
+    ///   - a thread activity (membership / pin change) —
+    ///     `{"kind":"thread_activity","event":"member_added|pinned|unpinned","time_ms":<ms>,"actor_mri":"8:orgid:…","members":["…"],"member_mris":["…"]}`;
+    ///   - a meeting activity (scheduled / cancelled / moved) —
+    ///     `{"kind":"meeting","event":"scheduled|cancelled|updated","title":"…","start_ms":<ms>,"end_ms":<ms>,"location":"…","organizer_mri":"8:orgid:…","join_url":"https://…"}`
+    ///     (see [`crate::teams_read::parse_meeting_activity`]).
+    ///
     /// Legacy rows stored before this column existed carry `""` and are upgraded
-    /// in place by [`Store::convert_legacy_call_events`].
+    /// in place by [`Store::convert_legacy_call_events`] /
+    /// [`Store::convert_legacy_thread_activities`].
     pub system_event: String,
     /// For a team-channel message, the id of the thread's ROOT message (Teams
     /// `rootMessageId` / the `;messageid=<root>` in `conversationLink`). A root
@@ -478,27 +517,28 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
         compose_time: row.get(3)?,
         sender: row.get(4)?,
         sender_mri: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-        content: row.get(6)?,
+        message_type: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+        content: row.get(7)?,
         attachments: row
-            .get::<_, Option<String>>(7)?
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "[]".to_string()),
-        reactions: row
             .get::<_, Option<String>>(8)?
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "[]".to_string()),
-        system_event: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
-        thread_root_id: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
-        thread_subject: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-        deleted: row.get::<_, Option<i64>>(12)?.unwrap_or(0) != 0,
+        reactions: row
+            .get::<_, Option<String>>(9)?
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "[]".to_string()),
+        system_event: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+        thread_root_id: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+        thread_subject: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+        deleted: row.get::<_, Option<i64>>(13)?.unwrap_or(0) != 0,
         mentions: row
-            .get::<_, Option<String>>(13)?
+            .get::<_, Option<String>>(14)?
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "[]".to_string()),
     })
 }
 
-const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions";
+const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions";
 
 fn row_to_mail(row: &Row) -> rusqlite::Result<MailMessageRow> {
     Ok(MailMessageRow {
@@ -669,6 +709,11 @@ fn migrate(conn: &Connection) -> Result<()> {
     // Legacy rows and messages without mentions carry the empty-array default;
     // `backfill_mentions` heals a legacy row on the next sync that carries them.
     add_column("ALTER TABLE messages ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]'")?;
+    // messagetype: the Teams frame type, verbatim. The front-end needs it to render
+    // a `Text` body as plain text instead of parsing it as HTML, and it is the
+    // provenance an unexplainable row was missing. Legacy rows get '' and heal on
+    // the next sync/live update that carries the message (see `insert_message`).
+    add_column("ALTER TABLE messages ADD COLUMN messagetype TEXT NOT NULL DEFAULT ''")?;
 
     // Sidebar-fidelity columns (last-message preview + unread/muted/pinned/hidden
     // state), all sourced from the CSA `users/me` sync. Legacy rows get the
@@ -815,12 +860,14 @@ impl Store {
     }
 
     /// Delete control/system frames that older builds persisted as chat messages,
-    /// before ingestion started gating on `messagetype`. Two shapes leaked in:
+    /// before ingestion started gating on `messagetype`. Three shapes leaked in:
     ///   - typing/presence pushes whose body is a bare Skype notifications
-    ///     endpoint URL (`https://notifications.skype.net/…`), and
+    ///     endpoint URL (`https://notifications.skype.net/…`),
     ///   - `ThreadActivity` member/topic/policy changes whose body is a raw system
     ///     XML frame (`<partlist>`, `<addmember>`, `<topicupdate>`,
-    ///     `<meetingpolicyupdated>`, …).
+    ///     `<meetingpolicyupdated>`, …), and
+    ///   - the same typing/presence pushes with an EMPTY body, which render as a
+    ///     blank bubble (see [`Store::purge_payloadless_control_frames`]).
     ///
     /// Call/meeting events are NOT deleted here — they carry useful information and
     /// are upgraded into structured `system_event` rows by
@@ -852,6 +899,37 @@ impl Store {
         Ok(n)
     }
 
+    /// Delete the typing/presence frames older builds stored with an EMPTY body —
+    /// the ones [`Store::purge_control_frames`] cannot see because their `content`
+    /// never held the endpoint URL (it was the frame's `from`). They render as an
+    /// empty bubble attributed to a `notifications.skype.net/…/contacts/…` URL, or,
+    /// once [`Store::blank_identity_senders`] has run, to nobody at all.
+    ///
+    /// The predicate is "NOTHING to render AND NOBODY to attribute it to": no body,
+    /// no attachment, no system event, not a deletion (a tombstone renders a "message
+    /// deleted" placeholder), no reactions (a reacted-to message was real), and an
+    /// author that is either the notifications endpoint or absent. That last clause is
+    /// what keeps it off the ~20 payload-less rows from REAL senders (item 10 of
+    /// `TODO-message-rendering.md`): those still carry a human name, so they survive
+    /// here and stay diagnosable — the fix for them is provenance (`messagetype`, the
+    /// ingestion log), not deletion.
+    ///
+    /// Meant to run once at startup, next to [`Store::purge_control_frames`];
+    /// idempotent, since it only ever removes rows. Returns rows removed.
+    pub fn purge_payloadless_control_frames(&self) -> Result<usize> {
+        let n = self.exec(
+            "DELETE FROM messages WHERE
+                 (content IS NULL OR content = '')
+              AND (attachments IS NULL OR attachments IN ('', '[]'))
+              AND (system_event IS NULL OR system_event = '')
+              AND (reactions IS NULL OR reactions IN ('', '[]'))
+              AND deleted = 0
+              AND (sender IS NULL OR sender = '' OR sender LIKE 'https://notifications.skype.net/%')",
+            &[],
+        )?;
+        Ok(n)
+    }
+
     /// Upgrade call/meeting event rows that older builds stored raw — either the
     /// `Event/Call` XML frame or the meeting-thread JSON call marker
     /// (`{…"callId"…"meetingOrganizerId"…}`) — into the structured `system_event`
@@ -866,20 +944,14 @@ impl Store {
     /// a converted row has empty content and an unparseable one is skipped, so a
     /// later run converts nothing. Returns the number of rows upgraded.
     pub fn convert_legacy_call_events(&self) -> Result<usize> {
-        let rows: Vec<(String, String, String)> = {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT id, conversation_id, content FROM messages
-                 WHERE system_event = ''
-                   AND (content LIKE '%<callEventType>%'
-                     OR content LIKE '<ended%'
-                     OR content LIKE '<started%'
-                     OR (content LIKE '%callId%' AND content LIKE '%meetingOrganizerId%'))",
-            )?;
-            let mapped = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-            })?;
-            mapped.collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        let rows = self.rows_matching(
+            "SELECT id, conversation_id, content FROM messages
+             WHERE system_event = ''
+               AND (content LIKE '%<callEventType>%'
+                 OR content LIKE '<ended%'
+                 OR content LIKE '<started%'
+                 OR (content LIKE '%callId%' AND content LIKE '%meetingOrganizerId%'))",
+        )?;
         let mut converted = 0;
         for (id, conversation_id, content) in rows {
             // messagetype is unknown for a stored row, so rely on the content shape.
@@ -910,16 +982,10 @@ impl Store {
     /// idempotent — an upgraded row no longer contains the marker in `content`, so
     /// a later run matches nothing. Returns `(upgraded, deleted)`.
     pub fn convert_legacy_call_recordings(&self) -> Result<(usize, usize)> {
-        let rows: Vec<(String, String, String)> = {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT id, conversation_id, content FROM messages
-                 WHERE content LIKE '%CallRecording%'",
-            )?;
-            let mapped = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-            })?;
-            mapped.collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        let rows = self.rows_matching(
+            "SELECT id, conversation_id, content FROM messages
+             WHERE content LIKE '%CallRecording%'",
+        )?;
         let (mut upgraded, mut deleted) = (0usize, 0usize);
         for (id, conversation_id, content) in rows {
             match crate::teams_read::parse_call_recording("", &content) {
@@ -945,6 +1011,201 @@ impl Store {
             }
         }
         Ok((upgraded, deleted))
+    }
+
+    /// Upgrade `ThreadActivity` frames that older builds stored as a bubble of raw
+    /// JSON (`{"eventtime":…,"members":[…]}` for a member added,
+    /// `{"eventtime":…,"operation":"pinned"}` for a pin) into the structured
+    /// `system_event` form the UI renders as a centered line. Frames we cannot label
+    /// are deleted: they are machinery, and a bubble of JSON is strictly worse than
+    /// nothing. The sender is blanked at the same time — these frames carry the
+    /// THREAD as their `from`, so the row's author was a raw URL.
+    ///
+    /// [`crate::teams_read::parse_thread_activity`] is the source of truth; the
+    /// `LIKE` clause is only a cheap prefilter, so a real message that merely
+    /// contains the word `eventtime` is left untouched, never deleted.
+    ///
+    /// Meant to run once at startup (next to [`Store::convert_legacy_call_events`]);
+    /// idempotent — an upgraded row has empty content, so a later run matches
+    /// nothing. Returns `(upgraded, deleted)`.
+    pub fn convert_legacy_thread_activities(&self) -> Result<(usize, usize)> {
+        let rows = self.rows_matching(
+            "SELECT id, conversation_id, content FROM messages
+             WHERE system_event = '' AND content LIKE '%eventtime%'",
+        )?;
+        let (mut upgraded, mut deleted) = (0usize, 0usize);
+        for (id, conversation_id, content) in rows {
+            match crate::teams_read::parse_thread_activity(&content) {
+                Some(crate::teams_read::ThreadActivity::Event(event)) => {
+                    self.exec(
+                        "UPDATE messages SET content = '', sender = '', system_event = ?3
+                         WHERE conversation_id = ?1 AND id = ?2",
+                        params![conversation_id, id, event.to_string()],
+                    )?;
+                    upgraded += 1;
+                }
+                Some(crate::teams_read::ThreadActivity::Noise) => {
+                    self.exec(
+                        "DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2",
+                        params![conversation_id, id],
+                    )?;
+                    deleted += 1;
+                }
+                // Not a thread-activity frame — a real message that just mentions the
+                // word. Leave it exactly as it is.
+                None => {}
+            }
+        }
+        Ok((upgraded, deleted))
+    }
+
+    /// Upgrade adaptive/connector card rows that older builds stored as the raw
+    /// `<URIObject type="SWIFT.1">` body — which renders as Skype's "Card - access it
+    /// on … cards.unsupported" apology, in the bubble AND in the sidebar preview —
+    /// into the structured card attachment the UI can render (see
+    /// [`crate::teams_cards`]). The decoded card replaces the body, which becomes
+    /// empty.
+    ///
+    /// [`crate::teams_cards::parse_swift_card`] is the source of truth; a row whose
+    /// payload cannot be decoded keeps its fallback body rather than being emptied,
+    /// so nothing is ever lost. Meant to run once at startup; idempotent — an
+    /// upgraded row no longer holds a URIObject. Returns the number of rows upgraded.
+    pub fn convert_legacy_cards(&self) -> Result<usize> {
+        let rows = self.rows_matching(
+            "SELECT id, conversation_id, content FROM messages
+             WHERE content LIKE '%SWIFT.1%'",
+        )?;
+        let mut upgraded = 0;
+        for (id, conversation_id, content) in rows {
+            let Some(crate::teams_cards::SwiftCard::Card(card)) =
+                crate::teams_cards::parse_swift_card(&content)
+            else {
+                continue;
+            };
+            let attachments = serde_json::Value::Array(vec![card]).to_string();
+            self.exec(
+                "UPDATE messages SET content = '', attachments = ?3
+                 WHERE conversation_id = ?1 AND id = ?2",
+                params![conversation_id, id, attachments],
+            )?;
+            upgraded += 1;
+        }
+        Ok(upgraded)
+    }
+
+    /// Blank the `sender` of rows whose author is an IDENTITY rather than a name — a
+    /// `https://…/v1/users/ME/contacts/8:orgid:<guid>` contacts URL or a bare MRI.
+    /// Older builds fell back to the frame's `from` when `imdisplayname` was empty
+    /// (meeting scheduled/cancelled notices, thread activities, recordings), so those
+    /// bubbles are attributed to a raw URL. Ingestion no longer does that (see
+    /// `teams_read::sender_display_name`); this heals what is already stored.
+    ///
+    /// Blank is the correct value, not a placeholder: the identity still lives in
+    /// `sender_mri`, and both the UI and [`Store::display_name_for_mri`] resolve a
+    /// name from it. No real display name can match these patterns, so the update
+    /// cannot touch a genuine author. Idempotent; returns rows healed.
+    pub fn blank_identity_senders(&self) -> Result<usize> {
+        let n = self.exec(
+            "UPDATE messages SET sender = '' WHERE
+                 sender LIKE 'http://%'
+              OR sender LIKE 'https://%'
+              OR sender LIKE '8:%'
+              OR sender LIKE '19:%'
+              OR sender LIKE '28:%'
+              OR sender LIKE '48:%'",
+            &[],
+        )?;
+        Ok(n)
+    }
+
+    /// Re-file the channel posts that older builds stored under a `;messageid=`
+    /// DEEP-LINK id, then delete the pseudo-conversations those ids created.
+    ///
+    /// `19:<channel>@thread.tacv2;messageid=<rootId>` addresses one thread inside a
+    /// channel, not a conversation: the live feed used to derive a conversation id
+    /// from it verbatim (fixed in `trouter_events::conversation_id_of`), so 14 rows
+    /// holding 71 channel posts had piled up in `conversations` under
+    /// `kind='unknown'` while the posts were missing from their channel. This heals
+    /// what is already stored: each message moves to the base thread id, taking the
+    /// suffix's root id as its `thread_root_id` when it has none, and the pseudo-row
+    /// is removed.
+    ///
+    /// A move can COLLIDE — the same post often exists under the real channel id too
+    /// (37 of the 71 did), and `(conversation_id, id)` is the primary key — so the
+    /// UPDATE is `OR IGNORE` (the duplicate is left behind, then deleted) rather than
+    /// an error that would abort the whole migration. Nothing is lost: the surviving
+    /// row is the one already filed correctly.
+    ///
+    /// A base id that is NOT a channel keeps its conversation row (an ordinary chat
+    /// deep link): the messages are merged into it and its `last_message_time` is
+    /// carried over, so they never become unreachable. Idempotent — no id contains a
+    /// `;` afterwards. Returns `(messages re-filed, duplicates dropped, pseudo-rows
+    /// deleted)`.
+    pub fn reparent_thread_link_messages(&self) -> Result<(usize, usize, usize)> {
+        let (mut moved, mut dropped, mut rows_deleted) = (0usize, 0usize, 0usize);
+        for link_id in self.thread_link_ids()? {
+            let base = crate::teams_read::base_thread_id(&link_id).to_string();
+            if base.is_empty() || base == link_id {
+                continue; // not a deep-link id after all; never touch it
+            }
+            let root = crate::teams_read::thread_link_root_id(&link_id).unwrap_or_default();
+            moved += self.exec(
+                "UPDATE OR IGNORE messages
+                    SET conversation_id = ?2,
+                        thread_root_id = CASE
+                            WHEN thread_root_id = '' AND ?3 <> '' THEN ?3
+                            ELSE thread_root_id END
+                  WHERE conversation_id = ?1",
+                params![link_id, base, root],
+            )?;
+            // Whatever the UPDATE skipped is a duplicate of a correctly-filed row.
+            dropped += self.exec(
+                "DELETE FROM messages WHERE conversation_id = ?1",
+                params![link_id],
+            )?;
+            // For a chat (not a channel), keep the merged messages reachable from the
+            // base conversation, carrying the pseudo-row's recency with them.
+            if !crate::teams_read::is_channel_thread_id(&base) {
+                let last_time: i64 = self
+                    .query_one(
+                        "SELECT last_message_time FROM conversations WHERE id = ?1",
+                        params![link_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(0);
+                self.upsert_conversation(&base, "", last_time)?;
+            }
+            if self.delete_conversation_row(&link_id)? {
+                rows_deleted += 1;
+            }
+        }
+        Ok((moved, dropped, rows_deleted))
+    }
+
+    /// Every conversation id holding a `;messageid=` deep-link suffix, from BOTH the
+    /// `conversations` table and the messages themselves — a live post could file
+    /// messages under such an id without ever creating a list row (5 of the 19 ids in
+    /// the real store were message-only).
+    fn thread_link_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM conversations WHERE id LIKE '%;messageid=%'
+             UNION
+             SELECT DISTINCT conversation_id FROM messages WHERE conversation_id LIKE '%;messageid=%'",
+        )?;
+        let ids = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(ids.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The `(id, conversation_id, content)` of every row a cleanup's prefilter
+    /// matches, collected up front so the pass can UPDATE/DELETE while iterating.
+    /// `sql` must select exactly those three columns.
+    fn rows_matching(&self, sql: &str) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare_cached(sql)?;
+        let mapped = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        Ok(mapped.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Returns true when the row was newly inserted or an existing row actually
@@ -1177,6 +1438,10 @@ impl Store {
     /// for rows that share a position (e.g. legacy rows synced before positions
     /// existed, which all default to 0). Empty channels are never inserted, so every
     /// row here has content.
+    ///
+    /// The CSA channel container carries no last-message BODY, so a channel's stored
+    /// preview is always empty — it is derived here from the newest message we hold
+    /// (see [`Store::derived_preview`]).
     pub fn channels(&self) -> Result<Vec<ChannelRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, team_id, team_name, display_name, is_general, is_favorite,
@@ -1203,7 +1468,42 @@ impl Store {
                 team_group_id: r.get(12)?,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut channels: Vec<ChannelRow> = rows.collect::<rusqlite::Result<_>>()?;
+        for channel in &mut channels {
+            if channel.last_message_preview.is_empty() {
+                channel.last_message_preview = self.derived_preview(&channel.id)?;
+            }
+        }
+        Ok(channels)
+    }
+
+    /// A sidebar preview derived from the messages we HOLD for a thread, for a
+    /// container whose synced preview is empty. Returns `""` when we hold nothing
+    /// describable.
+    ///
+    /// Local-first, and the only way to fill the gaps the CSA snapshot leaves: a
+    /// channel container never carries a last-message body, and a chat whose newest
+    /// frame is a system event (a call, a member added) previews as nothing — 44
+    /// containers with messages showed a blank second line, which reads as "no
+    /// messages" when there are hundreds.
+    ///
+    /// Scans a few newest rows rather than only the last one, so an undescribable
+    /// frame at the top (a payload-less row) falls through to the last message that
+    /// *can* be described. [`crate::teams_read::preview_for_message`] does the
+    /// labelling (text, emoji, `📷 Image`, `📎 File`, a card title, a call line).
+    fn derived_preview(&self, thread_id: &str) -> Result<String> {
+        /// How far back to look for something describable. Small: this runs per
+        /// container on a sidebar read, and a thread whose newest frames are all
+        /// undescribable has nothing to say anyway.
+        const SCAN_DEPTH: i64 = 5;
+        let preview = self
+            .newest_messages(thread_id, SCAN_DEPTH)?
+            .iter()
+            .rev()
+            .map(crate::teams_read::preview_for_message)
+            .find(|preview| !preview.is_empty())
+            .unwrap_or_default();
+        Ok(preview)
     }
 
     // ---- mail (read-only Outlook mirror) ------------------------------------
@@ -1525,18 +1825,54 @@ impl Store {
     /// Mentions travel WITH the body — a mention span is addressed by an `itemid`
     /// into this list — so they are rewritten exactly when the content is (an edit
     /// can add or drop a mention), and left alone by a frame that carries no body.
+    ///
+    /// `messagetype` is BACKFILLED on conflict: it is immutable for a given message
+    /// (Teams never retypes one), so a row that predates the column takes the
+    /// incoming value and then stops changing. That heal counts as a change, because
+    /// it is one the UI must re-render — a `Text` body renders differently once its
+    /// type is known — and it converges after a single sync per row.
+    ///
+    /// So are the CHANNEL-THREAD fields and the attachments, under one rule: an EMPTY
+    /// stored value takes a non-empty incoming one, and a non-empty stored value is
+    /// never clobbered. Without it a row stored before channel threading landed could
+    /// never heal — 496 channel posts held no `thread_root_id`, so the UI grouped each
+    /// one as its own single-post thread, and no amount of re-fetching fixed it
+    /// because the conflict branch only ever wrote `content`/`deleted`. Backfill-only
+    /// (rather than "latest wins") is what keeps a frame that merely omits a field —
+    /// a plain edit, a reaction echo — from erasing good data.
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
         let reactions = if m.reactions.is_empty() { "[]" } else { m.reactions.as_str() };
         let n = self.exec(
-            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(conversation_id, id) DO UPDATE SET
-                 content = CASE WHEN excluded.content = '' THEN messages.content ELSE excluded.content END,
+                 -- a frame that turns out to be a SYSTEM EVENT drops the body it was
+                 -- stored with: the event says it better (and in the reader's own
+                 -- language), so a legacy row healed by a refetch ends up exactly like
+                 -- a freshly ingested one instead of keeping a stale English sentence
+                 content = CASE
+                     WHEN excluded.system_event <> '' AND messages.system_event = '' THEN ''
+                     WHEN excluded.content = '' THEN messages.content
+                     ELSE excluded.content END,
                  mentions = CASE WHEN excluded.content = '' THEN messages.mentions ELSE excluded.mentions END,
+                 messagetype = CASE WHEN excluded.messagetype <> '' THEN excluded.messagetype ELSE messages.messagetype END,
+                 -- backfill-only: an empty stored field takes the incoming value,
+                 -- a filled one is left alone (see the doc comment)
+                 thread_root_id = CASE WHEN messages.thread_root_id = '' THEN excluded.thread_root_id ELSE messages.thread_root_id END,
+                 thread_subject = CASE WHEN messages.thread_subject = '' THEN excluded.thread_subject ELSE messages.thread_subject END,
+                 attachments = CASE
+                     WHEN messages.attachments IN ('', '[]') AND excluded.attachments NOT IN ('', '[]')
+                     THEN excluded.attachments ELSE messages.attachments END,
+                 system_event = CASE WHEN messages.system_event = '' THEN excluded.system_event ELSE messages.system_event END,
                  deleted = MAX(messages.deleted, excluded.deleted)
                  WHERE (excluded.content <> '' AND messages.content <> excluded.content)
-                    OR (excluded.deleted = 1 AND messages.deleted = 0)",
-            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.content, m.attachments, reactions, m.system_event, m.thread_root_id, m.thread_subject, m.deleted as i64, m.mentions],
+                    OR (excluded.deleted = 1 AND messages.deleted = 0)
+                    OR (excluded.messagetype <> '' AND messages.messagetype = '')
+                    OR (excluded.thread_root_id <> '' AND messages.thread_root_id = '')
+                    OR (excluded.thread_subject <> '' AND messages.thread_subject = '')
+                    OR (excluded.system_event <> '' AND messages.system_event = '')
+                    OR (excluded.attachments NOT IN ('', '[]') AND messages.attachments IN ('', '[]'))",
+            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.message_type, m.content, m.attachments, reactions, m.system_event, m.thread_root_id, m.thread_subject, m.deleted as i64, m.mentions],
         )?;
         Ok(n == 1)
     }
@@ -1786,13 +2122,22 @@ impl Store {
         // server (is_channel_thread_id || is_channel). The SQL above only knows the
         // channels table; this drops any tacv2 thread CSA has not yet classified so
         // a channel can never leak into the chat sidebar.
-        rows.filter(|r| {
-            r.as_ref()
-                .map(|c| !crate::teams_read::is_channel_thread_id(&c.id))
-                .unwrap_or(true)
-        })
-        .collect::<rusqlite::Result<_>>()
-        .map_err(Into::into)
+        let mut conversations: Vec<ConversationRow> = rows
+            .filter(|r| {
+                r.as_ref()
+                    .map(|c| !crate::teams_read::is_channel_thread_id(&c.id))
+                    .unwrap_or(true)
+            })
+            .collect::<rusqlite::Result<_>>()?;
+        // A synced preview can be empty (the newest frame was a system event, or an
+        // emoji/image-only body an older build previewed as nothing); derive one from
+        // what we hold rather than showing a blank row.
+        for conversation in &mut conversations {
+            if conversation.last_message_preview.is_empty() {
+                conversation.last_message_preview = self.derived_preview(&conversation.id)?;
+            }
+        }
+        Ok(conversations)
     }
 
     /// Derive a display name for a conversation whose stored title is empty
@@ -1899,7 +2244,7 @@ mod tests {
             content: format!("message {seq}"),
             attachments: "[]".into(),
             reactions: "[]".into(),
-            system_event: String::new(),
+            message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             mentions: "[]".into(),
@@ -2318,7 +2663,7 @@ mod tests {
             content: content.into(),
             attachments: "[]".into(),
             reactions: "[]".into(),
-            system_event: String::new(),
+            message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             mentions: "[]".into(),
@@ -2357,6 +2702,266 @@ mod tests {
         assert_eq!(s.purge_control_frames().unwrap(), 0);
     }
 
+    /// A row with nothing to render AND nobody to attribute it to is a stored
+    /// typing/presence frame — but a payload-less row from a REAL sender is the
+    /// still-undiagnosed shape of item 10, and must survive.
+    #[test]
+    fn purge_removes_payloadless_frames_but_keeps_rows_from_real_senders() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+
+        let row = |id: &str, sender: &str| Message {
+            id: id.into(),
+            conversation_id: "c1".into(),
+            seq: 1,
+            compose_time: 1,
+            sender: sender.into(),
+            sender_mri: "8:orgid:bea5de00".into(),
+            content: String::new(),
+            attachments: "[]".into(),
+            reactions: "[]".into(),
+            message_type: String::new(),
+            system_event: String::new(),
+            thread_root_id: String::new(),
+            thread_subject: String::new(),
+            deleted: false,
+            mentions: "[]".into(),
+        };
+
+        // Control frames: the raw contacts URL an older build stored as the author,
+        // and the same row after `blank_identity_senders` blanked it.
+        s.insert_message(&row("junk1", "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:bea5de00")).unwrap();
+        s.insert_message(&row("junk2", "")).unwrap();
+        // Survivors, each for a different reason.
+        s.insert_message(&row("real1", "Matthieu GAUCHER")).unwrap(); // a human author
+        let mut with_body = row("real2", "");
+        with_body.content = "<p>hello</p>".into();
+        s.insert_message(&with_body).unwrap();
+        let mut with_file = row("real3", "");
+        with_file.attachments = "[{\"kind\":\"file\",\"name\":\"a.pdf\"}]".into();
+        s.insert_message(&with_file).unwrap();
+        let mut with_event = row("real4", "");
+        with_event.system_event = "{\"kind\":\"call\",\"event\":\"ended\"}".into();
+        s.insert_message(&with_event).unwrap();
+        let mut tombstone = row("real5", "");
+        tombstone.deleted = true;
+        s.insert_message(&tombstone).unwrap();
+        let mut reacted = row("real6", "");
+        reacted.reactions = "[{\"key\":\"like\",\"users\":[{\"mri\":\"8:orgid:x\"}]}]".into();
+        s.insert_message(&reacted).unwrap();
+
+        assert_eq!(s.purge_payloadless_control_frames().unwrap(), 2);
+        let mut left: Vec<_> = s.newest_messages("c1", 50).unwrap().into_iter().map(|m| m.id).collect();
+        left.sort();
+        assert_eq!(left, ["real1", "real2", "real3", "real4", "real5", "real6"]);
+        // Idempotent.
+        assert_eq!(s.purge_payloadless_control_frames().unwrap(), 0);
+    }
+
+    /// Channel posts filed under a `;messageid=` deep-link id move back into their
+    /// channel, duplicates are dropped instead of erroring, and the phantom
+    /// conversation rows disappear from the chat list.
+    #[test]
+    fn reparents_thread_link_messages_into_their_channel() {
+        let s = Store::open_in_memory().unwrap();
+        let channel = "19:chan@thread.tacv2";
+        let link = "19:chan@thread.tacv2;messageid=100";
+        s.upsert_channel_full(&chan_upd(channel, "team", "Team", "General", 0)).unwrap();
+        s.upsert_conversation(link, "", 500).unwrap();
+
+        // Two posts under the phantom id: one already filed under the channel too
+        // (the collision), one only here.
+        let post = |conv: &str, id: &str| Message {
+            id: id.into(),
+            conversation_id: conv.into(),
+            seq: id.parse().unwrap(),
+            compose_time: id.parse().unwrap(),
+            sender: "Alice".into(),
+            sender_mri: String::new(),
+            content: format!("post {id}"),
+            attachments: "[]".into(),
+            reactions: "[]".into(),
+            message_type: String::new(),
+            system_event: String::new(),
+            thread_root_id: String::new(),
+            thread_subject: String::new(),
+            deleted: false,
+            mentions: "[]".into(),
+        };
+        s.insert_message(&post(channel, "100")).unwrap(); // the root, already correct
+        s.insert_message(&post(link, "100")).unwrap(); // ...and its duplicate
+        s.insert_message(&post(link, "101")).unwrap(); // only under the phantom id
+        // A phantom id with messages but NO conversation row must be healed too.
+        let orphan_link = "19:other@thread.tacv2;messageid=200";
+        s.insert_message(&post(orphan_link, "201")).unwrap();
+
+        let (moved, dropped, rows) = s.reparent_thread_link_messages().unwrap();
+        assert_eq!((moved, dropped, rows), (2, 1, 1));
+
+        let ids: Vec<_> = s.newest_messages(channel, 50).unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, ["100", "101"], "both posts now live under the channel");
+        // The moved post takes the deep link's root id; the one already filed keeps
+        // whatever it had (empty here — a refetch backfills it, see item 6).
+        let moved_post = s.get_message(channel, "101").unwrap().unwrap();
+        assert_eq!(moved_post.thread_root_id, "100");
+        assert_eq!(moved_post.content, "post 101", "the surviving row keeps its body");
+        assert!(s.newest_messages(link, 50).unwrap().is_empty(), "nothing left under the phantom id");
+        assert_eq!(s.newest_messages("19:other@thread.tacv2", 50).unwrap().len(), 1);
+        assert!(
+            !s.conversations("").unwrap().iter().any(|c| c.id == link),
+            "the phantom conversation is gone from the chat list"
+        );
+
+        // Idempotent: nothing left to re-file.
+        assert_eq!(s.reparent_thread_link_messages().unwrap(), (0, 0, 0));
+    }
+
+    /// A non-channel deep link (an ordinary chat) keeps a reachable conversation:
+    /// the messages merge into the base chat, which inherits the phantom's recency.
+    #[test]
+    fn reparenting_a_chat_deep_link_keeps_the_chat_reachable() {
+        let s = Store::open_in_memory().unwrap();
+        let link = "19:grp@thread.v2;messageid=100";
+        s.upsert_conversation(link, "", 700).unwrap();
+        let mut m = msg(link, 5);
+        m.id = "500".into();
+        s.insert_message(&m).unwrap();
+
+        let (moved, dropped, rows) = s.reparent_thread_link_messages().unwrap();
+        assert_eq!((moved, dropped, rows), (1, 0, 1));
+
+        let convs = s.conversations("").unwrap();
+        let base = convs
+            .iter()
+            .find(|c| c.id == "19:grp@thread.v2")
+            .expect("the base chat exists");
+        assert_eq!(base.last_message_time, 700, "recency carried over from the phantom row");
+        assert_eq!(s.newest_messages("19:grp@thread.v2", 10).unwrap().len(), 1);
+    }
+
+    /// A re-fetch must HEAL a legacy row that predates channel threading: 496 stored
+    /// channel posts had no `thread_root_id`, and the old conflict clause (content +
+    /// deleted only) meant no sync could ever fill it in.
+    #[test]
+    fn insert_message_backfills_thread_fields_and_attachments_without_clobbering() {
+        let s = Store::open_in_memory().unwrap();
+        let channel = "19:chan@thread.tacv2";
+        // As stored before threading landed: body only.
+        let mut legacy = msg(channel, 1);
+        legacy.content = "<p>root post</p>".into();
+        assert!(s.insert_message(&legacy).unwrap());
+
+        // The same message as a refetch delivers it now.
+        let mut refetched = legacy.clone();
+        refetched.thread_root_id = "m1".into();
+        refetched.thread_subject = "Release notes".into();
+        refetched.attachments = "[{\"kind\":\"file\",\"name\":\"notes.pdf\"}]".into();
+        assert!(s.insert_message(&refetched).unwrap(), "the heal is a change the UI must render");
+        let healed = s.get_message(channel, "m1").unwrap().unwrap();
+        assert_eq!(healed.thread_root_id, "m1");
+        assert_eq!(healed.thread_subject, "Release notes");
+        assert_eq!(healed.attachments, "[{\"kind\":\"file\",\"name\":\"notes.pdf\"}]");
+
+        // A later frame that carries none of it (a plain edit, a reaction echo) must
+        // never blank what we now hold.
+        let mut sparse = legacy.clone();
+        sparse.content = "<p>root post edited</p>".into();
+        assert!(s.insert_message(&sparse).unwrap());
+        let after_edit = s.get_message(channel, "m1").unwrap().unwrap();
+        assert_eq!(after_edit.content, "<p>root post edited</p>");
+        assert_eq!(after_edit.thread_root_id, "m1", "thread linkage survives an edit");
+        assert_eq!(after_edit.thread_subject, "Release notes");
+        assert_eq!(after_edit.attachments, "[{\"kind\":\"file\",\"name\":\"notes.pdf\"}]");
+        // ...and a different root id is never overwritten either (first value wins).
+        let mut other_root = legacy.clone();
+        other_root.thread_root_id = "m999".into();
+        s.insert_message(&other_root).unwrap();
+        assert_eq!(s.get_message(channel, "m1").unwrap().unwrap().thread_root_id, "m1");
+
+        // Converged: replaying the refetch is now a no-op.
+        assert!(!s.insert_message(&refetched).unwrap());
+    }
+
+    /// A legacy row whose frame turns out to be a SYSTEM EVENT heals completely on a
+    /// refetch: the event lands and the body it was stored with (a localised
+    /// "Scheduled a meeting", a raw call frame) goes away, so it ends up identical to
+    /// a freshly ingested row instead of a system line with a stale bubble behind it.
+    #[test]
+    fn insert_message_drops_the_body_of_a_row_that_becomes_a_system_event() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 10).unwrap();
+        let mut legacy = msg("c1", 1);
+        legacy.content = "Scheduled a meeting".into();
+        s.insert_message(&legacy).unwrap();
+
+        let mut refetched = legacy.clone();
+        refetched.content = String::new();
+        refetched.system_event = "{\"kind\":\"meeting\",\"event\":\"scheduled\"}".into();
+        assert!(s.insert_message(&refetched).unwrap());
+        let healed = s.get_message("c1", "m1").unwrap().unwrap();
+        assert_eq!(healed.system_event, "{\"kind\":\"meeting\",\"event\":\"scheduled\"}");
+        assert_eq!(healed.content, "", "the stale body is gone");
+        // Converged, and a plain frame afterwards cannot resurrect a body either.
+        assert!(!s.insert_message(&refetched).unwrap());
+
+        // A row that already carries an event keeps its content rule (an edit still
+        // applies), so this only ever fires on the transition into a system event.
+        let mut edited = refetched.clone();
+        edited.content = "<p>real text</p>".into();
+        assert!(s.insert_message(&edited).unwrap());
+        assert_eq!(s.get_message("c1", "m1").unwrap().unwrap().content, "<p>real text</p>");
+    }
+
+    /// The sidebar never shows a blank second line for a thread we hold messages
+    /// for: a channel container carries no preview at all in the CSA snapshot, and a
+    /// chat whose newest frame is a call event previews as nothing.
+    #[test]
+    fn sidebar_previews_fall_back_to_the_newest_stored_message() {
+        let s = Store::open_in_memory().unwrap();
+        let channel = "19:chan@thread.tacv2";
+        s.upsert_channel_full(&chan_upd(channel, "team", "Team", "General", 10)).unwrap();
+        s.upsert_conversation("c1", "Chat", 10).unwrap();
+        s.upsert_conversation("c2", "Quiet", 10).unwrap();
+
+        let mut text = msg(channel, 1);
+        text.content = "<p>ship it</p>".into();
+        s.insert_message(&text).unwrap();
+        // Newest in the channel: an image-only body -> a typed label.
+        let mut image = msg(channel, 2);
+        image.content = "<p><img itemtype=\"http://schema.skype.com/AMSImage\" src=\"https://x/imgo\"></p>".into();
+        s.insert_message(&image).unwrap();
+
+        // The chat's newest row is a call event; the one before it is real text.
+        let mut chat_text = msg("c1", 1);
+        chat_text.content = "<p>see you</p>".into();
+        s.insert_message(&chat_text).unwrap();
+        let mut call = msg("c1", 2);
+        call.content = String::new();
+        call.system_event = "{\"kind\":\"call\",\"event\":\"missed\"}".into();
+        s.insert_message(&call).unwrap();
+
+        assert_eq!(s.channels().unwrap()[0].last_message_preview, "📷 Image");
+        let convs = s.conversations("").unwrap();
+        let preview = |id: &str| {
+            convs.iter().find(|c| c.id == id).unwrap().last_message_preview.clone()
+        };
+        assert_eq!(preview("c1"), "Missed call");
+        assert_eq!(preview("c2"), "", "a thread with no messages still previews as nothing");
+
+        // A synced preview is authoritative: the fallback only fills a blank one.
+        s.upsert_conversation_full(&ConversationUpdate {
+            last_message_preview: "from the sync",
+            last_message_time: 20,
+            ..upd("c1", "Chat", 20, ConversationKind::Group)
+        })
+        .unwrap();
+        let convs = s.conversations("").unwrap();
+        assert_eq!(
+            convs.iter().find(|c| c.id == "c1").unwrap().last_message_preview,
+            "from the sync"
+        );
+    }
+
     #[test]
     fn converts_legacy_call_events() {
         let s = Store::open_in_memory().unwrap();
@@ -2372,7 +2977,7 @@ mod tests {
             content: content.into(),
             attachments: "[]".into(),
             reactions: "[]".into(),
-            system_event: String::new(),
+            message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             mentions: "[]".into(),
@@ -2425,7 +3030,7 @@ mod tests {
             content: content.into(),
             attachments: "[]".into(),
             reactions: "[]".into(),
-            system_event: String::new(),
+            message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             mentions: "[]".into(),
@@ -2468,6 +3073,215 @@ mod tests {
     }
 
     #[test]
+    fn converts_legacy_thread_activities() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+
+        let frame = |id: &str, content: &str| {
+            let mut m = msg("c1", 1);
+            m.id = id.into();
+            m.content = content.into();
+            // These rows were stored with the thread's contacts URL as their author.
+            m.sender = "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/19:x@thread.v2".into();
+            m
+        };
+
+        // A member added, a pin, an operation we do not model, and a real message
+        // that merely contains the word `eventtime`.
+        s.insert_message(&frame(
+            "act1",
+            "{\"eventtime\":1784726018187,\"initiator\":\"8:orgid:init\",\"members\":[{\"id\":\"8:orgid:added\",\"friendlyname\":\"Théophile WALLEZ\"}]}",
+        )).unwrap();
+        s.insert_message(&frame(
+            "act2",
+            "{\"eventtime\":1781884089268,\"userId\":\"8:orgid:pinner\",\"operation\":\"pinned\"}",
+        )).unwrap();
+        s.insert_message(&frame(
+            "act3",
+            "{\"eventtime\":1781884089268,\"userId\":\"8:orgid:x\",\"operation\":\"somethingelse\"}",
+        )).unwrap();
+        s.insert_message(&frame("chat1", "<p>the eventtime field is epoch ms</p>")).unwrap();
+
+        let (upgraded, deleted) = s.convert_legacy_thread_activities().unwrap();
+        assert_eq!((upgraded, deleted), (2, 1), "two labelled activities, one unlabelled dropped");
+
+        let msgs = s.newest_messages("c1", 50).unwrap();
+        let ids: std::collections::HashSet<_> = msgs.iter().map(|m| m.id.as_str()).collect();
+        assert!(!ids.contains("act3"), "an activity we cannot label is removed");
+
+        let added = msgs.iter().find(|m| m.id == "act1").unwrap();
+        assert_eq!(added.content, "", "the raw JSON body is cleared once structured");
+        assert_eq!(added.sender, "", "the thread-URL author is blanked");
+        let event: serde_json::Value = serde_json::from_str(&added.system_event).unwrap();
+        assert_eq!(event["kind"], "thread_activity");
+        assert_eq!(event["event"], "member_added");
+        assert_eq!(event["time_ms"], 1784726018187i64);
+        assert_eq!(event["actor_mri"], "8:orgid:init");
+        assert_eq!(event["members"], serde_json::json!(["Théophile WALLEZ"]));
+        assert_eq!(event["member_mris"], serde_json::json!(["8:orgid:added"]));
+
+        let pinned: serde_json::Value =
+            serde_json::from_str(&msgs.iter().find(|m| m.id == "act2").unwrap().system_event).unwrap();
+        assert_eq!(pinned["event"], "pinned");
+        assert_eq!(pinned["actor_mri"], "8:orgid:pinner");
+
+        // The real message is left completely untouched.
+        let chat = msgs.iter().find(|m| m.id == "chat1").unwrap();
+        assert_eq!(chat.content, "<p>the eventtime field is epoch ms</p>");
+        assert_eq!(chat.system_event, "");
+
+        // Idempotent: converted rows hold no body, so a second pass does nothing.
+        assert_eq!(s.convert_legacy_thread_activities().unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn converts_legacy_cards() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+
+        let payload = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            serde_json::json!({
+                "summary": "n-Alerts",
+                "attachments": [{
+                    "contentType": "application/vnd.microsoft.teams.card.o365connector",
+                    "content": { "text": "<p>Filebeat error(s)</p>" }
+                }]
+            })
+            .to_string(),
+        );
+        let card_body = format!(
+            "<URIObject type=\"SWIFT.1\">Card - access it on <a href=\"https://go.skype.com/cards.unsupported\">…</a>. <Title>Card</Title><Swift b64=\"{payload}\"/></URIObject>"
+        );
+
+        let frame = |id: &str, content: &str| {
+            let mut m = msg("c1", 1);
+            m.id = id.into();
+            m.content = content.into();
+            m
+        };
+        s.insert_message(&frame("card1", &card_body)).unwrap();
+        // A card whose payload cannot be decoded keeps its fallback body: an
+        // undecodable card is still better than an empty bubble.
+        s.insert_message(&frame("card2", "<URIObject type=\"SWIFT.1\"><Title>Card</Title></URIObject>")).unwrap();
+        s.insert_message(&frame("chat1", "<p>SWIFT.1 is the card body type</p>")).unwrap();
+
+        assert_eq!(s.convert_legacy_cards().unwrap(), 1);
+
+        let msgs = s.newest_messages("c1", 50).unwrap();
+        let card = msgs.iter().find(|m| m.id == "card1").unwrap();
+        assert_eq!(card.content, "", "the Skype fallback sentence is cleared");
+        let atts: serde_json::Value = serde_json::from_str(&card.attachments).unwrap();
+        assert_eq!(atts.as_array().unwrap().len(), 1);
+        assert_eq!(atts[0]["kind"], "card");
+        assert_eq!(atts[0]["name"], "n-Alerts");
+        assert_eq!(atts[0]["card"]["title"], "n-Alerts");
+        assert_eq!(atts[0]["card"]["text"], "Filebeat error(s)");
+
+        assert_eq!(
+            msgs.iter().find(|m| m.id == "card2").unwrap().content,
+            "<URIObject type=\"SWIFT.1\"><Title>Card</Title></URIObject>",
+            "an undecodable card keeps its body",
+        );
+        assert_eq!(
+            msgs.iter().find(|m| m.id == "chat1").unwrap().content,
+            "<p>SWIFT.1 is the card body type</p>",
+            "a message that merely names the type is untouched",
+        );
+
+        // Idempotent: an upgraded row no longer holds a URIObject.
+        assert_eq!(s.convert_legacy_cards().unwrap(), 0);
+    }
+
+    #[test]
+    fn blank_identity_senders_only_touches_identity_authors() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+
+        let authored = |id: &str, sender: &str| {
+            let mut m = msg("c1", 1);
+            m.id = id.into();
+            m.sender = sender.into();
+            m
+        };
+        s.insert_message(&authored("a", "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:abc")).unwrap();
+        s.insert_message(&authored("b", "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:abc")).unwrap();
+        s.insert_message(&authored("c", "8:orgid:abc")).unwrap();
+        s.insert_message(&authored("d", "19:x@thread.v2")).unwrap();
+        s.insert_message(&authored("e", "Théophile WALLEZ")).unwrap();
+
+        assert_eq!(s.blank_identity_senders().unwrap(), 4);
+        let msgs = s.newest_messages("c1", 50).unwrap();
+        for id in ["a", "b", "c", "d"] {
+            assert_eq!(
+                msgs.iter().find(|m| m.id == id).unwrap().sender,
+                "",
+                "{id}: an identity is not a display name",
+            );
+        }
+        assert_eq!(
+            msgs.iter().find(|m| m.id == "e").unwrap().sender,
+            "Théophile WALLEZ",
+            "a real author is never touched",
+        );
+        // Idempotent.
+        assert_eq!(s.blank_identity_senders().unwrap(), 0);
+    }
+
+    #[test]
+    fn migration_adds_messagetype_to_existing_store() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY);
+             INSERT INTO messages (id) VALUES ('m1');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let messagetype: String = conn
+            .query_row("SELECT messagetype FROM messages WHERE id = 'm1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(messagetype, "", "a legacy row defaults to an unknown type");
+    }
+
+    #[test]
+    fn messagetype_roundtrips_and_heals_a_legacy_row() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+
+        // A plain-text message: the type is what tells the UI not to parse it as HTML.
+        let mut m = msg("c1", 1);
+        m.content = "pour moi c'est <yyyy>-<id>".into();
+        m.message_type = "Text".into();
+        assert!(s.insert_message(&m).unwrap());
+        assert_eq!(s.newest_messages("c1", 10).unwrap()[0].message_type, "Text");
+
+        // Re-ingesting the identical frame is still a no-op.
+        assert!(!s.insert_message(&m).unwrap(), "an unchanged frame reports no change");
+
+        // A row stored before the column existed (type '') heals on the next sync,
+        // and that heal IS a change — the body renders differently once typed.
+        let mut legacy = msg("c1", 2);
+        legacy.message_type = String::new();
+        s.insert_message(&legacy).unwrap();
+        let mut typed = legacy.clone();
+        typed.message_type = "RichText/Html".into();
+        assert!(s.insert_message(&typed).unwrap(), "the backfill is a real change");
+        let stored = s.get_message("c1", &typed.id).unwrap().unwrap();
+        assert_eq!(stored.message_type, "RichText/Html");
+        // Converged: the same frame again changes nothing.
+        assert!(!s.insert_message(&typed).unwrap());
+
+        // A frame that carries no type never erases a known one.
+        assert!(!s.insert_message(&legacy).unwrap());
+        assert_eq!(
+            s.get_message("c1", &legacy.id).unwrap().unwrap().message_type,
+            "RichText/Html",
+        );
+    }
+
+    #[test]
     fn cursor_roundtrip() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_conversation("c1", "Chat", 0).unwrap();
@@ -2480,7 +3294,7 @@ mod tests {
     fn display_name_for_mri_uses_latest_known_sender() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_conversation("c1", "Chat", 0).unwrap();
-        let mut with_mri = |seq: i64, name: &str, mri: &str| {
+        let with_mri = |seq: i64, name: &str, mri: &str| {
             let mut m = msg("c1", seq);
             m.sender = name.into();
             m.sender_mri = mri.into();
@@ -2722,7 +3536,7 @@ mod tests {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: String::new(), content: "salut".into(), attachments: "[]".into(),
             reactions: "[]".into(),
-            system_event: String::new(),
+            message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             mentions: "[]".into(),
@@ -2731,7 +3545,7 @@ mod tests {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: String::new(), content: "hello".into(), attachments: "[]".into(),
             reactions: "[]".into(),
-            system_event: String::new(),
+            message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             mentions: "[]".into(),
@@ -2754,7 +3568,7 @@ mod tests {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: String::new(), content: "coucou".into(), attachments: "[]".into(),
             reactions: "[]".into(),
-            system_event: String::new(),
+            message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             mentions: "[]".into(),
@@ -2773,18 +3587,18 @@ mod tests {
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: "8:orgid:me".into(), content: "salut".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: "8:orgid:leonor".into(), content: "hello".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
 
         // A group: even though it has non-self senders, a group has no single face.
         s.upsert_conversation_full(&upd("grp", "Team chat", 400, ConversationKind::Group)).unwrap();
         s.insert_message(&Message {
             id: "g1".into(), conversation_id: "grp".into(), seq: 1, compose_time: 1,
             sender: "Grace HOPPER".into(), sender_mri: "8:orgid:grace".into(), content: "hi all".into(),
-            attachments: "[]".into(), reactions: "[]".into(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
 
         let by_id = |id: &str| {
             s.conversations(me).unwrap().into_iter().find(|c| c.id == id).unwrap()
@@ -2802,7 +3616,7 @@ mod tests {
             id: "m1".into(), conversation_id: "c1".into(), seq: 1, compose_time: 1,
             sender: "Me".into(), sender_mri: String::new(), content: "hi".into(), attachments: "[]".into(),
             reactions: "[]".into(),
-            system_event: String::new(),
+            message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             mentions: "[]".into(),
@@ -2831,7 +3645,7 @@ mod tests {
             sender: "Me".into(), sender_mri: String::new(), content: "see file".into(),
             attachments: r#"[{"name":"report.pdf","content_type":"application/pdf","url":"https://x.skype.com/o/1","kind":"file"}]"#.into(),
             reactions: "[]".into(),
-            system_event: String::new(),
+            message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             mentions: "[]".into(),
@@ -2842,7 +3656,7 @@ mod tests {
             sender: "Me".into(), sender_mri: String::new(), content: "hi".into(),
             attachments: "[]".into(),
             reactions: "[]".into(),
-            system_event: String::new(),
+            message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             mentions: "[]".into(),

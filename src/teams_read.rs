@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 
 use crate::store::{ConversationKind, Message};
 use crate::teams::Session;
+use crate::teams_cards::SwiftCard;
 
 /// The chatsvcagg audience — the conversation-list aggregator rejects the ic3 token.
 pub const CSA_SCOPE: &str = "https://chatsvcagg.teams.microsoft.com/.default";
@@ -119,7 +120,35 @@ impl Conversation {
 /// before any `;` — a bare `ends_with("@thread.tacv2")` misses that form and lets
 /// a per-post channel thread leak into the chat list.
 pub fn is_channel_thread_id(id: &str) -> bool {
-    id.split(';').next().unwrap_or(id).ends_with("@thread.tacv2")
+    base_thread_id(id).ends_with("@thread.tacv2")
+}
+
+/// The THREAD id inside a conversation id, i.e. everything before the first `;`.
+///
+/// Teams addresses a single channel post with a deep-link id —
+/// `19:<channel>@thread.tacv2;messageid=<rootId>` — and puts that form in a live
+/// frame's `conversationLink`/`conversationid`. It is NOT a thread of its own: the
+/// posts belong to the channel, and the suffix only names the thread root. Deriving
+/// a conversation id without stripping it files channel posts under a nameless
+/// pseudo-conversation (see [`crate::store::Store::reparent_thread_link_messages`],
+/// which heals the rows a build that did that left behind).
+pub fn base_thread_id(id: &str) -> &str {
+    id.split(';').next().unwrap_or(id)
+}
+
+/// The thread ROOT message id carried by a `;messageid=<rootId>` deep-link
+/// suffix, or `None` when the id has none. The counterpart of
+/// [`base_thread_id`]: one keeps the channel, the other keeps the threading.
+///
+/// Accepts a bare id AND a `conversationLink`
+/// (`…/conversations/19:x@thread.tacv2;messageid=<root>/messages/<id>`), where the
+/// suffix is followed by more path — hence the cut at the next `/`, without which
+/// the root id came out as `<root>/messages/<id>`.
+pub fn thread_link_root_id(id: &str) -> Option<&str> {
+    id.split(";messageid=")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .filter(|root| !root.is_empty())
 }
 
 /// One team surfaced by the CSA aggregator, with its channels. Teams are the
@@ -207,8 +236,20 @@ fn parse_last_message(container: &Value) -> LastMessage {
             CallRecording::Ready(_) => "Meeting recording".to_string(),
             CallRecording::Pending => String::new(),
         }
+    } else if let Some(SwiftCard::Card(card)) = crate::teams_cards::parse_swift_card(content) {
+        // An adaptive/connector card previews as its TITLE. Its visible body is only
+        // Skype's "Card - access it on … cards.unsupported" apology, which is what
+        // the GitHub/Figma/Sentry channels used to show in the sidebar.
+        attachment_value_label(&card)
     } else if is_displayable_message_type(message_type) && !is_system_frame_content(content) {
-        preview_from_html(content)
+        // An emoji-only or image-only body strips to nothing, so fall back to a typed
+        // label rather than leaving the sidebar row's second line blank.
+        let text = preview_from_html(content);
+        if text.is_empty() {
+            typed_preview(content, "[]")
+        } else {
+            text
+        }
     } else {
         String::new()
     };
@@ -969,7 +1010,7 @@ fn call_participants(content: &str) -> Vec<(String, String)> {
 /// The value of a double-quoted attribute (`name="value"`) in an XML opening tag,
 /// or `None`. Minimal: finds the first case-insensitive `name="` and reads to the
 /// next `"`. Sufficient for the `identity` attribute on a call `<part>`.
-fn xml_attr(tag: &str, name: &str) -> Option<String> {
+pub(crate) fn xml_attr(tag: &str, name: &str) -> Option<String> {
     let hay = tag.to_ascii_lowercase();
     let needle = format!("{}=\"", name.to_ascii_lowercase());
     let at = hay.find(&needle)?;
@@ -1004,7 +1045,7 @@ fn xml_values(xml: &str, tag: &str) -> Vec<String> {
 }
 
 /// The inner text of the FIRST `<tag>…</tag>` occurrence, or `None`.
-fn xml_first_value(xml: &str, tag: &str) -> Option<String> {
+pub(crate) fn xml_first_value(xml: &str, tag: &str) -> Option<String> {
     xml_values(xml, tag).into_iter().next()
 }
 
@@ -1119,6 +1160,217 @@ fn parse_hms_to_seconds(s: &str) -> i64 {
     }
 }
 
+/// Recognise a Teams MEETING ACTIVITY frame — "Scheduled a meeting", "The meeting
+/// … is cancelled" — and turn it into the structured `system_event` payload the UI
+/// renders as a centered line. `None` for any other message, so the caller handles it
+/// as a normal one.
+///
+/// Recognised by `properties.meeting`, NOT by the body and NOT by `messagetype`.
+/// Recon against the tenant (2026-07-25) settles why: the three stored frames are
+/// typed `RichText/Html`, `RichText/Html` and `Text` — the same types ordinary chat
+/// uses — while their bodies are localised English sentences. `properties.meeting` is
+/// the only stable signal:
+///
+/// ```json
+/// {"itemid":"1778070908936","@type":"http://schema.skype.com/ScheduledMeetingCancelled",
+///  "meetingtitle":"LAB GEN AI Monthly",
+///  "scheduledmeetinginfo":{"startTime":"2026-05-19T14:30:00+00:00",
+///                          "endTime":"2026-05-19T15:30:00+00:00",
+///                          "location":"Microsoft Teams Meeting","isCancelled":true},
+///  "organizerId":"8bbe7426-…","meetingJoinUrl":"https://teams.microsoft.com/l/meetup-join/…"}
+/// ```
+///
+/// Yields one `system_event` kind, `meeting`:
+/// `{"kind":"meeting","event":"scheduled|cancelled|updated","title":"…",
+///   "start_ms":<ms>,"end_ms":<ms>,"location":"…","organizer_mri":"8:orgid:…",
+///   "join_url":"https://…"}`
+///
+/// `event` comes from the `@type` suffix (`ScheduledMeetingCreated` → `scheduled`,
+/// `…Cancelled` → `cancelled`, any other `ScheduledMeeting*` → `updated`), so a
+/// French or German tenant produces the same event as an English one. A `@type` that
+/// is not a scheduled-meeting activity is left alone: an unknown activity rendered as
+/// its own plain body is better than a system line we cannot label.
+///
+/// `organizerId` is a bare tenant GUID, normalised to a `8:orgid:` MRI so the UI can
+/// resolve a name/avatar the same way it does everywhere else. Times are epoch ms
+/// (0 when absent/unparseable); Teams sends them as `+00:00` ISO timestamps.
+pub(crate) fn parse_meeting_activity(m: &Value) -> Option<Value> {
+    let props = match m.get("properties") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        _ => Value::Null,
+    };
+    let meeting = match props.get("meeting") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        _ => Value::Null,
+    };
+    let activity = meeting.get("@type").and_then(Value::as_str)?;
+    let event = scheduled_meeting_event(activity)?;
+    let info = meeting.get("scheduledmeetinginfo").unwrap_or(&Value::Null);
+    let iso_ms = |key: &str| {
+        info.get(key)
+            .and_then(Value::as_str)
+            .map(parse_iso_ms)
+            .unwrap_or(0)
+    };
+    let organizer = meeting
+        .get("organizerId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(|id| if id.contains(':') { id.to_string() } else { format!("8:orgid:{id}") })
+        .unwrap_or_default();
+    Some(json!({
+        "kind": "meeting",
+        "event": event,
+        "title": meeting
+            .get("meetingtitle")
+            .and_then(Value::as_str)
+            .map(|t| t.trim())
+            .unwrap_or_default(),
+        "start_ms": iso_ms("startTime"),
+        "end_ms": iso_ms("endTime"),
+        "location": info.get("location").and_then(Value::as_str).unwrap_or_default(),
+        "organizer_mri": organizer,
+        "join_url": meeting.get("meetingJoinUrl").and_then(Value::as_str).unwrap_or_default(),
+    }))
+}
+
+/// Map a `properties.meeting` `@type` URI onto our `event` token, or `None` when it
+/// is not a scheduled-meeting activity at all.
+fn scheduled_meeting_event(activity: &str) -> Option<&'static str> {
+    let kind = activity.rsplit('/').next().unwrap_or(activity);
+    let suffix = kind.strip_prefix("ScheduledMeeting")?;
+    Some(match suffix.to_ascii_lowercase().as_str() {
+        "created" => "scheduled",
+        "cancelled" | "canceled" => "cancelled",
+        // Teams has shipped several edit/reschedule spellings; they all mean the same
+        // thing to a reader, and a new one must not fall back to "scheduled".
+        _ => "updated",
+    })
+}
+
+/// Outcome of inspecting a message body for a Teams `ThreadActivity` frame
+/// delivered as JSON — the shape Teams uses for membership and pin changes in a
+/// chat or meeting thread (the older frames are XML, and
+/// [`is_system_frame_content`]/[`Store::purge_control_frames`] handle those).
+pub(crate) enum ThreadActivity {
+    /// A recognised activity, as the structured `system_event` payload the UI
+    /// renders as a centered line (see [`parse_thread_activity`] for the shape).
+    Event(Value),
+    /// A thread-activity frame we have nothing to say about (an operation we do not
+    /// model). It is machinery, never a chat bubble, so it is dropped outright.
+    Noise,
+}
+
+/// Recognise a JSON `ThreadActivity` body and turn it into the structured
+/// `system_event` payload the UI renders as a centered line, or `None` when the
+/// body is not one (so the caller handles it as a normal message).
+///
+/// Teams posts these into chats and meeting threads with a body like:
+///
+/// ```json
+/// {"eventtime":1784726018187,"initiator":"8:orgid:…",
+///  "members":[{"id":"8:orgid:…","friendlyname":"Théophile WALLEZ"}]}   // member added
+/// {"eventtime":1781884089268,"userId":"8:orgid:…","operation":"pinned"} // pin/unpin
+/// ```
+///
+/// Both arrive with a `from` that is the THREAD itself and no `imdisplayname`, so
+/// they used to render as a bubble of literal JSON attributed to a raw URL. They
+/// are recognised by shape (a JSON object carrying `eventtime`) rather than by
+/// `messagetype`, so a stored legacy row converts through exactly the same code as
+/// a live frame — the pattern [`parse_call_event`] already follows.
+///
+/// Returns one `system_event` kind, `thread_activity`:
+/// `{"kind":"thread_activity","event":"member_added|pinned|unpinned","time_ms":<ms>,
+///   "actor_mri":"8:orgid:…","members":["<display name>"],"member_mris":["8:orgid:…"]}`
+/// `members` holds display names and `member_mris` the MRIs, index-aligned exactly
+/// like the call event's `participants`/`participant_mris` (Teams usually sends an
+/// empty `friendlyname`, so a slot may be `""` and the UI resolves it from the MRI).
+pub(crate) fn parse_thread_activity(content: &str) -> Option<ThreadActivity> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let frame: Value = serde_json::from_str(trimmed).ok()?;
+    let time_ms = frame.get("eventtime").and_then(Value::as_i64)?;
+
+    // Member added: `members` lists who joined, `initiator` who added them.
+    if let Some(members) = frame.get("members").and_then(Value::as_array) {
+        let people: Vec<(String, String)> = members
+            .iter()
+            .filter_map(|entry| {
+                let mri = entry
+                    .get("id")
+                    .or_else(|| entry.get("mri"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())?;
+                let name = entry
+                    .get("friendlyname")
+                    .or_else(|| entry.get("displayName"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                Some((name.to_string(), mri.to_string()))
+            })
+            .collect();
+        // A membership frame naming nobody has nothing to render.
+        if people.is_empty() {
+            return Some(ThreadActivity::Noise);
+        }
+        return Some(ThreadActivity::Event(json!({
+            "kind": "thread_activity",
+            "event": "member_added",
+            "time_ms": time_ms,
+            "actor_mri": frame.get("initiator").and_then(Value::as_str).unwrap_or_default(),
+            "members": people.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+            "member_mris": people.iter().map(|(_, mri)| mri.clone()).collect::<Vec<_>>(),
+        })));
+    }
+
+    // Pin/unpin: `operation` names it, `userId` is who did it. A body with neither
+    // `members` nor `operation` is NOT recognised as a thread activity — a user can
+    // legitimately paste JSON into a chat, and eating it would be worse than
+    // rendering one machine frame.
+    let operation = frame
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if operation.is_empty() {
+        return None;
+    }
+    // Only the operations we can label become an event; the rest are dropped rather
+    // than surfaced as a line the UI would have to render as "unknown".
+    if matches!(operation.as_str(), "pinned" | "unpinned") {
+        return Some(ThreadActivity::Event(json!({
+            "kind": "thread_activity",
+            "event": operation,
+            "time_ms": time_ms,
+            "actor_mri": frame.get("userId").and_then(Value::as_str).unwrap_or_default(),
+            "members": [],
+            "member_mris": [],
+        })));
+    }
+    Some(ThreadActivity::Noise)
+}
+
+/// A message's author display name, or EMPTY when the frame carries none.
+///
+/// `imdisplayname` is the ONLY field that holds a name. `from` — the historical
+/// fallback — is an identity, either a bare MRI or a
+/// `https://…/v1/users/ME/contacts/8:orgid:<guid>` contacts URL, and system-ish
+/// frames (meeting scheduled/cancelled notices, thread activities, recordings) send
+/// an empty `imdisplayname`, so falling back to it printed a raw URL as the author.
+/// Blank is strictly better: the identity still travels in `sender_mri`, and both
+/// the UI and [`Store::display_name_for_mri`] resolve a name from that.
+fn sender_display_name(m: &Value) -> String {
+    m.get("imdisplayname")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
 /// Parse a single message resource (shared by the read API and trouter events —
 /// both deliver the same message shape). `conversation_id` is passed in because
 /// the read API groups by conversation; for a live event, derive it from the
@@ -1134,13 +1386,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
     let deleted = is_deleted(m);
     let seq = m.get("sequenceId").and_then(|x| x.as_i64()).unwrap_or(0);
     let compose_time = m.get("composetime").and_then(|x| x.as_str()).map(parse_iso_ms).unwrap_or(0);
-    let sender = m
-        .get("imdisplayname")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .or_else(|| m.get("from").and_then(|x| x.as_str()))
-        .unwrap_or("")
-        .to_string();
+    let sender = sender_display_name(m);
     let sender_mri = m
         .get("from")
         .and_then(|x| x.as_str())
@@ -1158,6 +1404,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             compose_time,
             sender,
             sender_mri,
+            message_type: messagetype.to_string(),
             content: String::new(),
             attachments: "[]".to_string(),
             reactions: String::new(),
@@ -1167,6 +1414,63 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             deleted: false,
             mentions: "[]".to_string(),
         });
+    }
+
+    // A meeting scheduled / cancelled / moved becomes a system line as well. These
+    // frames are typed like ordinary chat (`RichText/Html`, `Text`) and their body is
+    // a localised English sentence, so the signal is `properties.meeting` — see
+    // `parse_meeting_activity`. The body is dropped with the same reasoning as a call
+    // event: the structured event says it better, in the reader's own UI language, and
+    // the frame carries no author (its `imdisplayname` is empty and its `from` is a
+    // bare contacts URL) — the event names the organizer instead.
+    if let Some(event) = parse_meeting_activity(m) {
+        let (thread_root_id, thread_subject) = parse_thread(m);
+        return Some(Message {
+            id,
+            conversation_id: conversation_id.to_string(),
+            seq,
+            compose_time,
+            sender: String::new(),
+            sender_mri,
+            message_type: messagetype.to_string(),
+            content: String::new(),
+            attachments: "[]".to_string(),
+            reactions: parse_emotions(m),
+            system_event: event.to_string(),
+            thread_root_id,
+            thread_subject,
+            deleted,
+            mentions: "[]".to_string(),
+        });
+    }
+
+    // A membership/pin change becomes a system line too (or is dropped when we
+    // cannot label it). Recognised before the messagetype gate for the same reason
+    // as a call event: Teams types these `ThreadActivity/*`, which the gate drops.
+    match parse_thread_activity(&content) {
+        Some(ThreadActivity::Event(event)) => {
+            return Some(Message {
+                id,
+                conversation_id: conversation_id.to_string(),
+                seq,
+                compose_time,
+                // The frame's only author hint is the thread itself; a system line
+                // needs no author (the event names its actor).
+                sender: String::new(),
+                sender_mri,
+                message_type: messagetype.to_string(),
+                content: String::new(),
+                attachments: "[]".to_string(),
+                reactions: String::new(),
+                system_event: event.to_string(),
+                thread_root_id: String::new(),
+                thread_subject: String::new(),
+                deleted: false,
+                mentions: "[]".to_string(),
+            });
+        }
+        Some(ThreadActivity::Noise) => return None,
+        None => {}
     }
 
     // A meeting-recording notice becomes a media message (a video card), not a
@@ -1187,6 +1491,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 compose_time,
                 sender: String::new(),
                 sender_mri,
+                message_type: messagetype.to_string(),
                 content: String::new(),
                 attachments: Value::Array(vec![attachment]).to_string(),
                 reactions: parse_emotions(m),
@@ -1198,6 +1503,43 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             });
         }
         Some(CallRecording::Pending) => return None,
+        None => {}
+    }
+
+    // An adaptive/connector card (`<URIObject type="SWIFT.1">`) becomes a card
+    // attachment: its visible body is only Skype's "access it on
+    // cards.unsupported" apology, while the real payload is base64 in
+    // `<Swift b64>` (see `teams_cards`). Recognised by body shape, like a
+    // recording. A payload we cannot decode is LOGGED and left as-is, so the
+    // fallback sentence still renders instead of an empty bubble.
+    match crate::teams_cards::parse_swift_card(&content) {
+        Some(SwiftCard::Card(attachment)) => {
+            let (thread_root_id, thread_subject) = parse_thread(m);
+            return Some(Message {
+                id,
+                conversation_id: conversation_id.to_string(),
+                seq,
+                compose_time,
+                sender,
+                sender_mri,
+                message_type: messagetype.to_string(),
+                // The card carries its own title/text; the fallback sentence in the
+                // body is noise, so the bubble renders the card alone.
+                content: String::new(),
+                attachments: Value::Array(vec![attachment]).to_string(),
+                reactions: parse_emotions(m),
+                system_event: String::new(),
+                thread_root_id,
+                thread_subject,
+                deleted,
+                // Mention spans live in the body we just dropped, so nothing is
+                // addressable anymore.
+                mentions: "[]".to_string(),
+            });
+        }
+        Some(SwiftCard::Undecodable(reason)) => {
+            eprintln!("[ingest] message {id} ({messagetype}): card payload dropped — {reason}");
+        }
         None => {}
     }
 
@@ -1219,6 +1561,8 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         }
     }
     let (thread_root_id, thread_subject) = parse_thread(m);
+    let attachments = parse_attachments(m);
+    log_invisible_payload(m, &id, messagetype, &content, &attachments, deleted);
     Some(Message {
         id,
         conversation_id: conversation_id.to_string(),
@@ -1226,8 +1570,9 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         compose_time,
         sender,
         sender_mri,
+        message_type: messagetype.to_string(),
         content,
-        attachments: parse_attachments(m),
+        attachments,
         reactions: parse_emotions(m),
         system_event: String::new(),
         thread_root_id,
@@ -1235,6 +1580,37 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         deleted,
         mentions: parse_mentions(m),
     })
+}
+
+/// Log a frame we are about to store with NOTHING visible in it — no body, no
+/// attachment, not a deletion — so the empty bubbles it produces are diagnosable.
+///
+/// The store holds ~20 such rows from real senders whose cause could not be
+/// determined after the fact, because neither the `messagetype` nor the raw frame
+/// was kept. `messagetype` is now persisted, and this line covers the rest: the
+/// frame's top-level KEY NAMES and how many `properties.files` entries it carried,
+/// which is what distinguishes "a payload shape we drop" (a voice memo, an app
+/// card) from "a file whose `objectUrl` was missing". Key names only — never
+/// values, which can hold tokens and message text.
+fn log_invisible_payload(
+    m: &Value,
+    id: &str,
+    messagetype: &str,
+    content: &str,
+    attachments: &str,
+    deleted: bool,
+) {
+    if deleted || !content.trim().is_empty() || attachments != "[]" {
+        return;
+    }
+    let keys = m
+        .as_object()
+        .map(|o| o.keys().map(String::as_str).collect::<Vec<_>>().join(","))
+        .unwrap_or_default();
+    eprintln!(
+        "[ingest] message {id} ({messagetype}) has no visible payload: {} file(s), frame keys: {keys}",
+        message_files(m).len(),
+    );
 }
 
 /// Whether a message resource represents a message the sender has DELETED. Teams
@@ -1278,8 +1654,8 @@ fn parse_thread(m: &Value) -> (String, String) {
             m.get("conversationLink")
                 .or_else(|| m.get("conversationid"))
                 .and_then(|x| x.as_str())
-                .and_then(|link| link.split(";messageid=").nth(1))
-                .map(|s| s.to_string())
+                .and_then(thread_link_root_id)
+                .map(str::to_string)
         })
         .unwrap_or_default();
     // `properties` may be a nested object or a JSON-encoded string (same double
@@ -1366,13 +1742,46 @@ fn parse_mentions(m: &Value) -> String {
 /// Inline images embedded directly in the message HTML (`<img>` in `content`) are
 /// NOT recorded here — the UI extracts and renders those from the content itself.
 ///
+/// App LINK-UNFURL cards are appended here as `kind:"card"` entries: their payload
+/// lives in `properties.cards`, not in the body (whose `InputExtension` span is an
+/// empty placeholder), so ingestion is the only place it can be recovered — see
+/// [`crate::teams_unfurl`].
+///
 /// Best-effort by design: an absent, malformed, or empty `properties`/`files`
 /// yields `"[]"`, never an error, so a surprising attachment shape can never
 /// break message ingestion.
 fn parse_attachments(m: &Value) -> String {
     let files = message_files(m);
-    let list: Vec<Value> = files.iter().filter_map(file_to_attachment).collect();
+    let mut list: Vec<Value> = files.iter().filter_map(file_to_attachment).collect();
+    if list.len() < files.len() {
+        log_dropped_files(m, &files, list.len());
+    }
+    list.extend(crate::teams_unfurl::parse_link_unfurl_cards(m));
     Value::Array(list).to_string()
+}
+
+/// Log the files [`file_to_attachment`] refused for lack of a usable URL, naming
+/// the KEYS each dropped object carried (never their values, which hold file names
+/// and signed URLs). A file payload we silently drop is the most likely cause of an
+/// empty bubble from a real sender, and the key list is what tells us whether Teams
+/// used a URL spelling we do not accept yet.
+fn log_dropped_files(m: &Value, files: &[Value], kept: usize) {
+    let id = m.get("id").and_then(Value::as_str).unwrap_or("?");
+    let dropped: Vec<String> = files
+        .iter()
+        .filter(|f| file_to_attachment(f).is_none())
+        .map(|f| {
+            f.as_object()
+                .map(|o| o.keys().map(String::as_str).collect::<Vec<_>>().join(","))
+                .unwrap_or_else(|| "not-an-object".to_string())
+        })
+        .collect();
+    eprintln!(
+        "[ingest] message {id}: dropped {} of {} file payload(s) with no usable URL (kept {kept}); keys: {}",
+        dropped.len(),
+        files.len(),
+        dropped.join(" | "),
+    );
 }
 
 /// Extract a message's reactions ("emotions") from its `properties` into the
@@ -1513,22 +1922,45 @@ pub(crate) fn normalize_mri(from: &str) -> String {
     from.rsplit('/').next().unwrap_or(from).to_string()
 }
 
+/// Block-level HTML tags: the ones that end a line when rendered, so stripping
+/// them must leave a SEPARATOR behind. Without it `<p>a</p><p>b</p>` previews as
+/// `ab`, and a reply's quoted author glues onto the quoted text
+/// (`Matthieu GAUCHERSi je vais…`). Inline tags (`b`, `span`, `a`, …) deliberately
+/// leave nothing: they sit inside a word's flow, and a space there would split
+/// words that Teams wraps in a `<span>`.
+const BLOCK_TAGS: [&str; 22] = [
+    "p", "div", "br", "hr", "blockquote", "pre", "li", "ul", "ol", "table", "tr", "td", "th",
+    "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "figure",
+];
+
 /// Turn a Teams message body (HTML like `<p>hello <b>world</b></p>`) into a
 /// short, single-line plain-text preview for the conversation list — the same
 /// role as the second line under a chat title in the Teams desktop sidebar.
 ///
-/// Best-effort and dependency-free: strip tags, decode the handful of entities
-/// Teams actually emits, collapse whitespace, and cap the length so a long
-/// message can't blow up a list row. Not a general HTML sanitizer.
+/// Best-effort and dependency-free: drop what is quoted rather than said (see
+/// [`strip_quoted_blocks`]), strip tags — leaving a space where a BLOCK tag was,
+/// so text either side of a line break stays separate words — decode the handful
+/// of entities Teams actually emits, collapse whitespace, and cap the length so a
+/// long message can't blow up a list row. Not a general HTML sanitizer.
 pub(crate) fn preview_from_html(html: &str) -> String {
     const MAX_CHARS: usize = 120;
+    let html = strip_quoted_blocks(html);
     let mut text = String::with_capacity(html.len());
     let mut in_tag = false;
+    let mut tag = String::new();
     for c in html.chars() {
         match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if in_tag => {}
+            '<' => {
+                in_tag = true;
+                tag.clear();
+            }
+            '>' => {
+                in_tag = false;
+                if is_block_tag(&tag) {
+                    text.push(' ');
+                }
+            }
+            _ if in_tag => tag.push(c),
             _ => text.push(c),
         }
     }
@@ -1548,6 +1980,208 @@ pub(crate) fn preview_from_html(html: &str) -> String {
         format!("{}…", truncated.trim_end())
     } else {
         collapsed
+    }
+}
+
+/// True when a raw tag body — everything between `<` and `>`, so `p style="…"`,
+/// `/p` and `br/` alike — names a [`BLOCK_TAGS`] element.
+fn is_block_tag(tag: &str) -> bool {
+    let name = tag
+        .trim_start_matches('/')
+        .split(|c: char| c.is_whitespace() || c == '/')
+        .next()
+        .unwrap_or("");
+    BLOCK_TAGS.iter().any(|block| name.eq_ignore_ascii_case(block))
+}
+
+/// Remove the QUOTED part of a reply/forward body, i.e. every
+/// `<blockquote itemtype="http://schema.skype.com/Reply|Forward">…</blockquote>`.
+///
+/// A Teams reply carries the message it answers inline, author first, so previewing
+/// the raw body shows the *quoted* text attributed to the *quoted* author instead of
+/// what the sender actually wrote (`Matthieu GAUCHERSi je vais le faire…`). The
+/// sidebar wants the reply itself; the UI renders the quote from the same markup.
+///
+/// A plain `<blockquote>` (someone quoting text in their own message) is KEPT — it
+/// is content the sender wrote. Nesting is tracked so an inner blockquote cannot end
+/// the outer quote early, and an unterminated quote drops the rest of the body
+/// (which is what it visually is).
+fn strip_quoted_blocks(html: &str) -> std::borrow::Cow<'_, str> {
+    const QUOTE_MARKERS: [&str; 2] = ["schema.skype.com/reply", "schema.skype.com/forward"];
+    let lower = html.to_ascii_lowercase();
+    if !QUOTE_MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return std::borrow::Cow::Borrowed(html);
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut rest = 0usize;
+    while let Some(open) = lower[rest..].find("<blockquote") {
+        let open = rest + open;
+        let Some(tag_end) = lower[open..].find('>').map(|e| open + e + 1) else { break };
+        let is_quote = QUOTE_MARKERS
+            .iter()
+            .any(|marker| lower[open..tag_end].contains(marker));
+        if !is_quote {
+            out.push_str(&html[rest..tag_end]);
+            rest = tag_end;
+            continue;
+        }
+        out.push_str(&html[rest..open]);
+        // Skip to this blockquote's own close, counting nested opens.
+        let mut depth = 1usize;
+        let mut scan = tag_end;
+        while depth > 0 {
+            let next_open = lower[scan..].find("<blockquote").map(|i| scan + i);
+            let next_close = lower[scan..].find("</blockquote").map(|i| scan + i);
+            match (next_open, next_close) {
+                (Some(o), Some(c)) if o < c => {
+                    depth += 1;
+                    scan = o + "<blockquote".len();
+                }
+                (_, Some(c)) => {
+                    depth -= 1;
+                    scan = lower[c..].find('>').map(|e| c + e + 1).unwrap_or(html.len());
+                }
+                // Unterminated quote: everything left is quoted.
+                (_, None) => {
+                    depth = 0;
+                    scan = html.len();
+                }
+            }
+        }
+        rest = scan;
+    }
+    out.push_str(&html[rest.min(html.len())..]);
+    std::borrow::Cow::Owned(out)
+}
+
+/// A short, typed LABEL for a message whose body previews as nothing — an
+/// emoji-only line, an image, a shared file, an adaptive card. Without it the
+/// sidebar shows a conversation with an empty second line, which reads as "no
+/// messages" when there very much are some.
+///
+/// Order matters: emoji first (an emoji-only body is *text* the sender meant, so
+/// show it verbatim), then any inline image, then the attachments — a body can hold
+/// both an image and a card, and the visible thing wins. Returns `""` when the
+/// message genuinely carries nothing to describe.
+fn typed_preview(content: &str, attachments: &str) -> String {
+    // Teams sends inline emoji as `<img itemtype="http://schema.skype.com/Emoji"
+    // alt="🙂">`; the `alt` IS the emoji, so an emoji-only line previews as itself.
+    let emoji: String = emoji_alts(content).concat();
+    if !emoji.is_empty() {
+        return emoji;
+    }
+    if contains_image_tag(content) {
+        return "📷 Image".to_string();
+    }
+    attachment_label(attachments)
+}
+
+/// The `alt` text of every Teams emoji `<img>` in a body, in order. Recognised by
+/// the Skype `Emoji` schema on the tag itself; an `<img>` without it is a real
+/// picture, not an emoji. Capped so a wall of emoji still previews as one line.
+fn emoji_alts(content: &str) -> Vec<String> {
+    const MAX_EMOJI: usize = 8;
+    img_tags(content)
+        .filter(|tag| tag.to_ascii_lowercase().contains("schema.skype.com/emoji"))
+        .filter_map(|tag| xml_attr(tag, "alt"))
+        .filter(|alt| !alt.is_empty())
+        .take(MAX_EMOJI)
+        .collect()
+}
+
+/// True when a body embeds a picture: an AMS/hosted image, a GIF, any `<img>` that
+/// is not an emoji.
+fn contains_image_tag(content: &str) -> bool {
+    img_tags(content).any(|tag| !tag.to_ascii_lowercase().contains("schema.skype.com/emoji"))
+}
+
+/// Every `<img …>` opening tag in a body, as raw tag text.
+fn img_tags(content: &str) -> impl Iterator<Item = &str> {
+    let lower = content.to_ascii_lowercase();
+    let mut spans = Vec::new();
+    let mut i = 0usize;
+    while let Some(at) = lower[i..].find("<img") {
+        let start = i + at;
+        // `<image>`/`<imgfoo>` are not `<img>`: the next char must end the name.
+        let next = lower.as_bytes().get(start + 4);
+        let end = lower[start..].find('>').map(|e| start + e + 1).unwrap_or(content.len());
+        if matches!(next, Some(b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')) {
+            spans.push((start, end));
+        }
+        i = end;
+    }
+    spans.into_iter().map(move |(start, end)| &content[start..end])
+}
+
+/// A label for the FIRST attachment a message carries: an adaptive card previews as
+/// its own title, a recording as an event-style line, everything else as a typed
+/// chip. `""` when there are no attachments (or the JSON is unparseable — a preview
+/// is never worth an error).
+fn attachment_label(attachments: &str) -> String {
+    let Ok(Value::Array(list)) = serde_json::from_str::<Value>(attachments) else {
+        return String::new();
+    };
+    list.first().map(attachment_value_label).unwrap_or_default()
+}
+
+/// The label for ONE attachment (see [`attachment_label`]), also used by the CSA
+/// path, which decodes a card straight out of the body it previews.
+pub(crate) fn attachment_value_label(attachment: &Value) -> String {
+    match attachment.get("kind").and_then(Value::as_str).unwrap_or("") {
+        "card" => attachment
+            .pointer("/card/title")
+            .and_then(Value::as_str)
+            .map(preview_from_html)
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "Card".to_string()),
+        "recording" => "Meeting recording".to_string(),
+        "image" => "📷 Image".to_string(),
+        _ => "📎 File".to_string(),
+    }
+}
+
+/// A short, single-line sidebar preview for a message we already hold in the store
+/// — the local-first counterpart of the CSA-provided preview in
+/// [`parse_last_message`].
+///
+/// The CSA snapshot does not always carry one (channel containers never do, and a
+/// chat whose newest frame is a system event previews as nothing), so the sidebar
+/// derives it from the stored row instead of showing a blank second line. Order
+/// mirrors the CSA path: a system event gets its label, then the body text, then a
+/// typed label for a body that previews as nothing (see [`typed_preview`]).
+pub fn preview_for_message(m: &crate::store::Message) -> String {
+    if !m.system_event.is_empty() {
+        return system_event_label(&m.system_event);
+    }
+    let text = preview_from_html(&m.content);
+    if !text.is_empty() {
+        return text;
+    }
+    typed_preview(&m.content, &m.attachments)
+}
+
+/// A short, English sidebar label for a stored `system_event` (see
+/// [`crate::store::Message::system_event`]): a call/meeting event or a thread
+/// activity. `""` for a shape we cannot label — better a blank line than machinery.
+fn system_event_label(system_event: &str) -> String {
+    let Ok(event) = serde_json::from_str::<Value>(system_event) else {
+        return String::new();
+    };
+    match event.get("kind").and_then(Value::as_str).unwrap_or("") {
+        "call" => call_event_label(&event).to_string(),
+        "thread_activity" => match event.get("event").and_then(Value::as_str).unwrap_or("") {
+            "member_added" => "Member added".to_string(),
+            "pinned" => "Message pinned".to_string(),
+            "unpinned" => "Message unpinned".to_string(),
+            _ => String::new(),
+        },
+        "meeting" => match event.get("event").and_then(Value::as_str).unwrap_or("") {
+            "scheduled" => "Meeting scheduled".to_string(),
+            "cancelled" => "Meeting cancelled".to_string(),
+            "updated" => "Meeting updated".to_string(),
+            _ => String::new(),
+        },
+        _ => String::new(),
     }
 }
 
@@ -1700,6 +2334,47 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_preview_labels_a_textless_csa_last_message() {
+        // The last message is an emoji, an image, or a card — bodies that strip to
+        // nothing, so the sidebar used to show a blank second line.
+        let chat = |content: &str| {
+            json!({
+                "chats": [{
+                    "id": "19:x@thread.v2", "title": "X", "chatType": "group",
+                    "lastMessage": {
+                        "id": "1", "composeTime": "2026-07-16T16:05:26.767Z",
+                        "messageType": "RichText/Html", "content": content
+                    }
+                }]
+            })
+        };
+        let preview = |content: &str| parse_conversations(&chat(content))[0].last_message_preview.clone();
+        assert_eq!(
+            preview("<p><img itemtype=\"http://schema.skype.com/Emoji\" itemid=\"smile\" alt=\"🙂\"></p>"),
+            "🙂"
+        );
+        assert_eq!(
+            preview("<p><img itemtype=\"http://schema.skype.com/AMSImage\" src=\"https://x/imgo\" alt=\"image\"></p>"),
+            "📷 Image"
+        );
+        // A card previews as its TITLE, not as Skype's "cards.unsupported" apology.
+        let activity = json!({
+            "attachments": [{
+                "contentType": "application/vnd.microsoft.teams.card.o365connector",
+                "content": { "title": "Build failed", "text": "<p>pipeline #42</p>" }
+            }]
+        });
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(activity.to_string());
+        let card_body = format!(
+            "<URIObject type=\"SWIFT.1\">Card - access it on \
+             <a href=\"https://go.skype.com/cards.unsupported\">https://go.skype.com/cards.unsupported</a>. \
+             <Swift b64=\"{b64}\"/></URIObject>"
+        );
+        assert_eq!(preview(&card_body), "Build failed");
+    }
+
+    #[test]
     fn missing_flags_default_to_read_and_unmuted() {
         // A chat with only the minimum fields must not surface a false unread
         // marker or spurious muted/pinned/hidden state.
@@ -1804,6 +2479,226 @@ mod tests {
         let out = preview_from_html(&long);
         assert!(out.chars().count() <= 121); // 120 + the ellipsis
         assert!(out.ends_with('…'));
+    }
+
+    /// The shape the tenant delivers (verified by recon, message ids 1778059385348 /
+    /// 1778059464183 / 1778070909111): an ordinary `messagetype`, a localised English
+    /// body, and the real signal in `properties.meeting`.
+    fn meeting_frame(messagetype: &str, activity: &str, body: &str) -> Value {
+        json!({
+            "id": "1778059464183",
+            "messagetype": messagetype,
+            "content": body,
+            "imdisplayname": "",
+            "from": "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:8bbe7426",
+            "properties": json!({
+                "meeting": {
+                    "itemid": "1778596087884",
+                    "@type": format!("http://schema.skype.com/{activity}"),
+                    "meetingtitle": "LAB GEN AI Monthly ",
+                    "scheduledmeetinginfo": {
+                        "startTime": "2026-05-12T14:30:00+00:00",
+                        "endTime": "2026-05-12T15:30:00+00:00",
+                        "location": "Microsoft Teams Meeting",
+                        "meetingType": 1
+                    },
+                    "organizerId": "8bbe7426-da82-4e39-ab40-85102d02a127",
+                    "meetingJoinUrl": "https://teams.microsoft.com/l/meetup-join/19%3ax%40thread.tacv2/1"
+                },
+                "languageStamp": "languages=en:100;length:19;&detector=Bling"
+            })
+            .to_string()
+        })
+    }
+
+    #[test]
+    fn a_meeting_activity_becomes_a_system_line() {
+        // `messagetype` is NOT the signal: the tenant's own frames use RichText/Html
+        // for one and Text for another, so both must be recognised.
+        let scheduled = parse_message(&meeting_frame("RichText/Html", "ScheduledMeetingCreated", "Scheduled a meeting"), "c1")
+            .expect("a meeting activity is kept as a system message");
+        let event: Value = serde_json::from_str(&scheduled.system_event).unwrap();
+        assert_eq!(event["kind"], "meeting");
+        assert_eq!(event["event"], "scheduled");
+        assert_eq!(event["title"], "LAB GEN AI Monthly", "title is trimmed");
+        assert_eq!(event["start_ms"], 1778596200000i64);
+        assert_eq!(event["end_ms"], 1778599800000i64);
+        assert_eq!(event["location"], "Microsoft Teams Meeting");
+        // A bare tenant GUID becomes a resolvable MRI.
+        assert_eq!(event["organizer_mri"], "8:orgid:8bbe7426-da82-4e39-ab40-85102d02a127");
+        assert!(event["join_url"].as_str().unwrap().starts_with("https://teams.microsoft.com/l/meetup-join/"));
+        // The localised body is dropped and no bogus author is invented.
+        assert_eq!(scheduled.content, "");
+        assert_eq!(scheduled.sender, "");
+        assert_eq!(scheduled.message_type, "RichText/Html", "provenance is kept");
+
+        let cancelled = parse_message(
+            &meeting_frame("Text", "ScheduledMeetingCancelled", "The meeting \"LAB GEN AI Monthly \" is cancelled"),
+            "c1",
+        )
+        .unwrap();
+        let event: Value = serde_json::from_str(&cancelled.system_event).unwrap();
+        assert_eq!(event["event"], "cancelled");
+
+        // A reschedule/edit spelling we have not seen still reads as an update, never
+        // as a fresh invitation.
+        let moved = parse_message(&meeting_frame("Text", "ScheduledMeetingUpdated", "The meeting has moved"), "c1").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&moved.system_event).unwrap()["event"],
+            "updated"
+        );
+
+        // A `properties.meeting` activity that is NOT a scheduled-meeting frame stays
+        // a plain message: an unlabelable system line is worse than its own body.
+        let other = parse_message(&meeting_frame("RichText/Html", "MeetingSomethingElse", "<p>hello</p>"), "c1").unwrap();
+        assert_eq!(other.system_event, "");
+        assert_eq!(other.content, "<p>hello</p>");
+        // ...and an ordinary message never becomes one.
+        let plain = parse_message(&json!({ "id": "1", "messagetype": "Text", "content": "hi" }), "c1").unwrap();
+        assert_eq!(plain.system_event, "");
+    }
+
+    #[test]
+    fn an_unfurl_card_rides_on_the_messages_attachments() {
+        // The body's InputExtension span is an empty placeholder; the card is in
+        // `properties.cards`, so ingestion is the only chance to keep it.
+        let m = json!({
+            "id": "1784279270015",
+            "messagetype": "RichText/Html",
+            "content": "<p><a href=\"https://github.com/owner/repo\">https://github.com/owner/repo</a></p>\
+                        <span itemid=\"app-preview-card-psd62d\" itemscope=\"\" \
+                        itemtype=\"http://schema.skype.com/InputExtension\">\
+                        <span itemprop=\"cardId\"></span></span>",
+            "imdisplayname": "Théophile WALLEZ",
+            "properties": json!({
+                "cards": [{
+                    "appId": "ca9e26b7-dce5-44a0-b2b7-a70a3d65ce25",
+                    "cardClientId": "app-preview-card-psd62d",
+                    "appName": "GitHub Notifications",
+                    "appIcon": "https://x/icon.png",
+                    "content": {
+                        "type": "AdaptiveCard",
+                        "body": [{ "type": "TextBlock", "text": "Repository | **owner/repo**" }]
+                    }
+                }],
+                "files": [],
+                "links": [{ "url": "https://github.com/owner/repo", "preview": { "title": "owner/repo" } }]
+            })
+            .to_string()
+        });
+        let parsed = parse_message(&m, "c1").expect("an unfurl message is a normal message");
+        let attachments: Vec<Value> = serde_json::from_str(&parsed.attachments).unwrap();
+        assert_eq!(attachments.len(), 1, "the card is persisted: {}", parsed.attachments);
+        assert_eq!(attachments[0]["kind"], "card");
+        assert_eq!(attachments[0]["card"]["title"], "owner/repo");
+        assert_eq!(attachments[0]["card"]["app_name"], "GitHub Notifications");
+        // The body (link + placeholder span) is untouched — the link still renders.
+        assert!(parsed.content.contains("https://github.com/owner/repo"));
+        // ...and it previews as the card when the body has no text of its own.
+        assert_eq!(preview_for_message(&parsed), "https://github.com/owner/repo");
+    }
+
+    #[test]
+    fn preview_separates_blocks_but_not_inline_spans() {
+        // A block boundary is a word boundary: without the separator these ran
+        // together ("Bonjour" + "ça va" -> "Bonjourça va").
+        assert_eq!(preview_from_html("<p>Bonjour</p><p>ça va</p>"), "Bonjour ça va");
+        assert_eq!(preview_from_html("<div>a</div><br><div>b</div>"), "a b");
+        assert_eq!(preview_from_html("<ul><li>one</li><li>two</li></ul>"), "one two");
+        // ...whereas an inline tag must NOT split a word Teams wrapped in a span.
+        assert_eq!(preview_from_html("<p>hel<b>lo</b></p>"), "hello");
+        assert_eq!(
+            preview_from_html("<p>Hi <span itemtype=\"http://schema.skype.com/Mention\">James</span>!</p>"),
+            "Hi James!"
+        );
+    }
+
+    #[test]
+    fn preview_drops_the_quoted_part_of_a_reply() {
+        // A reply carries the message it answers, author first. Previewing that
+        // showed the QUOTED text under the QUOTED author's name, glued together.
+        let reply = "<blockquote itemtype=\"http://schema.skype.com/Reply\" itemid=\"1784\">\
+                     <strong itemprop=\"mri\" itemid=\"8:orgid:abc\">Matthieu GAUCHER</strong>\
+                     <p>Si je vais le faire intervenir</p></blockquote>\
+                     <p>Parfait, merci !</p>";
+        assert_eq!(preview_from_html(reply), "Parfait, merci !");
+        // A forward quote is dropped the same way.
+        let forward = "<blockquote itemtype=\"http://schema.skype.com/Forward\">\
+                       <p>original message</p></blockquote><p>FYI</p>";
+        assert_eq!(preview_from_html(forward), "FYI");
+        // A quote the sender typed themselves is content, so it is KEPT.
+        assert_eq!(
+            preview_from_html("<blockquote><p>quoted by hand</p></blockquote>"),
+            "quoted by hand"
+        );
+        // An unterminated reply quote drops the rest of the body, not the reply.
+        assert_eq!(
+            preview_from_html("<p>mine</p><blockquote itemtype=\"http://schema.skype.com/Reply\"><p>theirs"),
+            "mine"
+        );
+        // A nested blockquote cannot close the reply early.
+        let nested = "<blockquote itemtype=\"http://schema.skype.com/Reply\">\
+                      <blockquote><p>inner</p></blockquote><p>quoted</p></blockquote><p>said</p>";
+        assert_eq!(preview_from_html(nested), "said");
+    }
+
+    #[test]
+    fn preview_falls_back_to_a_typed_label_for_a_textless_body() {
+        // Emoji-only: the emoji itself (its `alt`), which is what the sender sent.
+        let emoji = "<p><span title=\"Raising hands\"><img itemtype=\"http://schema.skype.com/Emoji\" \
+                     itemid=\"handsinair\" alt=\"🙌\" src=\"https://statics.teams.cdn.office.net/x.png\"></span></p>";
+        assert_eq!(preview_from_html(emoji), "", "an emoji body carries no text");
+        assert_eq!(typed_preview(emoji, "[]"), "🙌");
+        // An inline (AMS) image, and a Giphy GIF, both preview as a picture label.
+        let image = "<p><img src=\"https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-x/views/imgo\" \
+                     itemtype=\"http://schema.skype.com/AMSImage\" alt=\"image\"></p>";
+        assert_eq!(typed_preview(image, "[]"), "📷 Image");
+        assert_eq!(typed_preview("<p>&nbsp;</p><img src=\"https://media1.giphy.com/x.gif\">", "[]"), "📷 Image");
+        // Attachments, when the body itself says nothing.
+        assert_eq!(typed_preview("", "[{\"kind\":\"image\",\"name\":\"a.png\"}]"), "📷 Image");
+        assert_eq!(typed_preview("", "[{\"kind\":\"file\",\"name\":\"deck.pptx\"}]"), "📎 File");
+        assert_eq!(typed_preview("", "[{\"kind\":\"recording\"}]"), "Meeting recording");
+        assert_eq!(
+            typed_preview("", "[{\"kind\":\"card\",\"card\":{\"title\":\"n-Alerts\"}}]"),
+            "n-Alerts"
+        );
+        // A card with no title still says it is a card, and malformed JSON is silent.
+        assert_eq!(typed_preview("", "[{\"kind\":\"card\",\"card\":{}}]"), "Card");
+        assert_eq!(typed_preview("", "not json"), "");
+        assert_eq!(typed_preview("", "[]"), "");
+    }
+
+    #[test]
+    fn preview_for_a_stored_message_covers_text_labels_and_system_events() {
+        let row = |content: &str, attachments: &str, system_event: &str| crate::store::Message {
+            id: "m1".into(),
+            conversation_id: "c1".into(),
+            seq: 1,
+            compose_time: 1,
+            sender: "Alice".into(),
+            sender_mri: String::new(),
+            message_type: String::new(),
+            content: content.into(),
+            attachments: attachments.into(),
+            reactions: "[]".into(),
+            system_event: system_event.into(),
+            thread_root_id: String::new(),
+            thread_subject: String::new(),
+            deleted: false,
+            mentions: "[]".into(),
+        };
+        assert_eq!(preview_for_message(&row("<p>hello</p>", "[]", "")), "hello");
+        assert_eq!(preview_for_message(&row("", "[{\"kind\":\"file\"}]", "")), "📎 File");
+        // A call/meeting event previews as its short label, not as a blank line.
+        let call = r#"{"kind":"call","event":"ended","duration_seconds":7}"#;
+        assert_eq!(preview_for_message(&row("", "[]", call)), "Call ended");
+        let pinned = r#"{"kind":"thread_activity","event":"pinned"}"#;
+        assert_eq!(preview_for_message(&row("", "[]", pinned)), "Message pinned");
+        let meeting = r#"{"kind":"meeting","event":"cancelled","title":"LAB GEN AI Monthly"}"#;
+        assert_eq!(preview_for_message(&row("", "[]", meeting)), "Meeting cancelled");
+        // Nothing describable stays empty (the caller looks further back).
+        assert_eq!(preview_for_message(&row("", "[]", "")), "");
+        assert_eq!(preview_for_message(&row("", "[]", "{\"kind\":\"mystery\"}")), "");
     }
 
     #[test]
@@ -2237,6 +3132,165 @@ mod tests {
     }
 
     #[test]
+    fn the_messagetype_is_persisted_verbatim() {
+        // Every branch of parse_message keeps the frame's type: the UI needs it to
+        // render a `Text` body as plain text, and it is the provenance an
+        // unexplainable row was missing.
+        for mt in ["Text", "RichText/Html", "RichText/Media_Card"] {
+            let m = json!({
+                "id": "1", "sequenceId": 1, "composetime": "2026-07-25T09:00:00.000Z",
+                "content": "<p>hi</p>", "imdisplayname": "Alice", "messagetype": mt
+            });
+            assert_eq!(parse_message(&m, "c1").unwrap().message_type, mt);
+        }
+        // A call event is a system line, but its type still travels.
+        let call = json!({
+            "id": "2", "sequenceId": 2, "composetime": "2026-07-25T09:00:00.000Z",
+            "messagetype": "Event/Call",
+            "content": "<ended/><callEventType>callEnded</callEventType>"
+        });
+        assert_eq!(parse_message(&call, "c1").unwrap().message_type, "Event/Call");
+        // A frame without a type yields an empty one, never a guess.
+        let untyped = json!({
+            "id": "3", "sequenceId": 3, "composetime": "2026-07-25T09:00:00.000Z",
+            "content": "<p>hi</p>", "imdisplayname": "Alice"
+        });
+        assert_eq!(parse_message(&untyped, "c1").unwrap().message_type, "");
+    }
+
+    #[test]
+    fn a_sender_is_never_an_identity_url() {
+        // A meeting-activity notice: no `imdisplayname`, and `from` is a contacts
+        // URL. The author must be blank, NOT the URL — the identity travels in
+        // `sender_mri` and the UI resolves a name from it.
+        let m = json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-19T09:00:00.000Z",
+            "messagetype": "Text", "content": "Scheduled a meeting",
+            "imdisplayname": "",
+            "from": "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:8bbe7426"
+        });
+        let parsed = parse_message(&m, "c1").unwrap();
+        assert_eq!(parsed.sender, "", "a contacts URL is not a display name");
+        assert_eq!(parsed.sender_mri, "8:orgid:8bbe7426");
+        assert_eq!(parsed.content, "Scheduled a meeting", "the body itself is kept");
+
+        // A frame with no author information at all is blank too, and a real name is
+        // trimmed but otherwise untouched.
+        let anonymous = json!({
+            "id": "2", "sequenceId": 2, "composetime": "2026-07-19T09:00:00.000Z",
+            "messagetype": "Text", "content": "hi", "from": "8:orgid:abc"
+        });
+        assert_eq!(parse_message(&anonymous, "c1").unwrap().sender, "");
+        let named = json!({
+            "id": "3", "sequenceId": 3, "composetime": "2026-07-19T09:00:00.000Z",
+            "messagetype": "Text", "content": "hi", "imdisplayname": " Théophile WALLEZ ",
+            "from": "8:orgid:abc"
+        });
+        assert_eq!(parse_message(&named, "c1").unwrap().sender, "Théophile WALLEZ");
+    }
+
+    #[test]
+    fn thread_activity_json_becomes_a_system_line() {
+        // A member added to a meeting thread: `from` is the THREAD, so the row has no
+        // author, and the body must never render as literal JSON.
+        let added = json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-21T09:00:00.000Z",
+            "messagetype": "ThreadActivity/MemberAdded",
+            "imdisplayname": "",
+            "from": "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/19:meeting_x@thread.v2",
+            "content": "{\"eventtime\":1784726018187,\"initiator\":\"8:orgid:init\",\"members\":[{\"id\":\"8:orgid:one\",\"friendlyname\":\"Théophile WALLEZ\"},{\"id\":\"8:orgid:two\",\"friendlyname\":\"\"}]}"
+        });
+        let parsed = parse_message(&added, "19:meeting_x@thread.v2").unwrap();
+        assert_eq!(parsed.content, "", "the raw JSON never reaches a bubble");
+        assert_eq!(parsed.sender, "");
+        let event: Value = serde_json::from_str(&parsed.system_event).unwrap();
+        assert_eq!(event["kind"], "thread_activity");
+        assert_eq!(event["event"], "member_added");
+        assert_eq!(event["time_ms"], 1784726018187i64);
+        assert_eq!(event["actor_mri"], "8:orgid:init");
+        assert_eq!(
+            (event["members"].clone(), event["member_mris"].clone()),
+            (json!(["Théophile WALLEZ", ""]), json!(["8:orgid:one", "8:orgid:two"])),
+            "names and MRIs stay index-aligned, like a call event's participants",
+        );
+
+        // A pin: `operation` names the event, `userId` is the actor.
+        let pinned = json!({
+            "id": "2", "sequenceId": 2, "composetime": "2026-07-21T09:00:00.000Z",
+            "content": "{\"eventtime\":1781884089268,\"userId\":\"8:orgid:pinner\",\"operation\":\"pinned\"}"
+        });
+        let event: Value =
+            serde_json::from_str(&parse_message(&pinned, "c1").unwrap().system_event).unwrap();
+        assert_eq!(event["event"], "pinned");
+        assert_eq!(event["actor_mri"], "8:orgid:pinner");
+
+        // An operation we cannot label, and a membership frame naming nobody, are
+        // dropped rather than rendered as an unknown line.
+        for content in [
+            "{\"eventtime\":1781884089268,\"userId\":\"8:orgid:x\",\"operation\":\"roleupdated\"}",
+            "{\"eventtime\":1781884089268,\"initiator\":\"8:orgid:x\",\"members\":[]}",
+        ] {
+            let m = json!({ "id": "3", "sequenceId": 3, "content": content });
+            assert!(parse_message(&m, "c1").is_none(), "{content} must be dropped");
+        }
+
+        // A JSON body that is NOT a thread activity stays a normal message: a user
+        // can legitimately paste JSON into a chat.
+        let pasted = json!({
+            "id": "4", "sequenceId": 4, "composetime": "2026-07-21T09:00:00.000Z",
+            "messagetype": "Text", "imdisplayname": "Alice",
+            "content": "{\"eventtime\":123,\"note\":\"look at this\"}"
+        });
+        let parsed = parse_message(&pasted, "c1").unwrap();
+        assert_eq!(parsed.system_event, "");
+        assert_eq!(parsed.content, "{\"eventtime\":123,\"note\":\"look at this\"}");
+    }
+
+    #[test]
+    fn a_card_body_becomes_a_card_attachment() {
+        let payload = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            json!({
+                "summary": "Elena sent a poll",
+                "attachments": [{
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": { "type": "AdaptiveCard", "body": [
+                        { "type": "TextBlock", "text": "Poll" }
+                    ]}
+                }]
+            })
+            .to_string(),
+        );
+        let m = json!({
+            "id": "1", "sequenceId": 1, "composetime": "2026-07-08T09:00:00.000Z",
+            "messagetype": "RichText/Media_Card", "imdisplayname": "Polls",
+            "rootMessageId": "1781257277685",
+            "content": format!("<URIObject type=\"SWIFT.1\">Card - access it on <a href=\"https://go.skype.com/cards.unsupported\">…</a>. <Title>Card</Title><Swift b64=\"{payload}\"/></URIObject>")
+        });
+        let parsed = parse_message(&m, "19:channel@thread.tacv2").unwrap();
+        assert_eq!(parsed.content, "", "the Skype fallback sentence is dropped");
+        assert_eq!(parsed.sender, "Polls", "a card's bot author is kept");
+        assert_eq!(parsed.thread_root_id, "1781257277685", "channel threading survives");
+        let atts: Value = serde_json::from_str(&parsed.attachments).unwrap();
+        assert_eq!(atts.as_array().unwrap().len(), 1);
+        assert_eq!(atts[0]["kind"], "card");
+        assert_eq!(atts[0]["name"], "Elena sent a poll");
+        assert_eq!(atts[0]["card"]["title"], "Elena sent a poll");
+        assert_eq!(atts[0]["card"]["text"], "Poll");
+
+        // A card whose payload cannot be decoded keeps the fallback body: an
+        // unhelpful sentence still beats an empty bubble.
+        let undecodable = json!({
+            "id": "2", "sequenceId": 2, "composetime": "2026-07-08T09:00:00.000Z",
+            "messagetype": "RichText/Media_Card", "imdisplayname": "Polls",
+            "content": "<URIObject type=\"SWIFT.1\">Card - access it on x. <Title>Card</Title></URIObject>"
+        });
+        let parsed = parse_message(&undecodable, "c1").unwrap();
+        assert!(parsed.content.starts_with("<URIObject"), "the body is left alone");
+        assert_eq!(parsed.attachments, "[]");
+    }
+
+    #[test]
     fn parse_hms_to_seconds_handles_teams_durations() {
         assert_eq!(parse_hms_to_seconds("1:08:03.92"), 4083);
         assert_eq!(parse_hms_to_seconds("0:00:00"), 0);
@@ -2469,7 +3523,7 @@ mod tests {
                 content: "c".into(),
                 attachments: "[]".into(),
                 reactions: "[]".into(),
-                system_event: String::new(),
+                message_type: String::new(), system_event: String::new(),
                 thread_root_id: String::new(), thread_subject: String::new(),
                 deleted: false,
                 mentions: "[]".into(),
@@ -2581,6 +3635,24 @@ mod tests {
         assert!(!is_channel_thread_id("19:abc@unq.gbl.spaces")); // 1:1
         assert!(!is_channel_thread_id("48:notes")); // system thread
         assert!(!is_channel_thread_id(""));
+    }
+
+    #[test]
+    fn a_thread_link_id_splits_into_its_channel_and_its_root() {
+        let link = "19:abc@thread.tacv2;messageid=1784899486984";
+        assert_eq!(base_thread_id(link), "19:abc@thread.tacv2");
+        assert_eq!(thread_link_root_id(link), Some("1784899486984"));
+        // A plain id is its own base and names no root.
+        assert_eq!(base_thread_id("19:abc@thread.tacv2"), "19:abc@thread.tacv2");
+        assert_eq!(thread_link_root_id("19:abc@thread.tacv2"), None);
+        // A suffix with no value is not a root id.
+        assert_eq!(thread_link_root_id("19:abc@thread.tacv2;messageid="), None);
+        assert_eq!(base_thread_id(""), "");
+        // A conversationLink carries path AFTER the suffix; only the root belongs.
+        assert_eq!(
+            thread_link_root_id("https://x/v1/users/ME/conversations/19:abc@thread.tacv2;messageid=100/messages/101"),
+            Some("100")
+        );
     }
 
     #[test]

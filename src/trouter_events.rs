@@ -327,14 +327,21 @@ fn read_receipts_from_event(event: &Value) -> Vec<ReadReceiptEvent> {
 
 /// Extract the conversation id from a message resource. The live shape uses
 /// `conversationid`; some paths only carry `conversationLink` (…/conversations/{id}/…).
+///
+/// The `;messageid=<rootId>` suffix a channel post carries is STRIPPED: it addresses
+/// one thread inside the channel, not a conversation of its own, so keeping it filed
+/// the post under a nameless pseudo-conversation instead of its channel (14 such rows
+/// holding 71 posts had accumulated). The root id is not lost — `parse_message` reads
+/// it off the same resource for the thread linkage (see `teams_read::parse_thread`).
 fn conversation_id_of(resource: &Value) -> String {
     if let Some(id) = resource.get("conversationid").and_then(|c| c.as_str()) {
-        return id.to_string();
+        return teams_read::base_thread_id(id).to_string();
     }
     if let Some(link) = resource.get("conversationLink").and_then(|c| c.as_str()) {
         // .../v1/users/ME/conversations/{id}/messages/{msgId}
         if let Some(rest) = link.split("/conversations/").nth(1) {
-            return rest.split('/').next().unwrap_or("").to_string();
+            let id = rest.split('/').next().unwrap_or("");
+            return teams_read::base_thread_id(id).to_string();
         }
     }
     String::new()
@@ -452,6 +459,32 @@ mod tests {
         let msgs = messages_from_request(&request).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].conversation_id, "19:link@thread.v2");
+    }
+
+    /// A channel post addresses its thread with a `;messageid=<root>` deep link. The
+    /// post belongs to the CHANNEL — filing it under the deep-link id created the 14
+    /// phantom conversations holding 71 channel posts — while the suffix survives as
+    /// the message's thread root.
+    #[test]
+    fn a_channel_thread_link_files_the_post_under_its_channel() {
+        let link = "19:chan@thread.tacv2;messageid=1784879567087";
+        for (field, value) in [
+            ("conversationid", json!(link)),
+            (
+                "conversationLink",
+                json!(format!("https://x/v1/users/ME/conversations/{link}/messages/1784879567099")),
+            ),
+        ] {
+            let mut ev = new_message_event();
+            let res = ev.get_mut("resource").unwrap().as_object_mut().unwrap();
+            res.remove("conversationid");
+            res.insert(field.into(), value);
+            let request = json!({ "url": "https://x/messaging", "headers": {}, "body": ev.to_string() });
+            let msgs = messages_from_request(&request).unwrap();
+            assert_eq!(msgs.len(), 1, "{field}");
+            assert_eq!(msgs[0].conversation_id, "19:chan@thread.tacv2", "{field}");
+            assert_eq!(msgs[0].thread_root_id, "1784879567087", "{field}");
+        }
     }
 
     #[test]

@@ -594,8 +594,26 @@ impl trouter::CredentialProvider for Ctx {
 /// Only a failure to open the store is fatal (nothing works without it); a
 /// cleanup that fails is logged and skipped, since it only affects how legacy
 /// history renders.
-fn prepare_store(db_path: &str) -> Result<()> {
+///
+/// `allow_writes` is false in read-only mode, and then NOTHING here runs beyond
+/// opening the store: no cleanups (they rewrite and delete message rows) and no
+/// statistics refresh (`PRAGMA optimize` writes too). A read-only backend is the one
+/// tooling is allowed to start against the user's REAL store — while the user's own
+/// backend is live on it — so silently migrating their history from under them is
+/// exactly the class of surprise `TEAMS_LITE_READ_ONLY=1` exists to prevent. The flag
+/// therefore covers the LOCAL store, not just outward sends.
+///
+/// The schema migration inside [`Store::open`] is deliberately NOT gated: it is
+/// additive, and without it the file cannot be read at all.
+fn prepare_store(db_path: &str, allow_writes: bool) -> Result<()> {
     let store = Store::open(db_path)?;
+    if !allow_writes {
+        eprintln!(
+            "[store] read-only mode (TEAMS_LITE_READ_ONLY=1): skipping the statistics refresh \
+             and the one-shot cleanups — the user's rows are never rewritten"
+        );
+        return Ok(());
+    }
     if let Err(e) = store.optimize() {
         eprintln!("[store] could not refresh statistics: {e}");
     }
@@ -628,6 +646,17 @@ fn run_legacy_cleanups(store: &Store) {
             eprintln!("[cleanup] could not purge {feed}: {e}");
         }
     }
+    // Channel posts that an older live feed filed under a `;messageid=` deep-link id
+    // are moved back into their channel, and the pseudo-conversations those ids
+    // created are removed from the chat list.
+    match store.reparent_thread_link_messages() {
+        Ok((moved, dropped, rows)) if moved > 0 || dropped > 0 || rows > 0 => eprintln!(
+            "[cleanup] channel threads: re-filed {moved} post(s), dropped {dropped} duplicate(s), \
+             removed {rows} phantom conversation(s)"
+        ),
+        Ok(_) => {}
+        Err(e) => eprintln!("[cleanup] could not re-file channel thread posts: {e}"),
+    }
     // Older builds also stored control/system frames (typing/presence pushes
     // and ThreadActivity member/topic changes) as chat bubbles — the bare
     // `notifications.skype.net` URLs and raw `<partlist>`/`<addmember>` XML.
@@ -656,6 +685,41 @@ fn run_legacy_cleanups(store: &Store) {
         Ok(_) => {}
         Err(e) => eprintln!("[cleanup] could not convert call recordings: {e}"),
     }
+    // `ThreadActivity` frames (a member added, a message pinned) that older builds
+    // stored as a bubble of raw JSON become a centered system line; the ones we
+    // cannot label are removed.
+    match store.convert_legacy_thread_activities() {
+        Ok((up, del)) if up > 0 || del > 0 => {
+            eprintln!("[cleanup] thread activities: upgraded {up}, removed {del}")
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[cleanup] could not convert thread activities: {e}"),
+    }
+    // Adaptive/connector cards stored as the raw `SWIFT.1` URIObject — which reads
+    // as "Card - access it on … cards.unsupported" in the bubble and in the sidebar
+    // — are upgraded into a structured card attachment.
+    match store.convert_legacy_cards() {
+        Ok(n) if n > 0 => eprintln!("[cleanup] upgraded {n} legacy card message(s)"),
+        Ok(_) => {}
+        Err(e) => eprintln!("[cleanup] could not convert cards: {e}"),
+    }
+    // Rows whose author is a raw contacts URL or MRI (an older fallback for frames
+    // with no `imdisplayname`) get a blank sender, so the UI resolves a real name
+    // from `sender_mri` instead of printing a URL.
+    match store.blank_identity_senders() {
+        Ok(n) if n > 0 => eprintln!("[cleanup] blanked {n} identity-URL sender(s)"),
+        Ok(_) => {}
+        Err(e) => eprintln!("[cleanup] could not blank identity senders: {e}"),
+    }
+    // Typing/presence frames stored with an empty body render as a blank bubble with
+    // no author. Removed LAST, so every pass above has had its chance to turn a row
+    // that only LOOKS payload-less (a recording, a card, a thread activity) into
+    // something renderable first.
+    match store.purge_payloadless_control_frames() {
+        Ok(n) if n > 0 => eprintln!("[cleanup] removed {n} payload-less control frame(s)"),
+        Ok(_) => {}
+        Err(e) => eprintln!("[cleanup] could not purge payload-less control frames: {e}"),
+    }
     // Only claim the revision once the passes above have had their turn: a store
     // whose cleanup errored out retries on the next boot rather than staying
     // half-healed forever.
@@ -679,8 +743,9 @@ async fn main() -> Result<()> {
     let db_path = data_db_path()?;
     eprintln!("[ok] store {db_path}");
     // Creates the schema, applies pending migrations and indexes, refreshes stale
-    // planner statistics, and heals legacy rows — all once per boot.
-    prepare_store(&db_path)?;
+    // planner statistics, and heals legacy rows — all once per boot. A read-only
+    // backend skips the healing: it must not rewrite the user's rows.
+    prepare_store(&db_path, !read_only())?;
 
     let (events_tx, _) = broadcast::channel::<Value>(256);
     let ctx = Ctx {
@@ -2039,6 +2104,15 @@ fn mentions_value(m: &Message) -> Value {
 /// or `null` when the message is a normal chat message (empty `system_event`) or
 /// the stored value is malformed. The UI renders a centered system line when this
 /// is present (see `web/src/components/call-event-line.tsx`).
+///
+/// Two `kind`s ride this field:
+///   - `call` — `{event:"ended|missed|started", duration_seconds, participant_count,
+///     participants[], participant_mris[], meeting?}`;
+///   - `thread_activity` — `{event:"member_added|pinned|unpinned", time_ms,
+///     actor_mri, members[], member_mris[]}`, where `members` holds display names
+///     index-aligned with `member_mris` (a name may be empty: resolve it from the MRI).
+/// A UI that does not know a `kind` should render nothing for it rather than the
+/// raw payload; new kinds are added here, never inferred from `content`.
 fn system_event_value(m: &Message) -> Value {
     if m.system_event.is_empty() {
         return Value::Null;
@@ -2167,10 +2241,19 @@ fn read_receipts_json(
     json!({ "receipts": receipts })
 }
 
+/// Serialize one message for the wire.
+///
+/// `message_type` is the Teams `messagetype` verbatim (`Text`, `RichText/Html`,
+/// `RichText/Media_Card`, …), snake_cased like the other wire keys. A front-end
+/// needs it to know that a `Text` body is PLAIN text and must be escaped rather
+/// than parsed as HTML (otherwise `Vec<String>` renders as `Vec`). Empty for legacy
+/// rows stored before the column existed — treat empty as "unknown", i.e. keep the
+/// previous HTML behaviour.
 fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
     json!({
         "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
         "compose_time": m.compose_time, "sender": m.sender, "sender_mri": m.sender_mri,
+        "message_type": m.message_type,
         "content": m.content,
         "attachments": attachments_value(m),
         "mentions": mentions_value(m),
@@ -2677,6 +2760,53 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    /// The write lock covers the LOCAL store too: a read-only backend is the one
+    /// tooling may start against the user's real database, while the user's own
+    /// backend is live on it, so it must not run the row-rewriting cleanups.
+    #[test]
+    fn read_only_prepare_store_never_rewrites_message_rows() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("teams-lite-prepare-{}.sqlite", std::process::id()));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        let db = path.to_str().unwrap();
+
+        // A stored control frame: exactly what the cleanups delete.
+        {
+            let store = Store::open(db).unwrap();
+            store.upsert_conversation("c1", "Chat", 1).unwrap();
+            let mut junk = message(1);
+            junk.content = "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:x".into();
+            store.insert_message(&junk).unwrap();
+        }
+
+        prepare_store(db, false).unwrap();
+        {
+            let store = Store::open(db).unwrap();
+            assert_eq!(
+                store.newest_messages("c1", 10).unwrap().len(),
+                1,
+                "read-only mode must leave the user's rows exactly as they are"
+            );
+            assert!(
+                store.cleanups_pending().unwrap(),
+                "...and must not claim the cleanup revision, so the user's own backend still heals"
+            );
+        }
+
+        // The user's own (write-capable) backend does run them.
+        prepare_store(db, true).unwrap();
+        {
+            let store = Store::open(db).unwrap();
+            assert!(store.newest_messages("c1", 10).unwrap().is_empty());
+            assert!(!store.cleanups_pending().unwrap());
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
     fn message(seq: i64) -> Message {
         Message {
             id: format!("m{seq}"),
@@ -2688,7 +2818,7 @@ mod tests {
             content: format!("message {seq}"),
             attachments: "[]".into(),
             reactions: "[]".into(),
-            system_event: String::new(),
+            message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             mentions: "[]".into(),
@@ -2749,6 +2879,21 @@ mod tests {
         let mut broken = message(3);
         broken.mentions = "{not json".into();
         assert_eq!(message_json(&broken, "Alice", "8:me")["mentions"], json!([]));
+    }
+
+    #[test]
+    fn the_message_type_rides_the_wire() {
+        // The front-end needs the Teams type verbatim to know a `Text` body is plain
+        // text and must be escaped, not parsed as HTML.
+        let mut m = message(1);
+        m.message_type = "Text".into();
+        m.content = "pour moi c'est <yyyy>-<id>".into();
+        let v = message_json(&m, "Alice", "8:me");
+        assert_eq!(v["message_type"], "Text");
+        assert_eq!(v["content"], "pour moi c'est <yyyy>-<id>", "the body is not rewritten");
+
+        // A legacy row carries an empty type — "unknown", not a guess.
+        assert_eq!(message_json(&message(2), "Alice", "8:me")["message_type"], "");
     }
 
     #[test]
