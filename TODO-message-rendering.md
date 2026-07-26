@@ -12,11 +12,31 @@ and note the commit that fixed an item next to it.
 Counts are occurrences in that snapshot, so they are a lower bound on how often
 each shape shows up in real usage.
 
+## Status — all 18 items land in three commits
+
+- `5e857a5` feat(store): the ingestion side — `messagetype` persisted, adaptive
+  cards and link unfurls decoded, activity/meeting frames structured, channel
+  thread links re-parented, legacy rows healed, typed sidebar previews.
+- `84918a4` feat(web): the rendering side — emoji as text, real tables, headings,
+  email summaries, card surfaces, system lines, plain-text bodies, the
+  "Forwarded" label and the no-payload placeholder.
+- `7f93db0` chore(web): `--conversation` for the sanctioned preview script, so a
+  specific fixture can be captured without hand-rolling a browser driver.
+
+Verified against a copy of the snapshot: phantom conversations 14 → 0 (71 posts
+re-filed or deduped), authorless control frames 25 → 0, containers holding
+messages but showing a blank preview 44 → 0, and 40/40 rootless posts healed in
+the channel that was refetched (the rest heal as their channels are refetched).
+
+Two items heal only on refetch, because the payload was never stored and cannot be
+reconstructed offline: the link-unfurl cards of #15 and the meeting activities of
+#9. New messages are correct at ingestion.
+
 ---
 
 ## P1 — wrong on almost every conversation
 
-### [ ] 1. Teams emoji are `<img>`, rendered as picture cards — 247 messages
+### [x] 1. Teams emoji are `<img>`, rendered as picture cards — 247 messages
 
 Teams sends inline emoji as
 `<img itemtype="http://schema.skype.com/Emoji" itemid="smile" alt="🙂"
@@ -33,7 +53,7 @@ the parser and emit the `alt` text as a plain text node.
 
 Repro ids: `1784645601649`, `1784627239695`, `1784279169798`.
 
-### [ ] 2. Emoji-only messages render as framed photos — 17 messages
+### [x] 2. Emoji-only messages render as framed photos — 17 messages
 
 Follows from #1: with the emoji counted as an image, `hasNonImageContent` is
 false → `imageOnly` is true (`message-bubble.tsx:208`) → the bubble chrome is
@@ -44,7 +64,7 @@ Fixed for free by #1.
 
 Repro ids: `1781625043581`, `1782984079975`, `1784810713129`.
 
-### [ ] 3. Tables are flattened to one cell per line — 35 messages
+### [x] 3. Tables are flattened to one cell per line — 35 messages
 
 `table`/`thead`/`tbody`/`tr`/`td`/`th`/`colgroup`/`col` are absent from
 `TAG_MAP`, so they are unwrapped and every cell lands on its own line:
@@ -62,7 +82,7 @@ drop `&nbsp;`-only cells so empty cells don't add blank lines.
 
 Repro ids: `1776787594282`, `1776978121549`, `1779287383679`.
 
-### [ ] 4. Adaptive cards show only the Skype fallback — 43 messages
+### [x] 4. Adaptive cards show only the Skype fallback — 43 messages
 
 `<URIObject type="SWIFT.1">` bodies (polls, `n-Alerts` monitoring alerts,
 GitHub/Figma/Sentry app cards) render as
@@ -82,7 +102,7 @@ Repro ids: `1781257277685` (poll), `1710459702206` (monitoring alert).
 
 ## P2 — structural: messages filed or grouped wrong
 
-### [ ] 5. Phantom conversations from channel thread links — 14 rows, 71 messages
+### [x] 5. Phantom conversations from channel thread links — 14 rows, 71 messages
 
 14 rows in `conversations` have an id of the form
 `19:…@thread.tacv2;messageid=<rootId>` — that is a **channel thread** id, not a
@@ -99,7 +119,7 @@ migration that deletes the phantom rows after re-parenting their messages.
 Repro ids: `19:fb9105cfa1da4bf3a69fdc52cc39e605@thread.tacv2;messageid=1784879567087`
 and 13 more (`select id from conversations where id like '%;messageid=%'`).
 
-### [ ] 6. 498 channel messages have no `thread_root_id` — and can never heal
+### [x] 6. 498 channel messages have no `thread_root_id` — and can never heal
 
 12 channels hold posts stored before channel threading landed
 (`General` 82, `🚩 Sentry notifications 2` 40, `📚 Literature` 40, `n-Alerts` 40,
@@ -118,7 +138,7 @@ backfills thread fields from a refetch, or widen the `ON CONFLICT` update.
 
 ## P3 — control/system frames rendered as chat
 
-### [ ] 7. Stored typing/presence frames show as empty bubbles — 25 messages
+### [x] 7. Stored typing/presence frames show as empty bubbles — 25 messages
 
 `b306c02` stopped ingesting `Control/*` frames, but nothing cleans the rows
 already in the store (22–23 July, mostly *St🐀umn Core*). They render as an empty
@@ -128,7 +148,7 @@ bubble whose sender name is a raw
 Fix: one-shot migration deleting rows with empty content + no attachment + no
 system event + a `notifications.skype.net` sender.
 
-### [ ] 8. ThreadActivity frames stored as raw JSON — 10 messages
+### [x] 8. ThreadActivity frames stored as raw JSON — 10 messages
 
 Two shapes leak into bubbles as literal JSON:
 
@@ -141,7 +161,7 @@ rendered as a centered line like call events. Purge the existing rows.
 
 Repro ids: `1781884089268` (pinned), `1781160917613`-era member adds.
 
-### [ ] 9. Meeting activity messages show a URL as author — 3 messages
+### [x] 9. Meeting activity messages show a URL as author — 3 messages
 
 `Scheduled a meeting`, `The meeting "LAB GEN AI Monthly " is cancelled`: plain
 bodies whose `imdisplayname` is empty, so `sender` falls back to the raw
@@ -152,7 +172,7 @@ recording path does), and ideally render these as system lines.
 
 Repro ids: `1778059385348`, `1778059464183`, `1778070909111`.
 
-### [ ] 10. 20 blank bubbles from real senders — cause unknown
+### [x] 10. 20 blank bubbles from real senders — cause unknown
 
 `content=''`, `attachments='[]'`, `deleted=0`, real sender (Matthieu GAUCHER ×9,
 Théophile WALLEZ ×4, …) → an empty coloured pill. Most likely payload-only
@@ -173,7 +193,7 @@ Repro ids: `1784641849906`, `1784641998899`, `1784876742142`, `1784903835935`.
 
 ## P4 — formatting fidelity
 
-### [ ] 11. Plain-text messages are parsed as HTML — literal `<…>` eaten
+### [x] 11. Plain-text messages are parsed as HTML — literal `<…>` eaten
 
 `messagetype: Text` bodies are not HTML, but the web parses them as such, so any
 angle-bracketed text disappears: `pour moi c'est <yyyy>-<id>` renders as
@@ -183,7 +203,7 @@ Fix: persist `messagetype` and render `Text` bodies as text (escape, no parse).
 
 Repro id: `1775231521568`.
 
-### [ ] 12. Headings flattened — 32 messages
+### [x] 12. Headings flattened — 32 messages
 
 `h1`/`h2`/`h3` are unwrapped, so a release-note style post loses all hierarchy.
 Fix: allowlist them with a modest bump in weight/size (they sit inside a bubble,
@@ -191,7 +211,7 @@ so don't scale like page headings).
 
 Repro ids: `1779292826769`, `1784797533519`.
 
-### [ ] 13. Relayed HTML emails are a wall of text — 26 messages
+### [x] 13. Relayed HTML emails are a wall of text — 26 messages
 
 The `🚩 Sentry notifications 2` channel receives full HTML emails
 (`div itemtype="http://schema.org/EmailMessage"`): the `display:none` preheader
@@ -205,7 +225,7 @@ Fix: detect the `schema.org/EmailMessage` wrapper and render a compact summary
 
 Repro ids: `1755770894847`, `1755770531556`.
 
-### [ ] 14. Forwarded messages have no "forwarded" header — 6 messages
+### [x] 14. Forwarded messages have no "forwarded" header — 6 messages
 
 `parseRichMessage` only recognises `blockquote itemtype=".../Reply"`
 (`web/src/lib/protocol.ts:448`); a `.../Forward` blockquote falls through to a
@@ -213,7 +233,7 @@ generic quote block with no attribution.
 
 Repro ids: `1784304655568`, `1784622433979`.
 
-### [ ] 15. Small stuff
+### [x] 15. Small stuff
 
 - `<hr>` is dropped entirely (2 messages) — no separator rendered.
 - `<small>` renders at body size (26 messages).
@@ -222,11 +242,20 @@ Repro ids: `1784304655568`, `1784622433979`.
 - App link-unfurl cards (`span itemtype=".../InputExtension"`, 6 messages)
   render as nothing; the card content is lost.
 
----
+### [x] 18. Legacy `Reply` author markup is not recognised — 8 of 696 replies
+
+Most `Reply` blockquotes attribute their quoted author with
+`<strong itemprop="mri" itemid="8:orgid:…">`, but 8 use an older shape:
+`<p><b><span itemprop="mri" itemid="8:orgid:…">Name</span></b></p>`. `QUOTED_AUTHOR`
+(`web/src/lib/protocol.ts`) only matches the `strong` form, so the quote renders
+with an empty author and the author line leaks into the quote body instead.
+
+Found while fixing #14 (not part of it: that fix had to keep `Reply` output
+byte-identical).
 
 ## P5 — sidebar previews
 
-### [ ] 16. A reply previews as its quoted message, author glued on — 3 conversations
+### [x] 16. A reply previews as its quoted message, author glued on — 3 conversations
 
 `preview_from_html` (`src/teams_read.rs:1427`) strips tags with no separator and
 does not skip the `Reply` blockquote, so the preview shows the **quoted** text
@@ -236,7 +265,7 @@ prefixed by the quoted author with no space:
 Fix: drop the reply blockquote before previewing (and insert a space at block
 boundaries).
 
-### [ ] 17. 42 conversations/channels have messages but an empty preview
+### [x] 17. 42 conversations/channels have messages but an empty preview
 
 17 chats + 25 channels: the last message is emoji-only, image-only, or a card, so
 `preview_from_html` yields nothing. Fix: fall back to a typed label
