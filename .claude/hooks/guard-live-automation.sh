@@ -65,27 +65,86 @@ sanctioned_automation() {
     grep -qE 'scripts/preview\.ts|bun run preview|test:e2e|playwright test|playwright install'
 }
 
-# A script file the command runs counts as part of the command. The incident's
+# A script file the command RUNS counts as part of the command. The incident's
 # command line was a bare `bun run /tmp/shot-sparkle.ts`: every risky thing —
 # launching chromium, typing into the composer, pressing Enter — lived inside the
 # file, so a pattern match on the command line alone saw nothing at all.
 #
-# Only AD-HOC scripts are scanned: files outside the repo (/tmp/…) or untracked
-# inside it. Tracked repo files are reviewed code, and several of them legitimately
-# name the backend port (ws-client.ts, preview.ts, playwright.config.ts).
+# Two filters, both about precision rather than leniency:
+#   * only files an interpreter is about to execute in that command segment. A
+#     command that merely NAMES a file (`git add x.ts`, `wc -l x.ts`, `grep … x.ts`)
+#     runs nothing, so scanning its contents can only produce false blocks — and a
+#     guard that fires on `git add` is one whose next reader learns to phrase
+#     commands around it, which is the habit that caused the incident.
+#   * only AD-HOC scripts: files outside the repo (/tmp/…) or untracked inside it.
+#     Tracked repo files are reviewed code, and several legitimately name the
+#     backend port (ws-client.ts, preview.ts, playwright.config.ts) or drive a
+#     browser through the sanctioned helper (scripts/scroll-probe.ts).
 ad_hoc_scripts() {
-  local token path
-  for token in $(printf '%s' "$command_line" | grep -oE '[A-Za-z0-9_./~-]+\.(ts|tsx|js|mjs|cjs)' | sort -u); do
+  local token path dir abs
+  for token in $(printf '%s' "$command_line" | python3 -c '
+import re, shlex, sys
+
+INTERPRETER = re.compile(r"^(bun|bunx|node|nodejs|npx|pnpm|yarn|deno|tsx|ts-node|vite-node|python3?)$")
+SCRIPT = re.compile(r"^[A-Za-z0-9_./~-]+\.(ts|tsx|js|mjs|cjs)$")
+
+line = sys.stdin.read()
+try:
+    words = shlex.split(line, comments=False)
+except ValueError:
+    words = line.split()
+
+found, running = [], False
+for word in words:
+    # A new command starts at every separator: `git add x.ts && bun run y.ts`
+    # must not treat x.ts as something bun is about to run.
+    if word in (";", "&&", "||", "|", "&"):
+        running = False
+        continue
+    base = word.rsplit("/", 1)[-1]
+    if INTERPRETER.match(base):
+        running = True
+    elif SCRIPT.match(word) and (running or word.startswith("./")):
+        found.append(word)
+for path in dict.fromkeys(found):
+    print(path)
+' 2>/dev/null); do
     path="$token"
     case "$path" in "~"*) path="$HOME${path#\~}" ;; esac
     [ -f "$path" ] || continue
-    case "$(cd "$(dirname "$path")" && pwd)" in
+    # Resolve to an absolute path before asking git about it: the command may be
+    # run from a subdirectory (`cd web && bun run scripts/x.ts`), and a relative
+    # path would be looked up against the repo root instead — making every tracked
+    # script under a subdirectory look untracked, hence ad-hoc.
+    dir="$(cd "$(dirname "$path")" && pwd)"
+    abs="$dir/$(basename "$path")"
+    case "$dir" in
       "$project_dir"*)
-        git -C "$project_dir" ls-files --error-unmatch "$path" >/dev/null 2>&1 && continue
+        git -C "$dir" ls-files --error-unmatch "$abs" >/dev/null 2>&1 && continue
         ;;
     esac
-    printf '%s\n' "$path"
+    printf '%s\n' "$abs"
   done
+}
+
+# The browser-automation match below runs on the command line itself, so a tracked
+# file whose NAME contains one of the patterns (`web/playwright.config.ts`) reads as
+# a driver — `sed -n 1,20p web/playwright.config.ts` runs nothing at all. Drop
+# tracked repo paths from the copy used for that match. An inline driver
+# (`node -e "…require('playwright')…"`) is untouched: that text is not a path to
+# reviewed code.
+command_line_sans_tracked_paths() {
+  local scrubbed="$command_line" token path dir
+  for token in $(printf '%s' "$command_line" | grep -oE '[A-Za-z0-9_./~-]+\.[A-Za-z0-9]+'); do
+    path="$token"
+    case "$path" in "~"*) path="$HOME${path#\~}" ;; esac
+    [ -f "$path" ] || continue
+    dir="$(cd "$(dirname "$path")" && pwd)"
+    case "$dir" in "$project_dir"*) ;; *) continue ;; esac
+    git -C "$dir" ls-files --error-unmatch "$dir/$(basename "$path")" >/dev/null 2>&1 || continue
+    scrubbed="${scrubbed//$token/}"
+  done
+  printf '%s' "$scrubbed"
 }
 
 scripts_driving_a_browser=""
@@ -150,7 +209,7 @@ bodies. If mail SENDING is genuinely wanted, it is a deliberate feature with its
 consent gate — ask the user, do not improvise it here."
 fi
 
-if printf '%s' "$command_line" | grep -qiE 'playwright|puppeteer|chrome-linux64/chrome|chromium' ||
+if command_line_sans_tracked_paths | grep -qiE 'playwright|puppeteer|chrome-linux64/chrome|chromium' ||
   [ -n "$scripts_driving_a_browser" ]; then
   if ! sanctioned_automation; then
     [ -n "$scripts_driving_a_browser" ] &&
