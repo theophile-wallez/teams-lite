@@ -2994,6 +2994,17 @@ function dispatch(method: string, params: unknown): unknown {
       return { ...media, name: attachment.name };
     }
 
+    // ---- calendar (read-only) ----------------------------------------------
+
+    case "calendars":
+      return MOCK_CALENDARS;
+
+    case "calendar_view": {
+      const start = requireString(params, "start");
+      const end = requireString(params, "end");
+      return mockCalendarView(start, end, optionalStringList(params, "calendars"));
+    }
+
     default:
       throw new Error(`unknown method: ${method}`);
   }
@@ -3224,6 +3235,51 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       broadcast("notifications_changed", {});
       return Response.json({ ok: true }, { status: 200 });
     }
+    // Move or cancel an event and broadcast the window it lives in, exactly like the
+    // Rust backend's `calendar_view_updated` — so the E2E suite can drive a
+    // reconciliation (a meeting rescheduled or removed in real Outlook) without
+    // waiting for a poll. READ-ONLY still holds: this is the test control plane
+    // pretending the SERVER changed, not a client writing.
+    if (body.kind === "calendar") {
+      // Re-seed the calendar, so a serial suite can undo the reschedules and
+      // removals below and stay deterministic across runs against a reused mock.
+      if (body.reset === true) {
+        calendarEvents.length = 0;
+        seedCalendar();
+        broadcast("calendars_changed", {});
+        return Response.json({ ok: true, reset: true }, { status: 200 });
+      }
+      const id = typeof body.event_id === "string" ? body.event_id : "";
+      const index = calendarEvents.findIndex((e) => e.id === id);
+      if (index < 0) {
+        return Response.json({ ok: false, error: `unknown event: ${id}` }, { status: 404 });
+      }
+      const event = calendarEvents[index]!;
+      if (body.remove === true) {
+        calendarEvents.splice(index, 1);
+      } else {
+        if (typeof body.subject === "string") event.subject = body.subject;
+        if (typeof body.start === "string") event.start = body.start;
+        if (typeof body.end === "string") event.end = body.end;
+        if (typeof body.is_cancelled === "boolean") event.is_cancelled = body.is_cancelled;
+        if (typeof body.response === "string") event.response = body.response;
+      }
+      // The watched window, the way the backend describes it: whole calendar months
+      // around the event, so the client's merge is authoritative over the same range
+      // the real backend would claim.
+      const start = typeof body.start === "string" ? body.start : event.start;
+      const month = start.slice(0, 7);
+      const [year, monthNumber] = month.split("-").map(Number);
+      const windowStart = `${month}-01T00:00:00Z`;
+      const nextMonth =
+        monthNumber === 12 ? `${(year ?? 0) + 1}-01` : `${year}-${String((monthNumber ?? 1) + 1).padStart(2, "0")}`;
+      const windowEnd = `${nextMonth}-01T00:00:00Z`;
+      broadcast(
+        "calendar_view_updated",
+        mockCalendarView(windowStart, windowEnd, typeof body.calendar === "string" ? [body.calendar] : []),
+      );
+      return Response.json({ ok: true }, { status: 200 });
+    }
     // Broadcast a typing/presence signal, exactly like the Rust backend's
     // `typing` event, so the E2E suite can drive the indicator deterministically.
     if (body.kind === "typing") {
@@ -3342,6 +3398,20 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       })),
     });
   }
+  if (req.method === "GET" && url.pathname === "/__test/calendar") {
+    return Response.json({
+      calendars: MOCK_CALENDARS,
+      events: calendarEvents.map((e) => ({
+        id: e.id,
+        calendar_id: e.calendar_id,
+        subject: e.subject,
+        start: e.start,
+        end: e.end,
+        is_all_day: e.is_all_day,
+        response: e.response,
+      })),
+    });
+  }
   if (req.method === "GET" && url.pathname === "/__test/channels") {
     return Response.json(
       channelOrder.map((id) => {
@@ -3351,6 +3421,315 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     );
   }
   return null;
+}
+
+
+// ---------------------------------------------------------------------------
+// Calendar (READ-ONLY, mirrors src/calendar.rs).
+//
+// Two properties are load-bearing, exactly as for mail:
+//   1. The fixtures cover what the views must survive — a recurring stand-up, a
+//      multi-day leave bar, an all-day holiday, three overlapping meetings, an
+//      unanswered invitation, a cancelled one, a tentative one, a meeting that
+//      crosses midnight, and an invitation with more attendees than the backend
+//      keeps. That is the set that breaks a naive layout.
+//   2. There is no way to write. No `calendar_create` / `calendar_respond` case
+//      exists here, mirroring a backend where the capability is absent rather than
+//      merely ungated.
+//
+// Events are generated RELATIVE TO TODAY so the calendar always has something in
+// the window it opens on, and anchored to whole hours so a screenshot is stable.
+// ---------------------------------------------------------------------------
+
+type MockCalendar = {
+  id: string;
+  name: string;
+  hex_color: string;
+  is_default: boolean;
+  can_edit: boolean;
+  position: number;
+};
+
+type MockEventPerson = { name: string; address: string; response: string; kind: string };
+
+type MockCalendarEvent = {
+  id: string;
+  calendar_id: string;
+  subject: string;
+  preview: string;
+  /** ISO 8601 UTC, whole seconds — the exact shape the Rust backend normalizes to. */
+  start: string;
+  /** ISO 8601 UTC, whole seconds, EXCLUSIVE. */
+  end: string;
+  is_all_day: boolean;
+  is_cancelled: boolean;
+  is_organizer: boolean;
+  organizer: MockEventPerson;
+  location: string;
+  join_url: string;
+  web_link: string;
+  show_as: string;
+  response: string;
+  series: string;
+  recurrence: string;
+  importance: string;
+  sensitivity: string;
+  categories: string[];
+  attendees: MockEventPerson[];
+  attendee_count: number;
+  has_attachments: boolean;
+  reminder_minutes: number;
+};
+
+/** Matches `calendar::MAX_ATTENDEES` on the Rust side. */
+const MOCK_MAX_ATTENDEES = 20;
+
+const MOCK_CALENDARS: MockCalendar[] = [
+  { id: "cal-main", name: "Calendar", hex_color: "#9fe1e7", is_default: true, can_edit: true, position: 0 },
+  { id: "cal-team", name: "Platform team", hex_color: "#5e6ad2", is_default: false, can_edit: false, position: 1 },
+  // No hex colour: exercises the UI's own fallback palette.
+  { id: "cal-birthdays", name: "Birthdays", hex_color: "", is_default: false, can_edit: false, position: 2 },
+  { id: "cal-holidays", name: "Holidays in France", hex_color: "#16a765", is_default: false, can_edit: false, position: 3 },
+];
+
+const calendarEvents: MockCalendarEvent[] = [];
+
+/** A person as an event attendee. */
+function mockAttendee(name: string, response: string, kind = "required"): MockEventPerson {
+  return { ...personAddress(name), response, kind };
+}
+
+/** Local midnight today, as the anchor every fixture is offset from. */
+function mockToday(): Date {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+/** An instant `days` from today at local `hour`:`minute`, as a canonical timestamp. */
+function mockAt(days: number, hour: number, minute = 0): string {
+  const base = mockToday();
+  return isoSeconds(
+    new Date(base.getFullYear(), base.getMonth(), base.getDate() + days, hour, minute).getTime(),
+  );
+}
+
+/** Midnight UTC on the date `days` from today — the shape Graph uses for an all-day
+ *  boundary, which is a DATE and not an instant. */
+function mockAllDay(days: number): string {
+  const base = mockToday();
+  const day = new Date(base.getFullYear(), base.getMonth(), base.getDate() + days);
+  const year = day.getFullYear();
+  const month = `${day.getMonth() + 1}`.padStart(2, "0");
+  const date = `${day.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${date}T00:00:00Z`;
+}
+
+/** Add one event, filling in the defaults a sparse fixture leaves out. */
+function addMockEvent(
+  event: Pick<MockCalendarEvent, "id" | "subject" | "start" | "end"> & Partial<MockCalendarEvent>,
+): void {
+  const attendees = event.attendees ?? [];
+  calendarEvents.push({
+    calendar_id: "cal-main",
+    preview: "",
+    is_all_day: false,
+    is_cancelled: false,
+    is_organizer: false,
+    organizer: mockAttendee("Lucas Silva", ""),
+    location: "",
+    join_url: "",
+    web_link: "https://outlook.office.com/calendar/item/mock",
+    show_as: "busy",
+    response: "accepted",
+    series: "singleInstance",
+    recurrence: "",
+    importance: "normal",
+    sensitivity: "normal",
+    categories: [],
+    attendee_count: attendees.length,
+    has_attachments: false,
+    reminder_minutes: 15,
+    ...event,
+    attendees: attendees.slice(0, MOCK_MAX_ATTENDEES),
+  });
+}
+
+/** Seed the calendars and a month of events around today. Deterministic given the
+ *  date, so screenshots and E2E assertions are stable within a day. */
+function seedCalendar(): void {
+  const teamsJoin =
+    "https://teams.microsoft.com/l/meetup-join/19%3Ameeting_mock%40thread.v2/0?context=%7B%7D";
+
+  // A recurring stand-up on every weekday of the surrounding five weeks: the case
+  // that proves the backend expands recurrence and the grid draws one row per
+  // occurrence.
+  for (let offset = -14; offset <= 21; offset++) {
+    const day = new Date(mockToday().getFullYear(), mockToday().getMonth(), mockToday().getDate() + offset);
+    const weekday = day.getDay();
+    if (weekday === 0 || weekday === 6) continue;
+    addMockEvent({
+      id: `ev-standup-${offset}`,
+      subject: "Platform stand-up",
+      preview: "Round the room: what shipped, what is stuck.",
+      start: mockAt(offset, 9, 30),
+      end: mockAt(offset, 9, 45),
+      calendar_id: "cal-team",
+      series: offset === 0 ? "exception" : "occurrence",
+      recurrence: "weekly",
+      join_url: teamsJoin,
+      location: "Microsoft Teams Meeting",
+      attendees: [
+        mockAttendee("Lucas Silva", "accepted"),
+        mockAttendee("Ada Kimani", "accepted"),
+        mockAttendee("Mei Tanaka", "notResponded", "optional"),
+      ],
+    });
+  }
+
+  // Three overlapping meetings this afternoon: the case the column layout exists for.
+  addMockEvent({
+    id: "ev-overlap-a",
+    subject: "Architecture guild",
+    preview: "Agenda: local-first storage, the write lock, and what we do about calling.",
+    start: mockAt(0, 14, 0),
+    end: mockAt(0, 15, 0),
+    join_url: teamsJoin,
+    location: "Microsoft Teams Meeting",
+    categories: ["Platform"],
+    attendees: [mockAttendee("Ada Kimani", "accepted"), mockAttendee("Mei Tanaka", "accepted")],
+  });
+  addMockEvent({
+    id: "ev-overlap-b",
+    subject: "1:1 with Ada",
+    start: mockAt(0, 14, 30),
+    end: mockAt(0, 15, 30),
+    calendar_id: "cal-main",
+    is_organizer: true,
+    response: "organizer",
+    attendees: [mockAttendee("Ada Kimani", "accepted")],
+  });
+  addMockEvent({
+    id: "ev-overlap-c",
+    subject: "Release sign-off",
+    start: mockAt(0, 14, 45),
+    end: mockAt(0, 15, 15),
+    calendar_id: "cal-team",
+    show_as: "tentative",
+    response: "tentativelyAccepted",
+    join_url: teamsJoin,
+  });
+
+  // An unanswered invitation with more attendees than the backend keeps: the outline
+  // treatment plus the "and N more" count.
+  addMockEvent({
+    id: "ev-all-hands",
+    subject: "Engineering all-hands",
+    preview: "Quarterly review. Recording will be shared afterwards.",
+    start: mockAt(1, 16, 0),
+    end: mockAt(1, 17, 0),
+    response: "notResponded",
+    show_as: "tentative",
+    join_url: teamsJoin,
+    location: "Microsoft Teams Meeting",
+    attendee_count: 777,
+    attendees: Array.from({ length: MOCK_MAX_ATTENDEES }, (_, i) =>
+      mockAttendee(PEOPLE[i % PEOPLE.length]!.name, i % 3 === 0 ? "accepted" : "notResponded"),
+    ),
+  });
+
+  // A cancelled meeting: struck through, still visible (Outlook keeps it until it is
+  // removed from the calendar).
+  addMockEvent({
+    id: "ev-cancelled",
+    subject: "Vendor demo",
+    start: mockAt(2, 11, 0),
+    end: mockAt(2, 12, 0),
+    is_cancelled: true,
+    response: "declined",
+  });
+
+  // A whole week of leave: the multi-day bar, laid out in its own lane across
+  // several week rows.
+  addMockEvent({
+    id: "ev-leave",
+    subject: "Ada — annual leave",
+    start: mockAllDay(3),
+    end: mockAllDay(10),
+    is_all_day: true,
+    calendar_id: "cal-team",
+    show_as: "oof",
+    reminder_minutes: -1,
+  });
+
+  // A one-day all-day event, from a calendar with no colour of its own.
+  addMockEvent({
+    id: "ev-holiday",
+    subject: "Public holiday",
+    start: mockAllDay(5),
+    end: mockAllDay(6),
+    is_all_day: true,
+    calendar_id: "cal-holidays",
+    show_as: "free",
+    reminder_minutes: -1,
+  });
+  addMockEvent({
+    id: "ev-birthday",
+    subject: "Mei's birthday",
+    start: mockAllDay(-2),
+    end: mockAllDay(-1),
+    is_all_day: true,
+    calendar_id: "cal-birthdays",
+    show_as: "free",
+    reminder_minutes: -1,
+  });
+
+  // A timed event that crosses midnight: it cannot be a block in one day column, so
+  // it must ride in the all-day band.
+  addMockEvent({
+    id: "ev-overnight",
+    subject: "Datacentre migration window",
+    start: mockAt(4, 22, 0),
+    end: mockAt(5, 2, 0),
+    calendar_id: "cal-team",
+    location: "Remote",
+  });
+
+  // A dense morning next week, so the week view has something to lay out away from
+  // today.
+  for (const [index, hour] of [8, 10, 11, 13, 17].entries()) {
+    addMockEvent({
+      id: `ev-week-${index}`,
+      subject: ["Design review", "Incident retro", "Interview: platform", "Roadmap sync", "Deep work"][index]!,
+      start: mockAt(8, hour, 0),
+      end: mockAt(8, hour + 1, 0),
+      calendar_id: index % 2 === 0 ? "cal-main" : "cal-team",
+      show_as: index === 4 ? "free" : "busy",
+      join_url: index % 2 === 0 ? teamsJoin : "",
+    });
+  }
+}
+
+/** Every event overlapping `[start, end)`, restricted to `calendarIds` when given.
+ *  The same overlap rule the Rust store and `calendar::overlaps` implement — the
+ *  zero-length clause included. */
+function mockCalendarView(
+  start: string,
+  end: string,
+  calendarIds: string[],
+): { start: string; end: string; events: MockCalendarEvent[] } {
+  const events = calendarEvents
+    .filter((event) => calendarIds.length === 0 || calendarIds.includes(event.calendar_id))
+    .filter((event) => event.start < end && (event.end > start || event.start >= start))
+    .sort((a, b) => (a.start === b.start ? a.id.localeCompare(b.id) : a.start < b.start ? -1 : 1));
+  return { start, end, events };
+}
+
+/** An optional array-of-strings param, empty when absent — mirrors the backend's
+ *  `param_str_list`. */
+function optionalStringList(params: unknown, key: string): string[] {
+  const value = asObject(params)[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -3373,6 +3752,9 @@ seedChannels();
 // Mail draws no random numbers at all (its fixtures are fully deterministic), so
 // its position here cannot disturb any existing spec either.
 seedMail();
+// Same for the calendar: fully deterministic given today's date, and it draws no
+// random numbers, so it cannot disturb any existing spec either.
+seedCalendar();
 
 const server = Bun.serve({
   port: PORT,

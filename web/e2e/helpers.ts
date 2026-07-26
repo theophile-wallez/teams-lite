@@ -269,6 +269,90 @@ export async function fetchTestMail(page: Page): Promise<{
   return res.json();
 }
 
+/** Switch the sidebar to the Calendar tab and wait for the grid to render. The
+ *  calendar loads lazily — the calendar list and the first window are fetched only
+ *  when this tab is first shown — so specs must go through here. */
+export async function openCalendarTab(page: Page): Promise<void> {
+  await page.locator('[data-testid="tab-calendar"]').click();
+  await expect(page.locator('[data-testid="calendar-pane"]')).toBeVisible();
+  await expect
+    .poll(() => calendarEvents(page).count(), { timeout: 15_000 })
+    .toBeGreaterThan(0);
+}
+
+/** Every event drawn in the calendar GRID.
+ *
+ *  Scoped to the pane on purpose: the sidebar's "Up next" list renders the same
+ *  events with the same test id, so an unscoped locator matches an event twice and
+ *  every strict-mode assertion on it fails. */
+export function calendarEvents(page: Page) {
+  return page.locator('[data-testid="calendar-pane"] [data-testid="calendar-event"]');
+}
+
+/** One event in the grid, by id (see {@link calendarEvents} on why this is scoped). */
+export function calendarEvent(page: Page, id: string) {
+  return page.locator(
+    `[data-testid="calendar-pane"] [data-testid="calendar-event"][data-event-id="${id}"]`,
+  );
+}
+
+/** Switch the calendar to one of its views and wait for that view to mount. */
+export async function openCalendarView(
+  page: Page,
+  view: "month" | "week" | "day" | "agenda",
+): Promise<void> {
+  await page.locator(`[data-testid="calendar-view-${view}"]`).click();
+  const surface = {
+    month: '[data-testid="calendar-month"]',
+    week: '[data-testid="calendar-time-grid"]',
+    day: '[data-testid="calendar-time-grid"]',
+    agenda: '[data-testid="calendar-agenda"], [data-testid="calendar-agenda-empty"]',
+  }[view];
+  await expect(page.locator(surface).first()).toBeVisible();
+}
+
+/** Reschedule, cancel or remove an event on the mock and broadcast the window it
+ *  lives in — mirroring what the Rust backend emits when its poll notices a change
+ *  made in real Outlook. */
+export async function emitCalendarChange(
+  page: Page,
+  body: {
+    event_id?: string;
+    subject?: string;
+    start?: string;
+    end?: string;
+    is_cancelled?: boolean;
+    response?: string;
+    remove?: boolean;
+    calendar?: string;
+    /** Re-seed the mock's calendar, undoing every change made by this suite. */
+    reset?: boolean;
+  },
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "calendar", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** The mock's seeded calendars and events, via the gated `/__test/calendar` endpoint. */
+export async function fetchTestCalendar(page: Page): Promise<{
+  calendars: { id: string; name: string; is_default: boolean }[];
+  events: {
+    id: string;
+    calendar_id: string;
+    subject: string;
+    start: string;
+    end: string;
+    is_all_day: boolean;
+    response: string;
+  }[];
+}> {
+  const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/calendar`);
+  expect(res.ok()).toBeTruthy();
+  return res.json();
+}
+
 /** Filter out benign console noise so `consoleErrors` only holds real problems. */
 export function realErrors(errors: string[]): string[] {
   return errors.filter(

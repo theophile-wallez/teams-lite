@@ -23,7 +23,11 @@ import {
   replyToPayload,
   shouldNotify,
   trimHistoryPage,
+  mergeCalendarWindow,
   type AppSettings,
+  type CalendarEvent,
+  type CalendarInfo,
+  type CalendarViewResult,
   type CallSignal,
   type CallSignalFrame,
   type Channel,
@@ -49,6 +53,13 @@ import {
   type UpdateInfo,
 } from "./protocol";
 import { coalesce } from "./singleflight";
+import {
+  requestRange,
+  shiftAnchor,
+  startOfDay,
+  visibleRange,
+  type CalendarViewMode,
+} from "./calendar";
 import { ensureNotificationPermission, notifyCall, notifyMessage } from "./notify";
 import {
   APPEARANCE_STORAGE_KEY,
@@ -72,7 +83,7 @@ export type PendingReply = { message: ChatMessage; marker: string | null };
 /** Which sidebar list is showing: normal chats, the team/channel tree, or the
  *  mailbox. Each is a distinct source — a channel never appears in the chat list,
  *  and mail is a different backend surface entirely — so this is a hard switch. */
-export type SidebarTab = "chats" | "channels" | "mail";
+export type SidebarTab = "chats" | "channels" | "mail" | "calendar";
 
 /** The cache key a mail attachment's proxied bytes are stored under. Namespaced so
  *  it can never collide with a Teams hosted-content URL in the shared media cache. */
@@ -181,6 +192,31 @@ export type AppState = {
   mailBody: MailBody | null;
   mailBodyLoading: boolean;
   mailBodyError: string | null;
+
+  // ---- calendar (read-only Teams/Outlook surface) ---------------------------
+
+  /** The mailbox's calendars, default first. Empty until the Calendar tab is first
+   *  opened — like mail, the calendar is loaded lazily. */
+  calendars: CalendarInfo[];
+  /** Which calendars are drawn. Persisted locally, and seeded with the default
+   *  calendar alone: a mailbox here carries six (birthdays, holidays, a shared
+   *  team one…), and syncing all of them on first paint would cost six round-trips
+   *  to show what the user came for. */
+  visibleCalendarIds: string[];
+  /** Which view the calendar shows. */
+  calendarMode: CalendarViewMode;
+  /** The date the view is centred on, as epoch milliseconds (a `Date` in reactive
+   *  state would re-render on every identity change even when the day is the same). */
+  calendarAnchorMs: number;
+  /** Every event held for the window on screen (and whatever else is still cached
+   *  from a window visited earlier), earliest first. */
+  calendarEvents: CalendarEvent[];
+  calendarLoading: boolean;
+  /** Why the calendar could not be loaded, or null. Scoped to the calendar pane:
+   *  the calendar failing must never break the chat surfaces. */
+  calendarError: string | null;
+  /** The event whose details panel is open, or null. */
+  openEventId: string | null;
 };
 
 const DRAFT_SAVE_DELAY_MS = 150;
@@ -217,6 +253,9 @@ const MEDIA_CACHE_BYTES = 48 * 1024 * 1024;
 // would otherwise accumulate megabytes of markup. The backend caches every body
 // durably in SQLite, so re-opening an evicted mail is a local round-trip.
 const RETAINED_MAIL_BODIES = 12;
+// Where the locally-chosen visible calendars are persisted (client-only, like the
+// channel-favorite overrides).
+const VISIBLE_CALENDARS_KEY = "teams-lite:visible-calendars";
 
 function initialState(): AppState {
   return {
@@ -263,6 +302,16 @@ function initialState(): AppState {
     mailBody: null,
     mailBodyLoading: false,
     mailBodyError: null,
+    calendars: [],
+    visibleCalendarIds: [],
+    calendarMode: "month",
+    // Midnight today: the anchor is a DAY, and carrying a wall-clock time in it
+    // would make "is this the anchor's month" depend on when the app was opened.
+    calendarAnchorMs: startOfDay(new Date()).getTime(),
+    calendarEvents: [],
+    calendarLoading: false,
+    calendarError: null,
+    openEventId: null,
   };
 }
 
@@ -399,6 +448,7 @@ export class TeamsController {
     this.applyPersistedAppearance();
     this.applyPersistedSounds();
     this.applyPersistedFavorites();
+    this.applyPersistedVisibleCalendars();
     this.wireEvents();
 
     // Pick up the backend's write token from our own server before connecting, so
@@ -606,6 +656,34 @@ export class TeamsController {
       const d = raw as { folder: string; error: string };
       if (this.get().mailFolderId === d.folder && this.get().mailMessages.length === 0) {
         this.set({ mailError: d.error || "Couldn't load mail", mailLoading: false });
+      }
+    });
+
+    // A calendar's name, colour or order moved. Only refresh once the calendar has
+    // been opened at least once, so a user who never looks at it is never made to
+    // load it.
+    on("calendars_changed", () => {
+      if (this.get().calendars.length > 0) void this.refreshCalendars();
+    });
+
+    // The backend reconciled the window it is watching. Fold it in: a meeting moved
+    // or cancelled in real Outlook appears (or disappears) here without a reload.
+    // Guarded on the window still being one we care about — a late update for a
+    // month the user has navigated away from is cached, not rendered over.
+    on("calendar_view_updated", (raw) => {
+      const view = raw as CalendarViewResult;
+      if (!view || typeof view.start !== "string" || !Array.isArray(view.events)) return;
+      this.set({
+        calendarEvents: mergeCalendarWindow(this.get().calendarEvents, view),
+        calendarError: null,
+        calendarLoading: false,
+      });
+    });
+
+    on("calendar_view_error", (raw) => {
+      const d = raw as { error?: string };
+      if (this.get().calendarEvents.length === 0) {
+        this.set({ calendarError: d?.error || "Couldn\u2019t load the calendar", calendarLoading: false });
       }
     });
     on("realtime_status", (s) => {
@@ -881,6 +959,7 @@ export class TeamsController {
   setSidebarTab(tab: SidebarTab): void {
     if (this.get().sidebarTab !== tab) this.set({ sidebarTab: tab });
     if (tab === "mail") void this.ensureMailLoaded();
+    if (tab === "calendar") void this.ensureCalendarLoaded();
   }
 
   // ---- mail (read-only Outlook surface) ------------------------------------
@@ -1083,6 +1162,155 @@ export class TeamsController {
     this.persistFavorites(next);
   }
 
+  // ---- calendar (read-only Teams/Outlook surface) --------------------------
+  //
+  // Local-first like mail: the backend serves a window from its SQLite mirror and
+  // reconciles it against Graph in the background, so stepping back to a month
+  // already visited is instant.
+  //
+  // READ-ONLY, and more sharply so than mail: creating an event mails an invitation
+  // to every attendee, and answering one mails the organizer. There is no method
+  // here that could, and none in the backend either (see src/calendar.rs).
+
+  /** Guards against a stale answer winning. Every view load takes a ticket; a
+   *  response whose ticket is no longer the current one is dropped, so quickly
+   *  paging through months (or toggling calendars) can never leave the grid showing
+   *  a window the user has already left. */
+  private calendarLoadToken = 0;
+
+  private refreshCalendars = coalesce(() => this.loadCalendars());
+
+  /** Load the calendars and the first window the first time the Calendar tab is
+   *  shown. */
+  private async ensureCalendarLoaded(): Promise<void> {
+    if (this.get().calendars.length === 0) await this.refreshCalendars();
+    await this.loadCalendarView();
+  }
+
+  /** Fetch the calendar list. Best-effort: the calendar is a secondary surface, so
+   *  a failure is surfaced in the calendar pane only, never as a fatal. */
+  private async loadCalendars(): Promise<void> {
+    try {
+      const calendars = await this.backend.calendars();
+      this.set({ calendars, calendarError: null });
+      // Nothing chosen yet (a first run, or a persisted choice naming calendars this
+      // mailbox no longer has): fall back to the default calendar alone.
+      const visible = this.get().visibleCalendarIds.filter((id) =>
+        calendars.some((c) => c.id === id),
+      );
+      if (visible.length === 0) {
+        const fallback = calendars.find((c) => c.is_default) ?? calendars[0];
+        if (fallback) this.setVisibleCalendars([fallback.id]);
+      } else if (visible.length !== this.get().visibleCalendarIds.length) {
+        this.setVisibleCalendars(visible);
+      }
+    } catch (e) {
+      if (this.get().calendars.length === 0) this.set({ calendarError: errText(e) });
+    }
+  }
+
+  /**
+   * Load the window the current view shows.
+   *
+   * The events already held are kept on screen while the request is in flight, so
+   * navigating between months never blanks the grid — the new window replaces its own
+   * range on arrival (see `mergeCalendarWindow`) and leaves neighbouring months
+   * cached for the step back.
+   */
+  async loadCalendarView(): Promise<void> {
+    const state = this.get();
+    const range = visibleRange(state.calendarMode, new Date(state.calendarAnchorMs));
+    const { start, end } = requestRange(range);
+    const calendars = state.visibleCalendarIds;
+    // No calendar switched on is not an error and not a load: it is an empty grid.
+    if (calendars.length === 0) {
+      this.set({ calendarEvents: [], calendarLoading: false, calendarError: null });
+      return;
+    }
+
+    const token = ++this.calendarLoadToken;
+    this.set({ calendarLoading: true, calendarError: null });
+    try {
+      const view = await this.backend.calendarView(start, end, calendars);
+      if (token !== this.calendarLoadToken) return;
+      this.set({ calendarEvents: mergeCalendarWindow(this.get().calendarEvents, view) });
+    } catch (e) {
+      if (token !== this.calendarLoadToken) return;
+      this.set({ calendarError: errText(e) });
+    } finally {
+      if (token === this.calendarLoadToken) this.set({ calendarLoading: false });
+    }
+  }
+
+  /** Switch the calendar view (month / week / day / agenda) and load its window. */
+  setCalendarMode(mode: CalendarViewMode): void {
+    if (this.get().calendarMode === mode) return;
+    this.set({ calendarMode: mode, openEventId: null });
+    void this.loadCalendarView();
+  }
+
+  /** Centre the calendar on a date (a click in the mini month, or a day header). */
+  setCalendarAnchor(date: Date): void {
+    const anchor = startOfDay(date).getTime();
+    if (this.get().calendarAnchorMs === anchor) return;
+    this.set({ calendarAnchorMs: anchor, openEventId: null });
+    void this.loadCalendarView();
+  }
+
+  /** Step one view forward (`+1`) or back (`-1`). */
+  shiftCalendar(delta: number): void {
+    const state = this.get();
+    const next = shiftAnchor(state.calendarMode, new Date(state.calendarAnchorMs), delta);
+    this.setCalendarAnchor(next);
+  }
+
+  /** Jump back to today, keeping the current view. */
+  goToToday(): void {
+    this.setCalendarAnchor(new Date());
+  }
+
+  /** Show or hide one calendar. Hiding is local-only and instant (the events are
+   *  already held); showing may need a window the backend has not read for that
+   *  calendar yet, so it reloads. */
+  toggleCalendarVisible(id: string): void {
+    const current = this.get().visibleCalendarIds;
+    const next = current.includes(id) ? current.filter((c) => c !== id) : [...current, id];
+    this.setVisibleCalendars(next);
+    void this.loadCalendarView();
+  }
+
+  /** Record the visible calendars in state and in localStorage. */
+  private setVisibleCalendars(ids: string[]): void {
+    this.set({ visibleCalendarIds: ids });
+    try {
+      localStorage.setItem(VISIBLE_CALENDARS_KEY, JSON.stringify(ids));
+    } catch {
+      /* ignore — a failed persist just doesn't survive reload */
+    }
+  }
+
+  /** Load the persisted visible-calendar choice. Best-effort and SSR-safe: any
+   *  failure leaves the list empty, and `loadCalendars` then falls back to the
+   *  default calendar. */
+  private applyPersistedVisibleCalendars(): void {
+    try {
+      const raw = localStorage.getItem(VISIBLE_CALENDARS_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        const ids = parsed.filter((id): id is string => typeof id === "string" && id.length > 0);
+        if (ids.length > 0) this.set({ visibleCalendarIds: ids });
+      }
+    } catch {
+      /* ignore — the visible-calendar choice is non-critical */
+    }
+  }
+
+  /** Open one event's details panel, or close it (`null`). */
+  setOpenEvent(id: string | null): void {
+    this.set({ openEventId: id });
+  }
+
   // ---- notifications (activity feed) --------------------------------------
 
   // Local "seen" high-water mark (epoch ms). The badge counts unread entries
@@ -1232,6 +1460,14 @@ export class TeamsController {
       void this.refreshMailFolders();
       const folderId = this.get().mailFolderId;
       if (folderId) void this.selectMailFolder(folderId);
+    }
+
+    // And the calendar, on the same terms: a meeting moved or cancelled while we
+    // were offline would otherwise only correct itself on the next poll tick, and
+    // re-loading the window also re-registers it as the one the backend watches.
+    if (this.get().calendars.length > 0) {
+      void this.refreshCalendars();
+      void this.loadCalendarView();
     }
   }
 

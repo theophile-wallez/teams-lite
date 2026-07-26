@@ -13,9 +13,11 @@
 //          | fetch_media | fetch_avatar | profile | presence | get_settings
 //          | set_settings | enrich_link
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
+//          | calendars | calendar_view
 // Events:  status | message | conversations_changed | notifications_changed | typing
 //          | read_receipt | call | call_signal | update_available
 //          | mail_folders_changed | mail_list_updated | mail_list_error
+//          | calendars_changed | calendar_view_updated | calendar_view_error
 //
 // The `mail_*` methods are the READ-ONLY Outlook surface (see `mail`): the same
 // broker identity carries the mailbox, and the app lists folders, reads messages and
@@ -23,6 +25,13 @@
 // exists in the crate, and `mail::tests` enforce that on the source. Mail bodies are
 // sanitized server-side and stripped of every remote reference, so displaying one
 // makes no network request of its own.
+//
+// The `calendar_*` methods are the READ-ONLY Teams/Outlook calendar (see `calendar`),
+// on the same identity and the same local-first pipeline. It cannot create, move,
+// cancel, accept, decline or forward anything — again absent from the crate rather
+// than merely ungated, and `calendar::tests` enforce it on the source. That matters
+// as much as it does for mail: creating an event mails an invitation to every
+// attendee, and answering one mails the organizer.
 //
 // The `call` event is incoming-call AWARENESS only (ring/dismiss a banner) — it
 // rides on the after-the-fact `Event/Call` chat system message.
@@ -52,7 +61,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    auth, mail, retry, teams, teams_activity, teams_avatars, teams_media, teams_presence,
+    auth, calendar, mail, retry, teams, teams_activity, teams_avatars, teams_media, teams_presence,
     teams_profiles, teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
 use teams_lite::gitlab;
@@ -415,6 +424,22 @@ struct Ctx {
     /// request per folder the user actually looks at rather than one per folder the
     /// mailbox happens to have.
     mail_watch: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// The calendar window the live poll re-reads (see `spawn_calendar_sync`), or
+    /// `None` until a UI opens the calendar. Only the LATEST window is watched: a
+    /// calendar UI shows exactly one range at a time, and re-reading the month the
+    /// user navigated away from would be work nobody is looking at.
+    calendar_watch: Arc<Mutex<Option<CalendarWatch>>>,
+}
+
+/// The calendar window a UI currently has on screen, and over which calendars.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CalendarWatch {
+    /// Canonical UTC timestamps, month-aligned (the span of
+    /// [`calendar::months_covering`]) rather than the exact grid the UI drew, so the
+    /// poll refreshes whole cache units.
+    start: String,
+    end: String,
+    calendars: Vec<String>,
 }
 
 /// The session plus when it was minted, so we can rebuild it before the
@@ -514,7 +539,8 @@ impl Ctx {
         Ok(fresh)
     }
 
-    /// A valid Microsoft Graph token, for the read-only mail surface.
+    /// A valid Microsoft Graph token, for the read-only mail and calendar surfaces
+    /// (they share one scope, and therefore one cache entry and one refresh).
     async fn graph(&self) -> Result<String> {
         self.tokens.get(mail::MAIL_SCOPE).await
     }
@@ -529,9 +555,17 @@ impl Ctx {
         }
     }
 
-    /// Run a Graph (mail) operation under the shared retry policy.
+    /// Mark the calendar window the live poll should re-read, replacing whatever it
+    /// watched before.
+    fn watch_calendar(&self, watch: CalendarWatch) {
+        if let Ok(mut slot) = self.calendar_watch.lock() {
+            *slot = Some(watch);
+        }
+    }
+
+    /// Run a Graph (mail or calendar) operation under the shared retry policy.
     ///
-    /// The mail sibling of [`Ctx::retry_on_auth`]: `op` gets a freshly-read Graph
+    /// The Graph sibling of [`Ctx::retry_on_auth`]: `op` gets a freshly-read Graph
     /// token per attempt, and a 401 refreshes THAT token only — the Teams session
     /// and its skypetoken are unrelated to the mailbox, so refreshing them here
     /// would be noise (and would rebuild a session for nothing).
@@ -545,7 +579,7 @@ impl Ctx {
             op(token).await
         };
         let on_auth = || async {
-            eprintln!("[auth] 401 from Graph — refreshing the mail token before retry");
+            eprintln!("[auth] 401 from Graph — refreshing the Graph token before retry");
             self.tokens.refresh(mail::MAIL_SCOPE).await.map(|_| ())
         };
         retry::with_retry(retry::RetryPolicy::default(), Some(on_auth), attempt).await
@@ -759,6 +793,7 @@ async fn main() -> Result<()> {
         events: events_tx,
         update: Arc::new(std::sync::Mutex::new(None)),
         mail_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        calendar_watch: Arc::new(Mutex::new(None)),
     };
 
     // real-time: run the trouter, persist each live message, broadcast an event.
@@ -767,6 +802,10 @@ async fn main() -> Result<()> {
     // mail: poll whichever folders a client opens (read-only, and idle until one
     // does — see `spawn_mail_sync`).
     spawn_mail_sync(ctx.clone());
+
+    // calendar: poll whichever window a client is looking at (read-only, and idle
+    // until one opens the calendar — see `spawn_calendar_sync`).
+    spawn_calendar_sync(ctx.clone());
 
     // one-shot, best-effort: is a newer rolling `latest` build available?
     spawn_update_check(ctx.clone());
@@ -1658,6 +1697,113 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }))
         }
 
+        // ---- calendar (READ-ONLY Teams/Outlook surface, see `calendar`) -------
+        //
+        // Both methods below only read, and neither is in `OUTWARD_METHODS` because
+        // neither can act on a calendar: there is no create/update/delete/accept/
+        // decline/cancel/forward path anywhere in the crate (`calendar::tests`
+        // enforce it). What the write lock protects is Teams; what protects the
+        // calendar is that the capability does not exist.
+
+        // The calendar list — LOCAL-FIRST like `mail_folders`, and cold-start-aware
+        // for the same reason: answering an empty list on the first call would leave
+        // the UI with nothing to show and no way to tell that apart from a mailbox
+        // with no calendars.
+        "calendars" => {
+            let rows = ctx.store()?.calendars()?;
+            if !rows.is_empty() {
+                sync_calendars_bg(ctx.clone());
+                return Ok(json!(rows.iter().map(calendar_json).collect::<Vec<Value>>()));
+            }
+            let calendars = fetch_calendars(ctx).await?;
+            let store = ctx.store()?;
+            calendar::persist_calendars(&store, &calendars)?;
+            let rows = store.calendars()?;
+            Ok(json!(rows.iter().map(calendar_json).collect::<Vec<Value>>()))
+        }
+
+        // Every event in a window — LOCAL-FIRST: a month already synced answers from
+        // SQLite with no network at all (0 round-trips when navigating back to it),
+        // then a background refresh reconciles it and emits `calendar_view_updated`
+        // if anything moved. A window whose months have never been read waits for the
+        // network instead, because "no events" and "not fetched yet" look identical
+        // on a calendar grid — and the second one would render as a free week.
+        //
+        // Opening a window also makes it the one the live poll watches.
+        "calendar_view" => {
+            let start = param_str(params, "start")?;
+            let end = param_str(params, "end")?;
+            // Months, not the requested window: the sync unit is a calendar month, so
+            // a week straddling two of them is still a cache hit. See the
+            // `calendar` module doc.
+            let months = calendar::months_covering(&start, &end);
+            let (Some(first), Some(last)) = (months.first(), months.last()) else {
+                anyhow::bail!("calendar_view needs a start before its end, both ISO 8601 UTC");
+            };
+            let (span_start, span_end) = (first.start(), last.end());
+
+            // Which calendars: whatever the client asked for, else every one we know
+            // (resolving them from the network if this is a cold store, so the first
+            // calendar_view of a session does not come back empty).
+            let calendars = match param_str_list(params, "calendars") {
+                ids if !ids.is_empty() => ids,
+                _ => {
+                    let known = ctx.store()?.calendars()?;
+                    if known.is_empty() {
+                        let fetched = fetch_calendars(ctx).await?;
+                        calendar::persist_calendars(&ctx.store()?, &fetched)?;
+                        fetched.into_iter().map(|c| c.id).collect()
+                    } else {
+                        known.into_iter().map(|c| c.id).collect()
+                    }
+                }
+            };
+
+            ctx.watch_calendar(CalendarWatch {
+                start: span_start.clone(),
+                end: span_end.clone(),
+                calendars: calendars.clone(),
+            });
+
+            let fully_synced = {
+                let store = ctx.store()?;
+                let mut synced = true;
+                for calendar_id in &calendars {
+                    for month in &months {
+                        if !store.calendar_month_synced(calendar_id, &month.key())? {
+                            synced = false;
+                            break;
+                        }
+                    }
+                    if !synced {
+                        break;
+                    }
+                }
+                synced
+            };
+
+            if !fully_synced {
+                refresh_calendar_span(ctx, &calendars, &months).await?;
+            } else {
+                let ctx_bg = ctx.clone();
+                let calendars_bg = calendars.clone();
+                let months_bg = months.clone();
+                tokio::spawn(async move {
+                    match refresh_calendar_span(&ctx_bg, &calendars_bg, &months_bg).await {
+                        Ok(true) => emit_calendar_view(&ctx_bg),
+                        Ok(false) => {}
+                        Err(e) => ctx_bg.emit(
+                            "calendar_view_error",
+                            json!({ "error": e.to_string() }),
+                        ),
+                    }
+                });
+            }
+
+            let events = ctx.store()?.calendar_events(&start, &end, &calendars)?;
+            Ok(calendar_view_json(&events, &start, &end))
+        }
+
         other => anyhow::bail!("unknown method: {other}"),
     }
 }
@@ -1869,6 +2015,216 @@ fn mail_body_json(mail: &teams_lite::store::MailMessageRow) -> Value {
     })
 }
 
+// ---- calendar (READ-ONLY, see `calendar`) ----------------------------------
+
+/// Read the mailbox's calendars from Graph under the shared retry policy.
+async fn fetch_calendars(ctx: &Ctx) -> Result<Vec<calendar::Calendar>> {
+    let http = ctx.http.clone();
+    ctx.retry_graph(move |token| {
+        let http = http.clone();
+        async move { calendar::fetch_calendars(&http, &token).await }
+    })
+    .await
+}
+
+/// Sync the calendar list from Graph in the background, emitting
+/// `calendars_changed` when any calendar's name, colour or order moved. Best-effort:
+/// the calendar is a secondary surface, so a failure is logged and the cached list
+/// stands.
+fn sync_calendars_bg(ctx: Ctx) {
+    tokio::spawn(async move {
+        match fetch_calendars(&ctx).await {
+            Ok(calendars) => {
+                let changed = ctx
+                    .store()
+                    .and_then(|store| calendar::persist_calendars(&store, &calendars));
+                match changed {
+                    Ok(true) => ctx.emit("calendars_changed", json!({})),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[calendar] could not persist calendars: {e}"),
+                }
+            }
+            Err(e) => eprintln!("[calendar] calendar sync failed: {e}"),
+        }
+    });
+}
+
+/// Re-read a contiguous span of calendar-months from Graph and reconcile it into the
+/// store, for every calendar in `calendars`. Returns whether anything changed, so the
+/// caller only emits an event when it did.
+///
+/// ONE request per calendar covering the whole span, rather than one per
+/// (calendar, month): a month grid reaches into three calendar months, and three
+/// sequential round-trips per calendar would be plainly visible on the first paint.
+/// The results are then split back into months, because a month is the unit the
+/// store records as synced and the unit it reconciles.
+///
+/// Reconciling means pruning: an event held locally that the fresh read does not
+/// list has been deleted, moved out of the window, or had its whole series removed in
+/// real Outlook, and must disappear here too (see `Store::prune_calendar_window`).
+async fn refresh_calendar_span(
+    ctx: &Ctx,
+    calendars: &[String],
+    months: &[calendar::Month],
+) -> Result<bool> {
+    let (Some(first), Some(last)) = (months.first(), months.last()) else {
+        return Ok(false);
+    };
+    let (span_start, span_end) = (first.start(), last.end());
+
+    let mut changed = false;
+    for calendar_id in calendars {
+        let http = ctx.http.clone();
+        let id = calendar_id.clone();
+        let (from, to) = (span_start.clone(), span_end.clone());
+        let view = ctx
+            .retry_graph(move |token| {
+                let http = http.clone();
+                let (id, from, to) = (id.clone(), from.clone(), to.clone());
+                async move { calendar::fetch_view(&http, &token, &id, &from, &to).await }
+            })
+            .await?;
+        if view.truncated {
+            // Never a silent truncation: a short month reads as a quiet one.
+            eprintln!(
+                "[calendar] {calendar_id} {span_start}..{span_end} has more events than one \
+                 sync reads; the view is incomplete"
+            );
+        }
+
+        let store = ctx.store()?;
+        changed |= calendar::persist_events(&store, &view.events)? > 0;
+        for month in months {
+            let (month_start, month_end) = (month.start(), month.end());
+            // The ids this month is allowed to keep, decided by the SAME overlap rule
+            // the store's range query uses — see `calendar::overlaps`.
+            let keep: Vec<String> = view
+                .events
+                .iter()
+                .filter(|e| calendar::overlaps(e, &month_start, &month_end))
+                .map(|e| e.id.clone())
+                .collect();
+            // A truncated read is not authoritative about what is absent, so it must
+            // not prune: it would delete events it simply did not get to.
+            if !view.truncated {
+                changed |= store
+                    .prune_calendar_window(calendar_id, &month_start, &month_end, &keep)?
+                    > 0;
+                store.mark_calendar_month_synced(calendar_id, &month.key())?;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// Broadcast the currently watched calendar window to every connected UI.
+fn emit_calendar_view(ctx: &Ctx) {
+    let Some(watch) = ctx.calendar_watch.lock().ok().and_then(|w| w.clone()) else {
+        return;
+    };
+    let Ok(store) = ctx.store() else { return };
+    let Ok(events) = store.calendar_events(&watch.start, &watch.end, &watch.calendars) else {
+        return;
+    };
+    ctx.emit(
+        "calendar_view_updated",
+        calendar_view_json(&events, &watch.start, &watch.end),
+    );
+}
+
+/// How often the watched calendar window is re-read. Slower than mail: a meeting
+/// moved five minutes ago is worth knowing about, a meeting moved five seconds ago is
+/// not worth a request every few seconds — and this is one request per visible
+/// calendar.
+const CALENDAR_POLL_INTERVAL: Duration = Duration::from_secs(120);
+
+/// The calendar live loop: re-read the window a UI is looking at on a timer and
+/// broadcast it when it changed.
+///
+/// A poll, not a push, for the same reason mail polls: trouter carries no calendar
+/// traffic, and Graph's change notifications need a public webhook.
+///
+/// LAZY BY DESIGN: the watch starts empty, so this loop makes NO requests until a
+/// client opens the calendar. A user who only ever chats — or the terminal UI, which
+/// has no calendar surface — pays nothing for it.
+fn spawn_calendar_sync(ctx: Ctx) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(CALENDAR_POLL_INTERVAL).await;
+            let Some(watch) = ctx.calendar_watch.lock().ok().and_then(|w| w.clone()) else {
+                continue;
+            };
+            let months = calendar::months_covering(&watch.start, &watch.end);
+            match refresh_calendar_span(&ctx, &watch.calendars, &months).await {
+                Ok(true) => emit_calendar_view(&ctx),
+                Ok(false) => {}
+                // A transient failure is not worth telling the UI about: the cached
+                // window is still valid and the next tick retries.
+                Err(e) => eprintln!("[calendar] poll of the watched window failed: {e}"),
+            }
+        }
+    });
+}
+
+/// Serialize one calendar for the sidebar.
+fn calendar_json(calendar: &teams_lite::store::CalendarRow) -> Value {
+    json!({
+        "id": calendar.id,
+        "name": calendar.name,
+        "hex_color": calendar.hex_color,
+        "is_default": calendar.is_default,
+        "can_edit": calendar.can_edit,
+        "position": calendar.position,
+    })
+}
+
+/// Serialize one event. `attendees` and `categories` are stored as JSON and pass
+/// straight through — nothing in the backend looks inside them.
+fn calendar_event_json(event: &teams_lite::store::CalendarEventRow) -> Value {
+    let array = |raw: &str| serde_json::from_str::<Value>(raw).unwrap_or_else(|_| json!([]));
+    json!({
+        "id": event.id,
+        "calendar_id": event.calendar_id,
+        "subject": event.subject,
+        "preview": event.preview,
+        "start": event.start_utc,
+        "end": event.end_utc,
+        "is_all_day": event.is_all_day,
+        "is_cancelled": event.is_cancelled,
+        "is_organizer": event.is_organizer,
+        "organizer": { "name": event.organizer_name, "address": event.organizer_address },
+        "location": event.location,
+        "join_url": event.join_url,
+        "web_link": event.web_link,
+        "show_as": event.show_as,
+        "response": event.response,
+        "series": event.series,
+        "recurrence": event.recurrence,
+        "importance": event.importance,
+        "sensitivity": event.sensitivity,
+        "categories": array(&event.categories),
+        "attendees": array(&event.attendees),
+        "attendee_count": event.attendee_count,
+        "has_attachments": event.has_attachments,
+        "reminder_minutes": event.reminder_minutes,
+    })
+}
+
+/// A window of events plus the window itself, so a client can tell a late-arriving
+/// `calendar_view_updated` for a month it has navigated away from apart from one for
+/// the month it is showing.
+fn calendar_view_json(
+    events: &[teams_lite::store::CalendarEventRow],
+    start: &str,
+    end: &str,
+) -> Value {
+    json!({
+        "start": start,
+        "end": end,
+        "events": events.iter().map(calendar_event_json).collect::<Vec<Value>>(),
+    })
+}
+
 fn parse_reply_to(value: &Value) -> Result<teams_send::ReplyTo> {
     Ok(teams_send::ReplyTo {
         compose_time: value
@@ -1950,6 +2306,25 @@ fn param_str(params: &Value, key: &str) -> Result<String> {
         .and_then(|v| v.as_str())
         .map(String::from)
         .with_context(|| format!("missing param: {key}"))
+}
+
+/// An optional array-of-strings parameter, empty when absent, not an array, or made
+/// only of blanks. Callers treat "empty" as "no filter", so a malformed value
+/// degrades to the unfiltered result rather than to an error.
+fn param_str_list(params: &Value, key: &str) -> Vec<String> {
+    params
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Build the non-secret view of the app settings for the UI: the configured
@@ -2700,7 +3075,19 @@ mod tests {
 
     #[test]
     fn reads_never_need_the_write_token() {
-        for method in ["conversations", "open", "backfill", "read_receipts", "set_draft"] {
+        for method in [
+            "conversations",
+            "open",
+            "backfill",
+            "read_receipts",
+            "set_draft",
+            // The read-only Graph surfaces: the write lock gates Teams, and neither
+            // of these can act on the mailbox or the calendar at all.
+            "mail_folders",
+            "mail_list",
+            "calendars",
+            "calendar_view",
+        ] {
             assert!(check_write_allowed(method, &json!({}), Some("tok")).is_ok(), "{method}");
             assert!(check_write_allowed(method, &json!({}), None).is_ok(), "{method}");
         }

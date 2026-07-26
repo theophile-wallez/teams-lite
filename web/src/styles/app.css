@@ -533,3 +533,15 @@
     transform: rotate(360deg);
   }
 }
+
+/* Calendar: the diagonal hatch every calendar uses for a TENTATIVE event, so
+   "maybe" is legible without a colour of its own (colour is reserved for which
+   calendar an event belongs to). Drawn over the block's own tint at low contrast,
+   and keyed to the block's `--event-color` so it works in both themes. */
+.calendar-hatch {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--event-color) 22%, transparent) 0 2px,
+    transparent 2px 6px
+  );
+}

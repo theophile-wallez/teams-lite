@@ -11,6 +11,8 @@
 
 import type {
   AppSettings,
+  CalendarInfo,
+  CalendarViewResult,
   Channel,
   Conversation,
   LinkMetadataResult,
@@ -419,6 +421,35 @@ export class Backend {
     return this.request("mail_attachment", {
       message_id: messageId,
       attachment_id: attachmentId,
+    });
+  }
+
+  // ---- calendar (read-only) -----------------------------------------------
+  //
+  // Read-only for the same reason mail is, only more sharply: creating an event
+  // mails an invitation to every attendee and answering one mails the organizer.
+  // Neither this client nor the backend has any path that could (see
+  // src/calendar.rs). `join_url` and `web_link` on an event are links the user
+  // clicks — nothing here joins or answers anything.
+
+  /** The mailbox's calendars, default first. Local-first on the backend: answers
+   *  from its cache, then a background sync may push `calendars_changed`. */
+  calendars(): Promise<CalendarInfo[]> {
+    return this.request<CalendarInfo[]>("calendars");
+  }
+
+  /** Every event overlapping `[start, end)` (ISO 8601 UTC), restricted to
+   *  `calendarIds` when given.
+   *
+   *  Local-first: a window whose months the backend has already read answers from
+   *  SQLite with no network at all, and a background refresh may then push
+   *  `calendar_view_updated`. A window it has never read waits for the network,
+   *  because an unsynced week and a free week are indistinguishable on a grid. */
+  calendarView(start: string, end: string, calendarIds?: string[]): Promise<CalendarViewResult> {
+    return this.request<CalendarViewResult>("calendar_view", {
+      start,
+      end,
+      ...(calendarIds && calendarIds.length > 0 ? { calendars: calendarIds } : {}),
     });
   }
 

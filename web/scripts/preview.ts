@@ -34,6 +34,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/preview --type "hello there" --send
 //   bun run web/scripts/preview.ts --out /tmp/preview --incoming "hello there"
 //   bun run web/scripts/preview.ts --out /tmp/mail --mail        # the Mail surface
+//   bun run web/scripts/preview.ts --out /tmp/cal --calendar     # the Calendar surface
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
@@ -272,6 +273,62 @@ export async function openMailAt(page: Page, index: number): Promise<string> {
 }
 
 /**
+ * Switch the sidebar to the Calendar tab and wait for the grid to render.
+ *
+ * The calendar loads lazily — the calendar list and the first window are only
+ * fetched when this tab is first shown — so a caller must go through here rather
+ * than assuming a grid exists.
+ *
+ * Reading a calendar is a pure read on any backend: there is no create/respond path
+ * at all (see src/calendar.rs), so unlike the composer helpers this one has no
+ * keystroke gate to re-assert. It still only ever runs inside `withPreview`, which
+ * proved the backend was the mock before handing over the page.
+ */
+export async function openCalendarTab(page: Page): Promise<void> {
+  await page.locator('[data-testid="tab-calendar"]').click();
+  await page.waitForSelector('[data-testid="calendar-pane"]', { timeout: APP_READY_TIMEOUT_MS });
+  await page.waitForSelector('[data-testid="calendar-event"]', { timeout: APP_READY_TIMEOUT_MS });
+}
+
+/** Switch the calendar to one of its views and wait for that view to mount. */
+export async function openCalendarView(
+  page: Page,
+  view: "month" | "week" | "day" | "agenda",
+): Promise<void> {
+  await page.locator(`[data-testid="calendar-view-${view}"]`).click();
+  const surface = {
+    month: '[data-testid="calendar-month"]',
+    week: '[data-testid="calendar-time-grid"]',
+    day: '[data-testid="calendar-time-grid"]',
+    agenda: '[data-testid="calendar-agenda"], [data-testid="calendar-agenda-empty"]',
+  }[view];
+  await page.locator(surface).first().waitFor({ timeout: APP_READY_TIMEOUT_MS });
+}
+
+/**
+ * Switch every calendar on, so a capture shows the layouts that only appear with
+ * more than one source: multi-day bars, lanes, and colour-coded overlays. The app
+ * defaults to the primary calendar alone (see the store's `visibleCalendarIds`).
+ */
+export async function enableAllCalendars(page: Page): Promise<void> {
+  const toggles = page.locator('[data-testid="calendar-toggle"]');
+  for (let i = 0; i < (await toggles.count()); i++) {
+    const toggle = toggles.nth(i);
+    if ((await toggle.getAttribute("aria-checked")) !== "true") await toggle.click();
+  }
+  await page.waitForTimeout(500);
+}
+
+/** Open the first event's details dialog. Returns its id. */
+export async function openFirstEvent(page: Page): Promise<string> {
+  const event = page.locator('[data-testid="calendar-event"]').first();
+  const id = (await event.getAttribute("data-event-id")) ?? "";
+  await event.click();
+  await page.waitForSelector('[data-testid="calendar-event-details"]');
+  return id;
+}
+
+/**
  * Hover the last message until its quick reaction row appears (it is revealed
  * after a dwell, see REACTION_HOVER_MS in message-bubble.tsx).
  *
@@ -445,6 +502,38 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-list-light.png, ${out}-light.png, ` +
           `${out}-attachments-light.png and ${out}-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // The Calendar surface: every view, in both themes, plus the details dialog.
+  if (args.includes("--calendar")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openCalendarTab(page);
+      await shot(`${out}-month-light.png`);
+      // Again with every calendar on: multi-day bars, lanes and the colour coding
+      // only show once there is more than one source.
+      await enableAllCalendars(page);
+      await shot(`${out}-month-all-light.png`);
+      await openCalendarView(page, "week");
+      await shot(`${out}-week-light.png`);
+      await openCalendarView(page, "day");
+      await shot(`${out}-day-light.png`);
+      await openCalendarView(page, "agenda");
+      await shot(`${out}-agenda-light.png`);
+      await openCalendarView(page, "month");
+      await openFirstEvent(page);
+      await shot(`${out}-details-light.png`);
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(250);
+      await setTheme("dark");
+      await shot(`${out}-month-dark.png`);
+      await openCalendarView(page, "week");
+      await shot(`${out}-week-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-{month,month-all,week,day,agenda,details}-light.png and ` +
+          `${out}-{month,week}-dark.png`,
       );
     });
     process.exit(0);

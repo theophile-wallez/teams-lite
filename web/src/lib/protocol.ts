@@ -1450,3 +1450,170 @@ export function mergeOlderMailPage(current: MailPage | undefined, incoming: Mail
     has_more: incoming.has_more,
   };
 }
+
+// ---- calendar (read-only Teams/Outlook surface) -----------------------------
+//
+// Mirrors the Rust backend's `calendars` / `calendar_view` methods (see
+// src/calendar.rs and the calendar serializers in src/bin/server.rs). Strictly
+// read-only: there is no create, move, cancel, accept, decline or forward here, and
+// none exists in the backend either. An event's `join_url` and `web_link` are links
+// the USER clicks; nothing in this app ever joins or answers anything.
+//
+// Ordering note: `start` and `end` are ISO 8601 UTC timestamps truncated to whole
+// seconds by the backend, so string comparison is chronological comparison. `end` is
+// EXCLUSIVE (Graph's own convention) — for an all-day event it is midnight after the
+// last day.
+
+/** One of the mailbox's calendars, as the sidebar lists them. */
+export type CalendarInfo = {
+  id: string;
+  name: string;
+  /** Outlook's own colour as `#rrggbb`, or empty when the calendar uses the
+   *  automatic colour — the UI then falls back to its own palette (see
+   *  {@link calendarColor}). */
+  hex_color: string;
+  /** The primary calendar: where Teams meetings land, and the one shown by default. */
+  is_default: boolean;
+  /** What Outlook itself would allow. Shown for honesty only — this app never
+   *  writes to a calendar, whatever the flag says. */
+  can_edit: boolean;
+  position: number;
+};
+
+/** A person on an event: its organizer, or one attendee. */
+export type EventPerson = {
+  name: string;
+  address: string;
+  /** `accepted` | `declined` | `tentativelyAccepted` | `notResponded` | `none`.
+   *  Empty for an organizer. */
+  response: string;
+  /** `required` | `optional` | `resource`. Empty for an organizer. */
+  kind: string;
+};
+
+/** One occurrence on the calendar. A recurring meeting arrives as one of these per
+ *  occurrence — the backend asks Graph for a view, which expands recurrence
+ *  server-side. */
+export type CalendarEvent = {
+  id: string;
+  calendar_id: string;
+  subject: string;
+  /** Graph's own plain-text first lines of the invitation body. */
+  preview: string;
+  /** ISO 8601 UTC, whole seconds. */
+  start: string;
+  /** ISO 8601 UTC, whole seconds, EXCLUSIVE. */
+  end: string;
+  is_all_day: boolean;
+  is_cancelled: boolean;
+  is_organizer: boolean;
+  organizer: EventPerson;
+  location: string;
+  /** The Teams join link, when this is an online meeting. */
+  join_url: string;
+  /** Outlook-on-the-web deep link, for "Open in Outlook". */
+  web_link: string;
+  /** `free` | `tentative` | `busy` | `oof` | `workingElsewhere` | `unknown`. */
+  show_as: string;
+  /** The user's own answer, or `organizer` when they own the event. */
+  response: string;
+  /** `singleInstance` | `occurrence` | `exception` | `seriesMaster`. */
+  series: string;
+  /** The series' pattern (`daily`, `weekly`, …) when the backend saw one. An
+   *  occurrence carries none of its own — `series` is what says it repeats. */
+  recurrence: string;
+  importance: string;
+  sensitivity: string;
+  categories: string[];
+  /** Up to a capped number of attendees; {@link CalendarEvent.attendee_count} is
+   *  the true total (one real invitation in this tenant has 777). */
+  attendees: EventPerson[];
+  attendee_count: number;
+  has_attachments: boolean;
+  /** Minutes before the start, or -1 when the event records no reminder. */
+  reminder_minutes: number;
+};
+
+/** A window of events, plus the window itself so a client can tell a late-arriving
+ *  update for a month it has navigated away from apart from one for what it shows. */
+export type CalendarViewResult = {
+  start: string;
+  end: string;
+  events: CalendarEvent[];
+};
+
+/** Fallback colours for calendars Outlook reports on the automatic colour, keyed by
+ *  position so a calendar keeps the same colour for the whole session. Picked to
+ *  stay legible as a 3px bar and as a filled chip in both themes. */
+const CALENDAR_PALETTE = [
+  "#6875e6", // indigo — the app's own accent, for the primary calendar
+  "#0ea5e9",
+  "#16a34a",
+  "#f97316",
+  "#a855f7",
+  "#ef4444",
+  "#0d9488",
+  "#d946ef",
+] as const;
+
+/** A calendar's display colour: Outlook's own when it has one, else a stable
+ *  palette entry. */
+export function calendarColor(calendar: Pick<CalendarInfo, "hex_color" | "position">): string {
+  if (/^#[0-9a-fA-F]{6}$/.test(calendar.hex_color)) return calendar.hex_color;
+  const index = Math.abs(Math.trunc(calendar.position)) % CALENDAR_PALETTE.length;
+  return CALENDAR_PALETTE[index]!;
+}
+
+/** A calendar's name, with a fallback for one that reports none. */
+export function calendarLabel(calendar: Pick<CalendarInfo, "name">): string {
+  return calendar.name || "(calendar)";
+}
+
+/** An event's title, with the placeholder every calendar shows for an empty one. */
+export function eventTitle(event: Pick<CalendarEvent, "subject">): string {
+  return event.subject || "(no title)";
+}
+
+/** Whether an event repeats — true for any row that belongs to a series. */
+export function eventRepeats(event: Pick<CalendarEvent, "series">): boolean {
+  return event.series !== "" && event.series !== "singleInstance";
+}
+
+/** The organizer's display label, preferring the name over the bare address. */
+export function personLabel(person: Pick<EventPerson, "name" | "address">): string {
+  return person.name || person.address || "(unknown)";
+}
+
+/** Sort events earliest first, with the id as a deterministic tie-breaker so two
+ *  meetings at the same minute never swap places between renders. */
+function compareEventsAsc(a: CalendarEvent, b: CalendarEvent): number {
+  if (a.start !== b.start) return a.start < b.start ? -1 : 1;
+  if (a.end !== b.end) return a.end < b.end ? -1 : 1;
+  return a.id.localeCompare(b.id);
+}
+
+/** Merge event lists by id (earliest first). Later entries win, so a refreshed
+ *  occurrence — one that has since moved or been answered — replaces the stale copy. */
+export function mergeEvents(current: CalendarEvent[], incoming: CalendarEvent[]): CalendarEvent[] {
+  const byId = new Map(current.map((event) => [event.id, event]));
+  for (const event of incoming) byId.set(event.id, event);
+  return [...byId.values()].sort(compareEventsAsc);
+}
+
+/**
+ * Fold a freshly-fetched window into what we hold.
+ *
+ * The incoming window is AUTHORITATIVE over its own range: an event the server no
+ * longer lists inside it has been deleted or moved in real Outlook and must
+ * disappear here too. Events outside the window are untouched, so a background
+ * refresh of July never drops a cached August.
+ */
+export function mergeCalendarWindow(
+  current: CalendarEvent[],
+  incoming: CalendarViewResult,
+): CalendarEvent[] {
+  const outside = current.filter(
+    (event) => !(event.start < incoming.end && (event.end > incoming.start || event.start >= incoming.start)),
+  );
+  return mergeEvents(outside, incoming.events);
+}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Outlet, useMatchRoute, useNavigate, useParams } from "@tanstack/react-router";
 import { ControllerProvider, useAppState, useController } from "./controller-context";
+import { CalendarPane } from "./calendar-pane";
 import { ConversationList } from "./conversation-list";
 import { MailPane } from "./mail-pane";
 import { MessagePane } from "./message-pane";
@@ -58,7 +59,11 @@ function AppInner() {
   // "page", Teams-style. `paneOpen` drives that slide. On desktop both columns are
   // always on screen, so it only feeds the subtle parallax on the list.
   const isMobile = useIsMobile();
-  const paneOpen = !!routeConversationId || !!routeMailId || onSettings;
+  // The calendar has no list-then-detail shape: its sidebar rail is a picker, not a
+  // list of things to open, so on mobile the grid IS the page and the pane is up as
+  // soon as the tab is.
+  const paneOpen =
+    !!routeConversationId || !!routeMailId || onSettings || sidebarTab === "calendar";
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -134,7 +139,8 @@ function AppInner() {
   }, [isMobile, paneOpen, openMailId, controller]);
 
   // The keyboard-navigable list is whichever the active tab shows: chats or mail.
-  // (The channel tree is a tree, not a flat list, and uses click/Tab focus.)
+  // (The channel tree is a tree, not a flat list, and the calendar is a grid — both
+  // use click/Tab focus, and the calendar pane owns its own arrow keys.)
   const keyboardList = sidebarTab === "mail" ? mailMessages : conversations;
 
   // Keep the selection in range as the active list changes.
@@ -179,7 +185,7 @@ function AppInner() {
       // mirroring the TUI. It drives whichever virtualized list the active tab
       // shows — Chats or Mail; the Channels tab is a tree and uses click/Tab focus.
       if (routeConversationId || routeMailId || onSettings) return;
-      if (sidebarTab === "channels") return;
+      if (sidebarTab === "channels" || sidebarTab === "calendar") return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
 
@@ -246,11 +252,14 @@ function AppInner() {
             paneOpen ? "translate-x-0" : "translate-x-full",
           )}
         >
-          {/* Which surface the detail pane shows. Settings wins; then a mail —
-              either one addressed by the URL, or the Mail tab's own empty state, so
-              switching to Mail does not leave a chat's empty state on the right. */}
+          {/* Which surface the detail pane shows. Settings wins; then the calendar
+              when its tab is up; then a mail — either one addressed by the URL, or
+              the Mail tab's own empty state, so switching to Mail does not leave a
+              chat's empty state on the right. */}
           {onSettings ? (
             <SettingsPane onBack={goToList} />
+          ) : sidebarTab === "calendar" && !routeConversationId && !routeMailId ? (
+            <CalendarPane onBack={() => controller.setSidebarTab("chats")} />
           ) : routeMailId || (sidebarTab === "mail" && !routeConversationId) ? (
             <MailPane onBack={goToList} />
           ) : (

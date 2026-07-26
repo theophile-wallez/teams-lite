@@ -16,6 +16,7 @@ import {
 import type { SidebarTab } from "~/lib/store";
 import { cn } from "~/lib/utils";
 import { Avatar, tintFor } from "./avatar";
+import { CalendarSidebar } from "./calendar-sidebar";
 import { useAppState, useController } from "./controller-context";
 import { MailList } from "./mail-list";
 import { NotificationsBell } from "./notifications-bell";
@@ -42,10 +43,15 @@ function formatTime(ms: number): string {
 }
 
 /**
- * The left sidebar: an account header, a ⌘K search field, a Chats/Channels tab
- * switch, and — depending on the tab — a virtualized conversation list or the
- * team → channel tree. Channel messages live entirely under the Channels tab and
- * never appear in the chat list, matching the Microsoft Teams separation.
+ * The left sidebar: an account header, a ⌘K search field, a section switch, and —
+ * depending on the section — a virtualized conversation list, the team → channel
+ * tree, the mailbox, or the calendar's own rail. Channel messages live entirely
+ * under the Channels tab and never appear in the chat list, matching the Microsoft
+ * Teams separation.
+ *
+ * The four labels are abbreviated in the tab strip (a 320px column will not carry
+ * "Channels" and "Calendar" in full) with the full name on the accessible label, so
+ * the strip stays legible without lying about what the sections are.
  */
 export function ConversationList(props: {
   selectedIndex: number;
@@ -139,17 +145,22 @@ export function ConversationList(props: {
       >
         <div className="px-3 pb-1.5">
           <TabsList aria-label="Sidebar sections" className="w-full">
-            <TabsTrigger value="chats" data-testid="tab-chats">
+            <TabsTrigger value="chats" data-testid="tab-chats" className="px-2">
               Chats
             </TabsTrigger>
-            <TabsTrigger value="channels" data-testid="tab-channels">
-              Channels
+            <TabsTrigger value="channels" data-testid="tab-channels" className="px-2">
+              <span aria-hidden>Chans</span>
+              <span className="sr-only">Channels</span>
             </TabsTrigger>
-            <TabsTrigger value="mail" data-testid="tab-mail">
+            <TabsTrigger value="mail" data-testid="tab-mail" className="px-2">
               <span className="flex items-center justify-center gap-1.5">
                 Mail
                 <MailUnreadBadge />
               </span>
+            </TabsTrigger>
+            <TabsTrigger value="calendar" data-testid="tab-calendar" className="px-2">
+              <span aria-hidden>Cal</span>
+              <span className="sr-only">Calendar</span>
             </TabsTrigger>
           </TabsList>
         </div>
@@ -162,6 +173,9 @@ export function ConversationList(props: {
         </TabsPanel>
         <TabsPanel value="mail" className="flex min-h-0 flex-1 flex-col">
           <MailList />
+        </TabsPanel>
+        <TabsPanel value="calendar" className="flex min-h-0 flex-1 flex-col">
+          <CalendarSidebar />
         </TabsPanel>
       </Tabs>
 

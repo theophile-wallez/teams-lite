@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS mail_messages (
     to_addresses           TEXT NOT NULL DEFAULT '[]',
     cc_addresses           TEXT NOT NULL DEFAULT '[]',
     -- ISO 8601 UTC, whole seconds. Fixed-width, so ordering and keyset paging run
-    -- on the text directly (see mail::normalize_timestamp).
+    -- on the text directly (see graph_time::normalize_timestamp).
     received               TEXT NOT NULL DEFAULT '',
     is_read                INTEGER NOT NULL DEFAULT 1,
     has_attachments        INTEGER NOT NULL DEFAULT 0,
@@ -123,6 +123,65 @@ CREATE TABLE IF NOT EXISTS mail_messages (
     blocked_remote_images  INTEGER NOT NULL DEFAULT 0,
     body_truncated         INTEGER NOT NULL DEFAULT 0,
     attachments            TEXT NOT NULL DEFAULT '[]'
+);
+-- Teams/Outlook calendar (READ-ONLY mirror; see src/calendar.rs). Its own tables
+-- for the same reason mail has its own: an event is a RANGE (two timestamps) rather
+-- than a point, addressed by calendar instead of folder or thread, and carries
+-- attendees and a response state.
+CREATE TABLE IF NOT EXISTS calendars (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL DEFAULT '',
+    -- Outlook's own colour as '#rrggbb', or empty for a calendar on the automatic
+    -- colour (the UI then falls back to its own palette, keyed by position).
+    hex_color   TEXT NOT NULL DEFAULT '',
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    -- What Outlook itself would allow. Recorded for display honesty only: this app
+    -- never writes to a calendar, whatever the flag says.
+    can_edit    INTEGER NOT NULL DEFAULT 0,
+    position    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS calendar_events (
+    -- Graph's OCCURRENCE id: a weekly meeting yields one row per week, because the
+    -- view endpoint expands recurrence server-side.
+    id                 TEXT PRIMARY KEY,
+    calendar_id        TEXT NOT NULL,
+    subject            TEXT NOT NULL DEFAULT '',
+    preview            TEXT NOT NULL DEFAULT '',
+    -- ISO 8601 UTC, whole seconds; `end_utc` is EXCLUSIVE (Graph's convention).
+    -- Fixed-width, so every range predicate is a plain string comparison.
+    start_utc          TEXT NOT NULL DEFAULT '',
+    end_utc            TEXT NOT NULL DEFAULT '',
+    is_all_day         INTEGER NOT NULL DEFAULT 0,
+    is_cancelled       INTEGER NOT NULL DEFAULT 0,
+    is_organizer       INTEGER NOT NULL DEFAULT 0,
+    organizer_name     TEXT NOT NULL DEFAULT '',
+    organizer_address  TEXT NOT NULL DEFAULT '',
+    location           TEXT NOT NULL DEFAULT '',
+    join_url           TEXT NOT NULL DEFAULT '',
+    web_link           TEXT NOT NULL DEFAULT '',
+    show_as            TEXT NOT NULL DEFAULT 'unknown',
+    response           TEXT NOT NULL DEFAULT 'none',
+    series             TEXT NOT NULL DEFAULT 'singleInstance',
+    recurrence         TEXT NOT NULL DEFAULT '',
+    importance         TEXT NOT NULL DEFAULT 'normal',
+    sensitivity        TEXT NOT NULL DEFAULT 'normal',
+    -- JSON arrays: categories of strings, attendees of {name, address, response, kind}.
+    categories         TEXT NOT NULL DEFAULT '[]',
+    attendees          TEXT NOT NULL DEFAULT '[]',
+    attendee_count     INTEGER NOT NULL DEFAULT 0,
+    has_attachments    INTEGER NOT NULL DEFAULT 0,
+    reminder_minutes   INTEGER NOT NULL DEFAULT -1
+);
+-- Which calendar-months have been synced, so a re-opened month is served from
+-- SQLite with no network at all. The sync unit is a whole month rather than the
+-- window the user is looking at, because a week view straddling two months would
+-- otherwise never be a cache hit (see the src/calendar.rs module doc).
+CREATE TABLE IF NOT EXISTS calendar_months (
+    calendar_id  TEXT NOT NULL,
+    -- 'YYYY-MM'.
+    month        TEXT NOT NULL,
+    synced_at    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (calendar_id, month)
 );
 "#;
 
@@ -146,6 +205,12 @@ CREATE INDEX IF NOT EXISTS idx_conv_sidebar_order ON conversations(is_pinned DES
 -- first page nor a scroll-up ever scans the folder. `body_html` is deliberately not
 -- covered: a list read never touches it (bodies are up to ~135 KB each).
 CREATE INDEX IF NOT EXISTS idx_mail_folder_received ON mail_messages(folder_id, received DESC, id ASC);
+-- Every calendar read is a range scan over `start_utc` (a view's window, and the
+-- window a sync reconciles), so without this each one scans the whole calendar.
+-- The trailing columns are the rest of the read's shape: `end_utc` completes the
+-- overlap predicate, `id` completes its ORDER BY (without it the last term needs a
+-- temp b-tree), and `calendar_id` serves the visible-calendars filter.
+CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc, end_utc, id, calendar_id);
 "#;
 
 /// Version of everything the file must physically contain: `SCHEMA`, [`migrate`]
@@ -164,7 +229,10 @@ CREATE INDEX IF NOT EXISTS idx_mail_folder_received ON mail_messages(folder_id, 
 /// v3 adds `messages.messagetype`, so a `Text` body can be told apart from HTML.
 /// A store that already sat at v2 has to run the pass again to grow the column,
 /// which is exactly what a fresh bump buys.
-const SCHEMA_VERSION: i64 = 3;
+///
+/// v4 adds the read-only calendar mirror (`calendars`, `calendar_events`,
+/// `calendar_months` and their index), the same way.
+const SCHEMA_VERSION: i64 = 4;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -505,6 +573,91 @@ pub struct MailBodyUpdate<'a> {
     pub attachments: &'a str,
 }
 
+/// One calendar row, in sidebar order (default calendar first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarRow {
+    pub id: String,
+    pub name: String,
+    pub hex_color: String,
+    pub is_default: bool,
+    pub can_edit: bool,
+    pub position: i64,
+}
+
+/// Calendar metadata from a network sync, fed to [`Store::upsert_calendar`].
+#[derive(Debug, Clone)]
+pub struct CalendarUpdate<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub hex_color: &'a str,
+    pub is_default: bool,
+    pub can_edit: bool,
+    pub position: i64,
+}
+
+/// One event as the store holds it. Attendees and categories stay JSON strings all
+/// the way to the UI, exactly like a mail's recipient lists: nothing in the backend
+/// looks inside them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarEventRow {
+    pub id: String,
+    pub calendar_id: String,
+    pub subject: String,
+    pub preview: String,
+    pub start_utc: String,
+    /// EXCLUSIVE end (Graph's convention), kept verbatim.
+    pub end_utc: String,
+    pub is_all_day: bool,
+    pub is_cancelled: bool,
+    pub is_organizer: bool,
+    pub organizer_name: String,
+    pub organizer_address: String,
+    pub location: String,
+    pub join_url: String,
+    pub web_link: String,
+    pub show_as: String,
+    pub response: String,
+    pub series: String,
+    pub recurrence: String,
+    pub importance: String,
+    pub sensitivity: String,
+    pub categories: String,
+    pub attendees: String,
+    pub attendee_count: i64,
+    pub has_attachments: bool,
+    pub reminder_minutes: i64,
+}
+
+/// One event from a network fetch, fed to [`Store::upsert_calendar_event`].
+#[derive(Debug, Clone)]
+pub struct CalendarEventUpdate<'a> {
+    pub id: &'a str,
+    pub calendar_id: &'a str,
+    pub subject: &'a str,
+    pub preview: &'a str,
+    pub start_utc: &'a str,
+    pub end_utc: &'a str,
+    pub is_all_day: bool,
+    pub is_cancelled: bool,
+    pub is_organizer: bool,
+    pub organizer_name: &'a str,
+    pub organizer_address: &'a str,
+    pub location: &'a str,
+    pub join_url: &'a str,
+    pub web_link: &'a str,
+    pub show_as: &'a str,
+    pub response: &'a str,
+    pub series: &'a str,
+    pub recurrence: &'a str,
+    pub importance: &'a str,
+    pub sensitivity: &'a str,
+    pub categories: &'a str,
+    pub attendees: &'a str,
+    pub attendee_count: i64,
+    pub has_attachments: bool,
+    pub reminder_minutes: i64,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -564,6 +717,38 @@ fn row_to_mail(row: &Row) -> rusqlite::Result<MailMessageRow> {
 }
 
 const MAIL_SELECT_COLS: &str = "id, folder_id, conversation_id, subject, from_name, from_address, to_addresses, cc_addresses, received, is_read, has_attachments, importance, preview, body_html, body_loaded, blocked_remote_images, body_truncated, attachments";
+
+fn row_to_event(row: &Row) -> rusqlite::Result<CalendarEventRow> {
+    Ok(CalendarEventRow {
+        id: row.get(0)?,
+        calendar_id: row.get(1)?,
+        subject: row.get(2)?,
+        preview: row.get(3)?,
+        start_utc: row.get(4)?,
+        end_utc: row.get(5)?,
+        is_all_day: row.get::<_, i64>(6)? != 0,
+        is_cancelled: row.get::<_, i64>(7)? != 0,
+        is_organizer: row.get::<_, i64>(8)? != 0,
+        organizer_name: row.get(9)?,
+        organizer_address: row.get(10)?,
+        location: row.get(11)?,
+        join_url: row.get(12)?,
+        web_link: row.get(13)?,
+        show_as: row.get(14)?,
+        response: row.get(15)?,
+        series: row.get(16)?,
+        recurrence: row.get(17)?,
+        importance: row.get(18)?,
+        sensitivity: row.get(19)?,
+        categories: row.get(20)?,
+        attendees: row.get(21)?,
+        attendee_count: row.get(22)?,
+        has_attachments: row.get::<_, i64>(23)? != 0,
+        reminder_minutes: row.get(24)?,
+    })
+}
+
+const EVENT_SELECT_COLS: &str = "id, calendar_id, subject, preview, start_utc, end_utc, is_all_day, is_cancelled, is_organizer, organizer_name, organizer_address, location, join_url, web_link, show_as, response, series, recurrence, importance, sensitivity, categories, attendees, attendee_count, has_attachments, reminder_minutes";
 
 /// Canonicalize an MRI for identity comparison: keep only the last path segment
 /// (so a `.../contacts/8:orgid:<guid>` URL becomes a bare MRI) and drop a leading
@@ -1772,6 +1957,275 @@ impl Store {
             args.push(id);
         }
         Ok(self.exec(&sql, &args)?)
+    }
+
+    // ---- calendar (read-only Teams/Outlook mirror) ---------------------------
+
+    /// Upsert one calendar's metadata from a network sync. Returns true when a
+    /// column actually moved, so the caller emits `calendars_changed` only on a real
+    /// change.
+    pub fn upsert_calendar(&self, u: &CalendarUpdate) -> Result<bool> {
+        let changed = self.exec(
+            "INSERT INTO calendars (id, name, hex_color, is_default, can_edit, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                name       = excluded.name,
+                hex_color  = excluded.hex_color,
+                is_default = excluded.is_default,
+                can_edit   = excluded.can_edit,
+                position   = excluded.position
+             WHERE excluded.name       <> calendars.name
+                OR excluded.hex_color  <> calendars.hex_color
+                OR excluded.is_default <> calendars.is_default
+                OR excluded.can_edit   <> calendars.can_edit
+                OR excluded.position   <> calendars.position",
+            params![
+                u.id,
+                u.name,
+                u.hex_color,
+                u.is_default as i64,
+                u.can_edit as i64,
+                u.position,
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Every known calendar, default first then Graph's order, with the name as a
+    /// deterministic tie-breaker.
+    pub fn calendars(&self) -> Result<Vec<CalendarRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, name, hex_color, is_default, can_edit, position
+             FROM calendars
+             ORDER BY position ASC, name ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(CalendarRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                hex_color: r.get(2)?,
+                is_default: r.get::<_, i64>(3)? != 0,
+                can_edit: r.get::<_, i64>(4)? != 0,
+                position: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Upsert one event. Returns true when something actually changed (a new event,
+    /// or one that has since been moved, renamed, cancelled or re-answered), so a
+    /// re-sync that reports the same month emits no event to the UI.
+    pub fn upsert_calendar_event(&self, u: &CalendarEventUpdate) -> Result<bool> {
+        let changed = self.exec(
+            "INSERT INTO calendar_events (
+                id, calendar_id, subject, preview, start_utc, end_utc, is_all_day,
+                is_cancelled, is_organizer, organizer_name, organizer_address, location,
+                join_url, web_link, show_as, response, series, recurrence, importance,
+                sensitivity, categories, attendees, attendee_count, has_attachments,
+                reminder_minutes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+             ON CONFLICT(id) DO UPDATE SET
+                calendar_id       = excluded.calendar_id,
+                subject           = excluded.subject,
+                preview           = excluded.preview,
+                start_utc         = excluded.start_utc,
+                end_utc           = excluded.end_utc,
+                is_all_day        = excluded.is_all_day,
+                is_cancelled      = excluded.is_cancelled,
+                is_organizer      = excluded.is_organizer,
+                organizer_name    = excluded.organizer_name,
+                organizer_address = excluded.organizer_address,
+                location          = excluded.location,
+                join_url          = excluded.join_url,
+                web_link          = excluded.web_link,
+                show_as           = excluded.show_as,
+                response          = excluded.response,
+                series            = excluded.series,
+                recurrence        = excluded.recurrence,
+                importance        = excluded.importance,
+                sensitivity       = excluded.sensitivity,
+                categories        = excluded.categories,
+                attendees         = excluded.attendees,
+                attendee_count    = excluded.attendee_count,
+                has_attachments   = excluded.has_attachments,
+                reminder_minutes  = excluded.reminder_minutes
+             WHERE excluded.calendar_id       <> calendar_events.calendar_id
+                OR excluded.subject           <> calendar_events.subject
+                OR excluded.preview           <> calendar_events.preview
+                OR excluded.start_utc         <> calendar_events.start_utc
+                OR excluded.end_utc           <> calendar_events.end_utc
+                OR excluded.is_all_day        <> calendar_events.is_all_day
+                OR excluded.is_cancelled      <> calendar_events.is_cancelled
+                OR excluded.is_organizer      <> calendar_events.is_organizer
+                OR excluded.organizer_name    <> calendar_events.organizer_name
+                OR excluded.organizer_address <> calendar_events.organizer_address
+                OR excluded.location          <> calendar_events.location
+                OR excluded.join_url          <> calendar_events.join_url
+                OR excluded.web_link          <> calendar_events.web_link
+                OR excluded.show_as           <> calendar_events.show_as
+                OR excluded.response          <> calendar_events.response
+                OR excluded.series            <> calendar_events.series
+                OR excluded.recurrence        <> calendar_events.recurrence
+                OR excluded.importance        <> calendar_events.importance
+                OR excluded.sensitivity       <> calendar_events.sensitivity
+                OR excluded.categories        <> calendar_events.categories
+                OR excluded.attendees         <> calendar_events.attendees
+                OR excluded.attendee_count    <> calendar_events.attendee_count
+                OR excluded.has_attachments   <> calendar_events.has_attachments
+                OR excluded.reminder_minutes  <> calendar_events.reminder_minutes",
+            params![
+                u.id,
+                u.calendar_id,
+                u.subject,
+                u.preview,
+                u.start_utc,
+                u.end_utc,
+                u.is_all_day as i64,
+                u.is_cancelled as i64,
+                u.is_organizer as i64,
+                u.organizer_name,
+                u.organizer_address,
+                u.location,
+                u.join_url,
+                u.web_link,
+                u.show_as,
+                u.response,
+                u.series,
+                u.recurrence,
+                u.importance,
+                u.sensitivity,
+                u.categories,
+                u.attendees,
+                u.attendee_count,
+                u.has_attachments as i64,
+                u.reminder_minutes,
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Every held event that OVERLAPS `[start, end)`, earliest first.
+    ///
+    /// `calendar_ids` restricts the result to the calendars the user has switched on;
+    /// an empty slice means "every calendar", which is what a client that has not
+    /// chosen yet gets.
+    ///
+    /// The overlap predicate is deliberately two clauses rather than the textbook
+    /// `start < end AND event_end > start`: an event with a zero-length span (Graph
+    /// does emit them, and a missing end is clamped to the start by
+    /// `calendar::parse_event`) has `end_utc == start_utc` and would fail the second
+    /// clause even while sitting inside the window. `OR start_utc >= start` catches
+    /// exactly that case — "starts within the window" — and their union is the real
+    /// overlap test.
+    pub fn calendar_events(
+        &self,
+        start: &str,
+        end: &str,
+        calendar_ids: &[String],
+    ) -> Result<Vec<CalendarEventRow>> {
+        // `start_utc < ?2` is what the range index serves; the rest filters the rows
+        // it returns. That is the right shape at calendar scale — months are synced
+        // on demand, so this table holds thousands of rows, not a mailbox's tens of
+        // thousands — and it keeps the predicate exactly correct for events that
+        // began before the window (a week of leave seen from its last day).
+        let mut sql = format!(
+            "SELECT {EVENT_SELECT_COLS} FROM calendar_events
+              WHERE start_utc < ?2 AND (end_utc > ?1 OR start_utc >= ?1)"
+        );
+        let mut args: Vec<&dyn ToSql> = vec![&start, &end];
+        if !calendar_ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", calendar_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(" AND calendar_id IN ({placeholders})"));
+            for id in calendar_ids {
+                args.push(id);
+            }
+        }
+        sql.push_str(" ORDER BY start_utc ASC, end_utc ASC, id ASC");
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(args.as_slice(), row_to_event)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Reconcile one calendar's window against the server's own view of it.
+    ///
+    /// Deletes every locally-held event of `calendar_id` overlapping `[start, end)`
+    /// that is absent from `keep_ids` — i.e. an event deleted, moved out of the
+    /// window, or whose whole series was removed in real Outlook. Returns how many
+    /// rows were removed.
+    ///
+    /// An EMPTY `keep_ids` is meaningful here, unlike the mail equivalent: a month
+    /// with no events is a normal answer, and the stale rows must go. A *failed*
+    /// fetch never reaches this function — the error propagates from the caller — so
+    /// "empty" can never be a network failure in disguise.
+    pub fn prune_calendar_window(
+        &self,
+        calendar_id: &str,
+        start: &str,
+        end: &str,
+        keep_ids: &[String],
+    ) -> Result<usize> {
+        // Diffed in Rust rather than with a `NOT IN (…)` of every id: a busy month
+        // can hold hundreds of events, and this keeps the statement's parameter count
+        // fixed no matter how many.
+        let held: Vec<String> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT id FROM calendar_events
+                  WHERE calendar_id = ?1 AND start_utc < ?3 AND (end_utc > ?2 OR start_utc >= ?2)",
+            )?;
+            let rows = stmt.query_map(params![calendar_id, start, end], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let keep: std::collections::HashSet<&str> =
+            keep_ids.iter().map(String::as_str).collect();
+        let stale: Vec<String> = held
+            .into_iter()
+            .filter(|id| !keep.contains(id.as_str()))
+            .collect();
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        self.transaction(|| {
+            let mut removed = 0;
+            for id in &stale {
+                removed += self.exec("DELETE FROM calendar_events WHERE id = ?1", params![id])?;
+            }
+            Ok(removed)
+        })
+    }
+
+    /// Record that `month` ("YYYY-MM") of `calendar_id` has been read from Graph, so
+    /// the next request for it is served from SQLite with no network at all.
+    pub fn mark_calendar_month_synced(&self, calendar_id: &str, month: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.exec(
+            "INSERT INTO calendar_months (calendar_id, month, synced_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(calendar_id, month) DO UPDATE SET synced_at = excluded.synced_at",
+            params![calendar_id, month, now],
+        )?;
+        Ok(())
+    }
+
+    /// Whether `month` of `calendar_id` has ever been read from Graph.
+    ///
+    /// This is what tells "the month is empty" apart from "the month is unknown" —
+    /// the same distinction `mail_frontier` draws for a folder, and without it an
+    /// unsynced week would render as a free one.
+    pub fn calendar_month_synced(&self, calendar_id: &str, month: &str) -> Result<bool> {
+        let found: Option<i64> = self
+            .query_one(
+                "SELECT 1 FROM calendar_months WHERE calendar_id = ?1 AND month = ?2",
+                params![calendar_id, month],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
     }
 
     /// Remove a conversation and all of its messages. Used to purge the
@@ -4311,6 +4765,272 @@ mod tests {
         assert!(
             !plan.contains("TEMP B-TREE"),
             "the mail page must not sort in a temp b-tree, got: {plan}"
+        );
+    }
+
+    // ---- calendar ------------------------------------------------------------
+
+    /// Minimal `CalendarEventUpdate`: only id, calendar and the span vary, which is
+    /// what every range and pruning test turns on.
+    fn event<'a>(
+        id: &'a str,
+        calendar_id: &'a str,
+        start: &'a str,
+        end: &'a str,
+    ) -> CalendarEventUpdate<'a> {
+        CalendarEventUpdate {
+            id,
+            calendar_id,
+            subject: "Stand-up",
+            preview: "",
+            start_utc: start,
+            end_utc: end,
+            is_all_day: false,
+            is_cancelled: false,
+            is_organizer: false,
+            organizer_name: "",
+            organizer_address: "",
+            location: "",
+            join_url: "",
+            web_link: "",
+            show_as: "busy",
+            response: "none",
+            series: "singleInstance",
+            recurrence: "",
+            importance: "normal",
+            sensitivity: "normal",
+            categories: "[]",
+            attendees: "[]",
+            attendee_count: 0,
+            has_attachments: false,
+            reminder_minutes: 15,
+        }
+    }
+
+    fn event_ids(rows: &[CalendarEventRow]) -> Vec<String> {
+        rows.iter().map(|e| e.id.clone()).collect()
+    }
+
+    #[test]
+    fn calendar_events_returns_everything_overlapping_the_window() {
+        let s = Store::open_in_memory().unwrap();
+        for (id, start, end) in [
+            // Entirely before the window.
+            ("before", "2026-07-05T09:00:00Z", "2026-07-05T10:00:00Z"),
+            // Ends exactly when the window starts — adjacent, not overlapping.
+            ("adjacent", "2026-07-12T09:00:00Z", "2026-07-13T00:00:00Z"),
+            // Started before the window and still running inside it: a week of leave
+            // seen from a day in the middle. The case a naive "starts within" filter
+            // loses.
+            ("straddles", "2026-07-11T00:00:00Z", "2026-07-16T00:00:00Z"),
+            ("inside", "2026-07-13T09:00:00Z", "2026-07-13T10:00:00Z"),
+            // Starts exactly when the window ends — the next day's event.
+            ("after", "2026-07-14T00:00:00Z", "2026-07-14T01:00:00Z"),
+        ] {
+            s.upsert_calendar_event(&event(id, "cal", start, end)).unwrap();
+        }
+        let rows = s
+            .calendar_events("2026-07-13T00:00:00Z", "2026-07-14T00:00:00Z", &[])
+            .unwrap();
+        assert_eq!(event_ids(&rows), vec!["straddles", "inside"]);
+    }
+
+    #[test]
+    fn calendar_events_includes_a_zero_length_event_inside_the_window() {
+        // Graph does emit these, and a missing end is clamped to the start by
+        // `calendar::parse_event`. The textbook `end > window_start` predicate alone
+        // would drop one sitting exactly on the window's first instant.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_calendar_event(&event(
+            "point",
+            "cal",
+            "2026-07-13T00:00:00Z",
+            "2026-07-13T00:00:00Z",
+        ))
+        .unwrap();
+        let rows = s
+            .calendar_events("2026-07-13T00:00:00Z", "2026-07-14T00:00:00Z", &[])
+            .unwrap();
+        assert_eq!(event_ids(&rows), vec!["point"]);
+    }
+
+    #[test]
+    fn calendar_events_filters_to_the_visible_calendars() {
+        let s = Store::open_in_memory().unwrap();
+        for (id, calendar) in [("work", "cal-main"), ("birthday", "cal-birthdays")] {
+            s.upsert_calendar_event(&event(id, calendar, "2026-07-13T09:00:00Z", "2026-07-13T10:00:00Z"))
+                .unwrap();
+        }
+        let window = ("2026-07-13T00:00:00Z", "2026-07-14T00:00:00Z");
+        // No filter means every calendar.
+        assert_eq!(s.calendar_events(window.0, window.1, &[]).unwrap().len(), 2);
+        let only_work = s
+            .calendar_events(window.0, window.1, &["cal-main".to_string()])
+            .unwrap();
+        assert_eq!(event_ids(&only_work), vec!["work"]);
+    }
+
+    #[test]
+    fn calendar_events_are_ordered_earliest_first() {
+        let s = Store::open_in_memory().unwrap();
+        for (id, start) in [
+            ("noon", "2026-07-13T12:00:00Z"),
+            ("dawn", "2026-07-13T06:00:00Z"),
+            ("dusk", "2026-07-13T20:00:00Z"),
+        ] {
+            s.upsert_calendar_event(&event(id, "cal", start, "2026-07-13T23:00:00Z"))
+                .unwrap();
+        }
+        let rows = s
+            .calendar_events("2026-07-13T00:00:00Z", "2026-07-14T00:00:00Z", &[])
+            .unwrap();
+        assert_eq!(event_ids(&rows), vec!["dawn", "noon", "dusk"]);
+    }
+
+    #[test]
+    fn upserting_an_event_reports_only_real_changes() {
+        let s = Store::open_in_memory().unwrap();
+        let mut e = event("e1", "cal", "2026-07-13T09:00:00Z", "2026-07-13T10:00:00Z");
+        assert!(s.upsert_calendar_event(&e).unwrap(), "a new event is a change");
+        assert!(!s.upsert_calendar_event(&e).unwrap(), "an identical re-sync is not");
+        // A meeting moved half an hour later.
+        e.start_utc = "2026-07-13T09:30:00Z";
+        assert!(s.upsert_calendar_event(&e).unwrap());
+        // An invitation answered.
+        e.response = "accepted";
+        assert!(s.upsert_calendar_event(&e).unwrap());
+    }
+
+    #[test]
+    fn pruning_a_window_removes_events_deleted_elsewhere() {
+        let s = Store::open_in_memory().unwrap();
+        for (id, start) in [
+            ("kept", "2026-07-13T09:00:00Z"),
+            ("cancelled-in-outlook", "2026-07-13T14:00:00Z"),
+            ("next-month", "2026-08-02T09:00:00Z"),
+        ] {
+            s.upsert_calendar_event(&event(id, "cal", start, "2026-07-13T23:00:00Z"))
+                .unwrap();
+        }
+        let removed = s
+            .prune_calendar_window(
+                "cal",
+                "2026-07-01T00:00:00Z",
+                "2026-08-01T00:00:00Z",
+                &["kept".to_string()],
+            )
+            .unwrap();
+        assert_eq!(removed, 1);
+        // Outside the pruned window, August is untouched.
+        let august = s
+            .calendar_events("2026-08-01T00:00:00Z", "2026-09-01T00:00:00Z", &[])
+            .unwrap();
+        assert_eq!(event_ids(&august), vec!["next-month"]);
+    }
+
+    #[test]
+    fn pruning_an_empty_month_clears_it() {
+        // Unlike mail, an empty answer here is meaningful: a month with nothing in it
+        // is normal, and the stale rows must go. A failed fetch never reaches this
+        // call — the error propagates from the caller instead.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_calendar_event(&event("gone", "cal", "2026-07-13T09:00:00Z", "2026-07-13T10:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            s.prune_calendar_window("cal", "2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z", &[])
+                .unwrap(),
+            1
+        );
+        assert!(s
+            .calendar_events("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z", &[])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn pruning_one_calendar_leaves_the_others_alone() {
+        let s = Store::open_in_memory().unwrap();
+        for calendar in ["cal-main", "cal-holidays"] {
+            s.upsert_calendar_event(&event(
+                calendar,
+                calendar,
+                "2026-07-13T09:00:00Z",
+                "2026-07-13T10:00:00Z",
+            ))
+            .unwrap();
+        }
+        s.prune_calendar_window("cal-main", "2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z", &[])
+            .unwrap();
+        let rows = s
+            .calendar_events("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z", &[])
+            .unwrap();
+        assert_eq!(event_ids(&rows), vec!["cal-holidays"]);
+    }
+
+    #[test]
+    fn a_synced_month_is_remembered_per_calendar() {
+        // The distinction that keeps an unsynced week from rendering as a free one.
+        let s = Store::open_in_memory().unwrap();
+        assert!(!s.calendar_month_synced("cal", "2026-07").unwrap());
+        s.mark_calendar_month_synced("cal", "2026-07").unwrap();
+        assert!(s.calendar_month_synced("cal", "2026-07").unwrap());
+        assert!(!s.calendar_month_synced("cal", "2026-08").unwrap());
+        assert!(!s.calendar_month_synced("other", "2026-07").unwrap());
+        // Idempotent: re-marking is a refresh, not a duplicate row.
+        s.mark_calendar_month_synced("cal", "2026-07").unwrap();
+        assert!(s.calendar_month_synced("cal", "2026-07").unwrap());
+    }
+
+    #[test]
+    fn calendars_list_puts_the_default_first() {
+        let s = Store::open_in_memory().unwrap();
+        for (id, name, position, is_default) in [
+            ("cal-birthdays", "Birthdays", 1, false),
+            ("cal-main", "Calendar", 0, true),
+        ] {
+            s.upsert_calendar(&CalendarUpdate {
+                id,
+                name,
+                hex_color: "",
+                is_default,
+                can_edit: is_default,
+                position,
+            })
+            .unwrap();
+        }
+        let rows = s.calendars().unwrap();
+        assert_eq!(
+            rows.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+            vec!["cal-main", "cal-birthdays"]
+        );
+        assert!(rows[0].is_default);
+    }
+
+    #[test]
+    fn the_calendar_range_query_never_scans_the_table() {
+        // The calendar equivalent of the assertions above: every view is a range
+        // read, so the index must serve it rather than the table.
+        let s = Store::open_in_memory().unwrap();
+        let plan = query_plan(
+            &s,
+            &format!(
+                "SELECT {EVENT_SELECT_COLS} FROM calendar_events
+                  WHERE start_utc < '2026-08-01T00:00:00Z'
+                    AND (end_utc > '2026-07-01T00:00:00Z' OR start_utc >= '2026-07-01T00:00:00Z')
+                  ORDER BY start_utc ASC, end_utc ASC, id ASC"
+            ),
+        );
+        assert!(
+            plan.contains("idx_calendar_event_range"),
+            "the calendar range read must use its index, got: {plan}"
+        );
+        assert!(
+            !plan.contains("SCAN calendar_events"),
+            "the calendar range read must not scan the table, got: {plan}"
+        );
+        assert!(
+            !plan.contains("TEMP B-TREE"),
+            "the calendar range read must not sort in a temp b-tree, got: {plan}"
         );
     }
 }

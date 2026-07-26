@@ -4,6 +4,13 @@
 // so the web and terminal clients stay observably identical.
 import { describe, it, expect } from "vitest";
 import {
+  calendarColor,
+  eventRepeats,
+  eventTitle,
+  mergeCalendarWindow,
+  mergeEvents,
+  personLabel,
+  type CalendarEvent,
   parseMessageContent,
   extractImages,
   mediaNeedsProxy,
@@ -1444,5 +1451,123 @@ describe("mail page merging", () => {
     );
     expect(merged.messages.map((m) => m.id)).toEqual(["new", "old"]);
     expect(merged.has_more).toBe(false);
+  });
+});
+
+// ---- calendar (read-only surface) -------------------------------------------
+
+describe("calendar protocol helpers", () => {
+  function ev(id: string, start: string, end: string, over: Partial<CalendarEvent> = {}): CalendarEvent {
+    return {
+      id,
+      calendar_id: "cal",
+      subject: id,
+      preview: "",
+      start,
+      end,
+      is_all_day: false,
+      is_cancelled: false,
+      is_organizer: false,
+      organizer: { name: "", address: "", response: "", kind: "" },
+      location: "",
+      join_url: "",
+      web_link: "",
+      show_as: "busy",
+      response: "none",
+      series: "singleInstance",
+      recurrence: "",
+      importance: "normal",
+      sensitivity: "normal",
+      categories: [],
+      attendees: [],
+      attendee_count: 0,
+      has_attachments: false,
+      reminder_minutes: -1,
+      ...over,
+    };
+  }
+
+  it("prefers Outlook's own colour and falls back to a stable palette", () => {
+    expect(calendarColor({ hex_color: "#16a765", position: 3 })).toBe("#16a765");
+    // "auto" / empty / malformed all fall through to the palette.
+    const byPosition = calendarColor({ hex_color: "", position: 1 });
+    expect(byPosition).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(calendarColor({ hex_color: "auto", position: 1 })).toBe(byPosition);
+    expect(calendarColor({ hex_color: "#xyzxyz", position: 1 })).toBe(byPosition);
+    // Same position, same colour, every time — a calendar must not change colour
+    // between renders.
+    expect(calendarColor({ hex_color: "", position: 1 })).toBe(byPosition);
+    // The palette wraps rather than yielding undefined for a large position.
+    expect(calendarColor({ hex_color: "", position: 99 })).toMatch(/^#[0-9a-f]{6}$/i);
+  });
+
+  it("labels an event and its people with honest fallbacks", () => {
+    expect(eventTitle({ subject: "Guild" })).toBe("Guild");
+    expect(eventTitle({ subject: "" })).toBe("(no title)");
+    expect(personLabel({ name: "Ada", address: "ada@x.com" })).toBe("Ada");
+    expect(personLabel({ name: "", address: "ada@x.com" })).toBe("ada@x.com");
+    expect(personLabel({ name: "", address: "" })).toBe("(unknown)");
+  });
+
+  it("knows which events belong to a series", () => {
+    expect(eventRepeats({ series: "singleInstance" })).toBe(false);
+    expect(eventRepeats({ series: "" })).toBe(false);
+    expect(eventRepeats({ series: "occurrence" })).toBe(true);
+    expect(eventRepeats({ series: "exception" })).toBe(true);
+  });
+
+  it("merges events by id, keeping the fresher copy and earliest-first order", () => {
+    const held = [
+      ev("b", "2026-07-13T10:00:00Z", "2026-07-13T11:00:00Z"),
+      ev("a", "2026-07-13T09:00:00Z", "2026-07-13T09:30:00Z"),
+    ];
+    const merged = mergeEvents(held, [
+      // The same occurrence, moved half an hour later and now accepted.
+      ev("a", "2026-07-13T09:30:00Z", "2026-07-13T10:00:00Z", { response: "accepted" }),
+    ]);
+    expect(merged.map((e) => e.id)).toEqual(["a", "b"]);
+    expect(merged[0]!.response).toBe("accepted");
+    expect(merged[0]!.start).toBe("2026-07-13T09:30:00Z");
+  });
+
+  it("lets a refreshed window drop an event deleted in Outlook", () => {
+    const held = [
+      ev("kept", "2026-07-13T09:00:00Z", "2026-07-13T10:00:00Z"),
+      ev("gone", "2026-07-14T09:00:00Z", "2026-07-14T10:00:00Z"),
+    ];
+    const merged = mergeCalendarWindow(held, {
+      start: "2026-07-01T00:00:00Z",
+      end: "2026-08-01T00:00:00Z",
+      events: [held[0]!],
+    });
+    expect(merged.map((e) => e.id)).toEqual(["kept"]);
+  });
+
+  it("keeps events outside the refreshed window", () => {
+    // A background refresh of July must not drop a cached August: stepping back to
+    // it would otherwise show an empty month until the network answered again.
+    const held = [
+      ev("july", "2026-07-13T09:00:00Z", "2026-07-13T10:00:00Z"),
+      ev("august", "2026-08-03T09:00:00Z", "2026-08-03T10:00:00Z"),
+    ];
+    const merged = mergeCalendarWindow(held, {
+      start: "2026-07-01T00:00:00Z",
+      end: "2026-08-01T00:00:00Z",
+      events: [],
+    });
+    expect(merged.map((e) => e.id)).toEqual(["august"]);
+  });
+
+  it("keeps a multi-day event that started before the refreshed window", () => {
+    // Its start is in June, so a "starts within the window" test would treat it as
+    // outside and never reconcile it — while the server DID list it.
+    const leave = ev("leave", "2026-06-29T00:00:00Z", "2026-07-06T00:00:00Z", { is_all_day: true });
+    const merged = mergeCalendarWindow([leave], {
+      start: "2026-07-01T00:00:00Z",
+      end: "2026-08-01T00:00:00Z",
+      events: [],
+    });
+    // Dropped, because the window is authoritative and no longer lists it.
+    expect(merged).toEqual([]);
   });
 });

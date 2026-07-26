@@ -46,6 +46,32 @@ must never write to it.
   remote image is a read receipt for its sender), not an optimization: never add a
   "load remote images" action, and never let a body reach a browser unsanitized.
 
+## The calendar is READ-ONLY (MANDATORY — no exception, not even a sandbox)
+
+The app reads the user's Teams/Outlook calendar over Microsoft Graph
+(`src/calendar.rs`). It must never write to it.
+
+- **Never create, update, move, delete, cancel, forward, accept, decline or
+  tentatively accept an event** — and never dismiss or snooze a reminder. Like mail,
+  the calendar has *no* sandbox and *no* pre-authorized target. It is worse than mail
+  in one respect: a single create mails an invitation to **every attendee** (one real
+  meeting in this tenant has 777), and a single response mails the organizer. Neither
+  can be recalled.
+- The same broker token carries the consent, so nothing at the API level stops it.
+  What stops it is that **no code names the endpoints**: `src/calendar.rs` issues GET
+  requests only, and two tests enforce it mechanically — one scans the module for any
+  other verb, the other scans the whole crate for `/accept`, `/decline`,
+  `/tentativelyAccept`, `/cancel`, `/forward`, `/snoozeReminder` and
+  `/dismissReminder`. Do not weaken, skip, or work around either.
+- Reading, rendering and navigating the calendar are fine and are what the feature is
+  for. `join_url` and `web_link` are links the **user** clicks — never something the
+  app follows, prefetches or opens on their behalf.
+- There is deliberately no "New event" button, even though the reference design
+  (`shadcnuikit.com/dashboard/apps/calendar`) has one. If responding to invitations is
+  ever wanted, it is a deliberate feature: its own consent gate, its own entry in
+  `OUTWARD_METHODS`, its own write-lock coverage — never a quiet addition to the read
+  path.
+
 ## Automation safety (MANDATORY — read before driving the UI)
 
 **This section exists because of a real incident.** An agent was screenshotting a
@@ -86,7 +112,9 @@ user. Two independent mechanisms enforce that split:
   immediately before every keystroke. Use `cd web && bun run preview -- --out
   /tmp/shot`, or import `withPreview` / `typeInComposer` / `openFirstConversation`
   from it. For the mail surface: `bun run preview -- --out /tmp/mail --mail`, or
-  `openMailTab` / `openFirstMail` / `openMailAt` from the same file.
+  `openMailTab` / `openFirstMail` / `openMailAt` from the same file. For the calendar:
+  `bun run preview -- --out /tmp/cal --calendar`, or `openCalendarTab` /
+  `openCalendarView` / `openFirstEvent`.
   `web/scripts/scroll-probe.ts` is what a diagnostic built on top of it looks like
   (it measures history scroll smoothness frame by frame): a tracked script that
   drives the app *through* `withPreview`, never around it.
@@ -138,7 +166,8 @@ to fix in the same change, not a note for later.
 
 - Backend: Rust (`src/`, binary `server` in `src/bin/server.rs`) — auth broker over
   D-Bus, real-time trouter client, local-first SQLite store, send, name resolution,
-  and the READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`).
+  the READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`) and the
+  READ-ONLY Teams/Outlook calendar (`src/calendar.rs`).
   Exposed over a local WebSocket (`ws://127.0.0.1:8420`).
 - Two front-ends, both talking to the backend only through that WebSocket. Local-first
   is enforced server-side; neither front-end touches the network or SQLite directly.
