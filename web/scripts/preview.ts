@@ -31,10 +31,15 @@
 // Usage from the shell (screenshot the first conversation, light + dark):
 //
 //   bun run web/scripts/preview.ts --out /tmp/preview
-//   bun run web/scripts/preview.ts --out /tmp/preview --type "hey bébou" --send
-//   bun run web/scripts/preview.ts --out /tmp/preview --incoming "hey bébou"
+//   bun run web/scripts/preview.ts --out /tmp/preview --type "hello there" --send
+//   bun run web/scripts/preview.ts --out /tmp/preview --incoming "hello there"
 //   bun run web/scripts/preview.ts --out /tmp/mail --mail        # the Mail surface
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
+//
+// To capture a specific thread instead of the top row — `--conversation` matches a
+// sidebar row by name, so a fixture can be aimed at without writing a driver:
+//
+//   bun run web/scripts/preview.ts --out /tmp/cards --conversation "App Cards"
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -169,10 +174,61 @@ export async function typeInComposer(
  * top row once the list is sorted by recency.
  */
 export async function openFirstConversation(page: Page): Promise<string> {
-  const row = page.locator('[data-testid="conversation-row"]').first();
-  const id = (await row.getAttribute("data-conversation-id")) ?? "";
+  return openRow(page, page.locator('[data-testid="conversation-row"]').first());
+}
+
+/** The two sidebar tabs, and how to walk each one's list. */
+const SIDEBAR_TABS = [
+  { tab: "chats", row: "conversation-row", scroll: "sidebar-scroll" },
+  { tab: "channels", row: "channel-row", scroll: "channels-scroll" },
+] as const;
+
+/**
+ * Open the chat or channel whose sidebar row contains `name` (case-insensitive)
+ * and wait for its thread to render. Returns its id, like `openFirstConversation`.
+ *
+ * Exists so that capturing a specific fixture never requires a hand-rolled browser
+ * driver: "the preview can only open the first conversation" is a reason to reach
+ * for an ad-hoc Playwright script, and that reach is what this file exists to
+ * prevent. Both tabs are searched, and each list is scrolled while looking — the
+ * chat list is virtualized, so a row far enough down is simply not in the DOM until
+ * it has been scrolled to. Throws, listing what it did see, when nothing matches.
+ */
+export async function openConversation(page: Page, name: string): Promise<string> {
+  const pattern = new RegExp(escapeForRegExp(name), "i");
+  const seen: string[] = [];
+  for (const { tab, row, scroll } of SIDEBAR_TABS) {
+    const tabButton = page.locator(`[data-testid="tab-${tab}"]`);
+    if ((await tabButton.count()) > 0) {
+      await tabButton.click();
+      await page.waitForTimeout(200);
+    }
+    const rows = page.locator(`[data-testid="${row}"]`);
+    // Walk the list one viewport at a time until the row shows up or the list ends.
+    for (;;) {
+      const match = rows.filter({ hasText: pattern }).first();
+      if ((await match.count()) > 0) return openRow(page, match);
+      seen.push(...(await rows.allInnerTexts()).map((text) => `${tab}: ${oneLine(text)}`));
+      if (!(await scrollDown(page, scroll))) break;
+      await page.waitForTimeout(150);
+    }
+  }
+  throw new Error(
+    `no conversation or channel matching "${name}". Rows seen while scrolling:\n` +
+      [...new Set(seen)].map((text) => `  - ${text}`).join("\n"),
+  );
+}
+
+/** Click a sidebar row, wait for its thread, and report the id that was opened. */
+async function openRow(page: Page, row: ReturnType<Page["locator"]>): Promise<string> {
+  const id =
+    (await row.getAttribute("data-conversation-id")) ??
+    (await row.getAttribute("data-channel-id")) ??
+    "";
   await row.click();
-  await page.waitForSelector('[data-testid="message"]');
+  // A thread is "there" once it shows a bubble OR a system line — a conversation
+  // can legitimately consist of nothing but membership/call notices.
+  await page.waitForSelector('[data-testid="message"], [data-testid="system-event"]');
   return id;
 }
 
@@ -240,6 +296,33 @@ export async function openReactionPicker(page: Page): Promise<void> {
   await page.locator('[data-testid="reaction-picker"] [data-testid="reaction-more"]').click();
   await page.waitForSelector('[data-testid="emoji-picker"]');
   await page.waitForTimeout(800);
+}
+
+/**
+ * Scroll a sidebar list down by most of a viewport. Returns false once it cannot
+ * advance any further, which is how the row search knows the list is exhausted
+ * rather than looping forever.
+ */
+async function scrollDown(page: Page, testid: string): Promise<boolean> {
+  // Passed as source text, not a closure: this file type-checks under the node
+  // tsconfig (no DOM lib), and the body runs in the page.
+  return (await page.evaluate(`(() => {
+    const el = document.querySelector('[data-testid="${testid}"]');
+    if (!el) return false;
+    const before = el.scrollTop;
+    el.scrollTop = before + el.clientHeight * 0.8;
+    return el.scrollTop > before;
+  })()`)) as boolean;
+}
+
+/** Collapse a row's multi-line text into one readable line for an error message. */
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** Quote a user-supplied name so it matches literally inside a RegExp. */
+function escapeForRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // ---- setup helpers ---------------------------------------------------------
@@ -344,6 +427,7 @@ if (import.meta.main) {
   const send = args.includes("--send");
   const incoming = flag("--incoming");
   const react = args.includes("--react");
+  const named = flag("--conversation");
 
   // The Mail surface: the sidebar's Mail tab plus the reading pane, in both themes.
   if (args.includes("--mail")) {
@@ -367,7 +451,9 @@ if (import.meta.main) {
   }
 
   await withPreview(async ({ page, shot, setTheme, emit }) => {
-    const conversation = await openFirstConversation(page);
+    const conversation = named
+      ? await openConversation(page, named)
+      : await openFirstConversation(page);
     // Inject the other side's message first, so a `--type` draft (or the message
     // it sends) stays the last thing in the thread.
     if (incoming !== undefined) {
