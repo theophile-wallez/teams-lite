@@ -11,17 +11,31 @@ import {
   eventTouchesDay,
   eventsForDay,
   formatEventTime,
+  formatEventTimeRange,
+  formatRangeSubtitle,
+  formatRangeTitle,
   formatTimeCompact,
+  isDeclined,
+  isPast,
+  isTentative,
+  isUnanswered,
+  isWeekend,
+  isoWeekNumber,
   layoutDayBand,
   layoutDayGrid,
+  layoutMonthRow,
   monthGridDays,
+  monthSlotCount,
   nowIndicatorPercent,
   requestRange,
   shiftAnchor,
   startOfWeek,
+  timezoneLabel,
   visibleRange,
   weekdayLabels,
   weeksOf,
+  withoutDeclined,
+  workdaysOnly,
 } from "./calendar";
 import type { CalendarEvent } from "./protocol";
 
@@ -109,6 +123,47 @@ describe("day helpers", () => {
     // Same seven names, rotated by one.
     expect(monday.slice(0, 6)).toEqual(sunday.slice(1));
     expect(monday[6]).toBe(sunday[0]);
+  });
+});
+
+describe("weekends", () => {
+  it("names Saturday and Sunday", () => {
+    expect(isWeekend(at(2026, 7, 25))).toBe(true); // Saturday
+    expect(isWeekend(at(2026, 7, 26))).toBe(true); // Sunday
+    expect(isWeekend(at(2026, 7, 24))).toBe(false);
+  });
+
+  it("drops them from a row only when asked", () => {
+    const week = Array.from({ length: 7 }, (_, i) => addDays(at(2026, 7, 20), i));
+    expect(workdaysOnly(week, true)).toHaveLength(7);
+    const workdays = workdaysOnly(week, false);
+    expect(workdays).toHaveLength(5);
+    expect(workdays.map(dayKey)).toEqual([
+      "2026-07-20",
+      "2026-07-21",
+      "2026-07-22",
+      "2026-07-23",
+      "2026-07-24",
+    ]);
+  });
+});
+
+describe("isoWeekNumber", () => {
+  it("numbers weeks the way ISO 8601 does", () => {
+    // Week 1 is the one holding the first Thursday, so it can start in December.
+    expect(isoWeekNumber(at(2026, 1, 1))).toBe(1); // a Thursday
+    expect(isoWeekNumber(at(2025, 12, 29))).toBe(1); // the Monday of that same week
+    expect(isoWeekNumber(at(2026, 7, 20))).toBe(30);
+    expect(isoWeekNumber(at(2026, 7, 26))).toBe(30); // the Sunday closes week 30
+    // 2026 is a 53-week year, and its week 53 runs into January 2027.
+    expect(isoWeekNumber(at(2026, 12, 31))).toBe(53);
+    expect(isoWeekNumber(at(2027, 1, 3))).toBe(53);
+  });
+});
+
+describe("timezoneLabel", () => {
+  it("is either a short zone name or a UTC offset", () => {
+    expect(timezoneLabel(at(2026, 7, 26, 12))).toMatch(/^([A-Z]{2,5}|GMT[+-]\d{1,2}(:\d{2})?)$/);
   });
 });
 
@@ -362,6 +417,128 @@ describe("layoutDayGrid", () => {
   });
 });
 
+describe("layoutDayGrid horizontal cascade", () => {
+  const day = at(2026, 7, 22);
+
+  it("gives a lone meeting the column, less the right-hand gap", () => {
+    const [block] = layoutDayGrid([timed("m", at(2026, 7, 22, 9), at(2026, 7, 22, 10))], day);
+    expect(block!.left).toBe(0);
+    expect(block!.width).toBeGreaterThan(90);
+    expect(block!.width).toBeLessThan(100);
+  });
+
+  it("takes the whole column when the gap is waived (the Day view)", () => {
+    const [block] = layoutDayGrid([timed("m", at(2026, 7, 22, 9), at(2026, 7, 22, 10))], day, {
+      rightGapPercent: 0,
+    });
+    expect(block!.width).toBe(100);
+  });
+
+  it("cascades overlapping meetings so each keeps its leading edge", () => {
+    const events = [
+      timed("a", at(2026, 7, 22, 10, 0), at(2026, 7, 22, 11, 0)),
+      timed("b", at(2026, 7, 22, 10, 30), at(2026, 7, 22, 11, 30)),
+      timed("c", at(2026, 7, 22, 10, 45), at(2026, 7, 22, 11, 15)),
+    ];
+    const blocks = layoutDayGrid(events, day).sort((x, y) => x.column - y.column);
+    const lefts = blocks.map((b) => b.left);
+    // Strictly increasing, and every leading edge is well clear of the next one.
+    expect(lefts[0]).toBe(0);
+    expect(lefts[1]! - lefts[0]!).toBeGreaterThan(15);
+    expect(lefts[2]! - lefts[1]!).toBeGreaterThan(15);
+    // The run still ends exactly on the gap — no block escapes the column.
+    const last = blocks[blocks.length - 1]!;
+    expect(last.left + last.width).toBeCloseTo(94, 5);
+    for (const block of blocks) expect(block.left + block.width).toBeLessThanOrEqual(94.001);
+  });
+});
+
+describe("monthSlotCount", () => {
+  it("scales with the cell and stays within bounds", () => {
+    expect(monthSlotCount(0)).toBe(1);
+    expect(monthSlotCount(40)).toBe(1);
+    expect(monthSlotCount(120)).toBeGreaterThan(monthSlotCount(80));
+    expect(monthSlotCount(4000)).toBeLessThanOrEqual(8);
+  });
+});
+
+describe("layoutMonthRow", () => {
+  const week = Array.from({ length: 7 }, (_, i) => addDays(at(2026, 7, 20), i)); // Mon 20 → Sun 26
+
+  it("reserves the top slots for the row's bars and fills the rest per day", () => {
+    const leave = allDay("leave", "2026-07-21", "2026-07-24"); // Tue–Thu
+    const one = timed("one", at(2026, 7, 21, 9), at(2026, 7, 21, 10));
+    const two = timed("two", at(2026, 7, 21, 11), at(2026, 7, 21, 12));
+    const row = layoutMonthRow([leave, one, two], week, 4);
+
+    expect(row.laneCount).toBe(1);
+    expect(row.bars.map((b) => b.event.id)).toEqual(["leave"]);
+    const tuesday = row.cells[1]!;
+    expect(tuesday.items.map((e) => e.id)).toEqual(["one", "two"]);
+    expect(tuesday.hidden).toBe(0);
+    // A day with nothing of its own still gets a cell.
+    expect(row.cells).toHaveLength(7);
+    expect(row.cells[0]!.items).toEqual([]);
+  });
+
+  it("counts the event the indicator displaces in its own total", () => {
+    const events = [0, 1, 2, 3, 4].map((i) =>
+      timed(`m${i}`, at(2026, 7, 22, 9 + i), at(2026, 7, 22, 10 + i)),
+    );
+    // Three slots, no bars: two events are drawn and the third slot says "+3 more" —
+    // three, not two, because the indicator took a slot an event could have used.
+    const row = layoutMonthRow(events, week, 3);
+    const wednesday = row.cells[2]!;
+    expect(wednesday.items.map((e) => e.id)).toEqual(["m0", "m1"]);
+    expect(wednesday.hidden).toBe(3);
+  });
+
+  it("hides every timed event when the bars have taken the budget", () => {
+    const bars = [
+      allDay("a", "2026-07-20", "2026-07-27"),
+      allDay("b", "2026-07-20", "2026-07-27"),
+    ];
+    const meeting = timed("m", at(2026, 7, 22, 9), at(2026, 7, 22, 10));
+    const row = layoutMonthRow([...bars, meeting], week, 2);
+    expect(row.laneCount).toBe(2);
+    expect(row.cells[2]!.items).toEqual([]);
+    expect(row.cells[2]!.hidden).toBe(1);
+  });
+});
+
+describe("event state", () => {
+  it("reads the user's own answer, not a decoration", () => {
+    expect(isUnanswered(timed("a", at(2026, 7, 22, 9), at(2026, 7, 22, 10)))).toBe(true);
+    expect(isUnanswered(timed("b", at(2026, 7, 22, 9), at(2026, 7, 22, 10), { response: "accepted" }))).toBe(
+      false,
+    );
+    expect(isDeclined(timed("c", at(2026, 7, 22, 9), at(2026, 7, 22, 10), { response: "declined" }))).toBe(true);
+    expect(isDeclined(timed("d", at(2026, 7, 22, 9), at(2026, 7, 22, 10), { is_cancelled: true }))).toBe(true);
+    expect(
+      isTentative(timed("e", at(2026, 7, 22, 9), at(2026, 7, 22, 10), { response: "tentativelyAccepted" })),
+    ).toBe(true);
+    expect(isTentative(timed("f", at(2026, 7, 22, 9), at(2026, 7, 22, 10), { show_as: "tentative" }))).toBe(
+      true,
+    );
+  });
+
+  it("knows what is already over, all-day events by their last date", () => {
+    const now = at(2026, 7, 22, 12);
+    expect(isPast(timed("done", at(2026, 7, 22, 9), at(2026, 7, 22, 10)), now)).toBe(true);
+    expect(isPast(timed("running", at(2026, 7, 22, 11, 30), at(2026, 7, 22, 12, 30)), now)).toBe(false);
+    // An all-day event covering today is not past, even though its start was midnight.
+    expect(isPast(allDay("today", "2026-07-22", "2026-07-23"), now)).toBe(false);
+    expect(isPast(allDay("yesterday", "2026-07-21", "2026-07-22"), now)).toBe(true);
+  });
+
+  it("filters declined events out only when asked", () => {
+    const kept = timed("kept", at(2026, 7, 22, 9), at(2026, 7, 22, 10), { response: "accepted" });
+    const gone = timed("gone", at(2026, 7, 22, 9), at(2026, 7, 22, 10), { response: "declined" });
+    expect(withoutDeclined([kept, gone], true).map((e) => e.id)).toEqual(["kept", "gone"]);
+    expect(withoutDeclined([kept, gone], false).map((e) => e.id)).toEqual(["kept"]);
+  });
+});
+
 describe("nowIndicatorPercent", () => {
   it("places the line only on today", () => {
     const now = at(2026, 7, 22, 6, 0);
@@ -398,5 +575,45 @@ describe("formatEventTime", () => {
     const label = formatEventTime(timed("m", at(2026, 7, 22, 9, 30), at(2026, 7, 22, 10, 15)));
     expect(label).toContain("–");
     expect(label).toMatch(/9|09/);
+  });
+});
+
+describe("formatEventTimeRange", () => {
+  it("writes a shared period once", () => {
+    const range = formatEventTimeRange(timed("m", at(2026, 7, 22, 14, 0), at(2026, 7, 22, 15, 0)));
+    const single = formatTimeCompact(at(2026, 7, 22, 15, 0).getTime());
+    const suffix = single.match(/[^\d:\s]+$/)?.[0];
+    expect(range).toContain("\u2013");
+    if (suffix) {
+      // "2–3 PM", never "2 PM–3 PM".
+      expect(range.split(suffix)).toHaveLength(2);
+    }
+  });
+
+  it("keeps both periods when they differ", () => {
+    const range = formatEventTimeRange(timed("m", at(2026, 7, 22, 11, 0), at(2026, 7, 22, 14, 0)));
+    expect(range).toMatch(/11/);
+    expect(range).toMatch(/2|14/);
+  });
+
+  it("says All day for an all-day event", () => {
+    expect(formatEventTimeRange(allDay("x", "2026-07-22", "2026-07-23"))).toBe("All day");
+  });
+});
+
+describe("formatRangeTitle / formatRangeSubtitle", () => {
+  it("names the month a view sits in, and both when it straddles two", () => {
+    expect(formatRangeTitle("month", at(2026, 7, 15), 1)).toMatch(/2026/);
+    // The week of 29 June 2026 runs into July.
+    const straddle = formatRangeTitle("week", at(2026, 7, 1), 1);
+    expect(straddle).toContain("\u2013");
+    expect(formatRangeTitle("week", at(2026, 7, 22), 1)).not.toContain("\u2013");
+  });
+
+  it("says which week, which day, and how far the agenda looks", () => {
+    expect(formatRangeSubtitle("week", at(2026, 7, 22), 1)).toBe("Week 30");
+    expect(formatRangeSubtitle("month", at(2026, 7, 22), 1)).toBe("");
+    expect(formatRangeSubtitle("day", at(2026, 7, 22), 1)).toMatch(/22/);
+    expect(formatRangeSubtitle("agenda", at(2026, 7, 22), 1)).toBe(`Next ${AGENDA_DAYS} days`);
   });
 });

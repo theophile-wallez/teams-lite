@@ -290,11 +290,30 @@ export async function openCalendarTab(page: Page): Promise<void> {
   await page.waitForSelector('[data-testid="calendar-event"]', { timeout: APP_READY_TIMEOUT_MS });
 }
 
-/** Switch the calendar to one of its views and wait for that view to mount. */
+/**
+ * Open the calendar header's view menu and wait until its rows can be clicked.
+ *
+ * Radix keeps a CLOSING menu mounted for its exit animation, and a menu opened during
+ * that window is re-created mid-flight — which detaches the row this is about to click.
+ * Only a script drives a control that fast, so the waiting belongs here.
+ */
+async function openCalendarViewMenu(page: Page): Promise<void> {
+  const menu = page.locator('[role="menu"]');
+  await menu.waitFor({ state: "detached" }).catch(() => {});
+  await page.locator('[data-testid="calendar-view-menu"]').click();
+  await menu.waitFor();
+  // Let the panel finish opening: its rows are still moving for a frame or two, and a
+  // click on a moving target is a click Playwright has to retry.
+  await page.waitForTimeout(200);
+}
+
+/** Switch the calendar to one of its views and wait for that view to mount. The views
+ *  live behind the header's view menu, so this opens that first. */
 export async function openCalendarView(
   page: Page,
   view: "month" | "week" | "day" | "agenda",
 ): Promise<void> {
+  await openCalendarViewMenu(page);
   await page.locator(`[data-testid="calendar-view-${view}"]`).click();
   const surface = {
     month: '[data-testid="calendar-month"]',
@@ -319,13 +338,33 @@ export async function enableAllCalendars(page: Page): Promise<void> {
   await page.waitForTimeout(500);
 }
 
-/** Open the first event's details dialog. Returns its id. */
+/** Open the first event's details panel. Returns its id.
+ *
+ *  Scoped to the pane: the sidebar's "Up next" rail renders the same events with the
+ *  same test id, and an unscoped `.first()` would open one of those instead — which
+ *  looks the same in a screenshot but is not the grid interaction being captured. */
 export async function openFirstEvent(page: Page): Promise<string> {
-  const event = page.locator('[data-testid="calendar-event"]').first();
+  const event = page
+    .locator('[data-testid="calendar-pane"] [data-testid="calendar-event"]')
+    .first();
   const id = (await event.getAttribute("data-event-id")) ?? "";
   await event.click();
   await page.waitForSelector('[data-testid="calendar-event-details"]');
+  // The panel fades and zooms in; capturing mid-animation photographs a half-opacity
+  // surface and reads as a styling bug that is not there.
+  await page.waitForTimeout(250);
   return id;
+}
+
+/** Flip one of the view menu's display settings and close the menu again. */
+export async function toggleCalendarSetting(
+  page: Page,
+  key: "showWeekends" | "showDeclined" | "showWeekNumbers",
+): Promise<void> {
+  await openCalendarViewMenu(page);
+  await page.locator(`[data-testid="calendar-setting-${key}"]`).click();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
 }
 
 /**
@@ -507,7 +546,8 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  // The Calendar surface: every view, in both themes, plus the details dialog.
+  // The Calendar surface: every view, in both themes, plus the details panel and the
+  // working-week variant the view menu's settings produce.
   if (args.includes("--calendar")) {
     await withPreview(async ({ page, shot, setTheme }) => {
       await openCalendarTab(page);
@@ -518,22 +558,40 @@ if (import.meta.main) {
       await shot(`${out}-month-all-light.png`);
       await openCalendarView(page, "week");
       await shot(`${out}-week-light.png`);
-      await openCalendarView(page, "day");
-      await shot(`${out}-day-light.png`);
-      await openCalendarView(page, "agenda");
-      await shot(`${out}-agenda-light.png`);
-      await openCalendarView(page, "month");
+      // The details panel opens BESIDE the event it describes, so it is only worth
+      // looking at over a view that has something around it.
       await openFirstEvent(page);
       await shot(`${out}-details-light.png`);
       await page.keyboard.press("Escape");
       await page.waitForTimeout(250);
+      await openCalendarView(page, "day");
+      await shot(`${out}-day-light.png`);
+      await openCalendarView(page, "agenda");
+      await shot(`${out}-agenda-light.png`);
+      // Weekends off + week numbers on: the five-column working week.
+      await openCalendarView(page, "month");
+      await toggleCalendarSetting(page, "showWeekends");
+      await toggleCalendarSetting(page, "showWeekNumbers");
+      await shot(`${out}-workweek-light.png`);
+      await toggleCalendarSetting(page, "showWeekends");
+      await toggleCalendarSetting(page, "showWeekNumbers");
+      // Mobile: the grid IS the page there, and the details arrive as a dialog — a
+      // 320px panel pinned beside a full-width event has nowhere to go.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(400);
+      await shot(`${out}-mobile-light.png`);
+      await openFirstEvent(page);
+      await shot(`${out}-mobile-details-light.png`);
+      await page.keyboard.press("Escape");
+      await page.setViewportSize({ width: 1200, height: 850 });
+      await page.waitForTimeout(400);
       await setTheme("dark");
       await shot(`${out}-month-dark.png`);
       await openCalendarView(page, "week");
       await shot(`${out}-week-dark.png`);
       console.log(
-        `[preview] wrote ${out}-{month,month-all,week,day,agenda,details}-light.png and ` +
-          `${out}-{month,week}-dark.png`,
+        `[preview] wrote ${out}-{month,month-all,week,details,day,agenda,workweek,mobile,` +
+          `mobile-details}-light.png and ${out}-{month,week}-dark.png`,
       );
     });
     process.exit(0);

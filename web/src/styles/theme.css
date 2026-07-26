@@ -97,6 +97,13 @@
   --emoji-picker-accent: 104, 117, 230;
   --emoji-picker-input: 244, 244, 245;
 
+  /* Calendar: the barely-there wash that sets a weekend apart from a working day.
+   * A tint rather than a line, so the grid keeps one continuous rhythm. */
+  --calendar-weekend: #f5f5f7;
+  /* The hour/day lines of a time grid — lighter than --border-subtle, because a
+   * week view draws 24 of them and they must recede behind the events. */
+  --calendar-line: #eeeef0;
+
   /* Elevation — "shadow as a border": a crisp 1px ring + a 1–2px micro-drop.
    * Elevation scales by opacity + tiny offset, never by wide blur. */
   --elev-chip: 0 0 0 1px rgba(17, 17, 17, 0.04), 0 1px 1px rgba(17, 17, 17, 0.04);
@@ -173,6 +180,9 @@
   --emoji-picker-color: 229, 229, 229;
   --emoji-picker-accent: 120, 133, 248;
   --emoji-picker-input: 38, 38, 38;
+
+  --calendar-weekend: #1b1b1b;
+  --calendar-line: #232323;
 
   /* Dark: shadows barely show — separate surfaces with a hairline inset ring
    * (lightness step) plus a soft drop for popovers. */

@@ -1,5 +1,6 @@
 import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
+import { Check } from "lucide-react";
 import { cn } from "~/lib/utils";
 
 export const DropdownMenu = DropdownMenuPrimitive.Root;
@@ -53,6 +54,55 @@ export const DropdownMenuItem = React.forwardRef<
   />
 ));
 DropdownMenuItem.displayName = DropdownMenuPrimitive.Item.displayName;
+
+/**
+ * A menu row that toggles rather than acts, with the tick in a fixed gutter so a
+ * column of them stays aligned whether or not they are on.
+ *
+ * Radix closes a menu on select; a checkbox item keeps it open (`onSelect` is
+ * defaulted to a no-op preventer), because flipping three display settings in a row is
+ * the normal case and reopening the menu between each is not.
+ */
+export const DropdownMenuCheckboxItem = React.forwardRef<
+  React.ComponentRef<typeof DropdownMenuPrimitive.CheckboxItem>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.CheckboxItem>
+>(({ className, children, onSelect, ...props }, ref) => (
+  <DropdownMenuPrimitive.CheckboxItem
+    ref={ref}
+    onSelect={onSelect ?? ((event) => event.preventDefault())}
+    className={cn(
+      "flex cursor-pointer select-none items-center gap-2.5 rounded-lg py-1.5 pl-2 pr-2.5 text-sm text-foreground outline-none transition-colors",
+      "focus:bg-accent focus:text-foreground data-[highlighted]:bg-accent data-[highlighted]:text-foreground",
+      "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      className,
+    )}
+    {...props}
+  >
+    <span className="grid size-4 shrink-0 place-items-center text-primary">
+      <DropdownMenuPrimitive.ItemIndicator>
+        <Check className="size-3.5" strokeWidth={2.4} />
+      </DropdownMenuPrimitive.ItemIndicator>
+    </span>
+    {children}
+  </DropdownMenuPrimitive.CheckboxItem>
+));
+DropdownMenuCheckboxItem.displayName = DropdownMenuPrimitive.CheckboxItem.displayName;
+
+/** A small caption above a group of rows. */
+export const DropdownMenuLabel = React.forwardRef<
+  React.ComponentRef<typeof DropdownMenuPrimitive.Label>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Label>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.Label
+    ref={ref}
+    className={cn(
+      "px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-text-faint",
+      className,
+    )}
+    {...props}
+  />
+));
+DropdownMenuLabel.displayName = DropdownMenuPrimitive.Label.displayName;
 
 export const DropdownMenuSeparator = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.Separator>,

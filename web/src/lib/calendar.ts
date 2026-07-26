@@ -94,6 +94,52 @@ export function isSameMonth(date: Date, anchor: Date): boolean {
   return date.getFullYear() === anchor.getFullYear() && date.getMonth() === anchor.getMonth();
 }
 
+/** Saturday or Sunday. Only used to tint the grid, never to hide anything by itself
+ *  (that is the "Weekends" view setting's job). */
+export function isWeekend(date: Date): boolean {
+  const day = date.getDay();
+  return day === 0 || day === 6;
+}
+
+/** Drop Saturdays and Sundays from a row of days when the user has turned weekends
+ *  off. Every layout function here is index-based over the array it is given, so a
+ *  five-day row needs no other change. */
+export function workdaysOnly(days: Date[], showWeekends: boolean): Date[] {
+  return showWeekends ? days : days.filter((day) => !isWeekend(day));
+}
+
+/**
+ * The ISO 8601 week number of a date (weeks start on Monday, week 1 is the one
+ * holding the first Thursday).
+ *
+ * Shown next to the period in the header and, optionally, as the month grid's
+ * leading column — the number people quote in "let's do it in W31".
+ */
+export function isoWeekNumber(date: Date): number {
+  // Shift onto the Thursday of the same ISO week, then count weeks from the first
+  // Thursday of that Thursday's year. This is the standard trick, and it is why the
+  // year boundary needs no special case.
+  const thursday = addDays(startOfDay(date), 3 - ((date.getDay() + 6) % 7));
+  const firstThursday = new Date(thursday.getFullYear(), 0, 4);
+  const shift = (firstThursday.getDay() + 6) % 7;
+  const week1Monday = addDays(firstThursday, -shift);
+  return Math.round((thursday.getTime() - week1Monday.getTime()) / (7 * DAY_MS)) + 1;
+}
+
+/** The viewer's time zone, the way a calendar labels its hour gutter: the short
+ *  name when the platform has one ("CEST"), else a UTC offset ("GMT+2"). */
+export function timezoneLabel(now: Date = new Date()): string {
+  const short = now
+    .toLocaleTimeString(undefined, { timeZoneName: "short" })
+    .match(/\b([A-Z]{2,5})$/);
+  if (short) return short[1]!;
+  const offsetMinutes = -now.getTimezoneOffset();
+  const sign = offsetMinutes < 0 ? "-" : "+";
+  const hours = Math.floor(Math.abs(offsetMinutes) / 60);
+  const minutes = Math.abs(offsetMinutes) % 60;
+  return `GMT${sign}${hours}${minutes ? `:${`${minutes}`.padStart(2, "0")}` : ""}`;
+}
+
 /** The weekday headers, in the grid's own order, as short locale names. */
 export function weekdayLabels(weekStartsOn: number = WEEK_STARTS_ON): string[] {
   // Any week will do; 2026-03-01 was a Sunday, so offsetting from it gives every
@@ -277,6 +323,40 @@ export function compareForDisplay(a: CalendarEvent, b: CalendarEvent): number {
   return a.id.localeCompare(b.id);
 }
 
+// ---- what an event says about itself ---------------------------------------
+//
+// Colour is reserved for WHICH CALENDAR an event belongs to (that is what makes six
+// overlaid calendars readable), so everything else an event carries has to be said by
+// its treatment instead: struck through, hatched, outlined, dimmed. These predicates
+// are the single source of truth for which is which, keyed off Graph's own fields.
+
+/** The user has not answered this invitation yet — drawn outlined rather than filled. */
+export function isUnanswered(event: Pick<CalendarEvent, "response">): boolean {
+  return event.response === "notResponded" || event.response === "none";
+}
+
+/** The user declined it, or the organizer cancelled it — struck through. */
+export function isDeclined(
+  event: Pick<CalendarEvent, "response" | "is_cancelled">,
+): boolean {
+  return event.response === "declined" || event.is_cancelled;
+}
+
+/** A "maybe" — hatched, the way every calendar draws a tentative hold. */
+export function isTentative(event: Pick<CalendarEvent, "response" | "show_as">): boolean {
+  return event.response === "tentativelyAccepted" || event.show_as === "tentative";
+}
+
+/** Already over. Past events are dimmed so the eye lands on what is still ahead. */
+export function isPast(event: Pick<CalendarEvent, "start" | "end" | "is_all_day">, now: Date): boolean {
+  return eventSpan(event).endMs <= now.getTime();
+}
+
+/** Hide declined and cancelled events, for the "Declined events" view setting. */
+export function withoutDeclined(events: CalendarEvent[], showDeclined: boolean): CalendarEvent[] {
+  return showDeclined ? events : events.filter((event) => !isDeclined(event));
+}
+
 // ---- the all-day band ------------------------------------------------------
 
 /**
@@ -364,22 +444,102 @@ export function layoutDayBand(events: CalendarEvent[], days: Date[]): DayBandBar
   return bars;
 }
 
+// ---- the month grid --------------------------------------------------------
+//
+// A month cell has room for a handful of rows and no more, and the count depends on
+// the viewport — a 6×7 grid in a 700px pane gives each cell ~100px, in a 1200px one
+// ~180px. So the cell's capacity is MEASURED (`monthSlotCount`) and then SHARED
+// between the row's bars and the day's own chips, rather than guessed per kind. That
+// is what makes "+N more" honest: it counts exactly what did not fit.
+
+/** Height of one row inside a month cell — a bar or a chip — including its gap. */
+export const MONTH_SLOT_HEIGHT = 19;
+/** Room the day number takes above the slots. */
+export const MONTH_DAY_HEADER_HEIGHT = 26;
+/** A cell always offers at least one slot (if only for "+N more") and never more than
+ *  this, so a tall viewport does not turn the grid into a list. */
+const MONTH_MIN_SLOTS = 1;
+const MONTH_MAX_SLOTS = 8;
+
+/** How many rows of events a month cell of `cellHeight` pixels can show. */
+export function monthSlotCount(cellHeight: number): number {
+  const usable = cellHeight - MONTH_DAY_HEADER_HEIGHT;
+  const raw = Math.floor(usable / MONTH_SLOT_HEIGHT);
+  return Math.max(MONTH_MIN_SLOTS, Math.min(MONTH_MAX_SLOTS, raw));
+}
+
+/** One day of a month row: the timed events it shows, and how many it could not. */
+export type MonthDayCell = {
+  day: Date;
+  /** Timed events that fit, in display order. */
+  items: CalendarEvent[];
+  /** How many of the day's events are not drawn at all — the "+N more" count. */
+  hidden: number;
+};
+
+/** A whole week row of the month grid, laid out. */
+export type MonthRow = {
+  /** All-day and multi-day bars, in lanes across the row. */
+  bars: DayBandBar[];
+  /** How many lanes the bars need — the number of slots they consume in every cell,
+   *  so a bar keeps one straight line across the row. */
+  laneCount: number;
+  cells: MonthDayCell[];
+};
+
+/**
+ * Lay out one week row of the month grid within a budget of `slots` rows per cell.
+ *
+ * Bars take the top lanes (uniformly across the row — that is what lanes are for),
+ * and each day fills what is left with its own timed events. When a day has more than
+ * fits, the last slot becomes the overflow indicator, so the count it shows includes
+ * the event it displaced.
+ */
+export function layoutMonthRow(events: CalendarEvent[], days: Date[], slots: number): MonthRow {
+  const bars = layoutDayBand(events, days);
+  const laneCount = bars.reduce((max, bar) => Math.max(max, bar.lane + 1), 0);
+  const free = Math.max(0, slots - laneCount);
+
+  const cells = days.map((day) => {
+    const timed = eventsForDay(events, day).filter((event) => !eventSpan(event).banded);
+    // One slot has to pay for the indicator itself, or "+1 more" would sit where the
+    // event it is hiding could have been drawn.
+    const shown = timed.length > free ? Math.max(0, free - 1) : timed.length;
+    return { day, items: timed.slice(0, shown), hidden: timed.length - shown };
+  });
+
+  return { bars, laneCount, cells };
+}
+
 // ---- the hour grid ---------------------------------------------------------
 
 /**
- * One timed event positioned in a day column.
+ * One timed event positioned in a day column. Every number is a PERCENTAGE of the
+ * column, so the grid resizes with the viewport and the component does no arithmetic.
  *
- * `top`/`height` are percentages of the 24-hour column. `column` of `columns` places
- * side-by-side overlapping meetings: three meetings at 10:00 each take a third of the
- * width, which is the only way a busy morning stays readable.
+ * `top`/`height` come from the clock. `left`/`width` come from the overlap: three
+ * meetings at 10:00 cannot each be full width, or two of them would be invisible.
+ * They CASCADE rather than tile — each takes a wide slice and the next one overlaps
+ * its right edge, so every meeting keeps its leading edge (where the title starts)
+ * clear and the last one still reaches the right of the column. That is what Notion
+ * Calendar, Outlook and Google all do, and it beats tiling in a 130px week column
+ * where a strict third is too narrow to read.
  */
 export type TimedBlock = {
   event: CalendarEvent;
   top: number;
   height: number;
+  left: number;
+  width: number;
   column: number;
   columns: number;
 };
+
+/** How much of the column is left clear on the right, so a block never touches the
+ *  next day's border and an empty slot stays clickable. */
+const COLUMN_RIGHT_GAP_PERCENT = 6;
+/** How far each cascaded block is overlapped by the one after it. */
+const COLUMN_OVERLAP_PERCENT = 10;
 
 /** The shortest block the grid will draw, as a percentage of the day. A 5-minute
  *  meeting is otherwise a 2px sliver with no room for its own title. */
@@ -393,7 +553,16 @@ const MIN_BLOCK_PERCENT = (30 / (24 * 60)) * 100;
  * number of columns it needed. Computing it per cluster rather than per day is what
  * keeps a lone afternoon meeting full-width even when the morning was triple-booked.
  */
-export function layoutDayGrid(events: CalendarEvent[], day: Date): TimedBlock[] {
+export function layoutDayGrid(
+  events: CalendarEvent[],
+  day: Date,
+  options: {
+    /** Right-hand breathing room, as a percentage. The Day view passes 0: one column
+     *  wide enough for everything has nothing to gain from a gap. */
+    rightGapPercent?: number;
+  } = {},
+): TimedBlock[] {
+  const rightGap = options.rightGapPercent ?? COLUMN_RIGHT_GAP_PERCENT;
   const dayStart = startOfDay(day).getTime();
   const dayEnd = dayStart + DAY_MS;
 
@@ -417,10 +586,13 @@ export function layoutDayGrid(events: CalendarEvent[], day: Date): TimedBlock[] 
       // 23:45 is nudged up to sit flush with the bottom rather than being squashed
       // to an illegible sliver or overflowing the column.
       const height = clamp(Math.max(rawHeight, MIN_BLOCK_PERCENT), MIN_BLOCK_PERCENT, 100);
+      const { left, width } = cascade(item.column, columns, rightGap);
       blocks.push({
         event: item.event,
         top: Math.min(rawTop, 100 - height),
         height,
+        left,
+        width,
         column: item.column,
         columns,
       });
@@ -454,6 +626,22 @@ export function layoutDayGrid(events: CalendarEvent[], day: Date): TimedBlock[] 
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+/**
+ * Where one of `columns` cascaded blocks sits horizontally, as percentages.
+ *
+ * Solving `columns * width - (columns - 1) * overlap = 100 - gap` keeps the run
+ * flush with both edges of the column whatever the count; the last block absorbs the
+ * rounding so it always ends exactly on the gap.
+ */
+function cascade(column: number, columns: number, rightGap: number): { left: number; width: number } {
+  const usable = 100 - rightGap;
+  if (columns <= 1) return { left: 0, width: usable };
+  const overlap = Math.min(COLUMN_OVERLAP_PERCENT, usable / columns);
+  const width = (usable + overlap * (columns - 1)) / columns;
+  const left = column * (width - overlap);
+  return { left, width: column === columns - 1 ? usable - left : width };
 }
 
 /** Where "now" sits in a day column, as a percentage, or null when `now` is not that
@@ -507,34 +695,65 @@ export function formatDayShort(date: Date): string {
   return date.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
-/** The heading above the grid: "July 2026", "20 – 26 Jul 2026", "Sunday 26 July 2026". */
+/**
+ * An event's time in the few characters a grid block has: "10–11 AM", "9:30–10:15".
+ *
+ * The period is written once when both ends share it — the reference design's touch,
+ * and worth the trouble because "2–3 PM" fits a week column where "2:00 PM – 3:00 PM"
+ * does not. Done by comparing the two formatted strings rather than by assuming a
+ * 12-hour clock, so a 24-hour locale simply never has a suffix to drop.
+ */
+export function formatEventTimeRange(event: CalendarEvent): string {
+  const span = eventSpan(event);
+  if (event.is_all_day) return "All day";
+  const from = formatTimeCompact(span.startMs);
+  const to = formatTimeCompact(span.endMs);
+  if (span.endMs <= span.startMs) return from;
+  const suffix = from.match(/[^\d:\s]+$/)?.[0];
+  if (suffix && to.endsWith(suffix)) {
+    return `${from.slice(0, -suffix.length).trim()}\u2013${to}`;
+  }
+  return `${from}\u2013${to}`;
+}
+
+/** The heading above the grid: the month the view sits in, or the two it straddles. */
 export function formatRangeTitle(
+  mode: CalendarViewMode,
+  anchor: Date,
+  weekStartsOn: number = WEEK_STARTS_ON,
+): string {
+  const month = (date: Date, withYear: boolean) =>
+    date.toLocaleDateString(undefined, withYear ? { month: "long", year: "numeric" } : { month: "short" });
+
+  if (mode === "month" || mode === "day") return month(anchor, true);
+
+  const range = visibleRange(mode, anchor, weekStartsOn);
+  const last = addDays(range.end, -1);
+  if (isSameMonth(range.start, last)) return month(range.start, true);
+  return `${month(range.start, false)} \u2013 ${month(last, true)}`;
+}
+
+/** The muted line beside the heading: which week, which day, how far the list looks. */
+export function formatRangeSubtitle(
   mode: CalendarViewMode,
   anchor: Date,
   weekStartsOn: number = WEEK_STARTS_ON,
 ): string {
   switch (mode) {
     case "month":
-      return anchor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+      return "";
+    case "week":
+      return `Week ${isoWeekNumber(startOfWeek(anchor, weekStartsOn))}`;
     case "day":
+      // The month repeats what the heading already says, and is worth it: "Sunday 26"
+      // is the one combination Intl orders unpredictably across locales.
       return anchor.toLocaleDateString(undefined, {
         weekday: "long",
-        day: "numeric",
         month: "long",
-        year: "numeric",
+        day: "numeric",
       });
-    case "week":
-    case "agenda": {
-      const range = visibleRange(mode, anchor, weekStartsOn);
-      const last = addDays(range.end, -1);
-      const sameMonth = isSameMonth(range.start, last);
-      const from = range.start.toLocaleDateString(
-        undefined,
-        sameMonth ? { day: "numeric" } : { day: "numeric", month: "short" },
-      );
-      const to = last.toLocaleDateString(undefined, { day: "numeric", month: "short" });
-      return `${from} – ${to} ${last.getFullYear()}`;
-    }
+    case "agenda":
+      return `Next ${AGENDA_DAYS} days`;
   }
 }
 

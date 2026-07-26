@@ -205,6 +205,9 @@ export type AppState = {
   visibleCalendarIds: string[];
   /** Which view the calendar shows. */
   calendarMode: CalendarViewMode;
+  /** How the views are drawn, from the view menu. Persisted locally: these are
+   *  preferences about this screen, not anything the mailbox knows about. */
+  calendarSettings: CalendarSettings;
   /** The date the view is centred on, as epoch milliseconds (a `Date` in reactive
    *  state would re-render on every identity change even when the day is the same). */
   calendarAnchorMs: number;
@@ -256,6 +259,33 @@ const RETAINED_MAIL_BODIES = 12;
 // Where the locally-chosen visible calendars are persisted (client-only, like the
 // channel-favorite overrides).
 const VISIBLE_CALENDARS_KEY = "teams-lite:visible-calendars";
+// And the view menu's display preferences.
+const CALENDAR_SETTINGS_KEY = "teams-lite:calendar-settings";
+
+/**
+ * The calendar's display preferences — the three toggles the view menu offers.
+ *
+ * Each one changes what is DRAWN, never what is fetched: hiding weekends or declined
+ * invitations must not make the app read a different window, or stepping through
+ * months would re-sync every time a toggle moved.
+ */
+export type CalendarSettings = {
+  /** Draw Saturday and Sunday. Off gives the five-column working week. */
+  showWeekends: boolean;
+  /** Draw invitations the user declined (and meetings the organizer cancelled),
+   *  struck through. Off hides them everywhere. */
+  showDeclined: boolean;
+  /** Show ISO week numbers down the left of the month grid and the mini month. */
+  showWeekNumbers: boolean;
+};
+
+const DEFAULT_CALENDAR_SETTINGS: CalendarSettings = {
+  showWeekends: true,
+  // Shown by default and struck through: a declined meeting is still information —
+  // it tells the user why an hour of their day is quiet.
+  showDeclined: true,
+  showWeekNumbers: false,
+};
 
 function initialState(): AppState {
   return {
@@ -305,6 +335,7 @@ function initialState(): AppState {
     calendars: [],
     visibleCalendarIds: [],
     calendarMode: "month",
+    calendarSettings: DEFAULT_CALENDAR_SETTINGS,
     // Midnight today: the anchor is a DAY, and carrying a wall-clock time in it
     // would make "is this the anchor's month" depend on when the app was opened.
     calendarAnchorMs: startOfDay(new Date()).getTime(),
@@ -449,6 +480,7 @@ export class TeamsController {
     this.applyPersistedSounds();
     this.applyPersistedFavorites();
     this.applyPersistedVisibleCalendars();
+    this.applyPersistedCalendarSettings();
     this.wireEvents();
 
     // Pick up the backend's write token from our own server before connecting, so
@@ -1309,6 +1341,35 @@ export class TeamsController {
   /** Open one event's details panel, or close it (`null`). */
   setOpenEvent(id: string | null): void {
     this.set({ openEventId: id });
+  }
+
+  /** Flip one of the view menu's display preferences. Purely visual — no window is
+   *  re-read, because none of these change which events the view covers. */
+  toggleCalendarSetting(key: keyof CalendarSettings): void {
+    const next = { ...this.get().calendarSettings, [key]: !this.get().calendarSettings[key] };
+    this.set({ calendarSettings: next });
+    try {
+      localStorage.setItem(CALENDAR_SETTINGS_KEY, JSON.stringify(next));
+    } catch {
+      /* ignore — a failed persist just doesn't survive reload */
+    }
+  }
+
+  /** Load the persisted display preferences. Each key is validated on its own, so a
+   *  half-written or outdated blob degrades to the defaults instead of throwing. */
+  private applyPersistedCalendarSettings(): void {
+    try {
+      const raw = localStorage.getItem(CALENDAR_SETTINGS_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Partial<Record<keyof CalendarSettings, unknown>>;
+      const next = { ...DEFAULT_CALENDAR_SETTINGS };
+      for (const key of Object.keys(next) as (keyof CalendarSettings)[]) {
+        if (typeof parsed?.[key] === "boolean") next[key] = parsed[key] as boolean;
+      }
+      this.set({ calendarSettings: next });
+    } catch {
+      /* ignore — display preferences are non-critical */
+    }
   }
 
   // ---- notifications (activity feed) --------------------------------------

@@ -66,9 +66,13 @@ The app reads the user's Teams/Outlook calendar over Microsoft Graph
 - Reading, rendering and navigating the calendar are fine and are what the feature is
   for. `join_url` and `web_link` are links the **user** clicks — never something the
   app follows, prefetches or opens on their behalf.
-- There is deliberately no "New event" button, even though the reference design
-  (`shadcnuikit.com/dashboard/apps/calendar`) has one. If responding to invitations is
-  ever wanted, it is a deliberate feature: its own consent gate, its own entry in
+- There is deliberately no "New event" button, and no drag, resize or context menu on an
+  event, even though the reference design the views follow
+  (`github.com/vmnog/calendarcn`, itself after Notion Calendar) has all of them. Take
+  its *look* — the tinted blocks with a coloured rail, the measured month cells, the
+  time-zone gutter, the now badge, the anchored details panel — and none of its editing.
+  The header says `Read-only` for the same reason. If responding to invitations is ever
+  wanted, it is a deliberate feature: its own consent gate, its own entry in
   `OUTWARD_METHODS`, its own write-lock coverage — never a quiet addition to the read
   path.
 

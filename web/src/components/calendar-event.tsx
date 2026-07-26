@@ -6,18 +6,34 @@ import {
   type CalendarEvent,
   type CalendarInfo,
 } from "~/lib/protocol";
-import { eventSpan, formatTimeCompact } from "~/lib/calendar";
+import {
+  eventSpan,
+  formatEventTimeRange,
+  formatTimeCompact,
+  isDeclined,
+  isTentative,
+  isUnanswered,
+} from "~/lib/calendar";
 import { cn } from "~/lib/utils";
 import { useAppState } from "./controller-context";
 
-// The one visual vocabulary every calendar view draws events with.
+// The one visual vocabulary every calendar view draws events with — three shapes of
+// the same thing, after the reference design (Notion Calendar by way of calendarcn):
 //
-// An event's colour comes from its CALENDAR, not from its own properties: that is
-// what makes six overlaid calendars readable at a glance, and it is how Outlook and
-// Teams do it. Everything else an event says about itself is carried by the chip's
-// treatment rather than by another colour — a declined or cancelled event is struck
-// through, a tentative one is hatched, one the user has not answered is outlined
-// instead of filled.
+//   BLOCK — a timed meeting in the hour grid. Tinted fill, a coloured rail down its
+//           leading edge, title over time.
+//   BAR   — an all-day or multi-day run, drawn across the days it covers as one
+//           continuous line rather than a chip per day.
+//   ITEM  — the month cell's and the sidebar's row: no fill at all, just the rail,
+//           the start time and the title, so a cell of six of them stays quiet.
+//
+// An event's COLOUR is its CALENDAR's colour — that is what makes six overlaid
+// calendars readable, and it is how Outlook and Teams do it. Everything else an event
+// says about itself is therefore carried by its treatment rather than by a second
+// colour: a declined or cancelled event is struck through, a tentative one hatched,
+// an unanswered invitation outlined instead of filled, and anything already over is
+// dimmed so the eye lands on what is still ahead. The predicates behind those live in
+// `lib/calendar` and come straight from Graph's own fields.
 
 /** Resolve calendar id → display colour once per calendar list. */
 export function useCalendarColors(): (calendarId: string) => string {
@@ -32,154 +48,204 @@ export function colorLookup(calendars: CalendarInfo[]): (calendarId: string) => 
   return (calendarId: string) => byId.get(calendarId) ?? "var(--primary)";
 }
 
-/** How an event is filled: solid-ish for one the user is going to, outlined for one
- *  they have not answered. Keyed off Graph's own `response`, so it says something
- *  true rather than decorative. */
-function isUnanswered(event: CalendarEvent): boolean {
-  return event.response === "notResponded" || event.response === "none";
+/** What every event shape needs to know. */
+type EventVisualProps = {
+  event: CalendarEvent;
+  /** The calendar's colour, as a CSS colour. Drives fill, rail and text through the
+   *  `.calendar-event` recipe in app.css. */
+  color: string;
+  /** This event's details panel is open. */
+  selected?: boolean;
+  /** The event is over. Dimmed, never hidden. */
+  past?: boolean;
+  onOpen: (id: string) => void;
+  className?: string;
+  style?: React.CSSProperties;
+};
+
+/** The shared shell: the button, its identity for tests, and the state treatments
+ *  that mean the same thing in every view. */
+function eventShellProps(props: EventVisualProps) {
+  const { event } = props;
+  return {
+    type: "button" as const,
+    "data-testid": "calendar-event",
+    "data-event-id": event.id,
+    "data-selected": props.selected ? "true" : undefined,
+    title: `${eventTitle(event)} · ${formatEventTimeRange(event)}`,
+    "aria-label": `${eventTitle(event)}, ${formatEventTimeRange(event)}`,
+    style: { "--event-color": props.color, ...props.style } as React.CSSProperties,
+    onClick: (e: React.MouseEvent) => {
+      e.stopPropagation();
+      props.onOpen(event.id);
+    },
+  };
 }
 
-function isDeclined(event: CalendarEvent): boolean {
-  return event.response === "declined" || event.is_cancelled;
+/** Fill, rail and outline, shared by BLOCK and BAR (ITEM has no fill). */
+function filledClasses(props: EventVisualProps) {
+  const { event } = props;
+  return cn(
+    "calendar-event group/event relative flex min-w-0 select-none overflow-hidden text-left",
+    "transition-[background-color,box-shadow,opacity] duration-150",
+    // An answered event is filled; an unanswered invitation is left outlined, so
+    // "I have not decided" is visible without a legend.
+    isUnanswered(event)
+      ? "bg-[var(--card)] ring-1 ring-inset ring-[color-mix(in_srgb,var(--event-color)_45%,transparent)]"
+      : "bg-[var(--event-fill)]",
+    "hover:bg-[var(--event-fill-strong)]",
+    props.selected &&
+      "bg-[var(--event-fill-strong)] ring-2 ring-inset ring-[var(--event-color)] z-30",
+    isTentative(event) && "calendar-hatch",
+    isDeclined(event) && "opacity-60",
+    props.past && !props.selected && "opacity-65",
+  );
 }
 
-function isTentative(event: CalendarEvent): boolean {
-  return event.response === "tentativelyAccepted" || event.show_as === "tentative";
-}
-
-/** The inline custom properties every chip style keys off. `color-mix` does the
- *  tinting, so one colour drives fill, border and text in both themes. */
-function chipVars(color: string): React.CSSProperties {
-  return { "--event-color": color } as React.CSSProperties;
+/** The coloured rail down an event's leading edge. Absolute, so it survives the
+ *  block's own padding and never shifts the text. */
+function Rail(props: { hidden?: boolean; rounded?: boolean }) {
+  if (props.hidden) return null;
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "absolute inset-y-0 left-0 w-[3px] bg-[var(--event-color)]",
+        props.rounded && "rounded-l-[3px]",
+      )}
+    />
+  );
 }
 
 /**
- * One event as a compact chip: a coloured dot, its start time and its title on a
- * single line. The month grid's and the sidebar's unit.
+ * One timed meeting in the hour grid.
+ *
+ * The time is dropped when the block is too short to carry a second line — a
+ * 15-minute hold is 12 pixels tall, and half a clock reading is worse than none.
  */
-export function EventChip(props: {
-  event: CalendarEvent;
-  color: string;
-  onOpen: (id: string) => void;
-  /** Hide the time (the agenda already shows it in its own column). */
-  hideTime?: boolean;
-  className?: string;
-}) {
+export function EventBlock(props: EventVisualProps & { compact?: boolean }) {
   const { event } = props;
   const span = eventSpan(event);
-  const declined = isDeclined(event);
 
   return (
     <button
-      type="button"
-      data-testid="calendar-event"
-      data-event-id={event.id}
-      title={eventTitle(event)}
-      style={chipVars(props.color)}
-      onClick={(e) => {
-        e.stopPropagation();
-        props.onOpen(event.id);
-      }}
+      {...eventShellProps(props)}
       className={cn(
-        "group/event flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left",
-        "text-[11px] leading-tight transition-colors",
-        "hover:bg-[color-mix(in_srgb,var(--event-color)_18%,transparent)]",
-        declined && "opacity-55",
+        filledClasses(props),
+        "flex-col gap-px rounded-[4px] py-[1px] pl-2 pr-1",
         props.className,
       )}
     >
-      <span
-        aria-hidden
-        className={cn(
-          "size-1.5 shrink-0 rounded-full",
-          isUnanswered(event)
-            ? "ring-1 ring-inset ring-[var(--event-color)]"
-            : "bg-[var(--event-color)]",
-        )}
-      />
-      {!props.hideTime && !event.is_all_day && (
-        <span className="shrink-0 tabular-nums text-text-faint">
-          {formatTimeCompact(span.startMs)}
-        </span>
-      )}
+      <Rail rounded />
       <span
         className={cn(
-          "min-w-0 flex-1 truncate text-text-dim group-hover/event:text-foreground",
-          declined && "line-through",
+          "w-full truncate text-[11px] font-semibold leading-[1.35] text-[var(--event-title)]",
+          isDeclined(event) && "line-through",
         )}
       >
         {eventTitle(event)}
       </span>
-      {event.join_url && (
-        <Video className="size-2.5 shrink-0 text-text-faint" strokeWidth={2} aria-hidden />
+      {!props.compact && (
+        <span className="w-full truncate text-[10px] leading-[1.35] tabular-nums text-[var(--event-meta)]">
+          {formatEventTimeRange(event)}
+        </span>
+      )}
+      {event.join_url && !props.compact && (
+        <Video
+          className="absolute right-1 top-1 size-2.5 text-[var(--event-meta)]"
+          strokeWidth={2}
+          aria-hidden
+        />
+      )}
+      <span className="sr-only">{formatTimeCompact(span.startMs)}</span>
+    </button>
+  );
+}
+
+/**
+ * One all-day or multi-day run, as a bar across the days it covers.
+ *
+ * `continuesBefore` / `continuesAfter` say the run extends past the row it is drawn
+ * in: the bar then loses that edge's rounding (and its rail), so a fortnight of leave
+ * reads as one thing crossing two week rows rather than two separate holidays.
+ */
+export function EventBar(
+  props: EventVisualProps & { continuesBefore?: boolean; continuesAfter?: boolean },
+) {
+  const { event } = props;
+  const span = eventSpan(event);
+
+  return (
+    <button
+      {...eventShellProps(props)}
+      className={cn(
+        filledClasses(props),
+        "h-full items-center gap-1.5 py-0 pl-2 pr-1.5",
+        props.continuesBefore ? "rounded-l-none" : "rounded-l-[4px]",
+        props.continuesAfter ? "rounded-r-none" : "rounded-r-[4px]",
+        props.className,
+      )}
+    >
+      <Rail hidden={props.continuesBefore} />
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate text-[11px] font-semibold leading-none text-[var(--event-title)]",
+          isDeclined(event) && "line-through",
+        )}
+      >
+        {eventTitle(event)}
+      </span>
+      {!event.is_all_day && (
+        // A timed event only rides in the band when it crosses midnight, and then its
+        // start is the one thing the bar cannot show by its position.
+        <span className="shrink-0 text-[10px] leading-none tabular-nums text-[var(--event-meta)]">
+          {formatTimeCompact(span.startMs)}
+        </span>
       )}
     </button>
   );
 }
 
 /**
- * One event as a filled block: the week/day grid's positioned unit and the all-day
- * band's bar. Bigger than a chip, so it carries a second line when it has room.
+ * The quiet shape: a rail, the start time and the title on one line.
+ *
+ * The month grid's and the sidebar's unit. No fill — a cell holding six of these
+ * would otherwise be a block of colour, and the reference design's month view is
+ * deliberately almost white.
  */
-export function EventBlock(props: {
-  event: CalendarEvent;
-  color: string;
-  onOpen: (id: string) => void;
-  /** Show the time under the title (only when the block is tall enough). */
-  showTime?: boolean;
-  /** The bar is clipped at the row's leading / trailing edge. */
-  continuesBefore?: boolean;
-  continuesAfter?: boolean;
-  className?: string;
-  style?: React.CSSProperties;
-}) {
+export function EventItem(props: EventVisualProps & { hideTime?: boolean }) {
   const { event } = props;
   const span = eventSpan(event);
-  const declined = isDeclined(event);
-  const unanswered = isUnanswered(event);
 
   return (
     <button
-      type="button"
-      data-testid="calendar-event"
-      data-event-id={event.id}
-      title={eventTitle(event)}
-      style={{ ...chipVars(props.color), ...props.style }}
-      onClick={(e) => {
-        e.stopPropagation();
-        props.onOpen(event.id);
-      }}
+      {...eventShellProps(props)}
       className={cn(
-        "flex min-w-0 flex-col overflow-hidden px-1.5 py-0.5 text-left text-[11px] leading-tight",
-        "border-l-2 border-[var(--event-color)] transition-[filter,opacity]",
-        "hover:brightness-[0.97] dark:hover:brightness-110",
-        // Answered events are filled; an unanswered invitation is left outlined, so
-        // "I have not decided" is visible without a legend.
-        unanswered
-          ? "bg-[color-mix(in_srgb,var(--event-color)_8%,var(--card))] ring-1 ring-inset ring-[color-mix(in_srgb,var(--event-color)_35%,transparent)]"
-          : "bg-[color-mix(in_srgb,var(--event-color)_16%,var(--card))]",
-        // A tentative event gets the hatch every calendar uses for "maybe".
-        isTentative(event) && "calendar-hatch",
-        props.continuesBefore ? "rounded-l-none border-l-0" : "rounded-l-md",
-        props.continuesAfter ? "rounded-r-none" : "rounded-r-md",
-        declined && "opacity-55",
+        "calendar-event group/event relative flex w-full min-w-0 select-none items-center gap-1 overflow-hidden",
+        "rounded-[4px] pl-2 pr-1 text-left transition-colors duration-150",
+        "hover:bg-[var(--event-fill)]",
+        props.selected && "bg-[var(--event-fill-strong)] ring-1 ring-inset ring-[var(--event-color)]",
+        isDeclined(event) && "opacity-60",
+        props.past && !props.selected && "opacity-60",
         props.className,
       )}
     >
+      <Rail rounded />
+      {!props.hideTime && !event.is_all_day && (
+        <span className="shrink-0 text-[11px] leading-[1.45] tabular-nums text-[var(--event-meta)]">
+          {formatTimeCompact(span.startMs)}
+        </span>
+      )}
       <span
         className={cn(
-          "truncate font-medium text-foreground",
-          declined && "line-through",
+          "min-w-0 flex-1 truncate text-[11px] font-semibold leading-[1.45] text-[var(--event-title)]",
+          isDeclined(event) && "line-through",
         )}
       >
         {eventTitle(event)}
       </span>
-      {props.showTime && !event.is_all_day && (
-        // Start only: a week column is ~110px wide, and a full range would truncate
-        // the one part of the time that matters. The range is in the details panel.
-        <span className="truncate text-[10px] tabular-nums text-text-dim">
-          {formatTimeCompact(span.startMs)}
-        </span>
+      {event.join_url && (
+        <Video className="size-2.5 shrink-0 text-[var(--event-meta)]" strokeWidth={2} aria-hidden />
       )}
     </button>
   );

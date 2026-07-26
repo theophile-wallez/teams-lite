@@ -1,45 +1,77 @@
 import { useMemo, useState } from "react";
-import { Check, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Eye, EyeOff, Loader2 } from "lucide-react";
 import {
   WEEK_STARTS_ON,
+  addDays,
   addMonths,
   dayKey,
+  daysIn,
   eventTouchesDay,
   formatAgendaDay,
+  isPast,
   isSameDay,
   isSameMonth,
+  isWeekend,
+  isoWeekNumber,
   monthGridDays,
   startOfDay,
   startOfMonth,
+  visibleRange,
   weekdayLabels,
+  weeksOf,
+  withoutDeclined,
 } from "~/lib/calendar";
 import { calendarColor, calendarLabel, type CalendarEvent, type CalendarInfo } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
-import { EventChip, useCalendarColors } from "./calendar-event";
+import { EventItem, useCalendarColors } from "./calendar-event";
 import { useAppState, useController } from "./controller-context";
 
-// The Calendar tab's sidebar: a mini month for jumping around, the calendar list with
-// its colour swatches, and what is left of today.
+// The Calendar tab's sidebar: the mini month for jumping around, the calendar list
+// with its colour swatches, and what is still to come.
 //
-// This is the reference design's left rail, adapted to this app's 320px column instead
-// of a full-width dashboard shell. The calendar checkboxes are the one control here
-// that costs anything: switching a calendar on may need a window the backend has not
-// read for it yet, which is why the default is the primary calendar alone (a mailbox
-// here carries six).
+// This is the reference design's left rail (github.com/vmnog/calendarcn), adapted to
+// this app's 320px column instead of a full-width dashboard shell — the demo's shell
+// and this app's shell are the same shape, so its sidebar becomes ours and its main
+// section becomes the pane on the right.
+//
+// Two touches from that design are worth naming. The mini month HIGHLIGHTS THE DAYS
+// THE MAIN VIEW IS SHOWING, so the rail says where you are rather than only where you
+// clicked. And the calendar list toggles with an eye rather than a checkbox, because
+// what it controls is visibility, not membership — Outlook's own wording.
+//
+// The calendar toggles are the one control here that costs anything: switching a
+// calendar on may need a window the backend has not read for it yet, which is why the
+// default is the primary calendar alone (a mailbox here carries six).
 
 export function CalendarSidebar() {
   const controller = useController();
   const calendars = useAppState((s) => s.calendars);
   const visible = useAppState((s) => s.visibleCalendarIds);
-  const events = useAppState((s) => s.calendarEvents);
+  const allEvents = useAppState((s) => s.calendarEvents);
   const loading = useAppState((s) => s.calendarLoading);
   const error = useAppState((s) => s.calendarError);
   const anchorMs = useAppState((s) => s.calendarAnchorMs);
+  const mode = useAppState((s) => s.calendarMode);
+  const settings = useAppState((s) => s.calendarSettings);
+
   const anchor = useMemo(() => new Date(anchorMs), [anchorMs]);
+  const events = useMemo(
+    () => withoutDeclined(allEvents, settings.showDeclined),
+    [allEvents, settings.showDeclined],
+  );
+  // The window the pane is showing, so the mini month can shade it.
+  const inView = useMemo(() => {
+    const keys = new Set<string>();
+    for (const day of daysIn(visibleRange(mode, anchor, WEEK_STARTS_ON))) keys.add(dayKey(day));
+    return keys;
+  }, [mode, anchor]);
 
   if (error && calendars.length === 0) {
     return (
-      <p data-testid="calendar-sidebar-error" className="px-4 py-6 text-center text-[13px] text-destructive">
+      <p
+        data-testid="calendar-sidebar-error"
+        className="px-4 py-6 text-center text-[13px] text-destructive"
+      >
         {error}
       </p>
     );
@@ -62,11 +94,13 @@ export function CalendarSidebar() {
       <MiniMonth
         anchor={anchor}
         events={events}
+        inView={mode === "month" ? null : inView}
+        showWeekNumbers={settings.showWeekNumbers}
         onPick={(day) => controller.setCalendarAnchor(day)}
       />
 
-      <section className="flex flex-col gap-1">
-        <h3 className="px-1 pb-0.5 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
+      <section className="flex flex-col gap-0.5">
+        <h3 className="px-1.5 pb-0.5 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
           Calendars
         </h3>
         {calendars.map((calendar) => (
@@ -78,7 +112,7 @@ export function CalendarSidebar() {
           />
         ))}
         {visible.length === 0 && (
-          <p className="px-1 pt-1 text-[11px] text-text-faint">
+          <p className="px-1.5 pt-1 text-[11px] text-text-faint">
             No calendar shown — pick at least one.
           </p>
         )}
@@ -89,12 +123,16 @@ export function CalendarSidebar() {
   );
 }
 
-/** The mini month picker. Its own local month, so browsing ahead in it does not move
- *  the main view until a day is actually clicked — the behaviour every calendar's
- *  date picker has. */
+/** The mini month picker. Its own month, so browsing ahead in it does not move the main
+ *  view until a day is actually clicked — the behaviour every calendar's date picker
+ *  has. */
 function MiniMonth(props: {
   anchor: Date;
   events: CalendarEvent[];
+  /** Days the main view is showing, shaded as a block. Null in Month view, where the
+   *  whole grid is "in view" and shading it would say nothing. */
+  inView: Set<string> | null;
+  showWeekNumbers: boolean;
   onPick: (day: Date) => void;
 }) {
   const [offset, setOffset] = useState(0);
@@ -107,25 +145,39 @@ function MiniMonth(props: {
   }
 
   const month = useMemo(() => addMonths(startOfMonth(props.anchor), offset), [props.anchor, offset]);
-  const days = useMemo(() => monthGridDays(month, WEEK_STARTS_ON), [month]);
+  const weeks = useMemo(() => weeksOf(monthGridDays(month, WEEK_STARTS_ON)), [month]);
   const labels = useMemo(() => weekdayLabels(WEEK_STARTS_ON), []);
   const today = new Date();
 
   // Which days have anything on them, so the picker can show density dots.
   const busy = useMemo(() => {
     const keys = new Set<string>();
-    for (const day of days) {
-      if (props.events.some((event) => eventTouchesDay(event, day))) keys.add(dayKey(day));
+    for (const week of weeks) {
+      for (const day of week) {
+        if (props.events.some((event) => eventTouchesDay(event, day))) keys.add(dayKey(day));
+      }
     }
     return keys;
-  }, [days, props.events]);
+  }, [weeks, props.events]);
+
+  const columns = `${props.showWeekNumbers ? "18px " : ""}repeat(7, minmax(0, 1fr))`;
 
   return (
     <section data-testid="calendar-mini-month" className="flex flex-col gap-1.5 pt-1">
       <header className="flex items-center gap-1 px-1">
-        <h3 className="min-w-0 flex-1 truncate text-[13px] font-medium capitalize text-foreground">
+        <h3 className="min-w-0 flex-1 truncate text-[13px] font-semibold capitalize text-foreground">
           {month.toLocaleDateString(undefined, { month: "long", year: "numeric" })}
         </h3>
+        {offset !== 0 && (
+          <button
+            type="button"
+            data-testid="calendar-mini-reset"
+            onClick={() => setOffset(0)}
+            className="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-accent"
+          >
+            Back
+          </button>
+        )}
         <button
           type="button"
           aria-label="Previous month"
@@ -146,7 +198,8 @@ function MiniMonth(props: {
         </button>
       </header>
 
-      <div className="grid grid-cols-7 gap-y-0.5">
+      <div className="grid gap-y-0.5" style={{ gridTemplateColumns: columns }}>
+        {props.showWeekNumbers && <span aria-hidden />}
         {labels.map((label) => (
           <span
             key={label}
@@ -155,45 +208,104 @@ function MiniMonth(props: {
             {label.slice(0, 2)}
           </span>
         ))}
-        {days.map((day) => {
-          const outside = !isSameMonth(day, month);
-          const selected = isSameDay(day, props.anchor);
-          const isToday = isSameDay(day, today);
-          return (
-            <button
-              key={dayKey(day)}
-              type="button"
-              data-testid="calendar-mini-day"
-              data-day={dayKey(day)}
-              data-selected={selected ? "true" : undefined}
-              onClick={() => props.onPick(day)}
+        {weeks.map((week) => (
+          <MiniWeek
+            key={dayKey(week[0]!)}
+            days={week}
+            month={month}
+            today={today}
+            anchor={props.anchor}
+            inView={props.inView}
+            busy={busy}
+            showWeekNumbers={props.showWeekNumbers}
+            onPick={props.onPick}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * One week of the mini month.
+ *
+ * A fragment rather than a row element, so all six weeks share the section's single
+ * grid — which is what lets the "in view" shading run continuously across a week
+ * instead of stopping at a row boundary.
+ */
+function MiniWeek(props: {
+  days: Date[];
+  month: Date;
+  today: Date;
+  anchor: Date;
+  inView: Set<string> | null;
+  busy: Set<string>;
+  showWeekNumbers: boolean;
+  onPick: (day: Date) => void;
+}) {
+  return (
+    <>
+      {props.showWeekNumbers && (
+        <span className="grid place-items-center text-[9px] tabular-nums text-text-faint">
+          {isoWeekNumber(props.days[0]!)}
+        </span>
+      )}
+      {props.days.map((day) => {
+        const key = dayKey(day);
+        const outside = !isSameMonth(day, props.month);
+        const selected = isSameDay(day, props.anchor);
+        const isToday = isSameDay(day, props.today);
+        const shown = props.inView?.has(key) ?? false;
+        // Round only where the shaded run actually begins and ends, so a week that
+        // continues into the next row reads as one band.
+        const opensRun = shown && !props.inView?.has(dayKey(addDays(day, -1)));
+        const closesRun = shown && !props.inView?.has(dayKey(addDays(day, 1)));
+        return (
+          <button
+            key={key}
+            type="button"
+            data-testid="calendar-mini-day"
+            data-day={key}
+            data-selected={selected ? "true" : undefined}
+            data-in-view={shown ? "true" : undefined}
+            onClick={() => props.onPick(day)}
+            className={cn(
+              "relative grid h-7 place-items-center text-[11px] tabular-nums transition-colors",
+              // The shaded band marks the window on screen; it is a background on the
+              // grid cell, so consecutive days join up.
+              shown && "bg-primary/10",
+              opensRun && "rounded-l-md",
+              closesRun && "rounded-r-md",
+            )}
+          >
+            <span
               className={cn(
-                "relative mx-auto grid size-7 place-items-center rounded-full text-[11px] tabular-nums transition-colors",
+                "grid size-6 place-items-center rounded-full transition-colors",
                 selected
                   ? "bg-primary font-semibold text-primary-foreground"
                   : isToday
                     ? "font-semibold text-primary hover:bg-accent"
                     : outside
                       ? "text-text-faint hover:bg-accent hover:text-foreground"
-                      : "text-text-dim hover:bg-accent hover:text-foreground",
+                      : cn(
+                          "hover:bg-accent hover:text-foreground",
+                          isWeekend(day) ? "text-text-faint" : "text-text-dim",
+                        ),
               )}
             >
               {day.getDate()}
-              {busy.has(dayKey(day)) && !selected && (
-                <span
-                  aria-hidden
-                  className="absolute bottom-0.5 size-1 rounded-full bg-primary/60"
-                />
-              )}
-            </button>
-          );
-        })}
-      </div>
-    </section>
+            </span>
+            {props.busy.has(key) && !selected && (
+              <span aria-hidden className="absolute bottom-0 size-1 rounded-full bg-primary/60" />
+            )}
+          </button>
+        );
+      })}
+    </>
   );
 }
 
-/** One calendar's visibility toggle: a colour swatch that becomes a checkmark. */
+/** One calendar's visibility toggle: its colour, its name, and an eye. */
 function CalendarToggle(props: {
   calendar: CalendarInfo;
   checked: boolean;
@@ -209,18 +321,13 @@ function CalendarToggle(props: {
       data-calendar-id={props.calendar.id}
       data-cuelume-toggle=""
       onClick={props.onToggle}
-      className="flex w-full items-center gap-2.5 rounded-lg px-1.5 py-1.5 text-left transition-colors hover:bg-row-hovered"
+      className="group/calendar flex w-full items-center gap-2.5 rounded-lg px-1.5 py-1.5 text-left transition-colors hover:bg-row-hovered"
     >
       <span
         aria-hidden
-        style={props.checked ? { backgroundColor: color, borderColor: color } : { borderColor: color }}
-        className={cn(
-          "grid size-4 shrink-0 place-items-center rounded border-[1.5px]",
-          props.checked ? "text-white" : "text-transparent",
-        )}
-      >
-        <Check className="size-3" strokeWidth={3} />
-      </span>
+        style={{ backgroundColor: color }}
+        className={cn("size-3 shrink-0 rounded-[3px] transition-opacity", !props.checked && "opacity-35")}
+      />
       <span
         className={cn(
           "min-w-0 flex-1 truncate text-[13px]",
@@ -230,10 +337,21 @@ function CalendarToggle(props: {
         {calendarLabel(props.calendar)}
       </span>
       {props.calendar.is_default && (
-        <span className="shrink-0 text-[10px] uppercase tracking-wide text-text-faint">
-          Main
-        </span>
+        <span className="shrink-0 text-[10px] uppercase tracking-wide text-text-faint">Main</span>
       )}
+      <span
+        aria-hidden
+        className={cn(
+          "grid size-5 shrink-0 place-items-center rounded-md text-text-faint transition-opacity",
+          props.checked ? "opacity-0 group-hover/calendar:opacity-100" : "opacity-100",
+        )}
+      >
+        {props.checked ? (
+          <Eye className="size-3.5" strokeWidth={1.8} />
+        ) : (
+          <EyeOff className="size-3.5" strokeWidth={1.8} />
+        )}
+      </span>
     </button>
   );
 }
@@ -243,19 +361,19 @@ function CalendarToggle(props: {
 function UpNext(props: { events: CalendarEvent[]; loading: boolean }) {
   const colorOf = useCalendarColors();
   const controller = useController();
+  const openEventId = useAppState((s) => s.openEventId);
   const now = new Date();
 
   const next = useMemo(() => {
     const nowMs = now.getTime();
     const todayStart = startOfDay(now).getTime();
-    const upcoming = props.events
+    return props.events
       .filter((event) => {
         // Anything still running or still to come today, and anything later.
         const end = Date.parse(event.end);
         return Number.isFinite(end) ? end > nowMs : Date.parse(event.start) >= todayStart;
       })
       .slice(0, 4);
-    return upcoming;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `now` is per-render on purpose
   }, [props.events]);
 
@@ -263,7 +381,7 @@ function UpNext(props: { events: CalendarEvent[]; loading: boolean }) {
 
   return (
     <section data-testid="calendar-up-next" className="flex flex-col gap-1 pb-2">
-      <h3 className="flex items-center gap-1.5 px-1 pb-0.5 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
+      <h3 className="flex items-center gap-1.5 px-1.5 pb-0.5 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
         Up next
         {props.loading && <Loader2 className="size-3 animate-spin" strokeWidth={1.6} />}
       </h3>
@@ -272,9 +390,11 @@ function UpNext(props: { events: CalendarEvent[]; loading: boolean }) {
           <span className="px-1.5 text-[10px] text-text-faint">
             {formatAgendaDay(new Date(Date.parse(event.start) || Date.now()), now)}
           </span>
-          <EventChip
+          <EventItem
             event={event}
             color={colorOf(event.calendar_id)}
+            selected={openEventId === event.id}
+            past={isPast(event, now)}
             onOpen={(id) => controller.setOpenEvent(id)}
             className="py-1"
           />

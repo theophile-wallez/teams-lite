@@ -9,6 +9,7 @@ import {
   emitCalendarChange,
   fetchTestCalendar,
   realErrors,
+  toggleCalendarSetting,
 } from "./helpers";
 
 // The calendar is a fourth first-class sidebar surface next to Chats, Channels and
@@ -56,8 +57,10 @@ test.describe("calendar", () => {
     for (const label of [/^accept$/i, /^decline$/i, /^tentative$/i]) {
       await expect(page.getByRole("button", { name: label })).toHaveCount(0);
     }
-    // And the surface says what it is.
-    await expect(page.locator('[data-testid="calendar-pane"]')).toContainText("read-only");
+    // And the surface says what it is, in its own chrome rather than only in a panel
+    // the user has to open.
+    await expect(page.locator('[data-testid="calendar-read-only"]')).toBeVisible();
+    await expect(page.locator('[data-testid="calendar-pane"]')).toContainText(/read-only/i);
   });
 
   test("shows only the default calendar until another is switched on", async ({ page }) => {
@@ -157,7 +160,7 @@ test.describe("calendar", () => {
     expect(calendars.length).toBeGreaterThan(1);
   });
 
-  test("places overlapping meetings side by side in the day view", async ({ page }) => {
+  test("cascades overlapping meetings so each keeps a readable leading edge", async ({ page }) => {
     await gotoApp(page);
     await openCalendarTab(page);
     await openCalendarView(page, "day");
@@ -170,9 +173,43 @@ test.describe("calendar", () => {
 
     const boxA = (await a.boundingBox())!;
     const boxB = (await b.boundingBox())!;
-    // They overlap in time, so they must not overlap on screen.
-    const separated = boxA.x + boxA.width <= boxB.x + 1 || boxB.x + boxB.width <= boxA.x + 1;
-    expect(separated).toBe(true);
+    const column = (await page.locator('[data-testid="calendar-day-column"]').boundingBox())!;
+    // They overlap in time, so they are offset horizontally: the later one starts well
+    // inside the earlier one and paints over its trailing edge (the way Notion
+    // Calendar, Outlook and Google all draw a double-booked hour).
+    expect(boxB.x).toBeGreaterThan(boxA.x + 0.15 * column.width);
+    // Neither is squeezed below the width its title needs, and neither escapes the
+    // column.
+    for (const box of [boxA, boxB]) {
+      expect(box.width).toBeGreaterThan(0.2 * column.width);
+      expect(box.x + box.width).toBeLessThanOrEqual(column.x + column.width + 1);
+    }
+  });
+
+  test("opens the details beside the event, and puts them away on a background click", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    await openCalendarTab(page);
+    await openCalendarView(page, "week");
+
+    const event = calendarEvent(page, "ev-overlap-a");
+    const eventBox = (await event.boundingBox())!;
+    await event.click();
+
+    const details = page.locator('[data-testid="calendar-event-details"]');
+    await expect(details).toBeVisible();
+    // Beside the event, not over it: the row the user is reasoning about stays visible.
+    const panel = (await details.boundingBox())!;
+    const overlaps =
+      panel.x < eventBox.x + eventBox.width && panel.x + panel.width > eventBox.x;
+    expect(overlaps).toBe(false);
+    // And the event it describes is marked as the open one.
+    await expect(event).toHaveAttribute("data-selected", "true");
+
+    // A click on the grid's own background closes it, like every calendar.
+    await page.locator('[data-testid="calendar-hours"]').click({ position: { x: 8, y: 200 } });
+    await expect(details).toHaveCount(0);
   });
 
   test("opens an event's details, with the user's own actions and nothing else", async ({ page }) => {
@@ -202,6 +239,77 @@ test.describe("calendar", () => {
 
     await page.keyboard.press("Escape");
     await expect(details).toHaveCount(0);
+  });
+
+  test("draws the working week, and week numbers, when the view menu says so", async ({ page }) => {
+    await gotoApp(page);
+    await openCalendarTab(page);
+    await openCalendarView(page, "week");
+    await expect(page.locator('[data-testid="calendar-day-column"]')).toHaveCount(7);
+
+    await toggleCalendarSetting(page, "showWeekends");
+    // Five columns, and the same window: hiding weekends is a display choice, so it
+    // must never change which events were fetched.
+    await expect(page.locator('[data-testid="calendar-day-column"]')).toHaveCount(5);
+    await expect(page.locator('[data-testid="calendar-day-column"][data-day$="-25"]')).toHaveCount(0);
+
+    await openCalendarView(page, "month");
+    await expect(page.locator('[data-testid="calendar-day"]')).toHaveCount(30);
+    await toggleCalendarSetting(page, "showWeekends");
+    await expect(page.locator('[data-testid="calendar-day"]')).toHaveCount(42);
+
+    // Week numbers are off by default and gate the month grid's leading column.
+    await expect(page.locator('[data-testid="calendar-week-number"]')).toHaveCount(0);
+    await toggleCalendarSetting(page, "showWeekNumbers");
+    await expect(page.locator('[data-testid="calendar-week-number"]')).toHaveCount(6);
+    await toggleCalendarSetting(page, "showWeekNumbers");
+    await expect(page.locator('[data-testid="calendar-week-number"]')).toHaveCount(0);
+  });
+
+  test("hides declined and cancelled events when the view menu says so", async ({ page }) => {
+    await gotoApp(page);
+    await openCalendarTab(page);
+
+    // A meeting the user declined (this one was cancelled by its organizer too) is
+    // shown struck through by default — it still explains a quiet hour.
+    const declined = calendarEvent(page, "ev-cancelled");
+    await expect(declined).toBeVisible();
+
+    await toggleCalendarSetting(page, "showDeclined");
+    await expect(declined).toHaveCount(0);
+    // Everything else is untouched.
+    await expect(calendarEvent(page, "ev-overlap-a")).toBeVisible();
+
+    await toggleCalendarSetting(page, "showDeclined");
+    await expect(declined).toBeVisible();
+  });
+
+  test("switches views and steps the period from the keyboard", async ({ page }) => {
+    await gotoApp(page);
+    await openCalendarTab(page);
+    const title = page.locator('[data-testid="calendar-title"]');
+    // Take the focus off the sidebar's tablist first: while a tab has it, the arrow keys
+    // belong to the tabs (they move between Chats/Channels/Mail/Calendar), not to the
+    // calendar — which is correct for a tablist and not what this spec is about.
+    await title.click();
+
+    await page.keyboard.press("w");
+    await expect(page.locator('[data-testid="calendar-day-column"]')).toHaveCount(7);
+    await expect(page.locator('[data-testid="calendar-subtitle"]')).toContainText(/week \d+/i);
+
+    const thisWeek = (await page.locator('[data-testid="calendar-subtitle"]').textContent())!;
+    await page.keyboard.press("ArrowRight");
+    await expect(page.locator('[data-testid="calendar-subtitle"]')).not.toHaveText(thisWeek);
+    await page.keyboard.press("t");
+    await expect(page.locator('[data-testid="calendar-subtitle"]')).toHaveText(thisWeek);
+
+    await page.keyboard.press("d");
+    await expect(page.locator('[data-testid="calendar-day-column"]')).toHaveCount(1);
+    await page.keyboard.press("a");
+    await expect(page.locator('[data-testid="calendar-agenda"]')).toBeVisible();
+    await page.keyboard.press("m");
+    await expect(page.locator('[data-testid="calendar-month"]')).toBeVisible();
+    await expect(title).not.toBeEmpty();
   });
 
   test("shows the true attendee count even when the list is capped", async ({ page }) => {

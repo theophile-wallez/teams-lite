@@ -296,11 +296,30 @@ export function calendarEvent(page: Page, id: string) {
   );
 }
 
-/** Switch the calendar to one of its views and wait for that view to mount. */
+/**
+ * Open the header's view menu and wait until its rows are settled enough to click.
+ *
+ * Two waits, both for the same reason — a spec drives this control far faster than a
+ * person does. Radix keeps a CLOSING menu mounted for its exit animation, and a menu
+ * opened during that window is re-created mid-flight, which detaches the row the caller
+ * is about to click. So: wait for any previous menu to be gone, then for the new one to
+ * have finished opening.
+ */
+async function openCalendarViewMenu(page: Page): Promise<void> {
+  const menu = page.locator('[role="menu"]');
+  await expect(menu).toHaveCount(0);
+  await page.locator('[data-testid="calendar-view-menu"]').click();
+  await expect(menu).toHaveCount(1);
+  await expect(menu).toHaveAttribute("data-state", "open");
+}
+
+/** Switch the calendar to one of its views and wait for that view to mount. The views
+ *  live behind the header's view menu, so this opens that first. */
 export async function openCalendarView(
   page: Page,
   view: "month" | "week" | "day" | "agenda",
 ): Promise<void> {
+  await openCalendarViewMenu(page);
   await page.locator(`[data-testid="calendar-view-${view}"]`).click();
   const surface = {
     month: '[data-testid="calendar-month"]',
@@ -309,6 +328,22 @@ export async function openCalendarView(
     agenda: '[data-testid="calendar-agenda"], [data-testid="calendar-agenda-empty"]',
   }[view];
   await expect(page.locator(surface).first()).toBeVisible();
+}
+
+/** Flip one of the view menu's display settings (weekends, declined events, week
+ *  numbers) and close the menu again. Checkbox rows keep the menu open on purpose, so
+ *  the Escape is this helper's job. */
+export async function toggleCalendarSetting(
+  page: Page,
+  key: "showWeekends" | "showDeclined" | "showWeekNumbers",
+): Promise<void> {
+  await openCalendarViewMenu(page);
+  const item = page.locator(`[data-testid="calendar-setting-${key}"]`);
+  const before = await item.getAttribute("aria-checked");
+  await item.click();
+  await expect(item).not.toHaveAttribute("aria-checked", before ?? "");
+  await page.keyboard.press("Escape");
+  await expect(item).toHaveCount(0);
 }
 
 /** Reschedule, cancel or remove an event on the mock and broadcast the window it

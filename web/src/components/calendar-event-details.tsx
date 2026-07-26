@@ -8,6 +8,7 @@ import {
   Repeat,
   Users,
   Video,
+  X,
 } from "lucide-react";
 import {
   calendarLabel,
@@ -18,12 +19,13 @@ import {
   type CalendarInfo,
   type EventPerson,
 } from "~/lib/protocol";
-import { formatEventTime } from "~/lib/calendar";
+import { formatEventTime, isDeclined } from "~/lib/calendar";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 
-// One event's details, as a dialog over whichever view opened it.
+// One event's details, as a self-contained panel. Its host decides where it appears:
+// a popover pinned to the event on a wide screen, a dialog on a narrow one (see
+// calendar-event-popover.tsx).
 //
 // READ-ONLY, and it says so. There is no Accept / Decline / Tentative row, and their
 // absence is deliberate rather than unfinished: answering an invitation mails the
@@ -62,150 +64,153 @@ const RECURRENCE_LABELS: Record<string, string> = {
 };
 
 export function CalendarEventDetails(props: {
-  event: CalendarEvent | null;
+  event: CalendarEvent;
   calendars: CalendarInfo[];
   color: string;
   onClose: () => void;
 }) {
-  const event = props.event;
+  const { event } = props;
   const calendar = useMemo(
-    () => props.calendars.find((c) => c.id === event?.calendar_id) ?? null,
-    [props.calendars, event?.calendar_id],
+    () => props.calendars.find((c) => c.id === event.calendar_id) ?? null,
+    [props.calendars, event.calendar_id],
   );
 
   return (
-    <Dialog open={!!event} onOpenChange={(open) => !open && props.onClose()}>
-      {event && (
-        <DialogContent
-          data-testid="calendar-event-details"
-          data-event-id={event.id}
-          className="max-w-xl"
+    <div
+      data-testid="calendar-event-details"
+      data-event-id={event.id}
+      style={{ ["--event-color" as string]: props.color }}
+      className="calendar-event flex max-h-full flex-col"
+    >
+      <header className="flex shrink-0 items-start gap-2.5 border-b border-border-subtle p-3.5">
+        <span
+          aria-hidden
+          className="mt-1 h-9 w-[3px] shrink-0 rounded-full bg-[var(--event-color)]"
+        />
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <h2
+            data-testid="calendar-event-title"
+            className={cn(
+              "truncate text-[15px] font-semibold leading-snug text-foreground",
+              isDeclined(event) && "line-through opacity-70",
+            )}
+            title={eventTitle(event)}
+          >
+            {eventTitle(event)}
+          </h2>
+          <p data-testid="calendar-event-when" className="text-[12px] text-text-dim">
+            {formatEventTime(event)}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={props.onClose}
+          aria-label="Close"
+          data-testid="calendar-event-close"
+          className="-mr-1 -mt-1 grid size-7 shrink-0 place-items-center rounded-lg text-text-faint transition-colors hover:bg-accent hover:text-foreground"
         >
-          <DialogHeader>
-            <div className="flex items-start gap-2.5 pr-8">
-              <span
-                aria-hidden
-                style={{ backgroundColor: props.color }}
-                className="mt-1.5 size-2.5 shrink-0 rounded-full"
-              />
-              <div className="flex min-w-0 flex-col gap-1">
-                <DialogTitle
-                  data-testid="calendar-event-title"
-                  className={cn(
-                    "text-base leading-snug",
-                    event.is_cancelled && "line-through opacity-70",
-                  )}
-                >
-                  {eventTitle(event)}
-                </DialogTitle>
-                <p className="text-[12px] text-text-faint">
-                  {[calendar ? calendarLabel(calendar) : "", "read-only"]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </p>
-              </div>
-            </div>
-          </DialogHeader>
+          <X className="size-4" strokeWidth={1.8} />
+        </button>
+      </header>
 
-          <div className="flex flex-col gap-3">
-            <Row icon={<Clock className="size-4" strokeWidth={1.6} />}>
-              <span data-testid="calendar-event-when" className="text-[13px] text-foreground">
-                {formatEventTime(event)}
-              </span>
-              {statusLine(event) && (
-                <span className="text-[12px] text-text-faint">{statusLine(event)}</span>
-              )}
-            </Row>
+      <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-3.5">
+        {statusLine(event) && (
+          <Row icon={<Clock className="size-4" strokeWidth={1.6} />}>
+            <span className="text-[13px] text-text-dim">{statusLine(event)}</span>
+          </Row>
+        )}
 
-            {eventRepeats(event) && (
-              <Row icon={<Repeat className="size-4" strokeWidth={1.6} />}>
-                <span className="text-[13px] text-text-dim">
-                  {RECURRENCE_LABELS[event.recurrence] ?? "Part of a series"}
-                  {event.series === "exception" && " · this occurrence was moved"}
-                </span>
-              </Row>
-            )}
+        {eventRepeats(event) && (
+          <Row icon={<Repeat className="size-4" strokeWidth={1.6} />}>
+            <span className="text-[13px] text-text-dim">
+              {RECURRENCE_LABELS[event.recurrence] ?? "Part of a series"}
+              {event.series === "exception" && " · this occurrence was moved"}
+            </span>
+          </Row>
+        )}
 
-            {event.location && (
-              <Row icon={<MapPin className="size-4" strokeWidth={1.6} />}>
-                <span className="text-[13px] text-text-dim">{event.location}</span>
-              </Row>
-            )}
+        {event.location && (
+          <Row icon={<MapPin className="size-4" strokeWidth={1.6} />}>
+            <span className="text-[13px] text-text-dim">{event.location}</span>
+          </Row>
+        )}
 
-            {event.reminder_minutes >= 0 && (
-              <Row icon={<Bell className="size-4" strokeWidth={1.6} />}>
-                <span className="text-[13px] text-text-dim">
-                  {event.reminder_minutes === 0
-                    ? "Reminder at the start"
-                    : `Reminder ${event.reminder_minutes} min before`}
-                </span>
-              </Row>
-            )}
+        {event.reminder_minutes >= 0 && (
+          <Row icon={<Bell className="size-4" strokeWidth={1.6} />}>
+            <span className="text-[13px] text-text-dim">
+              {event.reminder_minutes === 0
+                ? "Reminder at the start"
+                : `Reminder ${event.reminder_minutes} min before`}
+            </span>
+          </Row>
+        )}
 
-            {(event.organizer.name || event.organizer.address) && (
-              <Row icon={<CalendarDays className="size-4" strokeWidth={1.6} />}>
-                <span className="text-[13px] text-text-dim">
-                  Organized by{" "}
-                  <span className="text-foreground">{personLabel(event.organizer)}</span>
-                </span>
-              </Row>
-            )}
+        <Row icon={<CalendarDays className="size-4" strokeWidth={1.6} />}>
+          <span className="text-[13px] text-text-dim">
+            {calendar ? calendarLabel(calendar) : "Calendar"} · read-only
+          </span>
+          {(event.organizer.name || event.organizer.address) && (
+            <span className="text-[12px] text-text-faint">
+              Organized by {personLabel(event.organizer)}
+            </span>
+          )}
+        </Row>
 
-            {event.attendee_count > 0 && <Attendees event={event} />}
+        {event.attendee_count > 0 && <Attendees event={event} />}
 
-            {event.categories.length > 0 && (
-              <ul className="flex flex-wrap gap-1.5 pl-7">
-                {event.categories.map((category) => (
-                  <li
-                    key={category}
-                    className="rounded-full bg-element px-2 py-0.5 text-[11px] text-text-dim"
-                  >
-                    {category}
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            {event.preview && (
-              <p className="max-h-32 overflow-y-auto whitespace-pre-line pl-7 text-[12px] leading-relaxed text-text-dim">
-                {event.preview}
-              </p>
-            )}
-          </div>
-
-          {/* The user's own clicks. Nothing here acts on the calendar. */}
-          <div className="flex flex-wrap items-center gap-2 pt-1">
-            {event.join_url && (
-              <a
-                data-testid="calendar-event-join"
-                href={event.join_url}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
+        {event.categories.length > 0 && (
+          <ul className="flex flex-wrap gap-1.5 pl-7">
+            {event.categories.map((category) => (
+              <li
+                key={category}
+                className="rounded-full bg-element px-2 py-0.5 text-[11px] text-text-dim"
               >
-                <Video className="size-3.5" strokeWidth={1.8} />
-                Join meeting
-              </a>
-            )}
-            {event.web_link && (
-              <a
-                data-testid="calendar-event-outlook"
-                href={event.web_link}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="flex items-center gap-1.5 rounded-lg bg-card px-3 py-1.5 text-[13px] text-text-dim shadow-chip transition-colors hover:text-foreground"
-              >
-                <ExternalLink className="size-3.5" strokeWidth={1.8} />
-                Open in Outlook
-              </a>
-            )}
-            <p className="ml-auto text-[11px] text-text-faint">
-              Answering an invitation happens in Outlook — this app never writes.
-            </p>
-          </div>
-        </DialogContent>
-      )}
-    </Dialog>
+                {category}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {event.preview && (
+          <p className="max-h-32 overflow-y-auto whitespace-pre-line pl-7 text-[12px] leading-relaxed text-text-dim">
+            {event.preview}
+          </p>
+        )}
+      </div>
+
+      {/* The user's own clicks. Nothing here acts on the calendar. */}
+      <footer className="flex shrink-0 flex-col gap-2 border-t border-border-subtle p-3.5">
+        <div className="flex flex-wrap items-center gap-2">
+          {event.join_url && (
+            <a
+              data-testid="calendar-event-join"
+              href={event.join_url}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
+            >
+              <Video className="size-3.5" strokeWidth={1.8} />
+              Join meeting
+            </a>
+          )}
+          {event.web_link && (
+            <a
+              data-testid="calendar-event-outlook"
+              href={event.web_link}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="flex items-center gap-1.5 rounded-lg bg-card px-3 py-1.5 text-[13px] text-text-dim shadow-chip transition-colors hover:text-foreground"
+            >
+              <ExternalLink className="size-3.5" strokeWidth={1.8} />
+              Open in Outlook
+            </a>
+          )}
+        </div>
+        <p className="text-[11px] text-text-faint">
+          Answering an invitation happens in Outlook — this app never writes.
+        </p>
+      </footer>
+    </div>
   );
 }
 
@@ -255,9 +260,7 @@ function Attendees(props: { event: CalendarEvent }) {
           </li>
         ))}
       </ul>
-      {hidden > 0 && (
-        <span className="pt-1 text-[11px] text-text-faint">and {hidden} more</span>
-      )}
+      {hidden > 0 && <span className="pt-1 text-[11px] text-text-faint">and {hidden} more</span>}
     </Row>
   );
 }
