@@ -73,6 +73,15 @@ stopping_a_process() {
   printf '%s' "$command_line" | grep -qE '(^|[;&|[:space:]])(p?kill|pgrep|killall)([[:space:]]|$)'
 }
 
+# Is this command merely LOOKING at a file the rules below match by path — `ls -l
+# target/debug/server`, `stat …`? That runs nothing either. Restricted to a command
+# that is nothing else: `ls x && ./x` does start it, so any separator disqualifies.
+inspecting_a_file() {
+  printf '%s' "$command_line" | grep -qE '[;&|]' && return 1
+  printf '%s' "$command_line" |
+    grep -qE '^[[:space:]]*(ls|stat|file|readlink|du|wc|sha256sum|md5sum)([[:space:]]|$)'
+}
+
 # Commands that ARE the sanctioned automation paths (or plain browser installs).
 sanctioned_automation() {
   printf '%s' "$command_line" |
@@ -309,8 +318,16 @@ earlier, before a dev server exists that something could drive.)"
 fi
 
 # --- 3. the backend an agent starts must be read-only ------------------------
-if ! stopping_a_process &&
-  printf '%s' "$command_line" | grep -qE 'cargo run.*--bin server|teams-dev-server\.sh|target/(debug|release)/server'; then
+# The compiled binary is matched only where a shell would RUN it — at the start of a
+# command, after a separator, or behind `nohup`/`exec`/`env`. Text that merely names
+# the path (a commit message about it, a doc line, a `--bin server` in prose) starts
+# nothing, and a guard that fires on prose is one whose next reader learns to write
+# around it. `cargo run --bin server` and the dev launcher stay matched anywhere:
+# those spellings do not appear by accident.
+runs_the_backend_binary='(^|[;&|])[[:space:]]*((nohup|exec|env|sudo)[[:space:]]+)*[A-Za-z0-9_./-]*target/(debug|release)/server([[:space:]]|$)'
+if ! stopping_a_process && ! inspecting_a_file &&
+  printf '%s' "$command_line" |
+  grep -qE "cargo run.*--bin server|teams-dev-server\.sh|$runs_the_backend_binary"; then
   if ! printf '%s' "$command_line" | grep -q 'TEAMS_LITE_READ_ONLY=1'; then
     block "Start the backend read-only, or let the user start it. A send-capable backend
 launched by tooling is how an accidental message reaches a colleague:

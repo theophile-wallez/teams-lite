@@ -159,5 +159,45 @@ pub async fn get_token(scope: &str) -> Result<String> {
     btr.get("accessToken")
         .and_then(|t| t.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| anyhow!("no accessToken in broker response for scope {scope}"))
+        .ok_or_else(|| anyhow!("no accessToken for scope {scope}: {}", broker_failure(&resp)))
+}
+
+/// Why the broker refused, in one line, for the error above.
+///
+/// A silent acquisition fails for reasons the user has to act on — an expired PRT
+/// needing an interactive sign-in, a revoked device, a scope the tenant does not
+/// consent to — and the broker says which in its response. Reporting only "no
+/// accessToken" turns all of them into the same dead end.
+fn broker_failure(resp: &Value) -> String {
+    let dig = |key: &str| -> Option<String> {
+        for place in [resp.get("brokerTokenResponse"), resp.get("errorResponse"), Some(resp)] {
+            if let Some(v) = place.and_then(|p| p.get(key)) {
+                let text = v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+                if !text.is_empty() && text != "null" {
+                    return Some(text);
+                }
+            }
+        }
+        None
+    };
+    let parts: Vec<String> = ["errorCode", "errorStatus", "errorDescription", "error"]
+        .iter()
+        .filter_map(|k| dig(k).map(|v| format!("{k}={v}")))
+        .collect();
+    if parts.is_empty() {
+        // Nothing recognizable: name the keys we did get, so the next reader can add
+        // one here instead of guessing. Values are withheld — some carry tokens.
+        let keys: Vec<&str> = btr_keys(resp);
+        return format!("broker gave no error detail (keys: {})", keys.join(", "));
+    }
+    parts.join(" ")
+}
+
+/// The response's own keys, plus those of a nested `brokerTokenResponse`.
+fn btr_keys(resp: &Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = resp.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
+    if let Some(inner) = resp.get("brokerTokenResponse").and_then(|b| b.as_object()) {
+        keys.extend(inner.keys().map(String::as_str));
+    }
+    keys
 }

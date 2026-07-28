@@ -97,6 +97,12 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, "pkill -f 'target/debug/server'"),
         ("ALLOW", PROJECT, "pkill -f 'vite dev'"),
         ("ALLOW", PROJECT, 'pgrep -af "vite dev|mock/server.ts"'),
+        # Looking at the binary is not running it — but a compound that runs it is.
+        ("ALLOW", PROJECT, "ls -la target/debug/server"),
+        ("BLOCK", PROJECT, "ls target/debug/server && ./target/debug/server"),
+        ("BLOCK", PROJECT, "nohup target/release/server &"),
+        # Prose that names the binary runs nothing: a commit message, a doc line.
+        ("ALLOW", PROJECT, "git commit -m 'fix: stop blocking `ls target/debug/server`'"),
     ]
 
 
