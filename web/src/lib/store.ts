@@ -482,6 +482,7 @@ export class TeamsController {
     this.applyPersistedVisibleCalendars();
     this.applyPersistedCalendarSettings();
     this.wireEvents();
+    this.watchWakeups();
 
     // Pick up the backend's write token from our own server before connecting, so
     // the first send of the session already carries it. Reads never need it; a
@@ -566,6 +567,29 @@ export class TeamsController {
     this.mailBodyCache.clear();
     this.backend.close();
     this.started = false;
+  }
+
+  /**
+   * Reconnect the moment this tab is in use again.
+   *
+   * A phone freezes a backgrounded tab: the socket dies when the OS suspends it
+   * and no retry timer runs, so the reconnect backoff wakes up already past its
+   * give-up deadline and reports the backend lost to someone who only switched
+   * apps for a minute (see `retryNow` in ws-client.ts). Becoming visible again —
+   * and regaining the network — are the two moments worth an immediate attempt.
+   */
+  private watchWakeups(): void {
+    if (typeof document === "undefined" || typeof window === "undefined") return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") this.backend.retryNow();
+    };
+    const onOnline = () => this.backend.retryNow();
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onOnline);
+    this.disposers.push(() => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onOnline);
+    });
   }
 
   private wireEvents(): void {
@@ -738,7 +762,10 @@ export class TeamsController {
     // not re-announce a `realtime_status` when only the browser↔backend link
     // blipped) — treat it as a recovery and reconcile the same way.
     on("reconnected", () => {
-      this.set({ live: "connected" });
+      // Clear the fatal overlay too: a socket that reopened proves the backend is
+      // back, and `watchWakeups` retries long after the backoff gave up — so this
+      // is the normal path out of "backend lost" for a phone returning to the tab.
+      this.set({ live: "connected", fatal: null, status: "reconnected" });
       if (this.connectionDropped) {
         this.connectionDropped = false;
         void this.handleLiveRecovery();

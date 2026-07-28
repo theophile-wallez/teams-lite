@@ -2,7 +2,7 @@
 // FakeWebSocket is injected via globalThis.WebSocket and driven synchronously by
 // the test, and fake timers make the reconnect backoff deterministic.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { Backend } from "./ws-client";
+import { Backend, backendUrlForPage, needsRelay } from "./ws-client";
 
 type WsEvent = { data?: unknown };
 
@@ -310,5 +310,100 @@ describe("Backend reconnect", () => {
     expect(reconnects).toBe(1);
 
     backend.close();
+  });
+});
+
+describe("backendUrlForPage", () => {
+  it("keeps the page's own host, so a remote device reaches this machine's backend", () => {
+    // The point of going through the page's origin: on a phone opening the app
+    // over Tailscale, ws://127.0.0.1:8420 would be the phone itself.
+    expect(backendUrlForPage({ protocol: "http:", host: "theophile-remote:4321" })).toBe(
+      "ws://theophile-remote:4321/__backend",
+    );
+  });
+
+  it("upgrades to wss on an https page (a plaintext ws:// would be refused)", () => {
+    expect(backendUrlForPage({ protocol: "https:", host: "host.ts.net:8443" })).toBe(
+      "wss://host.ts.net:8443/__backend",
+    );
+  });
+
+  it("has no answer without a real page (SSR, or a non-http origin)", () => {
+    expect(backendUrlForPage(null)).toBeNull();
+    expect(backendUrlForPage(undefined)).toBeNull();
+    expect(backendUrlForPage({ protocol: "http:", host: "" })).toBeNull();
+    expect(backendUrlForPage({ protocol: "file:", host: "" })).toBeNull();
+  });
+});
+
+describe("needsRelay", () => {
+  it("is true only for a loopback backend seen from another device", () => {
+    expect(needsRelay("ws://127.0.0.1:8420", { hostname: "theophile-remote.ts.net" })).toBe(true);
+    expect(needsRelay("ws://localhost:8420", { hostname: "100.80.26.90" })).toBe(true);
+  });
+
+  it("leaves a page on this machine talking to the backend directly", () => {
+    expect(needsRelay("ws://127.0.0.1:8420", { hostname: "localhost" })).toBe(false);
+    expect(needsRelay("ws://127.0.0.1:8420", { hostname: "127.0.0.1" })).toBe(false);
+  });
+
+  it("never redirects a backend that is already remote — the mock stays the mock", () => {
+    // A configured non-loopback backend was named on purpose; relaying it would
+    // quietly retarget the page at whatever the serving host proxies to.
+    expect(needsRelay("ws://mock.internal:8455", { hostname: "theophile-remote.ts.net" })).toBe(
+      false,
+    );
+    expect(needsRelay("not a url", { hostname: "theophile-remote.ts.net" })).toBe(false);
+  });
+
+  it("has nothing to decide without a page (SSR)", () => {
+    expect(needsRelay("ws://127.0.0.1:8420", null)).toBe(false);
+    expect(needsRelay("ws://127.0.0.1:8420", { hostname: "" })).toBe(false);
+  });
+});
+
+describe("Backend retryNow", () => {
+  it("reconnects after the give-up window, the way a woken phone tab needs", () => {
+    const backend = new Backend("ws://test", { giveUpMs: 1000, initialDelayMs: 10, maxDelayMs: 100 });
+    let lost = 0;
+    backend.on("backend_lost", () => {
+      lost += 1;
+    });
+    backend.connect().catch(() => {});
+
+    // Exhaust the backoff: retries stop and nothing opens a socket any more.
+    let guard = 0;
+    while (lost === 0 && guard < 100) {
+      guard += 1;
+      FakeWebSocket.last().simulateClose();
+      if (lost > 0) break;
+      vi.advanceTimersByTime(100);
+    }
+    const exhausted = FakeWebSocket.instances.length;
+    vi.advanceTimersByTime(10_000);
+    expect(FakeWebSocket.instances).toHaveLength(exhausted);
+
+    // A tab coming back to the foreground gets a real attempt, not the banner.
+    backend.retryNow();
+    expect(FakeWebSocket.instances).toHaveLength(exhausted + 1);
+    FakeWebSocket.last().simulateOpen();
+    expect(backend.connected).toBe(true);
+
+    // And the fresh window is back: a later drop schedules a retry again.
+    FakeWebSocket.last().simulateClose();
+    vi.advanceTimersByTime(10);
+    expect(FakeWebSocket.instances).toHaveLength(exhausted + 2);
+
+    backend.close();
+  });
+
+  it("does nothing while connected, or once closed", async () => {
+    const { backend } = await connected();
+    backend.retryNow();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    backend.close();
+    backend.retryNow();
+    expect(FakeWebSocket.instances).toHaveLength(1);
   });
 });

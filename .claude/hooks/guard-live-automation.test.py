@@ -42,6 +42,22 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:8420');\n"
         "ws.send(JSON.stringify({ method: 'conversations' }));\n"
     ),
+    # The app's server relays every WebSocket to the same backend (web/server.ts),
+    # so its port is a second address for the live account — same split applies.
+    "relay-writer.ts": (
+        "// Writes to the live backend through the app's own server.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:4321');\n"
+        "ws.send(JSON.stringify({ method: 'send' }));\n"
+    ),
+    "relay-reader.ts": (
+        "// Reads through the app's own server, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:4321');\n"
+        "ws.send(JSON.stringify({ method: 'conversations' }));\n"
+    ),
+    "token-thief.ts": (
+        "// Fetches the write capability from the app's own server.\n"
+        "const res = await fetch('http://127.0.0.1:4321/__write-token');\n"
+    ),
 }
 
 
@@ -56,9 +72,18 @@ def cases(tmp: Path):
         ("BLOCK", WEB, "vite dev"),
         ("BLOCK", PROJECT, "cargo run --bin server"),
         ("BLOCK", PROJECT, "curl -X POST https://graph.microsoft.com/v1.0/me/sendMail"),
+        # The app server relays to the same backend, so writing through it is writing.
+        ("BLOCK", PROJECT, f"bun run {tmp}/relay-writer.ts"),
+        # The write token is the capability itself — never ours to fetch.
+        ("BLOCK", PROJECT, f"bun run {tmp}/token-thief.ts"),
+        ("BLOCK", PROJECT, "curl -s http://127.0.0.1:4321/__write-token"),
+        ("BLOCK", PROJECT, 'cat "$XDG_RUNTIME_DIR/teams-lite/write-token"'),
         # --- must allow ------------------------------------------------------
-        # Reading the live backend is deliberately fine.
+        # Reading the live backend is deliberately fine, through either address.
         ("ALLOW", PROJECT, f"bun run {tmp}/backend-reader.ts"),
+        ("ALLOW", PROJECT, f"bun run {tmp}/relay-reader.ts"),
+        # Reading the code that implements the token endpoint is ordinary work.
+        ("ALLOW", PROJECT, 'grep -rn "__write-token" web/src'),
         # Commands that only NAME a file run nothing, whatever is inside it.
         ("ALLOW", PROJECT, "git add web/scripts/scroll-probe.ts"),
         ("ALLOW", PROJECT, "wc -l web/src/lib/ws-client.ts web/mock/server.ts"),
@@ -68,7 +93,10 @@ def cases(tmp: Path):
         ("ALLOW", WEB, "bun run preview -- --out /tmp/shot"),
         ("ALLOW", WEB, "bun run dev:mock"),
         ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 cargo run --bin server"),
+        # Stopping or inspecting a process is cleanup, whatever it names.
         ("ALLOW", PROJECT, "pkill -f 'target/debug/server'"),
+        ("ALLOW", PROJECT, "pkill -f 'vite dev'"),
+        ("ALLOW", PROJECT, 'pgrep -af "vite dev|mock/server.ts"'),
     ]
 
 

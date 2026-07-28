@@ -15,7 +15,12 @@
 #   1. browser automation (playwright / puppeteer / chromium) that does not go
 #      through web/scripts/preview.ts — the helper that proves it is on the mock
 #      before it types;
-#   2. a script that calls send/edit/react against 127.0.0.1:8420;
+#   2. a script that calls send/edit/react against the live backend — on its own
+#      port (8420) or through the app server that relays to it (4321, and whatever
+#      tailnet name it is served under: see the relay in web/server.ts);
+#   2b. fetching the backend's write token, from the file it publishes or from the
+#      endpoint the app's own server exposes it on. It is a capability: holding it
+#      is what makes a write possible at all;
 #   3. `vite dev` without an explicit VITE_TEAMS_WS_URL (a dev server with no
 #      declared backend is exactly how the incident started);
 #   4. starting the Rust backend without TEAMS_LITE_READ_ONLY=1 — an agent has no
@@ -58,6 +63,15 @@ block() {
 }
 
 project_dir="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
+# Is this command STOPPING something rather than starting it? `kill`, `pkill` and
+# `pgrep` name the same binaries and ports the rules below match, but cannot send,
+# serve or type anything — and a guard that blocks cleanup only teaches the next
+# agent to phrase its commands around the guard, which is the habit that caused the
+# incident. Used by rules 2 and 3.
+stopping_a_process() {
+  printf '%s' "$command_line" | grep -qE '(^|[;&|[:space:]])(p?kill|pgrep|killall)([[:space:]]|$)'
+}
 
 # Commands that ARE the sanctioned automation paths (or plain browser installs).
 sanctioned_automation() {
@@ -150,6 +164,7 @@ command_line_sans_tracked_paths() {
 scripts_driving_a_browser=""
 scripts_writing_to_the_backend=""
 scripts_sending_mail=""
+scripts_fetching_the_write_token=""
 if ! sanctioned_automation; then
   while IFS= read -r script; do
     [ -z "$script" ] && continue
@@ -164,18 +179,29 @@ if ! sanctioned_automation; then
     fi
     # READING the live backend is fine and often the point (inspecting real data
     # beats guessing). WRITING is not: `send`/`edit`/`react` post as the user. So
-    # a script that addresses port 8420 is blocked only when it also names a write
+    # a script that addresses the backend is blocked only when it also names a write
     # method or carries a write token.
-    if grep -qE '(127\.0\.0\.1|localhost):8420' "$script" &&
+    #
+    # "Addresses the backend" includes the app's own server: it relays every
+    # WebSocket upgrade to the same backend (see web/server.ts), so its port — and
+    # any host it is reachable on, such as a tailnet name — is a second address for
+    # the user's live account, not merely a static-file server.
+    if grep -qE '(127\.0\.0\.1|localhost):(8420|4321)|[A-Za-z0-9-]+\.ts\.net' "$script" &&
       grep -qE '"(send|edit|react)"|'\''(send|edit|react)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
+    fi
+    # A script has no business naming the write token at all: an ad-hoc one that
+    # does is fetching a capability it was not handed (see below).
+    if grep -qE '__write-token|teams-lite/write-token' "$script"; then
+      scripts_fetching_the_write_token="$scripts_fetching_the_write_token $script"
     fi
   done <<<"$(ad_hoc_scripts)"
 fi
 
 # --- 1. no writes to the live backend, and no ad-hoc browser drivers ----------
 if [ -n "$scripts_writing_to_the_backend" ]; then
-  block "This command runs a script that calls a WRITE method on the REAL backend (port 8420):
+  block "This command runs a script that calls a WRITE method on the REAL backend — its own
+port (8420) or the app server that relays to it (4321 / a tailnet name):
    ${scripts_writing_to_the_backend# }
 
 Reading the live backend is fine — inspect all the real data you need. Writing is
@@ -184,6 +210,38 @@ without the capability token it publishes for the user's own frontends (see the
 write lock in src/bin/server.rs), and this hook refuses to run the attempt at all.
 
 Exercise write flows against the mock: cd web && bun run preview."
+fi
+
+# --- 1a. the write token is never ours to fetch -------------------------------
+# The token IS the write capability: the backend refuses send/edit/react without it
+# and accepts them with it, whoever presents it. So a client that never has one is
+# structurally read-only, and that is the property worth keeping — which means not
+# going looking for it, in either of the two places it exists: the 0600 file the
+# backend publishes, and the endpoint the app's own server hands it to its page on.
+#
+# Matched only behind a command that RETRIEVES it, so reading the code that
+# implements the endpoint (`grep __write-token web/src`) stays allowed — the guard
+# has to say yes to ordinary work or its next reader learns to phrase around it.
+if printf '%s' "$command_line" |
+  grep -qE '(curl|wget|xh|nc|cat|head|tail|less|od|xxd|base64|cp|install|tee)[^;&|]*(__write-token|teams-lite/write-token)' ||
+  [ -n "$scripts_fetching_the_write_token" ]; then
+  [ -n "$scripts_fetching_the_write_token" ] &&
+    printf 'note: the write token is named inside%s\n' "$scripts_fetching_the_write_token" >&2
+  block "This command would fetch the backend's WRITE TOKEN — a capability, not a config value.
+
+Whoever holds it can post to real people as the user: it is the one thing standing
+between a client that found the backend socket and a message in a colleague's chat.
+Reading is open to any local client precisely BECAUSE writing needs this token, so
+taking it collapses the split the whole design rests on (see the write lock in
+src/bin/server.rs, and web/write-token.ts for the endpoint that serves the page).
+
+It is published for the user's own frontends — the browser page and the TUI — and
+was not handed to you. Nothing you legitimately need requires it:
+
+  read real data     TEAMS_LITE_READ_ONLY=1 cargo run --bin server   (ws on 8430)
+  exercise a write   cd web && bun run preview                       (mock backend)
+
+If a real send is genuinely wanted, ask the user: consent is per-message."
 fi
 
 # --- 1b. no mail may ever be sent, moved or deleted ---------------------------
@@ -231,7 +289,12 @@ lacks something — do not hand-roll a driver around it."
 fi
 
 # --- 2. a dev server must name its backend -----------------------------------
-if printf '%s' "$command_line" | grep -qE '(vite dev|vite build --watch|bun run dev)([^:]|$)'; then
+# Same exemption as rule 3 below, for the same reason: STARTING one is the risk.
+# `pkill -f 'vite dev'` or a `pgrep` that names it is cleanup — it cannot serve
+# anything to anyone — and a guard that blocks cleanup only teaches its next reader
+# to phrase commands around it, which is the habit that caused the incident.
+if ! stopping_a_process &&
+  printf '%s' "$command_line" | grep -qE '(vite dev|vite build --watch|bun run dev)([^:]|$)'; then
   if ! printf '%s' "$command_line" | grep -q 'VITE_TEAMS_WS_URL'; then
     block "A dev server must state which backend it targets. Without VITE_TEAMS_WS_URL the app
 has no default in dev, and \`bun run dev\` is the user's own live-account shortcut —
@@ -246,13 +309,6 @@ earlier, before a dev server exists that something could drive.)"
 fi
 
 # --- 3. the backend an agent starts must be read-only ------------------------
-# STARTING one is what matters. Stopping one (`kill`, `pkill`, `pgrep`) names the
-# same binary but cannot send anything, and blocking it would only teach the next
-# agent to phrase its cleanup around this hook — which is the habit that caused the
-# incident in the first place.
-stopping_a_process() {
-  printf '%s' "$command_line" | grep -qE '(^|[;&|[:space:]])(p?kill|pgrep|killall)([[:space:]]|$)'
-}
 if ! stopping_a_process &&
   printf '%s' "$command_line" | grep -qE 'cargo run.*--bin server|teams-dev-server\.sh|target/(debug|release)/server'; then
   if ! printf '%s' "$command_line" | grep -q 'TEAMS_LITE_READ_ONLY=1'; then

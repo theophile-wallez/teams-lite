@@ -4,12 +4,14 @@
 //   - dist/client/  — hashed static assets + the client entry
 //   - dist/server/server.js — a portable SSR handler exporting { fetch }
 //
-// This wrapper serves the static assets and falls back to the SSR handler for
-// everything else. It is intentionally a plain Bun fetch server (no Nitro, no
-// Node): that keeps it self-contained so the `teams --web` launcher can run it
-// in-process with the embedded Bun runtime, preserving the single-binary promise.
+// This wrapper serves the static assets, relays the page's WebSocket to the local
+// Rust backend, and falls back to the SSR handler for everything else. It is
+// intentionally a plain Bun fetch server (no Nitro, no Node): that keeps it
+// self-contained so the `teams --web` launcher can run it in-process with the
+// embedded Bun runtime, preserving the single-binary promise.
 //
-// Env: PORT (default 4321), HOST (default 127.0.0.1).
+// Env: PORT (default 4321), HOST (default 127.0.0.1),
+//      TEAMS_LITE_WS_URL (default ws://127.0.0.1:8420 — the backend to relay to).
 
 import { existsSync } from "node:fs";
 import { join, normalize } from "node:path";
@@ -33,6 +35,29 @@ const { default: ssr } = (await import(serverEntry)) as {
 const port = Number(process.env.PORT ?? 4321);
 const hostname = process.env.HOST ?? "127.0.0.1";
 
+/**
+ * The backend this server relays page sockets to.
+ *
+ * Loopback by default, because that is the only interface the backend binds
+ * (`bind_addr()` in `src/bin/server.rs`) and the only one it should: reaching it
+ * means reaching the user's Teams account. Overridable so a read-only backend can
+ * be put behind the app instead (`TEAMS_LITE_READ_ONLY=1` listens on 8430).
+ */
+const backendWsUrl = process.env.TEAMS_LITE_WS_URL?.trim() || "ws://127.0.0.1:8420";
+
+/** Per-connection state for one page socket relayed to the backend. */
+type Relay = {
+  /** Our socket to the backend, opened when the page's socket opens. */
+  upstream: WebSocket | null;
+  /** Frames from the page that arrived before `upstream` finished opening. */
+  pending: (string | ArrayBufferLike | ArrayBufferView)[];
+};
+
+// Ceiling on a single relayed frame, both ways. Generous because the protocol
+// carries proxied media inline: `fetch_media` and `mail_attachment` answer with a
+// base64 blob on this same socket, so one frame can be an entire attachment.
+const MAX_FRAME_BYTES = 128 * 1024 * 1024;
+
 // Resolve a request path to a static file inside dist/client, guarding against
 // path traversal. Returns null when there is no matching static asset.
 function staticFileFor(pathname: string): string | null {
@@ -43,12 +68,24 @@ function staticFileFor(pathname: string): string | null {
   return existsSync(full) ? full : null;
 }
 
-const server = Bun.serve({
+const server = Bun.serve<Relay>({
   port,
   hostname,
   idleTimeout: 60,
-  async fetch(request) {
+  async fetch(request, server) {
     const url = new URL(request.url);
+    // A WebSocket upgrade is always the page asking for the backend: the app opens
+    // exactly one socket, on `BACKEND_WS_ROUTE` (see `defaultWsUrl` in
+    // src/lib/ws-client.ts; the dev server proxies the same path). Relaying it is
+    // what lets the app work from another device — a phone's own 127.0.0.1 is not
+    // this machine's backend, and an https: page may not open a plaintext ws:// at
+    // all — while the backend itself stays bound to loopback. Any path is accepted:
+    // this server has no other socket to confuse it with, and matching loosely
+    // keeps it working if the route ever moves.
+    if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      if (server.upgrade(request, { data: { upstream: null, pending: [] } })) return undefined;
+      return new Response("expected a WebSocket upgrade", { status: 400 });
+    }
     // The app's page cannot read the backend's write token from disk, so hand it
     // over here. Without it the client is read-only (see write-token.ts).
     if (url.pathname === WRITE_TOKEN_ROUTE) return writeTokenResponse();
@@ -73,6 +110,57 @@ const server = Bun.serve({
     }
     return ssr.fetch(request);
   },
+  websocket: {
+    maxPayloadLength: MAX_FRAME_BYTES,
+    backpressureLimit: MAX_FRAME_BYTES,
+    // Drop the connection rather than silently discarding a frame: the client
+    // reconnects and reissues, whereas a hole in the stream would hang a request
+    // until its timeout with no way to tell what went missing.
+    closeOnBackpressureLimit: true,
+    // Bun pings on its own (`sendPings` defaults to true) and browsers answer, so
+    // an idle chat stays open instead of being torn down every couple of minutes.
+    idleTimeout: 120,
+
+    open(ws) {
+      const upstream = new WebSocket(backendWsUrl);
+      ws.data.upstream = upstream;
+      upstream.onopen = () => {
+        for (const frame of ws.data.pending) upstream.send(frame as string);
+        ws.data.pending = [];
+      };
+      upstream.onmessage = (event: MessageEvent) => ws.send(event.data);
+      upstream.onclose = () => ws.close();
+      // A refused connection means no backend is listening. Close with "server
+      // error" so the page's own reconnect/backoff handles it (see ws-client.ts)
+      // instead of waiting on requests that can never be answered.
+      upstream.onerror = () => ws.close(1011, "backend unreachable");
+    },
+
+    message(ws, message) {
+      const upstream = ws.data.upstream;
+      if (!upstream) return;
+      // The page can send as soon as ITS socket is open, which happens before ours
+      // to the backend is — hold those frames rather than dropping them, or the
+      // first request of every session (`conversations`) would vanish.
+      if (upstream.readyState !== WebSocket.OPEN) {
+        ws.data.pending.push(message);
+        return;
+      }
+      upstream.send(message as string);
+    },
+
+    close(ws) {
+      ws.data.pending = [];
+      try {
+        ws.data.upstream?.close();
+      } catch {
+        // Already closing/closed: nothing left to release.
+      }
+      ws.data.upstream = null;
+    },
+  },
 });
 
-console.log(`[teams-web] serving on http://${server.hostname}:${server.port}`);
+console.log(
+  `[teams-web] serving on http://${server.hostname}:${server.port} (backend ${backendWsUrl})`,
+);

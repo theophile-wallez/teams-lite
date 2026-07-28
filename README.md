@@ -138,6 +138,33 @@ It ships **inside** the single `teams` binary — no extra install, no Node, no
 
 Everything is served on `127.0.0.1` by default, so it stays on your machine.
 
+### From another device (phone, tablet) over Tailscale
+
+The app is usable from a phone without opening the backend to the network. Put a
+[Tailscale](https://tailscale.com) proxy in front of the web UI — the backend
+itself keeps listening on loopback only:
+
+```bash
+# on the machine running teams-lite
+tailscale serve --bg --https=8443 http://127.0.0.1:4321
+# then open https://<machine>.<tailnet>.ts.net:8443 on the phone
+```
+
+The page notices it was not served from the backend's own machine and asks the
+web server to relay the WebSocket instead of dialling `127.0.0.1:8420` — which,
+from a phone, would be the phone. That relay lives in `web/server.ts` (and as a
+Vite proxy in dev), so exactly one port is ever exposed, over Tailscale's own
+authenticated HTTPS.
+
+Two things worth knowing before you do it:
+
+- **Anything on your tailnet that can reach that port gets your Teams account**,
+  send included: the page fetches the backend's write token from the same server.
+  Keep it `tailscale serve` (tailnet-only) — never `tailscale funnel`, which
+  publishes it to the whole internet.
+- A backgrounded mobile tab has its timers frozen and its socket dropped; the app
+  reconnects when you come back to it rather than showing "backend lost".
+
 ### Dev mode (`teams --web-dev`)
 
 Working on the web UI? Use:

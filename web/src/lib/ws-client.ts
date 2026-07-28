@@ -9,6 +9,7 @@
 //   response <- { id, result } | { id, error }
 //   event    <- { event, data }        (server push)
 
+import { BACKEND_WS_ROUTE } from "./backend-route";
 import type {
   AppSettings,
   CalendarInfo,
@@ -30,8 +31,70 @@ import type {
 type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
 type EventHandler = (data: unknown) => void;
 
-/** Where a production build looks for the local Rust backend. */
+/** Where the local Rust backend listens, for a process with no page to ask. */
 const PRODUCTION_WS_URL = "ws://127.0.0.1:8420";
+
+/** Hosts that mean "the machine this page came from is also the backend's". */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"]);
+
+function isLoopbackHost(hostname: string): boolean {
+  return LOOPBACK_HOSTS.has(hostname.toLowerCase());
+}
+
+/** Whether `url` names a loopback address — i.e. is only meaningful to a client
+ *  running on the same machine as the backend. */
+function pointsAtLoopback(url: string): boolean {
+  try {
+    return isLoopbackHost(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The backend endpoint on the origin that served this page — `loc` is normally
+ * `globalThis.location` — or null when there is no page (SSR).
+ *
+ * A page opened from another device cannot dial `ws://127.0.0.1:8420` itself, even
+ * though that is where the backend listens: "localhost" only means the backend for
+ * a browser running on the same machine as it. Open the app from a phone — over
+ * Tailscale, say — and 127.0.0.1 is the phone; over an `https:` origin the browser
+ * refuses a plaintext `ws://` as mixed content before it even resolves. Going
+ * through the server that served the page fixes both at once, and keeps the
+ * backend's own socket on loopback where it belongs (`bind_addr()` in
+ * `src/bin/server.rs` binds 127.0.0.1 and nothing else): the app's server is the
+ * only thing that bridges it.
+ */
+export function backendUrlForPage(
+  loc: { protocol: string; host: string } | null | undefined,
+): string | null {
+  if (!loc?.host) return null;
+  if (loc.protocol !== "http:" && loc.protocol !== "https:") return null;
+  return `${loc.protocol === "https:" ? "wss" : "ws"}://${loc.host}${BACKEND_WS_ROUTE}`;
+}
+
+/**
+ * Whether a page on `loc` has to go through the relay to reach `configured`.
+ *
+ * Only one case does: a configured backend on loopback, opened from somewhere that
+ * is not this machine. Everything else keeps the URL it was given — the mock stays
+ * the mock, an explicitly remote backend stays that one — so the safety catch below
+ * keeps meaning exactly what it says.
+ */
+export function needsRelay(
+  configured: string,
+  loc: { hostname: string } | null | undefined,
+): boolean {
+  if (!loc?.hostname) return false;
+  return pointsAtLoopback(configured) && !isLoopbackHost(loc.hostname);
+}
+
+/** `configured`, or the relay on this page's own origin when that address cannot
+ *  work from where the page is running (see {@link needsRelay}). */
+function reachableFromThisPage(configured: string): string {
+  if (!needsRelay(configured, globalThis.location)) return configured;
+  return backendUrlForPage(globalThis.location) ?? configured;
+}
 
 /**
  * The backend URL to use when a caller does not name one.
@@ -48,13 +111,18 @@ const PRODUCTION_WS_URL = "ws://127.0.0.1:8420";
  * 1:1 chats because a restarted `vite dev` lost its `VITE_TEAMS_WS_URL`. Failing
  * loudly at startup costs one variable; the silent fallback costs a real message.
  *
+ * Either way, a page opened from ANOTHER DEVICE goes through the relay instead:
+ * whatever this machine calls "the backend", a loopback address does not name it
+ * from a phone (see {@link needsRelay} and {@link backendUrlForPage}). That is what
+ * makes the app usable over Tailscale without exposing the backend's own port.
+ *
  * Resolved lazily (a function, not a module constant) so importing this module
  * stays side-effect-free — unit tests construct `Backend` with an explicit URL
  * and must not need the variable at all.
  */
 export function defaultWsUrl(): string {
   const configured = (import.meta.env?.VITE_TEAMS_WS_URL as string | undefined)?.trim();
-  if (configured) return configured;
+  if (configured) return reachableFromThisPage(configured);
   if (import.meta.env?.DEV) {
     throw new Error(
       "VITE_TEAMS_WS_URL is not set. A dev server must name its backend explicitly — " +
@@ -64,7 +132,7 @@ export function defaultWsUrl(): string {
         "work against your own account.",
     );
   }
-  return PRODUCTION_WS_URL;
+  return reachableFromThisPage(PRODUCTION_WS_URL);
 }
 
 const RECONNECT_GIVE_UP_MS = 30_000;
@@ -110,6 +178,31 @@ export class Backend {
   /** Connect and keep alive (auto-reconnect with capped backoff). */
   connect(): Promise<void> {
     return new Promise((resolve, reject) => this.openSocket(resolve, reject));
+  }
+
+  /**
+   * Reconnect right now, with a fresh give-up window.
+   *
+   * The backoff stops retrying after {@link RECONNECT_GIVE_UP_MS} of failures,
+   * which is right for a backend that died and wrong for a phone that was merely
+   * asleep. A backgrounded mobile tab has its timers frozen: the socket closes
+   * when the OS suspends it, no retry ever runs, and the first one to run after it
+   * wakes is already minutes past the deadline — so a returning tab would show
+   * "backend lost" without a single real attempt. Callers use this on the moments
+   * that mean "in use again" (see `watchWakeups` in `store.ts`).
+   *
+   * A no-op while connected, or after {@link close}.
+   */
+  retryNow(): void {
+    if (this.closed || this.connected) return;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnecting = false;
+    this.firstFailureAt = null;
+    this.reconnectDelay = this.initialDelayMs;
+    this.openSocket();
   }
 
   /** Stop everything: cancel reconnect, drop the socket, fail pending requests. */

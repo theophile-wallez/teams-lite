@@ -8,6 +8,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { WRITE_TOKEN_ROUTE, writeTokenResponse } from "./write-token";
+import { BACKEND_WS_ROUTE } from "./src/lib/backend-route";
 
 // The dev server port for `vite dev`. The production server reads PORT at
 // runtime (see server.ts / the Nitro output), so this only affects local dev.
@@ -36,13 +37,28 @@ function writeTokenPlugin(): Plugin {
   };
 }
 
+// The backend the dev server relays {@link BACKEND_WS_ROUTE} to: the very one it
+// was told to target, never a default (see `defaultWsUrl` in src/lib/ws-client.ts —
+// a dev server with an implicit backend is how three real messages went out). No
+// variable, no relay: the page then has to name a backend it can reach itself.
+const DEV_BACKEND_WS_URL = process.env.VITE_TEAMS_WS_URL?.trim();
+
 export default defineConfig(({ command }) => ({
   server: {
     port: DEV_PORT,
     host: DEV_HOST,
-    // The browser talks to the Rust backend directly over its own WebSocket
-    // (ws://127.0.0.1:8420), so Vite needs no proxy — but keep HMR stable when
-    // launched behind the `teams --web` supervisor.
+    // A browser on this machine talks to the Rust backend directly. One on another
+    // device cannot — its own 127.0.0.1 is not this host — so it asks the dev
+    // server for the same socket on this path, and Vite forwards it. That is what
+    // makes the app work from a phone (over Tailscale) with the backend still bound
+    // to loopback; `web/server.ts` does the same for a production build.
+    proxy: DEV_BACKEND_WS_URL
+      ? { [BACKEND_WS_ROUTE]: { target: DEV_BACKEND_WS_URL, ws: true, rewrite: () => "/" } }
+      : undefined,
+    // Reached through a Tailscale name, not just localhost. Vite rejects unknown
+    // Host headers by default (DNS-rebinding protection), which would answer the
+    // phone with "Blocked request" before any of the above matters.
+    allowedHosts: [".ts.net"],
     strictPort: false,
   },
   ssr: {
