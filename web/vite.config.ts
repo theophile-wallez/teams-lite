@@ -59,7 +59,11 @@ export default defineConfig(({ command }) => ({
     // Host headers by default (DNS-rebinding protection), which would answer the
     // phone with "Blocked request" before any of the above matters.
     allowedHosts: [".ts.net"],
-    strictPort: false,
+    // Fail on a taken port instead of quietly taking the next one. Everything that
+    // points at this server names its port exactly — a Tailscale proxy, a phone's
+    // bookmark, the E2E suite, `scripts/preview.ts` — so drifting to 4322 does not
+    // degrade gracefully: it leaves those pointing at whatever else is on 4321.
+    strictPort: true,
   },
   ssr: {
     // For the production BUILD, bundle every dependency into the SSR output so
