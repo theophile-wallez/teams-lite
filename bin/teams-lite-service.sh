@@ -239,14 +239,17 @@ configure_tailscale() {
 
 print_units_state() {
   say "Units"
-  local unit state
+  local unit state enabled
   for unit in "${UNITS[@]}"; do
     if [ ! -f "$UNIT_DIR/$unit" ]; then
       info "$unit: not installed"
       continue
     fi
-    state="$("$SYSTEMCTL" --user is-active "$unit" 2>/dev/null || true)"
-    info "$unit: ${state:-unknown} ($("$SYSTEMCTL" --user is-enabled "$unit" 2>/dev/null || echo not-enabled))"
+    # Both queries exit non-zero for an inactive or disabled unit and print the
+    # answer on stdout, so take the first line and ignore the status.
+    state="$("$SYSTEMCTL" --user is-active "$unit" 2>/dev/null | head -1 || true)"
+    enabled="$("$SYSTEMCTL" --user is-enabled "$unit" 2>/dev/null | head -1 || true)"
+    info "$unit: ${state:-unknown} (${enabled:-not-enabled})"
   done
 }
 
