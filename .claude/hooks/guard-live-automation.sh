@@ -16,8 +16,9 @@
 #      through web/scripts/preview.ts — the helper that proves it is on the mock
 #      before it types;
 #   2. a script that calls send/edit/react against the live backend — on its own
-#      port (19420) or through the app server that relays to it (19440, and whatever
-#      tailnet name it is served under: see the relay in web/server.ts);
+#      port (19420 for the always-on service, 19421 for the dev one) or through an
+#      app server that relays to it (19440 / 19441, and whatever tailnet name it is
+#      served under: see the relay in web/server.ts);
 #   2b. fetching the backend's write token, from the file it publishes or from the
 #      endpoint the app's own server exposes it on. It is a capability: holding it
 #      is what makes a write possible at all;
@@ -216,7 +217,11 @@ if ! sanctioned_automation; then
     # WebSocket upgrade to the same backend (see web/server.ts), so its port — and
     # any host it is reachable on, such as a tailnet name — is a second address for
     # the user's live account, not merely a static-file server.
-    if grep -qE '(127\.0\.0\.1|localhost):(19420|19440)|[A-Za-z0-9-]+\.ts\.net' "$script" &&
+    #
+    # FOUR ports, not two. 19420/19440 are the always-on service; 19421/19441 are the
+    # user's hands-on dev pair (bin/teams-dev-server.sh and `bun run dev`), which is
+    # just as send-capable. Only 19430 — read-only — is absent, by design.
+    if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
       grep -qE '"(send|edit|react)"|'\''(send|edit|react)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
@@ -231,7 +236,8 @@ fi
 # --- 1. no writes to the live backend, and no ad-hoc browser drivers ----------
 if [ -n "$scripts_writing_to_the_backend" ]; then
   block "This command runs a script that calls a WRITE method on the REAL backend — its own
-port (19420) or the app server that relays to it (19440 / a tailnet name):
+port (19420 service / 19421 dev) or an app server that relays to it (19440 / 19441 /
+a tailnet name):
    ${scripts_writing_to_the_backend# }
 
 Reading the live backend is fine — inspect all the real data you need. Writing is

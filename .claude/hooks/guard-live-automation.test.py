@@ -49,6 +49,23 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19440');\n"
         "ws.send(JSON.stringify({ method: 'send' }));\n"
     ),
+    # The user's hands-on dev pair (19421 / 19441) is just as send-capable as the
+    # always-on service's, so it is guarded by the same rule.
+    "dev-backend-writer.ts": (
+        "// Writes to the DEV backend, which is also the real account.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19421');\n"
+        "ws.send(JSON.stringify({ method: 'react' }));\n"
+    ),
+    "dev-relay-writer.ts": (
+        "// Writes through the DEV web server's relay.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19441');\n"
+        "ws.send(JSON.stringify({ method: 'edit' }));\n"
+    ),
+    "dev-backend-reader.ts": (
+        "// Reads the DEV backend, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19421');\n"
+        "ws.send(JSON.stringify({ method: 'conversations' }));\n"
+    ),
     "relay-reader.ts": (
         "// Reads through the app's own server, which is allowed.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19440');\n"
@@ -74,6 +91,9 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "curl -X POST https://graph.microsoft.com/v1.0/me/sendMail"),
         # The app server relays to the same backend, so writing through it is writing.
         ("BLOCK", PROJECT, f"bun run {tmp}/relay-writer.ts"),
+        # The dev pair reaches the same account as the service's.
+        ("BLOCK", PROJECT, f"bun run {tmp}/dev-backend-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/dev-relay-writer.ts"),
         # The write token is the capability itself — never ours to fetch.
         ("BLOCK", PROJECT, f"bun run {tmp}/token-thief.ts"),
         ("BLOCK", PROJECT, "curl -s http://127.0.0.1:19440/__write-token"),
@@ -96,6 +116,7 @@ def cases(tmp: Path):
         # Reading the live backend is deliberately fine, through either address.
         ("ALLOW", PROJECT, f"bun run {tmp}/backend-reader.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/relay-reader.ts"),
+        ("ALLOW", PROJECT, f"bun run {tmp}/dev-backend-reader.ts"),
         # Reading the code that implements the token endpoint is ordinary work.
         ("ALLOW", PROJECT, 'grep -rn "__write-token" web/src'),
         # Commands that only NAME a file run nothing, whatever is inside it.

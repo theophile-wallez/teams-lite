@@ -46,8 +46,12 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
 
-/** The real backend's port. Nothing here may ever talk to it. */
-const BACKEND_PORT = 19420;
+/**
+ * Ports a send-capable backend — or the app server that relays to one — may be on.
+ * Nothing here may ever talk to any of them: 19420/19440 are the always-on service,
+ * 19421/19441 the user's hands-on dev pair. All four reach the real account.
+ */
+const LIVE_PORTS = [19420, 19421, 19440, 19441];
 /** Ports for our own throwaway mock + dev server (override via env if taken). */
 const MOCK_PORT = Number(process.env.PREVIEW_MOCK_PORT ?? 19456);
 const WEB_PORT = Number(process.env.PREVIEW_WEB_PORT ?? 19446);
@@ -425,10 +429,13 @@ function escapeForRegExp(text: string): string {
 
 /** Belt and braces: never let a misconfigured port aim this at the real backend. */
 function assertPortsAreNotTheBackend(): void {
-  if (MOCK_PORT === BACKEND_PORT || WEB_PORT === BACKEND_PORT) {
-    throw new Error(
-      `PREVIEW_MOCK_PORT/PREVIEW_WEB_PORT must not be ${BACKEND_PORT} — that is the real backend.`,
-    );
+  for (const port of [MOCK_PORT, WEB_PORT]) {
+    if (LIVE_PORTS.includes(port)) {
+      throw new Error(
+        `PREVIEW_MOCK_PORT/PREVIEW_WEB_PORT must not be ${port} — that port reaches the ` +
+          `real account (live ports: ${LIVE_PORTS.join(", ")}).`,
+      );
+    }
   }
 }
 

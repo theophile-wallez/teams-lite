@@ -14,8 +14,14 @@ import { BUILD_INFO_FILE, type BuildInfo } from "./build-info";
 import { BACKEND_WS_ROUTE } from "./src/lib/backend-route";
 
 // The dev server port for `vite dev`. The production server reads PORT at
-// runtime (see server.ts / the Nitro output), so this only affects local dev.
-const DEV_PORT = Number(process.env.PORT ?? 19440);
+// runtime (see server.ts), so this only affects local dev.
+//
+// Deliberately NOT 19440, the production port: that one belongs to the always-on
+// service (packaging/systemd/teams-lite-web.service), which holds it for weeks at a
+// time. A dev server defaulting there would fail to bind whenever the service runs —
+// and, worse, would win the port on the boot where it started first, quietly putting
+// a hot-reloading dev build behind the tailnet HTTPS address the phone bookmarks.
+const DEV_PORT = Number(process.env.PORT ?? 19441);
 // The dev server host. `teams --web-dev` sets HOST to bind the same interface as
 // the production launcher; unset lets Vite pick its default (localhost).
 const DEV_HOST = process.env.HOST || undefined;

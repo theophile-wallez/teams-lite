@@ -107,9 +107,10 @@ user. Two independent mechanisms enforce that split:
   is precisely the line this draws.
 - **The hook (harness).** Blocks, before execution, any command that would write:
   ad-hoc browser drivers, scripts calling `send`/`edit`/`react` against
-  `127.0.0.1:19420`, dev servers with no declared backend, a production web server
-  with no declared backend, a send-capable backend started by tooling — including
-  `systemctl --user start` on the always-on service's units.
+  `127.0.0.1:19420` or `19421` (and the 19440 / 19441 relays in front of them), dev
+  servers with no declared backend, a production web server with no declared backend,
+  a send-capable backend started by tooling — including `systemctl --user start` on
+  the always-on service's units.
 
 - **Never hand-roll browser automation.** `web/scripts/preview.ts` is the only
   sanctioned way to drive the web UI: it starts its own mock, points the dev
@@ -135,8 +136,9 @@ user. Two independent mechanisms enforce that split:
   `TEAMS_LITE_READ_ONLY=1` refuses `send`/`edit`/`react` at the dispatch choke
   point (`src/bin/server.rs`) *and* binds **19430** instead of 19420, so it never
   competes for the port the user's own backend owns. The two run side by side on
-  the same SQLite store (WAL): the user's always-on service keeps 19420 while you
-  read real data on `ws://127.0.0.1:19430` — point a client at it with
+  the same SQLite store (WAL): the user's always-on service keeps 19420 and their
+  hands-on dev backend 19421, while you read real data on `ws://127.0.0.1:19430` —
+  point a client at it with
   `VITE_TEAMS_WS_URL=ws://127.0.0.1:19430`. `TEAMS_LITE_PORT` overrides either
   default.
 - **The always-on service is the user's to start.** `bin/teams-lite-service.sh
@@ -200,18 +202,27 @@ can never lose a race to it.
 
 | Port      | What                                              | Where the default lives |
 | --------- | ------------------------------------------------- | ----------------------- |
-| **19420** | Backend, send-capable — the user's real account    | `src/bin/server.rs` `DEFAULT_PORT` |
+| **19420** | Backend, send-capable — the always-on service      | `src/bin/server.rs` `DEFAULT_PORT` |
+| **19421** | Backend, send-capable — the user's hands-on dev one | `bin/teams-dev-server.sh` |
 | **19430** | Backend, read-only (`TEAMS_LITE_READ_ONLY=1`)      | `src/bin/server.rs` `READ_ONLY_PORT` |
-| **19440** | Web UI, production **and** `vite dev`              | `web/server.ts`, `web/vite.config.ts` |
+| **19440** | Web UI, production — the always-on service         | `web/server.ts` |
+| **19441** | Web UI, `vite dev`                                 | `web/vite.config.ts` `DEV_PORT` |
 | 19455 / 19445 | `bun run dev:mock` — mock backend / app        | `web/package.json` |
 | 19456 / 19446 | `bun run preview` — mock backend / app         | `web/scripts/preview.ts` |
 | 19457 / 19447 | E2E — mock backend / app                       | `web/playwright.config.ts` |
 | 8443      | Tailnet HTTPS front for the web UI (`tailscale serve`) | `bin/teams-lite-service.sh` |
 
-`TEAMS_LITE_PORT` overrides the backend's, `PORT` the web server's,
+**The x420/x440 pair is the service; x421/x441 is the user's dev pair.** They are two
+send-capable backends on one SQLite store, so they must never share a port: the service
+holds 19420 for weeks, and `bin/teams-dev-server.sh` plus `bun run dev` step aside to
+19421/19441 so both can run at once. Read-only is the exception that keeps its own
+19430 — and `teams-dev-server.sh` deliberately does not pin `TEAMS_LITE_PORT` when
+`TEAMS_LITE_READ_ONLY=1`, because an explicit port would drag it off 19430.
+
+`TEAMS_LITE_PORT` overrides a backend's, `PORT` a web server's,
 `E2E_MOCK_PORT` / `E2E_WEB_PORT` the suite's. Change a default in code and this table
 in the same commit — and check `.claude/hooks/guard-live-automation.sh`, which matches
-19420 and 19440 by number.
+19420, 19421, 19440 and 19441 by number.
 
 ## The always-on service
 

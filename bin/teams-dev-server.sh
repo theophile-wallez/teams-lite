@@ -23,6 +23,21 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 # Keep the dev backend alive across frontend disconnects (only Ctrl+C stops it).
 export TEAMS_NO_IDLE_EXIT="${TEAMS_NO_IDLE_EXIT:-1}"
 
+# A PORT OF ITS OWN: 19421, next door to the always-on service's 19420.
+#
+# Both are send-capable backends on the same store, so they must not compete for one
+# port. The service holds 19420 for weeks; this launcher is for hands-on work while
+# that keeps running, so it steps aside by default. `bun run dev` in web/ points at
+# 19421 to match, and `TEAMS_LITE_PORT` still overrides both.
+#
+# Not when read-only: `TEAMS_LITE_PORT` wins over every default in `resolve_port`
+# (src/bin/server.rs), so setting it here unconditionally would drag a read-only
+# backend off 19430 and onto the dev port — taking a port the user wants, which is
+# the one thing read-only mode exists to avoid.
+if [ "${TEAMS_LITE_READ_ONLY:-}" != "1" ]; then
+  export TEAMS_LITE_PORT="${TEAMS_LITE_PORT:-19421}"
+fi
+
 # shellcheck source=bin/broker-env.sh
 . "$SCRIPT_DIR/broker-env.sh"
 teams_lite_export_broker_bus

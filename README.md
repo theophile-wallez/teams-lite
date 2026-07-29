@@ -211,6 +211,10 @@ Worth knowing:
   update leaves both alone. Native calling is deliberately off in the service
   (`TEAMS_LITE_CALLING=1` changes how your real calls ring across your endpoints);
   add it there if you want it.
+- **The dev stack has ports of its own** — backend 19421, Vite 19441 — so
+  `bun run dev:server` + `bun run dev` work while the service keeps running on
+  19420/19440. Both are send-capable backends over one SQLite store, so they get
+  separate ports rather than fighting for one.
 
 ### Dev mode (`teams --web-dev`)
 
@@ -253,10 +257,11 @@ cd web && bun run dev             # then, in another shell: bun run mock
 #   (TEAMS_NO_IDLE_EXIT) so it stays up across browser reloads/inactivity and only
 #   stops on Ctrl+C, and it bridges D-Bus to the Identity Broker the same way the
 #   production launcher does (so sign-in works from source, incl. containerized
-#   Intune). See bin/teams-dev-server.sh:
+#   Intune). This pair uses ports of its own — backend 19421, app 19441 — so it runs
+#   happily alongside the always-on service on 19420/19440. See bin/teams-dev-server.sh:
 cd web
-bun run dev:server                # terminal 1  (real backend, authed + kept alive)
-bun run dev                       # terminal 2  (Vite HMR against :19420)
+bun run dev:server                # terminal 1  (real backend on 19421, kept alive)
+bun run dev                       # terminal 2  (Vite HMR on 19441, against :19421)
 
 # 3b. …or produce the single `teams` binary (backend + web UI embedded)
 cargo build --release --bin server
