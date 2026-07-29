@@ -103,7 +103,7 @@ type EventHandler = (data: any) => void;
 
 /// Follows `TEAMS_LITE_PORT` like the backend and `ui/src/server.ts` do, so a UI
 /// that owns a backend on another port still finds it.
-const DEFAULT_URL = `ws://127.0.0.1:${Number(process.env.TEAMS_LITE_PORT) || 8420}`;
+const DEFAULT_URL = `ws://127.0.0.1:${Number(process.env.TEAMS_LITE_PORT) || 19420}`;
 
 // After this long of *continuous* connection failure we stop retrying and
 // declare the backend lost. Bounding this is critical: an unbounded reconnect

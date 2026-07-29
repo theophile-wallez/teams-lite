@@ -13,7 +13,7 @@
 // a GET with its name, the Rust backend speaks only WebSocket and returns nothing.
 // We check that once, before any spec runs, and abort the whole run otherwise.
 
-const MOCK_PORT = process.env.E2E_MOCK_PORT ?? "8461";
+const MOCK_PORT = process.env.E2E_MOCK_PORT ?? "19457";
 const MOCK_URL = `http://127.0.0.1:${MOCK_PORT}/`;
 /** What `web/mock/server.ts` answers to a plain GET. */
 const MOCK_GREETING = "teams-lite mock backend";
@@ -33,6 +33,6 @@ export default async function globalSetup(): Promise<void> {
     `Something other than the mock backend is listening on port ${MOCK_PORT} — very likely ` +
       `your real teams-lite backend. Running the suite against it would send real messages ` +
       `to real people. Start it on a free port instead, e.g.\n\n` +
-      `  E2E_MOCK_PORT=8455 E2E_WEB_PORT=4455 bun run test:e2e\n`,
+      `  E2E_MOCK_PORT=19467 E2E_WEB_PORT=19468 bun run test:e2e\n`,
   );
 }

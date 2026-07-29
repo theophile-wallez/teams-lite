@@ -7,8 +7,7 @@
 //      `itemid` to the person it names)
 // It never publishes our own presence and never writes anything.
 //
-//   DBUS_SESSION_BUS_ADDRESS="unix:path=/proc/$(pgrep -f \
-//     identity-broker/bin/microsoft-identity-broker|head -1)/root/run/user/0/bus" \
+//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
 //     cargo run --example person_recon -- 8:orgid:<guid> [19:<conversation-id>]
 use anyhow::Result;
 use serde_json::Value;

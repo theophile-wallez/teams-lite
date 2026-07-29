@@ -22,6 +22,11 @@ export default defineConfig({
     environment: "node",
     // Both extensions: a component test is written in JSX (`*.test.tsx`), and an
     // include pattern that only matched `.ts` would skip it in silence.
-    include: ["src/**/*.test.{ts,tsx}"],
+    //
+    // `scripts/` is in the list because testable code lives outside src/ too: the
+    // production server's runtime file set and its build-info guard are not client
+    // code, and a pattern that only saw src/ would run their tests never — which is
+    // how the embedded bundle went out missing a module in the first place.
+    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.{ts,tsx}"],
   },
 });

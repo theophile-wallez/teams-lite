@@ -1,0 +1,12 @@
+[Unit]
+# The indirection teams-lite-broker-bus.path needs: a .path unit can only START a
+# unit, never restart one, so it starts this oneshot instead.
+Description=Restart the teams-lite backend after the broker bus moved
+Documentation=file://@REPO@/packaging/systemd/teams-lite-broker-bus.path
+
+[Service]
+Type=oneshot
+# try-restart, not restart: it does nothing when the backend is stopped on purpose,
+# so a container restart cannot resurrect a service the user took down.
+ExecStart=@SYSTEMCTL@ --user try-restart teams-lite-backend.service
+SyslogIdentifier=teams-lite-broker-bus

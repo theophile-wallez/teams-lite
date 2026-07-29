@@ -101,8 +101,19 @@ pub async fn run(
         // Fresh credentials for THIS attempt. If minting fails (broker down,
         // etc.) treat it like a disconnect and back off. connect_once only
         // returns on disconnect/error, so we ignore its result either way.
-        if let Ok(Credentials { session, ic3 }) = creds.credentials().await {
-            let _ = connect_once(&http, &session, &ic3, &epid, &events, &typing, &receipts, &calls, &status).await;
+        //
+        // Say WHY when it fails. This loop retries forever and the error used to be
+        // dropped on the floor, so a broker that stopped minting tokens left the live
+        // feed dead with an empty journal — while mail and the calendar both logged
+        // their failures. A backend that runs for weeks is diagnosed from that
+        // journal, so the one line that names the cause has to be in it.
+        match creds.credentials().await {
+            Ok(Credentials { session, ic3 }) => {
+                let _ = connect_once(&http, &session, &ic3, &epid, &events, &typing, &receipts, &calls, &status).await;
+            }
+            Err(e) => eprintln!(
+                "[realtime] no credentials, retrying in {backoff}s — is the identity broker up? ({e:#})"
+            ),
         }
         // If the consumer is gone, stop.
         if events.is_closed() || status.is_closed() {

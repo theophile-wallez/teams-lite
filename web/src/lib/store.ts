@@ -584,11 +584,20 @@ export class TeamsController {
       if (document.visibilityState === "visible") this.backend.retryNow();
     };
     const onOnline = () => this.backend.retryNow();
+    // A third wake-up, specific to iOS Safari: a page restored from the back/forward
+    // cache fires `pageshow` with `persisted: true` and does NOT always fire
+    // `visibilitychange`. Without this, coming back to the app with the back gesture
+    // can leave the socket closed until the user switches tabs and returns.
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) this.backend.retryNow();
+    };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("online", onOnline);
+    window.addEventListener("pageshow", onPageShow);
     this.disposers.push(() => {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("online", onOnline);
+      window.removeEventListener("pageshow", onPageShow);
     });
   }
 
@@ -766,6 +775,13 @@ export class TeamsController {
       // back, and `watchWakeups` retries long after the backoff gave up — so this
       // is the normal path out of "backend lost" for a phone returning to the tab.
       this.set({ live: "connected", fatal: null, status: "reconnected" });
+      // Refetch the write token. The backend mints a new one per PROCESS, so a
+      // backend that restarted — a crash, an update, a `systemctl restart` of the
+      // always-on service — invalidates the one this page fetched at startup. Reads
+      // keep working, which is what makes it nasty: the tab looks healthy and every
+      // send is refused until someone reloads the page. On a phone left open for
+      // days that is the normal outcome of a restart, so recovery has to be here.
+      void this.loadWriteToken();
       if (this.connectionDropped) {
         this.connectionDropped = false;
         void this.handleLiveRecovery();

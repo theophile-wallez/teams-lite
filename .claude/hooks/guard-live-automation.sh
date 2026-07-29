@@ -5,7 +5,7 @@
 # the mock backend, pointed `vite dev` at it, and drove the app with an ad-hoc
 # playwright-core script that typed into the composer and pressed Enter. Later it
 # restarted `vite dev` WITHOUT `VITE_TEAMS_WS_URL`; the app silently fell back to
-# the real backend on 127.0.0.1:8420. The next scripted keypress posted three
+# the real backend on 127.0.0.1:19420. The next scripted keypress posted three
 # messages to two real 1:1 chats with the user's colleagues. Every layer had been
 # reasoned about and none of them could say no.
 #
@@ -16,15 +16,18 @@
 #      through web/scripts/preview.ts — the helper that proves it is on the mock
 #      before it types;
 #   2. a script that calls send/edit/react against the live backend — on its own
-#      port (8420) or through the app server that relays to it (4321, and whatever
+#      port (19420) or through the app server that relays to it (19440, and whatever
 #      tailnet name it is served under: see the relay in web/server.ts);
 #   2b. fetching the backend's write token, from the file it publishes or from the
 #      endpoint the app's own server exposes it on. It is a capability: holding it
 #      is what makes a write possible at all;
-#   3. `vite dev` without an explicit VITE_TEAMS_WS_URL (a dev server with no
-#      declared backend is exactly how the incident started);
+#   3. `vite dev` without an explicit VITE_TEAMS_WS_URL, and the production web
+#      server without an explicit TEAMS_LITE_WS_URL (a server with no declared
+#      backend is exactly how the incident started);
 #   4. starting the Rust backend without TEAMS_LITE_READ_ONLY=1 — an agent has no
-#      reason to run a send-capable backend; the user starts that one;
+#      reason to run a send-capable backend; the user starts that one. This covers
+#      every spelling: the binary in target/, the staged copy the always-on service
+#      runs, the launcher scripts, and `systemctl --user start` on its units;
 #   5. anything that would send MAIL. The mailbox is read-only here and has no
 #      sandbox equivalent (see AGENTS.md § Mail is READ-ONLY): the broker token
 #      already carries `Mail.Send`, so the only thing standing between this
@@ -73,13 +76,31 @@ stopping_a_process() {
   printf '%s' "$command_line" | grep -qE '(^|[;&|[:space:]])(p?kill|pgrep|killall)([[:space:]]|$)'
 }
 
+# The same idea, tightened, for rule 1 — which guards browser automation, where a
+# chained second command would be the whole risk. `pgrep -af playwright` and
+# `pkill -f chromium` name a browser driver and can drive nothing at all; blocking
+# them only teaches the next reader to phrase commands around the guard.
+#
+# So: the command must BEGIN with a process probe, and must not chain or substitute
+# another one. A bare `|` is tolerated because it is normally inside the pattern
+# argument (`pgrep -af 'vite dev|mock/server.ts'`); `;`, `&`, a backtick and `$(` are
+# not, because each can introduce a command this predicate never looked at.
+probing_processes() {
+  printf '%s' "$command_line" |
+    grep -qE '^[[:space:]]*(p?kill|pgrep|killall)([[:space:]]|$)' || return 1
+  printf '%s' "$command_line" | grep -qE '[;&`]|\$\(' && return 1
+  return 0
+}
+
 # Is this command merely LOOKING at a file the rules below match by path — `ls -l
-# target/debug/server`, `stat …`? That runs nothing either. Restricted to a command
-# that is nothing else: `ls x && ./x` does start it, so any separator disqualifies.
+# target/debug/server`, `stat …`, `bash -n bin/teams-dev-server.sh`? That runs
+# nothing either: `-n` is bash's syntax-check mode, which parses and exits.
+# Restricted to a command that is nothing else: `ls x && ./x` does start it, and
+# `bash -n x && bash x` does too, so any separator disqualifies.
 inspecting_a_file() {
   printf '%s' "$command_line" | grep -qE '[;&|]' && return 1
   printf '%s' "$command_line" |
-    grep -qE '^[[:space:]]*(ls|stat|file|readlink|du|wc|sha256sum|md5sum)([[:space:]]|$)'
+    grep -qE '^[[:space:]]*((ls|stat|file|readlink|du|wc|sha256sum|md5sum|shellcheck)([[:space:]]|$)|(ba|z)?sh[[:space:]]+-n([[:space:]]|$))'
 }
 
 # Commands that ARE the sanctioned automation paths (or plain browser installs).
@@ -195,7 +216,7 @@ if ! sanctioned_automation; then
     # WebSocket upgrade to the same backend (see web/server.ts), so its port — and
     # any host it is reachable on, such as a tailnet name — is a second address for
     # the user's live account, not merely a static-file server.
-    if grep -qE '(127\.0\.0\.1|localhost):(8420|4321)|[A-Za-z0-9-]+\.ts\.net' "$script" &&
+    if grep -qE '(127\.0\.0\.1|localhost):(19420|19440)|[A-Za-z0-9-]+\.ts\.net' "$script" &&
       grep -qE '"(send|edit|react)"|'\''(send|edit|react)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
@@ -210,7 +231,7 @@ fi
 # --- 1. no writes to the live backend, and no ad-hoc browser drivers ----------
 if [ -n "$scripts_writing_to_the_backend" ]; then
   block "This command runs a script that calls a WRITE method on the REAL backend — its own
-port (8420) or the app server that relays to it (4321 / a tailnet name):
+port (19420) or the app server that relays to it (19440 / a tailnet name):
    ${scripts_writing_to_the_backend# }
 
 Reading the live backend is fine — inspect all the real data you need. Writing is
@@ -247,7 +268,7 @@ src/bin/server.rs, and web/write-token.ts for the endpoint that serves the page)
 It is published for the user's own frontends — the browser page and the TUI — and
 was not handed to you. Nothing you legitimately need requires it:
 
-  read real data     TEAMS_LITE_READ_ONLY=1 cargo run --bin server   (ws on 8430)
+  read real data     TEAMS_LITE_READ_ONLY=1 cargo run --bin server   (ws on 19430)
   exercise a write   cd web && bun run preview                       (mock backend)
 
 If a real send is genuinely wanted, ask the user: consent is per-message."
@@ -276,7 +297,11 @@ bodies. If mail SENDING is genuinely wanted, it is a deliberate feature with its
 consent gate — ask the user, do not improvise it here."
 fi
 
-if command_line_sans_tracked_paths | grep -qiE 'playwright|puppeteer|chrome-linux64/chrome|chromium' ||
+# `probing_processes` exempts only the COMMAND-LINE half: a `pgrep`/`pkill` that names
+# a browser drives nothing. The script-contents half stays unexempted on purpose, so
+# `pkill -f chrome; bun run /tmp/driver.ts` is still blocked by the driver inside it.
+if { command_line_sans_tracked_paths | grep -qiE 'playwright|puppeteer|chrome-linux64/chrome|chromium' &&
+  ! probing_processes; } ||
   [ -n "$scripts_driving_a_browser" ]; then
   if ! sanctioned_automation; then
     [ -n "$scripts_driving_a_browser" ] &&
@@ -309,7 +334,7 @@ if ! stopping_a_process &&
 has no default in dev, and \`bun run dev\` is the user's own live-account shortcut —
 neither is yours to start.
 
-  cd web && bun run dev:mock     # mock backend on 8455 + vite on 4455 (use this)
+  cd web && bun run dev:mock     # mock backend on 19455 + vite on 19445 (use this)
 
 The user runs \`bun run dev\` themselves for hands-on work against their account.
 (The dev build also refuses to start without the variable; this hook stops you
@@ -317,17 +342,51 @@ earlier, before a dev server exists that something could drive.)"
   fi
 fi
 
+# --- 2a. the PRODUCTION web server must name its backend too -------------------
+# `web/server.ts` is not a static-file server: it relays every WebSocket upgrade to
+# whatever `TEAMS_LITE_WS_URL` names, and that variable DEFAULTS to the live backend
+# (web/server.ts). So `bun run start` with a bare environment builds the same
+# unnamed-backend bridge rule 2 exists to forbid, one directory over. The always-on
+# service states the variable in its unit file; a command line must state it too.
+if ! stopping_a_process &&
+  printf '%s' "$command_line" | grep -qE '(bun run start|bun[^;&|]*web/server\.ts)([^:]|$)'; then
+  if ! printf '%s' "$command_line" | grep -q 'TEAMS_LITE_WS_URL'; then
+    block "The production web server must state which backend it relays to. TEAMS_LITE_WS_URL
+defaults to the LIVE backend (see web/server.ts), so starting it bare puts a bridge
+to the user's real account on a local port.
+
+  cd web && bun run preview                       # mock backend, screenshots
+  TEAMS_LITE_WS_URL=ws://127.0.0.1:19430 bun run start   # read-only backend
+
+The user's own always-on instance is a systemd unit that names it explicitly; see
+bin/teams-lite-service.sh and AGENTS.md § The always-on service."
+  fi
+fi
+
 # --- 3. the backend an agent starts must be read-only ------------------------
-# The compiled binary is matched only where a shell would RUN it — at the start of a
-# command, after a separator, or behind `nohup`/`exec`/`env`. Text that merely names
-# the path (a commit message about it, a doc line, a `--bin server` in prose) starts
-# nothing, and a guard that fires on prose is one whose next reader learns to write
-# around it. `cargo run --bin server` and the dev launcher stay matched anywhere:
-# those spellings do not appear by accident.
-runs_the_backend_binary='(^|[;&|])[[:space:]]*((nohup|exec|env|sudo)[[:space:]]+)*[A-Za-z0-9_./-]*target/(debug|release)/server([[:space:]]|$)'
+# The binary and the launcher scripts are matched only where a shell would RUN them —
+# at the start of a command, after a separator, or behind `nohup`/`exec`/`env`/a shell.
+# Text that merely names one (a commit message, a doc line, `chmod +x` on it, a
+# `--bin server` in prose) starts nothing, and a guard that fires on prose is one
+# whose next reader learns to write around it. `cargo run --bin server` stays matched
+# anywhere: that spelling does not appear by accident.
+#
+# TWO PATHS, not one. `target/(debug|release)/server` is the build output; the
+# always-on service runs a STAGED copy outside the checkout
+# (~/.local/share/teams-lite/service/server, see bin/teams-lite-service.sh), and a
+# rule that knew only about target/ would wave that one straight through.
+# The leading path may be spelled with a variable or a tilde — `$HOME/.local/...`,
+# `~/.local/...`, `"$PWD"/target/...` — so the prefix class accepts those characters
+# too. Without `$` and `~` in it, the staged path only matched when written relative.
+at_backend_command_start='(^|[;&|])[[:space:]]*((nohup|exec|env|sudo|bash|sh|zsh)[[:space:]]+)*["'\'']?[A-Za-z0-9_./~${}-]*'
+runs_the_backend_binary="${at_backend_command_start}(target/(debug|release)|teams-lite/service)/server([[:space:]]|\$)"
+# Every way of EXECUTING a launcher still matches, including through an interpreter
+# (`bash bin/teams-dev-server.sh`) — which is why the prefix list above names the
+# shells. `bash -n` is a syntax check and is exempted by `inspecting_a_file`.
+runs_a_backend_launcher="${at_backend_command_start}teams-(dev-server|lite-backend)\.sh([[:space:]]|\$)"
 if ! stopping_a_process && ! inspecting_a_file &&
   printf '%s' "$command_line" |
-  grep -qE "cargo run.*--bin server|teams-dev-server\.sh|$runs_the_backend_binary"; then
+  grep -qE "cargo run.*--bin server|$runs_a_backend_launcher|$runs_the_backend_binary"; then
   if ! printf '%s' "$command_line" | grep -q 'TEAMS_LITE_READ_ONLY=1'; then
     block "Start the backend read-only, or let the user start it. A send-capable backend
 launched by tooling is how an accidental message reaches a colleague:
@@ -335,11 +394,49 @@ launched by tooling is how an accidental message reaches a colleague:
   TEAMS_LITE_READ_ONLY=1 cargo run --bin server
 
 That refuses send/edit/react at the dispatch choke point (src/bin/server.rs) AND
-listens on 8430 instead of 8420, so it never takes the port the user's own backend
-wants — they can keep \`teams-back\`/\`teams-web\` running while you inspect real data
-on ws://127.0.0.1:8430. If you genuinely need a send-capable backend, ask the user
+listens on 19430 instead of 19420, so it never takes the port the user's own backend
+wants — they can keep the always-on service running while you inspect real data
+on ws://127.0.0.1:19430. If you genuinely need a send-capable backend, ask the user
 to start it themselves."
   fi
+fi
+
+# --- 3a. the always-on service is the user's to start -------------------------
+# The service turns "start a send-capable backend" into one systemctl call, which
+# rule 3 cannot see: no binary path, no `cargo run`, no TEAMS_LITE_READ_ONLY to
+# offer, because a unit carries its environment in its own file. So this rule blocks
+# the START verbs by name and unconditionally.
+#
+# Everything that only LOOKS or STOPS stays allowed, deliberately — `status`, `cat`,
+# `show`, `list-units`, `is-active`, `daemon-reload`, `disable`, `stop`, and every
+# `journalctl` — because installing and diagnosing the service IS agent work, and a
+# guard that blocked the diagnosis would teach its next reader to phrase around it.
+# `install` and `update` in bin/teams-lite-service.sh deliberately never start a
+# unit, for the same reason; its `start`/`restart` subcommands are matched here.
+# Both patterns are anchored to a command position — the start of the line, or
+# after a separator — so that PROSE naming the same words runs nothing: a commit
+# message ("chore: systemctl --user start teams-lite at boot") must stay allowed,
+# for the same reason `ls target/debug/server` does.
+at_command_start='(^|[;&|])[[:space:]]*((nohup|exec|env|sudo)[[:space:]]+)*'
+starts_a_teams_lite_unit="${at_command_start}systemctl[^;&|]*[[:space:]](start|restart|try-restart|reload-or-restart|enable)([[:space:]][^;&|]*)?teams-lite"
+runs_service_script_start="${at_command_start}[A-Za-z0-9_./-]*teams-lite-service\.sh[[:space:]]+[^;&|]*(start|restart|enable)"
+if printf '%s' "$command_line" | grep -qE "$starts_a_teams_lite_unit|$runs_service_script_start"; then
+  block "The always-on teams-lite service is the user's to start. Its backend unit is
+send-capable by design — it is their real Teams client, running 24/7 — so a
+\`systemctl --user start\` on it is the same act rule 3 refuses, just spelled with
+systemd instead of a binary path.
+
+Install and inspect it freely; starting it is the user's call:
+
+  bin/teams-lite-service.sh install     # stage artifacts + write the units (starts nothing)
+  bin/teams-lite-service.sh status      # unit state, ports, broker, tailscale
+  journalctl --user -u teams-lite-backend -n 200 --no-pager
+
+Then ask the user to run:
+
+  systemctl --user enable --now teams-lite.target
+
+To exercise the app yourself, use the mock: cd web && bun run preview."
 fi
 
 exit 0

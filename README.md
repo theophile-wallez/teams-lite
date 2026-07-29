@@ -132,7 +132,7 @@ It ships **inside** the single `teams` binary — no extra install, no Node, no
 
 | Flag             | Description                                             |
 | ---------------- | ------------------------------------------------------- |
-| `--port <n>`     | Port to serve the web UI on (default `4321`)            |
+| `--port <n>`     | Port to serve the web UI on (default `19440`)            |
 | `--host <h>`     | Host/interface to bind (default `127.0.0.1`)            |
 | `--no-open`      | Don't open the browser automatically                    |
 
@@ -146,12 +146,12 @@ itself keeps listening on loopback only:
 
 ```bash
 # on the machine running teams-lite
-tailscale serve --bg --https=8443 http://127.0.0.1:4321
+tailscale serve --bg --https=8443 http://127.0.0.1:19440
 # then open https://<machine>.<tailnet>.ts.net:8443 on the phone
 ```
 
 The page notices it was not served from the backend's own machine and asks the
-web server to relay the WebSocket instead of dialling `127.0.0.1:8420` — which,
+web server to relay the WebSocket instead of dialling `127.0.0.1:19420` — which,
 from a phone, would be the phone. That relay lives in `web/server.ts` (and as a
 Vite proxy in dev), so exactly one port is ever exposed, over Tailscale's own
 authenticated HTTPS.
@@ -164,6 +164,53 @@ Two things worth knowing before you do it:
   publishes it to the whole internet.
 - A backgrounded mobile tab has its timers frozen and its socket dropped; the app
   reconnects when you come back to it rather than showing "backend lost".
+
+### Always on (systemd service)
+
+`teams --web` lives as long as your terminal does. To keep the app reachable from
+your phone at any hour — including after a reboot, with no session open — install it
+as a pair of **systemd user services**:
+
+```bash
+bin/teams-lite-service.sh install     # build, stage, write the units
+bin/teams-lite-service.sh tailscale   # publish it on your tailnet over HTTPS
+systemctl --user enable --now teams-lite.target   # start it (and at every boot)
+```
+
+| Unit                         | What it runs                                        |
+| ---------------------------- | --------------------------------------------------- |
+| `teams-lite-backend.service` | the Rust backend on `ws://127.0.0.1:19420`          |
+| `teams-lite-web.service`     | the production SSR server on `127.0.0.1:19440`      |
+| `teams-lite-broker-bus.path` | restarts the backend when the Intune container moves |
+| `teams-lite.target`          | one handle for all of the above                      |
+
+```bash
+bin/teams-lite-service.sh status      # units, ports, staged commit, broker, tailscale
+bin/teams-lite-service.sh logs -f     # both journals, interleaved
+bin/teams-lite-service.sh update      # rebuild, restage, restart what is running
+bin/teams-lite-service.sh uninstall   # remove the units (keeps your data)
+```
+
+Worth knowing:
+
+- **It runs a promoted copy, not your working tree.** `install` and `update` build,
+  then stage the release binary and the web bundle into
+  `~/.local/share/teams-lite/service` with the commit recorded next to them. Your
+  checkout can then be rebuilt, switched or tested without changing what the service
+  serves — and it never picks up the `web/dist` an E2E run leaves behind, which is
+  built to dial a mock.
+- **`update` restarts only what is already running**, so it never starts a service you
+  chose to keep down.
+- **It survives a reboot** thanks to lingering (`loginctl enable-linger`, which
+  `status` checks) — no session needed. The `tailscale serve` mapping persists on its
+  own, in tailscaled's state.
+- **It retries forever, slowly.** If the identity broker is down, the backend fails to
+  start and systemd backs off from 5 s to 5 min rather than giving up — so a laptop
+  that comes back, or an Intune container that restarts, heals itself.
+- **Local overrides** go in `~/.config/teams-lite/backend.env` and `web.env`; an
+  update leaves both alone. Native calling is deliberately off in the service
+  (`TEAMS_LITE_CALLING=1` changes how your real calls ring across your endpoints);
+  add it there if you want it.
 
 ### Dev mode (`teams --web-dev`)
 
@@ -209,7 +256,7 @@ cd web && bun run dev             # then, in another shell: bun run mock
 #   Intune). See bin/teams-dev-server.sh:
 cd web
 bun run dev:server                # terminal 1  (real backend, authed + kept alive)
-bun run dev                       # terminal 2  (Vite HMR against :8420)
+bun run dev                       # terminal 2  (Vite HMR against :19420)
 
 # 3b. …or produce the single `teams` binary (backend + web UI embedded)
 cargo build --release --bin server
@@ -268,7 +315,7 @@ and opened in your browser). Whichever you run, the backend and the local-first
 store are identical.
 
 ```
-        ┌───────────────────────────┐        ws://127.0.0.1:8420        ┌──────────────────────┐
+        ┌───────────────────────────┐       ws://127.0.0.1:19420        ┌──────────────────────┐
         │      UI  (Bun process)     │  ─────────── JSON RPC ─────────▶  │   Backend (Rust)     │
         │  OpenTUI + Solid terminal  │                                   │                      │
         │  • renders conversations   │  ◀──────── live events ─────────  │  • auth broker (D-Bus)│

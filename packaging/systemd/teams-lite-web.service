@@ -1,0 +1,55 @@
+[Unit]
+# Installed by bin/teams-lite-service.sh, which substitutes every @token@ below.
+# Local overrides go in @CONFIG_DIR@/web.env; an update does not touch that file.
+Description=teams-lite web UI (production SSR server on 127.0.0.1:@WEB_PORT@)
+Documentation=https://github.com/theophile-wallez/teams-lite
+Documentation=file://@REPO@/README.md
+
+# Ordering only, on purpose. The web server tolerates a down backend: it closes the
+# page's socket with 1011 and the page's own backoff takes over. Requires= would stop
+# this unit too, so the phone would get a TCP refusal from Tailscale instead of the
+# app saying "backend unreachable" — losing the only diagnostic available from
+# outside the machine. BindsTo= would be worse: it would tear the web server down on
+# every ordinary backend restart.
+Wants=teams-lite-backend.service
+After=teams-lite-backend.service
+PartOf=teams-lite.target
+
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+WorkingDirectory=@SERVICE_DIR@/web
+
+# Absolute path to bun: the systemd user manager's PATH has no ~/.bun/bin, and a bare
+# `bun` fails with status 203/EXEC.
+ExecStart=@BUN@ run @SERVICE_DIR@/web/server.ts
+
+# web/server.ts reads these three.
+Environment=PORT=@WEB_PORT@
+# Loopback only, always. `tailscale serve` proxies the tailnet HTTPS port to
+# 127.0.0.1:@WEB_PORT@ from this same host, so nothing needs a public interface — and
+# this server hands out the backend's write token and relays WebSockets to a
+# send-capable backend. Binding 0.0.0.0 would publish the user's Teams account to
+# anything that can reach the port.
+Environment=HOST=127.0.0.1
+# Stated rather than left to the default, so the topology is readable here and a
+# backend on another port is a one-line change.
+Environment=TEAMS_LITE_WS_URL=ws://127.0.0.1:@BACKEND_PORT@
+
+EnvironmentFile=-@CONFIG_DIR@/web.env
+
+Restart=always
+RestartSec=2
+RestartSteps=5
+RestartMaxDelaySec=60
+
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=teams-lite-web
+
+[Install]
+WantedBy=teams-lite.target

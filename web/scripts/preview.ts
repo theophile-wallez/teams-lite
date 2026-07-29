@@ -47,10 +47,10 @@ import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
 
 /** The real backend's port. Nothing here may ever talk to it. */
-const BACKEND_PORT = 8420;
+const BACKEND_PORT = 19420;
 /** Ports for our own throwaway mock + dev server (override via env if taken). */
-const MOCK_PORT = Number(process.env.PREVIEW_MOCK_PORT ?? 8455);
-const WEB_PORT = Number(process.env.PREVIEW_WEB_PORT ?? 4455);
+const MOCK_PORT = Number(process.env.PREVIEW_MOCK_PORT ?? 19456);
+const WEB_PORT = Number(process.env.PREVIEW_WEB_PORT ?? 19446);
 const WEB_ORIGIN = `http://127.0.0.1:${WEB_PORT}`;
 const MOCK_WS_URL = `ws://127.0.0.1:${MOCK_PORT}`;
 

@@ -316,9 +316,9 @@ describe("Backend reconnect", () => {
 describe("backendUrlForPage", () => {
   it("keeps the page's own host, so a remote device reaches this machine's backend", () => {
     // The point of going through the page's origin: on a phone opening the app
-    // over Tailscale, ws://127.0.0.1:8420 would be the phone itself.
-    expect(backendUrlForPage({ protocol: "http:", host: "theophile-remote:4321" })).toBe(
-      "ws://theophile-remote:4321/__backend",
+    // over Tailscale, ws://127.0.0.1:19420 would be the phone itself.
+    expect(backendUrlForPage({ protocol: "http:", host: "theophile-remote:19440" })).toBe(
+      "ws://theophile-remote:19440/__backend",
     );
   });
 
@@ -338,27 +338,27 @@ describe("backendUrlForPage", () => {
 
 describe("needsRelay", () => {
   it("is true only for a loopback backend seen from another device", () => {
-    expect(needsRelay("ws://127.0.0.1:8420", { hostname: "theophile-remote.ts.net" })).toBe(true);
-    expect(needsRelay("ws://localhost:8420", { hostname: "100.80.26.90" })).toBe(true);
+    expect(needsRelay("ws://127.0.0.1:19420", { hostname: "theophile-remote.ts.net" })).toBe(true);
+    expect(needsRelay("ws://localhost:19420", { hostname: "100.80.26.90" })).toBe(true);
   });
 
   it("leaves a page on this machine talking to the backend directly", () => {
-    expect(needsRelay("ws://127.0.0.1:8420", { hostname: "localhost" })).toBe(false);
-    expect(needsRelay("ws://127.0.0.1:8420", { hostname: "127.0.0.1" })).toBe(false);
+    expect(needsRelay("ws://127.0.0.1:19420", { hostname: "localhost" })).toBe(false);
+    expect(needsRelay("ws://127.0.0.1:19420", { hostname: "127.0.0.1" })).toBe(false);
   });
 
   it("never redirects a backend that is already remote — the mock stays the mock", () => {
     // A configured non-loopback backend was named on purpose; relaying it would
     // quietly retarget the page at whatever the serving host proxies to.
-    expect(needsRelay("ws://mock.internal:8455", { hostname: "theophile-remote.ts.net" })).toBe(
+    expect(needsRelay("ws://mock.internal:19455", { hostname: "theophile-remote.ts.net" })).toBe(
       false,
     );
     expect(needsRelay("not a url", { hostname: "theophile-remote.ts.net" })).toBe(false);
   });
 
   it("has nothing to decide without a page (SSR)", () => {
-    expect(needsRelay("ws://127.0.0.1:8420", null)).toBe(false);
-    expect(needsRelay("ws://127.0.0.1:8420", { hostname: "" })).toBe(false);
+    expect(needsRelay("ws://127.0.0.1:19420", null)).toBe(false);
+    expect(needsRelay("ws://127.0.0.1:19420", { hostname: "" })).toBe(false);
   });
 });
 

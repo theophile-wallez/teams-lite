@@ -23,14 +23,14 @@ function resolveChromium(): string | undefined {
   return undefined;
 }
 
-// The mock's port must NEVER default to 8420: that is the real backend's port, and
+// The mock's port must NEVER default to 19420: that is the real backend's port, and
 // with `reuseExistingServer` on outside CI the suite would silently "reuse" a
 // running dev backend and send real messages to real people. It did, once.
-const MOCK_PORT = process.env.E2E_MOCK_PORT ?? "8461";
-const WEB_PORT = process.env.E2E_WEB_PORT ?? "4399";
+const MOCK_PORT = process.env.E2E_MOCK_PORT ?? "19457";
+const WEB_PORT = process.env.E2E_WEB_PORT ?? "19447";
 // The app's WebSocket target is baked at BUILD time, so it must be derived from
 // MOCK_PORT here. Moving the mock's port without this is exactly how the suite
-// ended up driving a real account: the mock moved, the app kept dialing 8420.
+// ended up driving a real account: the mock moved, the app kept dialing 19420.
 const MOCK_WS_URL = `ws://127.0.0.1:${MOCK_PORT}`;
 const executablePath = resolveChromium();
 
@@ -84,7 +84,17 @@ export default defineConfig({
       timeout: 180_000,
       // VITE_TEAMS_WS_URL is consumed by the BUILD (baked into the client bundle),
       // which is why it must be set here and not just for the mock process.
-      env: { PORT: WEB_PORT, HOST: "127.0.0.1", VITE_TEAMS_WS_URL: MOCK_WS_URL },
+      //
+      // That is also why this run leaves a bundle behind that must never be served
+      // to a real user: it dials the mock. The build records the pin and
+      // `web/server.ts` refuses such a bundle — so THIS harness, the one that meant
+      // it, is the one place that opts back in (see web/build-info.ts).
+      env: {
+        PORT: WEB_PORT,
+        HOST: "127.0.0.1",
+        VITE_TEAMS_WS_URL: MOCK_WS_URL,
+        TEAMS_LITE_ALLOW_PINNED_BUILD: "1",
+      },
       stdout: "ignore",
       stderr: "pipe",
     },

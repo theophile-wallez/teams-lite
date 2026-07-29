@@ -1,0 +1,20 @@
+[Unit]
+# One handle for the whole feature:
+#   systemctl --user enable --now teams-lite.target
+#   systemctl --user restart teams-lite.target
+#   systemctl --user status teams-lite.target
+Description=teams-lite (backend + production web UI)
+Documentation=https://github.com/theophile-wallez/teams-lite
+Documentation=file://@REPO@/README.md
+
+# Wants= pulls the members in when the target starts. What makes a target RESTART
+# reach them is `PartOf=teams-lite.target` on each member — a target on its own has
+# no members, so without that line a restart here would do nothing at all.
+Wants=teams-lite-backend.service
+Wants=teams-lite-web.service
+Wants=teams-lite-broker-bus.path
+After=teams-lite-backend.service
+After=teams-lite-web.service
+
+[Install]
+WantedBy=default.target

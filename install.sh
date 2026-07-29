@@ -72,21 +72,34 @@ install -m 0755 "$tmp" "$BIN_DIR/teams-bin"
 #        • Containerized Intune: the broker runs as the same host user inside a
 #          rootless container, on the container's own bus (/run/user/0/bus). That
 #          socket is reachable unprivileged from the host via
-#          /proc/<broker-pid>/root/run/user/0/bus, so we just point
+#          /proc/<container-pid>/root/run/user/0/bus, so we just point
 #          DBUS_SESSION_BUS_ADDRESS at it and connect directly.
 #      Detection is automatic; if no broker is found we still launch and let the
 #      binary surface its own error.
+#
+#      This is a self-contained COPY of bin/broker-env.sh, because an installed
+#      binary has no repo to source it from. bin/broker-env.sh is the source of
+#      truth and carries the full explanation — in particular why the CONTAINER,
+#      not the broker process, is the handle: the broker is D-Bus activated, so
+#      most of the time no broker process exists to find.
 cat > "$BIN_DIR/teams" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
 TEAMS_BIN="$BIN_DIR/teams-bin"
-BROKER_MATCH='identity-broker/bin/microsoft-identity-broker'
 BROKER_DBUS_NAME='com.microsoft.identity.broker1'
+CONTAINER_STATE="\${TEAMS_LITE_CONTAINER_STATE:-\$HOME/.local/share/intune-container/rootless.json}"
 
 launch() {
   cd "$BIN_DIR" || exit 1
   exec "\$TEAMS_BIN" "\$@"
+}
+
+# Does a bus carry the broker name — owned, or merely activatable?
+broker_on_bus() {
+  command -v busctl >/dev/null 2>&1 || return 1
+  busctl --address="\$1" --list --no-legend 2>/dev/null |
+    awk '{print \$1}' | grep -qx "\$BROKER_DBUS_NAME"
 }
 
 # Topology 1 — classic Intune: broker name already on our host session bus.
@@ -95,22 +108,25 @@ if command -v busctl >/dev/null 2>&1 &&
   launch "\$@"
 fi
 
-# Topology 2 — containerized Intune: connect directly to the in-container bus.
-BROKER_PID="\$(pgrep -f "\$BROKER_MATCH" | head -1 || true)"
-if [ -z "\$BROKER_PID" ]; then
-  echo "teams-lite: identity broker not found — start Intune first. Launching" \\
-       "anyway; sign-in will fail if the broker stays down." >&2
-  launch "\$@"
-fi
+# Topology 2 — containerized Intune: the container's own bus, reached through
+# /proc. The container leader first (it lives as long as the container), then any
+# process that runs inside it.
+for pid in \
+  "\$(grep -o '"leader"[[:space:]]*:[[:space:]]*[0-9]\\+' "\$CONTAINER_STATE" 2>/dev/null | grep -o '[0-9]\\+\$' || true)" \
+  \$(pgrep -f 'identity-broker/bin/microsoft-identity' 2>/dev/null || true) \
+  \$(pgrep -f 'intune/bin/intune-daemon' 2>/dev/null || true); do
+  [ -n "\$pid" ] || continue
+  bus="/proc/\$pid/root/run/user/0/bus"
+  [ -S "\$bus" ] || continue
+  if broker_on_bus "unix:path=\$bus"; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=\$bus"
+    launch "\$@"
+  fi
+done
 
-BROKER_BUS="/proc/\$BROKER_PID/root/run/user/0/bus"
-if [ ! -S "\$BROKER_BUS" ]; then
-  echo "teams-lite: broker \$BROKER_PID has no reachable bus at \$BROKER_BUS —" \\
-       "launching directly (sign-in may fail)." >&2
-  launch "\$@"
-fi
-
-export DBUS_SESSION_BUS_ADDRESS="unix:path=\$BROKER_BUS"
+echo "teams-lite: identity broker not found on this session bus and no Intune" \\
+     "container was found — start Intune first. Launching anyway; sign-in will" \\
+     "fail while the broker stays unreachable." >&2
 launch "\$@"
 EOF
 chmod 0755 "$BIN_DIR/teams"

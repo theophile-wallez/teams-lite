@@ -5,8 +5,7 @@
 // which properties a real event carries (all-day, recurring, Teams online meeting,
 // response status, categories…).
 //
-//   DBUS_SESSION_BUS_ADDRESS="unix:path=/proc/$(pgrep -f \
-//     identity-broker/bin/microsoft-identity-broker|head -1)/root/run/user/0/bus" \
+//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
 //     cargo run --example calendar_recon -- 2026-07-01T00:00:00Z 2026-08-01T00:00:00Z
 //
 // READS ONLY, and prints SHAPE, never content: property names, types, counts and

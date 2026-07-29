@@ -1,0 +1,74 @@
+[Unit]
+# Installed by bin/teams-lite-service.sh, which substitutes every @token@ below.
+# Do not hand-edit the installed copy: `teams-lite-service.sh update` rewrites it.
+# Put local overrides in @CONFIG_DIR@/backend.env, which is read below and is not
+# touched by an update.
+Description=teams-lite backend (Teams/Outlook bridge on ws://127.0.0.1:@BACKEND_PORT@)
+Documentation=https://github.com/theophile-wallez/teams-lite
+Documentation=file://@REPO@/README.md
+
+# The backend's first action is a broker token call over D-Bus, so the Intune
+# container has to be up. Wants=, not Requires=: the container unit is a
+# Type=oneshot that stays "active (exited)", and retrying beats refusing to start.
+Wants=intune-container.service
+After=intune-container.service
+
+# A container restart mints a new leader PID, and the broker's bus path embeds that
+# PID (see bin/broker-env.sh). The address is re-read per token call but from the
+# process environment, which is frozen after exec — so the only way to pick up a new
+# bus is to restart. PartOf= propagates a restart of the container unit here.
+# teams-lite-broker-bus.path covers the other case: the container restarting itself
+# without its unit changing state.
+PartOf=intune-container.service
+PartOf=teams-lite.target
+
+# Retry forever, and never latch to "failed". A broker that is briefly unreachable
+# makes start-time authentication fail, and the whole point of this unit is that it
+# comes back on its own. Note the section: StartLimit* belongs in [Unit], and a copy
+# of it under [Service] is silently ignored.
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+WorkingDirectory=@SERVICE_DIR@
+
+# A wrapper, not the binary: the broker's bus address has to be resolved at every
+# start, and systemd's Environment= is static. The wrapper execs the binary, so this
+# process stays the unit's MainPID.
+ExecStart=@SERVICE_DIR@/teams-lite-backend.sh
+
+# MANDATORY. Without it the backend exits ~10 s after the last frontend disconnects
+# (30 s if none ever connected) — which for a service means seconds after every
+# start, in a permanent restart loop.
+Environment=TEAMS_NO_IDLE_EXIT=1
+# Stated explicitly so a stray TEAMS_LITE_READ_ONLY in the environment cannot move
+# the listener to the read-only port and leave the web unit talking to nothing.
+Environment=TEAMS_LITE_PORT=@BACKEND_PORT@
+
+# Local overrides, e.g. TEAMS_LITE_CALLING=1. The "-" makes a missing file harmless.
+# Deliberately NOT set here: TEAMS_LITE_CALLING (it re-routes how the user's real
+# calls ring across their endpoints), TEAMS_LITE_CALL_DEBUG and
+# TEAMS_LITE_CALL_CAPTURE (they write call identities, SDP and session keys, and this
+# host keeps the journal for weeks).
+EnvironmentFile=-@CONFIG_DIR@/backend.env
+
+Restart=always
+RestartSec=5
+# Walk 5 s -> 300 s over six steps, then stay there: a broker outage then costs a
+# dozen retries an hour instead of several hundred. Both directives are required —
+# each is ignored without the other.
+RestartSteps=6
+RestartMaxDelaySec=300
+
+# The backend installs no signal handler, so SIGTERM stops it at once. Nothing needs
+# a drain: SQLite runs in WAL mode with per-request commits, so an abrupt stop can
+# lose nothing that was acknowledged.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=teams-lite-backend
+
+[Install]
+WantedBy=teams-lite.target

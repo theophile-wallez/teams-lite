@@ -32,7 +32,7 @@ type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
 type EventHandler = (data: unknown) => void;
 
 /** Where the local Rust backend listens, for a process with no page to ask. */
-const PRODUCTION_WS_URL = "ws://127.0.0.1:8420";
+const PRODUCTION_WS_URL = "ws://127.0.0.1:19420";
 
 /** Hosts that mean "the machine this page came from is also the backend's". */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"]);
@@ -55,7 +55,7 @@ function pointsAtLoopback(url: string): boolean {
  * The backend endpoint on the origin that served this page — `loc` is normally
  * `globalThis.location` — or null when there is no page (SSR).
  *
- * A page opened from another device cannot dial `ws://127.0.0.1:8420` itself, even
+ * A page opened from another device cannot dial `ws://127.0.0.1:19420` itself, even
  * though that is where the backend listens: "localhost" only means the backend for
  * a browser running on the same machine as it. Open the app from a phone — over
  * Tailscale, say — and 127.0.0.1 is the phone; over an `https:` origin the browser
@@ -127,7 +127,7 @@ export function defaultWsUrl(): string {
     throw new Error(
       "VITE_TEAMS_WS_URL is not set. A dev server must name its backend explicitly — " +
         "there is no default in dev, so that nothing can reach the real Teams account by " +
-        `accident. Use the mock (bun run dev:mock, or VITE_TEAMS_WS_URL=ws://127.0.0.1:8455) ` +
+        `accident. Use the mock (bun run dev:mock, or VITE_TEAMS_WS_URL=ws://127.0.0.1:19455) ` +
         `for anything automated; pass VITE_TEAMS_WS_URL=${PRODUCTION_WS_URL} only for hands-on ` +
         "work against your own account.",
     );

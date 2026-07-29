@@ -2,17 +2,20 @@
 //
 // Plugin order matters: tsconfig paths -> tailwind -> tanstackStart -> react
 // (react's plugin MUST come after Start's, per the TanStack Start docs).
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import tsConfigPaths from "vite-tsconfig-paths";
 import tailwindcss from "@tailwindcss/vite";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { WRITE_TOKEN_ROUTE, writeTokenResponse } from "./write-token";
+import { BUILD_INFO_FILE, type BuildInfo } from "./build-info";
 import { BACKEND_WS_ROUTE } from "./src/lib/backend-route";
 
 // The dev server port for `vite dev`. The production server reads PORT at
 // runtime (see server.ts / the Nitro output), so this only affects local dev.
-const DEV_PORT = Number(process.env.PORT ?? 4321);
+const DEV_PORT = Number(process.env.PORT ?? 19440);
 // The dev server host. `teams --web-dev` sets HOST to bind the same interface as
 // the production launcher; unset lets Vite pick its default (localhost).
 const DEV_HOST = process.env.HOST || undefined;
@@ -33,6 +36,36 @@ function writeTokenPlugin(): Plugin {
         res.setHeader("content-type", response.headers.get("content-type") ?? "text/plain");
         res.end(await response.text());
       });
+    },
+  };
+}
+
+/**
+ * Records what the build was pinned to, so the production server can refuse to
+ * serve a bundle that was built for a test (see build-info.ts for the whole trap).
+ * `VITE_TEAMS_WS_URL` is compiled INTO the client, and nothing in the output
+ * directory afterwards reveals that — this file is what reveals it.
+ *
+ * `writeBundle` on the client build only: it runs once the assets are on disk, and
+ * the server build writes into the same `dist/` from a sibling directory.
+ */
+function buildInfoPlugin(): Plugin {
+  return {
+    name: "teams-lite-build-info",
+    apply: "build",
+    writeBundle(options) {
+      const dir = options.dir;
+      // Client output is dist/client, server output dist/server. Write one file at
+      // dist/ level, from whichever finishes: both carry the same information.
+      if (!dir) return;
+      const distDir = join(dir, "..");
+      const info: BuildInfo = {
+        pinnedBackend: process.env.VITE_TEAMS_WS_URL?.trim() || null,
+        builtAt: new Date().toISOString(),
+        commit: process.env.TEAMS_BUILD_REV?.trim() || null,
+      };
+      mkdirSync(distDir, { recursive: true });
+      writeFileSync(join(distDir, BUILD_INFO_FILE), `${JSON.stringify(info, null, 2)}\n`);
     },
   };
 }
@@ -62,7 +95,7 @@ export default defineConfig(({ command }) => ({
     // Fail on a taken port instead of quietly taking the next one. Everything that
     // points at this server names its port exactly — a Tailscale proxy, a phone's
     // bookmark, the E2E suite, `scripts/preview.ts` — so drifting to 4322 does not
-    // degrade gracefully: it leaves those pointing at whatever else is on 4321.
+    // degrade gracefully: it leaves those pointing at whatever else is on 19440.
     strictPort: true,
   },
   ssr: {
@@ -80,6 +113,7 @@ export default defineConfig(({ command }) => ({
   },
   plugins: [
     writeTokenPlugin(),
+    buildInfoPlugin(),
     tsConfigPaths({ projects: ["./tsconfig.json"] }),
     tailwindcss(),
     tanstackStart(),

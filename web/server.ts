@@ -10,16 +10,18 @@
 // self-contained so the `teams --web` launcher can run it in-process with the
 // embedded Bun runtime, preserving the single-binary promise.
 //
-// Env: PORT (default 4321), HOST (default 127.0.0.1),
-//      TEAMS_LITE_WS_URL (default ws://127.0.0.1:8420 — the backend to relay to).
+// Env: PORT (default 19440), HOST (default 127.0.0.1),
+//      TEAMS_LITE_WS_URL (default ws://127.0.0.1:19420 — the backend to relay to).
 
 import { existsSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { WRITE_TOKEN_ROUTE, writeTokenResponse } from "./write-token";
+import { readBuildInfo, refuseToServeReason } from "./build-info";
 
 const here = import.meta.dir;
-const clientDir = join(here, "dist", "client");
-const serverEntry = join(here, "dist", "server", "server.js");
+const distDir = join(here, "dist");
+const clientDir = join(distDir, "client");
+const serverEntry = join(distDir, "server", "server.js");
 
 if (!existsSync(serverEntry)) {
   console.error(
@@ -28,11 +30,22 @@ if (!existsSync(serverEntry)) {
   process.exit(1);
 }
 
+// Refuse a bundle built against a pinned backend — an E2E build, in practice. It
+// would send the page to that backend instead of this machine's, and nothing about
+// the directory shows it (see build-info.ts). Exit rather than warn: a service that
+// starts anyway is a service whose logs nobody reads until the phone misbehaves.
+const buildInfo = readBuildInfo(distDir);
+const refusal = refuseToServeReason(buildInfo, process.env);
+if (refusal) {
+  console.error(`[teams-web] refusing to serve this build: ${refusal}`);
+  process.exit(1);
+}
+
 const { default: ssr } = (await import(serverEntry)) as {
   default: { fetch: (request: Request) => Response | Promise<Response> };
 };
 
-const port = Number(process.env.PORT ?? 4321);
+const port = Number(process.env.PORT ?? 19440);
 const hostname = process.env.HOST ?? "127.0.0.1";
 
 /**
@@ -41,9 +54,9 @@ const hostname = process.env.HOST ?? "127.0.0.1";
  * Loopback by default, because that is the only interface the backend binds
  * (`bind_addr()` in `src/bin/server.rs`) and the only one it should: reaching it
  * means reaching the user's Teams account. Overridable so a read-only backend can
- * be put behind the app instead (`TEAMS_LITE_READ_ONLY=1` listens on 8430).
+ * be put behind the app instead (`TEAMS_LITE_READ_ONLY=1` listens on 19430).
  */
-const backendWsUrl = process.env.TEAMS_LITE_WS_URL?.trim() || "ws://127.0.0.1:8420";
+const backendWsUrl = process.env.TEAMS_LITE_WS_URL?.trim() || "ws://127.0.0.1:19420";
 
 /** Per-connection state for one page socket relayed to the backend. */
 type Relay = {
@@ -62,7 +75,15 @@ const MAX_FRAME_BYTES = 128 * 1024 * 1024;
 // path traversal. Returns null when there is no matching static asset.
 function staticFileFor(pathname: string): string | null {
   if (pathname === "/" || pathname === "") return null;
-  const rel = normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, "");
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    // A malformed escape (`/%ZZ`) throws URIError. Answer "no such asset" and let
+    // SSR render its 404, rather than letting a 500 out of the fetch handler.
+    return null;
+  }
+  const rel = normalize(decoded).replace(/^(\.\.[/\\])+/, "");
   const full = join(clientDir, rel);
   if (!full.startsWith(clientDir)) return null;
   return existsSync(full) ? full : null;
@@ -164,3 +185,10 @@ const server = Bun.serve<Relay>({
 console.log(
   `[teams-web] serving on http://${server.hostname}:${server.port} (backend ${backendWsUrl})`,
 );
+// Name the artifact in the log too: the always-on service runs a STAGED copy of
+// this bundle (bin/teams-lite-service.sh), so "which build is live" is a question
+// the journal has to be able to answer.
+if (buildInfo) {
+  const commit = buildInfo.commit ? ` commit ${buildInfo.commit.slice(0, 12)}` : "";
+  console.log(`[teams-web] bundle built ${buildInfo.builtAt}${commit}`);
+}

@@ -22,10 +22,11 @@
 //
 // Run it (from the web/ directory):
 //   export PATH="$HOME/.bun/bin:$PATH"
-//   PORT=8420 bun run mock/server.ts
+//   PORT=19455 bun run mock/server.ts
 //
-// It listens on ws://127.0.0.1:PORT (PORT defaults to 8420). Point the UI at it
-// with VITE_TEAMS_WS_URL=ws://127.0.0.1:8420 (that is already the default URL).
+// It listens on ws://127.0.0.1:PORT (PORT defaults to 19455, the dev/E2E mock port —
+// deliberately NOT the real backend's 19420, so a mock can never be mistaken for it).
+// Point the UI at it with VITE_TEAMS_WS_URL=ws://127.0.0.1:19455.
 //
 // This file has no dependencies beyond the Bun runtime. Everything below —
 // types, seed data, PRNG, protocol handling — is self-contained on purpose, so
@@ -187,7 +188,7 @@ type ReplyTo = {
 // Constants.
 // ---------------------------------------------------------------------------
 
-const PORT = Number(process.env.PORT ?? 8420);
+const PORT = Number(process.env.PORT ?? 19455);
 const HOST = "127.0.0.1";
 
 /** Matches teams_read::DEFAULT_PAGE_SIZE (see src/bin/server.rs tests). */

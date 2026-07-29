@@ -68,14 +68,19 @@ use teams_lite::gitlab;
 
 /// The port the user's own backend owns: what `teams`, `teams-web` and the TUI
 /// dial by default.
-const DEFAULT_PORT: u16 = 8420;
+///
+/// Every teams-lite port sits in one 194xx block, chosen because nothing registers
+/// it and it stays below the ephemeral range (`net.ipv4.ip_local_port_range` starts
+/// at 32768), so an outbound connection can never borrow it first. The full map
+/// lives in AGENTS.md § Ports; keep the two in step.
+const DEFAULT_PORT: u16 = 19420;
 /// Where a READ-ONLY backend listens instead, unless `TEAMS_LITE_PORT` says
 /// otherwise. A separate port by default so a read-only instance — the one tooling
 /// is allowed to start — can never take the port the real one wants, and the two
-/// can run side by side: the user keeps their live app on 8420 while an agent
-/// inspects real data on 8430. They share the SQLite store safely (WAL +
+/// can run side by side: the user keeps their live app on 19420 while an agent
+/// inspects real data on 19430. They share the SQLite store safely (WAL +
 /// busy_timeout, see `store::Store::open`).
-const READ_ONLY_PORT: u16 = 8430;
+const READ_ONLY_PORT: u16 = 19430;
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) teams-lite/0.1";
 /// Give the UI ample time to connect after the server becomes ready. Authentication
@@ -764,6 +769,28 @@ fn run_legacy_cleanups(store: &Store) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // CLAIM THE PORT FIRST, before anything with a side effect.
+    //
+    // The listener used to be bound at the very end, after authentication, the store
+    // migrations and the trouter registration. A second backend started by hand
+    // therefore did all of that — including rewriting rows in the shared store, and
+    // registering the SAME endpoint id with the real-time service, which silently
+    // stole the live feed from the instance already running — and only then died on
+    // "address already in use".
+    //
+    // Binding here turns that into an immediate, obvious failure. Nothing is served
+    // yet: `accept()` runs at the end of this function, so a client that connects
+    // during authentication simply waits in the listen backlog, which is strictly
+    // better than being refused.
+    let addr = bind_addr();
+    let listener = TcpListener::bind(&addr).await.with_context(|| {
+        format!(
+            "bind {addr} — another teams-lite backend already owns this port. \
+             Stop it first (systemctl --user stop teams-lite-backend), or give this \
+             one a port of its own with TEAMS_LITE_PORT."
+        )
+    })?;
+
     eprintln!("teams-lite server — authenticating (broker)…");
     let http = reqwest::Client::builder().user_agent(UA).http1_only().build()?;
     let tokens = auth::TokenCache::new();
@@ -810,8 +837,6 @@ async fn main() -> Result<()> {
     // one-shot, best-effort: is a newer rolling `latest` build available?
     spawn_update_check(ctx.clone());
 
-    let addr = bind_addr();
-    let listener = TcpListener::bind(&addr).await.with_context(|| format!("bind {addr}"))?;
     eprintln!("[ok] server ws://{addr} — ready");
     // Say which write policy is in force, and where a frontend can pick up the
     // token — never the token itself (it must not land in a log or a scrollback).

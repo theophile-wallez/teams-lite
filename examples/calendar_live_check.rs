@@ -7,8 +7,7 @@
 // sibling of `mail_live_check.rs`: not a unit test, a hands-on verification that the
 // implementation works against the real account.
 //
-//   DBUS_SESSION_BUS_ADDRESS="unix:path=/proc/$(pgrep -f \
-//     identity-broker/bin/microsoft-identity-broker|head -1)/root/run/user/0/bus" \
+//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
 //     cargo run --example calendar_live_check -- 2026-07
 //
 // READS ONLY, and it prints STRUCTURE, never content: subjects, attendees, locations

@@ -5,8 +5,7 @@
 // reports what it found. This is the mail sibling of `broker_token.rs`: not a unit
 // test, a hands-on verification that the implementation works against the tenant.
 //
-//   DBUS_SESSION_BUS_ADDRESS="unix:path=/proc/$(pgrep -f \
-//     identity-broker/bin/microsoft-identity-broker|head -1)/root/run/user/0/bus" \
+//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
 //     cargo run --example mail_live_check
 //
 // READS ONLY, and it prints STRUCTURE, never content: subjects, senders, addresses

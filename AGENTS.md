@@ -11,7 +11,7 @@
   `server`, a script, or a direct API/WebSocket call.
 - **The one standing exception is the designated sandbox channel**
   `19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2`
-  (`http://localhost:4321/c/19%3A21d2695ae8ff4e25ace9c662e5c326cb%40thread.v2`).
+  (`http://localhost:19440/c/19%3A21d2695ae8ff4e25ace9c662e5c326cb%40thread.v2`).
   Sending there is pre-authorized — it is the only place a send is allowed without
   asking first. Treat every other channel and chat as off-limits absent explicit
   consent.
@@ -82,7 +82,7 @@ The app reads the user's Teams/Outlook calendar over Microsoft Graph
 UI change. It started the mock backend, pointed `vite dev` at it, and drove the
 app with an ad-hoc `playwright-core` script that typed into the composer and
 pressed Enter. It then restarted `vite dev` *without* `VITE_TEAMS_WS_URL`; the app
-silently reconnected to the real backend on `127.0.0.1:8420`. The next scripted
+silently reconnected to the real backend on `127.0.0.1:19420`. The next scripted
 keypress **posted three messages to two real 1:1 chats with the user's
 colleagues.** Nothing in the chain was able to notice, and the mistake was
 invisible until the screenshots came back full of real conversations.
@@ -107,8 +107,9 @@ user. Two independent mechanisms enforce that split:
   is precisely the line this draws.
 - **The hook (harness).** Blocks, before execution, any command that would write:
   ad-hoc browser drivers, scripts calling `send`/`edit`/`react` against
-  `127.0.0.1:8420`, dev servers with no declared backend, and a send-capable
-  backend started by tooling.
+  `127.0.0.1:19420`, dev servers with no declared backend, a production web server
+  with no declared backend, a send-capable backend started by tooling — including
+  `systemctl --user start` on the always-on service's units.
 
 - **Never hand-roll browser automation.** `web/scripts/preview.ts` is the only
   sanctioned way to drive the web UI: it starts its own mock, points the dev
@@ -126,22 +127,27 @@ user. Two independent mechanisms enforce that split:
   `[data-testid="backend-badge"][data-backend="mock"]`, which comes from the
   backend's own `backend_info` sentinel (only `web/mock/server.ts` emits it). No
   badge means *unproven*, which means live.
-- **A dev server must name its backend.** Use `bun run dev:mock` (mock on 8455,
-  app on 4455). `bun run dev` is the *user's* shortcut to their live account — not
+- **A dev server must name its backend.** Use `bun run dev:mock` (mock on 19455,
+  app on 19445). `bun run dev` is the *user's* shortcut to their live account — not
   yours to start. A bare `vite dev` refuses to run at all: there is no default
   backend in dev (see `defaultWsUrl` in `web/src/lib/ws-client.ts`).
 - **Start the backend read-only, or let the user start it.**
   `TEAMS_LITE_READ_ONLY=1` refuses `send`/`edit`/`react` at the dispatch choke
-  point (`src/bin/server.rs`) *and* binds **8430** instead of 8420, so it never
+  point (`src/bin/server.rs`) *and* binds **19430** instead of 19420, so it never
   competes for the port the user's own backend owns. The two run side by side on
-  the same SQLite store (WAL): the user keeps `teams-back` + `teams-web` on 8420
-  while you read real data on `ws://127.0.0.1:8430` — point a client at it with
-  `VITE_TEAMS_WS_URL=ws://127.0.0.1:8430`. `TEAMS_LITE_PORT` overrides either
+  the same SQLite store (WAL): the user's always-on service keeps 19420 while you
+  read real data on `ws://127.0.0.1:19430` — point a client at it with
+  `VITE_TEAMS_WS_URL=ws://127.0.0.1:19430`. `TEAMS_LITE_PORT` overrides either
   default.
-- **Check the port before running the E2E suite.** Its mock defaults to 8420 — the
-  real backend's port — and `reuseExistingServer` is on outside CI, so a running
-  dev backend gets "reused" and the specs send for real. `e2e/global-setup.ts`
-  aborts the run in that case; use `E2E_MOCK_PORT=8455 E2E_WEB_PORT=4455`.
+- **The always-on service is the user's to start.** `bin/teams-lite-service.sh
+  install` and `status` are yours; `systemctl --user enable --now teams-lite.target`
+  is theirs, because that backend signs in as them and can post. See § The always-on
+  service.
+- **Check the port before running the E2E suite.** `reuseExistingServer` is on
+  outside CI, so anything already listening on the suite's mock port gets adopted
+  and the specs send through it. `e2e/global-setup.ts` aborts when the answer is not
+  the mock; still pass explicit ports when another session may be running one:
+  `E2E_MOCK_PORT=19467 E2E_WEB_PORT=19468`.
 - **Screenshots are not proof of the target.** Before trusting a captured UI, look
   at *what it shows*: the mock's fixtures are in English with names like "Lucas
   Silva". Real conversations mean you were live all along.
@@ -172,7 +178,7 @@ to fix in the same change, not a note for later.
   D-Bus, real-time trouter client, local-first SQLite store, send, name resolution,
   the READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`) and the
   READ-ONLY Teams/Outlook calendar (`src/calendar.rs`).
-  Exposed over a local WebSocket (`ws://127.0.0.1:8420`).
+  Exposed over a local WebSocket (`ws://127.0.0.1:19420`).
 - Two front-ends, both talking to the backend only through that WebSocket. Local-first
   is enforced server-side; neither front-end touches the network or SQLite directly.
   - Terminal UI (`ui/`): TypeScript + Bun + OpenTUI + Solid — keyboard-first TUI, client
@@ -184,6 +190,58 @@ to fix in the same change, not a note for later.
     (`web/server.ts`) and launched via `teams --web`, which opens it in the browser
     against the same local backend. `web/mock/server.ts` is a backend mock used by the
     E2E suite.
+
+## Ports
+
+Every port lives in one 194xx block. It was picked because nothing registers those
+numbers and they sit **below** the ephemeral range (`net.ipv4.ip_local_port_range`
+starts at 32768), so an outbound connection can never borrow one first and a listener
+can never lose a race to it.
+
+| Port      | What                                              | Where the default lives |
+| --------- | ------------------------------------------------- | ----------------------- |
+| **19420** | Backend, send-capable — the user's real account    | `src/bin/server.rs` `DEFAULT_PORT` |
+| **19430** | Backend, read-only (`TEAMS_LITE_READ_ONLY=1`)      | `src/bin/server.rs` `READ_ONLY_PORT` |
+| **19440** | Web UI, production **and** `vite dev`              | `web/server.ts`, `web/vite.config.ts` |
+| 19455 / 19445 | `bun run dev:mock` — mock backend / app        | `web/package.json` |
+| 19456 / 19446 | `bun run preview` — mock backend / app         | `web/scripts/preview.ts` |
+| 19457 / 19447 | E2E — mock backend / app                       | `web/playwright.config.ts` |
+| 8443      | Tailnet HTTPS front for the web UI (`tailscale serve`) | `bin/teams-lite-service.sh` |
+
+`TEAMS_LITE_PORT` overrides the backend's, `PORT` the web server's,
+`E2E_MOCK_PORT` / `E2E_WEB_PORT` the suite's. Change a default in code and this table
+in the same commit — and check `.claude/hooks/guard-live-automation.sh`, which matches
+19420 and 19440 by number.
+
+## The always-on service
+
+The user runs teams-lite as a permanent background service, reachable from their
+phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the units.
+
+- **It runs staged artifacts, not the checkout.** `install`/`update` build, then copy
+  the release binary and the web bundle into `~/.local/share/teams-lite/service`, with
+  the commit recorded in `VERSION`. That is deliberate: a `git pull`, a rebuild, or an
+  E2E run (which rewrites `web/dist` with its mock's URL baked in) would otherwise
+  change what the service serves at a moment nobody chose.
+- **What is yours:** `install`, `update`, `units`, `status`, `logs`, `stop`,
+  `uninstall`, and every `systemctl --user status|cat|show` /
+  `journalctl --user -u …`. Diagnosing the service is normal work.
+- **What is the user's:** `systemctl --user enable --now teams-lite.target`. That
+  backend is send-capable, so the hook blocks every start/restart/enable spelling —
+  including the service script's own `start` subcommand.
+- **Two things it must never lose.** `TEAMS_NO_IDLE_EXIT=1` in the backend unit (or
+  the process exits seconds after every start, since a service has no owning
+  frontend), and `HOST=127.0.0.1` on the web unit (it serves the write token and
+  relays WebSockets to the send-capable backend, so a public bind would hand the
+  account to anything that can reach the port).
+- **The broker bus moves.** It lives at `/proc/<container-leader>/root/run/user/0/bus`
+  and that PID changes on every Intune container boot, so `bin/broker-env.sh` resolves
+  it at each start and `teams-lite-broker-bus.path` restarts the backend when
+  `rootless.json` changes. Without that the backend stays up, unauthenticated, and
+  silent.
+- **Tailscale, never Funnel.** `tailscale serve` is tailnet-only, behind Tailscale's
+  own authenticated HTTPS. `tailscale funnel` would publish the user's Teams account
+  to the internet, send included.
 
 ## Conventions
 
@@ -208,6 +266,10 @@ to fix in the same change, not a note for later.
   - Terminal UI (`ui/`): `bun test` (run in `ui/`).
   - Web app (`web/`): `bun run test` (unit) plus `bun run typecheck`; add
     `bun run test:e2e` when behavior or flows change.
+  - The automation guard (`.claude/hooks/`): `python3
+    .claude/hooks/guard-live-automation.test.py` whenever you touch the hook, a
+    launcher name, or a port. It pins both halves — what must block, and the ordinary
+    work that must not.
   - A change that only touches a frontend does not need `cargo test`, and a
     backend-only change does not need the frontend suites. When a change spans
     both (e.g. a protocol or WebSocket contract), run the suites on both sides.

@@ -10,7 +10,7 @@ type Fixtures = {
 };
 
 /** The port the mock is expected on — mirrors `playwright.config.ts`. */
-const MOCK_PORT = process.env.E2E_MOCK_PORT ?? "8461";
+const MOCK_PORT = process.env.E2E_MOCK_PORT ?? "19457";
 
 export const test = base.extend<Fixtures>({
   consoleErrors: async ({ page }, use) => {
@@ -25,7 +25,7 @@ export const test = base.extend<Fixtures>({
   // The suite sends, edits and reacts. If the app under test is talking to the
   // real backend, those are real messages to real colleagues — it has happened:
   // moving E2E_MOCK_PORT without rebuilding the app's baked WebSocket URL left the
-  // app dialing 127.0.0.1:8420, and four test strings landed in a 1:1 chat.
+  // app dialing 127.0.0.1:19420, and four test strings landed in a 1:1 chat.
   //
   // This is an AUTO fixture, and it watches the socket rather than the DOM, for one
   // reason: it must be impossible to bypass. The previous guard lived in `gotoApp`,

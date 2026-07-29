@@ -12,7 +12,12 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ensureServer } from "./server";
 
-const BACKEND_URL = "ws://127.0.0.1:8420";
+/// The backend this launcher keeps a client on. It follows `TEAMS_LITE_PORT` like
+/// `ui/src/server.ts` and `ui/src/client.ts` do: a hardcoded port here would make
+/// the keepalive dial 19420 while `ensureServer` managed a backend somewhere else,
+/// and reconnect against nothing for the whole session.
+const BACKEND_PORT = Number(process.env.TEAMS_LITE_PORT) || 19420;
+const BACKEND_URL = `ws://127.0.0.1:${BACKEND_PORT}`;
 
 export type WebOptions = {
   port: number;
@@ -23,7 +28,7 @@ export type WebOptions = {
   dev: boolean;
 };
 
-const DEFAULTS: WebOptions = { port: 4321, host: "127.0.0.1", open: true, dev: false };
+const DEFAULTS: WebOptions = { port: 19440, host: "127.0.0.1", open: true, dev: false };
 
 /**
  * Parse `teams --web|--web-dev [--port N] [--host H] [--no-open]` from argv.
@@ -178,6 +183,10 @@ export async function runWeb(options: WebOptions): Promise<void> {
   const { entry } = await resolveWebRoot();
   process.env.PORT = String(options.port);
   process.env.HOST = options.host;
+  // Name the backend the page's socket is relayed to. web/server.ts defaults to
+  // 19420, so without this a `TEAMS_LITE_PORT` backend would be managed here and
+  // ignored there — the page would load and never reach a backend.
+  process.env.TEAMS_LITE_WS_URL ??= BACKEND_URL;
   // Dynamic import with a runtime-computed path so the compiler never tries to
   // bundle the separate web app into the `teams` binary.
   await import(/* @vite-ignore */ entry);

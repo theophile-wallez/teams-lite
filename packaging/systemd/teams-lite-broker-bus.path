@@ -1,0 +1,23 @@
+[Unit]
+# Self-healing for the one failure that is otherwise silent and permanent.
+#
+# The Intune broker lives on the container's own D-Bus, reached through
+# /proc/<container-leader>/root/run/user/0/bus. That path embeds a PID, and a process
+# environment cannot change after exec — so when the container restarts, a running
+# backend keeps dialling a socket that no longer exists. It does not crash: it stays
+# up, unauthenticated, and its real-time feed never reconnects. Nothing notices,
+# because the container's unit stays "active (exited)" the whole time (it has
+# restarted itself several times an hour on this host).
+#
+# `intune-container` rewrites rootless.json with the new leader on every boot, so that
+# file is the signal. Watching it turns a permanent failure into a five-second gap.
+Description=Watch the Intune container leader for a new broker bus path
+Documentation=file://@REPO@/bin/broker-env.sh
+PartOf=teams-lite.target
+
+[Path]
+PathChanged=@CONTAINER_STATE@
+Unit=teams-lite-backend-restart.service
+
+[Install]
+WantedBy=teams-lite.target

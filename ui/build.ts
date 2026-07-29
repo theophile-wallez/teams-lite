@@ -44,9 +44,15 @@ copyFileSync(serverBin, embedPath);
 // 2b. Build the web UI and stage it as an embedded tarball so `teams --web`
 //     works from the single binary (see ui/src/embedded-web.ts / web-embed.ts).
 //     web/server.ts resolves its dist/ relative to itself, so the archive keeps
-//     that layout: server.ts + dist/ at the archive root -> extracted to
+//     that layout: the runtime files + dist/ at the archive root -> extracted to
 //     ~/.cache/teams-lite/web on first launch. Set TEAMS_SKIP_WEB=1 to skip
 //     (produces a binary whose `teams --web` reports the UI is unavailable).
+//
+//     WHAT goes in the archive is not decided here: RUNTIME_ENTRIES in
+//     web/scripts/stage-bundle.ts owns that list, and a test there fails when a new
+//     relative import escapes it. This used to be a hand-written `server.ts dist`,
+//     and the day server.ts imported ./write-token the archive silently lost a
+//     module — every `teams --web` from a fresh binary then died on startup.
 const webDir = join(repoRoot, "web");
 const webTar = join(uiDir, "web.tar.gz");
 const skipWeb = process.env.TEAMS_SKIP_WEB === "1";
@@ -67,7 +73,13 @@ if (!skipWeb) {
     console.error("error: web build failed.");
     process.exit(1);
   }
-  const tar = Bun.spawnSync(["tar", "-czf", webTar, "-C", webDir, "server.ts", "dist"], {
+  const { RUNTIME_ENTRIES } = await import("../web/scripts/stage-bundle");
+  const missing = RUNTIME_ENTRIES.filter((entry) => !existsSync(join(webDir, entry)));
+  if (missing.length > 0) {
+    console.error(`error: the web build produced no ${missing.join(", ")}.`);
+    process.exit(1);
+  }
+  const tar = Bun.spawnSync(["tar", "-czf", webTar, "-C", webDir, ...RUNTIME_ENTRIES], {
     stdout: "inherit",
     stderr: "inherit",
   });

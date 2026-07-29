@@ -34,29 +34,29 @@ FIXTURES = {
     ),
     "backend-writer.ts": (
         "// Calls a write method on the real backend.\n"
-        "const ws = new WebSocket('ws://127.0.0.1:8420');\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'send' }));\n"
     ),
     "backend-reader.ts": (
         "// Reads the real backend, which is allowed.\n"
-        "const ws = new WebSocket('ws://127.0.0.1:8420');\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'conversations' }));\n"
     ),
     # The app's server relays every WebSocket to the same backend (web/server.ts),
     # so its port is a second address for the live account — same split applies.
     "relay-writer.ts": (
         "// Writes to the live backend through the app's own server.\n"
-        "const ws = new WebSocket('ws://127.0.0.1:4321');\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19440');\n"
         "ws.send(JSON.stringify({ method: 'send' }));\n"
     ),
     "relay-reader.ts": (
         "// Reads through the app's own server, which is allowed.\n"
-        "const ws = new WebSocket('ws://127.0.0.1:4321');\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19440');\n"
         "ws.send(JSON.stringify({ method: 'conversations' }));\n"
     ),
     "token-thief.ts": (
         "// Fetches the write capability from the app's own server.\n"
-        "const res = await fetch('http://127.0.0.1:4321/__write-token');\n"
+        "const res = await fetch('http://127.0.0.1:19440/__write-token');\n"
     ),
 }
 
@@ -76,8 +76,22 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/relay-writer.ts"),
         # The write token is the capability itself — never ours to fetch.
         ("BLOCK", PROJECT, f"bun run {tmp}/token-thief.ts"),
-        ("BLOCK", PROJECT, "curl -s http://127.0.0.1:4321/__write-token"),
+        ("BLOCK", PROJECT, "curl -s http://127.0.0.1:19440/__write-token"),
         ("BLOCK", PROJECT, 'cat "$XDG_RUNTIME_DIR/teams-lite/write-token"'),
+        # The always-on service: every spelling that STARTS the send-capable backend.
+        ("BLOCK", PROJECT, "systemctl --user start teams-lite-backend.service"),
+        ("BLOCK", PROJECT, "systemctl --user restart teams-lite.target"),
+        ("BLOCK", PROJECT, "systemctl --user enable --now teams-lite.target"),
+        ("BLOCK", PROJECT, "systemctl --user stop teams-lite.target && systemctl --user start teams-lite.target"),
+        ("BLOCK", PROJECT, "bin/teams-lite-service.sh start"),
+        ("BLOCK", PROJECT, "bin/teams-lite-service.sh restart --web-only"),
+        # The staged copy the service runs is a second path to the same binary.
+        ("BLOCK", PROJECT, "$HOME/.local/share/teams-lite/service/server"),
+        ("BLOCK", PROJECT, "bin/teams-lite-backend.sh"),
+        ("BLOCK", PROJECT, "bash bin/teams-dev-server.sh"),
+        ("BLOCK", PROJECT, "cd /tmp && $HOME/.local/share/teams-lite/service/teams-lite-backend.sh"),
+        # The production web server relays to the LIVE backend by default.
+        ("BLOCK", WEB, "bun run start"),
         # --- must allow ------------------------------------------------------
         # Reading the live backend is deliberately fine, through either address.
         ("ALLOW", PROJECT, f"bun run {tmp}/backend-reader.ts"),
@@ -97,12 +111,39 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, "pkill -f 'target/debug/server'"),
         ("ALLOW", PROJECT, "pkill -f 'vite dev'"),
         ("ALLOW", PROJECT, 'pgrep -af "vite dev|mock/server.ts"'),
+        # A probe that NAMES a browser driver drives nothing.
+        ("ALLOW", PROJECT, "pgrep -af playwright"),
+        ("ALLOW", PROJECT, "pkill -f chromium"),
+        # …but a probe is not a licence for whatever follows it.
+        ("BLOCK", PROJECT, "pkill -f chrome; node -e \"require('playwright')\""),
         # Looking at the binary is not running it — but a compound that runs it is.
         ("ALLOW", PROJECT, "ls -la target/debug/server"),
+        # `-n` is bash's syntax-check mode: it parses the launcher and exits.
+        ("ALLOW", PROJECT, "bash -n bin/teams-dev-server.sh"),
+        ("ALLOW", PROJECT, "shellcheck bin/teams-lite-backend.sh"),
+        # Ordinary file work on a launcher runs nothing.
+        ("ALLOW", PROJECT, "chmod +x bin/teams-lite-backend.sh"),
+        ("ALLOW", PROJECT, "git add bin/teams-lite-backend.sh bin/teams-dev-server.sh"),
+        ("ALLOW", PROJECT, "grep -n broker bin/teams-dev-server.sh"),
+        ("BLOCK", PROJECT, "bash -n bin/teams-dev-server.sh && bin/teams-dev-server.sh"),
         ("BLOCK", PROJECT, "ls target/debug/server && ./target/debug/server"),
         ("BLOCK", PROJECT, "nohup target/release/server &"),
         # Prose that names the binary runs nothing: a commit message, a doc line.
         ("ALLOW", PROJECT, "git commit -m 'fix: stop blocking `ls target/debug/server`'"),
+        ("ALLOW", PROJECT, "git commit -m 'chore: systemctl --user start teams-lite at boot'"),
+        # Installing and DIAGNOSING the always-on service is agent work. Starting it
+        # is the user's call, so everything that only looks or stops stays allowed.
+        ("ALLOW", PROJECT, "bin/teams-lite-service.sh install"),
+        ("ALLOW", PROJECT, "bin/teams-lite-service.sh status"),
+        ("ALLOW", PROJECT, "systemctl --user status teams-lite-backend.service"),
+        ("ALLOW", PROJECT, "systemctl --user cat teams-lite-backend.service"),
+        ("ALLOW", PROJECT, "systemctl --user stop teams-lite.target"),
+        ("ALLOW", PROJECT, "systemctl --user disable teams-lite.target"),
+        ("ALLOW", PROJECT, "systemctl --user daemon-reload"),
+        ("ALLOW", PROJECT, "journalctl --user -u teams-lite-backend -n 50 --no-pager"),
+        ("ALLOW", PROJECT, "ls -la $HOME/.local/share/teams-lite/service/server"),
+        # A production web server that names a read-only backend is fine.
+        ("ALLOW", WEB, "TEAMS_LITE_WS_URL=ws://127.0.0.1:19430 bun run start"),
     ]
 
 

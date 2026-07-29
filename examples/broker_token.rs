@@ -4,8 +4,7 @@
 // with DBUS_SESSION_BUS_ADDRESS pointed at whichever bus the broker is on (the
 // `teams` launcher sets this automatically):
 //
-//   DBUS_SESSION_BUS_ADDRESS="unix:path=/proc/$(pgrep -f \
-//     identity-broker/bin/microsoft-identity-broker|head -1)/root/run/user/0/bus" \
+//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
 //     cargo run --example broker_token
 //
 // Prints the scope and a short token prefix on success; anything else is a failure.

@@ -7,11 +7,10 @@
 // This connects to the real backend over its real WebSocket and asserts that every
 // field the web client reads is actually present.
 //
-// Start a READ-ONLY backend first (it binds 8430, never competing with the user's
-// own on 8420), then run this:
+// Start a READ-ONLY backend first (it binds 19430, never competing with the user's
+// own on 19420), then run this:
 //
-//   DBUS_SESSION_BUS_ADDRESS="unix:path=/proc/$(pgrep -f \
-//     identity-broker/bin/microsoft-identity-broker|head -1)/root/run/user/0/bus" \
+//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
 //     TEAMS_LITE_READ_ONLY=1 cargo run --bin server &
 //   cargo run --example mail_rpc_check
 //
@@ -21,7 +20,7 @@ use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 
-const BACKEND: &str = "ws://127.0.0.1:8430";
+const BACKEND: &str = "ws://127.0.0.1:19430";
 
 /// Assert an object carries every key the web client reads, and report which.
 fn require_keys(what: &str, value: &Value, keys: &[&str]) -> Result<()> {

@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "postinstall": "bun run sync:emoji",
-    "dev": "bun run sync:emoji && VITE_TEAMS_WS_URL=ws://127.0.0.1:8420 vite dev",
-    "dev:mock": "bun run sync:emoji && { PORT=8455 MOCK_TEST_HOOKS=1 bun run mock/server.ts & MOCK_PID=$!; trap 'kill $MOCK_PID' EXIT; VITE_TEAMS_WS_URL=ws://127.0.0.1:8455 vite dev --port 4455; }",
+    "dev": "bun run sync:emoji && VITE_TEAMS_WS_URL=ws://127.0.0.1:19420 vite dev",
+    "dev:mock": "bun run sync:emoji && { PORT=19455 MOCK_TEST_HOOKS=1 bun run mock/server.ts & MOCK_PID=$!; trap 'kill $MOCK_PID' EXIT; VITE_TEAMS_WS_URL=ws://127.0.0.1:19455 vite dev --port 19445; }",
     "dev:server": "../bin/teams-dev-server.sh",
     "preview": "bun run sync:emoji && bun run scripts/preview.ts",
     "build": "bun run sync:emoji && vite build",
