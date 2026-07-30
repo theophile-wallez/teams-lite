@@ -2198,6 +2198,20 @@ type ReadReceipt = {
 
 const injectedReceipts = new Map<string, Map<string, ReadReceipt>>();
 
+/** The broker health the mock reports, or null for "healthy and never announced".
+ *  Null is the default so every existing spec keeps seeing an app with no banner.
+ *  HELD rather than only broadcast, so a reconnect replays it exactly as the Rust
+ *  backend replays its own state in the greeting. */
+let mockBrokerStatus: {
+  ok: boolean;
+  signature: string;
+  message: string;
+  detail: string;
+  consecutive_failures: number;
+  can_repair: boolean;
+  repairing: boolean;
+} | null = null;
+
 /** Upsert one member's read position for a conversation (newest write wins),
  *  returning the stored receipt so the caller can broadcast it. */
 function setReceipt(conversationId: string, receipt: ReadReceipt): ReadReceipt {
@@ -2914,6 +2928,29 @@ function dispatch(method: string, params: unknown): unknown {
       return { reacted: on };
     }
 
+    case "repair_broker": {
+      // Pretend the repair unit started: flip `repairing`, then report a healthy
+      // broker a beat later. That is what lets a spec — and `bun run preview` — drive
+      // the whole flow with no Intune container anywhere near it.
+      if (mockBrokerStatus) {
+        mockBrokerStatus = { ...mockBrokerStatus, repairing: true };
+        broadcast("broker_status", mockBrokerStatus);
+        setTimeout(() => {
+          mockBrokerStatus = {
+            ok: true,
+            signature: "",
+            message: "",
+            detail: "",
+            consecutive_failures: 0,
+            can_repair: false,
+            repairing: false,
+          };
+          broadcast("broker_status", mockBrokerStatus);
+        }, 500);
+      }
+      return { started: true };
+    }
+
     case "fetch_media": {
       const url = requireString(params, "url");
       return mockMedia(url);
@@ -3308,6 +3345,29 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           typeof body.participant_count === "number" ? body.participant_count : 0,
       });
       return Response.json({ ok: true }, { status: 200 });
+    }
+    // Set the broker health the mock reports, and broadcast it — mirroring the Rust
+    // backend's `broker_status` event. `{ kind: "broker", ok: true }` puts it back,
+    // which a spec must do before it ends: the mock is shared and adopted across runs.
+    if (body.kind === "broker") {
+      const ok = body.ok === true;
+      mockBrokerStatus = {
+        ok,
+        signature: typeof body.signature === "string" ? body.signature : ok ? "" : "disconnected",
+        message:
+          typeof body.message === "string"
+            ? body.message
+            : ok
+              ? ""
+              : "The identity broker stopped answering. Its keyring is usually locked.",
+        detail: typeof body.detail === "string" ? body.detail : "",
+        consecutive_failures:
+          typeof body.consecutive_failures === "number" ? body.consecutive_failures : ok ? 0 : 3,
+        can_repair: body.can_repair === undefined ? !ok : Boolean(body.can_repair),
+        repairing: Boolean(body.repairing),
+      };
+      broadcast("broker_status", mockBrokerStatus);
+      return Response.json({ ok: true, broker: mockBrokerStatus }, { status: 200 });
     }
     // Move a member's read position ("seen by") and broadcast it, exactly like
     // the Rust backend's `read_receipt` event, so the E2E suite can drive the
@@ -3772,6 +3832,9 @@ const server = Bun.serve({
       // Then greet exactly like the Rust backend does on a fresh connection.
       sendJson(ws, { event: "status", data: "connected" });
       sendJson(ws, { event: "realtime_status", data: "connected" });
+      // Only when something is wrong, like the real backend: a mock that announced a
+      // healthy broker would make the banner's "null means silence" rule untestable.
+      if (mockBrokerStatus) sendJson(ws, { event: "broker_status", data: mockBrokerStatus });
     },
     message(ws, message) {
       const raw = typeof message === "string" ? message : new TextDecoder().decode(message);

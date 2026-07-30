@@ -445,4 +445,38 @@ Then ask the user to run:
 To exercise the app yourself, use the mock: cd web && bun run preview."
 fi
 
+# --- 3b. the Intune container is the user's sign-in, not a toy ------------------
+# `intune-container stop` takes the identity broker down, and with it every token the
+# backend holds: the app goes empty for whoever is using it, on a phone included. A
+# restart is also how the login keyring gets unlocked, so it is a real remedy — which is
+# exactly why it belongs to the user, or to the rate-limited repair unit that the app's
+# own button drives (see bin/teams-lite-broker-check.sh).
+#
+# Looking is free: `status`, `doctor` and `--help` answer the questions an agent
+# actually has, and blocking those would only teach the next reader to phrase around
+# the guard.
+cycles_the_container="${at_command_start}[A-Za-z0-9_./~\${}-]*intune-container([[:space:]]+[^;&|]*)?[[:space:]](stop|start|restart|enroll|init|destroy|edge|autostart)([[:space:]]|\$)"
+# The check script is read-only WITHOUT arguments and a trigger WITH `--repair`: it asks
+# systemd for the repair unit, which restarts the container. So the flag is what decides.
+# Anchored at a command position like every other rule here, so a commit message or a
+# doc line that names the flag runs nothing and stays allowed.
+asks_for_a_repair="${at_command_start}[A-Za-z0-9_./~\${}-]*teams-lite-broker-check\.sh[^;&|]*--repair"
+if printf '%s' "$command_line" | grep -qE "$cycles_the_container|$asks_for_a_repair"; then
+  block "The Intune container is the user's sign-in. Stopping or restarting it takes the identity
+broker down, so teams-lite goes empty for whoever is looking at it — including a phone
+on the tailnet — for about a minute.
+
+Diagnose it freely:
+
+  intune-container status
+  intune-container doctor
+  bin/teams-lite-broker-check.sh        # is the login keyring locked?
+
+A restart IS the remedy when that keyring re-locked, but it is not yours to run: the
+app has a Repair sign-in button, and teams-lite-broker-repair.service does it at most
+three times an hour. Ask the user to press the button, or to run:
+
+  intune-container stop && intune-container start"
+fi
+
 exit 0

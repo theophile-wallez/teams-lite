@@ -50,4 +50,25 @@ fi
 
 [ -n "$broker_bus" ] && export DBUS_SESSION_BUS_ADDRESS="$broker_bus"
 
+# A locked container keyring is not a missing bus: the socket is there, the broker name
+# is activatable, and the check above passes — then authentication fails and the backend
+# exits, and systemd retries for ever with nobody to fix the cause. So look at the cause
+# before starting, and ask for a repair when it is locked.
+#
+# `--repair` only enqueues the repair unit, which restarts the container. We do not wait
+# for it: the restart moves the broker bus, so this start is doomed either way. Exit 69
+# (EX_UNAVAILABLE) and let `Restart=always` come back to a repaired container.
+#
+# ONLY on exit 1, which means "locked". Exit 2 is "cannot tell" — no busctl, a classic
+# Intune host, no secret service — and refusing to start on that would turn an unknown
+# into an outage.
+if [ -x "$SCRIPT_DIR/teams-lite-broker-check.sh" ]; then
+  keyring=0
+  "$SCRIPT_DIR/teams-lite-broker-check.sh" --repair || keyring=$?
+  if [ "$keyring" -eq 1 ]; then
+    echo "teams-lite(service): waiting for the broker repair to finish; systemd will retry." >&2
+    exit 69
+  fi
+fi
+
 exec "$SERVER_BIN" "$@"

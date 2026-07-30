@@ -29,6 +29,8 @@ function AppInner() {
   const navigate = useNavigate();
   const ready = useAppState((s) => s.ready);
   const fatal = useAppState((s) => s.fatal);
+  // Survives the socket drop, because it is plain state rather than connection state.
+  const repairing = useAppState((s) => s.brokerStatus?.repairing ?? false);
   const splashMessage = useAppState((s) => s.splashMessage);
   const conversations = useAppState((s) => s.conversations);
   const sidebarTab = useAppState((s) => s.sidebarTab);
@@ -246,7 +248,11 @@ function AppInner() {
 
       <IncomingCallBanner />
 
-      {fatal && <FatalOverlay message={fatal} />}
+      {/* A repair restarts the backend on purpose, so the socket drops and the
+          reconnect can outlast its 35 s give-up window. Telling the user the backend
+          is "lost" at the exact moment they asked for a repair reads as a failure —
+          say what is actually happening instead. */}
+      {fatal && <FatalOverlay message={repairing ? REPAIRING_MESSAGE : fatal} />}
 
       {/* The conversation routes render nothing themselves; the shell above is
           the whole UI. Rendering the Outlet keeps the matched route mounted so
@@ -255,6 +261,11 @@ function AppInner() {
     </div>
   );
 }
+
+/** What the overlay says while a broker repair is running — the backend is meant to be
+ *  down at that moment, so "backend lost" would be a lie of emphasis. */
+const REPAIRING_MESSAGE =
+  "Repairing sign-in — the Intune container is restarting. This takes about a minute, and the app reconnects on its own.";
 
 function FatalOverlay(props: { message: string }) {
   return (

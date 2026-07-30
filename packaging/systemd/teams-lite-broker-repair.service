@@ -1,0 +1,75 @@
+[Unit]
+# Installed by bin/teams-lite-service.sh, which substitutes every @token@ below.
+# Do not hand-edit the installed copy: `teams-lite-service.sh update` rewrites it.
+Description=Repair the Intune broker by restarting its container
+Documentation=file://@REPO@/bin/teams-lite-broker-check.sh
+Documentation=file://@REPO@/bin/broker-env.sh
+
+# Ordering only, and deliberately NO PartOf=teams-lite.target: restarting the target
+# must never restart the user's Intune container. A repair is an explicit act, never
+# a side effect of an ordinary service restart.
+After=intune-container.service
+
+# A classic-Intune host has no container to restart. A failing condition SKIPS the
+# unit instead of failing it, and does not count against the rate limit below.
+ConditionFileIsExecutable=@INTUNE_CONTAINER@
+
+# THE RATE LIMIT. At most three repairs an hour, counted across every trigger —
+# `man systemd.unit` is explicit that StartLimit* "apply to all kinds of starts
+# (including manual), not just those triggered by the Restart= logic", so the health
+# timer, the backend and the in-app button share one budget.
+#
+# Note the section: StartLimit* belongs in [Unit]. A copy under [Service] is silently
+# ignored (proved on this host by opencode-serve.service, whose [Service] copy reads
+# back as the 10 s default).
+#
+# A keyring that re-locks faster than three times an hour is not a case for another
+# restart; it needs a person. StartLimitAction=none keeps systemd from escalating.
+StartLimitIntervalSec=1h
+StartLimitBurst=3
+StartLimitAction=none
+
+[Service]
+Type=oneshot
+
+# Only when the keyring really is locked. Every trigger checks first, but this is the
+# one check no trigger can skip — including the in-app button, which a user may press
+# on a healthy system. `ExecCondition=` reads 0 as "go on" and 1-254 as "skip without
+# failing", so `--locked` inverts the script's human-facing exit codes, and an unknown
+# state skips. Never restart a container on a guess.
+ExecCondition=@SERVICE_DIR@/teams-lite-broker-check.sh --locked
+
+# `stop` then `start`, never a bare `start`: on a running container the binary
+# short-circuits ("container already running") and never re-runs the session setup
+# that unlocks the keyring. That is exactly why a bare `start` did not repair it.
+#
+# The leading "-" on the stop line is required, not defensive: a stop of an
+# already-stopped container may exit non-zero, and an unprefixed failure would abandon
+# the remaining commands and fail the unit.
+#
+# Absolute path: the systemd user manager's PATH has no ~/.local/bin, so a bare
+# `intune-container` fails with 203/EXEC.
+ExecStart=-@INTUNE_CONTAINER@ stop
+ExecStart=@INTUNE_CONTAINER@ start
+
+# `intune-container start` registers the container's scope with StartTransientUnit on
+# the USER bus. Pin that address: the container's own bus also owns
+# org.freedesktop.systemd1, so an inherited container address would reach the
+# container's inner systemd and fail in a way that reads like something else entirely.
+# %t is $XDG_RUNTIME_DIR for a user unit.
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+
+# A Type=oneshot service has NO start timeout by default, so a hung container boot
+# would pin this unit in "activating" for ever and every later repair would coalesce
+# into that dead job. 300 s covers a boot plus the in-container readiness wait; it
+# needs no more, because a repair never pulls the rootfs.
+TimeoutStartSec=300
+
+# No RemainAfterExit: a oneshot that stays active makes the next `systemctl start` a
+# silent no-op, and the second repair would do nothing.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=teams-lite-broker-repair
+
+# No [Install] section on purpose. Nothing enables this unit; it runs on demand.

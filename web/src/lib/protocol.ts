@@ -285,6 +285,40 @@ export type UpdateInfo = {
 
 export type LiveStatus = "connecting" | "connected" | "disconnected";
 
+/** Wire shape of the backend `broker_status` event (see `broker_status_payload` in
+ *  src/bin/server.rs): the backend's own view of Microsoft's identity broker, which
+ *  is what mints every token.
+ *
+ *  It exists because a broken broker is invisible otherwise. The socket stays up, the
+ *  backend stays `active (running)`, and every read fails — so the app shows an empty
+ *  sidebar and says nothing. The backend emits this on a CHANGE of state and in each
+ *  client's greeting; a healthy backend that never failed emits nothing at all, so the
+ *  absence of this event must always read as "fine". */
+export type BrokerStatus = {
+  ok: boolean;
+  /** The classified failure: `disconnected`, `unresponsive`, `unreachable`,
+   *  `refused`, `no_account`, `other`. Empty when `ok`. */
+  signature: string;
+  /** One English sentence, from the backend, safe to show as-is. */
+  message: string;
+  /** The full cause chain, for a bug report. Not shown by default. */
+  detail: string;
+  consecutive_failures: number;
+  /** Whether the backend can restart the Intune container for this failure. False
+   *  for every failure a container restart cannot fix, and on a read-only backend. */
+  can_repair: boolean;
+  /** True while a repair runs, so every open client disables its button. */
+  repairing: boolean;
+};
+
+/** Is this broker state worth telling the user about? A missing state (an older
+ *  backend, or the mock) and a healthy one are both silence.
+ *
+ *  Pure, and unit-tested, because it decides whether a banner covers part of the app. */
+export function brokerNeedsAttention(status: BrokerStatus | null | undefined): boolean {
+  return !!status && status.ok === false;
+}
+
 /** Wire shape of the backend `typing` event (see src/bin/server.rs). Ephemeral
  *  presence: `is_typing` is false when the sender stopped or just sent. `sender`
  *  is the display name the backend resolved from `sender_mri` (may be empty when

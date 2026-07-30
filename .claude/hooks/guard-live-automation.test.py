@@ -112,6 +112,16 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "cd /tmp && $HOME/.local/share/teams-lite/service/teams-lite-backend.sh"),
         # The production web server relays to the LIVE backend by default.
         ("BLOCK", WEB, "bun run start"),
+        # The repair unit restarts the Intune container: same rule, by unit name.
+        ("BLOCK", PROJECT, "systemctl --user start teams-lite-broker-repair.service"),
+        # …and the container itself is not ours to cycle, whatever the spelling.
+        ("BLOCK", PROJECT, "intune-container stop"),
+        ("BLOCK", PROJECT, "intune-container stop && intune-container start"),
+        ("BLOCK", PROJECT, "$HOME/.local/bin/intune-container restart"),
+        ("BLOCK", PROJECT, "intune-container -v start"),
+        # The check script is a read of the keyring — until `--repair`, which starts
+        # the repair unit and therefore restarts the container.
+        ("BLOCK", PROJECT, "bin/teams-lite-broker-check.sh --repair"),
         # --- must allow ------------------------------------------------------
         # Reading the live backend is deliberately fine, through either address.
         ("ALLOW", PROJECT, f"bun run {tmp}/backend-reader.ts"),
@@ -163,6 +173,13 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, "systemctl --user daemon-reload"),
         ("ALLOW", PROJECT, "journalctl --user -u teams-lite-backend -n 50 --no-pager"),
         ("ALLOW", PROJECT, "ls -la $HOME/.local/share/teams-lite/service/server"),
+        # Diagnosing the container is the normal way to answer "why is it empty".
+        ("ALLOW", PROJECT, "intune-container status"),
+        ("ALLOW", PROJECT, "intune-container doctor"),
+        ("ALLOW", PROJECT, "bin/teams-lite-broker-check.sh"),
+        # Prose that names a repair runs nothing: a commit message, a doc line.
+        ("ALLOW", PROJECT, "git commit -m 'feat: run broker-check.sh --repair from the timer'"),
+        ("ALLOW", PROJECT, "git commit -m 'docs: intune-container stop && start unlocks it'"),
         # A production web server that names a read-only backend is fine.
         ("ALLOW", WEB, "TEAMS_LITE_WS_URL=ws://127.0.0.1:19430 bun run start"),
     ]

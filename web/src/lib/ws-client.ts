@@ -415,6 +415,19 @@ export class Backend {
       key,
     });
   }
+  /** Ask the backend to repair sign-in: it starts a systemd unit that restarts the
+   *  Intune container, because the container's login keyring re-locks and the broker
+   *  then answers no token call at all.
+   *
+   *  A WRITE request, though it posts nothing to Teams: it restarts a service on the
+   *  user's machine, so the backend gates it on the same capability token and refuses
+   *  it outright when read-only (see `MACHINE_METHODS` in src/bin/server.rs).
+   *
+   *  Resolves as soon as the unit is ENQUEUED. The repair itself takes about a minute
+   *  and drops this socket on the way; recovery is the page's own reconnect. */
+  repairBroker(): Promise<{ started: boolean; reason?: string }> {
+    return this.writeRequest<{ started: boolean; reason?: string }>("repair_broker", {});
+  }
   /** Fetch the notifications panel's three activity streams — Activity, Mentions
    *  and Following — in one round-trip. None is a chat: the backend fetches them
    *  fresh from Teams (concurrently) and decodes each entry. */

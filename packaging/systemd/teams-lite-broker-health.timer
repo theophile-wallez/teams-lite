@@ -1,0 +1,18 @@
+[Unit]
+# Installed by bin/teams-lite-service.sh, which substitutes every @token@ below.
+Description=Check the Intune broker keyring every 15 minutes
+Documentation=file://@REPO@/packaging/systemd/teams-lite-broker-health.service
+PartOf=teams-lite.target
+
+[Timer]
+Unit=teams-lite-broker-health.service
+# The first check waits for the backend to finish its own start-time authentication, so
+# a boot does not race a repair against a container that is still coming up.
+OnBootSec=5min
+OnUnitActiveSec=15min
+# One late check is enough after a suspend; do not fire a burst of missed ones.
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=teams-lite.target

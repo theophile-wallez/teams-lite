@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
+# `process` is here for exactly one caller: `Ctx::start_broker_repair` asks systemd to
+# run the broker repair unit. It is the only process this crate ever spawns.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync", "process"] }
 # rustls-tls => no system openssl dependency, portable static binary
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }

@@ -4,6 +4,7 @@
 // so the web and terminal clients stay observably identical.
 import { describe, it, expect } from "vitest";
 import {
+  brokerNeedsAttention,
   calendarColor,
   eventRepeats,
   eventTitle,
@@ -1569,5 +1570,29 @@ describe("calendar protocol helpers", () => {
     });
     // Dropped, because the window is authoritative and no longer lists it.
     expect(merged).toEqual([]);
+  });
+});
+
+describe("brokerNeedsAttention", () => {
+  const failing = {
+    ok: false,
+    signature: "disconnected",
+    message: "The identity broker stopped answering.",
+    detail: "",
+    consecutive_failures: 3,
+    can_repair: true,
+    repairing: false,
+  };
+
+  it("raises the banner only for a backend that says sign-in is broken", () => {
+    expect(brokerNeedsAttention(failing)).toBe(true);
+    expect(brokerNeedsAttention({ ...failing, ok: true })).toBe(false);
+  });
+
+  it("stays silent when the backend never said anything", () => {
+    // The mock and any backend older than this feature emit no broker_status at all,
+    // and a banner that appeared by default would be worse than the bug it explains.
+    expect(brokerNeedsAttention(null)).toBe(false);
+    expect(brokerNeedsAttention(undefined)).toBe(false);
   });
 });

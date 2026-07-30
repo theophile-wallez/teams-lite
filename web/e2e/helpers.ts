@@ -159,6 +159,30 @@ export async function emitCall(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Set the broker health the mock reports, through its gated test hook; the mock then
+ *  broadcasts `broker_status`, mirroring the Rust backend's own event.
+ *
+ *  ALWAYS restore it with `{ ok: true }` before the spec ends. The mock is a shared
+ *  process and `reuseExistingServer` adopts it across runs, so a broker left broken
+ *  would raise the banner in every later spec. */
+export async function emitBrokerStatus(
+  page: Page,
+  body: {
+    ok?: boolean;
+    signature?: string;
+    message?: string;
+    detail?: string;
+    consecutive_failures?: number;
+    can_repair?: boolean;
+    repairing?: boolean;
+  } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "broker", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Move a member's read position ("seen by") through the mock's gated test hook,
  *  then the mock broadcasts a `read_receipt` event. Defaults anchor the reader to
  *  the conversation's newest message (avatars land at the bottom). */

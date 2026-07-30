@@ -100,6 +100,45 @@ const SETTING_GITLAB_TOKEN: &str = "gitlab_token";
 /// other method only reads, or writes to the local store.
 const OUTWARD_METHODS: [&str; 3] = ["send", "edit", "react"];
 
+/// The RPC methods that act on THIS MACHINE, outside the store and the network.
+///
+/// A second reason to need the write token, and deliberately not folded into
+/// {@link OUTWARD_METHODS}: that list means "posts as the user", three tests iterate
+/// it, and AGENTS.md tells every later reader that a new entry there is a Teams,
+/// mail or calendar write gaining a consent gate. `repair_broker` posts nothing — it
+/// restarts the Intune container — so it is gated for the other reason, and says so
+/// in its own refusal text.
+const MACHINE_METHODS: [&str; 1] = ["repair_broker"];
+
+/// Why a method needs the write token, or `None` when it only reads or writes the
+/// local store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteClass {
+    /// Posts to real people as the user. See {@link OUTWARD_METHODS}.
+    Outward,
+    /// Changes this machine. See {@link MACHINE_METHODS}.
+    Machine,
+}
+
+fn write_class(method: &str) -> Option<WriteClass> {
+    if OUTWARD_METHODS.contains(&method) {
+        return Some(WriteClass::Outward);
+    }
+    if MACHINE_METHODS.contains(&method) {
+        return Some(WriteClass::Machine);
+    }
+    None
+}
+
+/// The systemd unit that repairs the broker by restarting the Intune container.
+/// Never run `intune-container` from here: one unit keeps the rate limit in one
+/// place, counted across the health timer, this backend and the in-app button.
+const BROKER_REPAIR_UNIT: &str = "teams-lite-broker-repair.service";
+
+/// The floor between two repairs this process asks for. Shorter than the unit's own
+/// limit (three an hour) so the backend refuses first and the journal names it.
+const REPAIR_MIN_INTERVAL: Duration = Duration::from_secs(20 * 60);
+
 /// Read-only mode (`TEAMS_LITE_READ_ONLY=1`): refuse every {@link OUTWARD_METHODS}
 /// call before it can reach the network.
 ///
@@ -280,26 +319,73 @@ fn publish_write_token(token: &str) -> Result<()> {
 ///
 /// Pure (token injected) so the policy is unit-testable without a live backend.
 fn check_write_allowed(method: &str, params: &Value, token: Option<&str>) -> Result<(), String> {
-    if !OUTWARD_METHODS.contains(&method) {
+    let Some(class) = write_class(method) else {
         return Ok(());
-    }
+    };
     let Some(token) = token else {
-        return Err(format!(
-            "refused: `{method}` acts on the real Teams account and this server runs read-only \
-             (TEAMS_LITE_READ_ONLY=1). Restart it without that variable to allow writes, or \
-             point the client at web/mock/server.ts to exercise the flow."
-        ));
+        return Err(match class {
+            WriteClass::Outward => format!(
+                "refused: `{method}` acts on the real Teams account and this server runs read-only \
+                 (TEAMS_LITE_READ_ONLY=1). Restart it without that variable to allow writes, or \
+                 point the client at web/mock/server.ts to exercise the flow."
+            ),
+            WriteClass::Machine => format!(
+                "refused: `{method}` restarts the Intune container on this machine, and this \
+                 server runs read-only (TEAMS_LITE_READ_ONLY=1). Tooling never repairs the user's \
+                 sign-in — their own backend does."
+            ),
+        });
     };
     match params.get("write_token").and_then(Value::as_str) {
         Some(presented) if presented == token => Ok(()),
-        _ => Err(format!(
-            "refused: `{method}` needs the write token this backend published for the user's own \
-             frontends. A client that was not given it (an ad-hoc script, an automated driver) \
-             may read everything here, but must not post as the user. If you are a frontend, \
-             read the token from {WRITE_TOKEN_ENV} or from the file the backend logged at \
-             startup; if you are automation, drive web/mock/server.ts instead."
-        )),
+        _ => Err(match class {
+            WriteClass::Outward => format!(
+                "refused: `{method}` needs the write token this backend published for the user's \
+                 own frontends. A client that was not given it (an ad-hoc script, an automated \
+                 driver) may read everything here, but must not post as the user. If you are a \
+                 frontend, read the token from {WRITE_TOKEN_ENV} or from the file the backend \
+                 logged at startup; if you are automation, drive web/mock/server.ts instead."
+            ),
+            WriteClass::Machine => format!(
+                "refused: `{method}` needs the write token this backend published for the user's \
+                 own frontends. It restarts the Intune container, which takes the identity broker \
+                 down for a minute — not something a client that merely found this socket gets to \
+                 do. If you are a frontend, read the token from {WRITE_TOKEN_ENV} or from the file \
+                 the backend logged at startup."
+            ),
+        }),
     }
+}
+
+/// The `broker_status` event payload: what the backend thinks of the identity
+/// broker, and whether it can do anything about it.
+///
+/// Emitted on a CHANGE of state and in every client's greeting — a phone that opens
+/// the tab mid-outage has to learn about it too, and a page that reconnects after a
+/// repair has to learn that the trouble is over. One shape for both.
+fn broker_status_payload(repairing: bool) -> Value {
+    let state = auth::broker_state().unwrap_or_default();
+    // Only the one signature whose known cause a container restart fixes, and never
+    // from a read-only backend. Not checked here: whether this host HAS an Intune
+    // container. It does not need to be — a locked keyring is a containerized-Intune
+    // failure, and a classic host produces `Unreachable` or `Refused` instead, both of
+    // which already answer false. The repair unit re-checks anyway
+    // (ConditionFileIsExecutable + its ExecCondition), so a wrong yes costs nothing.
+    let can_repair = state
+        .failure
+        .map(|f| f.is_repairable() && !read_only())
+        .unwrap_or(false);
+    json!({
+        "ok": state.is_ok(),
+        "signature": state.failure.map(|f| f.tag()).unwrap_or(""),
+        "message": state.failure.map(|f| f.message()).unwrap_or(""),
+        // The full cause chain. Useful in a bug report, and never a secret: the
+        // broker's error codes carry no token (see `broker_failure` in src/auth.rs).
+        "detail": state.detail,
+        "consecutive_failures": state.consecutive_failures,
+        "can_repair": can_repair,
+        "repairing": repairing,
+    })
 }
 
 /// Tracks established WebSocket clients. Raw TCP readiness probes do not count:
@@ -434,6 +520,9 @@ struct Ctx {
     /// calendar UI shows exactly one range at a time, and re-reading the month the
     /// user navigated away from would be work nobody is looking at.
     calendar_watch: Arc<Mutex<Option<CalendarWatch>>>,
+    /// When this process last asked systemd for a broker repair, so it cannot loop.
+    /// See {@link REPAIR_MIN_INTERVAL} and `start_broker_repair`.
+    last_repair: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 /// The calendar window a UI currently has on screen, and over which calendars.
@@ -504,6 +593,67 @@ impl Ctx {
     fn emit(&self, event: &str, data: Value) {
         // ignore send errors (no subscribers yet is fine)
         let _ = self.events.send(json!({ "event": event, "data": data }));
+    }
+
+    /// Ask systemd to run the broker repair unit, unless this process asked for one
+    /// too recently.
+    ///
+    /// Refuses in read-only mode HERE, not only at the dispatch choke point: the
+    /// automatic trigger never passes through `check_write_allowed`, so without this
+    /// guard a read-only backend started by tooling could restart the user's
+    /// container on its own.
+    ///
+    /// Starting a unit through `systemctl` is a child process, and that is safe:
+    /// `systemctl` is only a D-Bus client, so the unit's own processes are forked by
+    /// the user manager into the UNIT's cgroup, a sibling of ours. The repair
+    /// therefore survives the backend restart that `teams-lite-broker-bus.path`
+    /// fires seconds later when the container rewrites rootless.json — which a
+    /// direct child would not, because KillMode=control-group kills our whole group.
+    async fn start_broker_repair(&self, automatic: bool) -> Result<Value> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never restarts the user's \
+             Intune container"
+        );
+
+        if automatic {
+            let mut last = self
+                .last_repair
+                .lock()
+                .map_err(|_| anyhow::anyhow!("repair timestamp lock poisoned"))?;
+            if let Some(at) = *last {
+                let waited = at.elapsed();
+                if waited < REPAIR_MIN_INTERVAL {
+                    let left = (REPAIR_MIN_INTERVAL - waited).as_secs() / 60;
+                    eprintln!(
+                        "[broker] repair already tried {}m ago — not asking again for {left}m",
+                        waited.as_secs() / 60
+                    );
+                    return Ok(json!({ "started": false, "reason": "rate_limited" }));
+                }
+            }
+            *last = Some(std::time::Instant::now());
+        }
+
+        eprintln!("[broker] asking systemd to run {BROKER_REPAIR_UNIT}");
+        let status = tokio::process::Command::new("systemctl")
+            .args(["--user", "start", "--no-block", BROKER_REPAIR_UNIT])
+            // Explicit: dropping this future must never kill the client mid-enqueue.
+            .kill_on_drop(false)
+            .status()
+            .await
+            .with_context(|| format!("run systemctl to start {BROKER_REPAIR_UNIT}"))?;
+
+        // A non-zero exit is almost always the unit's own rate limit. `--no-block`
+        // only enqueues, so success says nothing about the repair itself — the
+        // outcome arrives as the broker recovering, or not.
+        anyhow::ensure!(
+            status.success(),
+            "{BROKER_REPAIR_UNIT} refused to start ({status}). Most likely its rate limit of \
+             three repairs an hour; check `systemctl --user status {BROKER_REPAIR_UNIT}`."
+        );
+        self.emit("broker_status", broker_status_payload(true));
+        Ok(json!({ "started": true }))
     }
     /// A valid CSA-audience token (auto-refreshed).
     async fn csa(&self) -> Result<String> {
@@ -821,7 +971,39 @@ async fn main() -> Result<()> {
         update: Arc::new(std::sync::Mutex::new(None)),
         mail_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         calendar_watch: Arc::new(Mutex::new(None)),
+        last_repair: Arc::new(Mutex::new(None)),
     };
+
+    // Watch the broker, and react once per CHANGE of state (see `observe_broker`).
+    //
+    // This is what turns "no chats, and nothing says why" into a banner the user can
+    // act on. Two reactions: tell every connected client, and — for the one signature
+    // whose known cause is a locked container keyring — ask for a repair, at most
+    // once every REPAIR_MIN_INTERVAL.
+    let watcher = ctx.clone();
+    auth::observe_broker(move |state| {
+        match state.failure {
+            None => eprintln!("[broker] sign-in works again"),
+            Some(failure) => eprintln!(
+                "[broker] {} ({} in a row) — {}",
+                failure.message(),
+                state.consecutive_failures,
+                state.detail
+            ),
+        }
+        watcher.emit("broker_status", broker_status_payload(false));
+
+        if state.failure.is_some_and(|f| f.is_repairable()) && !read_only() {
+            // Spawned, not awaited: the observer runs inside whatever token call just
+            // failed, and that caller must not wait on a container restart.
+            let repairer = watcher.clone();
+            tokio::spawn(async move {
+                if let Err(e) = repairer.start_broker_repair(true).await {
+                    eprintln!("[broker] could not start the repair: {e:#}");
+                }
+            });
+        }
+    });
 
     // real-time: run the trouter, persist each live message, broadcast an event.
     spawn_realtime(ctx.clone(), session, db_path);
@@ -908,6 +1090,17 @@ async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTrac
         write.send(WsMessage::Text(ev.to_string().into())).await?;
     }
 
+    // Say how sign-in is doing, on every fresh connection. The state event is
+    // otherwise emitted only on a CHANGE, so a phone that opens the tab in the middle
+    // of an outage would see an empty app and no reason for it — and a page that
+    // reconnects after a repair would keep showing a banner for trouble that is over.
+    // Only when there is something to say: a backend that has never failed stays
+    // quiet, so this cannot raise a banner by accident.
+    if auth::broker_state().is_some_and(|s| !s.is_ok()) {
+        let ev = json!({ "event": "broker_status", "data": broker_status_payload(false) });
+        write.send(WsMessage::Text(ev.to_string().into())).await?;
+    }
+
     loop {
         tokio::select! {
             // incoming requests from the UI
@@ -959,6 +1152,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
     }
     match method {
         "ping" => Ok(json!("pong")),
+        // Restart the Intune container, through its own systemd unit, because the
+        // container's login keyring re-locks and the broker then answers every token
+        // call with NoReply. The only RPC with an effect outside the store and the
+        // network: token-gated as a MACHINE method, refused read-only, and refused
+        // again inside the primitive so the automatic caller inherits both.
+        "repair_broker" => ctx.start_broker_repair(false).await,
 
         // full conversation list — LOCAL-FIRST: answer instantly from the SQLite
         // cache (0 network round-trips), then sync from the network in the
@@ -1932,7 +2131,7 @@ fn sync_mail_folders_bg(ctx: Ctx) {
                     Err(e) => eprintln!("[mail] could not persist folders: {e}"),
                 }
             }
-            Err(e) => eprintln!("[mail] folder sync failed: {e}"),
+            Err(e) => eprintln!("[mail] folder sync failed: {e:#}"),
         }
     });
 }
@@ -1974,7 +2173,7 @@ fn spawn_mail_sync(ctx: Ctx) {
                     Ok(false) => {}
                     // A transient failure is not worth telling the UI about: the
                     // cached list is still valid and the next tick retries.
-                    Err(e) => eprintln!("[mail] poll of a watched folder failed: {e}"),
+                    Err(e) => eprintln!("[mail] poll of a watched folder failed: {e:#}"),
                 }
             }
         }
@@ -2069,7 +2268,7 @@ fn sync_calendars_bg(ctx: Ctx) {
                     Err(e) => eprintln!("[calendar] could not persist calendars: {e}"),
                 }
             }
-            Err(e) => eprintln!("[calendar] calendar sync failed: {e}"),
+            Err(e) => eprintln!("[calendar] calendar sync failed: {e:#}"),
         }
     });
 }
@@ -2185,7 +2384,7 @@ fn spawn_calendar_sync(ctx: Ctx) {
                 Ok(false) => {}
                 // A transient failure is not worth telling the UI about: the cached
                 // window is still valid and the next tick retries.
-                Err(e) => eprintln!("[calendar] poll of the watched window failed: {e}"),
+                Err(e) => eprintln!("[calendar] poll of the watched window failed: {e:#}"),
             }
         }
     });
@@ -2737,7 +2936,14 @@ fn sync_csa_bg(ctx: Ctx) {
             .await
         {
             Ok(c) => c,
-            Err(_) => return,
+            // Say so. This is the sync that fills the chat list and the channel tree,
+            // so a silent return is a sidebar that stays empty with nothing in the
+            // journal to explain it — which is exactly how a locked keyring read as
+            // "the app is broken" for a whole morning.
+            Err(e) => {
+                eprintln!("[sync] conversation list refresh failed: {e:#}");
+                return;
+            }
         };
         let (chats_changed, channels_changed) = {
             if let Ok(store) = ctx.store() {
@@ -3139,6 +3345,53 @@ mod tests {
         for method in OUTWARD_METHODS {
             assert!(check_write_allowed(method, &params, Some("tok")).is_ok(), "{method}");
         }
+    }
+
+    // ---- the machine methods -----------------------------------------------
+    // `repair_broker` restarts the user's Intune container. It posts nothing to
+    // Teams, so it is not outward — but a client that merely found this socket must
+    // not be able to take the identity broker down either.
+
+    #[test]
+    fn repair_broker_is_gated_but_is_not_outward_facing() {
+        // The distinction is load-bearing: OUTWARD_METHODS means "posts as the user",
+        // and AGENTS.md tells every later reader that a new entry there is a Teams,
+        // mail or calendar write gaining a consent gate.
+        assert!(!OUTWARD_METHODS.contains(&"repair_broker"));
+        assert_eq!(write_class("repair_broker"), Some(WriteClass::Machine));
+        assert_eq!(write_class("send"), Some(WriteClass::Outward));
+        assert_eq!(write_class("conversations"), None);
+    }
+
+    #[test]
+    fn repair_broker_is_refused_without_the_token() {
+        let err = check_write_allowed("repair_broker", &json!({}), Some("tok"))
+            .expect_err("must refuse a tokenless repair");
+        assert!(err.contains("write token"), "{err}");
+        // The refusal has to say what it is about; the outward text would be wrong.
+        assert!(err.contains("Intune container"), "{err}");
+    }
+
+    #[test]
+    fn repair_broker_is_refused_with_a_wrong_token() {
+        let params = json!({ "write_token": "not-the-token" });
+        assert!(check_write_allowed("repair_broker", &params, Some("tok")).is_err());
+    }
+
+    #[test]
+    fn repair_broker_passes_with_the_published_token() {
+        let params = json!({ "write_token": "tok" });
+        assert!(check_write_allowed("repair_broker", &params, Some("tok")).is_ok());
+    }
+
+    #[test]
+    fn read_only_mode_refuses_repair_broker_even_with_a_correct_token() {
+        // Tooling never repairs the user's sign-in: restarting their container drops
+        // the broker, and every session that depends on it, for about a minute.
+        let params = json!({ "write_token": "tok" });
+        let err = check_write_allowed("repair_broker", &params, None)
+            .expect_err("read-only must refuse a repair");
+        assert!(err.contains("read-only"), "{err}");
     }
 
     #[test]

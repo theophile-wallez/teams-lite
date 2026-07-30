@@ -13,8 +13,16 @@ Documentation=file://@REPO@/README.md
 Wants=teams-lite-backend.service
 Wants=teams-lite-web.service
 Wants=teams-lite-broker-bus.path
+Wants=teams-lite-broker-health.timer
 After=teams-lite-backend.service
 After=teams-lite-web.service
+
+# Ordering only, and NO Wants=: this pins teams-lite-broker-repair.service in memory so
+# its StartLimit counters survive between repairs. A finished oneshot is
+# garbage-collected, and garbage collection flushes those counters — `man systemd.unit`
+# says it outright: "configuring start rate limiting for a unit that is not referenced
+# continuously has no effect". `After=` never pulls a unit in, so this starts nothing.
+After=teams-lite-broker-repair.service
 
 [Install]
 WantedBy=default.target

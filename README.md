@@ -177,12 +177,14 @@ bin/teams-lite-service.sh tailscale   # publish it on your tailnet over HTTPS
 systemctl --user enable --now teams-lite.target   # start it (and at every boot)
 ```
 
-| Unit                         | What it runs                                        |
-| ---------------------------- | --------------------------------------------------- |
-| `teams-lite-backend.service` | the Rust backend on `ws://127.0.0.1:19420`          |
-| `teams-lite-web.service`     | the production SSR server on `127.0.0.1:19440`      |
-| `teams-lite-broker-bus.path` | restarts the backend when the Intune container moves |
-| `teams-lite.target`          | one handle for all of the above                      |
+| Unit                             | What it runs                                          |
+| -------------------------------- | ----------------------------------------------------- |
+| `teams-lite-backend.service`     | the Rust backend on `ws://127.0.0.1:19420`            |
+| `teams-lite-web.service`         | the production SSR server on `127.0.0.1:19440`        |
+| `teams-lite-broker-bus.path`     | restarts the backend when the Intune container moves   |
+| `teams-lite-broker-health.timer` | checks the sign-in keyring every 15 minutes            |
+| `teams-lite-broker-repair.service` | restarts the Intune container when that keyring locked |
+| `teams-lite.target`              | one handle for all of the above                        |
 
 ```bash
 bin/teams-lite-service.sh status      # units, ports, staged commit, broker, tailscale
@@ -215,6 +217,40 @@ Worth knowing:
   `bun run dev:server` + `bun run dev` work while the service keeps running on
   19420/19440. Both are send-capable backends over one SQLite store, so they get
   separate ports rather than fighting for one.
+
+#### When sign-in breaks
+
+On a **containerized-Intune** host the container's login keyring re-locks on its own,
+roughly every eighteen hours. The identity broker then answers no token call at all, and
+nothing else looks wrong: the socket stays up, the backend stays `active (running)`, the
+live dot stays green — and the app has no chats, mail or calendar.
+
+teams-lite handles that itself now:
+
+- **It says so.** A banner in the sidebar names the cause instead of leaving an empty
+  list, on every tab, with a **Repair sign-in** button. For a failure a container
+  restart cannot fix — an expired sign-in that needs you at a browser — the button stays
+  visible but inert and says why.
+- **It repairs itself.** Three triggers share one rate-limited unit
+  (`teams-lite-broker-repair.service`, at most three times an hour): the backend when a
+  token call fails with that signature, `teams-lite-broker-health.timer` every 15
+  minutes, and the button. The health timer matters most: with nobody in Mail or the
+  Calendar the backend makes no broker calls at all, so an outage at 03:00 would
+  otherwise wait for you to notice.
+- **It never restarts the container on a guess.** Every trigger checks the keyring's
+  actual `Locked` property first, and the repair unit checks again as its own
+  `ExecCondition` — so a button pressed on a healthy system does nothing.
+
+To look, or to repair by hand:
+
+```bash
+bin/teams-lite-broker-check.sh            # is the keyring locked?
+intune-container doctor                   # the whole Intune stack
+intune-container stop && intune-container start   # the manual repair
+```
+
+A bare `intune-container start` does **not** fix it: on a running container it
+short-circuits and never re-runs the session setup that unlocks the keyring.
 
 ### Dev mode (`teams --web-dev`)
 

@@ -25,6 +25,7 @@ import {
   trimHistoryPage,
   mergeCalendarWindow,
   type AppSettings,
+  type BrokerStatus,
   type CalendarEvent,
   type CalendarInfo,
   type CalendarViewResult,
@@ -118,6 +119,12 @@ export type AppState = {
    *  while disconnected — so nothing ever treats the real backend as the mock.
    *  Surfaced by the dev-only badge in the status bar. */
   backendIsMock: boolean;
+  /** The backend's view of the identity broker, from its `broker_status` event, or
+   *  null until it says something. Null must stay silent: the mock and any older
+   *  backend never emit it, and a banner that appears by default would be worse than
+   *  the empty sidebar it replaces. Disjoint from `fatal`: that one means the socket
+   *  is gone, this one means the socket works and the credentials do not. */
+  brokerStatus: BrokerStatus | null;
   ready: boolean;
   splashMessage: string;
   fatal: string | null;
@@ -303,6 +310,7 @@ function initialState(): AppState {
     status: "connecting…",
     live: "connecting",
     backendIsMock: false,
+    brokerStatus: null,
     ready: false,
     splashMessage: "connecting",
     fatal: null,
@@ -763,6 +771,13 @@ export class TeamsController {
       }
     });
     on("update_available", (u) => this.set({ update: u as UpdateInfo }));
+    // How sign-in is doing. The backend sends this on a change of state and in the
+    // greeting, so an outage that started before this tab opened still reaches it.
+    on("broker_status", (raw) => {
+      const next = raw as BrokerStatus | null;
+      if (!next || typeof next.ok !== "boolean") return;
+      this.set({ brokerStatus: next });
+    });
     on("disconnected", () => {
       this.connectionDropped = true;
       this.set({ live: "disconnected" });
@@ -1851,6 +1866,24 @@ export class TeamsController {
     this.set({ settings });
     this.linkCache.clear();
     return settings;
+  }
+
+  /** Ask the backend to repair sign-in by restarting the Intune container.
+   *
+   *  Marks the broker as repairing straight away, so the button disables before the
+   *  backend's own event arrives, and REJECTS on refusal so the banner can say why
+   *  (the backend's refusal text is the useful part: a missing write token, or
+   *  read-only mode). The repair drops the socket a moment later; the page's own
+   *  reconnect brings it back — see `watchWakeups` and the `reconnected` handler. */
+  async repairBroker(): Promise<void> {
+    const before = this.get().brokerStatus;
+    if (before) this.set({ brokerStatus: { ...before, repairing: true } });
+    try {
+      await this.backend.repairBroker();
+    } catch (e) {
+      if (before) this.set({ brokerStatus: { ...before, repairing: false } });
+      throw e;
+    }
   }
 
   /** Resolve rich metadata for a GitLab link (or null when not enrichable),

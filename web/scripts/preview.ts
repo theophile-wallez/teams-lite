@@ -532,6 +532,39 @@ if (import.meta.main) {
   const react = args.includes("--react");
   const named = flag("--conversation");
 
+  // The sign-in banner: what the sidebar shows when the identity broker stops minting
+  // tokens. Driven through the mock's own control plane, so no Intune container is
+  // touched — and the banner cannot be seen any other way without breaking sign-in.
+  if (args.includes("--broker")) {
+    await withPreview(async ({ page, shot, setTheme, emit }) => {
+      await emit({
+        kind: "broker",
+        ok: false,
+        signature: "disconnected",
+        message: "The identity broker stopped answering. Its keyring is usually locked.",
+      });
+      await page.locator('[data-testid="broker-banner"]').waitFor({ state: "visible" });
+      await shot(`${out}-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-dark.png`);
+      // The other half: a failure a container restart cannot fix keeps the button
+      // visible but inert, so the boundary is explicit.
+      await emit({
+        kind: "broker",
+        ok: false,
+        signature: "refused",
+        message: "The identity broker refused to sign in silently.",
+        can_repair: false,
+      });
+      await page.waitForTimeout(200);
+      await shot(`${out}-refused-dark.png`);
+      // Leave the shared mock healthy again.
+      await emit({ kind: "broker", ok: true });
+      console.log(`[preview] wrote ${out}-light.png, ${out}-dark.png and ${out}-refused-dark.png`);
+    });
+    process.exit(0);
+  }
+
   // The Mail surface: the sidebar's Mail tab plus the reading pane, in both themes.
   if (args.includes("--mail")) {
     await withPreview(async ({ page, shot, setTheme }) => {

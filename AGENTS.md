@@ -250,6 +250,17 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   it at each start and `teams-lite-broker-bus.path` restarts the backend when
   `rootless.json` changes. Without that the backend stays up, unauthenticated, and
   silent.
+- **The keyring re-locks, and that is repaired automatically.** The container's login
+  keyring locks itself every ~18 hours; the broker then answers every token call with
+  `NoReply`, and the app shows nothing. `bin/teams-lite-broker-check.sh` reads the
+  keyring's own `Locked` property — the cause, not a symptom — and three triggers share
+  one rate-limited `teams-lite-broker-repair.service` (3/hour): the backend on that
+  signature, `teams-lite-broker-health.timer` every 15 min, and the app's own
+  **Repair sign-in** button (`repair_broker`, a `MACHINE_METHODS` entry). **Restarting
+  the container is not yours to do** — it takes the user's sign-in down for a minute,
+  so the hook blocks `intune-container stop|start|restart` and
+  `teams-lite-broker-check.sh --repair`. `intune-container status|doctor` and the bare
+  check stay open, because diagnosing is the normal way to answer "why is it empty".
 - **Tailscale, never Funnel.** `tailscale serve` is tailnet-only, behind Tailscale's
   own authenticated HTTPS. `tailscale funnel` would publish the user's Teams account
   to the internet, send included.

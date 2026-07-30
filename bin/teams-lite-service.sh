@@ -53,11 +53,19 @@ UNITS=(
   teams-lite-web.service
   teams-lite-backend-restart.service
   teams-lite-broker-bus.path
+  teams-lite-broker-repair.service
+  teams-lite-broker-health.service
+  teams-lite-broker-health.timer
   teams-lite.target
 )
 
 BUN="${BUN:-$HOME/.bun/bin/bun}"
 SYSTEMCTL="$(command -v systemctl || echo /usr/bin/systemctl)"
+# Baked into the repair unit at install time, because the systemd user manager's PATH
+# has no ~/.local/bin. The fallback keeps the token substituted on a host that has no
+# intune-container at all; the unit's ConditionFileIsExecutable= then makes it inert
+# rather than broken.
+INTUNE_CONTAINER="${INTUNE_CONTAINER:-$(command -v intune-container || echo "$HOME/.local/bin/intune-container")}"
 
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
@@ -110,6 +118,7 @@ stage_artifacts() {
   mv -f "$SERVICE_DIR/server.new" "$SERVICE_DIR/server"
 
   install -m 0755 "$BIN_DIR/teams-lite-backend.sh" "$SERVICE_DIR/teams-lite-backend.sh"
+  install -m 0755 "$BIN_DIR/teams-lite-broker-check.sh" "$SERVICE_DIR/teams-lite-broker-check.sh"
   install -m 0644 "$BIN_DIR/broker-env.sh" "$SERVICE_DIR/broker-env.sh"
 
   # The web runtime file set is owned by web/scripts/stage-bundle.ts, so this script
@@ -143,6 +152,7 @@ install_units() {
       -e "s|@REPO@|$REPO|g" \
       -e "s|@BUN@|$BUN|g" \
       -e "s|@SYSTEMCTL@|$SYSTEMCTL|g" \
+      -e "s|@INTUNE_CONTAINER@|$INTUNE_CONTAINER|g" \
       -e "s|@BACKEND_PORT@|$BACKEND_PORT|g" \
       -e "s|@WEB_PORT@|$WEB_PORT|g" \
       "$REPO/packaging/systemd/$unit" >"$UNIT_DIR/$unit"
@@ -190,6 +200,19 @@ check_environment() {
     info "identity broker: on this session bus"
   else
     warn "identity broker unreachable — sign-in will fail. Try: intune-container start"
+  fi
+
+  if [ -x "$INTUNE_CONTAINER" ]; then
+    # The keyring re-locks on its own, so the repair path matters as much as the broker.
+    local keyring=0
+    "$BIN_DIR/teams-lite-broker-check.sh" >/dev/null 2>&1 || keyring=$?
+    case "$keyring" in
+      0) info "container keyring: unlocked ($INTUNE_CONTAINER can repair it)" ;;
+      1) warn "container keyring is LOCKED — no tokens. Repair: systemctl --user start teams-lite-broker-repair" ;;
+      *) info "container keyring: unknown (no secret service on the container bus)" ;;
+    esac
+  else
+    warn "no intune-container at $INTUNE_CONTAINER — the in-app repair button stays hidden"
   fi
 
   local owner

@@ -16,6 +16,7 @@ import {
 import type { SidebarTab } from "~/lib/store";
 import { cn } from "~/lib/utils";
 import { Avatar, tintFor } from "./avatar";
+import { BrokerBanner } from "./broker-banner";
 import { CalendarSidebar } from "./calendar-sidebar";
 import { useAppState, useController } from "./controller-context";
 import { MailList } from "./mail-list";
@@ -176,6 +177,10 @@ export function ConversationList(props: {
         </TabsPanel>
       </Tabs>
 
+      {/* Above the status bar and below every list, so it shows on all four tabs and
+          is impossible to miss — unlike the status line, which truncates at eleven
+          pixels and which a pending-update notice replaces outright. */}
+      <BrokerBanner />
       <StatusBar />
     </aside>
   );
@@ -213,6 +218,21 @@ function ChatList(props: { selectedIndex: number; onSelect: (index: number) => v
     estimateSize: () => ROW_HEIGHT,
     overscan: 12,
   });
+
+  // Say something when there is nothing, the way the channel tree and the mail list
+  // already do. A blank scroll box was the whole of the app's answer to "where did my
+  // chats go" during a sign-in outage — the banner below explains the usual cause, and
+  // this makes sure the list itself is never silently empty.
+  if (conversations.length === 0) {
+    return (
+      <div
+        data-testid="chats-empty"
+        className="flex flex-1 items-center justify-center px-6 text-center text-[13px] text-text-faint"
+      >
+        No chats to show.
+      </div>
+    );
+  }
 
   return (
     <div
