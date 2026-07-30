@@ -16,7 +16,7 @@ import { useAppState, useController } from "./controller-context";
 import { MailBody } from "./mail-body";
 
 // The reading pane for one mail. Occupies the same slot as `MessagePane`, so the
-// two-column layout, the mobile slide-over and the back button all behave
+// two-column layout, the mobile full-screen page and the back button all behave
 // identically whether the user is reading a chat or a mail.
 //
 // There is no reply, forward or delete affordance, and their absence is deliberate:

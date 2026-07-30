@@ -4,8 +4,8 @@ import { test, expect, gotoApp, openConversationAt } from "./helpers";
 // The mobile, single-pane layout. Emulate an Android Chrome phone (narrow
 // viewport + touch, so the `md` breakpoint resolves to the mobile layout and
 // coarse-pointer affordances turn on). Below `md` the conversation list is the
-// home screen and a conversation slides in over it as a separate "page"; there
-// is no persistent second column.
+// home screen and a conversation covers it as a separate "page"; there is no
+// persistent second column and no transition between the two pages.
 test.use({ ...devices["Pixel 7"] });
 
 /** The detail pane's left edge, used to tell whether it is on-screen (x≈0) or
@@ -32,7 +32,7 @@ test.describe("mobile single-pane layout", () => {
     await expect(page.locator('[data-testid="back-to-list"]')).toHaveCount(0);
   });
 
-  test("tapping a conversation slides the chat in over the list", async ({ page }) => {
+  test("tapping a conversation shows the chat over the list", async ({ page }) => {
     await gotoApp(page);
     await openConversationAt(page, 0);
 
@@ -42,6 +42,22 @@ test.describe("mobile single-pane layout", () => {
     await expect(page.locator('[data-testid="conversation-title"]')).toBeVisible();
     // The header back button (left of the person's name) is now available.
     await expect(page.locator('[data-testid="back-to-list"]')).toBeVisible();
+  });
+
+  test("neither page animates: the switch has no transition", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+
+    // Both pages are plain: the detail pane arrives in place and the list stays put,
+    // so nothing slides, drifts or lags behind the tap.
+    for (const testId of ["detail-pane", "sidebar"]) {
+      const duration = await page
+        .locator(`[data-testid="${testId}"]`)
+        .evaluate((el) => getComputedStyle(el).transitionDuration);
+      expect(duration).toBe("0s");
+    }
+    const listLeft = (await page.locator('[data-testid="sidebar"]').boundingBox())!.x;
+    expect(Math.abs(listLeft)).toBeLessThan(2);
   });
 
   test("the header back button returns to the conversation list", async ({ page }) => {

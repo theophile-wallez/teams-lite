@@ -60,7 +60,6 @@ export function ConversationList(props: {
   onOpenSettings: () => void;
   onOpenSettingsPage: () => void;
   settingsActive: boolean;
-  chatOpen: boolean;
 }) {
   const controller = useController();
   const sidebarTab = useAppState((s) => s.sidebarTab);
@@ -71,12 +70,10 @@ export function ConversationList(props: {
       data-testid="sidebar"
       className={cn(
         // Mobile: the full-screen home list. Desktop (md+): a fixed 320px column.
-        // When a conversation slides in over the list on mobile, the list drifts
-        // slightly left for an iOS-style parallax; this is a no-op on desktop.
+        // The list never moves: on mobile the detail pane covers it outright, with
+        // no transition and no parallax drift behind it.
         "flex w-full shrink-0 flex-col border-r border-border-subtle bg-background",
-        "transition-transform duration-300 ease-out will-change-transform",
-        "md:w-[320px] md:translate-x-0 md:transition-none md:will-change-auto",
-        props.chatOpen && "max-md:-translate-x-[12%]",
+        "md:w-[320px]",
       )}
     >
       {/* Account / workspace header. */}

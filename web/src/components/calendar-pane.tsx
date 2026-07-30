@@ -21,7 +21,7 @@ import { CalendarViewMenu } from "./calendar-view-menu";
 import { useAppState, useController } from "./controller-context";
 
 // The calendar surface, in the same detail-pane slot as `MessagePane` and `MailPane`
-// — so the two-column layout, the mobile slide-over and the back button behave
+// — so the two-column layout, the mobile full-screen page and the back button behave
 // identically whether the user is reading a chat, a mail or their week.
 //
 // Its chrome follows the reference design (github.com/vmnog/calendarcn, itself after

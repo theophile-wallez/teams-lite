@@ -71,9 +71,9 @@ export function CalendarEventPopover(props: {
     <Popover open onOpenChange={(next) => !next && props.onClose()}>
       {/* Portaled to the body on purpose. The stand-in is positioned in VIEWPORT
           coordinates, and the detail pane it would otherwise live in carries a
-          `translate-x` for the mobile slide — a transform makes that pane the
-          containing block for fixed children, which would offset the anchor by the
-          sidebar's width and defeat the popover's own collision handling. */}
+          `translate-x` that parks it off-screen on mobile — a transform makes that
+          pane the containing block for fixed children, which would offset the anchor
+          by the sidebar's width and defeat the popover's own collision handling. */}
       {createPortal(
         <PopoverAnchor
           aria-hidden
