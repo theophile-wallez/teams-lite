@@ -48,8 +48,6 @@ if [ -z "$broker_bus" ] && ! teams_lite_broker_on_session_bus; then
   exit 69
 fi
 
-[ -n "$broker_bus" ] && export DBUS_SESSION_BUS_ADDRESS="$broker_bus"
-
 # A locked container keyring is not a missing bus: the socket is there, the broker name
 # is activatable, and the check above passes — then authentication fails and the backend
 # exits, and systemd retries for ever with nobody to fix the cause. So look at the cause
@@ -62,13 +60,21 @@ fi
 # ONLY on exit 1, which means "locked". Exit 2 is "cannot tell" — no busctl, a classic
 # Intune host, no secret service — and refusing to start on that would turn an unknown
 # into an outage.
+#
+# TEAMS_LITE_BROKER_BUS pins the check to the bus this backend is about to use. Without
+# it the check re-resolves on its own, and it would find the broker's name on
+# `DBUS_SESSION_BUS_ADDRESS` — which is the CONTAINER's bus once exported — read that as
+# a classic-Intune host, and skip the keyring test entirely. It did exactly that once.
 if [ -x "$SCRIPT_DIR/teams-lite-broker-check.sh" ]; then
   keyring=0
-  "$SCRIPT_DIR/teams-lite-broker-check.sh" --repair || keyring=$?
+  TEAMS_LITE_BROKER_BUS="$broker_bus" \
+    "$SCRIPT_DIR/teams-lite-broker-check.sh" --repair || keyring=$?
   if [ "$keyring" -eq 1 ]; then
     echo "teams-lite(service): waiting for the broker repair to finish; systemd will retry." >&2
     exit 69
   fi
 fi
+
+[ -n "$broker_bus" ] && export DBUS_SESSION_BUS_ADDRESS="$broker_bus"
 
 exec "$SERVER_BIN" "$@"
