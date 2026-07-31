@@ -277,6 +277,14 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   the commit recorded in `VERSION`. That is deliberate: a `git pull`, a rebuild, or an
   E2E run (which rewrites `web/dist` with its mock's URL baked in) would otherwise
   change what the service serves at a moment nobody chose.
+- **Re-staging is automatic; starting is not.** `.claude/hooks/sync-service-to-master.sh`
+  (a `PostToolUse` hook on `Bash`) fires after a git command that can move master. It
+  fast-forwards the checkout, compares `VERSION`'s commit with `HEAD`, and on a gap runs
+  `update` in a detached background job — because staging by hand is a step nobody
+  remembers, and the failure is invisible: every test passes while the phone serves a
+  commit from days ago. It acts **only when a unit is already active** and **only from a
+  clean `master`**, so it can neither bring the send-capable backend up nor promote a
+  working tree. `.claude/hooks/sync-service-to-master.test.py` pins both refusals.
 - **What is yours:** `install`, `update`, `units`, `status`, `logs`, `stop`,
   `uninstall`, and every `systemctl --user status|cat|show` /
   `journalctl --user -u …`. Diagnosing the service is normal work.
@@ -334,7 +342,8 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   - The automation guard (`.claude/hooks/`): `python3
     .claude/hooks/guard-live-automation.test.py` whenever you touch the hook, a
     launcher name, or a port. It pins both halves — what must block, and the ordinary
-    work that must not.
+    work that must not. Run `python3 .claude/hooks/sync-service-to-master.test.py`
+    alongside it when you touch the service auto-update hook or `teams-lite-service.sh`.
   - A change that only touches a frontend does not need `cargo test`, and a
     backend-only change does not need the frontend suites. When a change spans
     both (e.g. a protocol or WebSocket contract), run the suites on both sides.
