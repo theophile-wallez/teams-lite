@@ -28,6 +28,20 @@ export function coerceAppearance(value: unknown): Appearance {
   return isAppearance(value) ? value : DEFAULT_APPEARANCE;
 }
 
+/**
+ * The `theme-color` each theme reports to the browser — the page background, and
+ * therefore the colour an INSTALLED app paints its status-bar band (iOS) or title
+ * bar (Android, desktop). Getting it wrong is visible: a dark strip above a light
+ * app, or an invisible clock above a dark one.
+ *
+ * These must equal `--background` in styles/theme.css, which a test enforces
+ * against that file so the two cannot drift.
+ */
+export const THEME_COLORS: Record<ResolvedTheme, string> = {
+  light: "#fbfbfc",
+  dark: "#171717",
+};
+
 /** Resolve a preference to the concrete theme that CSS keys off. */
 export function resolveTheme(pref: Appearance, systemPrefersDark: boolean): ResolvedTheme {
   if (pref === "system") return systemPrefersDark ? "dark" : "light";

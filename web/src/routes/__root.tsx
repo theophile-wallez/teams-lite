@@ -1,13 +1,21 @@
 /// <reference types="vite/client" />
 import { HeadContent, Outlet, Scripts, createRootRoute } from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { THEME_COLORS } from "~/lib/appearance";
 import appCss from "~/styles/app.css?url";
 
 // Applied before hydration so the resolved theme paints with the first frame
 // (no flash). Reads the stored preference ("system" | "light" | "dark") and, for
-// System, consults the OS media query. Dependency-free; it only sets the
-// data-theme attribute the whole palette keys off.
-const THEME_BOOTSTRAP = `(function(){try{var p=localStorage.getItem("teams-theme");if(p!=="light"&&p!=="dark"&&p!=="system")p="system";var dark=p==="dark"||(p==="system"&&window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-theme",dark?"dark":"light");}catch(e){}})();`;
+// System, consults the OS media query. Dependency-free; it sets the data-theme
+// attribute the whole palette keys off, plus the `theme-color` meta an INSTALLED
+// app paints its status-bar band from.
+//
+// That meta is created HERE rather than declared in `head` below, and it is the only
+// place that owns it (the controller keeps it in step when the theme changes, see
+// `paintTheme`). Two declarative metas with `media` queries would be the tidier
+// spelling, but React keeps one element per `name` — the second silently replaced
+// the first, and an installed light-theme app got a dark strip above it.
+const THEME_BOOTSTRAP = `(function(){try{var p=localStorage.getItem("teams-theme");if(p!=="light"&&p!=="dark"&&p!=="system")p="system";var dark=p==="dark"||(p==="system"&&window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-theme",dark?"dark":"light");var m=document.querySelector('meta[name="theme-color"]');if(!m){m=document.createElement("meta");m.setAttribute("name","theme-color");document.head.appendChild(m);}m.setAttribute("content",dark?${JSON.stringify(THEME_COLORS.dark)}:${JSON.stringify(THEME_COLORS.light)});}catch(e){}})();`;
 
 export const Route = createRootRoute({
   head: () => ({
@@ -25,11 +33,8 @@ export const Route = createRootRoute({
           "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",
       },
       { name: "color-scheme", content: "light dark" },
-      // The status-bar band of an installed app takes its colour from here, so it
-      // is declared per scheme — one value would leave a black strip above a light
-      // app, or a white one above a dark app.
-      { name: "theme-color", content: "#fbfbfc", media: "(prefers-color-scheme: light)" },
-      { name: "theme-color", content: "#171717", media: "(prefers-color-scheme: dark)" },
+      // `theme-color` is deliberately absent here: THEME_BOOTSTRAP owns it, because
+      // it is the only code that knows which theme resolved. See the note above it.
       // Installed-app hints. `display: standalone` in the manifest is what current
       // iOS reads; these keep an older iOS opening the Home Screen icon without
       // Safari's chrome, and name the app under the icon.

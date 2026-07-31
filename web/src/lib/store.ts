@@ -76,6 +76,7 @@ import {
 import {
   APPEARANCE_STORAGE_KEY,
   DEFAULT_APPEARANCE,
+  THEME_COLORS,
   coerceAppearance,
   resolveTheme,
   type Appearance,
@@ -2165,11 +2166,15 @@ export class TeamsController {
     return window.matchMedia("(prefers-color-scheme: dark)").matches;
   }
 
-  /** Apply a resolved theme to <html> so the whole palette repaints. */
+  /** Apply a resolved theme to <html> so the whole palette repaints, and keep the
+   *  `theme-color` meta in step — an installed app paints its status-bar band from
+   *  it, so switching to Dark must not leave a white strip above the app. The
+   *  pre-hydration bootstrap in routes/__root.tsx creates that meta. */
   private paintTheme(theme: ResolvedTheme): void {
-    if (typeof document !== "undefined") {
-      document.documentElement.setAttribute("data-theme", theme);
-    }
+    if (typeof document === "undefined") return;
+    document.documentElement.setAttribute("data-theme", theme);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", THEME_COLORS[theme]);
   }
 
   /** Watch the OS dark-mode query while (and only while) following the system. */

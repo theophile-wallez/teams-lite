@@ -1,7 +1,13 @@
+// Node's types are referenced for this file only (tsconfig.json lists just
+// "vite/client"): the last test reads the stylesheet from disk, because Vitest stubs
+// CSS imports out to an empty string — including `?raw`.
+/// <reference types="node" />
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   APPEARANCES,
   DEFAULT_APPEARANCE,
+  THEME_COLORS,
   appearanceLabel,
   coerceAppearance,
   isAppearance,
@@ -69,5 +75,22 @@ describe("defaults", () => {
   it("defaults to system so new users follow their OS", () => {
     expect(DEFAULT_APPEARANCE).toBe("system");
     expect(APPEARANCES).toContain(DEFAULT_APPEARANCE);
+  });
+});
+
+describe("THEME_COLORS", () => {
+  it("matches the page background of each theme in theme.css", () => {
+    // An installed app paints its status-bar band from `theme-color`, so a value
+    // that drifts from `--background` shows up as a coloured strip above the app —
+    // on a phone, where nobody is running the test suite. Read the stylesheet
+    // rather than trusting the copy.
+    const css = readFileSync(new URL("../styles/theme.css", import.meta.url), "utf8");
+    const backgrounds = [...css.matchAll(/--background:\s*(#[0-9a-fA-F]{3,8});/g)].map(
+      (match) => match[1]!.toLowerCase(),
+    );
+    // The file declares the light palette first, then the dark one.
+    expect(backgrounds.length).toBe(2);
+    expect(THEME_COLORS.light.toLowerCase()).toBe(backgrounds[0]);
+    expect(THEME_COLORS.dark.toLowerCase()).toBe(backgrounds[1]);
   });
 });
