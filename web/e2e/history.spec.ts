@@ -207,6 +207,37 @@ test.describe("history (infinite scroll)", () => {
     expect(motion.total).toBeLessThanOrEqual(12);
   });
 
+  test("offers a jump back to the newest message while scrolled up", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    await settled(page);
+
+    const scroller = page.locator('[data-testid="message-scroll"]');
+    const jump = page.locator('[data-testid="jump-to-latest"]');
+
+    // Opening a conversation lands on its newest message, so the button is mounted
+    // (it fades rather than unmounts) but hidden and inert.
+    await expect(jump).toHaveAttribute("data-visible", "false");
+
+    // Read upward, a couple of screens: now the newest message is off-screen and
+    // the button is the way back to it.
+    await scroller.evaluate((el) => {
+      el.scrollTop = Math.max(0, el.scrollTop - el.clientHeight * 2);
+    });
+    await expect(jump).toHaveAttribute("data-visible", "true");
+
+    await jump.click();
+
+    // Back at the bottom — and the button takes itself away again.
+    await expect(jump).toHaveAttribute("data-visible", "false");
+    await expect
+      .poll(
+        () => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight),
+        { timeout: 4_000 },
+      )
+      .toBeLessThanOrEqual(120);
+  });
+
   test("prefetches older history a couple of screens before the top", async ({ page }) => {
     await gotoApp(page);
     await openConversationAt(page, 0);

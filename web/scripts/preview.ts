@@ -36,6 +36,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/mail --mail        # the Mail surface
 //   bun run web/scripts/preview.ts --out /tmp/cal --calendar     # the Calendar surface
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
+//   bun run web/scripts/preview.ts --out /tmp/preview --scrolled # history scrolled up (jump button)
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -401,6 +402,25 @@ export async function openReactionPicker(page: Page): Promise<void> {
 }
 
 /**
+ * Read the open conversation upward by `screens` viewports, then wait for the
+ * history to settle. This is what puts the pane in the one state where the
+ * jump-to-latest button matters: the newest message off-screen below.
+ *
+ * It only scrolls, so it needs no sentinel of its own — but scrolling pulls older
+ * pages, hence the dwell before a capture.
+ */
+export async function scrollHistoryUp(page: Page, screens = 2): Promise<void> {
+  // Passed as source text, not a closure: this file type-checks under the node
+  // tsconfig (no DOM lib), and the body runs in the page.
+  await page.evaluate(`(() => {
+    const el = document.querySelector('[data-testid="message-scroll"]');
+    if (el) el.scrollTop = Math.max(0, el.scrollTop - el.clientHeight * ${screens});
+  })()`);
+  await page.waitForSelector('[data-testid="jump-to-latest"][data-visible="true"]');
+  await page.waitForTimeout(400);
+}
+
+/**
  * Scroll a sidebar list down by most of a viewport. Returns false once it cannot
  * advance any further, which is how the row search knows the list is exhausted
  * rather than looping forever.
@@ -650,6 +670,15 @@ if (import.meta.main) {
       await page.waitForTimeout(500);
     }
     if (text) await typeInComposer(page, text, { send });
+    // The history scrolled up: the state that shows the jump-to-latest button
+    // floating over the bottom of the messages, above the composer.
+    if (args.includes("--scrolled")) {
+      await scrollHistoryUp(page);
+      await shot(`${out}-scrolled-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-scrolled-dark.png`);
+      await setTheme("light");
+    }
     if (react) {
       // Chips first (from the mock, not from us clicking): one classic key and one
       // of the extended ones a real tenant sends, so a capture shows both paths.

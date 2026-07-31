@@ -18,6 +18,7 @@ import { ReadReceipts } from "./read-receipts";
 import { PersonHoverCard } from "./person-card";
 import { groupThreads, type Thread } from "~/lib/threads";
 import { Composer } from "./composer";
+import { JumpToLatest } from "./jump-to-latest";
 import { TypingIndicator } from "./typing-indicator";
 import { Button } from "./ui/button";
 import { cn } from "~/lib/utils";
@@ -41,6 +42,12 @@ const OVERSCAN_ROWS = 8;
 // Height reserved at the top of the list for the "loading earlier messages"
 // row, so reserving (and releasing) it doesn't shift the rows below.
 const HISTORY_LOADER_PX = 32;
+// How far from the bottom (in px) still counts as "at the bottom", which is what
+// hides the jump-to-latest button. It is well above a stray pixel of layout
+// rounding, so a row that measures slightly taller than its estimate never pops
+// the button up on its own — and small enough that a deliberate scroll of even
+// one short message shows it.
+const AT_BOTTOM_PX = 120;
 
 /** How close to the top (in px) the viewport must get before older history is
  *  prefetched — a couple of screens ahead so loading stays invisible. */
@@ -81,6 +88,10 @@ export function MessagePane(props: { onBack?: () => void }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [focusToken, setFocusToken] = useState(0);
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  // Whether the history is parked at its newest message. It drives the
+  // jump-to-latest button only, so it starts true: a pane that just opened is at
+  // the bottom, and a conversation short enough to fit can never leave it.
+  const [atBottom, setAtBottom] = useState(true);
   // Which channel threads are expanded (keyed by root message id). Threads are
   // collapsed by default — a thread shows its root post plus an "N replies" chip.
   const [expandedThreads, setExpandedThreads] = useState<Set<string>>(new Set());
@@ -223,9 +234,28 @@ export function MessagePane(props: { onBack?: () => void }) {
   // the effect below owns paging, and the prefetch must stay out of its way.
   const deepLinkPending = pendingScroll !== null && pendingScroll.convId === openId;
 
+  // Re-read the scroll geometry into `atBottom`. Called from the scroll handler
+  // and from every place that moves the viewport itself, so the button answers a
+  // programmatic jump as fast as it answers a wheel.
+  const syncAtBottom = useCallback(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_PX);
+  }, []);
+
+  // The button's job: park the reader back on the newest message. The jump is
+  // immediate, like the one a send performs — a smooth scroll over a virtualized
+  // backlog animates through rows whose heights are still estimates, so it lands
+  // short and then corrects, which reads as a stumble.
+  const jumpToLatest = useCallback(() => {
+    if (rows.length > 0) virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
+    syncAtBottom();
+  }, [rows.length, virtualizer, syncAtBottom]);
+
   const onScroll = () => {
     const el = viewportRef.current;
     if (!el) return;
+    syncAtBottom();
     // Never prefetch while a deep link is settling. Centering an off-screen row
     // scrolls through a list whose off-window rows are still estimated, so the
     // viewport can pass through the trigger zone on its way to the target —
@@ -245,7 +275,8 @@ export function MessagePane(props: { onBack?: () => void }) {
     if (prevOpenIdRef.current === openId) return;
     prevOpenIdRef.current = openId;
     if (rows.length > 0) virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
-  }, [openId, rows.length, virtualizer]);
+    syncAtBottom();
+  }, [openId, rows.length, virtualizer, syncAtBottom]);
 
   // Sending takes the sender to their own message: jump to the newest row, which
   // also leaves the view at the bottom so the send's echo is followed in.
@@ -253,14 +284,18 @@ export function MessagePane(props: { onBack?: () => void }) {
     if (bottomNonceRef.current === scrollToBottomNonce) return;
     bottomNonceRef.current = scrollToBottomNonce;
     if (rows.length > 0) virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
-  }, [scrollToBottomNonce, rows.length, virtualizer]);
+    syncAtBottom();
+  }, [scrollToBottomNonce, rows.length, virtualizer, syncAtBottom]);
 
   // A conversation whose loaded history doesn't fill the viewport can't be
   // scrolled, so nothing would ever trigger a backfill: pull the next page until
   // there is something to scroll (or history runs out).
   useLayoutEffect(() => {
     maybeFill();
-  }, [maybeFill, rows.length]);
+    // A row that arrives, grows or is measured moves the bottom without the user
+    // scrolling, and no scroll event reports that.
+    syncAtBottom();
+  }, [maybeFill, rows.length, syncAtBottom]);
 
   // A pending deep-link target: center that message, paging older until it
   // loads. The node is only in the DOM once its row is inside the virtual
@@ -453,83 +488,90 @@ export function MessagePane(props: { onBack?: () => void }) {
         </div>
       </header>
 
-      <div
-        ref={viewportRef}
-        onScroll={onScroll}
-        data-testid="message-scroll"
-        // How much history is loaded, which the rendered row count no longer
-        // reveals now that the list is virtualized (used by the E2E suite).
-        data-loaded-count={messages.length}
-        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 md:px-5"
-      >
-        {messages.length === 0 ? (
-          <EmptyState
-            loading={loadingMessages}
-            error={messagesError}
-            onRetry={() => void controller.openConversation(openId)}
-          />
-        ) : (
-          <div
-            // The virtualizer positions the rows itself (see `directDomUpdates`),
-            // so they carry no `transform` from React. The *height* stays here on
-            // purpose: prepending a page re-anchors the reader by writing
-            // `scrollTop`, and that write happens in the virtualizer's own layout
-            // effect — which runs before it would set this height itself. A
-            // scroller that hasn't grown yet clamps the write, and the reader ends
-            // up thrown back into the page that just loaded. Sizing this element
-            // during React's own DOM mutation keeps the growth ahead of the
-            // re-anchor; `containerRef` then keeps it in sync when a measurement
-            // changes the total without a re-render.
-            ref={virtualizer.containerRef}
-            className="relative mx-auto w-full max-w-3xl"
-            style={{ height: `${virtualizer.getTotalSize()}px` }}
-          >
-            {hasMoreOlder && (
-              <div
-                className="absolute inset-x-0 top-0 flex items-center justify-center"
-                style={{ height: `${HISTORY_LOADER_PX}px` }}
-              >
-                {loadingOlder ? (
-                  <span className="flex items-center gap-2 text-xs text-text-faint">
-                    <Loader2 className="size-3 animate-spin" strokeWidth={1.6} /> Loading earlier
-                    messages…
-                  </span>
-                ) : olderError ? (
-                  <span className="text-xs text-destructive">
-                    Couldn't load earlier messages — scroll up to retry.
-                  </span>
-                ) : null}
-              </div>
-            )}
-            {virtualRows.map((virtualRow) => {
-              const row = rows[virtualRow.index];
-              if (!row) return null;
-              return (
+      {/* The history and the control that floats over it. The wrapper is what the
+          jump-to-latest button positions against, so the button sits at the bottom
+          of the viewport (just above the composer) instead of scrolling away with
+          the messages. */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          ref={viewportRef}
+          onScroll={onScroll}
+          data-testid="message-scroll"
+          // How much history is loaded, which the rendered row count no longer
+          // reveals now that the list is virtualized (used by the E2E suite).
+          data-loaded-count={messages.length}
+          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 md:px-5"
+        >
+          {messages.length === 0 ? (
+            <EmptyState
+              loading={loadingMessages}
+              error={messagesError}
+              onRetry={() => void controller.openConversation(openId)}
+            />
+          ) : (
+            <div
+              // The virtualizer positions the rows itself (see `directDomUpdates`),
+              // so they carry no `transform` from React. The *height* stays here on
+              // purpose: prepending a page re-anchors the reader by writing
+              // `scrollTop`, and that write happens in the virtualizer's own layout
+              // effect — which runs before it would set this height itself. A
+              // scroller that hasn't grown yet clamps the write, and the reader ends
+              // up thrown back into the page that just loaded. Sizing this element
+              // during React's own DOM mutation keeps the growth ahead of the
+              // re-anchor; `containerRef` then keeps it in sync when a measurement
+              // changes the total without a re-render.
+              ref={virtualizer.containerRef}
+              className="relative mx-auto w-full max-w-3xl"
+              style={{ height: `${virtualizer.getTotalSize()}px` }}
+            >
+              {hasMoreOlder && (
                 <div
-                  key={virtualRow.key}
-                  data-index={virtualRow.index}
-                  ref={virtualizer.measureElement}
-                  // `flex flex-col` is load-bearing: the rows inside carry
-                  // vertical margins, and a flex container keeps them inside its
-                  // own box (no margin collapsing) so `measureElement` reports a
-                  // height that includes the spacing.
-                  className="absolute inset-x-0 top-0 flex flex-col"
+                  className="absolute inset-x-0 top-0 flex items-center justify-center"
+                  style={{ height: `${HISTORY_LOADER_PX}px` }}
                 >
-                  {row.kind === "thread" ? (
-                    <ThreadGroup
-                      thread={row.thread}
-                      expanded={expandedThreads.has(row.thread.rootId)}
-                      onToggle={() => toggleThread(row.thread.rootId)}
-                      renderMsg={renderMsg}
-                    />
-                  ) : (
-                    renderMsg(row.message, row.prev, row.next)
-                  )}
+                  {loadingOlder ? (
+                    <span className="flex items-center gap-2 text-xs text-text-faint">
+                      <Loader2 className="size-3 animate-spin" strokeWidth={1.6} /> Loading earlier
+                      messages…
+                    </span>
+                  ) : olderError ? (
+                    <span className="text-xs text-destructive">
+                      Couldn't load earlier messages — scroll up to retry.
+                    </span>
+                  ) : null}
                 </div>
-              );
-            })}
-          </div>
-        )}
+              )}
+              {virtualRows.map((virtualRow) => {
+                const row = rows[virtualRow.index];
+                if (!row) return null;
+                return (
+                  <div
+                    key={virtualRow.key}
+                    data-index={virtualRow.index}
+                    ref={virtualizer.measureElement}
+                    // `flex flex-col` is load-bearing: the rows inside carry
+                    // vertical margins, and a flex container keeps them inside its
+                    // own box (no margin collapsing) so `measureElement` reports a
+                    // height that includes the spacing.
+                    className="absolute inset-x-0 top-0 flex flex-col"
+                  >
+                    {row.kind === "thread" ? (
+                      <ThreadGroup
+                        thread={row.thread}
+                        expanded={expandedThreads.has(row.thread.rootId)}
+                        onToggle={() => toggleThread(row.thread.rootId)}
+                        renderMsg={renderMsg}
+                      />
+                    ) : (
+                      renderMsg(row.message, row.prev, row.next)
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <JumpToLatest visible={!atBottom} onClick={jumpToLatest} />
       </div>
 
       {/* The composer's fade overlay reaches up over this row and the typing line,
