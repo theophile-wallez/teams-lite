@@ -13,6 +13,7 @@
 
 import { Store } from "@tanstack/store";
 import { Backend, defaultWsUrl } from "./ws-client";
+import type { SendImage } from "./composer-image";
 import {
   appendLiveMessage,
   copyableMessageText,
@@ -2110,53 +2111,49 @@ export class TeamsController {
   }
 
   /**
-   * Send the current draft. In plain mode `text` carries the message; in rich
-   * mode `html` carries the already-normalized Teams-safe HTML (from the TipTap
-   * editor) and `text` is empty. When replying, the backend prepends the quote
-   * blockquote; the rich HTML (or plain `after` text) becomes the reply body.
+   * Send one snapshot of the composer. The snapshot stays visible while the
+   * request is pending and after a failure. A successful request clears only the
+   * exact submitted text, so text entered during the request is never erased.
    */
-  async sendDraft(text: string, html?: string): Promise<void> {
+  async sendDraft(text: string, html?: string, image?: SendImage): Promise<boolean> {
     const id = this.get().openId;
-    if (!id) return;
+    if (!id) return false;
     const clean = text.trim();
     const richHtml = html?.trim() || undefined;
-    if (!clean && !richHtml) return;
+    if (!clean && !richHtml && !image) return false;
 
-    // When replying, the backend builds the outgoing HTML as
-    // quote + body. For plain sends the body is paragraph(after); for rich sends
-    // it is the normalized HTML, so the reply body goes into `after`/html.
+    const submittedDraft = this.draftCache.get(id) ?? this.get().draft;
     const reply = this.get().replyingTo;
     const replyTo: ReplyTo | undefined = reply
       ? replyToPayload(reply.message, "", clean)
       : undefined;
 
-    const pending = this.draftSaveTimers.get(id);
-    if (pending) {
-      clearTimeout(pending);
-      this.draftSaveTimers.delete(id);
-    }
-
     try {
-      await this.backend.setDraft(id, "");
-      await this.backend.send(id, clean, replyTo, richHtml);
+      await this.backend.send(id, clean, replyTo, richHtml, image);
     } catch (e) {
       this.set({ status: `send failed: ${errText(e)}` });
       playCue("error");
-      return;
+      return false;
     }
 
-    // Sent — a soft confirmation cue (only reached when the send didn't throw).
     playCue("success");
-    this.draftCache.set(id, "");
+    if (this.draftCache.get(id) === submittedDraft) {
+      const pending = this.draftSaveTimers.get(id);
+      if (pending) {
+        clearTimeout(pending);
+        this.draftSaveTimers.delete(id);
+      }
+      this.draftCache.set(id, "");
+      this.persistDraft(id, "");
+      if (this.get().openId === id) this.set({ draft: "" });
+    }
     if (this.get().openId === id) {
       this.set({
-        draft: "",
-        replyingTo: null,
-        // Take the sender to their message, wherever they were reading.
+        replyingTo: this.get().replyingTo === reply ? null : this.get().replyingTo,
         scrollToBottomNonce: this.get().scrollToBottomNonce + 1,
       });
     }
-    this.persistDraft(id, "");
+    return true;
   }
 
   // ---- appearance (Light / Dark / System) ---------------------------------

@@ -1,4 +1,9 @@
-import { useEffect, type MutableRefObject, type ReactNode } from "react";
+import {
+  useEffect,
+  type ClipboardEvent as ReactClipboardEvent,
+  type MutableRefObject,
+  type ReactNode,
+} from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
@@ -62,7 +67,9 @@ function promptForLink(editor: Editor) {
 export function RichEditor(props: {
   initialContent: string;
   focusToken: unknown;
-  onSubmit: (html: string) => void;
+  onSubmit: (html: string) => Promise<boolean>;
+  /** Handles image clipboard items before ProseMirror inserts them as content. */
+  onPaste?: (event: ReactClipboardEvent) => void;
   /** Registers the editor's submit fn so an outside control (send button) can call it. */
   submitRef?: MutableRefObject<(() => void) | null>;
   /** Registers a focus fn so clicking the composer's dead space can focus the editor. */
@@ -107,9 +114,11 @@ export function RichEditor(props: {
   const submit = () => {
     if (!editor) return;
     const html = serializeTeamsHtml(editor.getHTML());
-    if (!html) return;
-    props.onSubmit(html);
-    editor.commands.clearContent();
+    const submittedHtml = html;
+    void props.onSubmit(html).then((sent) => {
+      if (!sent || !editor || serializeTeamsHtml(editor.getHTML()) !== submittedHtml) return;
+      editor.commands.clearContent();
+    });
   };
 
   useEffect(() => {
@@ -156,7 +165,12 @@ export function RichEditor(props: {
       </BubbleMenu>
       {/* `text-base` (16px) on mobile stops iOS Safari auto-zooming on focus;
           `md:text-sm` keeps 14px on desktop. */}
-      <EditorContent editor={editor} data-testid="composer-rich" className="text-base md:text-sm" />
+      <EditorContent
+        editor={editor}
+        data-testid="composer-rich"
+        className="text-base md:text-sm"
+        onPaste={props.onPaste}
+      />
     </div>
   );
 }

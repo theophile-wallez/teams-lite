@@ -10,6 +10,7 @@
 //   event    <- { event, data }        (server push)
 
 import { BACKEND_WS_ROUTE } from "./backend-route";
+import type { SendImage } from "./composer-image";
 import type {
   AppSettings,
   CalendarInfo,
@@ -390,12 +391,21 @@ export class Backend {
     text: string,
     replyTo?: ReplyTo,
     contentHtml?: string,
+    image?: SendImage,
   ): Promise<{ sent: boolean }> {
     return this.writeRequest<{ sent: boolean }>("send", {
       conversation,
       text,
       reply_to: replyTo,
       content_html: contentHtml,
+      image: image
+        ? {
+            content_type: image.contentType,
+            width: image.width,
+            height: image.height,
+            data_base64: image.dataBase64,
+          }
+        : undefined,
     });
   }
   edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {

@@ -1,5 +1,11 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { ArrowUp, Type, X } from "lucide-react";
+import { lazy, Suspense, useEffect, useRef, useState, type ClipboardEvent } from "react";
+import { ArrowUp, ImagePlus, LoaderCircle, Type, X } from "lucide-react";
+import {
+  composerImageAccept,
+  loadComposerImage,
+  sendImage,
+  type ComposerImage,
+} from "~/lib/composer-image";
 import { copyableMessageText } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
@@ -27,12 +33,28 @@ function draftToHtml(text: string): string {
   return `<p>${escaped}</p>`;
 }
 
+/** The first image file on the clipboard, or null when the paste carries none —
+ *  which is what keeps an ordinary text paste an ordinary text paste. */
+function clipboardImage(event: ClipboardEvent): File | null {
+  for (const item of event.clipboardData.items) {
+    if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
+    return item.getAsFile();
+  }
+  return null;
+}
+
 /**
  * Message composer with two input modes, toggled like Teams: a rich-text editor
  * (default — bold/italic/underline/strike/code/link/lists via keyboard shortcuts
  * and a select-to-format menu, no permanent toolbar) and a plain auto-growing
  * textarea. Enter sends, Shift+Enter inserts a newline; a reply banner shows the
  * quoted message. The rich editor can be turned off with the format toggle.
+ *
+ * One image can ride along with either mode — picked with the image button or
+ * pasted from the clipboard, previewed above the field, and uploaded to Teams by
+ * the backend as part of the same `send` (see src/teams_send.rs). The submitted
+ * snapshot stays on screen while the request is in flight and after a failure, so
+ * a rejected send never loses the image or the caption.
  */
 export function Composer(props: { focusToken: unknown }) {
   const controller = useController();
@@ -40,12 +62,25 @@ export function Composer(props: { focusToken: unknown }) {
   const replyingTo = useAppState((s) => s.replyingTo);
   const openId = useAppState((s) => s.openId);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [rich, setRich] = useState(false);
   // The rich editor owns its content, so it registers a submit callback here and
   // reports emptiness for the send button's enabled state.
   const richSubmitRef = useRef<(() => void) | null>(null);
   const [richEmpty, setRichEmpty] = useState(true);
   const richFocusRef = useRef<(() => void) | null>(null);
+  const [image, setImage] = useState<ComposerImage | null>(null);
+  const imageRef = useRef<ComposerImage | null>(null);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [imageLoading, setImageLoading] = useState(false);
+  const [sending, setSending] = useState(false);
+  // A ref as well as state: `send` must see the current values synchronously, so a
+  // second Enter during a pending request cannot start a duplicate send.
+  const sendingRef = useRef(false);
+  // Monotonic tokens that make a late async result harmless: a selection or a send
+  // only writes back when it is still the newest one for this conversation.
+  const selectionVersion = useRef(0);
+  const sendVersion = useRef(0);
 
   // Restore the mode preference on the client (kept out of SSR to avoid a
   // hydration mismatch — the server always renders the plain textarea, then we
@@ -59,6 +94,21 @@ export function Composer(props: { focusToken: unknown }) {
       setRich(true);
     }
   }, []);
+
+  imageRef.current = image;
+
+  // An image belongs to the conversation it was picked in, so switching away drops
+  // it rather than carrying it into somebody else's chat.
+  useEffect(() => {
+    selectionVersion.current += 1;
+    sendVersion.current += 1;
+    imageRef.current = null;
+    setImage(null);
+    setImageError(null);
+    setImageLoading(false);
+    sendingRef.current = false;
+    setSending(false);
+  }, [openId]);
 
   const toggleRich = () => {
     setRich((prev) => {
@@ -86,17 +136,90 @@ export function Composer(props: { focusToken: unknown }) {
     if (openId && !rich) textareaRef.current?.focus();
   }, [openId, rich, props.focusToken]);
 
-  const submitPlain = () => {
-    const text = textareaRef.current?.value ?? draft;
-    if (!text.trim()) return;
-    void controller.sendDraft(text);
+  /** Read, validate and preview one picked or pasted image. Decoding is async, so a
+   *  newer selection (or a removal) makes this result stale and it is dropped. */
+  const selectImage = async (file: File) => {
+    const version = ++selectionVersion.current;
+    setImageError(null);
+    setImageLoading(true);
+    try {
+      const next = await loadComposerImage(file);
+      if (selectionVersion.current !== version) return;
+      imageRef.current = next;
+      setImage(next);
+    } catch (error) {
+      if (selectionVersion.current !== version) return;
+      setImageError(error instanceof Error ? error.message : "Could not add the image.");
+    } finally {
+      if (selectionVersion.current === version) setImageLoading(false);
+    }
   };
 
-  const canSend = rich ? !richEmpty : draft.trim().length > 0;
+  const removeImage = () => {
+    selectionVersion.current += 1;
+    imageRef.current = null;
+    setImage(null);
+    setImageError(null);
+    setImageLoading(false);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    focusField();
+  };
+
+  const handlePaste = (event: ClipboardEvent) => {
+    const file = clipboardImage(event);
+    if (!file) return;
+    event.preventDefault();
+    void selectImage(file);
+  };
+
+  /**
+   * Send one snapshot of the composer: the text (or rich HTML) plus the pending
+   * image. Returns whether the backend accepted it, which is what tells the rich
+   * editor whether it may clear itself.
+   *
+   * Only the exact submitted image is cleared, and only on success — a failure
+   * leaves the whole snapshot on screen to retry, and a picture picked while the
+   * request was in flight is never thrown away.
+   */
+  const send = async (text: string, html?: string): Promise<boolean> => {
+    if (sendingRef.current || imageLoading) return false;
+    const clean = text.trim();
+    const richHtml = html?.trim() || undefined;
+    const submittedImage = imageRef.current;
+    if (!clean && !richHtml && !submittedImage) return false;
+
+    const version = ++sendVersion.current;
+    sendingRef.current = true;
+    setSending(true);
+    const sent = await controller.sendDraft(
+      text,
+      richHtml,
+      submittedImage ? sendImage(submittedImage) : undefined,
+    );
+    if (sendVersion.current !== version) return sent;
+    sendingRef.current = false;
+    setSending(false);
+    if (sent && imageRef.current === submittedImage) {
+      imageRef.current = null;
+      setImage(null);
+    }
+    return sent;
+  };
+
+  const submitPlain = () => {
+    const text = textareaRef.current?.value ?? draft;
+    void send(text);
+  };
+
+  const canSend =
+    !sending &&
+    !imageLoading &&
+    (image !== null || (rich ? !richEmpty : draft.trim().length > 0));
 
   const submit = () => {
-    if (rich) richSubmitRef.current?.();
-    else submitPlain();
+    if (!canSend) return;
+    if (rich && !richEmpty) richSubmitRef.current?.();
+    else void send(draft);
   };
 
   const focusField = () => {
@@ -117,6 +240,7 @@ export function Composer(props: { focusToken: unknown }) {
         aria-hidden
         className="composer-fade pointer-events-none absolute inset-x-0 bottom-full h-14"
       />
+
       {replyingTo && (
         <div
           data-testid="reply-banner"
@@ -144,19 +268,51 @@ export function Composer(props: { focusToken: unknown }) {
       )}
       <div
         className="flex cursor-text flex-col gap-2 rounded-2xl bg-card px-3 py-2.5 shadow-chip transition-shadow focus-within:shadow-card"
-        onMouseDown={(e) => {
+        onMouseDown={(event) => {
           // Clicking anywhere in the box focuses the field, except the action
-          // buttons (send / rich-text toggle) and the field itself, which handle
-          // their own clicks.
-          const el = e.target as HTMLElement;
-          if (el.closest("button") || el.closest("textarea, [contenteditable]")) return;
-          e.preventDefault();
+          // buttons (send / rich-text toggle / image) and the field itself, which
+          // handle their own clicks.
+          const element = event.target as HTMLElement;
+          if (element.closest("button") || element.closest("textarea, [contenteditable]")) return;
+          event.preventDefault();
           focusField();
         }}
       >
+        {/* The pending image, above the field like Teams: a thumbnail with its pixel
+            size and a remove button. It is a local preview (a data URL), so nothing
+            is uploaded until the message is actually sent. */}
+        {image && (
+          <div data-testid="composer-image-preview" className="relative w-fit max-w-full">
+            <img
+              src={image.previewUrl}
+              alt={image.name}
+              className="max-h-40 max-w-full rounded-xl border border-border-subtle object-contain"
+            />
+            <button
+              type="button"
+              aria-label="Remove image"
+              title="Remove image"
+              data-testid="composer-image-remove"
+              onClick={removeImage}
+              className="absolute -right-2 -top-2 grid size-7 place-items-center rounded-full bg-popover text-foreground shadow-pop hover:bg-accent"
+            >
+              <X className="size-4" strokeWidth={1.8} />
+            </button>
+            <div className="mt-1 text-xs text-text-faint">
+              {image.width} × {image.height}
+            </div>
+          </div>
+        )}
+        {imageError && (
+          <div role="alert" data-testid="composer-image-error" className="text-xs text-destructive">
+            {imageError}
+          </div>
+        )}
+
         {/* Input field. Rich mode is a bare-looking editor that formats via
             keyboard shortcuts and a select-to-format menu; plain mode is a bare
-            auto-growing textarea. Both read as the same lean box. */}
+            auto-growing textarea. Both read as the same lean box, and both hand a
+            pasted image to `handlePaste` instead of inserting it as content. */}
         {rich ? (
           <Suspense
             fallback={
@@ -173,7 +329,8 @@ export function Composer(props: { focusToken: unknown }) {
               // Mirror the editor's text into the plain draft so drafts still
               // persist per-conversation and toggling back to plain keeps the text.
               onChangeText={(text) => controller.setDraftText(text)}
-              onSubmit={(html) => void controller.sendDraft("", html)}
+              onPaste={handlePaste}
+              onSubmit={(html) => send("", html)}
             />
           </Suspense>
         ) : (
@@ -188,37 +345,70 @@ export function Composer(props: { focusToken: unknown }) {
               // when the field is focused; `md:text-sm` restores 14px on desktop.
               "max-h-64 w-full resize-none bg-transparent px-1 py-1 text-base outline-none md:text-sm placeholder:text-text-faint",
             )}
-            onChange={(e) => controller.setDraftText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
+            onChange={(event) => controller.setDraftText(event.target.value)}
+            onPaste={handlePaste}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
                 submitPlain();
               }
             }}
           />
         )}
 
-        {/* Bottom control bar: rich-text toggle on the left, send on the right. */}
+        {/* Bottom control bar: rich-text toggle and image picker on the left, send
+            on the right. */}
         <div className="flex items-center justify-between gap-1.5">
-          <button
-            type="button"
-            aria-label="Toggle rich text formatting"
-            aria-pressed={rich}
-            title="Rich text formatting"
-            data-testid="composer-format-toggle"
-            data-cuelume-toggle=""
-            onClick={toggleRich}
-            className={cn(
-              "grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground",
-              rich && "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
-            )}
-          >
-            <Type className="size-4" strokeWidth={1.6} />
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              aria-label="Toggle rich text formatting"
+              aria-pressed={rich}
+              title="Rich text formatting"
+              data-testid="composer-format-toggle"
+              data-cuelume-toggle=""
+              onClick={toggleRich}
+              className={cn(
+                "grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground",
+                rich && "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
+              )}
+            >
+              <Type className="size-4" strokeWidth={1.6} />
+            </button>
+            {/* The picker itself: hidden, opened by the button beside it. Its value is
+                cleared on every change so re-picking the same file still fires. */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={composerImageAccept()}
+              data-testid="composer-image-input"
+              className="sr-only"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (file) void selectImage(file);
+              }}
+            />
+            <button
+              type="button"
+              aria-label={image ? "Replace image" : "Add image"}
+              title={image ? "Replace image" : "Add image"}
+              data-testid="composer-image-button"
+              disabled={imageLoading || sending}
+              onClick={() => fileInputRef.current?.click()}
+              className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-50"
+            >
+              {imageLoading ? (
+                <LoaderCircle className="size-4 animate-spin" strokeWidth={1.6} />
+              ) : (
+                <ImagePlus className="size-4" strokeWidth={1.6} />
+              )}
+            </button>
+          </div>
 
           <button
             type="button"
-            aria-label="Send message"
+            aria-label={sending ? "Sending message" : "Send message"}
             title="Send (Enter)"
             data-testid="composer-send"
             disabled={!canSend}
@@ -230,7 +420,11 @@ export function Composer(props: { focusToken: unknown }) {
                 : "bg-element text-text-faint",
             )}
           >
-            <ArrowUp className="size-4" strokeWidth={2} />
+            {sending ? (
+              <LoaderCircle className="size-4 animate-spin" strokeWidth={1.8} />
+            ) : (
+              <ArrowUp className="size-4" strokeWidth={2} />
+            )}
           </button>
         </div>
       </div>

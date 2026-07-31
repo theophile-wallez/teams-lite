@@ -149,6 +149,38 @@ describe("Backend request/response", () => {
     backend.close();
   });
 
+  it("frames a send request with raw image data and dimensions", async () => {
+    const { backend, socket } = await connected();
+
+    const promise = backend.send("c1", "caption", undefined, undefined, {
+      contentType: "image/png",
+      width: 640,
+      height: 480,
+      dataBase64: "aGVsbG8=",
+    });
+
+    const frame = JSON.parse(socket.sent[0]!) as {
+      id: number;
+      method: string;
+      params?: Record<string, unknown>;
+    };
+    expect(frame.method).toBe("send");
+    expect(frame.params).toEqual({
+      conversation: "c1",
+      text: "caption",
+      image: {
+        content_type: "image/png",
+        width: 640,
+        height: 480,
+        data_base64: "aGVsbG8=",
+      },
+    });
+
+    socket.simulateMessage(JSON.stringify({ id: frame.id, result: { sent: true } }));
+    await expect(promise).resolves.toEqual({ sent: true });
+    backend.close();
+  });
+
   it("frames a react request with conversation, message_id and key", async () => {
     const { backend, socket } = await connected();
 
