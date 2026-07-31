@@ -186,6 +186,17 @@ def cases(tmp: Path):
         # Prose that names the binary runs nothing: a commit message, a doc line.
         ("ALLOW", PROJECT, "git commit -m 'fix: stop blocking `ls target/debug/server`'"),
         ("ALLOW", PROJECT, "git commit -m 'chore: systemctl --user start teams-lite at boot'"),
+        # …and that holds for a browser too: describing what a measurement showed, or
+        # what a spec covers, drives nothing.
+        ("ALLOW", PROJECT, "git commit -m 'fix(web): Chromium fell to 8 fps on 100 words'"),
+        ("ALLOW", PROJECT, "git commit -q -F /tmp/msg-about-playwright.txt"),
+        ("ALLOW", PROJECT, "git tag -a v1 -m 'e2e now runs under chromium'"),
+        # …but a commit is not a licence for whatever follows it.
+        ("BLOCK", PROJECT, "git commit -m 'wip' && node -e \"require('playwright')\""),
+        ("BLOCK", PROJECT, f"git commit -m 'wip'; bun run {tmp}/incident-driver.ts"),
+        # Only `git commit`/`git tag` themselves: what follows a bare `git` may be a
+        # command git runs.
+        ("BLOCK", PROJECT, "git -c core.editor='chromium --headless' commit"),
         # Installing and DIAGNOSING the always-on service is agent work. Starting it
         # is the user's call, so everything that only looks or stops stays allowed.
         ("ALLOW", PROJECT, "bin/teams-lite-service.sh install"),

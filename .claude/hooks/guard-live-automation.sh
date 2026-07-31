@@ -93,6 +93,25 @@ probing_processes() {
   return 0
 }
 
+# Is this command only RECORDING TEXT that happens to name a browser — a commit
+# message, an annotated tag? Rules 3 and 3a anchor their patterns to a command
+# position for exactly this reason ("prose that names the binary runs nothing"),
+# but rule 1 matches anywhere, so `git commit -m "…Chromium fell to 8 fps…"` read
+# as a driver. A guard that fires on a commit message teaches its next reader to
+# write around it, which is the habit that caused the incident.
+#
+# Narrow on purpose, like `probing_processes`: the command must BEGIN with `git
+# commit` or `git tag` — so `git -c core.editor=… commit` is not exempt, since what
+# follows `git` there is a command git will run — and it must neither chain nor
+# substitute anything, because either could introduce a real driver. The
+# script-contents half of rule 1 stays unexempted regardless.
+recording_a_message() {
+  printf '%s' "$command_line" |
+    grep -qE '^[[:space:]]*git[[:space:]]+(commit|tag)([[:space:]]|$)' || return 1
+  printf '%s' "$command_line" | grep -qE '[;&|`]|\$\(' && return 1
+  return 0
+}
+
 # Is this command merely LOOKING at a file the rules below match by path — `ls -l
 # target/debug/server`, `stat …`, `bash -n bin/teams-dev-server.sh`? That runs
 # nothing either: `-n` is bash's syntax-check mode, which parses and exits.
@@ -306,11 +325,12 @@ bodies. If mail SENDING is genuinely wanted, it is a deliberate feature with its
 consent gate — ask the user, do not improvise it here."
 fi
 
-# `probing_processes` exempts only the COMMAND-LINE half: a `pgrep`/`pkill` that names
-# a browser drives nothing. The script-contents half stays unexempted on purpose, so
+# `probing_processes` and `recording_a_message` exempt only the COMMAND-LINE half: a
+# `pgrep`/`pkill` that names a browser drives nothing, and neither does a commit
+# message that mentions one. The script-contents half stays unexempted on purpose, so
 # `pkill -f chrome; bun run /tmp/driver.ts` is still blocked by the driver inside it.
 if { command_line_sans_tracked_paths | grep -qiE 'playwright|puppeteer|chrome-linux64/chrome|chromium' &&
-  ! probing_processes; } ||
+  ! probing_processes && ! recording_a_message; } ||
   [ -n "$scripts_driving_a_browser" ]; then
   if ! sanctioned_automation; then
     [ -n "$scripts_driving_a_browser" ] &&
