@@ -27,6 +27,7 @@ import type {
   ReadReceiptsResult,
   ReplyTo,
 } from "./protocol";
+import type { PushStatus, SubscriptionPayload } from "./push";
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
 type EventHandler = (data: unknown) => void;
@@ -427,6 +428,34 @@ export class Backend {
    *  and drops this socket on the way; recovery is the page's own reconnect. */
   repairBroker(): Promise<{ started: boolean; reason?: string }> {
     return this.writeRequest<{ started: boolean; reason?: string }>("repair_broker", {});
+  }
+
+  /** What the backend can do about push notifications, and which devices it already
+   *  notifies. A read: the page needs the VAPID public key before it can subscribe,
+   *  and `supported: false` means this backend never pushes (read-only mode). */
+  pushStatus(): Promise<PushStatus> {
+    return this.request<PushStatus>("push_status", {});
+  }
+  /** Register THIS device for push notifications. Idempotent — the page calls it on
+   *  every launch so a rotated subscription heals itself.
+   *
+   *  A WRITE request, though it posts nothing to Teams: it decides which devices the
+   *  machine sends message previews to (a `MACHINE_METHODS` entry in
+   *  src/bin/server.rs). */
+  pushSubscribe(payload: SubscriptionPayload): Promise<PushStatus> {
+    return this.writeRequest<PushStatus>("push_subscribe", { ...payload });
+  }
+  /** Forget one device's subscription — the user turning notifications off. */
+  pushUnsubscribe(endpoint: string): Promise<PushStatus & { removed: boolean }> {
+    return this.writeRequest<PushStatus & { removed: boolean }>("push_unsubscribe", { endpoint });
+  }
+  /** Push a test notification to every subscribed device, so the user can prove the
+   *  chain works without waiting for somebody to write to them. */
+  pushTest(): Promise<{ delivered: number; failed: number; errors: string[] }> {
+    return this.writeRequest<{ delivered: number; failed: number; errors: string[] }>(
+      "push_test",
+      {},
+    );
   }
   /** Fetch the notifications panel's three activity streams — Activity, Mentions
    *  and Following — in one round-trip. None is a chat: the backend fetches them

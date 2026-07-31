@@ -15,6 +15,7 @@
 //          | edit | react | notifications | read_receipts | fetch_media | fetch_avatar
 //          | profile | presence
 //          | get_settings | set_settings | enrich_link
+//          | push_status | push_subscribe | push_unsubscribe | push_test
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 // Events:  status | realtime_status | message | conversations_changed
 //          | channels_changed | typing | call | read_receipt
@@ -1930,6 +1931,39 @@ function mockPresence(mri: string): MockPresence {
  *  write-only from the UI's side, so only its presence is ever reported back. */
 const mockSettings = { gitlab_host: "gitlab.com", gitlab_token: "" };
 
+/** Devices that "subscribed" to push notifications, keyed by endpoint (the real
+ *  backend keeps these in SQLite). In memory, so a mock restart forgets them. */
+const mockPushDevices = new Map<
+  string,
+  { endpoint: string; label: string; created_ms: number; last_ok_ms: number; last_error: string }
+>();
+
+/** A VAPID public key of the right SHAPE (65-byte uncompressed P-256 point,
+ *  base64url), so `pushManager.subscribe` accepts it in a browser driven against
+ *  this mock. Fixed, and useless for anything: the mock holds no private half and
+ *  never signs a push. */
+const MOCK_VAPID_PUBLIC_KEY =
+  "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8";
+
+/** The `push_status` result, matching the Rust one. */
+function pushStatusView(): {
+  supported: boolean;
+  public_key: string;
+  devices: {
+    endpoint: string;
+    label: string;
+    created_ms: number;
+    last_ok_ms: number;
+    last_error: string;
+  }[];
+} {
+  return {
+    supported: true,
+    public_key: MOCK_VAPID_PUBLIC_KEY,
+    devices: [...mockPushDevices.values()],
+  };
+}
+
 /** Non-secret settings view, matching the Rust `get_settings` result. */
 function settingsView(): { gitlab_host: string; gitlab_token_set: boolean } {
   const host = mockSettings.gitlab_host.trim() || "gitlab.com";
@@ -2975,6 +3009,41 @@ function dispatch(method: string, params: unknown): unknown {
         : [requireString(params, "mri")];
       return { presences: mris.map(mockPresence) };
     }
+
+    // ---- push notifications ------------------------------------------------
+    // The mock accepts a subscription and answers with a plausible status, so a
+    // spec or `bun run preview` can drive the whole Settings flow. It never sends
+    // anything: a real push needs Apple's or Google's service and a real device, so
+    // `push_test` reports what it is — nothing delivered.
+
+    case "push_status":
+      return pushStatusView();
+
+    case "push_subscribe": {
+      const endpoint = requireString(params, "endpoint");
+      const o = asObject(params);
+      mockPushDevices.set(endpoint, {
+        endpoint,
+        label: typeof o.label === "string" ? o.label : "",
+        created_ms: Date.now(),
+        last_ok_ms: 0,
+        last_error: "",
+      });
+      return pushStatusView();
+    }
+
+    case "push_unsubscribe": {
+      const endpoint = requireString(params, "endpoint");
+      const removed = mockPushDevices.delete(endpoint);
+      return { ...pushStatusView(), removed };
+    }
+
+    case "push_test":
+      return {
+        delivered: 0,
+        failed: mockPushDevices.size,
+        errors: mockPushDevices.size > 0 ? ["the mock backend never sends a real push"] : [],
+      };
 
     case "get_settings":
       return settingsView();

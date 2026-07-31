@@ -25,11 +25,29 @@ export const Route = createRootRoute({
           "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",
       },
       { name: "color-scheme", content: "light dark" },
+      // The status-bar band of an installed app takes its colour from here, so it
+      // is declared per scheme — one value would leave a black strip above a light
+      // app, or a white one above a dark app.
+      { name: "theme-color", content: "#fbfbfc", media: "(prefers-color-scheme: light)" },
+      { name: "theme-color", content: "#171717", media: "(prefers-color-scheme: dark)" },
+      // Installed-app hints. `display: standalone` in the manifest is what current
+      // iOS reads; these keep an older iOS opening the Home Screen icon without
+      // Safari's chrome, and name the app under the icon.
+      { name: "mobile-web-app-capable", content: "yes" },
+      { name: "apple-mobile-web-app-capable", content: "yes" },
+      { name: "apple-mobile-web-app-title", content: "teams-lite" },
+      { name: "apple-mobile-web-app-status-bar-style", content: "default" },
       { title: "teams-lite" },
     ],
     links: [
       { rel: "stylesheet", href: appCss },
       { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
+      // Add to Home Screen reads these two: the manifest makes the page an
+      // installable web app (which is what unlocks Web Push on iOS), and the
+      // apple-touch-icon is the icon itself — iOS will not take an SVG, and without
+      // a PNG it uses a screenshot of the page.
+      { rel: "manifest", href: "/manifest.webmanifest" },
+      { rel: "apple-touch-icon", href: "/icons/apple-touch-icon-180.png", sizes: "180x180" },
     ],
   }),
   component: RootComponent,

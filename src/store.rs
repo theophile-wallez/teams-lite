@@ -183,6 +183,40 @@ CREATE TABLE IF NOT EXISTS calendar_months (
     synced_at    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (calendar_id, month)
 );
+-- Devices that asked for push notifications (see src/push.rs). One row per
+-- installed web app: an iPhone Home Screen app and a laptop browser are two rows,
+-- each with its own endpoint and its own encryption keys.
+--
+-- Durable on purpose: the phone's subscription must outlive a backend restart, or
+-- notifications would stop until the user opened the app again — which is exactly
+-- the situation push exists to cover.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    -- The push service URL. Unique per device, so it is the natural key.
+    endpoint    TEXT PRIMARY KEY,
+    -- The device's public key and auth secret, base64url, straight from the
+    -- browser's PushSubscription.
+    p256dh      TEXT NOT NULL,
+    auth        TEXT NOT NULL,
+    -- A human label for the Settings list ("iPhone · Safari"), from the client.
+    label       TEXT NOT NULL DEFAULT '',
+    created_ms  INTEGER NOT NULL DEFAULT 0,
+    -- Last successful delivery, and the last failure text. Both exist so the user
+    -- can tell a working subscription from a dead one without reading a journal.
+    last_ok_ms  INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT NOT NULL DEFAULT ''
+);
+-- One row per notification already pushed, so it is pushed EXACTLY once.
+--
+-- Not an optimization: two send-capable backends share this store by design (the
+-- always-on service on 19420 and the user's dev one on 19421 — see the Ports table
+-- in AGENTS.md), both run a trouter, and both see every live message. Without a
+-- claim they would both push and the phone would buzz twice per message. Rows are
+-- pruned after a day (see [`Store::prune_push_deliveries`]).
+CREATE TABLE IF NOT EXISTS push_deliveries (
+    -- conversation_id + '/' + message_id.
+    dedupe_key TEXT PRIMARY KEY,
+    claimed_ms INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 /// Indexes, applied AFTER [`migrate`] because several of them cover columns that a
@@ -232,7 +266,10 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 ///
 /// v4 adds the read-only calendar mirror (`calendars`, `calendar_events`,
 /// `calendar_months` and their index), the same way.
-const SCHEMA_VERSION: i64 = 4;
+///
+/// v5 adds the Web Push tables (`push_subscriptions`, `push_deliveries`), so a
+/// phone that installed the app keeps its subscription across restarts.
+const SCHEMA_VERSION: i64 = 5;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -656,6 +693,22 @@ pub struct CalendarEventUpdate<'a> {
     pub attendee_count: i64,
     pub has_attachments: bool,
     pub reminder_minutes: i64,
+}
+
+/// One device subscribed to push notifications, as stored.
+///
+/// `p256dh`/`auth` are the device's own encryption keys: the payload is encrypted
+/// to them, so the push service in the middle forwards bytes it cannot read (see
+/// the [`crate::push`] module doc).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushSubscriptionRow {
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+    pub label: String,
+    pub created_ms: i64,
+    pub last_ok_ms: i64,
+    pub last_error: String,
 }
 
 pub struct Store {
@@ -2464,6 +2517,145 @@ impl Store {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    /// The name to say a message arrived *in*: a chat's display name, or a
+    /// channel's "Team · Channel". `""` when the store knows neither — a chat whose
+    /// title is derived per-viewer (a 1:1 is titled after the other person, which
+    /// the sidebar resolves at read time) or a channel not synced yet.
+    ///
+    /// Used by the push path, which has a message id and needs one line of context
+    /// (see [`crate::push_policy::Placement`]).
+    pub fn conversation_context(&self, id: &str) -> Result<String> {
+        let channel = self
+            .query_one(
+                "SELECT team_name, display_name FROM channels WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((team, channel)) = channel {
+            return Ok(match (team.trim(), channel.trim()) {
+                ("", "") => String::new(),
+                ("", channel) => channel.to_string(),
+                (team, "") => team.to_string(),
+                (team, channel) => format!("{team} · {channel}"),
+            });
+        }
+        Ok(self
+            .query_one(
+                "SELECT display_name FROM conversations WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .unwrap_or_default())
+    }
+
+    // ---- push notifications (see src/push.rs) ------------------------------
+
+    /// Remember one device's push subscription, replacing the row for the same
+    /// endpoint.
+    ///
+    /// Idempotent because the client re-registers on every launch: a browser may
+    /// rotate a subscription's keys under the same endpoint, and re-subscribing is
+    /// how the backend learns about it. The bookkeeping (`last_ok_ms`,
+    /// `last_error`) resets with the keys, since it describes the old keys.
+    pub fn put_push_subscription(
+        &self,
+        endpoint: &str,
+        p256dh: &str,
+        auth: &str,
+        label: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        self.exec(
+            "INSERT INTO push_subscriptions (endpoint, p256dh, auth, label, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(endpoint) DO UPDATE SET
+                 p256dh     = excluded.p256dh,
+                 auth       = excluded.auth,
+                 label      = excluded.label,
+                 last_error = ''",
+            params![endpoint, p256dh, auth, label, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Forget one device's subscription. `true` when a row went away — the user
+    /// turning notifications off on that device, or a push service telling us the
+    /// subscription is gone.
+    pub fn delete_push_subscription(&self, endpoint: &str) -> Result<bool> {
+        Ok(self.exec("DELETE FROM push_subscriptions WHERE endpoint = ?1", params![endpoint])? > 0)
+    }
+
+    /// Every subscribed device, oldest first.
+    pub fn push_subscriptions(&self) -> Result<Vec<PushSubscriptionRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT endpoint, p256dh, auth, label, created_ms, last_ok_ms, last_error
+             FROM push_subscriptions ORDER BY created_ms ASC, endpoint ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(PushSubscriptionRow {
+                    endpoint: row.get(0)?,
+                    p256dh: row.get(1)?,
+                    auth: row.get(2)?,
+                    label: row.get(3)?,
+                    created_ms: row.get(4)?,
+                    last_ok_ms: row.get(5)?,
+                    last_error: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// How many devices are subscribed. Its own query because the live-message path
+    /// asks it per message, and a user who never turned notifications on should pay
+    /// one count rather than a row decode.
+    pub fn count_push_subscriptions(&self) -> Result<i64> {
+        Ok(self.query_one("SELECT COUNT(*) FROM push_subscriptions", params![], |row| row.get(0))?)
+    }
+
+    /// Record the outcome of a delivery: the time on success, the reason on
+    /// failure. A success clears the stored error, so the Settings list shows the
+    /// current state of the device rather than the worst thing that ever happened
+    /// to it.
+    pub fn mark_push_delivery(&self, endpoint: &str, now_ms: i64, error: &str) -> Result<()> {
+        if error.is_empty() {
+            self.exec(
+                "UPDATE push_subscriptions SET last_ok_ms = ?2, last_error = '' WHERE endpoint = ?1",
+                params![endpoint, now_ms],
+            )?;
+        } else {
+            self.exec(
+                "UPDATE push_subscriptions SET last_error = ?2 WHERE endpoint = ?1",
+                params![endpoint, error],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Claim the right to push one notification, exactly once across every process
+    /// sharing this store. `true` means "it is yours to send"; `false` means another
+    /// backend already took it (see the `push_deliveries` note in `SCHEMA`).
+    ///
+    /// The claim is the INSERT itself — SQLite's primary key does the arbitration,
+    /// so there is no window between checking and claiming.
+    pub fn claim_push_delivery(&self, dedupe_key: &str, now_ms: i64) -> Result<bool> {
+        Ok(self.exec(
+            "INSERT OR IGNORE INTO push_deliveries (dedupe_key, claimed_ms) VALUES (?1, ?2)",
+            params![dedupe_key, now_ms],
+        )? > 0)
+    }
+
+    /// Drop delivery claims older than `before_ms`. They only exist to stop a
+    /// double push of a LIVE message, and the policy already refuses anything older
+    /// than a few minutes, so keeping them forever would grow a table nobody reads.
+    pub fn prune_push_deliveries(&self, before_ms: i64) -> Result<usize> {
+        Ok(self.exec("DELETE FROM push_deliveries WHERE claimed_ms < ?1", params![before_ms])?)
     }
 
     /// Backfill `sender_mri` on an existing row that predates the column (its MRI
@@ -5032,5 +5224,97 @@ mod tests {
             !plan.contains("TEMP B-TREE"),
             "the calendar range read must not sort in a temp b-tree, got: {plan}"
         );
+    }
+
+    #[test]
+    fn conversation_context_names_a_chat_or_a_teams_channel() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("19:group@thread.v2", "Release train", 100).unwrap();
+        assert_eq!(s.conversation_context("19:group@thread.v2").unwrap(), "Release train");
+
+        s.upsert_channel_full(&ChannelUpdate {
+            id: "19:chan@thread.tacv2",
+            team_id: "t1",
+            team_name: "Engine",
+            team_group_id: "",
+            display_name: "General",
+            is_general: true,
+            is_favorite: false,
+            last_message_time: 100,
+            last_message_preview: "",
+            last_message_sender: "",
+            last_message_from_me: false,
+            is_read: true,
+            team_pos: 0,
+            channel_pos: 0,
+        })
+        .unwrap();
+        assert_eq!(s.conversation_context("19:chan@thread.tacv2").unwrap(), "Engine · General");
+        assert_eq!(s.conversation_context("19:unknown@thread.v2").unwrap(), "");
+    }
+
+    #[test]
+    fn a_push_subscription_round_trips_and_re_registering_replaces_it() {
+        let s = Store::open_in_memory().unwrap();
+        s.put_push_subscription("https://web.push.apple.com/a", "key-a", "auth-a", "iPhone", 100)
+            .unwrap();
+        s.put_push_subscription("https://web.push.apple.com/b", "key-b", "auth-b", "Laptop", 200)
+            .unwrap();
+
+        let subs = s.push_subscriptions().unwrap();
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0].endpoint, "https://web.push.apple.com/a");
+        assert_eq!(subs[0].label, "iPhone");
+        assert_eq!(subs[0].p256dh, "key-a");
+
+        // A browser may rotate the keys under the same endpoint; re-registering
+        // updates the row instead of adding a second one for the same device.
+        s.put_push_subscription("https://web.push.apple.com/a", "key-a2", "auth-a2", "iPhone", 300)
+            .unwrap();
+        let subs = s.push_subscriptions().unwrap();
+        assert_eq!(subs.len(), 2, "re-registering must not duplicate the device");
+        assert_eq!(subs[0].p256dh, "key-a2");
+        assert_eq!(subs[0].created_ms, 100, "the original subscription date is kept");
+    }
+
+    #[test]
+    fn a_delivery_outcome_is_recorded_and_a_success_clears_the_error() {
+        let s = Store::open_in_memory().unwrap();
+        s.put_push_subscription("https://web.push.apple.com/a", "k", "a", "iPhone", 100).unwrap();
+
+        s.mark_push_delivery("https://web.push.apple.com/a", 500, "push service answered 500")
+            .unwrap();
+        let sub = s.push_subscriptions().unwrap().remove(0);
+        assert_eq!(sub.last_error, "push service answered 500");
+        assert_eq!(sub.last_ok_ms, 0);
+
+        s.mark_push_delivery("https://web.push.apple.com/a", 900, "").unwrap();
+        let sub = s.push_subscriptions().unwrap().remove(0);
+        assert_eq!(sub.last_error, "", "a success clears the stale failure");
+        assert_eq!(sub.last_ok_ms, 900);
+    }
+
+    #[test]
+    fn deleting_a_subscription_reports_whether_a_row_went_away() {
+        let s = Store::open_in_memory().unwrap();
+        s.put_push_subscription("https://web.push.apple.com/a", "k", "a", "", 100).unwrap();
+        assert!(s.delete_push_subscription("https://web.push.apple.com/a").unwrap());
+        assert!(!s.delete_push_subscription("https://web.push.apple.com/a").unwrap());
+        assert!(s.push_subscriptions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_the_first_claim_of_a_notification_wins() {
+        // Two backends share this store and both see every live message; the claim
+        // is what keeps the phone from buzzing twice.
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.claim_push_delivery("c1/m1", 1_000).unwrap());
+        assert!(!s.claim_push_delivery("c1/m1", 1_000).unwrap());
+        assert!(s.claim_push_delivery("c1/m2", 1_000).unwrap());
+
+        assert_eq!(s.prune_push_deliveries(1_001).unwrap(), 2);
+        // Pruned claims are re-claimable, which is fine: the policy refuses a
+        // message that old anyway.
+        assert!(s.claim_push_delivery("c1/m1", 2_000).unwrap());
     }
 }

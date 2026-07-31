@@ -165,6 +165,35 @@ Two things worth knowing before you do it:
 - A backgrounded mobile tab has its timers frozen and its socket dropped; the app
   reconnects when you come back to it rather than showing "backend lost".
 
+### Notifications on the phone (install it as an app)
+
+The web UI is an installable web app, and an installed one can be notified while it
+is **closed** — that is the difference between a bookmark and something you can
+actually rely on for messages.
+
+On iPhone or iPad:
+
+1. Open the tailnet HTTPS address in Safari (`https://<machine>.<tailnet>.ts.net:8443`).
+2. Tap **Share → Add to Home Screen**. iOS only offers Web Push to a Home Screen
+   web app, never to a Safari tab.
+3. Open teams-lite **from the new icon**, then go to **Settings → Notifications** and
+   turn on *This device*. iOS asks for permission at that tap — it refuses to ask any
+   other way, which is why there is a switch rather than a prompt on startup.
+4. Use **Send a test notification** to prove the whole chain before trusting it.
+
+Android and desktop Chrome, Edge or Firefox work the same way (install optional).
+
+What you get, and what you do not:
+
+- A notification for a **chat** message, and for a **channel** post that @mentions
+  you. Channel chatter that is not about you stays silent, as it does in Teams.
+- Nothing for your own messages, for system lines ("call ended", "member added"), or
+  for a message that is already several minutes old when it reaches the backend.
+- Delivery needs the backend running, which is what the systemd service below is
+  for. A laptop with the service stopped notifies nobody.
+- The notification text is **encrypted to your device** (RFC 8291): Apple or Google
+  forward bytes they cannot read. They do see that a message arrived, and when.
+
 ### Always on (systemd service)
 
 `teams --web` lives as long as your terminal does. To keep the app reachable from
@@ -381,6 +410,11 @@ store are identical.
 - Sign-in goes through the OS-level Microsoft Identity Broker — teams-lite never
   sees or stores your password.
 - No raw tokens are ever written to logs or sent to the UI.
+- Push notifications carry message text through Apple's or Google's push service, so
+  that text is encrypted to the subscribed device and unreadable in transit (RFC
+  8291). A subscription may only point at one of those services' own hosts, and
+  registering one needs the backend's write token — a client that merely found the
+  socket cannot aim your messages anywhere.
 
 ## Project status
 

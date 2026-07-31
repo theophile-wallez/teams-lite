@@ -71,6 +71,24 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19440');\n"
         "ws.send(JSON.stringify({ method: 'conversations' }));\n"
     ),
+    # Push: subscribing decides which of the user's devices the machine notifies, so
+    # it is a write to the live backend like send/edit/react (a MACHINE_METHODS entry
+    # in src/bin/server.rs).
+    "push-subscriber.ts": (
+        "// Registers a device for push on the real backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'push_subscribe' }));\n"
+    ),
+    "push-tester.ts": (
+        "// Buzzes the user's phone from the real backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19440');\n"
+        "ws.send(JSON.stringify({ method: 'push_test' }));\n"
+    ),
+    "push-status-reader.ts": (
+        "// Reads which devices are subscribed, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'push_status' }));\n"
+    ),
     "token-thief.ts": (
         "// Fetches the write capability from the app's own server.\n"
         "const res = await fetch('http://127.0.0.1:19440/__write-token');\n"
@@ -94,6 +112,10 @@ def cases(tmp: Path):
         # The dev pair reaches the same account as the service's.
         ("BLOCK", PROJECT, f"bun run {tmp}/dev-backend-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/dev-relay-writer.ts"),
+        # Push: aiming the user's message previews at a device, or buzzing their
+        # phone, is a write — through either address.
+        ("BLOCK", PROJECT, f"bun run {tmp}/push-subscriber.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/push-tester.ts"),
         # The write token is the capability itself — never ours to fetch.
         ("BLOCK", PROJECT, f"bun run {tmp}/token-thief.ts"),
         ("BLOCK", PROJECT, "curl -s http://127.0.0.1:19440/__write-token"),
@@ -127,6 +149,8 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/backend-reader.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/relay-reader.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/dev-backend-reader.ts"),
+        # Which devices are subscribed is a read, like any other status question.
+        ("ALLOW", PROJECT, f"bun run {tmp}/push-status-reader.ts"),
         # Reading the code that implements the token endpoint is ordinary work.
         ("ALLOW", PROJECT, 'grep -rn "__write-token" web/src'),
         # Commands that only NAME a file run nothing, whatever is inside it.

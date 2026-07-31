@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  Bell,
   Check,
   ChevronLeft,
   ExternalLink,
@@ -14,6 +15,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { APPEARANCES, appearanceLabel, type Appearance } from "~/lib/appearance";
+import { pushBlockerMessage } from "~/lib/push";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
 import { Button } from "./ui/button";
@@ -64,6 +66,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
       <div className="flex-1 overflow-y-auto px-4 py-6 md:px-5">
         <div className="mx-auto flex max-w-xl flex-col gap-8 pb-[env(safe-area-inset-bottom)]">
           <GitLabSettings />
+          <NotificationSettings />
           <AppearanceSettings />
           <SoundsSettings />
         </div>
@@ -216,6 +219,140 @@ function GitLabSettings() {
             </span>
           )}
         </div>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Push notifications for THIS device — the only path that reaches a phone whose app
+ * is closed (see lib/push.ts and src/push.rs).
+ *
+ * The switch is a real button and nothing subscribes on load: iOS refuses a
+ * permission prompt that does not come from a user gesture. When the device cannot
+ * subscribe at all, the section says why instead of offering a switch that would do
+ * nothing — on iPhone that reason is almost always "add it to the Home Screen
+ * first", which is advice, not a failure.
+ */
+function NotificationSettings() {
+  const controller = useController();
+  const push = useAppState((s) => s.push);
+  const [testResult, setTestResult] = useState<string | null>(null);
+
+  const enabled = push.endpoint !== null;
+  const blocked = push.blocker !== null;
+  const blockerMessage = pushBlockerMessage(push.blocker, push.error ?? undefined);
+  const otherDevices = push.devices.filter((device) => device.endpoint !== push.endpoint);
+
+  const toggle = async () => {
+    setTestResult(null);
+    try {
+      if (enabled) await controller.disablePush();
+      else await controller.enablePush();
+    } catch {
+      // The controller already put the reason in state; the pane shows it below.
+    }
+  };
+
+  const test = async () => {
+    setTestResult(null);
+    try {
+      const report = await controller.testPush();
+      setTestResult(
+        report.delivered > 0
+          ? `Sent to ${report.delivered} device${report.delivered === 1 ? "" : "s"}.`
+          : "No device accepted the notification.",
+      );
+    } catch {
+      // Same: `push.error` carries it.
+    }
+  };
+
+  return (
+    <section className="flex flex-col gap-4" data-testid="notification-settings">
+      <div className="flex items-start gap-3">
+        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
+          <Bell className="size-5" strokeWidth={1.5} />
+        </div>
+        <div className="flex flex-col">
+          <h3 className="text-[15px] font-medium text-foreground">Notifications</h3>
+          <p className="text-[13px] text-text-faint">
+            Get a notification on this device when someone writes to you — even when
+            teams-lite is closed.
+          </p>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-4 rounded-xl bg-card p-4 shadow-chip">
+        {blocked ? (
+          <p data-testid="push-blocked" className="text-[13px] text-text-dim">
+            {blockerMessage}
+          </p>
+        ) : (
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex min-w-0 flex-col">
+              <span className="text-[13px] font-medium text-foreground">This device</span>
+              <span className="text-[11px] text-text-faint">
+                {push.busy ? "Working…" : enabled ? "On" : "Off"}
+              </span>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={enabled}
+              aria-label="Push notifications on this device"
+              data-testid="push-toggle"
+              disabled={push.busy}
+              onClick={() => void toggle()}
+              className={cn(
+                "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+                push.busy && "opacity-60",
+                enabled ? "bg-primary" : "bg-element",
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
+                  enabled ? "translate-x-[22px]" : "translate-x-0.5",
+                )}
+              />
+            </button>
+          </div>
+        )}
+
+        {enabled && (
+          <div className="flex items-center gap-3">
+            <Button size="sm" variant="ghost" data-testid="push-test" disabled={push.busy} onClick={() => void test()}>
+              Send a test notification
+            </Button>
+            {testResult && (
+              <span data-testid="push-test-result" className="text-xs text-text-dim">
+                {testResult}
+              </span>
+            )}
+          </div>
+        )}
+
+        {push.error && !blocked && (
+          <span data-testid="push-error" className="text-xs text-destructive">
+            {push.error}
+          </span>
+        )}
+
+        {otherDevices.length > 0 && (
+          <div className="flex flex-col gap-1 border-t border-border-subtle pt-3">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-text-faint">
+              Other devices
+            </span>
+            {otherDevices.map((device) => (
+              <span key={device.endpoint} className="text-[12px] text-text-dim">
+                {device.label || "Unnamed device"}
+                {device.last_error ? " — not reachable" : ""}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </section>
   );

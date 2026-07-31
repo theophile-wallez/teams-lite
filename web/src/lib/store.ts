@@ -63,6 +63,17 @@ import {
 } from "./calendar";
 import { ensureNotificationPermission, notifyCall, notifyMessage } from "./notify";
 import {
+  INITIAL_PUSH_STATE,
+  currentSubscription,
+  deviceLabel,
+  pushBlocker,
+  readPushEnvironment,
+  subscribeThisDevice,
+  subscriptionPayload,
+  unsubscribeThisDevice,
+  type PushState,
+} from "./push";
+import {
   APPEARANCE_STORAGE_KEY,
   DEFAULT_APPEARANCE,
   coerceAppearance,
@@ -173,6 +184,10 @@ export type AppState = {
   /** Non-secret app settings (GitLab host + whether a token is stored), loaded
    *  from the backend on start. Drives which links get rich previews. */
   settings: AppSettings;
+  /** Push notifications for THIS device: what the browser supports, what stands in
+   *  the way, and which devices the backend notifies. The only path that reaches a
+   *  phone whose app is closed — see lib/push.ts. */
+  push: PushState;
 
   // ---- mail (read-only Outlook surface) ------------------------------------
 
@@ -328,6 +343,7 @@ function initialState(): AppState {
     resolvedTheme: "light",
     soundsEnabled: DEFAULT_SOUNDS_ENABLED,
     settings: { gitlab_host: "gitlab.com", gitlab_token_set: false },
+    push: INITIAL_PUSH_STATE,
     mailFolders: [],
     mailFolderId: null,
     mailMessages: [],
@@ -510,6 +526,10 @@ export class TeamsController {
       // App settings (GitLab host/token state) are best-effort too — a failure
       // just leaves the defaults, so link previews target gitlab.com.
       void this.loadSettings();
+      // Where this device stands on push notifications, and a re-registration if it
+      // is already subscribed (a browser may have rotated the subscription while the
+      // app was closed — see syncPush).
+      void this.syncPush();
     } catch (e) {
       const msg = errText(e);
       this.set({
@@ -1866,6 +1886,139 @@ export class TeamsController {
     this.set({ settings });
     this.linkCache.clear();
     return settings;
+  }
+
+  // ---- push notifications (see lib/push.ts) --------------------------------
+
+  /**
+   * Work out where this device stands on push notifications, and re-register it if
+   * it is already subscribed.
+   *
+   * Runs on every start, and the re-registration is the point: a browser may rotate
+   * a subscription while the app is closed, and the endpoint the backend holds is
+   * then dead. The page is the only place that can notice, because it is the only
+   * place with both the browser's current subscription and an authenticated socket.
+   *
+   * Best-effort throughout: notifications are an extra, and a failure here must
+   * never keep the app from starting.
+   */
+  private async syncPush(): Promise<void> {
+    if (typeof window === "undefined") return; // SSR has no browser to ask
+    const environment = readPushEnvironment();
+    try {
+      const status = await this.backend.pushStatus();
+      const blocker = pushBlocker(environment, status.supported);
+      const subscription = blocker === null ? await currentSubscription() : null;
+      this.set({
+        push: {
+          ...this.get().push,
+          environment,
+          blocker,
+          devices: status.devices,
+          endpoint: subscription?.endpoint ?? null,
+          error: blocker === "backend" ? (status.reason ?? null) : null,
+        },
+      });
+      if (!subscription) return;
+      // Re-register the subscription we found. Idempotent on the backend, and it
+      // heals both a rotated subscription and a store that lost the row.
+      const payload = subscriptionPayload(subscription, deviceLabel());
+      if (!payload) return;
+      const refreshed = await this.backend.pushSubscribe(payload);
+      this.set({ push: { ...this.get().push, devices: refreshed.devices } });
+    } catch {
+      // Leave the environment we did resolve, so Settings can still explain iOS's
+      // "add to Home Screen" requirement while the backend is unreachable.
+      this.set({ push: { ...this.get().push, environment } });
+    }
+  }
+
+  /**
+   * Turn notifications on for this device: ask permission, subscribe, and tell the
+   * backend.
+   *
+   * MUST be called straight from a user gesture — iOS refuses the permission prompt
+   * otherwise, which is why this lives behind a button and never runs on load.
+   * Rejects with a readable message so the pane can show it.
+   */
+  async enablePush(): Promise<void> {
+    const before = this.get().push;
+    this.set({ push: { ...before, busy: true, error: null } });
+    try {
+      const status = await this.backend.pushStatus();
+      if (!status.supported) {
+        throw new Error(status.reason ?? "this backend does not send push notifications");
+      }
+      const payload = await subscribeThisDevice(status.public_key);
+      const registered = await this.backend.pushSubscribe(payload);
+      this.set({
+        push: {
+          ...this.get().push,
+          busy: false,
+          error: null,
+          endpoint: payload.endpoint,
+          devices: registered.devices,
+          environment: readPushEnvironment(),
+          blocker: null,
+        },
+      });
+    } catch (e) {
+      const message = errText(e);
+      this.set({
+        push: {
+          ...this.get().push,
+          busy: false,
+          error: message,
+          environment: readPushEnvironment(),
+        },
+      });
+      throw e;
+    }
+  }
+
+  /** Turn notifications off for this device: drop the browser subscription and have
+   *  the backend forget the endpoint. Both halves, or a dead endpoint would keep
+   *  collecting failed deliveries. */
+  async disablePush(): Promise<void> {
+    const before = this.get().push;
+    this.set({ push: { ...before, busy: true, error: null } });
+    try {
+      const endpoint = (await unsubscribeThisDevice()) ?? before.endpoint;
+      const status = endpoint ? await this.backend.pushUnsubscribe(endpoint) : null;
+      this.set({
+        push: {
+          ...this.get().push,
+          busy: false,
+          endpoint: null,
+          devices: status?.devices ?? this.get().push.devices,
+        },
+      });
+    } catch (e) {
+      this.set({ push: { ...this.get().push, busy: false, error: errText(e) } });
+      throw e;
+    }
+  }
+
+  /** Ask the backend to push a test notification to every subscribed device.
+   *  Resolves with what it managed to deliver, so the pane can say "sent to 1
+   *  device" instead of leaving the user watching a lock screen. */
+  async testPush(): Promise<{ delivered: number; failed: number; errors: string[] }> {
+    const before = this.get().push;
+    this.set({ push: { ...before, busy: true, error: null } });
+    try {
+      const report = await this.backend.pushTest();
+      this.set({
+        push: {
+          ...this.get().push,
+          busy: false,
+          error: report.failed > 0 ? (report.errors[0] ?? "delivery failed") : null,
+        },
+      });
+      return report;
+    } catch (e) {
+      this.set({ push: { ...this.get().push, busy: false, error: errText(e) } });
+      throw e;
+    }
   }
 
   /** Ask the backend to repair sign-in by restarting the Intune container.

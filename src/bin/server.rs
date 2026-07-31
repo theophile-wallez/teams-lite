@@ -61,8 +61,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    auth, calendar, mail, retry, teams, teams_activity, teams_avatars, teams_media, teams_presence,
-    teams_profiles, teams_read, teams_readstate, teams_send, trouter, trouter_events,
+    auth, calendar, mail, push, push_policy, retry, teams, teams_activity, teams_avatars,
+    teams_media, teams_presence, teams_profiles, teams_read, teams_readstate, teams_send, trouter,
+    trouter_events,
 };
 use teams_lite::gitlab;
 
@@ -94,6 +95,16 @@ const DISCONNECTED_CLIENT_GRACE: Duration = Duration::from_secs(10);
 /// personal access token drive rich link previews (see `gitlab`).
 const SETTING_GITLAB_HOST: &str = "gitlab_host";
 const SETTING_GITLAB_TOKEN: &str = "gitlab_token";
+/// This machine's VAPID private key (base64url), generated on first use. It must
+/// stay stable: every device's subscription embeds the matching public half, so a
+/// new key silently stops every phone that already opted in (see
+/// [`teams_lite::push::VapidKey`]).
+const SETTING_PUSH_VAPID_PRIVATE: &str = "push_vapid_private";
+
+/// How long a delivery claim is kept before [`Store::prune_push_deliveries`] drops
+/// it. Only there to stop two backends double-pushing the same LIVE message, and
+/// the policy already refuses anything older than a few minutes.
+const PUSH_CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 
 /// The RPC methods that act OUTWARD — they change what other people see in the
 /// user's real Teams account (a message posted, edited, or reacted to). Every
@@ -108,7 +119,29 @@ const OUTWARD_METHODS: [&str; 3] = ["send", "edit", "react"];
 /// mail or calendar write gaining a consent gate. `repair_broker` posts nothing — it
 /// restarts the Intune container — so it is gated for the other reason, and says so
 /// in its own refusal text.
-const MACHINE_METHODS: [&str; 1] = ["repair_broker"];
+///
+/// The `push_*` methods are here for the same reason and one of their own: a
+/// subscription is a URL a client supplies, and every incoming message preview is
+/// then POSTed to it. Even with [`teams_lite::push::is_supported_endpoint`] confining
+/// that to the browser vendors' push services, deciding which devices a machine
+/// notifies is not something a client that merely found this socket gets to do.
+const MACHINE_METHODS: [&str; 4] =
+    ["repair_broker", "push_subscribe", "push_unsubscribe", "push_test"];
+
+/// What a {@link MACHINE_METHODS} entry actually does to the machine, for its
+/// refusal text. Per method, not per class: "restarts the Intune container" would be
+/// a lie about a push subscription, and a refusal nobody believes is a refusal
+/// nobody reads.
+fn machine_effect(method: &str) -> &'static str {
+    match method {
+        "repair_broker" => "restarts the Intune container on this machine",
+        "push_subscribe" | "push_unsubscribe" | "push_test" => {
+            "changes which devices this machine sends push notifications to"
+        }
+        // Unreachable while the two lists agree; the test below pins that they do.
+        _ => "changes this machine",
+    }
+}
 
 /// Why a method needs the write token, or `None` when it only reads or writes the
 /// local store.
@@ -330,9 +363,10 @@ fn check_write_allowed(method: &str, params: &Value, token: Option<&str>) -> Res
                  point the client at web/mock/server.ts to exercise the flow."
             ),
             WriteClass::Machine => format!(
-                "refused: `{method}` restarts the Intune container on this machine, and this \
-                 server runs read-only (TEAMS_LITE_READ_ONLY=1). Tooling never repairs the user's \
-                 sign-in — their own backend does."
+                "refused: `{method}` {}, and this server runs read-only \
+                 (TEAMS_LITE_READ_ONLY=1). Tooling never changes the user's own machine — their \
+                 own backend does.",
+                machine_effect(method)
             ),
         });
     };
@@ -348,10 +382,10 @@ fn check_write_allowed(method: &str, params: &Value, token: Option<&str>) -> Res
             ),
             WriteClass::Machine => format!(
                 "refused: `{method}` needs the write token this backend published for the user's \
-                 own frontends. It restarts the Intune container, which takes the identity broker \
-                 down for a minute — not something a client that merely found this socket gets to \
-                 do. If you are a frontend, read the token from {WRITE_TOKEN_ENV} or from the file \
-                 the backend logged at startup."
+                 own frontends. It {} — not something a client that merely found this socket gets \
+                 to do. If you are a frontend, read the token from {WRITE_TOKEN_ENV} or from the \
+                 file the backend logged at startup.",
+                machine_effect(method)
             ),
         }),
     }
@@ -811,6 +845,13 @@ fn prepare_store(db_path: &str, allow_writes: bool) -> Result<()> {
         Ok(false) => {}
         Err(e) => eprintln!("[cleanup] could not read the cleanup revision: {e}"),
     }
+    // Push delivery claims only stop two backends notifying the same live message
+    // twice, so a day-old one is dead weight. Cheap and unconditional (a keyed
+    // range delete), unlike the one-shot cleanups above.
+    let claims_before = now_ms() - PUSH_CLAIM_RETENTION.as_millis() as i64;
+    if let Err(e) = store.prune_push_deliveries(claims_before) {
+        eprintln!("[push] could not prune old delivery claims: {e}");
+    }
     Ok(())
 }
 
@@ -1158,6 +1199,74 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // network: token-gated as a MACHINE method, refused read-only, and refused
         // again inside the primitive so the automatic caller inherits both.
         "repair_broker" => ctx.start_broker_repair(false).await,
+
+        // ---- push notifications (see src/push.rs) ------------------------------
+        // What an installed web app needs to receive a notification while it is
+        // closed. Only `push_status` reads; the other three are MACHINE methods,
+        // because they decide which devices this machine notifies.
+
+        // The subscription key the page needs and what this backend already knows.
+        // Read-only, and the one arm that generates the VAPID key pair — a page that
+        // asks the question is a page about to subscribe.
+        "push_status" => {
+            let store = ctx.store()?;
+            push_status_json(&store)
+        }
+
+        // Remember this device. Idempotent: the page re-registers on every launch,
+        // which is how a rotated subscription heals itself.
+        "push_subscribe" => {
+            let subscription = push::Subscription {
+                endpoint: param_str(params, "endpoint")?,
+                p256dh: param_str(params, "p256dh")?,
+                auth: param_str(params, "auth")?,
+            };
+            // Validate BEFORE storing: a subscription that cannot be encrypted to,
+            // or that points somewhere other than a browser vendor's push service,
+            // must fail here rather than in a delivery task at 3 a.m.
+            subscription.validate()?;
+            let label = params
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .chars()
+                .take(80)
+                .collect::<String>();
+            let store = ctx.store()?;
+            store.put_push_subscription(
+                &subscription.endpoint,
+                &subscription.p256dh,
+                &subscription.auth,
+                &label,
+                now_ms(),
+            )?;
+            eprintln!("[push] a device subscribed ({} total)", store.push_subscriptions()?.len());
+            push_status_json(&store)
+        }
+
+        // Forget this device — the user turning notifications off on it.
+        "push_unsubscribe" => {
+            let endpoint = param_str(params, "endpoint")?;
+            let store = ctx.store()?;
+            let removed = store.delete_push_subscription(&endpoint)?;
+            let mut status = push_status_json(&store)?;
+            status["removed"] = json!(removed);
+            Ok(status)
+        }
+
+        // Push one notification to every subscribed device, so the user can prove
+        // the chain works without waiting for a colleague to write to them.
+        "push_test" => {
+            let notification = push::Notification {
+                title: "teams-lite".to_string(),
+                body: "Notifications are working on this device.".to_string(),
+                url: "/".to_string(),
+                tag: "teams-lite-test".to_string(),
+            };
+            let report = deliver_push(ctx, &notification, 60).await?;
+            Ok(json!({ "delivered": report.delivered, "failed": report.failed, "errors": report.errors }))
+        }
 
         // full conversation list — LOCAL-FIRST: answer instantly from the SQLite
         // cache (0 network round-trips), then sync from the network in the
@@ -3042,6 +3151,202 @@ fn spawn_update_check(ctx: Ctx) {
     });
 }
 
+// ---- push notifications --------------------------------------------------------
+// The delivery side of src/push.rs: the machine's VAPID identity, the status the
+// Settings pane shows, and the two paths that actually push — the `push_test` RPC
+// and every live message the policy accepts.
+
+/// Wall-clock milliseconds, the store's timestamp unit.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// This machine's VAPID identity, generated on first use and then loaded.
+///
+/// Generate-once-then-load, never per process: a device's subscription embeds the
+/// public half, so a fresh key pair would silently stop every phone that already
+/// opted in. A stored key that no longer parses is replaced — it cannot be used for
+/// anything, and refusing to push forever is worse than asking the devices to
+/// subscribe again.
+fn vapid_key(store: &Store) -> Result<push::VapidKey> {
+    if let Some(stored) = store.get_setting(SETTING_PUSH_VAPID_PRIVATE)? {
+        match push::VapidKey::from_private_base64url(&stored) {
+            Ok(key) => return Ok(key),
+            Err(e) => eprintln!("[push] the stored VAPID key is unusable ({e}) — generating a new one"),
+        }
+    }
+    let key = push::VapidKey::generate();
+    store.set_setting(SETTING_PUSH_VAPID_PRIVATE, &key.private_base64url())?;
+    eprintln!("[push] generated this machine's VAPID key pair");
+    Ok(key)
+}
+
+/// What the Settings pane needs to show the notification state, and what a page
+/// needs to subscribe.
+///
+/// `supported: false` in read-only mode: that backend never pushes (see
+/// [`deliver_push`]), so a page must not offer a switch that would do nothing.
+fn push_status_json(store: &Store) -> Result<Value> {
+    if read_only() {
+        return Ok(json!({
+            "supported": false,
+            "reason": "this backend runs read-only (TEAMS_LITE_READ_ONLY=1) and never pushes",
+            "public_key": "",
+            "devices": [],
+        }));
+    }
+    let key = vapid_key(store)?;
+    let devices: Vec<Value> = store
+        .push_subscriptions()?
+        .into_iter()
+        .map(|row| {
+            json!({
+                // The endpoint is the client's own handle on its subscription — how a
+                // page recognizes ITS device in the list. It is not a secret the page
+                // does not already hold.
+                "endpoint": row.endpoint,
+                "label": row.label,
+                "created_ms": row.created_ms,
+                "last_ok_ms": row.last_ok_ms,
+                "last_error": row.last_error,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "supported": true,
+        "public_key": key.public_base64url(),
+        "devices": devices,
+    }))
+}
+
+/// The outcome of pushing one notification to every subscribed device.
+#[derive(Debug, Default)]
+struct PushReport {
+    delivered: usize,
+    failed: usize,
+    /// One line per failure, for the caller that asked (the in-app test button).
+    errors: Vec<String>,
+}
+
+/// Encrypt one notification to every subscribed device and POST it.
+///
+/// Refuses outright in read-only mode. That mode exists so tooling can drive the
+/// real store without acting on the user, and buzzing their phone from a screenshot
+/// script is exactly the kind of action it forbids — the check is here, not only at
+/// the dispatch gate, because live delivery never passes through the gate.
+///
+/// A subscription the push service reports as gone is deleted: the app was
+/// uninstalled or the browser rotated it, and retrying it costs a request per
+/// message forever.
+async fn deliver_push(
+    ctx: &Ctx,
+    notification: &push::Notification,
+    ttl_secs: u32,
+) -> Result<PushReport> {
+    if read_only() {
+        anyhow::bail!(
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never notifies the user's \
+             devices"
+        );
+    }
+    let store = ctx.store()?;
+    let key = vapid_key(&store)?;
+    let payload = serde_json::to_vec(notification)?;
+    let mut report = PushReport::default();
+
+    for row in store.push_subscriptions()? {
+        let subscription = push::Subscription {
+            endpoint: row.endpoint.clone(),
+            p256dh: row.p256dh,
+            auth: row.auth,
+        };
+        let outcome = push::deliver(&ctx.http, &key, &subscription, &payload, ttl_secs).await;
+        match outcome {
+            Ok(push::Outcome::Delivered) => {
+                report.delivered += 1;
+                store.mark_push_delivery(&row.endpoint, now_ms(), "")?;
+            }
+            Ok(push::Outcome::Gone) => {
+                report.failed += 1;
+                report.errors.push("a device's subscription expired and was removed".to_string());
+                eprintln!("[push] a subscription is gone — forgetting the device");
+                store.delete_push_subscription(&row.endpoint)?;
+            }
+            Ok(push::Outcome::Failed(reason)) => {
+                report.failed += 1;
+                eprintln!("[push] delivery failed: {reason}");
+                store.mark_push_delivery(&row.endpoint, now_ms(), &reason)?;
+                report.errors.push(reason);
+            }
+            Err(e) => {
+                // A transport error (no network, TLS, a malformed stored key). Same
+                // treatment: record it and move to the next device.
+                let reason = e.to_string();
+                report.failed += 1;
+                eprintln!("[push] delivery failed: {reason}");
+                store.mark_push_delivery(&row.endpoint, now_ms(), &reason)?;
+                report.errors.push(reason);
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Notify the user's devices about one live message, if the policy says it deserves
+/// it (see [`push_policy::notification_for`]).
+///
+/// Fire-and-forget: the trouter loop must never wait on the network, so the whole
+/// delivery runs in its own task. Claiming the message in the store first is what
+/// keeps the two send-capable backends that share this store from both pushing it.
+fn push_live_message(
+    ctx: &Ctx,
+    store: &Store,
+    message: &Message,
+    is_channel: bool,
+    from_me: bool,
+    self_mri: &str,
+) {
+    if read_only() || !push_subscriptions_exist(store) {
+        return;
+    }
+    let context = store.conversation_context(&message.conversation_id).unwrap_or_default();
+    let placement = push_policy::Placement { is_channel, title: &context };
+    let Some(notification) =
+        push_policy::notification_for(message, &placement, self_mri, from_me, now_ms())
+    else {
+        return;
+    };
+    let dedupe_key = format!("{}/{}", message.conversation_id, message.id);
+    match store.claim_push_delivery(&dedupe_key, now_ms()) {
+        Ok(true) => {}
+        // Another backend on this store already pushed it.
+        Ok(false) => return,
+        Err(e) => {
+            eprintln!("[push] could not claim {dedupe_key}: {e}");
+            return;
+        }
+    }
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        match deliver_push(&ctx, &notification, push::MESSAGE_TTL_SECS).await {
+            Ok(report) if report.failed > 0 => {
+                eprintln!("[push] {} delivered, {} failed", report.delivered, report.failed);
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("[push] delivery skipped: {e}"),
+        }
+    });
+}
+
+/// Whether any device is subscribed — checked before doing any policy work, so a
+/// user who never turned notifications on pays one count per message.
+fn push_subscriptions_exist(store: &Store) -> bool {
+    store.count_push_subscriptions().map(|count| count > 0).unwrap_or(false)
+}
+
 /// Start the trouter; persist each live message and broadcast it as an event.
 ///
 /// The trouter re-acquires fresh credentials before every (re)connection via the
@@ -3100,8 +3405,8 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
                     // and, defensively, on any channel we already know.
                     let is_channel = teams_read::is_channel_thread_id(&m.conversation_id)
                         || store.is_channel(&m.conversation_id).unwrap_or(false);
+                    let from_me = is_self(m, &self_name, &self_mri);
                     if is_channel {
-                        let from_me = is_self(m, &self_name, &self_mri);
                         if store
                             .touch_channel(&m.conversation_id, m.compose_time, from_me)
                             .unwrap_or(false)
@@ -3134,6 +3439,15 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
                             .or_else(|| store.get_message(&m.conversation_id, &m.id).ok().flatten())
                             .unwrap_or_else(|| m.clone());
                         ctx_msgs.emit("message", message_json(&row, &self_name, &self_mri));
+                        // Reach the devices no socket reaches: a phone whose Home
+                        // Screen app is closed learns about this message only through
+                        // Web Push. Only on a FRESH insert — a reaction arriving on an
+                        // old message is not news worth a lock screen.
+                        if inserted {
+                            push_live_message(
+                                &ctx_msgs, store, &row, is_channel, from_me, &self_mri,
+                            );
+                        }
                     }
                 }
                 if activity_changed {
@@ -3376,6 +3690,74 @@ mod tests {
     fn repair_broker_is_refused_with_a_wrong_token() {
         let params = json!({ "write_token": "not-the-token" });
         assert!(check_write_allowed("repair_broker", &params, Some("tok")).is_err());
+    }
+
+    #[test]
+    fn the_push_methods_are_gated_but_are_not_outward_facing() {
+        // Subscribing decides which devices this machine notifies. It posts nothing
+        // to Teams, so it is not outward — but a client that merely found this
+        // socket must not be able to aim the user's message previews anywhere.
+        for method in ["push_subscribe", "push_unsubscribe", "push_test"] {
+            assert!(!OUTWARD_METHODS.contains(&method), "{method}");
+            assert_eq!(write_class(method), Some(WriteClass::Machine), "{method}");
+            let err = check_write_allowed(method, &json!({}), Some("tok"))
+                .expect_err("must refuse a tokenless push change");
+            assert!(err.contains("write token"), "{err}");
+            // The refusal has to say what it is about; the container text would be
+            // wrong, and a refusal nobody believes is a refusal nobody reads.
+            assert!(err.contains("push notifications"), "{err}");
+            assert!(check_write_allowed(method, &json!({ "write_token": "tok" }), Some("tok")).is_ok());
+        }
+        // Reading the status is open, like every other read.
+        assert_eq!(write_class("push_status"), None);
+    }
+
+    #[test]
+    fn push_status_generates_one_stable_key_and_lists_the_devices() {
+        let store = Store::open_in_memory().unwrap();
+
+        let first = push_status_json(&store).unwrap();
+        assert_eq!(first["supported"], true);
+        let key = first["public_key"].as_str().unwrap().to_string();
+        // The browser only accepts the 65-byte uncompressed P-256 point.
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&key).unwrap().len(),
+            65
+        );
+        assert_eq!(first["devices"].as_array().unwrap().len(), 0);
+
+        // Stable across calls, and across a reopen of the same store: a device's
+        // subscription embeds this key, so a second answer with a different one
+        // would silently retire every phone that opted in.
+        assert_eq!(push_status_json(&store).unwrap()["public_key"], key);
+        assert_eq!(
+            store.get_setting(SETTING_PUSH_VAPID_PRIVATE).unwrap().is_some(),
+            true,
+            "the private half must be persisted, not regenerated per process"
+        );
+
+        store
+            .put_push_subscription("https://web.push.apple.com/abc", "k", "a", "iPhone", 42)
+            .unwrap();
+        let listed = push_status_json(&store).unwrap();
+        assert_eq!(listed["public_key"], key);
+        let devices = listed["devices"].as_array().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0]["label"], "iPhone");
+        // The keys a push is encrypted to are the DEVICE's secrets; the status is
+        // read by any local client, so they must not be in it.
+        assert!(devices[0].get("p256dh").is_none(), "{:?}", devices[0]);
+        assert!(devices[0].get("auth").is_none(), "{:?}", devices[0]);
+    }
+
+    #[test]
+    fn every_machine_method_says_what_it_does_to_the_machine() {
+        // The refusal text is per method (see `machine_effect`), so a new entry in
+        // MACHINE_METHODS that forgets its own phrase is caught here rather than by
+        // a user reading a refusal about the wrong subject.
+        for method in MACHINE_METHODS {
+            assert_ne!(machine_effect(method), "changes this machine", "{method} has no phrase");
+        }
     }
 
     #[test]
