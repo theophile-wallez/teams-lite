@@ -16,9 +16,45 @@
 // echo converge without duplicates.
 
 use anyhow::{Context, Result};
-use serde_json::json;
+use base64::Engine as _;
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::teams::Session;
+
+pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+pub const MAX_IMAGE_DIMENSION: u32 = 16_384;
+const MAX_IMAGE_NAME_BYTES: usize = 255;
+const AMS_CLIENT_VERSION: &str = "1415/26061118216";
+const AMS_IMAGE_TYPE: &str = "http://schema.skype.com/AMSImage";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageUpload {
+    pub name: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageParams {
+    name: String,
+    content_type: String,
+    data_base64: String,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AmsImage {
+    id: String,
+    src: String,
+    name: String,
+    width: Option<u32>,
+    height: Option<u32>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyTo {
@@ -55,6 +91,96 @@ pub fn new_client_message_id() -> String {
     ms.to_string()
 }
 
+/// Parse and validate the optional image object carried by the existing send RPC.
+/// Decoding happens after a conservative encoded-length check, so an oversized
+/// client value cannot allocate an unbounded decoded buffer.
+pub fn parse_image(value: &Value) -> Result<ImageUpload> {
+    let params: ImageParams = serde_json::from_value(value.clone()).context("invalid image")?;
+    anyhow::ensure!(!params.name.is_empty(), "image name must not be empty");
+    anyhow::ensure!(
+        params.name.len() <= MAX_IMAGE_NAME_BYTES,
+        "image name is too long"
+    );
+    anyhow::ensure!(
+        !params.name.chars().any(|c| c.is_control()),
+        "image name contains a control character"
+    );
+
+    let content_type = params.content_type.to_ascii_lowercase();
+    anyhow::ensure!(
+        matches!(
+            content_type.as_str(),
+            "image/png"
+                | "image/jpeg"
+                | "image/gif"
+                | "image/webp"
+                | "image/bmp"
+                | "image/heic"
+                | "image/heif"
+        ),
+        "unsupported image content type"
+    );
+
+    let max_encoded_len = MAX_IMAGE_BYTES.div_ceil(3) * 4;
+    anyhow::ensure!(
+        params.data_base64.len() <= max_encoded_len,
+        "image exceeds the 10 MiB limit"
+    );
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&params.data_base64)
+        .context("image data is not valid base64")?;
+    anyhow::ensure!(!bytes.is_empty(), "image data must not be empty");
+    anyhow::ensure!(
+        bytes.len() <= MAX_IMAGE_BYTES,
+        "image exceeds the 10 MiB limit"
+    );
+    anyhow::ensure!(
+        image_bytes_match_content_type(&bytes, &content_type),
+        "image data does not match its content type"
+    );
+
+    validate_dimension("width", params.width)?;
+    validate_dimension("height", params.height)?;
+
+    Ok(ImageUpload {
+        name: params.name,
+        content_type,
+        bytes,
+        width: params.width,
+        height: params.height,
+    })
+}
+
+fn image_bytes_match_content_type(bytes: &[u8], content_type: &str) -> bool {
+    match content_type {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
+        "image/bmp" => bytes.starts_with(b"BM"),
+        "image/heic" => is_iso_base_media_type(bytes, &[b"heic", b"heix", b"hevc", b"hevx"]),
+        "image/heif" => is_iso_base_media_type(bytes, &[b"mif1", b"msf1", b"heif"]),
+        _ => false,
+    }
+}
+
+fn is_iso_base_media_type(bytes: &[u8], brands: &[&[u8; 4]]) -> bool {
+    bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && brands.iter().any(|brand| &bytes[8..12] == brand.as_slice())
+}
+
+fn validate_dimension(name: &str, value: Option<u32>) -> Result<()> {
+    if let Some(value) = value {
+        anyhow::ensure!(value > 0, "image {name} must be positive");
+        anyhow::ensure!(
+            value <= MAX_IMAGE_DIMENSION,
+            "image {name} exceeds {MAX_IMAGE_DIMENSION} pixels"
+        );
+    }
+    Ok(())
+}
+
 /// Send a message to a conversation. Returns the clientmessageid used (useful
 /// for optimistic echo correlation).
 ///
@@ -67,10 +193,12 @@ pub fn new_client_message_id() -> String {
 pub async fn send_message(
     http: &reqwest::Client,
     session: &Session,
+    ic3: &str,
     conversation_id: &str,
     text: &str,
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
+    image: Option<&ImageUpload>,
 ) -> Result<String> {
     let chat = session
         .endpoint("chatService")
@@ -81,11 +209,25 @@ pub async fn send_message(
         urlencoding::encode(conversation_id)
     );
     let cmid = new_client_message_id();
-    let body = build_body(&cmid, text, &session.self_name, reply_to, content_html);
+    let ams_image = match image {
+        Some(image) => Some(upload_image(http, session, ic3, conversation_id, image).await?),
+        None => None,
+    };
+    let body = build_body(
+        &cmid,
+        text,
+        &session.self_name,
+        reply_to,
+        content_html,
+        ams_image.as_ref(),
+    );
 
     let resp = http
         .post(&url)
-        .header("authentication", format!("skypetoken={}", session.skypetoken))
+        .header(
+            "authentication",
+            format!("skypetoken={}", session.skypetoken),
+        )
         .header("content-type", "application/json")
         .body(body.to_string())
         .send()
@@ -94,9 +236,107 @@ pub async fn send_message(
     let status = resp.status();
     if !status.is_success() {
         let txt = resp.text().await.unwrap_or_default();
-        anyhow::bail!("send -> {status}: {}", txt.chars().take(160).collect::<String>());
+        anyhow::bail!(
+            "send -> {status}: {}",
+            txt.chars().take(160).collect::<String>()
+        );
     }
     Ok(cmid)
+}
+
+async fn upload_image(
+    http: &reqwest::Client,
+    session: &Session,
+    ic3: &str,
+    conversation_id: &str,
+    image: &ImageUpload,
+) -> Result<AmsImage> {
+    anyhow::ensure!(!ic3.is_empty(), "missing IC3 token");
+    let ams = ams_endpoint(session)?;
+    let create_url = format!("{ams}/v1/objects/");
+    let create_body = build_ams_create_body(conversation_id, &image.name);
+    let response = http
+        .post(&create_url)
+        .bearer_auth(ic3)
+        .header("x-ms-migration", "True")
+        .header("x-ms-client-version", AMS_CLIENT_VERSION)
+        .json(&create_body)
+        .send()
+        .await
+        .context("create AMS image object")?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "create AMS image object -> {status}: {}",
+            text.chars().take(160).collect::<String>()
+        );
+    }
+    let response: Value = response.json().await.context("parse AMS image object")?;
+    let id = response
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .context("AMS image object response had no id")?;
+    validate_ams_id(id)?;
+
+    let upload_url = format!("{ams}/v1/objects/{id}/content/imgpsh");
+    let response = http
+        .put(&upload_url)
+        .bearer_auth(ic3)
+        .header("x-ms-migration", "True")
+        .header("x-ms-client-version", AMS_CLIENT_VERSION)
+        .header("content-type", "application/octet-stream")
+        .body(image.bytes.clone())
+        .send()
+        .await
+        .context("upload AMS image content")?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "upload AMS image content -> {status}: {}",
+            text.chars().take(160).collect::<String>()
+        );
+    }
+
+    Ok(AmsImage {
+        id: id.to_string(),
+        src: format!("{ams}/v1/objects/{id}/views/imgo"),
+        name: image.name.clone(),
+        width: image.width,
+        height: image.height,
+    })
+}
+
+fn ams_endpoint(session: &Session) -> Result<&str> {
+    session
+        .endpoint("amsV2")
+        .or_else(|| session.endpoint("ams"))
+        .map(|endpoint| endpoint.trim_end_matches('/'))
+        .filter(|endpoint| !endpoint.is_empty())
+        .context("no amsV2 or ams endpoint in regionGtms")
+}
+
+fn validate_ams_id(id: &str) -> Result<()> {
+    anyhow::ensure!(
+        !id.is_empty()
+            && id.len() <= 512
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+        "AMS image object response had an invalid id"
+    );
+    Ok(())
+}
+
+fn build_ams_create_body(conversation_id: &str, filename: &str) -> Value {
+    json!({
+        "type": "pish/image",
+        "permissions": { (conversation_id): ["read"] },
+        "sharingMode": "Inline",
+        "filename": filename,
+    })
 }
 
 /// Edit an existing message in place. Mirrors `send_message`, but targets the
@@ -132,7 +372,10 @@ pub async fn edit_message(
 
     let resp = http
         .put(&url)
-        .header("authentication", format!("skypetoken={}", session.skypetoken))
+        .header(
+            "authentication",
+            format!("skypetoken={}", session.skypetoken),
+        )
         .header("content-type", "application/json")
         .body(body.to_string())
         .send()
@@ -141,7 +384,10 @@ pub async fn edit_message(
     let status = resp.status();
     if !status.is_success() {
         let txt = resp.text().await.unwrap_or_default();
-        anyhow::bail!("edit -> {status}: {}", txt.chars().take(160).collect::<String>());
+        anyhow::bail!(
+            "edit -> {status}: {}",
+            txt.chars().take(160).collect::<String>()
+        );
     }
     Ok(())
 }
@@ -186,7 +432,10 @@ pub async fn set_reaction(
 
     let resp = http
         .put(&url)
-        .header("authentication", format!("skypetoken={}", session.skypetoken))
+        .header(
+            "authentication",
+            format!("skypetoken={}", session.skypetoken),
+        )
         .header("content-type", "application/json")
         .body(body.to_string())
         .send()
@@ -195,7 +444,10 @@ pub async fn set_reaction(
     let status = resp.status();
     if !status.is_success() {
         let txt = resp.text().await.unwrap_or_default();
-        anyhow::bail!("react -> {status}: {}", txt.chars().take(160).collect::<String>());
+        anyhow::bail!(
+            "react -> {status}: {}",
+            txt.chars().take(160).collect::<String>()
+        );
     }
     Ok(())
 }
@@ -211,24 +463,52 @@ fn reply_quote(reply: &ReplyTo) -> String {
     )
 }
 
-fn message_content(text: &str, reply_to: Option<&ReplyTo>, content_html: Option<&str>) -> String {
-    // Rich send: the body is pre-normalized Teams-safe HTML from the web client.
-    if let Some(html) = content_html.filter(|h| !h.is_empty()) {
-        return match reply_to {
+fn message_content(
+    text: &str,
+    reply_to: Option<&ReplyTo>,
+    content_html: Option<&str>,
+    image: Option<&AmsImage>,
+) -> String {
+    let body = if let Some(html) = content_html.filter(|h| !h.is_empty()) {
+        match reply_to {
             Some(reply) => format!("{}{}", reply_quote(reply), html),
             None => html.to_string(),
-        };
-    }
+        }
+    } else if let Some(reply) = reply_to {
+        format!(
+            "{}{}{}",
+            paragraph(&reply.before),
+            reply_quote(reply),
+            paragraph(&reply.after)
+        )
+    } else {
+        escape_html(text)
+    };
 
-    let Some(reply) = reply_to else {
-        return escape_html(text);
+    match image {
+        Some(image) => format!("{body}{}", image_markup(image)),
+        None => body,
+    }
+}
+
+fn image_markup(image: &AmsImage) -> String {
+    let dimensions = match (image.width, image.height) {
+        (Some(width), Some(height)) => format!(" width=\"{width}\" height=\"{height}\""),
+        (Some(width), None) => format!(" width=\"{width}\""),
+        (None, Some(height)) => format!(" height=\"{height}\""),
+        (None, None) => String::new(),
     };
     format!(
-        "{}{}{}",
-        paragraph(&reply.before),
-        reply_quote(reply),
-        paragraph(&reply.after)
+        "<p><img itemtype=\"{AMS_IMAGE_TYPE}\" src=\"{}\" alt=\"{}\"{dimensions}></p>",
+        escape_html_attribute(&image.src),
+        escape_html_attribute(&image.name),
     )
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    escape_html(value)
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn paragraph(text: &str) -> String {
@@ -245,14 +525,19 @@ fn build_body(
     self_name: &str,
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
+    image: Option<&AmsImage>,
 ) -> serde_json::Value {
-    json!({
+    let mut body = json!({
         "clientmessageid": client_message_id,
-        "content": message_content(text, reply_to, content_html),
+        "content": message_content(text, reply_to, content_html, image),
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "imdisplayname": self_name,
-    })
+    });
+    if let Some(image) = image {
+        body["amsreferences"] = json!([image.id]);
+    }
+    body
 }
 
 /// Build the edit request body (pure, unit-tested). Edits carry plain text, so
@@ -300,9 +585,219 @@ mod tests {
         assert!(id.chars().all(|c| c.is_ascii_digit()));
     }
 
+    fn image_bytes(content_type: &str) -> Vec<u8> {
+        match content_type.to_ascii_lowercase().as_str() {
+            "image/png" => b"\x89PNG\r\n\x1a\ncontent".to_vec(),
+            "image/jpeg" => b"\xff\xd8\xffcontent".to_vec(),
+            "image/gif" => b"GIF89acontent".to_vec(),
+            "image/webp" => b"RIFF\x04\0\0\0WEBPcontent".to_vec(),
+            "image/bmp" => b"BMcontent".to_vec(),
+            "image/heic" => b"\0\0\0\x18ftypheiccontent".to_vec(),
+            "image/heif" => b"\0\0\0\x18ftypmif1content".to_vec(),
+            _ => vec![1],
+        }
+    }
+
+    fn image_value(content_type: &str, bytes: &[u8]) -> Value {
+        json!({
+            "name": "screen.png",
+            "content_type": content_type,
+            "data_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+            "width": 640,
+            "height": 480,
+        })
+    }
+
+    #[test]
+    fn parses_supported_image_and_normalizes_content_type() {
+        let bytes = image_bytes("image/png");
+        let value = image_value("IMAGE/PNG", &bytes);
+        let image = parse_image(&value).unwrap();
+        assert_eq!(image.name, "screen.png");
+        assert_eq!(image.content_type, "image/png");
+        assert_eq!(image.bytes, bytes);
+        assert_eq!(image.width, Some(640));
+        assert_eq!(image.height, Some(480));
+    }
+
+    #[test]
+    fn accepts_each_supported_image_content_type() {
+        for content_type in [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp",
+            "image/bmp",
+            "image/heic",
+            "image/heif",
+        ] {
+            let bytes = image_bytes(content_type);
+            let value = image_value(content_type, &bytes);
+            assert!(parse_image(&value).is_ok(), "{content_type}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_image_shapes_and_values() {
+        let cases = [
+            json!({
+                "name": "screen.svg",
+                "content_type": "image/svg+xml",
+                "data_base64": "AQ==",
+            }),
+            json!({
+                "name": "screen.png",
+                "content_type": "image/png; charset=binary",
+                "data_base64": "AQ==",
+            }),
+            json!({
+                "name": "screen.png",
+                "content_type": "image/png",
+                "data_base64": "not base64",
+            }),
+            json!({
+                "name": "screen.png",
+                "content_type": "image/png",
+                "data_base64": "",
+            }),
+            json!({
+                "name": "screen.png",
+                "content_type": "image/png",
+                "data_base64": "AQ==",
+                "width": 0,
+            }),
+            json!({
+                "name": "screen.png",
+                "content_type": "image/png",
+                "data_base64": "AQ==",
+                "height": MAX_IMAGE_DIMENSION + 1,
+            }),
+            json!({
+                "name": "screen.png",
+                "content_type": "image/png",
+                "data_base64": "AQ==",
+                "unexpected": true,
+            }),
+            json!({
+                "name": "screen.png",
+                "content_type": "image/png",
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(b"GIF89acontent"),
+            }),
+        ];
+        for value in cases {
+            assert!(parse_image(&value).is_err(), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn enforces_decoded_image_size_limit() {
+        let mut allowed = vec![7; MAX_IMAGE_BYTES];
+        allowed[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let value = image_value("image/png", &allowed);
+        assert_eq!(parse_image(&value).unwrap().bytes.len(), MAX_IMAGE_BYTES);
+
+        let mut oversized = vec![7; MAX_IMAGE_BYTES + 1];
+        oversized[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let value = image_value("image/png", &oversized);
+        assert!(parse_image(&value).is_err());
+    }
+
+    #[test]
+    fn builds_ams_object_request() {
+        let body = build_ams_create_body("19:chat@thread.v2", "screen.png");
+        assert_eq!(body["type"], "pish/image");
+        assert_eq!(body["permissions"]["19:chat@thread.v2"], json!(["read"]));
+        assert_eq!(body["sharingMode"], "Inline");
+        assert_eq!(body["filename"], "screen.png");
+    }
+
+    #[test]
+    fn image_body_preserves_rich_html_and_adds_ams_reference() {
+        let image = AmsImage {
+            id: "0-weu-d1-image".into(),
+            src: "https://ams.example/v1/objects/0-weu-d1-image/views/imgo".into(),
+            name: "a & b.png".into(),
+            width: Some(640),
+            height: Some(480),
+        };
+        let body = build_body(
+            "9",
+            "plain fallback",
+            "Me",
+            None,
+            Some("<p><strong>Rich</strong> text</p>"),
+            Some(&image),
+        );
+        assert_eq!(body["amsreferences"], json!(["0-weu-d1-image"]));
+        assert_eq!(body["messagetype"], "RichText/Html");
+        assert_eq!(
+            body["content"],
+            concat!(
+                "<p><strong>Rich</strong> text</p>",
+                "<p><img itemtype=\"http://schema.skype.com/AMSImage\" ",
+                "src=\"https://ams.example/v1/objects/0-weu-d1-image/views/imgo\" ",
+                "alt=\"a &amp; b.png\" width=\"640\" height=\"480\"></p>"
+            )
+        );
+    }
+
+    #[test]
+    fn image_body_preserves_reply_markup_and_plain_text() {
+        let reply = ReplyTo {
+            compose_time: 42,
+            sender: "Alice".into(),
+            sender_mri: "8:alice".into(),
+            preview: "quoted".into(),
+            before: String::new(),
+            after: "reply text".into(),
+        };
+        let image = AmsImage {
+            id: "image-id".into(),
+            src: "https://ams.example/image".into(),
+            name: "screen.png".into(),
+            width: None,
+            height: None,
+        };
+        let content = message_content("reply text", Some(&reply), None, Some(&image));
+        assert!(content.starts_with("<blockquote itemscope"));
+        assert!(content.contains("</blockquote><p>reply text</p>"));
+        assert!(content.ends_with("alt=\"screen.png\"></p>"));
+    }
+
+    #[test]
+    fn prefers_ams_v2_and_falls_back_to_ams() {
+        let session = |gtms: Value| Session {
+            skypetoken: String::new(),
+            region: String::new(),
+            gtms,
+            self_name: String::new(),
+            self_mri: String::new(),
+        };
+        assert_eq!(
+            ams_endpoint(&session(
+                json!({ "amsV2": "https://v2/", "ams": "https://v1/" })
+            ))
+            .unwrap(),
+            "https://v2"
+        );
+        assert_eq!(
+            ams_endpoint(&session(json!({ "ams": "https://v1/" }))).unwrap(),
+            "https://v1"
+        );
+        assert!(ams_endpoint(&session(json!({}))).is_err());
+    }
+
+    #[test]
+    fn validates_ams_object_id_before_url_interpolation() {
+        assert!(validate_ams_id("0-weu-d1_abc.def").is_ok());
+        assert!(validate_ams_id("../content").is_err());
+        assert!(validate_ams_id("id/other").is_err());
+        assert!(validate_ams_id("").is_err());
+    }
+
     #[test]
     fn body_has_required_fields() {
-        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None);
+        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None, None);
         assert_eq!(b["clientmessageid"], "12345");
         assert_eq!(b["content"], "hi &lt;there&gt;");
         assert_eq!(b["messagetype"], "RichText/Html");
@@ -313,13 +808,13 @@ mod tests {
     #[test]
     fn rich_content_html_is_forwarded_as_content() {
         let html = "<p>hi <strong>bold</strong> <a href=\"https://x\">link</a></p>";
-        let b = build_body("9", "", "Me", None, Some(html));
+        let b = build_body("9", "", "Me", None, Some(html), None);
         assert_eq!(b["content"], html);
     }
 
     #[test]
     fn empty_rich_content_html_falls_back_to_plain() {
-        let b = build_body("9", "plain", "Me", None, Some(""));
+        let b = build_body("9", "plain", "Me", None, Some(""), None);
         assert_eq!(b["content"], "plain");
     }
 
@@ -333,7 +828,7 @@ mod tests {
             before: String::new(),
             after: String::new(),
         };
-        let content = message_content("", Some(&reply), Some("<p><em>rich</em> reply</p>"));
+        let content = message_content("", Some(&reply), Some("<p><em>rich</em> reply</p>"), None);
         assert!(content.starts_with("<blockquote itemscope"));
         assert!(content.ends_with("</blockquote><p><em>rich</em> reply</p>"));
     }
@@ -349,7 +844,7 @@ mod tests {
             after: "new <reply>".into(),
         };
 
-        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None);
+        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None, None);
 
         assert_eq!(
             b["content"],
@@ -365,7 +860,8 @@ mod tests {
     }
 
     #[test]
-    fn reply_markup_preserves_cursor_position() {        let reply = ReplyTo {
+    fn reply_markup_preserves_cursor_position() {
+        let reply = ReplyTo {
             compose_time: 42,
             sender: "Alice".into(),
             sender_mri: "8:alice".into(),
@@ -374,7 +870,7 @@ mod tests {
             after: "Second line".into(),
         };
 
-        let content = message_content("First lineSecond line", Some(&reply), None);
+        let content = message_content("First lineSecond line", Some(&reply), None, None);
 
         assert!(content.starts_with("<p>First line</p><blockquote"));
         assert!(content.ends_with("</blockquote><p>Second line</p>"));

@@ -713,11 +713,12 @@ impl Ctx {
         Ok(fresh)
     }
 
-    /// Force-refresh every credential the read/send paths depend on: the CSA,
+    /// Force-refresh every credential the read/send paths depend on: the IC3, CSA,
     /// profile, and Graph (SharePoint file downloads) broker tokens, and the Teams
     /// session (skypetoken). Called after an unexpected 401, whose cause may be any
     /// of these, so we refresh them all rather than guess.
     async fn force_refresh_auth(&self) -> Result<Session> {
+        let _ = self.tokens.refresh(IC3_SCOPE).await;
         let _ = self.tokens.refresh(teams_read::CSA_SCOPE).await;
         let _ = self.tokens.refresh(teams_profiles::PROFILE_SCOPE).await;
         let _ = self.tokens.refresh(teams_media::GRAPH_SCOPE).await;
@@ -1523,22 +1524,29 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .get("content_html")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            let image = params.get("image").map(teams_send::parse_image).transpose()?;
             let http = ctx.http.clone();
+            let tokens = ctx.tokens.clone();
             let send_conv = conv.clone();
             ctx.retry_on_auth(move |session, _csa| {
                 let http = http.clone();
+                let tokens = tokens.clone();
                 let conv = send_conv.clone();
                 let text = text.clone();
                 let reply_to = reply_to.clone();
                 let content_html = content_html.clone();
+                let image = image.clone();
                 async move {
+                    let ic3 = tokens.get(IC3_SCOPE).await?;
                     teams_send::send_message(
                         &http,
                         &session,
+                        &ic3,
                         &conv,
                         &text,
                         reply_to.as_ref(),
                         content_html.as_deref(),
+                        image.as_ref(),
                     )
                     .await
                 }
