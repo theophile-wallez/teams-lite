@@ -341,7 +341,13 @@ html[data-virtual-keyboard-open] .composer-shell {
    color. The glyphs are pseudo-elements, so they decorate the word without
    joining the text on selection or copy. Every animation here is neutralized by
    the global prefers-reduced-motion rule above; since none of them fill forwards,
-   the letters and glyphs simply settle into their resting look. */
+   the letters and glyphs simply settle into their resting look.
+
+   Motion is the expensive half of the egg, so it is rationed: the animations only
+   apply under `[data-motion="on"]`, which a word carries while it holds a slot in
+   the motion budget (lib/word-effect-motion.ts). Everything else here — the ramp,
+   the halo, the glyphs — applies to every decorated word, so a word with no slot
+   wears the same resting look it wears under reduced motion. */
 .effect-word {
   /* How much of a letter's own color bleeds around it. Off on a light surface,
      where a halo would just read as blurry text. */
@@ -365,7 +371,10 @@ html[data-virtual-keyboard-open] .composer-shell {
   display: inline-block;
   text-shadow: 0 0 0.4em color-mix(in oklab, currentColor var(--effect-halo), transparent);
   /* One delay for every animation on the letter, so a single stagger ripples
-     through all of them at once. */
+     through all of them at once. Every rule that names an animation below sets it
+     with the longhands (`animation-name`, `animation-duration`, …) rather than the
+     `animation` shorthand, because the shorthand resets this delay to zero from a
+     more specific rule — which is exactly how the stagger came to be dead. */
   animation-delay: calc(var(--effect-index, 0) * var(--effect-stagger));
 }
 .effect-word-letter:nth-child(6n + 1) {
@@ -425,10 +434,11 @@ html[data-virtual-keyboard-open] .composer-shell {
   --effect-5: #34d399;
   --effect-6: #fbbf24;
 }
-.sparkle-word .effect-word-letter {
-  animation:
-    teams-sparkle-bob 2.6s ease-in-out infinite,
-    teams-effect-shimmer 7s ease-in-out infinite;
+.sparkle-word[data-motion="on"] .effect-word-letter {
+  animation-name: teams-sparkle-bob, teams-effect-shimmer;
+  animation-duration: 2.6s, 7s;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
 }
 .sparkle-word::before,
 .sparkle-word::after {
@@ -437,7 +447,13 @@ html[data-virtual-keyboard-open] .composer-shell {
   /* A halo of their own color, always on: unlike the letters, a sparkle is a
      tiny glyph that has to hold up against a light or a dark bubble alike. */
   text-shadow: 0 0 5px currentColor;
-  animation: teams-sparkle-twinkle 3s ease-in-out infinite;
+}
+.sparkle-word[data-motion="on"]::before,
+.sparkle-word[data-motion="on"]::after {
+  animation-name: teams-sparkle-twinkle;
+  animation-duration: 3s;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
 }
 .sparkle-word::before {
   top: -0.42em;
@@ -500,9 +516,12 @@ html[data-virtual-keyboard-open] .composer-shell {
 .football-word .effect-word-letter {
   /* The squash lands on the baseline, like a ball hitting the ground. */
   transform-origin: bottom center;
-  animation:
-    teams-football-kick 2.2s cubic-bezier(0.3, 0, 0.4, 1) infinite,
-    teams-effect-shimmer 7s ease-in-out infinite;
+}
+.football-word[data-motion="on"] .effect-word-letter {
+  animation-name: teams-football-kick, teams-effect-shimmer;
+  animation-duration: 2.2s, 7s;
+  animation-timing-function: cubic-bezier(0.3, 0, 0.4, 1), ease-in-out;
+  animation-iteration-count: infinite;
 }
 .football-word::before,
 .football-word::after {
@@ -511,7 +530,13 @@ html[data-virtual-keyboard-open] .composer-shell {
   /* Emoji carry their own colors, so the ball gets its lift from a cast shadow
      rather than the colored halo the sparkles use. */
   filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.35));
-  animation: teams-football-spin 3.6s linear infinite;
+}
+.football-word[data-motion="on"]::before,
+.football-word[data-motion="on"]::after {
+  animation-name: teams-football-spin;
+  animation-duration: 3.6s;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
 }
 .football-word::before {
   top: -0.52em;
