@@ -13,6 +13,7 @@ import { Splash } from "./splash";
 import { TooltipProvider } from "./ui/tooltip";
 import { Button } from "./ui/button";
 import { cn } from "~/lib/utils";
+import { installVirtualKeyboardState } from "~/lib/virtual-keyboard";
 
 export function App() {
   return (
@@ -65,6 +66,8 @@ function AppInner() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
+
+  useEffect(() => installVirtualKeyboardState(), []);
 
   const goToConversation = useCallback(
     (id: string) => {
