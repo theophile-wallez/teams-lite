@@ -99,8 +99,12 @@ test.describe("calendar", () => {
 
     await page.locator('[data-testid="calendar-next"]').click();
     await expect(title).not.toHaveText(thisMonth);
-    // Off this month, no cell is today.
-    await expect(page.locator('[data-testid="calendar-day"][data-today="true"]')).toHaveCount(0);
+    // Off this month, no cell *of that month* is today. The grid always spills
+    // into its neighbours, so the month after one that ends today still shows
+    // today as a leading outside cell — and marks it, deliberately.
+    await expect(
+      page.locator('[data-testid="calendar-day"][data-today="true"]:not([data-outside="true"])'),
+    ).toHaveCount(0);
 
     await page.locator('[data-testid="calendar-prev"]').click();
     await expect(title).toHaveText(thisMonth);
