@@ -1,4 +1,4 @@
-import { devices } from "@playwright/test";
+import { devices, type Locator, type Page } from "@playwright/test";
 import { test, expect, gotoApp, openConversationAt } from "./helpers";
 
 // The mobile, single-pane layout. Emulate an Android Chrome phone (narrow
@@ -10,10 +10,40 @@ test.use({ ...devices["Pixel 7"] });
 
 /** The detail pane's left edge, used to tell whether it is on-screen (x≈0) or
  *  parked off the right edge (x≈viewport width). */
-async function paneLeft(page: import("@playwright/test").Page): Promise<number> {
+async function paneLeft(page: Page): Promise<number> {
   const box = await page.locator('[data-testid="detail-pane"]').boundingBox();
   expect(box).not.toBeNull();
   return box!.x;
+}
+
+async function touchGesture(
+  page: Page,
+  target: Locator,
+  moves: Array<{ x: number; y: number; delay?: number }> = [],
+  holdMs = 0,
+): Promise<void> {
+  const box = await target.boundingBox();
+  expect(box).not.toBeNull();
+  const start = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+  const dispatch = (type: "pointerdown" | "pointermove" | "pointerup", x: number, y: number) =>
+    target.dispatchEvent(type, {
+      pointerId: 1,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: x,
+      clientY: y,
+      bubbles: true,
+      cancelable: true,
+    });
+
+  await dispatch("pointerdown", start.x, start.y);
+  if (holdMs) await page.waitForTimeout(holdMs);
+  for (const move of moves) {
+    await dispatch("pointermove", start.x + move.x, start.y + move.y);
+    if (move.delay) await page.waitForTimeout(move.delay);
+  }
+  const end = moves.at(-1) ?? { x: 0, y: 0 };
+  await dispatch("pointerup", start.x + end.x, start.y + end.y);
 }
 
 test.describe("mobile single-pane layout", () => {
@@ -87,16 +117,61 @@ test.describe("mobile single-pane layout", () => {
     expect(box!.y + box!.height).toBeLessThanOrEqual(height + 1);
   });
 
-  test("message actions are reachable by tap on touch devices", async ({ page }) => {
+  test("a long press opens message actions without a permanent ellipsis", async ({ page }) => {
     await gotoApp(page);
     await openConversationAt(page, 0);
 
     const firstMessage = page.locator('[data-testid="message"]').first();
-    const actions = firstMessage.locator('[data-testid="message-actions"]');
-    // On a coarse pointer the actions trigger is always shown (no hover needed).
-    await expect(actions).toBeVisible();
-    await actions.click();
+    await expect(firstMessage.locator('[data-testid="message-actions"]')).not.toBeVisible();
+
+    await touchGesture(page, firstMessage, [], 550);
+
     await expect(page.locator('[data-testid="action-reply"]')).toBeVisible();
     await expect(page.locator('[data-testid="action-copy"]')).toBeVisible();
+  });
+
+  test("a short tap does not open message actions", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+
+    await touchGesture(page, page.locator('[data-testid="message"]').first());
+
+    await expect(page.locator('[data-testid="action-reply"]')).toHaveCount(0);
+  });
+
+  test("an incoming message swipes inward to reply", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+
+    const message = page.locator('[data-testid="message"][data-mine="false"]').first();
+    await touchGesture(page, message, [{ x: 24, y: 1 }, { x: 70, y: 2 }]);
+
+    await expect(page.locator('[data-testid="reply-banner"]')).toBeVisible();
+    await expect.poll(() => message.evaluate((element) => getComputedStyle(element).transform)).toBe(
+      "none",
+    );
+  });
+
+  test("a sent message swipes inward to reply", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+
+    const message = page.locator('[data-testid="message"][data-mine="true"]').first();
+    await touchGesture(page, message, [{ x: -24, y: 1 }, { x: -70, y: 2 }]);
+
+    await expect(page.locator('[data-testid="reply-banner"]')).toBeVisible();
+    await expect.poll(() => message.evaluate((element) => getComputedStyle(element).transform)).toBe(
+      "none",
+    );
+  });
+
+  test("vertical movement scrolls without starting a reply", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+
+    const message = page.locator('[data-testid="message"][data-mine="false"]').first();
+    await touchGesture(page, message, [{ x: 2, y: -25 }, { x: 3, y: -70 }]);
+
+    await expect(page.locator('[data-testid="reply-banner"]')).toHaveCount(0);
   });
 });

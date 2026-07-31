@@ -49,6 +49,7 @@ import { GitLabLinkCard } from "./gitlab-link-card";
 import { PersonHoverCard } from "./person-card";
 import { Emoji } from "./emoji";
 import { useAppState, useController } from "./controller-context";
+import { useMessageGestures } from "./use-message-gestures";
 
 // emoji-mart and its dataset are ~1.5 MB and only needed once someone reaches
 // past the six quick reactions, so the full picker is a lazy chunk.
@@ -378,6 +379,15 @@ function MessageBubbleImpl(props: {
     setPickerOpen(false);
   };
   useEffect(() => clearHoverTimer, []);
+  const messageGestures = useMessageGestures({
+    enabled: !inert && !props.editing,
+    mine,
+    onLongPress: () => {
+      cancelPicker();
+      setMenuOpen(true);
+    },
+    onReply: () => props.onReply(props.message),
+  });
 
   // Hand off from a quick surface to the full picker: the quick row and the ⋯
   // menu both step aside, since all three are the same one-reaction decision.
@@ -497,7 +507,7 @@ function MessageBubbleImpl(props: {
         chipsShown && REACTION_OVERHANG,
       )}
     >
-      <div
+      <motion.div
         data-testid="message"
         data-mine={mine ? "true" : "false"}
         data-message-id={props.message.id}
@@ -508,6 +518,8 @@ function MessageBubbleImpl(props: {
         data-card-only={cardOnly ? "true" : undefined}
         data-deleted={isDeleted ? "true" : undefined}
         data-unsupported={isUnsupported ? "true" : undefined}
+        style={{ x: messageGestures.x, touchAction: "pan-y" }}
+        {...messageGestures.handlers}
         className={cn(
           "relative text-sm leading-relaxed",
           // Media- and link-only messages drop the standard bubble chrome; the
@@ -547,6 +559,24 @@ function MessageBubbleImpl(props: {
           setMenuOpen(true);
         }}
       >
+        {!props.editing && !inert ? (
+          <motion.span
+            aria-hidden
+            data-testid="swipe-reply-indicator"
+            style={{
+              x: messageGestures.indicatorX,
+              opacity: messageGestures.indicatorOpacity,
+              scale: messageGestures.indicatorScale,
+            }}
+            className={cn(
+              "pointer-events-none absolute top-1/2 z-0 grid size-8 -translate-y-1/2 place-items-center rounded-full bg-primary text-primary-foreground shadow-chip",
+              mine ? "left-full ml-2" : "right-full mr-2",
+            )}
+          >
+            <Reply className="size-4" strokeWidth={1.8} />
+          </motion.span>
+        ) : null}
+
         {!props.editing && !inert && pickerOpen && (
           <div
             className={cn(
@@ -672,7 +702,7 @@ function MessageBubbleImpl(props: {
             )}
           </>
         )}
-      </div>
+      </motion.div>
     </div>
   );
 }
@@ -704,10 +734,9 @@ function MessageActionsMenu(props: {
           aria-label="Message actions"
           data-testid="message-actions"
           className={cn(
-            // Hidden until hover on a mouse, but always visible on touch
-            // (coarse pointer) where there is no hover — otherwise the
-            // reply/react/copy/edit menu would be unreachable on mobile.
-            "absolute top-1/2 grid size-7 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-text-dim opacity-0 transition hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:bg-accent data-[state=open]:text-foreground data-[state=open]:opacity-100 [@media(pointer:coarse)]:opacity-100",
+            // Hidden until hover on a mouse. A coarse pointer opens this menu
+            // with a long press, so the permanent mobile ellipsis is unnecessary.
+            "message-actions-trigger absolute top-1/2 hidden size-7 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-text-dim transition hover:bg-accent hover:text-foreground focus-visible:grid data-[state=open]:grid data-[state=open]:bg-accent data-[state=open]:text-foreground [@media(pointer:fine)]:grid [@media(pointer:fine)]:opacity-0 [@media(pointer:fine)]:focus-visible:opacity-100 [@media(pointer:fine)]:group-hover:grid [@media(pointer:fine)]:group-hover:opacity-100 [@media(pointer:fine)]:data-[state=open]:opacity-100",
             props.mine ? "-left-9" : "-right-9",
           )}
         >
