@@ -55,11 +55,6 @@ import { useMessageGestures } from "./use-message-gestures";
 // past the six quick reactions, so the full picker is a lazy chunk.
 const EmojiPicker = lazy(() => import("./emoji-picker"));
 
-/** Dwell before the hover reaction picker appears, the way Teams reveals its
- *  reaction bar — long enough that merely passing the cursor over a message
- *  doesn't flash it, short enough to feel responsive. */
-const REACTION_HOVER_MS = 350;
-
 /** Room reserved below a bubble that carries reactions. The chip row straddles
  *  the bubble's bottom edge — a third of a pill inside it, the rest hanging out
  *  (see {@link ReactionChips}) — and is positioned absolutely, so it takes no
@@ -326,9 +321,9 @@ function MessageBubbleImpl(props: {
     cards.length === 0;
 
   // A message nobody can act on: gone (deleted) or unshowable (unsupported). There
-  // is nothing to reply to, copy, edit or react to, so neither the hover picker nor
-  // the actions menu appears on it. Reactions already on it still show — they are
-  // information the reader would otherwise lose.
+  // is nothing to reply to, copy, edit or react to, so the actions menu does not
+  // appear on it. Reactions already on it still show — they are information the
+  // reader would otherwise lose.
   const inert = isDeleted || isUnsupported;
 
   // Media- and link-only messages render without the standard rounded, colored
@@ -353,54 +348,33 @@ function MessageBubbleImpl(props: {
   // overhang to reserve room for.
   const chipsShown = reactions.length > 0 && !props.editing && !isDeleted;
 
-  // Hover reaction picker: revealed after a short dwell, dismissed on leave. The
-  // whole bubble row is the hover target; the picker floats just above it and,
-  // being a descendant, keeps the hover alive when the cursor moves onto it.
-  const [pickerOpen, setPickerOpen] = useState(false);
   // The full emoji picker (all ~1550 Teams reactions), anchored to the bubble so
-  // it survives the transient surface it was opened from — moving the cursor into
-  // it leaves the bubble, which would dismiss a hover-owned popover.
+  // it survives the ⋯ menu it was opened from — that menu closes on select, and a
+  // popover must outlive the surface that opened it.
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const emojiTheme = useAppState((s) => s.resolvedTheme);
-  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const clearHoverTimer = () => {
-    if (hoverTimer.current) clearTimeout(hoverTimer.current);
-    hoverTimer.current = null;
-  };
-  const openPickerSoon = () => {
-    // Nothing to react to on a message that is gone (deleted) or that has no
-    // payload to show (see `inert`).
-    if (props.editing || menuOpen || emojiPickerOpen || inert) return;
-    clearHoverTimer();
-    hoverTimer.current = setTimeout(() => setPickerOpen(true), REACTION_HOVER_MS);
-  };
-  const cancelPicker = () => {
-    clearHoverTimer();
-    setPickerOpen(false);
-  };
-  useEffect(() => clearHoverTimer, []);
   const messageGestures = useMessageGestures({
     enabled: !inert && !props.editing,
     mine,
-    onLongPress: () => {
-      cancelPicker();
-      setMenuOpen(true);
-    },
+    onLongPress: () => setMenuOpen(true),
     onReply: () => props.onReply(props.message),
   });
 
-  // Hand off from a quick surface to the full picker: the quick row and the ⋯
-  // menu both step aside, since all three are the same one-reaction decision.
+  // Set while the ⋯ menu closes because it handed off to the full picker, so the
+  // menu can skip its focus restore that once (see `onCloseAutoFocus` below).
+  const handingOffToPicker = useRef(false);
+
+  // Hand off from the ⋯ menu's quick row to the full picker: the menu steps aside,
+  // since both are the same one-reaction decision.
   const openEmojiPicker = () => {
-    cancelPicker();
+    handingOffToPicker.current = true;
     setMenuOpen(false);
     setEmojiPickerOpen(true);
   };
 
-  // Apply a reaction from any surface (hover picker, menu bar, emoji picker, or a
-  // chip), then close every transient surface. The backend toggles server-side.
+  // Apply a reaction from any surface (the menu bar, the emoji picker, or a chip),
+  // then close every transient surface. The backend toggles server-side.
   const react = (key: string) => {
-    cancelPicker();
     setMenuOpen(false);
     setEmojiPickerOpen(false);
     props.onReact(props.message, key);
@@ -495,8 +469,6 @@ function MessageBubbleImpl(props: {
 
   return (
     <div
-      onMouseEnter={openPickerSoon}
-      onMouseLeave={cancelPicker}
       className={cn(
         "group flex w-full",
         mine ? "justify-end" : "justify-start",
@@ -577,33 +549,11 @@ function MessageBubbleImpl(props: {
           </motion.span>
         ) : null}
 
-        {!props.editing && !inert && pickerOpen && (
-          <div
-            className={cn(
-              // Float just above the bubble on the author's anchor side. The
-              // `pb-1` is a transparent hover bridge so the cursor never crosses
-              // an empty gap between bubble and picker (which would dismiss it).
-              "absolute bottom-full z-20 pb-1 animate-in fade-in zoom-in-95 duration-150",
-              mine ? "right-0" : "left-0",
-            )}
-          >
-            <ReactionPicker
-              data-testid="reaction-picker"
-              activeKey={myReactionKey}
-              onPick={react}
-              onMore={openEmojiPicker}
-              floating
-              className="rounded-full border border-border/50 bg-popover/70 p-1 shadow-pop backdrop-blur-md"
-            />
-          </div>
-        )}
-
-        {/* The full picker, opened from either quick surface. Anchored to an
+        {/* The full picker, opened from the ⋯ menu's quick row. Anchored to an
             invisible stand-in for the bubble's own box rather than to the button
-            that opened it: both of those are transient (the hover row dismisses
-            when the cursor leaves the bubble, the ⋯ menu closes on select), and a
-            popover outlives them. Only mounted while open, so the lazy chunk is
-            fetched on first use. */}
+            that opened it: that button is transient (the menu closes on select)
+            and a popover outlives it. Only mounted while open, so the lazy chunk
+            is fetched on first use. */}
         <Popover open={emojiPickerOpen} onOpenChange={setEmojiPickerOpen}>
           <PopoverAnchor aria-hidden className="pointer-events-none absolute inset-0" />
           <PopoverContent
@@ -686,11 +636,17 @@ function MessageBubbleImpl(props: {
               <MessageActionsMenu
                 mine={mine}
                 open={menuOpen}
-                onOpenChange={(open) => {
-                  setMenuOpen(open);
-                  // The menu and the hover picker are alternative reaction
-                  // surfaces; never show both at once.
-                  if (open) cancelPicker();
+                onOpenChange={setMenuOpen}
+                onCloseAutoFocus={(event) => {
+                  // The menu normally returns focus to its trigger when it closes,
+                  // which is right for Escape or a click away. On a handoff it is
+                  // not: the full picker is a popover that dismisses when focus
+                  // lands outside it, so the restore would close the picker the
+                  // moment it opened — and emoji-mart's search field is where
+                  // focus belongs anyway.
+                  if (!handingOffToPicker.current) return;
+                  handingOffToPicker.current = false;
+                  event.preventDefault();
                 }}
                 activeReactionKey={myReactionKey}
                 onReact={react}
@@ -708,16 +664,23 @@ function MessageBubbleImpl(props: {
 }
 
 /**
- * The ⋯ actions surface of a bubble: a hover-revealed trigger on the author's
- * outer side, opening a menu that leads with the reaction bar (the same emojis as
- * the hover picker, so reacting is reachable by keyboard too) and then Edit (mine
- * only), Reply and Copy. Rendered only for a message there is something to do with
- * — see `inert` in the bubble.
+ * The ⋯ actions surface of a bubble, and the only way in to a reaction: a
+ * hover-revealed trigger on the author's outer side, opening a menu that leads
+ * with the reaction bar and then Edit (mine only), Reply and Copy. On a coarse
+ * pointer a long press on the bubble opens the same menu. Rendered only for a
+ * message there is something to do with — see `inert` in the bubble.
+ *
+ * There is deliberately no floating picker on hover: it appeared over every
+ * message the cursor rested on, which is a lot of motion for a rare action that
+ * this menu already carries — reachable by keyboard and by touch, which the hover
+ * row never was.
  */
 function MessageActionsMenu(props: {
   mine: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Called as the menu closes, before it restores focus to its trigger. */
+  onCloseAutoFocus: (event: Event) => void;
   activeReactionKey?: string;
   onReact: (key: string) => void;
   /** Hand off to the full emoji picker — the quick row's "more" affordance. */
@@ -743,7 +706,10 @@ function MessageActionsMenu(props: {
           <MoreHorizontal className="size-4" strokeWidth={1.6} />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align={props.mine ? "start" : "end"}>
+      <DropdownMenuContent
+        align={props.mine ? "start" : "end"}
+        onCloseAutoFocus={props.onCloseAutoFocus}
+      >
         <ReactionPicker
           data-testid="menu-reaction-picker"
           activeKey={props.activeReactionKey}
@@ -884,22 +850,16 @@ function DeletedContent(props: { mine: boolean; revealable: boolean; children: R
 
 /**
  * A row of emoji buttons for adding a reaction, in Teams' canonical order,
- * followed by the affordance that opens the full emoji picker. Used both as the
- * floating hover picker and as the reaction bar at the top of the ⋯ menu. The
- * caller supplies chrome via `className` (a translucent, frosted rounded bar for
- * the hover picker; flat inside the menu). `activeKey` marks our current reaction
- * with a distinct highlight; clicking it removes the reaction, which the
- * highlight and the label ("Remove … reaction") already say — no extra badge
- * needed on top of the emoji.
- *
- * `floating` (the hover picker) adds the pop-scale on hover, which would be
- * clipped inside the menu's `overflow-hidden` surface.
+ * followed by the affordance that opens the full emoji picker. It is the reaction
+ * bar at the top of the ⋯ menu; the caller supplies its chrome via `className`.
+ * `activeKey` marks our current reaction with a distinct highlight; clicking it
+ * removes the reaction, which the highlight and the label ("Remove … reaction")
+ * already say — no extra badge needed on top of the emoji.
  */
 function ReactionPicker(props: {
   onPick: (key: string) => void;
   onMore: () => void;
   activeKey?: string;
-  floating?: boolean;
   className?: string;
   "data-testid"?: string;
 }) {
@@ -923,7 +883,6 @@ function ReactionPicker(props: {
             onClick={() => props.onPick(key)}
             className={cn(
               "grid size-7 place-items-center rounded-full leading-none transition-transform",
-              props.floating && "hover:scale-125",
               active ? "bg-primary/20 ring-1 ring-inset ring-primary/50" : "hover:bg-accent",
             )}
           >
@@ -938,10 +897,7 @@ function ReactionPicker(props: {
         aria-label="More reactions"
         data-testid="reaction-more"
         onClick={props.onMore}
-        className={cn(
-          "grid size-7 place-items-center rounded-full text-text-dim transition-transform hover:bg-accent hover:text-foreground",
-          props.floating && "hover:scale-110",
-        )}
+        className="grid size-7 place-items-center rounded-full text-text-dim transition-transform hover:bg-accent hover:text-foreground"
       >
         <SmilePlus className="size-[18px]" strokeWidth={1.6} />
       </button>

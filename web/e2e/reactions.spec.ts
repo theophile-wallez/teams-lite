@@ -48,11 +48,11 @@ test.describe("message reactions", () => {
     await expect(bubble.locator('[data-testid="reaction-chip-heart"]')).toHaveCount(0);
   });
 
-  test("reveals a hover reaction picker, reacts, then removes via the chip", async ({ page }) => {
+  test("reacts from the menu, then removes via the chip", async ({ page }) => {
     await gotoApp(page);
     await openConversationAt(page, 0);
 
-    const original = `hover-react-${Date.now()}`;
+    const original = `chip-react-${Date.now()}`;
     const composer = page.locator('[data-testid="composer"]');
     await composer.click();
     await composer.fill(original);
@@ -61,11 +61,13 @@ test.describe("message reactions", () => {
     const bubble = page.locator('[data-testid="message"]', { hasText: original });
     await expect(bubble).toBeVisible();
 
-    // Hovering the bubble reveals the floating picker after a short dwell.
+    // The ⋯ menu is the only reaction surface: nothing appears on hover alone.
     await bubble.hover();
-    const picker = page.locator('[data-testid="reaction-picker"]');
-    await expect(picker).toBeVisible({ timeout: 5_000 });
-    await picker.locator('[data-testid="reaction-option-like"]').click();
+    await expect(page.locator('[data-testid="menu-reaction-picker"]')).toHaveCount(0);
+    await bubble.locator('[data-testid="message-actions"]').click();
+    await page
+      .locator('[data-testid="menu-reaction-picker"] [data-testid="reaction-option-like"]')
+      .click();
 
     const chip = bubble.locator('[data-testid="reaction-chip-like"]');
     await expect(chip).toBeVisible();
@@ -102,10 +104,11 @@ test.describe("message reactions", () => {
       if (r.url().includes("/emoji/apple/") && !r.ok()) missing.push(`${r.status()} ${r.url()}`);
     });
 
-    // The quick row offers six reactions; the rest are behind "More reactions".
+    // The menu's quick row offers six reactions; the rest are behind "More
+    // reactions".
     await bubble.hover();
-    await expect(page.locator('[data-testid="reaction-picker"]')).toBeVisible({ timeout: 5_000 });
-    await page.locator('[data-testid="reaction-picker"] [data-testid="reaction-more"]').click();
+    await bubble.locator('[data-testid="message-actions"]').click();
+    await page.locator('[data-testid="menu-reaction-picker"] [data-testid="reaction-more"]').click();
 
     // Search narrows to one emoji, Enter picks it — emoji-mart lives in a shadow
     // root, so drive it the way a user does rather than by internal markup.
@@ -125,8 +128,8 @@ test.describe("message reactions", () => {
     expect(external).toEqual([]);
     expect(missing).toEqual([]);
 
-    // The ⋯ menu is the other way in (and the only one on touch, where nothing
-    // hovers): it hands off to the same picker and closes behind it.
+    // The menu closes behind the picker it hands off to, and Escape dismisses the
+    // picker without reacting.
     await bubble.hover();
     await bubble.locator('[data-testid="message-actions"]').click();
     await page.locator('[data-testid="menu-reaction-picker"] [data-testid="reaction-more"]').click();

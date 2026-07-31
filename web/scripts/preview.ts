@@ -372,28 +372,30 @@ export async function toggleCalendarSetting(
 }
 
 /**
- * Hover the last message until its quick reaction row appears (it is revealed
- * after a dwell, see REACTION_HOVER_MS in message-bubble.tsx).
+ * Open the ⋯ actions menu of the last message, whose reaction bar is the only way
+ * in to a reaction (there is no picker on hover).
  *
  * Reaction surfaces only *offer* a reaction — nothing leaves until an emoji is
  * clicked — but they are still write affordances, so these helpers re-assert the
  * mock sentinel like every other one here.
  */
-export async function revealReactionRow(page: Page): Promise<void> {
+export async function openMessageActions(page: Page): Promise<void> {
   await assertMockBackend(page);
-  await page.locator('[data-testid="message"]').last().hover();
-  await page.waitForSelector('[data-testid="reaction-picker"]');
-  await page.waitForTimeout(300); // let the row's reveal animation settle
+  const message = page.locator('[data-testid="message"]').last();
+  await message.hover(); // the trigger only shows on a hovered bubble
+  await message.locator('[data-testid="message-actions"]').click();
+  await page.waitForSelector('[data-testid="menu-reaction-picker"]');
+  await page.waitForTimeout(300); // let the menu's open animation settle
 }
 
 /**
- * Open the full emoji picker from a revealed quick row. Returns once emoji-mart
- * has mounted and its Apple images (served from our own origin) have had a beat
- * to arrive, so a capture isn't of a half-loaded grid.
+ * Open the full emoji picker from the actions menu's quick row. Returns once
+ * emoji-mart has mounted and its Apple images (served from our own origin) have
+ * had a beat to arrive, so a capture isn't of a half-loaded grid.
  */
 export async function openReactionPicker(page: Page): Promise<void> {
   await assertMockBackend(page);
-  await page.locator('[data-testid="reaction-picker"] [data-testid="reaction-more"]').click();
+  await page.locator('[data-testid="menu-reaction-picker"] [data-testid="reaction-more"]').click();
   await page.waitForSelector('[data-testid="emoji-picker"]');
   await page.waitForTimeout(800);
 }
@@ -661,12 +663,13 @@ if (import.meta.main) {
         if (id) await emit({ kind: "reaction", conversation, message_id: id, key, count: 2 });
       }
       await page.waitForTimeout(400);
-      // Three states worth reviewing: chips, the quick row, then the full picker.
+      // Three states worth reviewing: chips, the menu's quick row, then the full
+      // picker.
       await shot(`${out}-chips-light.png`);
       await setTheme("dark");
       await shot(`${out}-chips-dark.png`);
       await setTheme("light");
-      await revealReactionRow(page);
+      await openMessageActions(page);
       await shot(`${out}-row-light.png`);
       await openReactionPicker(page);
     }
