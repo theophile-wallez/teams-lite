@@ -185,6 +185,23 @@ type ReplyTo = {
   after: string;
 };
 
+/** The optional single image accepted by `send`. The shape mirrors the web and
+ *  Rust protocol. The mock validates it instead of accepting a partial object,
+ *  so protocol drift fails a test instead of producing a misleading echo. */
+type SendImage = {
+  name: string;
+  content_type: string;
+  data_base64: string;
+};
+
+type CapturedSend = {
+  conversation: string;
+  text: string;
+  reply_to?: ReplyTo;
+  content_html?: string;
+  image?: SendImage;
+};
+
 // ---------------------------------------------------------------------------
 // Constants.
 // ---------------------------------------------------------------------------
@@ -208,6 +225,13 @@ const SEND_ECHO_DELAY_MS = 150;
  *  /__test/conversations) so E2E tests can drive live events deterministically.
  *  Off by default — the mock behaves exactly as before for plain dev use. */
 const TEST_HOOKS = process.env.MOCK_TEST_HOOKS === "1";
+
+/** Mutable send behavior exists only behind the E2E control plane. It lets a
+ *  spec prove duplicate-send prevention and failure retention deterministically. */
+let testSendDelayMs = 0;
+let testSendError = "";
+const capturedSends: CapturedSend[] = [];
+let nextSentImage = 0;
 
 /** Our own identity. The UI tags messages via `is_self`; the MRI is the anchor. */
 const SELF_NAME = "You";
@@ -2121,6 +2145,33 @@ function parseReplyTo(value: unknown): ReplyTo | undefined {
   };
 }
 
+/** Parse the optional image payload strictly. Images are one-at-a-time by design. */
+function parseSendImage(value: unknown): SendImage | undefined {
+  if (value === undefined || value === null) return undefined;
+  const o = asObject(value);
+  if (typeof o.name !== "string" || o.name.length === 0) {
+    throw new Error("invalid image param: name");
+  }
+  if (typeof o.content_type !== "string" || !o.content_type.startsWith("image/")) {
+    throw new Error("invalid image param: content_type");
+  }
+  if (typeof o.data_base64 !== "string" || o.data_base64.length === 0) {
+    throw new Error("invalid image param: data_base64");
+  }
+  return { name: o.name, content_type: o.content_type, data_base64: o.data_base64 };
+}
+
+/** Build the AMS inline-image HTML Teams returns after a successful upload. */
+function sentImageContent(image: SendImage): string {
+  nextSentImage += 1;
+  const objectId = `mock-sent-image-${nextSentImage}`;
+  const url = `https://eu-api.asm.skype.com/v1/objects/${objectId}/views/imgo`;
+  return (
+    `<p><img itemtype="http://schema.skype.com/AMSImage" ` +
+    `src="${url}" alt="${escapeHtml(image.name)}"></p>`
+  );
+}
+
 // ---- next sequence / message id for freshly created messages ----
 
 /** Next seq for an ascending-by-seq message array. */
@@ -2937,12 +2988,32 @@ function dispatch(method: string, params: unknown): unknown {
     }
 
     case "send": {
+      const input = asObject(params);
       const id = requireString(params, "conversation");
       const text = requireString(params, "text");
-      const replyTo = parseReplyTo(asObject(params).reply_to);
-      const rawHtml = asObject(params).content_html;
+      const replyTo = parseReplyTo(input.reply_to);
+      const rawHtml = input.content_html;
       const contentHtml = typeof rawHtml === "string" && rawHtml.length > 0 ? rawHtml : undefined;
-      scheduleSendEcho(id, text, replyTo, contentHtml);
+      const image = parseSendImage(input.image);
+      if (TEST_HOOKS) {
+        capturedSends.push({
+          conversation: id,
+          text,
+          ...(replyTo ? { reply_to: replyTo } : {}),
+          ...(contentHtml ? { content_html: contentHtml } : {}),
+          ...(image ? { image } : {}),
+        });
+        if (testSendError) throw new Error(testSendError);
+        if (testSendDelayMs > 0) {
+          return new Promise((resolve) => {
+            setTimeout(() => {
+              scheduleSendEcho(id, text, replyTo, contentHtml, image);
+              resolve({ sent: true });
+            }, testSendDelayMs);
+          });
+        }
+      }
+      scheduleSendEcho(id, text, replyTo, contentHtml, image);
       return { sent: true };
     }
 
@@ -3118,7 +3189,7 @@ function dispatch(method: string, params: unknown): unknown {
 }
 
 /** Handle one text frame: parse, dispatch, reply. Never throws to the caller. */
-function handleFrame(ws: Socket, raw: string): void {
+async function handleFrame(ws: Socket, raw: string): Promise<void> {
   let req: { id?: unknown; method?: unknown; params?: unknown };
   try {
     req = JSON.parse(raw);
@@ -3132,7 +3203,7 @@ function handleFrame(ws: Socket, raw: string): void {
   const params = req.params ?? null;
 
   try {
-    const result = dispatch(method, params);
+    const result = await dispatch(method, params);
     sendJson(ws, { id, result });
   } catch (e) {
     sendJson(ws, { id, error: e instanceof Error ? e.message : String(e) });
@@ -3197,11 +3268,14 @@ function scheduleSendEcho(
   text: string,
   replyTo: ReplyTo | undefined,
   contentHtml?: string,
+  image?: SendImage,
 ): void {
   setTimeout(() => {
     const t = threadFor(convId);
     if (!t) return;
     const seq = nextSeq(t.messages);
+    const body = composeContent(text, replyTo, contentHtml);
+    const imageHtml = image ? sentImageContent(image) : "";
     const msg: ChatMessage = {
       id: `${convId}#${seq}`,
       conversation_id: convId,
@@ -3209,7 +3283,7 @@ function scheduleSendEcho(
       compose_time: Date.now(),
       sender: SELF_NAME,
       sender_mri: SELF_MRI,
-      content: composeContent(text, replyTo, contentHtml),
+      content: body + imageHtml,
       is_self: true,
     };
     t.messages.push(msg);
@@ -3508,6 +3582,24 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       reply: Boolean(body.reply),
     });
     return Response.json({ ok: msg !== null, message: msg }, { status: msg ? 200 : 404 });
+  }
+  if (req.method === "POST" && url.pathname === "/__test/send-control") {
+    let body: Record<string, unknown> = {};
+    try {
+      body = (await req.json()) as Record<string, unknown>;
+    } catch {
+      /* an empty body resets the controls */
+    }
+    testSendDelayMs =
+      typeof body.delay_ms === "number" && Number.isFinite(body.delay_ms)
+        ? Math.max(0, body.delay_ms)
+        : 0;
+    testSendError = typeof body.error === "string" ? body.error : "";
+    if (body.clear === true) capturedSends.length = 0;
+    return Response.json({ ok: true, delay_ms: testSendDelayMs, error: testSendError });
+  }
+  if (req.method === "GET" && url.pathname === "/__test/sends") {
+    return Response.json({ sends: capturedSends });
   }
   if (req.method === "GET" && url.pathname === "/__test/conversations") {
     return Response.json(

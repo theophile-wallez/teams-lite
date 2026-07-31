@@ -101,6 +101,33 @@ export async function openConversationAt(page: Page, index = 0): Promise<string>
   return id;
 }
 
+export type CapturedSend = {
+  conversation: string;
+  text: string;
+  content_html?: string;
+  image?: { name: string; content_type: string; data_base64: string };
+};
+
+/** Configure the mock's next sends. Always reset the control after a failure test,
+ *  because one mock process serves the complete E2E run. */
+export async function setSendControl(
+  page: Page,
+  body: { delay_ms?: number; error?: string; clear?: boolean } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/send-control`, {
+    data: body,
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Return the send requests captured by the mock test control plane. */
+export async function fetchCapturedSends(page: Page): Promise<CapturedSend[]> {
+  const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/sends`);
+  expect(res.ok()).toBeTruthy();
+  const body = (await res.json()) as { sends: CapturedSend[] };
+  return body.sends;
+}
+
 /** Inject a live message through the mock's gated test hook. */
 export async function emitLive(
   page: Page,
