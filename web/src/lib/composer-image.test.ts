@@ -35,6 +35,7 @@ describe("composer image validation", () => {
     };
 
     expect(sendImage(image)).toEqual({
+      name: "capture.png",
       contentType: "image/png",
       width: 80,
       height: 40,

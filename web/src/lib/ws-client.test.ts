@@ -153,6 +153,7 @@ describe("Backend request/response", () => {
     const { backend, socket } = await connected();
 
     const promise = backend.send("c1", "caption", undefined, undefined, {
+      name: "capture.png",
       contentType: "image/png",
       width: 640,
       height: 480,
@@ -169,6 +170,7 @@ describe("Backend request/response", () => {
       conversation: "c1",
       text: "caption",
       image: {
+        name: "capture.png",
         content_type: "image/png",
         width: 640,
         height: 480,

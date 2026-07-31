@@ -105,7 +105,13 @@ export type CapturedSend = {
   conversation: string;
   text: string;
   content_html?: string;
-  image?: { name: string; content_type: string; data_base64: string };
+  image?: {
+    name: string;
+    content_type: string;
+    data_base64: string;
+    width?: number;
+    height?: number;
+  };
 };
 
 /** Configure the mock's next sends. Always reset the control after a failure test,

@@ -25,7 +25,7 @@ test.describe("composer images", () => {
   test("selects an image and removes its preview", async ({ page }) => {
     await openComposer(page);
     await selectImage(page);
-    await expect(page.locator(IMAGE_PREVIEW)).toHaveAttribute("alt", "pixel.png");
+    await expect(page.locator(`${IMAGE_PREVIEW} img`)).toHaveAttribute("alt", "pixel.png");
 
     await page.locator('[data-testid="composer-image-remove"]').click();
     await expect(page.locator(IMAGE_PREVIEW)).toHaveCount(0);
@@ -45,27 +45,29 @@ test.describe("composer images", () => {
     }, PNG_BASE64);
 
     await expect(page.locator(IMAGE_PREVIEW)).toBeVisible();
-    await expect(page.locator(IMAGE_PREVIEW)).toHaveAttribute("alt", "pasted.png");
+    await expect(page.locator(`${IMAGE_PREVIEW} img`)).toHaveAttribute("alt", "pasted.png");
   });
 
   test("sends an image without text and renders the AMS image echo", async ({ page }) => {
     await openComposer(page);
-    const before = await page.locator('[data-testid="message"]').count();
     await selectImage(page, "image-only.png");
     await page.locator('[data-testid="composer-send"]').click();
 
-    await expect(page.locator('[data-testid="message"]')).toHaveCount(before + 1);
-    const message = page.locator('[data-testid="message"]').last();
-    await expect(message).toHaveAttribute("data-mine", "true");
-    await expect(message.locator('[data-testid="message-image"]')).toBeVisible();
+    const sentImage = page
+      .locator('[data-testid="message"][data-mine="true"]')
+      .filter({ has: page.locator('[data-testid="message-image"]') })
+      .last();
+    await expect(sentImage).toBeVisible();
 
     const sends = await fetchCapturedSends(page);
     expect(sends).toHaveLength(1);
     expect(sends[0]?.text).toBe("");
-    expect(sends[0]?.image).toEqual({
+    expect(sends[0]?.image).toMatchObject({
       name: "image-only.png",
       content_type: "image/png",
       data_base64: PNG_BASE64,
+      width: 1,
+      height: 1,
     });
   });
 
@@ -107,7 +109,7 @@ test.describe("composer images", () => {
       buffer: Buffer.from("not an image"),
     });
     await expect(page.locator(IMAGE_PREVIEW)).toHaveCount(0);
-    await expect(page.locator('[data-testid="status-bar"]')).toContainText(/image/i);
+    await expect(page.locator('[data-testid="composer-image-error"]')).toContainText(/image/i);
 
     await page.locator(IMAGE_INPUT).setInputFiles({
       name: "too-large.png",
@@ -115,7 +117,7 @@ test.describe("composer images", () => {
       buffer: Buffer.alloc(11 * 1024 * 1024),
     });
     await expect(page.locator(IMAGE_PREVIEW)).toHaveCount(0);
-    await expect(page.locator('[data-testid="status-bar"]')).toContainText(/large|size/i);
+    await expect(page.locator('[data-testid="composer-image-error"]')).toContainText(/smaller/i);
     expect(await fetchCapturedSends(page)).toHaveLength(0);
   });
 

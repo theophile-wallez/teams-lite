@@ -18,7 +18,7 @@ export type ComposerImage = {
   previewUrl: string;
 };
 
-export type SendImage = Omit<ComposerImage, "name" | "previewUrl">;
+export type SendImage = Omit<ComposerImage, "previewUrl">;
 
 const ACCEPTED_TYPES = new Set<string>(COMPOSER_IMAGE_TYPES);
 
@@ -85,6 +85,7 @@ export async function loadComposerImage(file: File): Promise<ComposerImage> {
 
 export function sendImage(image: ComposerImage): SendImage {
   return {
+    name: image.name,
     contentType: image.contentType,
     width: image.width,
     height: image.height,

@@ -400,6 +400,7 @@ export class Backend {
       content_html: contentHtml,
       image: image
         ? {
+            name: image.name,
             content_type: image.contentType,
             width: image.width,
             height: image.height,

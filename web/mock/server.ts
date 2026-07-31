@@ -192,6 +192,8 @@ type SendImage = {
   name: string;
   content_type: string;
   data_base64: string;
+  width?: number;
+  height?: number;
 };
 
 type CapturedSend = {
@@ -2158,7 +2160,15 @@ function parseSendImage(value: unknown): SendImage | undefined {
   if (typeof o.data_base64 !== "string" || o.data_base64.length === 0) {
     throw new Error("invalid image param: data_base64");
   }
-  return { name: o.name, content_type: o.content_type, data_base64: o.data_base64 };
+  const width = typeof o.width === "number" ? o.width : undefined;
+  const height = typeof o.height === "number" ? o.height : undefined;
+  return {
+    name: o.name,
+    content_type: o.content_type,
+    data_base64: o.data_base64,
+    ...(width ? { width } : {}),
+    ...(height ? { height } : {}),
+  };
 }
 
 /** Build the AMS inline-image HTML Teams returns after a successful upload. */
