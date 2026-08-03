@@ -2471,6 +2471,11 @@ const mockAgentProviders = new Map<
   ["opencode", { prefix: "@opencode", available: false, enabled: true, model: null, models: [] }],
 ]);
 
+/** Whether the agent would run on the user's own Claude Code configuration. Off, like a
+ *  fresh Rust store: the mock runs no CLI, so this is only the setting travelling to the
+ *  backend and back — which is exactly what the switch has to prove. */
+let mockAgentUnrestricted = false;
+
 /** The `agent_status` result, matching the Rust one. */
 function agentStatusView(): {
   backends: {
@@ -2484,6 +2489,7 @@ function agentStatusView(): {
   conversations: { conversation: string; mode: string }[];
   tools: string[];
   tool_grants: { key: string; label: string; detail: string; tools: string[] }[];
+  unrestricted: boolean;
   workspace: string;
   enabled: boolean;
   sandbox_conversation: string;
@@ -2493,6 +2499,7 @@ function agentStatusView(): {
     conversations: [...mockAgentModes].map(([conversation, mode]) => ({ conversation, mode })),
     tools: [...mockAgentTools],
     tool_grants: MOCK_AGENT_TOOL_GRANTS,
+    unrestricted: mockAgentUnrestricted,
     workspace: "/home/mock/GitHub/teams-lite",
     enabled: true,
     sandbox_conversation: MOCK_AGENT_SANDBOX,
@@ -3797,6 +3804,11 @@ function dispatch(method: string, params: unknown): unknown {
       return agentStatusView();
     }
 
+    case "agent_set_unrestricted": {
+      mockAgentUnrestricted = asObject(params).unrestricted === true;
+      return agentStatusView();
+    }
+
     case "agent_set_tools": {
       const tools = asObject(params).tools;
       mockAgentTools = Array.isArray(tools)
@@ -4618,6 +4630,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       // The other half of the same consent: what the agent may reach. Asserted here for
       // the same reason — a switch is only meaningful if the backend stored it.
       tools: [...mockAgentTools],
+      unrestricted: mockAgentUnrestricted,
       providers: [...mockAgentProviders].map(([name, p]) => ({
         name,
         available: p.available,

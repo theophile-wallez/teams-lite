@@ -282,6 +282,7 @@ export async function fetchAgentModes(page: Page): Promise<{
   conversations: { conversation: string; mode: string }[];
   tools: string[];
   providers: { name: string; available: boolean; enabled: boolean; model: string | null }[];
+  unrestricted: boolean;
 }> {
   const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/agent`);
   expect(res.ok()).toBeTruthy();

@@ -510,6 +510,16 @@ export class Backend {
   agentSetProvider(provider: string, patch: AgentProviderPatch): Promise<AgentStatus> {
     return this.writeRequest<AgentStatus>("agent_set_provider", { provider, ...patch });
   }
+  /** Run the agent on the user's OWN Claude Code configuration instead of this app's
+   *  allowlist — every MCP server and tool their settings hold, and their own permission
+   *  mode.
+   *
+   *  A WRITE request, and the sharpest of them: it is what turns a chat message into a
+   *  program that may write on that machine (a `MACHINE_METHODS` entry, refused
+   *  read-only). Off in a fresh store. */
+  agentSetUnrestricted(unrestricted: boolean): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_set_unrestricted", { unrestricted });
+  }
   /** Fetch the notifications panel's three activity streams — Activity, Mentions
    *  and Following — in one round-trip. None is a chat: the backend fetches them
    *  fresh from Teams (concurrently) and decodes each entry. */

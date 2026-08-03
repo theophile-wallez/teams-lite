@@ -77,6 +77,10 @@ export type AgentStatus = {
   /** The groups of tools the user may switch on. Absent from an older backend, which
    *  is then offered no switch rather than a guessed one. */
   tool_grants?: AgentToolGrant[];
+  /** Whether the agent runs on the user's OWN Claude Code configuration — every MCP
+   *  server and tool their settings hold — instead of the allowlist above. Off in a
+   *  fresh store, and absent on a backend too old to know the setting. */
+  unrestricted?: boolean;
   /** The directory an agent runs in. */
   workspace: string;
   /** False on a read-only backend, which never answers whatever the modes say. */
@@ -117,6 +121,13 @@ export function usableBackends(status: AgentStatus | null): AgentBackend[] {
  *  old to name any — a switch nobody described must not be drawn. */
 export function agentToolGrants(status: AgentStatus | null): AgentToolGrant[] {
   return status?.tool_grants ?? [];
+}
+
+/** Whether the agent runs on the user's own Claude Code configuration. False until the
+ *  backend says otherwise: this app's own allowlist is the default, so an unanswered
+ *  status must never read as the wider state. */
+export function agentIsUnrestricted(status: AgentStatus | null): boolean {
+  return status?.unrestricted === true;
 }
 
 /** Whether a group is granted: EVERY tool it names is in the allowlist.

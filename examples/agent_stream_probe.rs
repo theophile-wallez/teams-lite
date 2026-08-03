@@ -78,7 +78,10 @@ async fn main() -> Result<()> {
         system_prompt: agent_policy::system_prompt(backend, "teams-lite sandbox"),
         resume_session: None,
         workspace: agent::default_workspace(),
-        tools: agent::tools_from_setting(None),
+        // The read-only default, never what the store happens to hold: a probe that
+        // inherited `Permissions::OwnConfig` would run the widest configuration on this
+        // machine from a command line, which is not what "try the streaming" asks for.
+        permissions: agent::Permissions::Granted(agent::tools_from_setting(None)),
         model,
     };
     let (progress, mut watch) = tokio::sync::watch::channel(agent::Progress::default());

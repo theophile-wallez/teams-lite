@@ -3,6 +3,7 @@ import { Bot, Loader2 } from "lucide-react";
 import {
   agentGrantIsOn,
   agentHint,
+  agentIsUnrestricted,
   agentModeFor,
   agentRunnable,
   agentToolGrants,
@@ -41,11 +42,19 @@ import {
  * - **It waits for the backend before it looks on.** The write can be refused (a page
  *   without the write token), and the answer that lands in state is the backend's own.
  *
- * Under the switch sits the second half of the same consent: what the agent may READ
- * (`agentToolGrants`, from `agent::TOOL_GRANTS`). It belongs here rather than in
- * Settings because it is the same question asked twice — where this machine answers,
- * and what the program it runs may reach. Every group reads only; the backend pins that,
- * so no switch in this menu can post to Grafana, Sentry or Linear.
+ * Under the switch sits the second half of the same consent: what the agent may DO. It
+ * belongs here rather than in Settings because it is the same question asked twice —
+ * where this machine answers, and what the program it runs may reach.
+ *
+ * Two settings, and the wider one comes first because it overrides the other:
+ *
+ * - **My own Claude Code config** (`agentIsUnrestricted`) hands the child the user's own
+ *   configuration: every MCP server, every tool, their own permission mode. It is the run
+ *   their terminal gives them, they ask for it on purpose, and the menu says plainly that
+ *   everything written in the thread then reaches a program that can write.
+ * - **The read-only groups** (`agentToolGrants`, from `agent::TOOL_GRANTS`) are what
+ *   applies otherwise. Every group reads only; the backend pins that, so no group in this
+ *   menu can post to Grafana, Sentry or Linear.
  */
 export function AgentMenu(props: { conversationId: string }) {
   const controller = useController();
@@ -60,12 +69,25 @@ export function AgentMenu(props: { conversationId: string }) {
   // one of the user's own settings drops (see lib/agent.ts).
   const backends = usableBackends(status);
   const grants = agentToolGrants(status);
+  const unrestricted = agentIsUnrestricted(status);
 
   const toggle = async (next: boolean) => {
     setBusy(true);
     setError(null);
     try {
       await controller.setAgentMode(props.conversationId, next ? "reply" : "off");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleUnrestricted = async (next: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await controller.setAgentUnrestricted(next);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -137,10 +159,39 @@ export function AgentMenu(props: { conversationId: string }) {
           <>
             <DropdownMenuSeparator />
             <DropdownMenuLabel className="text-[11px] font-normal text-text-faint">
-              It may read
+              What it may do
             </DropdownMenuLabel>
 
-            {grants.map((grant) => {
+            {/* The wider setting first, because it decides whether the groups below
+                apply at all. */}
+            <DropdownMenuCheckboxItem
+              data-testid="agent-unrestricted-toggle"
+              checked={unrestricted}
+              disabled={busy || !runnable}
+              onCheckedChange={(next) => void toggleUnrestricted(next === true)}
+              onSelect={(event) => event.preventDefault()}
+              className="items-start"
+            >
+              <span className="flex flex-col gap-0.5">
+                <span>My own Claude Code config</span>
+                <span className="text-[11px] leading-snug text-text-faint">
+                  Every MCP server and tool your settings hold, and your own permission
+                  mode — the run your terminal gives you.
+                </span>
+              </span>
+            </DropdownMenuCheckboxItem>
+
+            {unrestricted && (
+              <p
+                data-testid="agent-unrestricted-warning"
+                className="px-2 pb-1.5 text-[11px] leading-snug text-text-faint"
+              >
+                Your settings decide, so the groups below do not apply. Everything
+                written in this thread reaches that agent as part of its prompt.
+              </p>
+            )}
+
+            {!unrestricted && grants.map((grant) => {
               const granted = agentGrantIsOn(status, grant);
               return (
                 <DropdownMenuCheckboxItem
@@ -163,9 +214,11 @@ export function AgentMenu(props: { conversationId: string }) {
               );
             })}
 
-            <p className="px-2 pb-1.5 text-[11px] leading-snug text-text-faint">
-              Reading only — nothing here can write to Grafana, Sentry or Linear.
-            </p>
+            {!unrestricted && (
+              <p className="px-2 pb-1.5 text-[11px] leading-snug text-text-faint">
+                Reading only — nothing here can write to Grafana, Sentry or Linear.
+              </p>
+            )}
           </>
         )}
       </DropdownMenuContent>

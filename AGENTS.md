@@ -95,7 +95,7 @@ tenant, which is what makes the surface reviewable — `cd web && bun run previe
 --out /tmp/reply --agent-reply` walks one run through every phase (`--agent` captures the
 menu instead), and `web/e2e/agent.spec.ts` pins it.
 
-Four rules hold it together. Each one is load-bearing, and each is pinned by a test:
+Five rules hold it together. Each one is load-bearing, and each is pinned by a test:
 
 - **Only the user may summon it.** The trigger requires the message to be ours
   (`from_me`). A prefix written by anybody else is ignored — the agent runs a program
@@ -114,16 +114,38 @@ Four rules hold it together. Each one is load-bearing, and each is pinned by a t
 - **The tool allowlist is read-only until the user widens it.** `Read`, `Glob`, `Grep`
   and nothing else (`agent::DEFAULT_TOOLS`), and Claude Code is pinned to
   `--permission-mode default` so anything outside the list is refused rather than
-  prompted for. The user's own settings may default to `bypassPermissions` for
-  interactive work; a chat message must never inherit that. Widening the list is
-  `agent_set_tools`, gated the same way — and it is *offered* as named read-only groups
-  (`agent::TOOL_GRANTS`, switched on from the same thread menu), because a consent the
-  user can only give through a hand-crafted RPC is a consent they cannot give. Every tool
-  in every group reads: the child loads the user's own MCP servers, so a group spelled
-  `mcp__grafana` would hand over `update_dashboard`, `create_incident` and
-  `grafana_api_request` with it. `every_granted_tool_reads` pins the shape — three
-  segments, never a whole server, and a verb that reads. The RPC still accepts any list,
-  which is the deliberate escape hatch for a tool no group names.
+  prompted for. Widening the list is `agent_set_tools`, gated the same way — and it is
+  *offered* as named read-only groups (`agent::TOOL_GRANTS`, switched on from the same
+  thread menu), because a consent the user can only give through a hand-crafted RPC is a
+  consent they cannot give. Every tool in every group reads: the child loads the user's
+  own MCP servers, so a group spelled `mcp__grafana` would hand over `update_dashboard`,
+  `create_incident` and `grafana_api_request` with it. `every_granted_tool_reads` pins
+  the shape — three segments, never a whole server, and a verb that reads. The RPC still
+  accepts any list, which is the deliberate escape hatch for a tool no group names.
+- **The user may hand it their own configuration, and only they may.**
+  `agent_set_unrestricted` (a `MACHINE_METHODS` entry, off in a fresh store) switches the
+  child to `agent::Permissions::OwnConfig`: this app then passes NEITHER
+  `--allowed-tools` NOR `--permission-mode`, so the CLI resolves every MCP server, every
+  tool and the permission mode from `~/.claude/settings.json` — the run the user gets in
+  their own terminal, which is what they asked for. Three things about it, all
+  load-bearing:
+  - **The app still never spells an escalation.** No `bypassPermissions`, no
+    `--dangerously-skip-permissions`, no opencode `--auto`, in either mode
+    (`no_mode_ever_spells_an_escalation`). What the setting opens is what the user's own
+    settings open, so editing those settings takes it back. A flag written here would
+    keep deciding after they changed their mind.
+  - **It accepts a real risk, and the menu says so.** The thread transcript travels with
+    every prompt, and the people in the thread never agreed to be able to steer a program
+    on that machine. With the user's own config that program can write files and run
+    commands, and it can read the 0600 write token and post to any chat around every gate
+    above. That is why the setting is off by default, why it is per machine and asked for
+    from the thread's own menu, and why the backend prints one `UNRESTRICTED` line at
+    startup. Never make it the default, never turn it on for the user, and never widen it
+    to a per-thread automatic.
+  - **The narrow state is what an unanswered status means.** `agentIsUnrestricted` is
+    false until the backend reports `true`, exactly like the mode switch: a hopeful
+    `true` would tell the user their own configuration is in force while the allowlist
+    is.
 - **The child never inherits the write token.** `TEAMS_LITE_WRITE_TOKEN` is removed
   from its environment: an agent holding it could `send` to any chat directly, around
   every gate above. A read-only backend never answers at all.

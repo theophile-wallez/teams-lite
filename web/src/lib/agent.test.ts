@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   agentGrantIsOn,
   agentHint,
+  agentIsUnrestricted,
   agentModeFor,
   agentRunnable,
   agentToolGrants,
@@ -184,6 +185,22 @@ describe("the tool grants", () => {
   it("can end at no tool at all, which is a legitimate answer", () => {
     const only = status({ tool_grants: [FILES] });
     expect(agentToolsWithGrant(only, FILES, false)).toEqual([]);
+  });
+});
+
+describe("agentIsUnrestricted", () => {
+  // The narrow state is the default, so anything short of an explicit `true` reads as
+  // "this app decides". A hopeful `true` would tell the user their own configuration is
+  // in force when the allowlist is.
+  it("is false until the backend says otherwise", () => {
+    expect(agentIsUnrestricted(null)).toBe(false);
+    expect(agentIsUnrestricted(status())).toBe(false);
+    expect(agentIsUnrestricted(status({ unrestricted: undefined }))).toBe(false);
+    expect(agentIsUnrestricted(status({ unrestricted: false }))).toBe(false);
+  });
+
+  it("is true when the backend reports the user's own configuration", () => {
+    expect(agentIsUnrestricted(status({ unrestricted: true }))).toBe(true);
   });
 });
 

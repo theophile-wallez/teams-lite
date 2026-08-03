@@ -15,6 +15,7 @@
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | calendars | calendar_view
 //          | agent_status | agent_set_mode | agent_set_tools | agent_set_provider
+//          | agent_set_unrestricted
 // Events:  status | message | conversations_changed | notifications_changed | typing
 //          | read_receipt | call | call_signal | update_available
 //          | mail_folders_changed | mail_list_updated | mail_list_error
@@ -191,7 +192,12 @@ const OUTWARD_METHODS: [&str; 5] = ["send", "edit", "react", "mark_read", "set_a
 /// message may make a local agent do, and `agent_set_provider` decides which CLI a
 /// chat message starts and which model reads the thread. A client that merely found
 /// this socket gets to do none of it.
-const MACHINE_METHODS: [&str; 8] = [
+///
+/// `agent_set_unrestricted` is the sharpest of them all: it hands the child the user's
+/// own configuration — every MCP server, every tool, their own permission mode. It is
+/// the one switch in this file that a stranger on the socket could turn into code
+/// execution, so it is gated exactly like the others and off in a fresh store.
+const MACHINE_METHODS: [&str; 9] = [
     "repair_broker",
     "push_subscribe",
     "push_unsubscribe",
@@ -200,6 +206,7 @@ const MACHINE_METHODS: [&str; 8] = [
     "agent_set_mode",
     "agent_set_tools",
     "agent_set_provider",
+    "agent_set_unrestricted",
 ];
 
 /// What a {@link MACHINE_METHODS} entry actually does to the machine, for its
@@ -221,6 +228,10 @@ fn machine_effect(method: &str) -> &'static str {
         "agent_set_provider" => {
             "decides which coding agent this machine starts for a chat message, and which \
              model reads the thread"
+        }
+        "agent_set_unrestricted" => {
+            "lets a local agent this machine runs use the user's own Claude Code \
+             configuration — every tool it holds"
         }
         // Unreachable while the two lists agree; the test below pins that they do.
         _ => "changes this machine",
@@ -1171,7 +1182,17 @@ async fn main() -> Result<()> {
             Err(e) => eprintln!("[write-lock] armed: token published nowhere ({e})"),
         },
     }
-    log_agent_backends();
+    // Read once at boot: a machine that answers a chat message with the user's own
+    // configuration must say so in its own journal, not only in a browser menu.
+    let unrestricted = match ctx.store() {
+        Ok(store) => store
+            .get_setting(agent::SETTING_UNRESTRICTED)
+            .ok()
+            .flatten()
+            .is_some_and(|value| agent::unrestricted_from_setting(Some(&value))),
+        Err(_) => false,
+    };
+    log_agent_backends(unrestricted);
     let clients = ClientTracker::new();
     let no_idle_exit = idle_exit_disabled();
     if no_idle_exit {
@@ -1454,6 +1475,30 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 backend.name,
                 if providers.is_enabled(backend.name) { "enabled" } else { "disabled" },
                 providers.model(backend.name).unwrap_or_else(|| "<the CLI's default>".into())
+            );
+            agent_status_json(&store)
+        }
+
+        // Run the agent on the user's OWN Claude Code configuration instead of this
+        // app's allowlist — every MCP server it holds, every tool, their own permission
+        // mode. Off in a fresh store, and the user asks for it from the same menu.
+        //
+        // The journal says which way it went, because this is the one setting here that
+        // decides whether a chat message can run a program that writes.
+        "agent_set_unrestricted" => {
+            let on = params
+                .get("unrestricted")
+                .and_then(Value::as_bool)
+                .context("missing param: unrestricted (a boolean)")?;
+            let store = ctx.store()?;
+            store.set_setting(agent::SETTING_UNRESTRICTED, if on { "1" } else { "0" })?;
+            eprintln!(
+                "[agent] the agent now runs {}",
+                if on {
+                    "on the USER'S OWN configuration — every tool their settings allow"
+                } else {
+                    "on this app's read-only allowlist"
+                }
             );
             agent_status_json(&store)
         }
@@ -3796,7 +3841,14 @@ const AGENT_STREAM_INTERVAL: Duration = Duration::from_millis(50);
 /// symptom is a thread that stays silent. A service inherits the systemd user manager's
 /// PATH, which holds neither `~/.local/bin` nor `~/.bun/bin`, so the PATH is printed
 /// with the refusal: it names the cause instead of the effect.
-fn log_agent_backends() {
+fn log_agent_backends(unrestricted: bool) {
+    if unrestricted {
+        eprintln!(
+            "[agent] UNRESTRICTED — a trigger runs on the user's own Claude Code \
+             configuration: every MCP server and tool their settings allow, and their own \
+             permission mode. Turn it off from a thread's agent menu."
+        );
+    }
     for backend in agent_policy::BACKENDS.iter() {
         match agent::program_path(backend) {
             Some(path) => eprintln!(
@@ -3920,7 +3972,10 @@ fn agent_request(store: &Store, command: &agent_policy::Command) -> Result<agent
             .get_setting(&agent_session_key(&command.conversation_id, command.backend.name))?
             .filter(|session| !session.trim().is_empty()),
         workspace,
-        tools: agent::tools_from_setting(store.get_setting(agent::SETTING_TOOLS)?.as_deref()),
+        permissions: agent::permissions_from_settings(
+            store.get_setting(agent::SETTING_TOOLS)?.as_deref(),
+            store.get_setting(agent::SETTING_UNRESTRICTED)?.as_deref(),
+        ),
         model: agent_policy::Providers::parse(
             store.get_setting(agent_policy::SETTING_PROVIDERS)?.as_deref(),
         )
@@ -4271,6 +4326,12 @@ fn agent_status_json(store: &Store) -> Result<Value> {
         "conversations": conversations,
         "tools": agent::tools_from_setting(store.get_setting(agent::SETTING_TOOLS)?.as_deref()),
         "tool_grants": tool_grants,
+        // Whether the allowlist above applies at all: on the user's own configuration it
+        // does not, and a client must say so rather than draw switches that decide
+        // nothing.
+        "unrestricted": agent::unrestricted_from_setting(
+            store.get_setting(agent::SETTING_UNRESTRICTED)?.as_deref(),
+        ),
         "workspace": workspace,
         // A read-only backend never answers, so a UI can say so rather than offering a
         // switch that would do nothing.

@@ -106,6 +106,39 @@ test.describe("The local agent switch", () => {
       .not.toContain("mcp__grafana__query_prometheus");
     await expect(files).toHaveAttribute("data-granted", "true");
   });
+
+  // The widest setting: the agent then runs on the user's own Claude Code configuration,
+  // so the groups above stop deciding anything. What this pins is the default (off, the
+  // narrow state), the round-trip, and the fact the menu stops offering switches that
+  // would decide nothing.
+  test("hands the agent the user's own config only when asked, and says so", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 3);
+
+    await page.locator('[data-testid="agent-menu"]').click();
+    const own = page.locator('[data-testid="agent-unrestricted-toggle"]');
+    await expect(own).toHaveAttribute("aria-checked", "false");
+    expect((await fetchAgentModes(page)).unrestricted).toBe(false);
+
+    await own.click();
+    await expect(own).toHaveAttribute("aria-checked", "true");
+    await expect
+      .poll(async () => (await fetchAgentModes(page)).unrestricted)
+      .toBe(true);
+    // The read-only groups no longer apply, so they are gone, and the menu says why.
+    await expect(page.locator('[data-testid="agent-tool-grant-grafana"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="agent-unrestricted-warning"]')).toBeVisible();
+
+    // And back, because a consent that cannot be withdrawn is not one.
+    await own.click();
+    await expect(own).toHaveAttribute("aria-checked", "false");
+    await expect
+      .poll(async () => (await fetchAgentModes(page)).unrestricted)
+      .toBe(false);
+    await expect(page.locator('[data-testid="agent-tool-grant-grafana"]')).toBeVisible();
+  });
 });
 
 test.describe("The local agent's answer", () => {

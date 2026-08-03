@@ -2194,6 +2194,30 @@ export class TeamsController {
    *
    * Rejects on failure, so the control that called it can say why.
    */
+  /**
+   * Run the agent on the user's own Claude Code configuration, or back on this app's
+   * allowlist.
+   *
+   * The widest of the agent settings: on the user's own configuration the child holds
+   * every MCP server and tool their settings hold, which is what their terminal gives
+   * them. A write request for that reason, and the backend's own answer is what lands in
+   * state.
+   *
+   * Rejects on failure, so the control that called it can say why.
+   */
+  async setAgentUnrestricted(unrestricted: boolean): Promise<AgentStatus> {
+    let status: AgentStatus;
+    try {
+      status = await this.backend.agentSetUnrestricted(unrestricted);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ agent: status });
+    playCue("success");
+    return status;
+  }
+
   async setAgentTools(tools: string[]): Promise<AgentStatus> {
     let status: AgentStatus;
     try {

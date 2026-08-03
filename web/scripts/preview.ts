@@ -1136,7 +1136,14 @@ if (import.meta.main) {
         await page.locator('[data-testid="agent-tool-grant-grafana"]').click();
         await page.waitForSelector('[data-testid="agent-tool-grant-grafana"][data-granted="true"]');
         await shot(`${out}-granted-light.png`, element);
-        console.log(`[preview] wrote ${out}-{light,dark,granted-light}.png`);
+        // And the widest state: the user's own configuration, where the read-only groups
+        // stop applying and the menu says what that means.
+        await page.locator('[data-testid="agent-unrestricted-toggle"]').click();
+        await page.waitForSelector('[data-testid="agent-unrestricted-warning"]');
+        await shot(`${out}-own-config-light.png`, element);
+        console.log(
+          `[preview] wrote ${out}-{light,dark,granted-light,own-config-light}.png`,
+        );
       },
       { deviceScaleFactor: dpr },
     );

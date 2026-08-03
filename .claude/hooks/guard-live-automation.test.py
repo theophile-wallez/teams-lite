@@ -155,6 +155,11 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19421');\n"
         "ws.send(JSON.stringify({ method: 'agent_set_provider' }));\n"
     ),
+    "agent-unrestrictor.ts": (
+        "// Hands a Teams-triggered agent the user's own Claude Code config.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19421');\n"
+        "ws.send(JSON.stringify({ method: 'agent_set_unrestricted', params: { unrestricted: true } }));\n"
+    ),
     "agent-status-reader.ts": (
         "// Reads which conversations are armed, which is allowed.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
@@ -244,6 +249,7 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/agent-armer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/agent-tooler.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/agent-provider-setter.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/agent-unrestrictor.ts"),
         # A cargo example reaches Teams with a broker token, past every port rule.
         ("BLOCK", PROJECT, "cargo run --example guard-test-loose-send"),
         ("BLOCK", PROJECT, "cargo run --example guard-test-real-send"),

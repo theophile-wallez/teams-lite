@@ -27,15 +27,23 @@
 //!
 //! Two things are deliberate and load-bearing:
 //!
-//! - **The permission mode is never `bypassPermissions`.** The trigger is a chat
-//!   message; the answer runs a program on the user's machine. So the tool list is an
-//!   explicit allowlist ([`DEFAULT_TOOLS`] is read-only) that the user widens on
-//!   purpose, and Claude Code is pinned to `--permission-mode default` so anything
-//!   outside it is refused rather than prompted for (there is no terminal to prompt).
-//!   [`TOOL_GRANTS`] is how that widening is offered — named read-only groups the user
-//!   switches on from the thread's own menu, so "it may read Grafana" is one action
-//!   instead of thirty tool names typed by hand. The RPC still takes any list, which
-//!   is the deliberate escape hatch for a tool no group names.
+//! - **This app never widens the child's permissions by itself.** The trigger is a chat
+//!   message; the answer runs a program on the user's machine. So by default the tool
+//!   list is an explicit allowlist ([`DEFAULT_TOOLS`] is read-only) and Claude Code is
+//!   pinned to `--permission-mode default`, which refuses anything outside it rather
+//!   than prompting (there is no terminal to prompt). [`TOOL_GRANTS`] is how that
+//!   allowlist is widened — named read-only groups the user switches on from the
+//!   thread's own menu, so "it may read Grafana" is one action instead of thirty tool
+//!   names typed by hand.
+//!
+//!   [`Permissions::OwnConfig`] is the other setting, off by default and gated
+//!   (`agent_set_unrestricted`): it passes NEITHER flag, so the CLI resolves both from
+//!   the user's own configuration — every MCP server, every tool, whatever
+//!   `permissions.defaultMode` says — which is the same run they get in their terminal.
+//!   The floor that stays: this crate never *spells* an escalation. No
+//!   `bypassPermissions`, no `--dangerously-skip-permissions`, ever. What the mode
+//!   opens is what the user's own settings already open, and § The local agent in
+//!   AGENTS.md names the risk it accepts.
 //! - **The child never inherits the write token.** `TEAMS_LITE_WRITE_TOKEN` is the
 //!   capability that makes `send` possible; an agent holding it could post to any
 //!   chat directly, around every consent gate in this crate. It is removed from the
@@ -184,6 +192,11 @@ pub const TOOL_GRANTS: [ToolGrant; 4] = [
 /// The store key holding the tool allowlist, as a JSON array of tool names.
 pub const SETTING_TOOLS: &str = "agent_tools";
 
+/// The store key holding whether the agent runs on the user's own configuration
+/// ([`Permissions::OwnConfig`]) instead of this app's allowlist. `"1"` is on; absent is
+/// off, which is what a fresh store holds.
+pub const SETTING_UNRESTRICTED: &str = "agent_unrestricted";
+
 /// The store key holding the directory the agent runs in.
 pub const SETTING_WORKSPACE: &str = "agent_workspace";
 
@@ -219,6 +232,22 @@ const MAX_TARGET_CHARS: usize = 120;
 /// `the_child_never_inherits_the_write_token` in that file.
 const WRITE_TOKEN_ENV: &str = "TEAMS_LITE_WRITE_TOKEN";
 
+/// What the child is allowed to do — the two states, spelled so they cannot disagree.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Permissions {
+    /// The allowlist this app decides, refusing everything else. One name per tool, and
+    /// `--permission-mode default` under it, so a tool nobody granted is refused rather
+    /// than prompted for. An empty list is a legitimate choice: an agent that only talks.
+    Granted(Vec<String>),
+    /// Whatever the user's own Claude Code configuration says — every MCP server, every
+    /// tool, their own `permissions.defaultMode`. The same run their terminal gives them.
+    ///
+    /// The user asks for this on purpose (`agent_set_unrestricted`, off by default). It
+    /// is not a wider default: it is this app standing aside, so what the child may do
+    /// is exactly what the user already configured for themselves.
+    OwnConfig,
+}
+
 /// What to run, and with what.
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -231,8 +260,8 @@ pub struct Request {
     pub resume_session: Option<String>,
     /// The directory the agent runs in.
     pub workspace: PathBuf,
-    /// The tools it may use without being asked.
-    pub tools: Vec<String>,
+    /// What it may do without being asked.
+    pub permissions: Permissions,
     /// The model to run, when the user chose one for this backend. `None` leaves the
     /// choice to the CLI's own configuration, which is the default.
     pub model: Option<String>,
@@ -433,15 +462,25 @@ fn build_command(command: &mut Command, request: &Request) -> Option<String> {
                 "stream-json",
                 "--include-partial-messages",
                 "--verbose",
-                // NEVER bypassPermissions: the user's own settings may default to it
-                // for interactive work, and this run is triggered by a chat message.
-                "--permission-mode",
-                "default",
             ]);
-            command.arg("--append-system-prompt").arg(&request.system_prompt);
-            if !request.tools.is_empty() {
-                command.arg("--allowed-tools").args(&request.tools);
+            match &request.permissions {
+                // The allowlist this app decides. `default` is the mode that refuses
+                // what the list does not name — and this crate never spells an
+                // escalation, whatever the user's own settings default to.
+                Permissions::Granted(tools) => {
+                    command.args(["--permission-mode", "default"]);
+                    if !tools.is_empty() {
+                        command.arg("--allowed-tools").args(tools);
+                    }
+                }
+                // NEITHER flag: the CLI then resolves the tools and the permission mode
+                // from the user's own configuration, which is what makes this the run
+                // their terminal gives them. Passing `bypassPermissions` here instead
+                // would be this app deciding, and it would keep deciding after the user
+                // changed their mind in `~/.claude/settings.json`.
+                Permissions::OwnConfig => {}
             }
+            command.arg("--append-system-prompt").arg(&request.system_prompt);
             if let Some(model) = model_of(request) {
                 command.arg("--model").arg(model);
             }
@@ -451,8 +490,10 @@ fn build_command(command: &mut Command, request: &Request) -> Option<String> {
             Some(request.prompt.clone())
         }
         // opencode: the message as arguments, and no --append-system-prompt, so the
-        // instructions ride at the top of the message. No --auto: tool permissions
-        // stay refused rather than auto-approved.
+        // instructions ride at the top of the message. No --auto in either mode: that
+        // flag is opencode's own escalation, not a setting the user already made, so
+        // spelling it here would be this app deciding. `Permissions::OwnConfig` is
+        // therefore a Claude Code setting, and the menu says so.
         _ => {
             command.args(["run", "--format", "json"]);
             command.arg("--dir").arg(&request.workspace);
@@ -972,6 +1013,25 @@ pub fn tools_from_setting(setting: Option<&str>) -> Vec<String> {
     }
 }
 
+/// Whether the user asked for the run their own configuration describes. Off unless the
+/// setting says `"1"`: anything unreadable means the app keeps deciding, which is the
+/// safe direction for a switch that hands over a machine.
+pub fn unrestricted_from_setting(setting: Option<&str>) -> bool {
+    setting.map(str::trim) == Some("1")
+}
+
+/// What the child may do, from the two settings that decide it.
+///
+/// One place, so the precedence is stated once: the user's own configuration wins when
+/// they asked for it, and the stored allowlist is what applies otherwise. A caller that
+/// reads both settings and combines them itself is a second answer waiting to drift.
+pub fn permissions_from_settings(tools: Option<&str>, unrestricted: Option<&str>) -> Permissions {
+    if unrestricted_from_setting(unrestricted) {
+        return Permissions::OwnConfig;
+    }
+    Permissions::Granted(tools_from_setting(tools))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,7 +1047,7 @@ mod tests {
             system_prompt: "answer for a chat".into(),
             resume_session: None,
             workspace: PathBuf::from("/tmp/agent-workspace"),
-            tools: vec!["Read".into(), "Grep".into()],
+            permissions: Permissions::Granted(vec!["Read".into(), "Grep".into()]),
             model: None,
         }
     }
@@ -1030,9 +1090,78 @@ mod tests {
     #[test]
     fn an_agent_with_no_tools_passes_no_allowlist_flag() {
         let mut request = request(CLAUDE);
-        request.tools.clear();
+        request.permissions = Permissions::Granted(Vec::new());
         let (args, _) = argv(&request);
         assert!(!args.contains(&"--allowed-tools".to_string()));
+    }
+
+    /// The run the user's own terminal gives them: this app names neither the tools nor
+    /// the mode, so the CLI reads both from `~/.claude/settings.json` and the MCP servers
+    /// configured there. Passing `bypassPermissions` instead would look the same today
+    /// and stop matching the moment the user changed their own settings.
+    ///
+    /// Verified against Claude Code 2.1.220 with the user's own configuration
+    /// (`permissions.defaultMode: bypassPermissions`): `claude -p` with neither flag ran
+    /// a Bash command and reported no permission denial.
+    #[test]
+    fn the_users_own_configuration_names_neither_the_tools_nor_the_mode() {
+        let mut request = request(CLAUDE);
+        request.permissions = Permissions::OwnConfig;
+        let (args, stdin) = argv(&request);
+        assert!(!args.contains(&"--allowed-tools".to_string()), "{args:?}");
+        assert!(!args.contains(&"--permission-mode".to_string()), "{args:?}");
+        // Everything else is unchanged: still headless, still streaming, and the system
+        // prompt that quarantines the thread transcript still rides along.
+        assert_eq!(stdin.as_deref(), Some("what is the port?"));
+        assert!(args.contains(&"stream-json".to_string()));
+        let system = args.iter().position(|a| a == "--append-system-prompt").expect("a prompt");
+        assert_eq!(args[system + 1], "answer for a chat");
+    }
+
+    /// The floor that holds in BOTH modes: this crate never spells an escalation. What
+    /// `OwnConfig` opens is what the user's own settings open — never something this app
+    /// added on top, and never something their settings cannot take back.
+    #[test]
+    fn no_mode_ever_spells_an_escalation() {
+        for permissions in [
+            Permissions::Granted(vec!["Read".into()]),
+            Permissions::Granted(Vec::new()),
+            Permissions::OwnConfig,
+        ] {
+            for backend in [CLAUDE, OPENCODE] {
+                let mut request = request(backend);
+                request.permissions = permissions.clone();
+                let (args, _) = argv(&request);
+                for forbidden in ["bypassPermissions", "acceptEdits", "dangerously", "--auto"] {
+                    assert!(
+                        !args.iter().any(|a| a.contains(forbidden)),
+                        "{} must never pass {forbidden}: {args:?}",
+                        backend.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_unrestricted_setting_is_off_unless_it_says_one() {
+        assert_eq!(
+            permissions_from_settings(None, None),
+            Permissions::Granted(DEFAULT_TOOLS.iter().map(|t| t.to_string()).collect())
+        );
+        // Only "1" is on. A typo, an empty value or an older spelling leaves this app
+        // deciding, because that is the direction a failure must fall in.
+        for off in [None, Some(""), Some("0"), Some("true"), Some("yes")] {
+            assert!(!unrestricted_from_setting(off), "{off:?} must not switch it on");
+        }
+        assert!(unrestricted_from_setting(Some("1")));
+        assert!(unrestricted_from_setting(Some(" 1 ")));
+        // And when it is on, the stored allowlist stops applying — the two settings can
+        // never half-apply.
+        assert_eq!(
+            permissions_from_settings(Some(r#"["Read"]"#), Some("1")),
+            Permissions::OwnConfig
+        );
     }
 
     #[test]
