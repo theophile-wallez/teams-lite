@@ -1,7 +1,6 @@
 // Desktop notifications for incoming messages, via the browser Notification API.
 //
-// The web analog of ui/src/notify.ts (which shells out to notify-send). It is a
-// thin, best-effort side-effect layer: it never throws, and the decision of
+// A thin, best-effort side-effect layer: it never throws, and the decision of
 // *whether* to notify lives in the caller (see shouldNotify in ./protocol).
 
 /** Ask for notification permission once, lazily. Safe to call repeatedly. */

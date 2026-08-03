@@ -2,8 +2,8 @@ name: ci
 
 # Validation pipeline for pull requests and feature branches. The release
 # pipeline (build.yml) runs on master and publishes the binary; this workflow
-# is the pre-merge gate: Rust, terminal-UI, web unit tests, typecheck, and the
-# full Playwright E2E suite (browser-driven, against the mock backend).
+# is the pre-merge gate: Rust, the `teams` launcher, web unit tests, typecheck,
+# and the full Playwright E2E suite (browser-driven, against the mock backend).
 
 on:
   pull_request: {}
@@ -25,20 +25,22 @@ jobs:
       - name: Backend tests
         run: cargo test
 
-  ui:
+  cli:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - name: Install UI dependencies
-        working-directory: ui
+      - name: Install launcher dependencies
+        working-directory: cli
         run: bun install --frozen-lockfile
-      # Deterministic subset (the rest needs the Microsoft broker over D-Bus).
-      - name: UI history tests
-        working-directory: ui
-        run: bun test src/message-history.test.ts src/message-scroll.test.ts
+      - name: Launcher tests
+        working-directory: cli
+        run: bun test
+      - name: Launcher typecheck
+        working-directory: cli
+        run: bun run typecheck
 
   web:
     runs-on: ubuntu-latest

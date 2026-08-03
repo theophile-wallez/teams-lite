@@ -9,8 +9,8 @@
 # backend ends up on a bus with no broker on it. Read that file for the two
 # topologies, and for why the CONTAINER — not the broker process — is the handle.
 #
-# The UI process spawns the Rust backend as a child that inherits our environment, so
-# wrapping this single entry point fixes both processes.
+# The launcher process spawns the Rust backend as a child that inherits our
+# environment, so wrapping this single entry point fixes both processes.
 set -euo pipefail
 
 # Resolve through symlinks: this file is meant to be linked onto the PATH (for
@@ -21,11 +21,11 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Absolute path to the compiled `teams` binary this launcher wraps.
-TEAMS_BIN="${TEAMS_LITE_BIN:-$REPO_ROOT/ui/dist/teams}"
+TEAMS_BIN="${TEAMS_LITE_BIN:-$REPO_ROOT/cli/dist/teams}"
 
 if [ ! -x "$TEAMS_BIN" ]; then
   echo "teams-lite: binary not found at $TEAMS_BIN" >&2
-  echo "  build it with: (cd ui && bun run build)  or set TEAMS_LITE_BIN" >&2
+  echo "  build it with: (cd cli && bun run build)  or set TEAMS_LITE_BIN" >&2
   exit 1
 fi
 

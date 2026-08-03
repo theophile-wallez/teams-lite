@@ -158,7 +158,6 @@ function useEnrichedLinks(urls: string[]): LinkResults {
  * Inbound Teams formatting (bold, links, lists, mentions, …) is rendered via
  * {@link RichContent}. When `editing` is true, the body is replaced by an
  * in-place editor (Enter to save, Shift+Enter for a newline, Escape to cancel).
- * Mirrors the TUI's MessageBubble (ui/src/app.tsx).
  *
  * GitLab links that resolve to a rich integration are shown as a preview card
  * and removed from the body text (never both). When the message is *only* such a

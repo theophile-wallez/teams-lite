@@ -140,6 +140,48 @@ inspecting_a_file() {
     grep -qE '^[[:space:]]*((ls|stat|file|readlink|du|wc|sha256sum|md5sum|shellcheck)([[:space:]]|$)|(ba|z)?sh[[:space:]]+-n([[:space:]]|$))'
 }
 
+# Is this command SEARCHING TEXT that happens to name something the rules below
+# match — `grep -rn "teams --web" README.md`, `rg teams-launcher`? A search runs
+# nothing, so the same reasoning as `inspecting_a_file` applies. It needs its own
+# predicate because a regex ALTERNATION puts a bare `|` on the command line, and every
+# rule here reads `|` as a command separator: `grep "a\|teams x"` was read as
+# `… | teams x` and blocked a search of this very repo.
+#
+# Narrow like `probing_processes`: the command must BEGIN with a search tool, and must
+# neither chain (`;`, `&`) nor substitute (a backtick, `$(`) anything — either could
+# introduce a command this predicate never looked at. A pipe is tolerated for the
+# reason above, and a pipeline whose sink is a launcher is not a shape anyone writes.
+searching_text() {
+  printf '%s' "$command_line" |
+    grep -qE '^[[:space:]]*(git[[:space:]]+)?(grep|egrep|fgrep|rg|ag|ack)([[:space:]]|$)' || return 1
+  printf '%s' "$command_line" | grep -qE '[;&`]|\$\(' && return 1
+  return 0
+}
+
+# Is this command asking a launcher to PRINT ITS USAGE? `teams --help` parses argv,
+# writes the flags and exits (see cli/src/index.ts), so it starts no backend and serves
+# no app — and reading a command's own help is how anyone checks what it takes.
+#
+# Narrow like `probing_processes`: the flag must be there as a word, and the command
+# must neither chain (`;`, `&`, `|`) nor substitute (a backtick, `$(`) anything, so
+# `teams --help && teams` is not exempt. It stays true only while `--help` really does
+# exit early; a launcher that grew a `--help` which also served something would make
+# this exemption wrong, which is why the flag is checked, not merely tolerated.
+printing_usage() {
+  printf '%s' "$command_line" | grep -qE '[;&|`]|\$\(' && return 1
+  printf '%s' "$command_line" | grep -qE '(^|[[:space:]])(--help|-h)([[:space:]]|$)'
+}
+
+# A COMMAND POSITION: the start of the line, or just after a separator, plus the
+# prefixes a shell allows in front of a program — `nohup`, `exec`, `env`, `sudo`, and
+# any number of `FOO=bar` assignments. Rules anchor their patterns to it so that PROSE
+# naming the same words runs nothing: a commit message ("chore: systemctl --user start
+# teams-lite at boot") must stay allowed, for the same reason `ls target/debug/server`
+# does. The assignments belong in it because the very variable rule 3 asks for is
+# written that way, and a rule a leading `FOO=1` can defeat is a rule with a spelling
+# that walks straight through it.
+at_command_start='(^|[;&|])[[:space:]]*(([A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|]*|nohup|exec|env|sudo)[[:space:]]+)*'
+
 # Commands that ARE the sanctioned automation paths (or plain browser installs).
 sanctioned_automation() {
   printf '%s' "$command_line" |
@@ -560,8 +602,9 @@ fi
 # Same exemption as rule 3 below, for the same reason: STARTING one is the risk.
 # `pkill -f 'vite dev'` or a `pgrep` that names it is cleanup — it cannot serve
 # anything to anyone — and a guard that blocks cleanup only teaches its next reader
-# to phrase commands around it, which is the habit that caused the incident.
-if ! stopping_a_process &&
+# to phrase commands around it, which is the habit that caused the incident. A search
+# that NAMES a dev server (`grep -rn "bun run dev" README.md`) starts nothing either.
+if ! stopping_a_process && ! searching_text &&
   printf '%s' "$command_line" | grep -qE '(vite dev|vite build --watch|bun run dev)([^:]|$)'; then
   if ! printf '%s' "$command_line" | grep -q 'VITE_TEAMS_WS_URL'; then
     block "A dev server must state which backend it targets. Without VITE_TEAMS_WS_URL the app
@@ -582,8 +625,14 @@ fi
 # (web/server.ts). So `bun run start` with a bare environment builds the same
 # unnamed-backend bridge rule 2 exists to forbid, one directory over. The always-on
 # service states the variable in its unit file; a command line must state it too.
-if ! stopping_a_process &&
-  printf '%s' "$command_line" | grep -qE '(bun run start|bun[^;&|]*web/server\.ts)([^:]|$)'; then
+#
+# `bun` is anchored to a command position, and that is not cosmetic: unanchored, the
+# three letters matched inside another WORD — `web/scripts/stage-bundle.ts
+# web/server.ts` in a plain `grep` argument read as an interpreter about to serve the
+# app. A search is exempted for the same reason.
+if ! stopping_a_process && ! searching_text &&
+  printf '%s' "$command_line" |
+  grep -qE "(bun run start|${at_command_start}bun[^;&|]*web/server\.ts)([^:]|\$)"; then
   if ! printf '%s' "$command_line" | grep -q 'TEAMS_LITE_WS_URL'; then
     block "The production web server must state which backend it relays to. TEAMS_LITE_WS_URL
 defaults to the LIVE backend (see web/server.ts), so starting it bare puts a bridge
@@ -612,13 +661,19 @@ fi
 # The leading path may be spelled with a variable or a tilde — `$HOME/.local/...`,
 # `~/.local/...`, `"$PWD"/target/...` — so the prefix class accepts those characters
 # too. Without `$` and `~` in it, the staged path only matched when written relative.
-at_backend_command_start='(^|[;&|])[[:space:]]*((nohup|exec|env|sudo|bash|sh|zsh)[[:space:]]+)*["'\'']?[A-Za-z0-9_./~${}-]*'
+#
+# It is `at_command_start` plus an interpreter and the path itself, so the environment
+# assignments a shell accepts are described in ONE place. That matters: the path class
+# holds no `=`, so before the shared prefix covered them
+# `TEAMS_NO_IDLE_EXIT=1 target/release/server` matched nothing at all and walked
+# straight through the rule it is the clearest example of.
+at_backend_command_start="${at_command_start}((bash|sh|zsh)[[:space:]]+)*[\"']?[A-Za-z0-9_./~\${}-]*"
 runs_the_backend_binary="${at_backend_command_start}(target/(debug|release)|teams-lite/service)/server([[:space:]]|\$)"
 # Every way of EXECUTING a launcher still matches, including through an interpreter
 # (`bash bin/teams-dev-server.sh`) — which is why the prefix list above names the
 # shells. `bash -n` is a syntax check and is exempted by `inspecting_a_file`.
 runs_a_backend_launcher="${at_backend_command_start}teams-(dev-server|lite-backend)\.sh([[:space:]]|\$)"
-if ! stopping_a_process && ! inspecting_a_file &&
+if ! stopping_a_process && ! inspecting_a_file && ! searching_text &&
   printf '%s' "$command_line" |
   grep -qE "cargo run.*--bin server|$runs_a_backend_launcher|$runs_the_backend_binary"; then
   if ! printf '%s' "$command_line" | grep -q 'TEAMS_LITE_READ_ONLY=1'; then
@@ -651,10 +706,10 @@ fi
 # after a separator — so that PROSE naming the same words runs nothing: a commit
 # message ("chore: systemctl --user start teams-lite at boot") must stay allowed,
 # for the same reason `ls target/debug/server` does.
-at_command_start='(^|[;&|])[[:space:]]*((nohup|exec|env|sudo)[[:space:]]+)*'
 starts_a_teams_lite_unit="${at_command_start}systemctl[^;&|]*[[:space:]](start|restart|try-restart|reload-or-restart|enable)([[:space:]][^;&|]*)?teams-lite"
 runs_service_script_start="${at_command_start}[A-Za-z0-9_./-]*teams-lite-service\.sh[[:space:]]+[^;&|]*(start|restart|enable)"
-if printf '%s' "$command_line" | grep -qE "$starts_a_teams_lite_unit|$runs_service_script_start"; then
+if ! searching_text &&
+  printf '%s' "$command_line" | grep -qE "$starts_a_teams_lite_unit|$runs_service_script_start"; then
   block "The always-on teams-lite service is the user's to start. Its backend unit is
 send-capable by design — it is their real Teams client, running 24/7 — so a
 \`systemctl --user start\` on it is the same act rule 3 refuses, just spelled with
@@ -689,7 +744,8 @@ cycles_the_container="${at_command_start}[A-Za-z0-9_./~\${}-]*intune-container([
 # Anchored at a command position like every other rule here, so a commit message or a
 # doc line that names the flag runs nothing and stays allowed.
 asks_for_a_repair="${at_command_start}[A-Za-z0-9_./~\${}-]*teams-lite-broker-check\.sh[^;&|]*--repair"
-if printf '%s' "$command_line" | grep -qE "$cycles_the_container|$asks_for_a_repair"; then
+if ! searching_text &&
+  printf '%s' "$command_line" | grep -qE "$cycles_the_container|$asks_for_a_repair"; then
   block "The Intune container is the user's sign-in. Stopping or restarting it takes the identity
 broker down, so teams-lite goes empty for whoever is looking at it — including a phone
 on the tailnet — for about a minute.
@@ -705,6 +761,43 @@ app has a Repair sign-in button, and teams-lite-broker-repair.service does it at
 three times an hour. Ask the user to press the button, or to run:
 
   intune-container stop && intune-container start"
+fi
+
+# --- 3c. the `teams` command is the whole live stack in one word ----------------
+# The third of the "not yours to start" rules, and the widest: `teams` spawns the
+# send-capable backend (rule 3) AND serves the real app on the production web port
+# (rule 2a), then opens a browser on it. One word, both risks, and no useful
+# read-only spelling of it — an agent that needs real data reads a read-only backend,
+# and an agent that needs the UI drives the mock. So this one blocks unconditionally.
+#
+# Every spelling that RUNS it: the compiled binary wherever it was installed
+# (cli/dist/teams, ~/.teams-lite/bin/teams, a `teams` on the PATH), the repo wrapper
+# that resolves the broker bus for it, and the source entrypoint. Anchored to a
+# command position like rules 3 and 3a, so prose, `git add cli/dist/teams` and
+# `chmod +x` still run nothing. `teams-lite-service.sh` and friends do not match:
+# the name must be followed by a space or the end of the segment. The entrypoint is
+# matched only behind the interpreter that would RUN it — the same shape rule 2a uses
+# for web/server.ts — because `git add cli/src/index.ts` starts nothing.
+runs_the_teams_command="${at_backend_command_start}teams([[:space:]]|\$)"
+runs_the_teams_launcher="${at_backend_command_start}teams-launcher\.sh([[:space:]]|\$)"
+runs_the_teams_entrypoint='bun[^;&|]*(cli/)?src/index\.ts'
+if ! stopping_a_process && ! inspecting_a_file && ! searching_text && ! printing_usage &&
+  printf '%s' "$command_line" |
+  grep -qE "$runs_the_teams_command|$runs_the_teams_launcher|$runs_the_teams_entrypoint"; then
+  block "\`teams\` is the user's whole live stack in one command: it starts a send-capable
+backend, serves the real app on 19440 and opens a browser on it. That is rule 3 and
+rule 2a at once, so it is theirs to run, not tooling's.
+
+To look at real data, read a read-only backend:
+
+  TEAMS_LITE_READ_ONLY=1 cargo run --bin server        # ws://127.0.0.1:19430
+
+To exercise or screenshot the UI, drive the mock:
+
+  cd web && bun run preview -- --out /tmp/shot
+
+The user's always-on instance already serves the real app; see AGENTS.md
+§ The always-on service."
 fi
 
 exit 0

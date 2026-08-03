@@ -2,13 +2,13 @@
 //
 // WHY THIS FILE EXISTS. Two things ship that set, and they used to each keep their
 // own idea of it:
-//   • ui/build.ts tars it into the `teams` binary (`teams --web` extracts it to
+//   • cli/build.ts tars it into the `teams` binary (which extracts it to
 //     ~/.cache/teams-lite/web and runs server.ts from there);
 //   • bin/teams-lite-service.sh stages it for the always-on systemd service.
 // The tar list said `server.ts dist` and nothing else, so when server.ts gained
-// `import "./write-token"` the embedded bundle lost a module it needs and
-// `teams --web` crashed on startup from any freshly built binary. Nothing failed at
-// build time, and no test looked.
+// `import "./write-token"` the embedded bundle lost a module it needs and `teams`
+// crashed on startup from any freshly built binary. Nothing failed at build time,
+// and no test looked.
 //
 // So the list lives here, next to a test that walks server.ts's own relative imports
 // and fails when one of them is not covered. Add an import, forget the list, and the

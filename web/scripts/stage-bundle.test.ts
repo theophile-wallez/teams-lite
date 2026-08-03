@@ -1,9 +1,9 @@
 // The guard the embedded web bundle never had.
 //
-// `ui/build.ts` shipped `server.ts` and `dist/` and nothing else. When server.ts
-// gained `import "./write-token"`, the tarball lost a module the server needs, and
-// `teams --web` crashed on startup from any newly built binary. Nothing failed at
-// build time; no test looked. These tests look.
+// The binary's build script shipped `server.ts` and `dist/` and nothing else. When
+// server.ts gained `import "./write-token"`, the tarball lost a module the server
+// needs, and `teams` crashed on startup from any newly built binary. Nothing failed
+// at build time; no test looked. These tests look.
 
 import { describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";

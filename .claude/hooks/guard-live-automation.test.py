@@ -280,7 +280,23 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "$HOME/.local/share/teams-lite/service/server"),
         ("BLOCK", PROJECT, "bin/teams-lite-backend.sh"),
         ("BLOCK", PROJECT, "bash bin/teams-dev-server.sh"),
+        # An environment assignment is a prefix, not a disguise: the path class holds
+        # no `=`, so these spellings used to match nothing at all.
+        ("BLOCK", PROJECT, "TEAMS_NO_IDLE_EXIT=1 target/release/server"),
+        ("BLOCK", PROJECT, "TEAMS_LITE_PORT=19425 bin/teams-lite-backend.sh"),
+        ("BLOCK", PROJECT, "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start teams-lite.target"),
         ("BLOCK", PROJECT, "cd /tmp && $HOME/.local/share/teams-lite/service/teams-lite-backend.sh"),
+        # `teams` is that same send-capable backend plus the real app on 19440, in one
+        # word — every spelling that runs it, and no read-only escape from it.
+        ("BLOCK", PROJECT, "teams"),
+        ("BLOCK", PROJECT, "teams --no-open"),
+        ("BLOCK", PROJECT, "cli/dist/teams --port 19450"),
+        ("BLOCK", PROJECT, "./cli/dist/teams"),
+        ("BLOCK", PROJECT, "$HOME/.teams-lite/bin/teams --dev"),
+        ("BLOCK", PROJECT, "bin/teams-launcher.sh"),
+        ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 teams"),
+        ("BLOCK", PROJECT, "cd cli && bun run src/index.ts"),
+        ("BLOCK", PROJECT, "bun run cli/src/index.ts --no-open"),
         # The production web server relays to the LIVE backend by default.
         ("BLOCK", WEB, "bun run start"),
         # The repair unit restarts the Intune container: same rule, by unit name.
@@ -302,7 +318,7 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/horizon-reader.ts"),
         # Reading the code that implements the write is ordinary work, like any search.
         ("ALLOW", PROJECT, 'grep -rn "name=consumptionhorizon" src'),
-        ("ALLOW", PROJECT, "grep -rn set_consumption_horizon src ui web"),
+        ("ALLOW", PROJECT, "grep -rn set_consumption_horizon src cli web"),
         # Reading presence is what the person card is built on, in every shape.
         ("ALLOW", PROJECT, f"bun run {tmp}/presence-reader.ts"),
         ("ALLOW", PROJECT, "cargo run --example guard-test-presence-read"),
@@ -327,6 +343,10 @@ def cases(tmp: Path):
         # Commands that only NAME a file run nothing, whatever is inside it.
         ("ALLOW", PROJECT, "git add web/scripts/scroll-probe.ts"),
         ("ALLOW", PROJECT, "wc -l web/src/lib/ws-client.ts web/mock/server.ts"),
+        # `bun` has to be at a command position: unanchored, those three letters matched
+        # inside `stage-bundle.ts` and read as an interpreter about to serve the app.
+        ("ALLOW", PROJECT, "wc -l web/scripts/stage-bundle.ts web/server.ts"),
+        ("ALLOW", PROJECT, "grep -n RUNTIME_ENTRIES web/scripts/stage-bundle.ts web/server.ts"),
         ("ALLOW", PROJECT, "sed -n 1,20p web/playwright.config.ts"),
         # Tracked scripts are reviewed code, including from a subdirectory.
         ("ALLOW", WEB, "bun run scripts/scroll-probe.ts --steps 10"),
@@ -339,6 +359,7 @@ def cases(tmp: Path):
         ("ALLOW", WEB, "bun run scripts/sandbox-live.ts --local"),
         ("ALLOW", WEB, "bun run dev:mock"),
         ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 cargo run --bin server"),
+        ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 target/release/server"),
         # Stopping or inspecting a process is cleanup, whatever it names.
         ("ALLOW", PROJECT, "pkill -f 'target/debug/server'"),
         ("ALLOW", PROJECT, "pkill -f 'vite dev'"),
@@ -353,7 +374,27 @@ def cases(tmp: Path):
         # `-n` is bash's syntax-check mode: it parses the launcher and exits.
         ("ALLOW", PROJECT, "bash -n bin/teams-dev-server.sh"),
         ("ALLOW", PROJECT, "shellcheck bin/teams-lite-backend.sh"),
-        # Ordinary file work on a launcher runs nothing.
+        # Ordinary file work on a launcher runs nothing — the `teams` command included.
+        ("ALLOW", PROJECT, "ls -la cli/dist/teams"),
+        ("ALLOW", PROJECT, "git add cli/src/index.ts cli/build.ts"),
+        ("ALLOW", PROJECT, "grep -n backendPort cli/src/backend.ts"),
+        # Searching the repo runs nothing, and a regex alternation is not a pipeline:
+        # the bare `|` in a pattern used to read as a command separator, which blocked
+        # a search of this very repo for the launcher it documents.
+        ("ALLOW", PROJECT, 'grep -rn "teams-web\\|teams --web" README.md AGENTS.md'),
+        ("ALLOW", PROJECT, 'rg "intune-container stop\\|systemctl --user start teams-lite"'),
+        ("ALLOW", PROJECT, "git grep -n 'target/release/server'"),
+        # …but a search is not a licence for whatever follows it.
+        ("BLOCK", PROJECT, "grep -rn teams README.md; teams --no-open"),
+        ("BLOCK", PROJECT, "grep -rn server src && target/release/server"),
+        ("ALLOW", PROJECT, "chmod +x bin/teams-launcher.sh"),
+        ("ALLOW", PROJECT, "git commit -m 'feat(cli): teams now opens the web app'"),
+        # Asking a launcher what its flags are prints text and exits.
+        ("ALLOW", PROJECT, "cli/dist/teams --help"),
+        ("ALLOW", PROJECT, "teams -h"),
+        # …but a usage line is not a licence for what follows it.
+        ("BLOCK", PROJECT, "cli/dist/teams --help && cli/dist/teams"),
+        ("ALLOW", PROJECT, "cd cli && bun test"),
         ("ALLOW", PROJECT, "chmod +x bin/teams-lite-backend.sh"),
         ("ALLOW", PROJECT, "git add bin/teams-lite-backend.sh bin/teams-dev-server.sh"),
         ("ALLOW", PROJECT, "grep -n broker bin/teams-dev-server.sh"),

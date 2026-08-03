@@ -162,9 +162,9 @@ function AppInner() {
       }
 
       // List navigation is only active when nothing is open and we're not on
-      // settings (otherwise the composer / settings form own the keyboard),
-      // mirroring the TUI. It drives whichever virtualized list the active tab
-      // shows — Chats or Mail; the Channels tab is a tree and uses click/Tab focus.
+      // settings (otherwise the composer / settings form own the keyboard). It
+      // drives whichever virtualized list the active tab shows — Chats or Mail;
+      // the Channels tab is a tree and uses click/Tab focus.
       if (routeConversationId || routeMailId || onSettings) return;
       if (sidebarTab === "channels" || sidebarTab === "calendar") return;
       const target = e.target as HTMLElement | null;

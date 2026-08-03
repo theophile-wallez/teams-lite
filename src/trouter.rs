@@ -2,8 +2,8 @@
 //
 // Promoted from the proven src/bin/trouter.rs spike. Instead of printing, it emits
 // parsed chat `Message`s and lifecycle `Status` over channels, and reconnects with
-// backoff. The TUI spawns `run` and persists each emitted message into the store,
-// then refreshes the view — that's live delivery, end to end.
+// backoff. The backend spawns `run` and persists each emitted message into the
+// store, then tells every client — that's live delivery, end to end.
 //
 // Flow (reverse-engineered from EionRobb/purple-teams teams_trouter.c):
 //   1. POST go.trouter.teams.microsoft.com/v4/a?epid={epid}  (x-skypetoken)

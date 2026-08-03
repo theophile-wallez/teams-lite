@@ -33,8 +33,8 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install UI dependencies
-        working-directory: ui
+      - name: Install launcher dependencies
+        working-directory: cli
         run: bun install --frozen-lockfile
 
       - name: Install web dependencies
@@ -45,11 +45,9 @@ jobs:
       - name: Backend tests
         run: cargo test
 
-      # The full UI suite includes live-tenant tests that require the Microsoft
-      # Identity Broker over D-Bus. Run only deterministic history tests in CI.
-      - name: UI history tests
-        working-directory: ui
-        run: bun test src/message-history.test.ts src/message-scroll.test.ts
+      - name: Launcher tests
+        working-directory: cli
+        run: bun test
 
       # The web client's tests are fully deterministic (pure logic + a fake
       # WebSocket), so the whole suite runs in CI, plus a typecheck gate.
@@ -70,15 +68,15 @@ jobs:
         run: cargo build --release --bin server
 
       - name: Compile single `teams` binary
-        # build.ts also builds the web UI and embeds it, so `teams --web` works
-        # from the published binary (web deps were installed above).
-        working-directory: ui
+        # build.ts also builds the web app and embeds it, so the published binary
+        # needs nothing else to serve it (web deps were installed above).
+        working-directory: cli
         run: bun run build.ts
 
       - name: Stage release asset
         run: |
           mkdir -p out
-          cp ui/dist/teams out/teams-linux-x64
+          cp cli/dist/teams out/teams-linux-x64
 
       - name: Publish rolling "latest" release
         env:

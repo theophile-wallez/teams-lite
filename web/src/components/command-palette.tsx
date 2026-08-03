@@ -12,8 +12,8 @@ import {
 } from "./ui/command";
 
 /**
- * Cmd/Ctrl+K fuzzy conversation jump, mirroring the TUI's command palette. cmdk
- * handles filtering and keyboard navigation; selecting opens the conversation.
+ * Cmd/Ctrl+K fuzzy conversation jump. cmdk handles filtering and keyboard
+ * navigation; selecting opens the conversation.
  */
 export function CommandPalette(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const conversations = useAppState((s) => s.conversations);

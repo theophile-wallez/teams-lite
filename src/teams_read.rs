@@ -46,7 +46,7 @@ pub fn is_unauthorized(err: &anyhow::Error) -> bool {
 /// conversation list (and cmd+K palette, later) is built from.
 ///
 /// The extra fields beyond id/title mirror what the Teams desktop sidebar shows,
-/// so the TUI can render a faithful list: a last-message preview line, an unread
+/// so a client can render a faithful list: a last-message preview line, an unread
 /// marker, and muted/pinned/hidden state. All of it comes from the SAME CSA call
 /// (`users/me`) with zero extra round-trips — the `lastMessage` sub-object holds
 /// the preview body and sender, and the chat carries the state booleans.
@@ -3749,7 +3749,7 @@ mod tests {
     // twice must report 0 changes the second time. persist_conversations is what
     // gates the `conversations_changed` event; if it counted every upsert (not
     // just real changes), the event would fire on every sync and the UI's
-    // refresh -> sync -> event -> refresh loop would amplify until the TUI froze.
+    // refresh -> sync -> event -> refresh loop would amplify until the client froze.
     #[test]
     fn persist_conversations_counts_only_real_changes() {
         let store = Store::open_in_memory().unwrap();

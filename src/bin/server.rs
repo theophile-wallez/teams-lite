@@ -1,9 +1,9 @@
 // teams-lite — SERVER (Rust backend, opencode model)
 //
 // The proven Rust core (auth broker, trouter real-time, local-first SQLite store,
-// send, name resolution) exposed over a local WebSocket so the OpenTUI/Solid UI
-// can drive it. The UI never touches the network or the store directly — it speaks
-// this JSON protocol:
+// send, name resolution) exposed over a local WebSocket so the web app can drive
+// it. The app never touches the network or the store directly — it speaks this
+// JSON protocol:
 //
 //   request  (client -> server):  { "id": <n>, "method": "<m>", "params": {...} }
 //   response (server -> client):  { "id": <n>, "result": <v> }  |  { "id": <n>, "error": "<msg>" }
@@ -83,7 +83,7 @@ use teams_lite::{
 };
 use teams_lite::{gitlab, link_preview};
 
-/// The port the user's own backend owns: what `teams`, `teams-web` and the TUI
+/// The port the user's own backend owns: what the `teams` command and the web app
 /// dial by default.
 ///
 /// Every teams-lite port sits in one 194xx block, chosen because nothing registers
@@ -315,8 +315,8 @@ const WRITE_TOKEN_ENV: &str = "TEAMS_LITE_WRITE_TOKEN";
 /// So every outward-facing call must present a capability token that only the
 /// user's own frontends are given: the backend mints one per process and
 /// publishes it to a 0600 file in the runtime directory (see
-/// `write_token_path`), where `web/server.ts`, the Vite dev server and the TUI
-/// read it. A client that was not handed the token — an ad-hoc script, a stray
+/// `write_token_path`), where `web/server.ts` and the Vite dev server read it. A
+/// client that was not handed the token — an ad-hoc script, a stray
 /// browser tab, an agent's driver — gets a refusal, not a message on the wire.
 ///
 /// `None` means writes are refused outright: read-only mode.
@@ -369,8 +369,8 @@ fn mint_write_token() -> String {
 /// BOTH, deliberately. A frontend does not necessarily see the same environment as
 /// the backend — a service unit may have `XDG_RUNTIME_DIR` while a shell-launched
 /// dev server does not — and a token only one side can find would leave the user's
-/// own app unable to send. The frontends (`web/write-token.ts`, `ui/src/client.ts`)
-/// search the same list in the same order.
+/// own app unable to send. The frontend (`web/write-token.ts`) searches the same
+/// list in the same order.
 fn write_token_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     let candidates = [
@@ -2503,8 +2503,8 @@ const MAIL_POLL_INTERVAL: Duration = Duration::from_secs(60);
 ///
 /// LAZY BY DESIGN: the watch set starts empty, so this loop makes NO requests until
 /// a client actually opens the mail surface (`mail_folders` triggers the folder sync,
-/// `mail_list` registers the folder it opened). A user who only ever uses chat — or
-/// the terminal UI, which has no mail surface — pays nothing for mail at all. Once
+/// `mail_list` registers the folder it opened). A user who only ever uses chat pays
+/// nothing for mail at all. Once
 /// Mail has been opened, the poll keeps its folders and the unread badge current for
 /// the rest of the session.
 fn spawn_mail_sync(ctx: Ctx) {
@@ -2721,8 +2721,7 @@ const CALENDAR_POLL_INTERVAL: Duration = Duration::from_secs(120);
 /// traffic, and Graph's change notifications need a public webhook.
 ///
 /// LAZY BY DESIGN: the watch starts empty, so this loop makes NO requests until a
-/// client opens the calendar. A user who only ever chats — or the terminal UI, which
-/// has no calendar surface — pays nothing for it.
+/// client opens the calendar. A user who only ever chats pays nothing for it.
 fn spawn_calendar_sync(ctx: Ctx) {
     tokio::spawn(async move {
         loop {

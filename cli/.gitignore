@@ -1,0 +1,12 @@
+# dependencies (bun install)
+node_modules
+
+# the compiled `teams` binary (see build.ts)
+dist
+
+# single-binary build artifacts, staged next to build.ts for the embed imports
+server.embed
+web.tar.gz
+
+# caches
+*.tsbuildinfo

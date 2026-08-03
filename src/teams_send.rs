@@ -516,8 +516,8 @@ const EMPTY_EDGE_BLOCKS: [&str; 6] = [
 /// This is the last net, and it is deliberately coarse: it reads no structure, so
 /// it only removes what sits at an edge of the string. A client that knows the
 /// tree — the web serializer — also trims the edge *inside* the first and the last
-/// block. Both are needed: a body reaches this function from the terminal UI, from
-/// the local agent and from an example too.
+/// block. Both are needed: a body reaches this function from the local agent and
+/// from an example too, not only from the web app.
 pub fn trim_message_html(html: &str) -> &str {
     let mut trimmed = html.trim();
     loop {
