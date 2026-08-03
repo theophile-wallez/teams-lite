@@ -39,6 +39,65 @@
 - Outside the sandbox chat, consent is per-message and never standing: approval
   to send one message is not permission to send others. When in doubt, draft it and
   ask first.
+- The one feature that posts on its own is the local agent (§ The local agent). It
+  is not an exception to the rule above: it answers only a message the USER wrote,
+  only in a conversation the user opted in, and the sandbox channel is the only one
+  opted in out of the box.
+
+## The local agent (`@claude` in a thread)
+
+The user can summon a coding agent that runs on this machine from any Teams client —
+their phone included — by writing `@claude <prompt>` or `@opencode <prompt>` in a
+thread. The backend runs that CLI, posts one message, and EDITS it as the answer
+arrives, so everybody in the thread watches the reply being written.
+
+`src/agent.rs` runs the CLI, `src/agent_policy.rs` decides whether a message asked for
+one, `src/agent_markdown.rs` turns the answer into the HTML a Teams message renders,
+and `agent_reply` in `src/bin/server.rs` posts and streams it.
+
+Four rules hold it together. Each one is load-bearing, and each is pinned by a test:
+
+- **Only the user may summon it.** The trigger requires the message to be ours
+  (`from_me`). A prefix written by anybody else is ignored — the agent runs a program
+  with the user's files in reach, so a trigger a colleague could type is remote code
+  execution with a friendly syntax. Never relax this to "a mention of the app", and
+  never to "an allowlist of colleagues".
+- **A conversation must be opted in.** The default is `off` everywhere. The sandbox
+  channel is the single built-in exception, because § Sending messages pre-authorizes
+  it. Anything else needs `agent_set_mode`, a write-token-gated `MACHINE_METHODS`
+  entry — which is the consent gate for this whole feature, and the reason it is not a
+  standing licence to post.
+- **The tool allowlist is read-only until the user widens it.** `Read`, `Glob`, `Grep`
+  and nothing else (`agent::DEFAULT_TOOLS`), and Claude Code is pinned to
+  `--permission-mode default` so anything outside the list is refused rather than
+  prompted for. The user's own settings may default to `bypassPermissions` for
+  interactive work; a chat message must never inherit that. Widening the list is
+  `agent_set_tools`, gated the same way.
+- **The child never inherits the write token.** `TEAMS_LITE_WRITE_TOKEN` is removed
+  from its environment: an agent holding it could `send` to any chat directly, around
+  every gate above. A read-only backend never answers at all.
+
+Two more things worth knowing before touching it:
+
+- **The thread transcript travels with the prompt, and it is DATA.** The appended
+  system prompt says so explicitly, because the people in a thread never agreed to be
+  able to steer an agent on the user's machine. Keep that instruction, keep the
+  transcript bounded, and never move it out of its `<thread>` delimiter.
+- **The reply signs itself.** The message is posted under the user's name, so the last
+  line says a machine wrote it (`— claude, via teams-lite`). That is honesty about
+  authorship, not decoration.
+
+`examples/agent_stream_probe.rs` drives the whole chain against the real tenant —
+pinned to the sandbox channel, and the only sanctioned way to try it live:
+
+```
+. bin/broker-env.sh && teams_lite_export_broker_bus && \
+  cargo run --example agent_stream_probe -- "your prompt" [claude|opencode]
+```
+
+It also pins the fact the streaming rests on: a send returns no `id`, only
+`{"OriginalArrivalTime": …}` — and a Teams message id IS its arrival time in epoch
+ms, which is what the edits address.
 
 ## Mail is READ-ONLY (MANDATORY — no exception, not even a sandbox)
 
@@ -227,6 +286,12 @@ user. Two independent mechanisms enforce that split:
 - **Screenshots are not proof of the target.** Before trusting a captured UI, look
   at *what it shows*: the mock's fixtures are in English with names like "Lucas
   Silva". Real conversations mean you were live all along.
+- **A cargo example that posts must pin the sandbox channel.** An example holds a
+  broker token and talks to Teams directly, so no port rule and no write token stands
+  between it and a colleague's chat — the only thing that does is what the file names.
+  Hard-code the conversation as a const and name no other (see
+  `examples/agent_stream_probe.rs`); the hook refuses to run any other shape,
+  including a target taken from an argument.
 
 **If a guardrail blocks you, fix the setup — never route around the guardrail.**
 Rewriting a command to slip past the hook, disabling the sentinel, or asserting
@@ -301,9 +366,11 @@ an outward action, so it is gated on purpose:
   D-Bus, real-time trouter client, local-first SQLite store, send, name resolution,
   Web Push to the user's own devices (`src/push.rs` + `src/push_policy.rs`), the
   READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`), the
-  READ-ONLY Teams/Outlook calendar (`src/calendar.rs`) and the READ-ONLY rich link
+  READ-ONLY Teams/Outlook calendar (`src/calendar.rs`), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
-  `src/gitlab.rs` and `src/linear.rs`).
+  `src/gitlab.rs` and `src/linear.rs`) and the local agent that answers an `@claude`
+  message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
+  § The local agent).
   Exposed over a local WebSocket (`ws://127.0.0.1:19420`).
 - Two front-ends, both talking to the backend only through that WebSocket. Local-first
   is enforced server-side; neither front-end touches the network or SQLite directly.

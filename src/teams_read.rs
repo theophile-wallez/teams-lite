@@ -2035,17 +2035,18 @@ const BLOCK_TAGS: [&str; 22] = [
     "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "figure",
 ];
 
-/// Turn a Teams message body (HTML like `<p>hello <b>world</b></p>`) into a
-/// short, single-line plain-text preview for the conversation list — the same
-/// role as the second line under a chat title in the Teams desktop sidebar.
+/// Turn a Teams message body (HTML like `<p>hello <b>world</b></p>`) into plain
+/// text, KEEPING the line structure: a block tag becomes a newline rather than a
+/// space, so a multi-line message survives as multiple lines.
 ///
 /// Best-effort and dependency-free: drop what is quoted rather than said (see
-/// [`strip_quoted_blocks`]), strip tags — leaving a space where a BLOCK tag was,
-/// so text either side of a line break stays separate words — decode the handful
-/// of entities Teams actually emits, collapse whitespace, and cap the length so a
-/// long message can't blow up a list row. Not a general HTML sanitizer.
-pub(crate) fn preview_from_html(html: &str) -> String {
-    const MAX_CHARS: usize = 120;
+/// [`strip_quoted_blocks`]), strip tags, and decode the handful of entities Teams
+/// actually emits. Not a general HTML sanitizer.
+///
+/// Two callers with opposite needs share it: [`preview_from_html`] collapses the
+/// result to one capped line for a sidebar row, and [`crate::agent_policy`] keeps it
+/// whole, because a prompt typed over three lines is three lines.
+pub fn plain_text_from_html(html: &str) -> String {
     let html = strip_quoted_blocks(html);
     let mut text = String::with_capacity(html.len());
     let mut in_tag = false;
@@ -2058,8 +2059,11 @@ pub(crate) fn preview_from_html(html: &str) -> String {
             }
             '>' => {
                 in_tag = false;
-                if is_block_tag(&tag) {
-                    text.push(' ');
+                // One newline per break, never two: `</p><p>` is two block tags but
+                // one line ending, and a prompt should not gain a blank line for
+                // every paragraph the sender typed.
+                if is_block_tag(&tag) && !text.ends_with('\n') {
+                    text.push('\n');
                 }
             }
             _ if in_tag => tag.push(c),
@@ -2067,14 +2071,21 @@ pub(crate) fn preview_from_html(html: &str) -> String {
         }
     }
     // Decode the common entities Teams emits (order matters: &amp; last).
-    let text = text
-        .replace("&nbsp;", " ")
+    text.replace("&nbsp;", " ")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&#160;", " ")
-        .replace("&amp;", "&");
+        .replace("&amp;", "&")
+}
+
+/// A short, single-line preview for the conversation list — the same role as the
+/// second line under a chat title in the Teams desktop sidebar. Collapses every run
+/// of whitespace and caps the length, so a long message can't blow up a list row.
+pub(crate) fn preview_from_html(html: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let text = plain_text_from_html(html);
     // Collapse any run of whitespace (incl. newlines) to a single space.
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() > MAX_CHARS {

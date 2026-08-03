@@ -1,0 +1,714 @@
+//! Run a local coding agent (Claude Code, opencode) and watch its answer grow.
+//!
+//! The mechanical half of the Teams agent reply; [`crate::agent_policy`] holds the
+//! opinions (who may summon it, where the answer may go). This module knows two
+//! things: how to spell the command line for each CLI, and how to read its streamed
+//! JSON back into one growing string.
+//!
+//! # Why it streams
+//!
+//! The answer is posted once and then EDITED as it grows, so everybody in the thread
+//! watches it being written (see `agent_reply` in `src/bin/server.rs`). That needs
+//! the answer-so-far, not just the final text, which is why both backends run in
+//! their streaming mode and why progress goes out over a [`watch`] channel: only the
+//! latest value matters, so a consumer doing a network round-trip per edit can never
+//! fall behind the model.
+//!
+//! # What the child may do
+//!
+//! Two things are deliberate and load-bearing:
+//!
+//! - **The permission mode is never `bypassPermissions`.** The trigger is a chat
+//!   message; the answer runs a program on the user's machine. So the tool list is an
+//!   explicit allowlist ([`DEFAULT_TOOLS`] is read-only) that the user widens on
+//!   purpose, and Claude Code is pinned to `--permission-mode default` so anything
+//!   outside it is refused rather than prompted for (there is no terminal to prompt).
+//! - **The child never inherits the write token.** `TEAMS_LITE_WRITE_TOKEN` is the
+//!   capability that makes `send` possible; an agent holding it could post to any
+//!   chat directly, around every consent gate in this crate. It is removed from the
+//!   child's environment. That is a floor, not a wall — a process running as the user
+//!   can read the same 0600 file the backend publishes — but nothing we hand it makes
+//!   posting easy.
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::watch;
+
+use crate::agent_policy::Backend;
+
+/// The tools an agent may use unless the user widens the list. Read-only on purpose:
+/// a message must not be able to write a file or run a command on the first day.
+pub const DEFAULT_TOOLS: [&str; 3] = ["Read", "Glob", "Grep"];
+
+/// The store key holding the tool allowlist, as a JSON array of tool names.
+pub const SETTING_TOOLS: &str = "agent_tools";
+
+/// The store key holding the directory the agent runs in.
+pub const SETTING_WORKSPACE: &str = "agent_workspace";
+
+/// The store key prefix under which one conversation's agent session id lives, so a
+/// follow-up question continues the same conversation with the model.
+pub const SETTING_SESSION_PREFIX: &str = "agent_session:";
+
+/// How long one run may take before the child is killed. Long enough for a real
+/// question with a few tool calls, short enough that a wedged CLI does not leave a
+/// "working…" message in a channel forever.
+pub const RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// How much answer is kept in memory. A runaway CLI that prints megabytes gets
+/// truncated here rather than in the store.
+const MAX_ANSWER_BYTES: usize = 200 * 1024;
+
+/// The environment variable holding the backend's write token — removed from the
+/// child's environment. Spelled here rather than imported because `src/bin/server.rs`
+/// is a binary, not a library, and one of the two copies drifting is caught by
+/// `the_child_never_inherits_the_write_token` in that file.
+const WRITE_TOKEN_ENV: &str = "TEAMS_LITE_WRITE_TOKEN";
+
+/// What to run, and with what.
+#[derive(Debug, Clone)]
+pub struct Request {
+    pub backend: &'static Backend,
+    /// The user's prompt, with any thread context already folded in.
+    pub prompt: String,
+    /// Instructions about the room the answer lands in.
+    pub system_prompt: String,
+    /// The agent session to continue, when this thread already has one.
+    pub resume_session: Option<String>,
+    /// The directory the agent runs in.
+    pub workspace: PathBuf,
+    /// The tools it may use without being asked.
+    pub tools: Vec<String>,
+}
+
+/// What one run produced.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Outcome {
+    /// The answer, authoritative: the CLI's own final text when it reports one.
+    pub text: String,
+    /// The agent session, to store against the thread for the next question.
+    pub session_id: Option<String>,
+    /// What the run cost in US dollars, when the CLI reports it. For the log line
+    /// only — a price never goes into a Teams message.
+    pub cost_usd: Option<f64>,
+}
+
+/// Whether this machine can run the given backend at all (the program is on `PATH`).
+pub fn is_available(backend: &Backend) -> bool {
+    which_program(backend.program).is_some()
+}
+
+/// Resolve a program on `PATH` without spawning a shell.
+fn which_program(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Run the agent, reporting the answer-so-far on `progress`.
+///
+/// Returns when the child exits, or fails after [`RUN_TIMEOUT`] with the child killed.
+/// A non-zero exit with no answer at all is an error carrying the tail of stderr,
+/// because "the agent said nothing" is not something to post to a channel.
+///
+/// A run that was resuming a stored session is retried ONCE from scratch when it
+/// fails. Sessions expire and CLI state gets cleared, and the failure looks exactly
+/// like a broken feature: every follow-up in a thread refuses, forever, because of an
+/// id nobody can see. Starting fresh loses the context and answers the question.
+pub async fn run(request: &Request, progress: &watch::Sender<String>) -> Result<Outcome> {
+    let first = run_once(request, progress).await;
+    let Err(error) = first else {
+        return first;
+    };
+    let Some(session) = &request.resume_session else {
+        return Err(error);
+    };
+    eprintln!(
+        "[agent] {} could not resume session {session} ({error}) — starting a fresh one",
+        request.backend.name
+    );
+    let mut fresh = request.clone();
+    fresh.resume_session = None;
+    run_once(&fresh, progress).await
+}
+
+async fn run_once(request: &Request, progress: &watch::Sender<String>) -> Result<Outcome> {
+    let program = which_program(request.backend.program).with_context(|| {
+        format!("`{}` is not on PATH — this machine cannot run it", request.backend.program)
+    })?;
+    std::fs::create_dir_all(&request.workspace)
+        .with_context(|| format!("create the agent workspace {}", request.workspace.display()))?;
+
+    let mut command = Command::new(program);
+    let stdin_prompt = build_command(&mut command, request);
+    command
+        .current_dir(&request.workspace)
+        .env_remove(WRITE_TOKEN_ENV)
+        .stdin(if stdin_prompt.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("start {}", request.backend.program))?;
+
+    if let (Some(text), Some(mut stdin)) = (stdin_prompt, child.stdin.take()) {
+        stdin.write_all(text.as_bytes()).await.context("write the prompt to the agent")?;
+        stdin.shutdown().await.ok();
+    }
+
+    let stdout = child.stdout.take().context("the agent has no stdout")?;
+    let stderr = child.stderr.take().context("the agent has no stderr")?;
+    let stderr_tail = tokio::spawn(read_tail(stderr));
+
+    let harvest = harvest(request.backend, stdout, progress);
+    let outcome = match tokio::time::timeout(RUN_TIMEOUT, harvest).await {
+        Ok(result) => result?,
+        Err(_) => {
+            child.kill().await.ok();
+            anyhow::bail!(
+                "{} ran longer than {} minutes and was stopped",
+                request.backend.name,
+                RUN_TIMEOUT.as_secs() / 60
+            );
+        }
+    };
+    let status = child.wait().await.context("wait for the agent")?;
+    let stderr_tail = stderr_tail.await.unwrap_or_default();
+
+    if outcome.text.trim().is_empty() {
+        let reason = if stderr_tail.is_empty() {
+            format!("{} exited {} without saying anything", request.backend.name, status)
+        } else {
+            format!("{} said nothing ({stderr_tail})", request.backend.name)
+        };
+        anyhow::bail!(reason);
+    }
+    Ok(outcome)
+}
+
+/// Spell the command line for one backend, returning the prompt to write on stdin
+/// when that backend reads it there.
+///
+/// Split out of [`run`] so both spellings are unit-tested without a child process:
+/// the flags are the security boundary (permission mode, tool allowlist), and a
+/// silent typo in one of them is a tool grant nobody notices.
+fn build_command(command: &mut Command, request: &Request) -> Option<String> {
+    match request.backend.name {
+        // Claude Code: the prompt on stdin (no argv limit, no quoting), the answer as
+        // a JSON event stream with per-token deltas.
+        "claude" => {
+            command.args([
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--include-partial-messages",
+                "--verbose",
+                // NEVER bypassPermissions: the user's own settings may default to it
+                // for interactive work, and this run is triggered by a chat message.
+                "--permission-mode",
+                "default",
+            ]);
+            command.arg("--append-system-prompt").arg(&request.system_prompt);
+            if !request.tools.is_empty() {
+                command.arg("--allowed-tools").args(&request.tools);
+            }
+            if let Some(session) = &request.resume_session {
+                command.arg("--resume").arg(session);
+            }
+            Some(request.prompt.clone())
+        }
+        // opencode: the message as arguments, and no --append-system-prompt, so the
+        // instructions ride at the top of the message. No --auto: tool permissions
+        // stay refused rather than auto-approved.
+        _ => {
+            command.args(["run", "--format", "json"]);
+            command.arg("--dir").arg(&request.workspace);
+            if let Some(session) = &request.resume_session {
+                command.arg("--session").arg(session);
+            }
+            command.arg("--");
+            command.arg(format!("{}\n\n{}", request.system_prompt, request.prompt));
+            None
+        }
+    }
+}
+
+/// Read the child's JSON event stream, updating `progress` as the answer grows.
+async fn harvest(
+    backend: &Backend,
+    stdout: tokio::process::ChildStdout,
+    progress: &watch::Sender<String>,
+) -> Result<Outcome> {
+    let mut lines = BufReader::new(stdout).lines();
+    let mut answer = Answer::default();
+    let mut outcome = Outcome::default();
+    let mut last_sent = String::new();
+
+    while let Some(line) = lines.next_line().await.context("read the agent's output")? {
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue; // a log line, a banner: not our business
+        };
+        for update in updates_from(backend, &event) {
+            match update {
+                Update::Session(id) => outcome.session_id = Some(id),
+                Update::Cost(cost) => outcome.cost_usd = Some(cost),
+                Update::Final(text) => outcome.text = text,
+                other => answer.apply(other),
+            }
+        }
+        let text = answer.text();
+        if text != last_sent {
+            last_sent = text.clone();
+            // A closed receiver is normal: the consumer stops watching once it has
+            // posted the final edit. The run still finishes, so the store learns the
+            // session id.
+            let _ = progress.send(text);
+        }
+    }
+    // The CLI's own final text wins when it reports one; the streamed pieces are what
+    // we have otherwise (and are all opencode ever gives us).
+    if outcome.text.trim().is_empty() {
+        outcome.text = answer.text();
+    }
+    Ok(outcome)
+}
+
+/// One thing an event tells us.
+#[derive(Debug, Clone, PartialEq)]
+enum Update {
+    /// The agent session id, to continue this thread next time.
+    Session(String),
+    /// Start a new paragraph before the next appended text.
+    Break,
+    /// More text for the paragraph being written.
+    Append(String),
+    /// The whole text of an identified part, which may arrive several times as it
+    /// grows (opencode reports parts, not deltas).
+    Part { key: String, text: String },
+    /// The CLI's authoritative final answer.
+    Final(String),
+    /// What the run cost.
+    Cost(f64),
+}
+
+/// Read one JSON event from a backend into zero or more [`Update`]s.
+///
+/// Shapes confirmed against the installed CLIs (Claude Code 2.1.220, opencode
+/// 1.18.3) rather than guessed; the tests below pin a real line from each.
+fn updates_from(backend: &Backend, event: &Value) -> Vec<Update> {
+    let mut updates = Vec::new();
+    let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+    match backend.name {
+        "claude" => {
+            if let Some(id) = event.get("session_id").and_then(Value::as_str) {
+                updates.push(Update::Session(id.to_string()));
+            }
+            match kind {
+                "stream_event" => {
+                    let inner = event.get("event").unwrap_or(&Value::Null);
+                    match inner.get("type").and_then(Value::as_str).unwrap_or("") {
+                        // A new text block, or a new assistant turn after a tool
+                        // call: what follows is a new paragraph.
+                        "content_block_start" => {
+                            if inner.pointer("/content_block/type").and_then(Value::as_str)
+                                == Some("text")
+                            {
+                                updates.push(Update::Break);
+                            }
+                        }
+                        "content_block_delta" => {
+                            if let Some(text) = inner
+                                .pointer("/delta/text")
+                                .and_then(Value::as_str)
+                                .filter(|_| {
+                                    inner.pointer("/delta/type").and_then(Value::as_str)
+                                        == Some("text_delta")
+                                })
+                            {
+                                updates.push(Update::Append(text.to_string()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                "result" => {
+                    if let Some(text) = event.get("result").and_then(Value::as_str) {
+                        updates.push(Update::Final(text.to_string()));
+                    }
+                    if let Some(cost) = event.get("total_cost_usd").and_then(Value::as_f64) {
+                        updates.push(Update::Cost(cost));
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {
+            if let Some(id) = event.get("sessionID").and_then(Value::as_str) {
+                updates.push(Update::Session(id.to_string()));
+            }
+            match kind {
+                "text" => {
+                    let part = event.get("part").unwrap_or(&Value::Null);
+                    if let (Some(key), Some(text)) = (
+                        part.get("id").and_then(Value::as_str),
+                        part.get("text").and_then(Value::as_str),
+                    ) {
+                        updates.push(Update::Part { key: key.to_string(), text: text.to_string() });
+                    }
+                }
+                "step_finish" => {
+                    if let Some(cost) = event.pointer("/part/cost").and_then(Value::as_f64) {
+                        updates.push(Update::Cost(cost));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    updates
+}
+
+/// The answer as it is being written: a list of paragraphs, each either appended to
+/// (a delta stream) or replaced wholesale (a part that grew).
+///
+/// One structure for both backends, because the difference between "append a token"
+/// and "here is the part again, longer" is not worth two accumulators.
+#[derive(Debug, Default)]
+struct Answer {
+    parts: Vec<(String, String)>,
+    /// Whether the next [`Update::Append`] opens a new paragraph.
+    pending_break: bool,
+}
+
+impl Answer {
+    fn apply(&mut self, update: Update) {
+        match update {
+            Update::Break => self.pending_break = true,
+            Update::Append(text) => {
+                let open = match self.parts.last_mut() {
+                    Some((key, existing)) if key.is_empty() && !self.pending_break => Some(existing),
+                    _ => None,
+                };
+                match open {
+                    Some(existing) => existing.push_str(&text),
+                    None => self.parts.push((String::new(), text)),
+                }
+                self.pending_break = false;
+            }
+            Update::Part { key, text } => match self.parts.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, existing)) => *existing = text,
+                None => self.parts.push((key, text)),
+            },
+            // Handled by the caller; listed so a new variant cannot be forgotten here.
+            Update::Session(_) | Update::Final(_) | Update::Cost(_) => {}
+        }
+    }
+
+    fn text(&self) -> String {
+        let mut text = self
+            .parts
+            .iter()
+            .map(|(_, part)| part.trim())
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if text.len() > MAX_ANSWER_BYTES {
+            let mut cut = MAX_ANSWER_BYTES;
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+        }
+        text
+    }
+}
+
+/// Keep the last few hundred bytes of a stream, for an error message.
+async fn read_tail<R: tokio::io::AsyncRead + Unpin>(stream: R) -> String {
+    const MAX: usize = 400;
+    let mut lines = BufReader::new(stream).lines();
+    let mut tail = String::new();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        tail = line.to_string();
+    }
+    if tail.chars().count() > MAX {
+        tail = tail.chars().take(MAX).collect();
+    }
+    tail
+}
+
+/// The default workspace: a directory of its own, never the checkout.
+///
+/// An agent summoned from a phone should not start out sitting in a git repository it
+/// can change. The user points it somewhere else on purpose, through
+/// [`SETTING_WORKSPACE`].
+pub fn default_workspace() -> PathBuf {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    base.join("teams-lite/agent-workspace")
+}
+
+/// Parse the stored tool allowlist, falling back to [`DEFAULT_TOOLS`].
+///
+/// A stored empty list is honoured (an agent with no tools at all is a legitimate
+/// choice); only an absent or unreadable setting falls back.
+pub fn tools_from_setting(setting: Option<&str>) -> Vec<String> {
+    let parsed = setting
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok());
+    match parsed {
+        Some(tools) => tools
+            .into_iter()
+            .map(|tool| tool.trim().to_string())
+            .filter(|tool| !tool.is_empty())
+            .collect(),
+        None => DEFAULT_TOOLS.iter().map(|t| t.to_string()).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_policy::BACKENDS;
+
+    const CLAUDE: &Backend = &BACKENDS[0];
+    const OPENCODE: &Backend = &BACKENDS[1];
+
+    fn request(backend: &'static Backend) -> Request {
+        Request {
+            backend,
+            prompt: "what is the port?".into(),
+            system_prompt: "answer for a chat".into(),
+            resume_session: None,
+            workspace: PathBuf::from("/tmp/agent-workspace"),
+            tools: vec!["Read".into(), "Grep".into()],
+        }
+    }
+
+    /// The argv a spelling produces, as strings, so a flag can be asserted on.
+    fn argv(request: &Request) -> (Vec<String>, Option<String>) {
+        let mut command = Command::new("/bin/true");
+        let stdin = build_command(&mut command, request);
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        (args, stdin)
+    }
+
+    #[test]
+    fn claude_runs_headless_streaming_and_never_bypasses_permissions() {
+        let (args, stdin) = argv(&request(CLAUDE));
+        assert_eq!(stdin.as_deref(), Some("what is the port?"));
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"--include-partial-messages".to_string()));
+        // The security boundary: an explicit mode, and never the bypass.
+        let mode = args.iter().position(|a| a == "--permission-mode").expect("a permission mode");
+        assert_eq!(args[mode + 1], "default");
+        assert!(!args.iter().any(|a| a.contains("bypassPermissions")));
+        assert!(!args.iter().any(|a| a.contains("dangerously")));
+    }
+
+    #[test]
+    fn claude_passes_the_tool_allowlist_and_the_system_prompt() {
+        let (args, _) = argv(&request(CLAUDE));
+        let allowed = args.iter().position(|a| a == "--allowed-tools").expect("an allowlist");
+        assert_eq!(&args[allowed + 1..allowed + 3], ["Read", "Grep"]);
+        let system = args.iter().position(|a| a == "--append-system-prompt").expect("a prompt");
+        assert_eq!(args[system + 1], "answer for a chat");
+    }
+
+    #[test]
+    fn an_agent_with_no_tools_passes_no_allowlist_flag() {
+        let mut request = request(CLAUDE);
+        request.tools.clear();
+        let (args, _) = argv(&request);
+        assert!(!args.contains(&"--allowed-tools".to_string()));
+    }
+
+    #[test]
+    fn a_follow_up_resumes_the_threads_session() {
+        let mut request = request(CLAUDE);
+        request.resume_session = Some("c1f31051".into());
+        let (args, _) = argv(&request);
+        let resume = args.iter().position(|a| a == "--resume").expect("a resume flag");
+        assert_eq!(args[resume + 1], "c1f31051");
+
+        let mut request = request.clone();
+        request.backend = OPENCODE;
+        request.resume_session = Some("ses_0378f913".into());
+        let (args, _) = argv(&request);
+        let session = args.iter().position(|a| a == "--session").expect("a session flag");
+        assert_eq!(args[session + 1], "ses_0378f913");
+    }
+
+    #[test]
+    fn opencode_runs_in_json_mode_and_never_auto_approves() {
+        let (args, stdin) = argv(&request(OPENCODE));
+        assert!(stdin.is_none(), "opencode takes the message as an argument");
+        assert_eq!(&args[..3], ["run", "--format", "json"]);
+        assert!(args.contains(&"--dir".to_string()));
+        assert!(!args.contains(&"--auto".to_string()));
+        // No --append-system-prompt exists there, so the instructions ride along.
+        let message = args.last().expect("a message");
+        assert!(message.starts_with("answer for a chat"));
+        assert!(message.ends_with("what is the port?"));
+    }
+
+    #[test]
+    fn the_prompt_is_never_run_through_a_shell() {
+        // A prompt is untrusted text. It must reach the CLI as one argument (or on
+        // stdin), never as something a shell parses.
+        let mut request = request(OPENCODE);
+        request.prompt = "$(rm -rf ~) && echo `whoami`".into();
+        let (args, _) = argv(&request);
+        assert_eq!(args.iter().filter(|a| a.contains("rm -rf")).count(), 1);
+    }
+
+    /// A real line from `claude -p --output-format stream-json --include-partial-messages`.
+    const CLAUDE_DELTA: &str = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ello"}},"session_id":"c1f31051"}"#;
+    /// A real line from `opencode run --format json`.
+    const OPENCODE_TEXT: &str = r#"{"type":"text","timestamp":1785774254040,"sessionID":"ses_0378f913","part":{"id":"prt_fc870a6b","messageID":"msg_fc8707e6","type":"text","text":"hello from opencode"}}"#;
+
+    fn apply_line(backend: &'static Backend, line: &str, answer: &mut Answer) -> Vec<Update> {
+        let event: Value = serde_json::from_str(line).expect("valid JSON");
+        let updates = updates_from(backend, &event);
+        for update in updates.clone() {
+            answer.apply(update);
+        }
+        updates
+    }
+
+    #[test]
+    fn claude_deltas_accumulate_into_one_paragraph() {
+        let mut answer = Answer::default();
+        for text in ["h", "ello", " there"] {
+            let line = CLAUDE_DELTA.replace("ello", text);
+            apply_line(CLAUDE, &line, &mut answer);
+        }
+        assert_eq!(answer.text(), "hello there");
+    }
+
+    #[test]
+    fn a_new_claude_text_block_starts_a_paragraph() {
+        let mut answer = Answer::default();
+        apply_line(CLAUDE, CLAUDE_DELTA, &mut answer);
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#;
+        apply_line(CLAUDE, start, &mut answer);
+        apply_line(CLAUDE, &CLAUDE_DELTA.replace("ello", "second"), &mut answer);
+        assert_eq!(answer.text(), "ello\n\nsecond");
+    }
+
+    #[test]
+    fn a_claude_line_reports_its_session() {
+        let updates = apply_line(CLAUDE, CLAUDE_DELTA, &mut Answer::default());
+        assert!(updates.contains(&Update::Session("c1f31051".into())));
+    }
+
+    #[test]
+    fn a_claude_result_is_the_final_answer_and_the_cost() {
+        let line = r#"{"type":"result","subtype":"success","result":"hello from claude","total_cost_usd":0.139}"#;
+        let updates = apply_line(CLAUDE, line, &mut Answer::default());
+        assert!(updates.contains(&Update::Final("hello from claude".into())));
+        assert!(updates.contains(&Update::Cost(0.139)));
+    }
+
+    #[test]
+    fn an_opencode_part_replaces_itself_as_it_grows() {
+        let mut answer = Answer::default();
+        apply_line(OPENCODE, &OPENCODE_TEXT.replace("hello from opencode", "hel"), &mut answer);
+        apply_line(OPENCODE, OPENCODE_TEXT, &mut answer);
+        assert_eq!(answer.text(), "hello from opencode");
+        // A second part is a second paragraph, not an overwrite.
+        apply_line(
+            OPENCODE,
+            &OPENCODE_TEXT.replace("prt_fc870a6b", "prt_other").replace("hello from opencode", "more"),
+            &mut answer,
+        );
+        assert_eq!(answer.text(), "hello from opencode\n\nmore");
+    }
+
+    #[test]
+    fn a_thinking_or_tool_event_contributes_no_text() {
+        let mut answer = Answer::default();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"Read"}}}"#,
+            r#"{"type":"system","subtype":"init","session_id":"c1f31051"}"#,
+        ] {
+            apply_line(CLAUDE, line, &mut answer);
+        }
+        assert_eq!(answer.text(), "");
+    }
+
+    #[test]
+    fn the_answer_is_capped() {
+        let mut answer = Answer::default();
+        answer.apply(Update::Append("é".repeat(MAX_ANSWER_BYTES)));
+        let text = answer.text();
+        assert!(text.len() <= MAX_ANSWER_BYTES);
+        // Cut on a character boundary, so the text is still valid UTF-8 text.
+        assert!(text.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn the_tool_setting_falls_back_but_honours_an_empty_list() {
+        assert_eq!(tools_from_setting(None), DEFAULT_TOOLS.to_vec());
+        assert_eq!(tools_from_setting(Some("not json")), DEFAULT_TOOLS.to_vec());
+        assert_eq!(tools_from_setting(Some("[]")), Vec::<String>::new());
+        assert_eq!(tools_from_setting(Some(r#"["Bash","Read"]"#)), vec!["Bash", "Read"]);
+    }
+
+    #[test]
+    fn the_default_workspace_is_not_the_checkout() {
+        let workspace = default_workspace();
+        assert!(workspace.ends_with("teams-lite/agent-workspace"), "{workspace:?}");
+        assert_ne!(workspace, std::env::current_dir().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_failed_resume_is_retried_once_and_still_reports_the_failure() {
+        // `false` stands in for a CLI that refuses whatever it is given, so both the
+        // resume and the fresh retry fail: the fallback must not mask the error, and
+        // must not loop.
+        static ALWAYS_FAILS: Backend =
+            Backend { name: "opencode", prefix: "@opencode", program: "false" };
+        let mut request = request(OPENCODE);
+        request.backend = &ALWAYS_FAILS;
+        request.resume_session = Some("ses_gone".into());
+        let (progress, _rx) = watch::channel(String::new());
+        let error = run(&request, &progress).await.expect_err("both attempts fail");
+        assert!(error.to_string().contains("without saying anything"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_program_fails_before_anything_runs() {
+        static MISSING: Backend =
+            Backend { name: "nope", prefix: "@nope", program: "teams-lite-no-such-agent" };
+        let mut request = request(CLAUDE);
+        request.backend = &MISSING;
+        let (progress, _rx) = watch::channel(String::new());
+        let error = run(&request, &progress).await.expect_err("no such program");
+        assert!(error.to_string().contains("not on PATH"), "{error}");
+        assert!(!is_available(&MISSING));
+    }
+}

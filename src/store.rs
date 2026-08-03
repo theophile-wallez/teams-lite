@@ -213,13 +213,17 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     last_ok_ms  INTEGER NOT NULL DEFAULT 0,
     last_error  TEXT NOT NULL DEFAULT ''
 );
--- One row per notification already pushed, so it is pushed EXACTLY once.
+-- One row per live message already ACTED ON, so it is acted on EXACTLY once.
 --
 -- Not an optimization: two send-capable backends share this store by design (the
 -- always-on service on 19420 and the user's dev one on 19421 — see the Ports table
 -- in AGENTS.md), both run a trouter, and both see every live message. Without a
--- claim they would both push and the phone would buzz twice per message. Rows are
--- pruned after a day (see [`Store::prune_push_deliveries`]).
+-- claim they would both push and the phone would buzz twice per message — and both
+-- answer an `@claude` trigger, which would post the same reply twice. Rows are
+-- pruned after a day (see [`Store::prune_claims`]).
+--
+-- The table keeps its original push-only name; the key space is what separates the
+-- users (`<conversation>/<message>` for a push, `agent/…` for an agent reply).
 CREATE TABLE IF NOT EXISTS push_deliveries (
     -- conversation_id + '/' + message_id.
     dedupe_key TEXT PRIMARY KEY,
@@ -2747,23 +2751,26 @@ impl Store {
         Ok(())
     }
 
-    /// Claim the right to push one notification, exactly once across every process
-    /// sharing this store. `true` means "it is yours to send"; `false` means another
-    /// backend already took it (see the `push_deliveries` note in `SCHEMA`).
+    /// Claim the right to act on one live message, exactly once across every process
+    /// sharing this store. `true` means "it is yours"; `false` means another backend
+    /// already took it (see the `push_deliveries` note in `SCHEMA`).
+    ///
+    /// Two callers, one key space each: a push notification claims
+    /// `<conversation>/<message>`, an agent reply claims `agent/…`.
     ///
     /// The claim is the INSERT itself — SQLite's primary key does the arbitration,
     /// so there is no window between checking and claiming.
-    pub fn claim_push_delivery(&self, dedupe_key: &str, now_ms: i64) -> Result<bool> {
+    pub fn claim_once(&self, dedupe_key: &str, now_ms: i64) -> Result<bool> {
         Ok(self.exec(
             "INSERT OR IGNORE INTO push_deliveries (dedupe_key, claimed_ms) VALUES (?1, ?2)",
             params![dedupe_key, now_ms],
         )? > 0)
     }
 
-    /// Drop delivery claims older than `before_ms`. They only exist to stop a
-    /// double push of a LIVE message, and the policy already refuses anything older
+    /// Drop claims older than `before_ms`. They only exist to stop two backends
+    /// acting twice on a LIVE message, and every policy already refuses anything older
     /// than a few minutes, so keeping them forever would grow a table nobody reads.
-    pub fn prune_push_deliveries(&self, before_ms: i64) -> Result<usize> {
+    pub fn prune_claims(&self, before_ms: i64) -> Result<usize> {
         Ok(self.exec("DELETE FROM push_deliveries WHERE claimed_ms < ?1", params![before_ms])?)
     }
 
@@ -5482,17 +5489,20 @@ mod tests {
     }
 
     #[test]
-    fn only_the_first_claim_of_a_notification_wins() {
+    fn only_the_first_claim_of_a_live_message_wins() {
         // Two backends share this store and both see every live message; the claim
-        // is what keeps the phone from buzzing twice.
+        // is what keeps the phone from buzzing twice — and one `@claude` trigger from
+        // being answered twice.
         let s = Store::open_in_memory().unwrap();
-        assert!(s.claim_push_delivery("c1/m1", 1_000).unwrap());
-        assert!(!s.claim_push_delivery("c1/m1", 1_000).unwrap());
-        assert!(s.claim_push_delivery("c1/m2", 1_000).unwrap());
+        assert!(s.claim_once("c1/m1", 1_000).unwrap());
+        assert!(!s.claim_once("c1/m1", 1_000).unwrap());
+        assert!(s.claim_once("c1/m2", 1_000).unwrap());
+        // The two users share the table and cannot collide: different key spaces.
+        assert!(s.claim_once("agent/c1/m1", 1_000).unwrap());
 
-        assert_eq!(s.prune_push_deliveries(1_001).unwrap(), 2);
-        // Pruned claims are re-claimable, which is fine: the policy refuses a
+        assert_eq!(s.prune_claims(1_001).unwrap(), 3);
+        // Pruned claims are re-claimable, which is fine: every policy refuses a
         // message that old anyway.
-        assert!(s.claim_push_delivery("c1/m1", 2_000).unwrap());
+        assert!(s.claim_once("c1/m1", 2_000).unwrap());
     }
 }

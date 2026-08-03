@@ -14,6 +14,7 @@
 //          | set_settings | enrich_link
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | calendars | calendar_view
+//          | agent_status | agent_set_mode | agent_set_tools
 // Events:  status | message | conversations_changed | notifications_changed | typing
 //          | read_receipt | call | call_signal | update_available
 //          | mail_folders_changed | mail_list_updated | mail_list_error
@@ -32,6 +33,14 @@
 // than merely ungated, and `calendar::tests` enforce it on the source. That matters
 // as much as it does for mail: creating an event mails an invitation to every
 // attendee, and answering one mails the organizer.
+//
+// The `agent_*` methods arm the LOCAL AGENT (see `agent`, `agent_policy`): the user
+// writes `@claude <prompt>` in a thread from any Teams client, this backend runs that
+// CLI on this machine, posts one message and edits it as the answer arrives — so the
+// whole thread watches the reply being written. It answers only a message the USER
+// wrote, only in a conversation the user opted in (the sandbox channel out of the
+// box), with a read-only tool allowlist, and never from a read-only backend. See
+// AGENTS.md § The local agent for the four rules and why each one is load-bearing.
 //
 // The `call` event is incoming-call AWARENESS only (ring/dismiss a banner) — it
 // rides on the after-the-fact `Event/Call` chat system message.
@@ -68,9 +77,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    auth, calendar, mail, push, push_policy, retry, teams, teams_activity, teams_avatars,
-    teams_media, teams_presence, teams_profiles, teams_read, teams_readstate, teams_send, trouter,
-    trouter_events,
+    agent, agent_policy, auth, calendar, mail, push, push_policy, retry, teams, teams_activity,
+    teams_avatars, teams_media, teams_presence, teams_profiles, teams_read, teams_readstate,
+    teams_send, trouter, trouter_events,
 };
 use teams_lite::{gitlab, link_preview};
 
@@ -111,10 +120,11 @@ const SETTING_LINEAR_TOKEN: &str = "linear_token";
 /// [`teams_lite::push::VapidKey`]).
 const SETTING_PUSH_VAPID_PRIVATE: &str = "push_vapid_private";
 
-/// How long a delivery claim is kept before [`Store::prune_push_deliveries`] drops
-/// it. Only there to stop two backends double-pushing the same LIVE message, and
-/// the policy already refuses anything older than a few minutes.
-const PUSH_CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
+/// How long a claim on a live message is kept before [`Store::prune_claims`] drops
+/// it. Only there to stop two backends acting twice on the same LIVE message — a
+/// double push, or one `@claude` trigger answered twice — and every policy already
+/// refuses anything older than a few minutes.
+const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 
 /// The RPC methods that act OUTWARD — they change what other people see in the
 /// user's real Teams account (a message posted, edited, or reacted to). Every
@@ -142,8 +152,21 @@ const OUTWARD_METHODS: [&str; 3] = ["send", "edit", "react"];
 /// `enrich_link` for a link on that host would hand it the user's stored GitLab
 /// token. Reading the settings back stays open — it never returns a token, only
 /// whether one is set.
-const MACHINE_METHODS: [&str; 5] =
-    ["repair_broker", "push_subscribe", "push_unsubscribe", "push_test", "set_settings"];
+///
+/// The `agent_*` methods are the sharpest case of that reasoning. Neither one posts,
+/// so neither belongs above — but `agent_set_mode` decides which conversations this
+/// machine will later answer in the user's name, and `agent_set_tools` decides what a
+/// chat message may make a local agent do. A client that merely found this socket
+/// gets to do neither.
+const MACHINE_METHODS: [&str; 7] = [
+    "repair_broker",
+    "push_subscribe",
+    "push_unsubscribe",
+    "push_test",
+    "set_settings",
+    "agent_set_mode",
+    "agent_set_tools",
+];
 
 /// What a {@link MACHINE_METHODS} entry actually does to the machine, for its
 /// refusal text. Per method, not per class: "restarts the Intune container" would be
@@ -156,6 +179,11 @@ fn machine_effect(method: &str) -> &'static str {
             "changes which devices this machine sends push notifications to"
         }
         "set_settings" => "stores the integration credentials kept on this machine",
+        "agent_set_mode" => {
+            "decides which conversations this machine answers in the user's name, with a local \
+             agent"
+        }
+        "agent_set_tools" => "decides what a local agent this machine runs may do",
         // Unreachable while the two lists agree; the test below pins that they do.
         _ => "changes this machine",
     }
@@ -864,12 +892,12 @@ fn prepare_store(db_path: &str, allow_writes: bool) -> Result<()> {
         Ok(false) => {}
         Err(e) => eprintln!("[cleanup] could not read the cleanup revision: {e}"),
     }
-    // Push delivery claims only stop two backends notifying the same live message
-    // twice, so a day-old one is dead weight. Cheap and unconditional (a keyed
-    // range delete), unlike the one-shot cleanups above.
-    let claims_before = now_ms() - PUSH_CLAIM_RETENTION.as_millis() as i64;
-    if let Err(e) = store.prune_push_deliveries(claims_before) {
-        eprintln!("[push] could not prune old delivery claims: {e}");
+    // A claim only stops two backends acting twice on the same live message, so a
+    // day-old one is dead weight. Cheap and unconditional (a keyed range delete),
+    // unlike the one-shot cleanups above.
+    let claims_before = now_ms() - CLAIM_RETENTION.as_millis() as i64;
+    if let Err(e) = store.prune_claims(claims_before) {
+        eprintln!("[store] could not prune old live-message claims: {e}");
     }
     Ok(())
 }
@@ -1287,6 +1315,54 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "delivered": report.delivered, "failed": report.failed, "errors": report.errors }))
         }
 
+        // ---- the local agent (see src/agent.rs and src/agent_policy.rs) --------
+        // What answers an `@claude` / `@opencode` message the USER writes, by running
+        // that CLI on this machine and streaming its answer into the thread. Only
+        // `agent_status` reads; the other two are MACHINE methods, because one decides
+        // where this machine answers as the user and the other what it may run.
+
+        // Which backends exist here, which conversations are opted in, what an agent
+        // may do, and where it runs.
+        "agent_status" => {
+            let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        // Opt one conversation in or out. The sandbox channel starts opted in because
+        // AGENTS.md pre-authorizes a send there; every other conversation is off until
+        // it is named here, and that is the consent gate for this whole feature.
+        "agent_set_mode" => {
+            let conversation = param_str(params, "conversation")?;
+            let mode = agent_policy::Mode::parse(&param_str(params, "mode")?);
+            let store = ctx.store()?;
+            let modes = store.get_setting(agent_policy::SETTING_MODES)?;
+            store.set_setting(
+                agent_policy::SETTING_MODES,
+                &agent_policy::with_mode(modes.as_deref(), &conversation, mode),
+            )?;
+            eprintln!("[agent] {conversation} is now `{}`", mode.as_str());
+            agent_status_json(&store)
+        }
+
+        // Replace the tool allowlist. Deliberately a WHOLE list rather than an
+        // add/remove pair: what an agent may do should be readable in one place, and
+        // a client that widens it has to say what the full answer is.
+        "agent_set_tools" => {
+            let tools: Vec<String> = params
+                .get("tools")
+                .and_then(Value::as_array)
+                .context("missing param: tools (an array of tool names)")?
+                .iter()
+                .filter_map(|tool| tool.as_str())
+                .map(|tool| tool.trim().to_string())
+                .filter(|tool| !tool.is_empty())
+                .collect();
+            let store = ctx.store()?;
+            store.set_setting(agent::SETTING_TOOLS, &serde_json::to_string(&tools)?)?;
+            eprintln!("[agent] the tool allowlist is now {tools:?}");
+            agent_status_json(&store)
+        }
+
         // full conversation list — LOCAL-FIRST: answer instantly from the SQLite
         // cache (0 network round-trips), then sync from the network in the
         // background and emit `conversations_changed` if anything new arrived.
@@ -1546,30 +1622,31 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let http = ctx.http.clone();
             let tokens = ctx.tokens.clone();
             let send_conv = conv.clone();
-            ctx.retry_on_auth(move |session, _csa| {
-                let http = http.clone();
-                let tokens = tokens.clone();
-                let conv = send_conv.clone();
-                let text = text.clone();
-                let reply_to = reply_to.clone();
-                let content_html = content_html.clone();
-                let image = image.clone();
-                async move {
-                    let ic3 = tokens.get(IC3_SCOPE).await?;
-                    teams_send::send_message(
-                        &http,
-                        &session,
-                        &ic3,
-                        &conv,
-                        &text,
-                        reply_to.as_ref(),
-                        content_html.as_deref(),
-                        image.as_ref(),
-                    )
-                    .await
-                }
-            })
-            .await?;
+            let sent = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let tokens = tokens.clone();
+                    let conv = send_conv.clone();
+                    let text = text.clone();
+                    let reply_to = reply_to.clone();
+                    let content_html = content_html.clone();
+                    let image = image.clone();
+                    async move {
+                        let ic3 = tokens.get(IC3_SCOPE).await?;
+                        teams_send::send_message(
+                            &http,
+                            &session,
+                            &ic3,
+                            &conv,
+                            &text,
+                            reply_to.as_ref(),
+                            content_html.as_deref(),
+                            image.as_ref(),
+                        )
+                        .await
+                    }
+                })
+                .await?;
             // The network accepted the message, so the persisted draft is no
             // longer needed. Never turn a successful send into an apparent
             // failure if this best-effort cleanup hits a transient SQLite error;
@@ -1577,7 +1654,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             if let Err(e) = ctx.store().and_then(|store| store.set_draft(&conv, "")) {
                 eprintln!("[draft] could not clear sent draft for {conv}: {e}");
             }
-            Ok(json!({ "sent": true }))
+            Ok(json!({ "sent": true, "message_id": sent.id }))
         }
 
         // edit one of our own messages in place. The network PUT replaces the
@@ -1598,7 +1675,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 let message_id = edit_id.clone();
                 let text = edit_text.clone();
                 async move {
-                    teams_send::edit_message(&http, &session, &conv, &message_id, &text).await
+                    teams_send::edit_message(&http, &session, &conv, &message_id, &text, None).await
                 }
             })
             .await?;
@@ -3370,7 +3447,7 @@ fn push_live_message(
         return;
     };
     let dedupe_key = format!("{}/{}", message.conversation_id, message.id);
-    match store.claim_push_delivery(&dedupe_key, now_ms()) {
+    match store.claim_once(&dedupe_key, now_ms()) {
         Ok(true) => {}
         // Another backend on this store already pushed it.
         Ok(false) => return,
@@ -3395,6 +3472,320 @@ fn push_live_message(
 /// user who never turned notifications on pays one count per message.
 fn push_subscriptions_exist(store: &Store) -> bool {
     store.count_push_subscriptions().map(|count| count > 0).unwrap_or(false)
+}
+
+// ---- the local agent (see src/agent.rs and src/agent_policy.rs) ---------------
+
+/// How often the streamed reply is edited in place, at most. Slow enough that a long
+/// answer costs tens of requests rather than thousands, fast enough that the thread
+/// visibly fills in.
+const AGENT_EDIT_INTERVAL: Duration = Duration::from_millis(1_200);
+
+/// How many progress edits one reply may make. Past this the answer only lands once,
+/// at the end: a pathological answer must not turn into a thousand PUTs.
+const AGENT_MAX_EDITS: usize = 100;
+
+/// Answer one live message with a local agent, if the policy says it asked for one.
+///
+/// Fire-and-forget, like [`push_live_message`]: the trouter loop must never wait on a
+/// child process or the network, so the whole run happens in its own task.
+///
+/// Refuses in read-only mode before anything else. That mode exists so tooling can
+/// drive the user's real store, and an agent that answers a message in their name is
+/// the loudest possible thing for a screenshot script to do — the check is here, not
+/// only at the dispatch gate, because this path never passes through the gate.
+fn agent_live_message(ctx: &Ctx, store: &Store, message: &Message, from_me: bool) {
+    if read_only() {
+        return;
+    }
+    // The cheap test first: only OUR message can be a trigger, and the great majority
+    // of live messages are not ours (see the module docs for why this is the rule that
+    // keeps the feature from being remote code execution).
+    if !from_me {
+        return;
+    }
+    let modes = store.get_setting(agent_policy::SETTING_MODES).unwrap_or_default();
+    let mode = agent_policy::mode_for(&message.conversation_id, modes.as_deref());
+    let Some(command) = agent_policy::command_for(message, from_me, mode, now_ms()) else {
+        return;
+    };
+    if !agent::is_available(command.backend) {
+        eprintln!(
+            "[agent] `{}` is not installed on this machine — ignoring the trigger",
+            command.backend.program
+        );
+        return;
+    }
+    // Claim the trigger in the store, so the two send-capable backends that share it
+    // (the always-on service on 19420 and the user's dev one on 19421) cannot both
+    // answer the same message. The same primitive the push path uses, with its own key
+    // space.
+    let claim = format!("agent/{}/{}", command.conversation_id, command.message_id);
+    match store.claim_once(&claim, now_ms()) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            eprintln!("[agent] could not claim {claim}: {e}");
+            return;
+        }
+    }
+    let request = match agent_request(store, &command) {
+        Ok(request) => request,
+        Err(e) => {
+            eprintln!("[agent] could not prepare the run: {e}");
+            return;
+        }
+    };
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = agent_reply(&ctx, &command, request).await {
+            eprintln!("[agent] {} failed in {}: {e}", command.backend.name, command.conversation_id);
+        }
+    });
+}
+
+/// Assemble everything a run needs from the store: the thread as context, the tool
+/// allowlist, the workspace, and the agent session this thread already has.
+fn agent_request(store: &Store, command: &agent_policy::Command) -> Result<agent::Request> {
+    let history = store
+        .messages_before(&command.conversation_id, i64::MAX, 60)
+        .unwrap_or_default();
+    let transcript = agent_policy::transcript(&history, &command.message_id);
+    let title = store.conversation_context(&command.conversation_id).unwrap_or_default();
+    let workspace = store
+        .get_setting(agent::SETTING_WORKSPACE)?
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(agent::default_workspace);
+    Ok(agent::Request {
+        backend: command.backend,
+        prompt: agent_policy::prompt_with_context(&command.prompt, &transcript),
+        system_prompt: agent_policy::system_prompt(command.backend, &title),
+        resume_session: store
+            .get_setting(&agent_session_key(&command.conversation_id, command.backend.name))?
+            .filter(|session| !session.trim().is_empty()),
+        workspace,
+        tools: agent::tools_from_setting(store.get_setting(agent::SETTING_TOOLS)?.as_deref()),
+    })
+}
+
+/// The setting key holding one thread's agent session, per backend — asking claude a
+/// follow-up must not resume an opencode session.
+fn agent_session_key(conversation_id: &str, backend: &str) -> String {
+    format!("{}{backend}:{conversation_id}", agent::SETTING_SESSION_PREFIX)
+}
+
+/// Post the answer, then keep editing that one message as the answer grows.
+///
+/// The streamed edit is the whole point: everybody in the thread watches the reply
+/// being written, rather than staring at nothing for two minutes. It is also the
+/// reason the placeholder goes out FIRST — the message must exist before it can be
+/// edited, and its id is what the send hands back (see [`teams_send::Sent`]).
+async fn agent_reply(
+    ctx: &Ctx,
+    command: &agent_policy::Command,
+    request: agent::Request,
+) -> Result<()> {
+    let backend = command.backend;
+    let placeholder = agent_policy::thinking_html(backend);
+    let sent = agent_send(ctx, command, &placeholder).await?;
+    if sent.id.is_empty() {
+        anyhow::bail!("the reply was posted but Teams returned no message id to edit");
+    }
+    // The reply is our own message, so it comes back on the trouter as a live message
+    // from us — and if an answer ever opened with a prefix, it would summon the agent
+    // again, forever. Claiming its id here means the trigger check finds it already
+    // taken. One line, and the loop cannot happen.
+    if let Ok(store) = ctx.store() {
+        let claim = format!("agent/{}/{}", command.conversation_id, sent.id);
+        if let Err(e) = store.claim_once(&claim, now_ms()) {
+            eprintln!("[agent] could not claim our own reply {claim}: {e}");
+        }
+    }
+
+    let (progress, mut watch_progress) = tokio::sync::watch::channel(String::new());
+    // The sender is dropped the moment the run ends, which is what stops the edit
+    // loop below. Without that explicit drop the two futures would wait on each
+    // other: `tokio::join!` keeps both alive until both finish.
+    let run = async move {
+        let outcome = agent::run(&request, &progress).await;
+        drop(progress);
+        outcome
+    };
+    let stream = agent_stream_edits(ctx, command, &sent.id, &mut watch_progress);
+    // Both at once: the child's output drives the watch channel, the edits drain it.
+    let (outcome, edits) = tokio::join!(run, stream);
+    if let Err(e) = edits {
+        eprintln!("[agent] a progress edit failed (the answer still lands): {e}");
+    }
+
+    let (final_html, session_id, cost) = match &outcome {
+        Ok(outcome) => (
+            agent_policy::reply_html(backend, &outcome.text, true),
+            outcome.session_id.clone(),
+            outcome.cost_usd,
+        ),
+        Err(e) => (agent_policy::failure_html(backend, &e.to_string()), None, None),
+    };
+    agent_edit(ctx, command, &sent.id, &final_html).await?;
+
+    // Remember the session so a follow-up in this thread continues the conversation.
+    if let (Some(session), Ok(store)) = (session_id, ctx.store()) {
+        let key = agent_session_key(&command.conversation_id, backend.name);
+        if let Err(e) = store.set_setting(&key, &session) {
+            eprintln!("[agent] could not remember the session for {key}: {e}");
+        }
+    }
+    match &outcome {
+        Ok(outcome) => eprintln!(
+            "[agent] {} answered in {} ({} chars{})",
+            backend.name,
+            command.conversation_id,
+            outcome.text.chars().count(),
+            cost.map(|c| format!(", ${c:.2}")).unwrap_or_default()
+        ),
+        Err(e) => eprintln!("[agent] {} could not answer: {e}", backend.name),
+    }
+    outcome.map(|_| ())
+}
+
+/// Edit the reply in place whenever the answer changed, at most every
+/// [`AGENT_EDIT_INTERVAL`] and at most [`AGENT_MAX_EDITS`] times.
+///
+/// Returns when the runner drops its end of the channel, i.e. when the run is over.
+/// The final text is NOT posted here — [`agent_reply`] does that once, from the
+/// authoritative outcome — so a missed last tick costs nothing.
+async fn agent_stream_edits(
+    ctx: &Ctx,
+    command: &agent_policy::Command,
+    message_id: &str,
+    progress: &mut tokio::sync::watch::Receiver<String>,
+) -> Result<()> {
+    let mut edits = 0;
+    let mut posted = String::new();
+    while progress.changed().await.is_ok() {
+        if edits >= AGENT_MAX_EDITS {
+            return Ok(());
+        }
+        let text = progress.borrow_and_update().clone();
+        if text.trim().is_empty() || text == posted {
+            continue;
+        }
+        let html = agent_policy::reply_html(command.backend, &text, false);
+        agent_edit(ctx, command, message_id, &html).await?;
+        posted = text;
+        edits += 1;
+        // Rate limit AFTER the edit, so the first piece of the answer appears as soon
+        // as it exists and the interval spaces out what follows.
+        tokio::time::sleep(AGENT_EDIT_INTERVAL).await;
+    }
+    Ok(())
+}
+
+/// Post the agent's message as a native Teams reply to the message that summoned it.
+///
+/// In a CHANNEL that quote is all the link there is: the send path does not carry a
+/// `rootMessageId` yet, so the answer opens its own thread rather than landing inside
+/// the user's. Nothing here needs to change when it does — the reply markup is already
+/// what a chat uses, and a channel would simply gain the parent id alongside it.
+async fn agent_send(
+    ctx: &Ctx,
+    command: &agent_policy::Command,
+    html: &str,
+) -> Result<teams_send::Sent> {
+    let reply_to = teams_send::ReplyTo {
+        sender: command.sender.clone(),
+        sender_mri: command.sender_mri.clone(),
+        compose_time: command.compose_time,
+        preview: agent_policy::preview_of(&command.prompt),
+        before: String::new(),
+        after: String::new(),
+    };
+    let http = ctx.http.clone();
+    let tokens = ctx.tokens.clone();
+    let conversation = command.conversation_id.clone();
+    let html = html.to_string();
+    ctx.retry_on_auth(move |session, _csa| {
+        let http = http.clone();
+        let tokens = tokens.clone();
+        let conversation = conversation.clone();
+        let html = html.clone();
+        let reply_to = reply_to.clone();
+        async move {
+            let ic3 = tokens.get(IC3_SCOPE).await?;
+            teams_send::send_message(
+                &http,
+                &session,
+                &ic3,
+                &conversation,
+                "",
+                Some(&reply_to),
+                Some(&html),
+                None,
+            )
+            .await
+        }
+    })
+    .await
+}
+
+/// Replace the reply's content with the answer as it stands.
+async fn agent_edit(
+    ctx: &Ctx,
+    command: &agent_policy::Command,
+    message_id: &str,
+    html: &str,
+) -> Result<()> {
+    let http = ctx.http.clone();
+    let conversation = command.conversation_id.clone();
+    let message_id = message_id.to_string();
+    let html = html.to_string();
+    ctx.retry_on_auth(move |session, _csa| {
+        let http = http.clone();
+        let conversation = conversation.clone();
+        let message_id = message_id.clone();
+        let html = html.clone();
+        async move {
+            teams_send::edit_message(&http, &session, &conversation, &message_id, "", Some(&html))
+                .await
+        }
+    })
+    .await
+}
+
+/// What `agent_status` reports: which backends this machine can run, which
+/// conversations are opted in, and what an agent is allowed to do.
+fn agent_status_json(store: &Store) -> Result<Value> {
+    let modes = store.get_setting(agent_policy::SETTING_MODES)?;
+    let backends: Vec<Value> = agent_policy::BACKENDS
+        .iter()
+        .map(|backend| {
+            json!({
+                "name": backend.name,
+                "prefix": backend.prefix,
+                "available": agent::is_available(backend),
+            })
+        })
+        .collect();
+    let conversations: Vec<Value> = agent_policy::configured_modes(modes.as_deref())
+        .into_iter()
+        .map(|(id, mode)| json!({ "conversation": id, "mode": mode.as_str() }))
+        .collect();
+    let workspace = store
+        .get_setting(agent::SETTING_WORKSPACE)?
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| agent::default_workspace().display().to_string());
+    Ok(json!({
+        "backends": backends,
+        "conversations": conversations,
+        "tools": agent::tools_from_setting(store.get_setting(agent::SETTING_TOOLS)?.as_deref()),
+        "workspace": workspace,
+        // A read-only backend never answers, so a UI can say so rather than offering a
+        // switch that would do nothing.
+        "enabled": !read_only(),
+        "sandbox_conversation": agent_policy::SANDBOX_THREAD,
+    }))
 }
 
 /// Start the trouter; persist each live message and broadcast it as an event.
@@ -3497,6 +3888,10 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
                             push_live_message(
                                 &ctx_msgs, store, &row, is_channel, from_me, &self_mri,
                             );
+                            // …and answer it, when the user summoned a local agent
+                            // with it. Same place for the same reason: a fresh insert
+                            // is the one event that means "this message is new".
+                            agent_live_message(&ctx_msgs, store, &row, from_me);
                         }
                     }
                 }
@@ -3818,6 +4213,98 @@ mod tests {
         store.set_setting(SETTING_LINEAR_TOKEN, "").unwrap();
         assert_eq!(settings_json(&store).unwrap()["linear_token_set"], false);
         assert_eq!(link_preview_settings(&store).unwrap().linear_token, None);
+    }
+
+    #[test]
+    fn the_agent_methods_are_gated_but_are_not_outward_facing() {
+        // Neither one posts, so neither is outward — but `agent_set_mode` decides
+        // which conversations this machine will later answer in the user's name, and
+        // `agent_set_tools` decides what a chat message may make a local agent do.
+        for (method, phrase) in
+            [("agent_set_mode", "in the user's name"), ("agent_set_tools", "local agent")]
+        {
+            assert!(!OUTWARD_METHODS.contains(&method), "{method}");
+            assert_eq!(write_class(method), Some(WriteClass::Machine), "{method}");
+            let err = check_write_allowed(method, &json!({}), Some("tok"))
+                .expect_err("must refuse a tokenless agent change");
+            assert!(err.contains("write token"), "{err}");
+            assert!(err.contains(phrase), "{method}: {err}");
+            assert!(check_write_allowed(method, &json!({ "write_token": "tok" }), Some("tok")).is_ok());
+        }
+        // Reading the status is open, like every other read.
+        assert_eq!(write_class("agent_status"), None);
+    }
+
+    #[test]
+    fn a_read_only_backend_refuses_to_arm_the_agent() {
+        // The reply path checks `read_only()` on its own (an agent answering in the
+        // user's name is the loudest thing a screenshot script could do), and the
+        // gate refuses the switch that would arm it in the first place.
+        for method in ["agent_set_mode", "agent_set_tools"] {
+            let err = check_write_allowed(method, &json!({ "write_token": "tok" }), None)
+                .expect_err("read-only must refuse");
+            assert!(err.contains("read-only"), "{err}");
+        }
+    }
+
+    #[test]
+    fn the_child_never_inherits_the_write_token() {
+        // `src/agent.rs` removes this variable from the agent's environment: an agent
+        // holding it could post to any chat directly, around every consent gate here.
+        // It cannot import the constant (this is a binary, not a library), so the two
+        // spellings are pinned to each other.
+        assert_eq!(WRITE_TOKEN_ENV, "TEAMS_LITE_WRITE_TOKEN");
+        let source = include_str!("../agent.rs");
+        assert!(
+            source.contains(&format!("const WRITE_TOKEN_ENV: &str = \"{WRITE_TOKEN_ENV}\"")),
+            "src/agent.rs must remove {WRITE_TOKEN_ENV} from the child's environment"
+        );
+        assert!(source.contains("env_remove(WRITE_TOKEN_ENV)"));
+    }
+
+    #[test]
+    fn the_agent_status_lists_the_backends_and_only_the_sandbox_is_armed() {
+        let store = Store::open_in_memory().unwrap();
+        let status = agent_status_json(&store).unwrap();
+        let names: Vec<&str> =
+            status["backends"].as_array().unwrap().iter().map(|b| b["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["claude", "opencode"]);
+        // Out of the box: one conversation, the pre-authorized one.
+        let conversations = status["conversations"].as_array().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0]["conversation"], agent_policy::SANDBOX_THREAD);
+        assert_eq!(conversations[0]["mode"], "reply");
+        // And a read-only default for what an agent may do.
+        assert_eq!(status["tools"], json!(["Read", "Glob", "Grep"]));
+    }
+
+    #[test]
+    fn arming_a_conversation_keeps_the_others() {
+        let store = Store::open_in_memory().unwrap();
+        for (conversation, mode) in
+            [("19:team@thread.v2", agent_policy::Mode::Reply), (agent_policy::SANDBOX_THREAD, agent_policy::Mode::Off)]
+        {
+            let modes = store.get_setting(agent_policy::SETTING_MODES).unwrap();
+            store
+                .set_setting(
+                    agent_policy::SETTING_MODES,
+                    &agent_policy::with_mode(modes.as_deref(), conversation, mode),
+                )
+                .unwrap();
+        }
+        let modes = store.get_setting(agent_policy::SETTING_MODES).unwrap();
+        assert_eq!(agent_policy::mode_for("19:team@thread.v2", modes.as_deref()), agent_policy::Mode::Reply);
+        // Turning the sandbox off is the user's call too, and it sticks.
+        assert_eq!(agent_policy::mode_for(agent_policy::SANDBOX_THREAD, modes.as_deref()), agent_policy::Mode::Off);
+    }
+
+    #[test]
+    fn one_agent_session_is_kept_per_thread_and_per_backend() {
+        // Asking claude a follow-up must not resume an opencode session.
+        let claude = agent_session_key("19:team@thread.v2", "claude");
+        let opencode = agent_session_key("19:team@thread.v2", "opencode");
+        assert_ne!(claude, opencode);
+        assert!(claude.starts_with(agent::SETTING_SESSION_PREFIX));
     }
 
     #[test]

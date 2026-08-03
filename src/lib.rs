@@ -1,3 +1,6 @@
+pub mod agent;
+pub mod agent_markdown;
+pub mod agent_policy;
 pub mod auth;
 pub mod calendar;
 pub mod gitlab;

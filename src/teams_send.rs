@@ -190,6 +190,22 @@ fn validate_dimension(name: &str, value: Option<u32>) -> Result<()> {
 /// forwarded as the message content. The web read path renders inbound HTML
 /// through an allowlist parser, so it is the XSS boundary; Teams also sanitizes
 /// server-side. When both are present for a reply, the quote is prepended.
+/// What a successful send tells us about the message that now exists.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Sent {
+    /// The SERVER message id — what an edit, a reaction or a reply addresses.
+    ///
+    /// Teams returns no `id` field: the response body is `{"OriginalArrivalTime":
+    /// 1785773946196}`, and a Teams message id IS its arrival time in epoch ms. That
+    /// equality is what makes a streamed reply possible (post once, then edit as the
+    /// answer grows) and it is verified against the real tenant — see
+    /// `examples/agent_stream_probe.rs`. Empty when the response carried neither
+    /// field: the message was still sent, so this is never an error here.
+    pub id: String,
+    /// The id we generated, which the trouter echo carries back.
+    pub client_message_id: String,
+}
+
 pub async fn send_message(
     http: &reqwest::Client,
     session: &Session,
@@ -199,7 +215,7 @@ pub async fn send_message(
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
     image: Option<&ImageUpload>,
-) -> Result<String> {
+) -> Result<Sent> {
     let chat = session
         .endpoint("chatService")
         .context("no chatService endpoint in regionGtms")?
@@ -234,14 +250,23 @@ pub async fn send_message(
         .await
         .context("send message request")?;
     let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        let txt = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "send -> {status}: {}",
-            txt.chars().take(160).collect::<String>()
-        );
+        anyhow::bail!("send -> {status}: {}", body.chars().take(160).collect::<String>());
     }
-    Ok(cmid)
+    Ok(Sent { id: sent_message_id(&body), client_message_id: cmid })
+}
+
+/// The server message id in a send response, or `""` when it carries none.
+fn sent_message_id(body: &str) -> String {
+    let Ok(parsed) = serde_json::from_str::<Value>(body) else {
+        return String::new();
+    };
+    parsed
+        .get("id")
+        .or_else(|| parsed.get("OriginalArrivalTime"))
+        .and_then(|v| v.as_str().map(String::from).or_else(|| v.as_i64().map(|n| n.to_string())))
+        .unwrap_or_default()
 }
 
 async fn upload_image(
@@ -352,12 +377,20 @@ fn build_ams_create_body(conversation_id: &str, filename: &str) -> Value {
 /// There is no `clientmessageid`: the message id already exists and identifies
 /// the resource being replaced. The server echoes a `MessageUpdate` over the
 /// trouter carrying the same message id and the new content.
+/// Replace the content of one of our own messages.
+///
+/// `content_html` is the same escape hatch [`send_message`] has: when set it becomes
+/// the body verbatim, so an edit can carry markup. The streamed agent reply lives on
+/// it — the answer is one message edited as it grows, and an answer with paragraphs,
+/// lists and code blocks would otherwise arrive as one run-on line (a newline means
+/// nothing in HTML). `text` is escaped as before when it is `None`.
 pub async fn edit_message(
     http: &reqwest::Client,
     session: &Session,
     conversation_id: &str,
     message_id: &str,
     text: &str,
+    content_html: Option<&str>,
 ) -> Result<()> {
     let chat = session
         .endpoint("chatService")
@@ -368,7 +401,7 @@ pub async fn edit_message(
         urlencoding::encode(conversation_id),
         urlencoding::encode(message_id)
     );
-    let body = build_edit_body(text, &session.self_name);
+    let body = build_edit_body(text, content_html, &session.self_name);
 
     let resp = http
         .put(&url)
@@ -540,11 +573,18 @@ fn build_body(
     body
 }
 
-/// Build the edit request body (pure, unit-tested). Edits carry plain text, so
-/// there is no reply markup and — unlike a send — no `clientmessageid`.
-fn build_edit_body(text: &str, self_name: &str) -> serde_json::Value {
+/// Build the edit request body (pure, unit-tested). There is no reply markup and —
+/// unlike a send — no `clientmessageid`; `content_html` wins over the escaped text.
+fn build_edit_body(
+    text: &str,
+    content_html: Option<&str>,
+    self_name: &str,
+) -> serde_json::Value {
     json!({
-        "content": escape_html(text),
+        "content": match content_html.filter(|html| !html.is_empty()) {
+            Some(html) => html.to_string(),
+            None => escape_html(text),
+        },
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "imdisplayname": self_name,
@@ -576,6 +616,18 @@ mod tests {
         assert_eq!(escape_html("plain text"), "plain text");
         // accents and emoji pass through untouched
         assert_eq!(escape_html("héllo 👋"), "héllo 👋");
+    }
+
+    #[test]
+    fn a_send_response_yields_the_editable_message_id() {
+        // The real shape (verified live): an arrival time, and no `id` field at all.
+        assert_eq!(sent_message_id(r#"{"OriginalArrivalTime":1785773946196}"#), "1785773946196");
+        // An explicit id wins if Teams ever starts returning one, in either type.
+        assert_eq!(sent_message_id(r#"{"id":"42","OriginalArrivalTime":1}"#), "42");
+        assert_eq!(sent_message_id(r#"{"id":42}"#), "42");
+        // A body with nothing usable is not an error: the message was sent.
+        assert_eq!(sent_message_id("{}"), "");
+        assert_eq!(sent_message_id("not json"), "");
     }
 
     #[test]
@@ -878,12 +930,22 @@ mod tests {
 
     #[test]
     fn edit_body_has_no_client_message_id_and_escapes_content() {
-        let b = build_edit_body("updated <text> & more", "Théophile WALLEZ");
+        let b = build_edit_body("updated <text> & more", None, "Théophile WALLEZ");
         assert!(b.get("clientmessageid").is_none());
         assert_eq!(b["content"], "updated &lt;text&gt; &amp; more");
         assert_eq!(b["messagetype"], "RichText/Html");
         assert_eq!(b["contenttype"], "text");
         assert_eq!(b["imdisplayname"], "Théophile WALLEZ");
+    }
+
+    #[test]
+    fn edit_body_forwards_rich_content_html_verbatim() {
+        // What the streamed agent reply rides on: an edit that keeps its markup.
+        let b = build_edit_body("ignored", Some("<p>an <code>answer</code></p>"), "Me");
+        assert_eq!(b["content"], "<p>an <code>answer</code></p>");
+        // An empty html falls back to the escaped text, like a send does.
+        let b = build_edit_body("plain", Some(""), "Me");
+        assert_eq!(b["content"], "plain");
     }
 
     #[test]
