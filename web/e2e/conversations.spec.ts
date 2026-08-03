@@ -31,6 +31,25 @@ test.describe("conversations", () => {
       .toBeGreaterThan(0);
   });
 
+  test("a group chat with a custom picture shows it instead of initials", async ({ page }) => {
+    await gotoApp(page);
+    // "Platform Team" is a mock group carrying a picture; the row's avatar must
+    // resolve it through the media proxy and paint an <img> over the initials.
+    const row = page.locator('[data-testid="conversation-row"]', { hasText: "Platform Team" }).first();
+    await expect(row.locator("img")).toBeVisible();
+    // The header avatar shows the same picture once the chat is open.
+    await row.click();
+    await expect(page.locator('[data-testid="conversation-title"]')).toHaveText("Platform Team");
+    await expect(page.locator("header img").first()).toBeVisible();
+    // A group WITHOUT a picture keeps its tinted initials — no image at all, which
+    // is what proves the picture is per-chat and not a blanket group avatar.
+    const plain = page
+      .locator('[data-testid="conversation-row"]', { hasText: "Incident Response" })
+      .first();
+    await expect(plain).toBeVisible();
+    await expect(plain.locator("img")).toHaveCount(0);
+  });
+
   test("virtualized sidebar scrolls to reveal more conversations", async ({ page }) => {
     await gotoApp(page);
     const firstId = await page

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { Conversation } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
 import { PersonCoin } from "./person-coin";
@@ -31,10 +32,34 @@ export function avatarInitials(label: string): string {
   return (words[0]![0]! + words[words.length - 1]![0]!).toUpperCase();
 }
 
-/** A real profile photo to load for an avatar: a person (`kind: "user"`, `id` =
- *  their MRI) or a Teams "team" group (`kind: "team"`, `id` = its AAD group id).
- *  When the subject has no photo, the avatar keeps its tinted initials. */
-export type AvatarPhoto = { kind: "user" | "team"; id: string };
+/** A real picture to load for an avatar. Two kinds of subject, addressed the way
+ *  Teams addresses each one:
+ *   - a person (`kind: "user"`, `id` = their MRI) or a Teams "team" group
+ *     (`kind: "team"`, `id` = its AAD group id) — an identity, so an id;
+ *   - a group chat's own uploaded picture (`kind: "chat"`) — hosted content, so
+ *     the `url` the backend reported on the conversation (`picture_url`).
+ *  When the subject has no picture, the avatar keeps its tinted initials. */
+export type AvatarPhoto =
+  | { kind: "user" | "team"; id: string }
+  | { kind: "chat"; url: string };
+
+/** The picture an avatar should show for a conversation, or `undefined` when there
+ *  is none to load (the avatar then keeps its tinted initials).
+ *
+ *  A 1:1 shows the other party's profile photo; a group chat shows the picture its
+ *  members gave it — Microsoft Teams lets a group carry one, and it is the only
+ *  face a multi-party thread has. */
+export function conversationPhoto(c: Conversation): AvatarPhoto | undefined {
+  if (c.avatar_mri) return { kind: "user", id: c.avatar_mri };
+  if (c.picture_url) return { kind: "chat", url: c.picture_url };
+  return undefined;
+}
+
+/** The cache/effect key of a photo: whichever of `id` / `url` addresses it. */
+function photoKey(photo?: AvatarPhoto): string {
+  if (!photo) return "";
+  return photo.kind === "chat" ? photo.url : photo.id;
+}
 
 /**
  * Resolve a profile photo to a blob object URL through the controller, or `null`
@@ -45,27 +70,33 @@ export type AvatarPhoto = { kind: "user" | "team"; id: string };
 function useAvatarPhoto(photo?: AvatarPhoto): string | null {
   const controller = useController();
   const [src, setSrc] = useState<string | null>(null);
+  const key = photoKey(photo);
 
   useEffect(() => {
-    if (!photo || !photo.id) {
+    if (!photo || !key) {
       setSrc(null);
       return;
     }
     let active = true;
     setSrc(null);
-    controller
-      .loadAvatar(photo.kind, photo.id)
+    const loading =
+      photo.kind === "chat"
+        ? controller.loadAvatarPicture(photo.url)
+        : controller.loadAvatar(photo.kind, photo.id);
+    loading
       .then((url) => {
         if (active) setSrc(url);
       })
       .catch(() => {
-        // transient failure — stay on initials; loadAvatar evicts so a later
-        // render retries.
+        // transient failure — stay on initials; the controller evicts the entry so
+        // a later render retries.
       });
     return () => {
       active = false;
     };
-  }, [controller, photo?.kind, photo?.id]);
+    // Keyed on the identity the photo carries, never on the object: callers build
+    // a fresh `photo` on every render.
+  }, [controller, photo?.kind, key]);
 
   return src;
 }

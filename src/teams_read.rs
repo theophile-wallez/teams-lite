@@ -83,6 +83,10 @@ pub struct Conversation {
     /// "sfbinteropchat"). `chat_type`/`kind()` stay the primary classifier; this
     /// is carried through for faithful rendering and future use.
     pub thread_type: String,
+    /// The custom picture the members gave this group chat, as an absolute URL
+    /// ready for the media proxy. Empty when the chat has none (the common case,
+    /// and every 1:1 / meeting thread) — the UI then keeps its tinted initials.
+    pub picture_url: String,
 }
 
 impl Conversation {
@@ -263,6 +267,32 @@ fn parse_last_message(container: &Value) -> LastMessage {
     LastMessage { time, has_message, preview, sender }
 }
 
+/// The custom picture a group chat carries, as an absolute URL the media proxy can
+/// fetch, or "" when the thread has none.
+///
+/// Proven shape (recon against the live tenant — `examples/group_avatar_recon.rs`):
+/// the CSA chat container carries `picture`, and the chatService thread resource the
+/// same value under `properties.picture`, in Skype's tagged form
+///
+///   URL@https://{region}-prod.asyncgw.teams.microsoft.com/v1/objects/{obj}/views/avatar_fullsize
+///
+/// `avatar_fullsize` is the only view that answers: `views/avatar` 400s and
+/// `views/imgo` 404s. The object needs the skypetoken, so the picture reaches the UI
+/// through the media proxy like any inline chat image — which is why the host is
+/// checked HERE, at the door: a `picture` value on an untrusted host is dropped
+/// rather than stored and handed to a credentialed fetch later.
+fn parse_thread_picture(container: &Value) -> String {
+    let raw = container.get("picture").and_then(|x| x.as_str()).unwrap_or("").trim();
+    // The tag is Skype's, not part of the URL. Accept a bare URL too, so a payload
+    // variant that drops the prefix still resolves.
+    let url = raw.strip_prefix("URL@").unwrap_or(raw);
+    if crate::teams_media::is_allowed_media_url(url) {
+        url.to_string()
+    } else {
+        String::new()
+    }
+}
+
 /// One page of history, oldest-first (ready to feed the store in seq order).
 pub struct MessagePage {
     pub messages: Vec<Message>,
@@ -438,6 +468,7 @@ fn upsert_conversations(store: &Store, convs: &[Conversation]) -> usize {
             is_pinned: c.is_pinned,
             is_hidden: c.is_hidden,
             thread_type: &c.thread_type,
+            picture_url: &c.picture_url,
         };
         if store.upsert_conversation_full(&update).unwrap_or(false) {
             changed += 1;
@@ -704,6 +735,7 @@ fn parse_conversations_with_self(v: &Value, self_mri: &str) -> Vec<Conversation>
             is_pinned,
             is_hidden,
             thread_type,
+            picture_url: parse_thread_picture(chat),
         });
     }
     out
@@ -2334,6 +2366,57 @@ mod tests {
     }
 
     #[test]
+    fn group_chat_picture_comes_through_the_csa_snapshot() {
+        // Shape captured from the live tenant: the tagged `URL@<url>` form, on the
+        // region's async-gateway host, with the `avatar_fullsize` view.
+        let v = json!({
+            "chats": [
+                {
+                    "id": "19:grp@thread.v2", "title": "Saturn Core", "chatType": "group",
+                    "picture": "URL@https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frs-d4-abc/views/avatar_fullsize",
+                    "lastMessage": { "id": "1", "composeTime": "2026-07-16T16:05:26.767Z" }
+                },
+                {
+                    "id": "19:plain@thread.v2", "title": "No picture", "chatType": "group",
+                    "lastMessage": { "id": "1", "composeTime": "2026-07-16T16:05:26.767Z" }
+                }
+            ]
+        });
+        let convs = parse_conversations(&v);
+        assert_eq!(
+            convs[0].picture_url,
+            "https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frs-d4-abc/views/avatar_fullsize",
+            "the URL@ tag is stripped so the value is fetchable as-is"
+        );
+        assert_eq!(convs[1].picture_url, "", "a chat with no picture keeps its initials");
+    }
+
+    #[test]
+    fn thread_picture_accepts_a_bare_url_and_refuses_an_untrusted_host() {
+        let picture = |value: Value| parse_thread_picture(&json!({ "picture": value }));
+        // Bare (untagged) URL on a trusted host — accepted.
+        assert_eq!(
+            picture(json!("https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/x/views/avatar_fullsize")),
+            "https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/x/views/avatar_fullsize"
+        );
+        // Surrounding whitespace is trimmed before the tag is stripped.
+        assert_eq!(
+            picture(json!("  URL@https://eu-api.asm.skype.com/v1/objects/x/views/avatar_fullsize  ")),
+            "https://eu-api.asm.skype.com/v1/objects/x/views/avatar_fullsize"
+        );
+        // An untrusted host is dropped at the door: this URL would otherwise be
+        // handed to a credentialed fetch. Same for a non-https scheme and garbage.
+        assert_eq!(picture(json!("URL@https://evil.example/steal")), "");
+        assert_eq!(picture(json!("URL@http://fr-prod.asyncgw.teams.microsoft.com/x")), "");
+        assert_eq!(picture(json!("URL@not a url")), "");
+        assert_eq!(picture(json!("")), "");
+        // A non-string (or absent) `picture` is simply "no picture".
+        assert_eq!(picture(json!(null)), "");
+        assert_eq!(picture(json!(42)), "");
+        assert_eq!(parse_thread_picture(&json!({})), "");
+    }
+
+    #[test]
     fn sidebar_preview_labels_a_textless_csa_last_message() {
         // The last message is an emoji, an image, or a card — bodies that strip to
         // nothing, so the sidebar used to show a blank second line.
@@ -2719,6 +2802,7 @@ mod tests {
             is_pinned: false,
             is_hidden: false,
             thread_type: String::new(),
+            picture_url: String::new(),
         };
 
         // explicit 1:1 flag
@@ -3560,6 +3644,7 @@ mod tests {
             is_pinned: false,
             is_hidden: false,
             thread_type: "group".into(),
+            picture_url: String::new(),
         }
     }
 

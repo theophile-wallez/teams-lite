@@ -2753,7 +2753,8 @@ fn conversations_json(rows: &[teams_lite::store::ConversationRow]) -> Value {
             "is_hidden": c.is_hidden,
             "thread_type": c.thread_type,
             "draft": c.draft,
-            "avatar_mri": c.avatar_mri
+            "avatar_mri": c.avatar_mri,
+            "picture_url": c.picture_url
         }))
         .collect::<Vec<_>>())
 }

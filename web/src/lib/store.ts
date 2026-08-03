@@ -459,11 +459,12 @@ export class TeamsController {
   private mediaRetained = new Map<string, number>();
   private mediaBytes = 0;
 
-  // Avatar cache: "user:<mri>" / "team:<groupId>" -> a promise of a blob object
-  // URL, or null when the subject has NO photo. The null is a deliberate negative
-  // cache — it is kept so a person/team without a photo is asked for only once —
-  // whereas a transient failure is evicted so a later render can retry (mirrors
-  // the media cache). Object URLs are revoked on dispose.
+  // Avatar cache: "user:<mri>" / "team:<groupId>" / "picture:<url>" (a group
+  // chat's own picture) -> a promise of a blob object URL, or null when the
+  // subject has NO photo. The null is a deliberate negative cache — it is kept so
+  // a subject without a photo is asked for only once — whereas a transient failure
+  // is evicted so a later render can retry (mirrors the media cache). Object URLs
+  // are revoked on dispose.
   private avatarCache = new Map<string, Promise<string | null>>();
   private avatarObjectUrls: string[] = [];
 
@@ -1844,13 +1845,39 @@ export class TeamsController {
    *  Returns `null` immediately for an empty id. */
   loadAvatar(kind: "user" | "team", id: string): Promise<string | null> {
     if (!id) return Promise.resolve(null);
-    const key = `${kind}:${id}`;
+    return this.cacheAvatar(`${kind}:${id}`, async () => {
+      const res = await this.backend.fetchAvatar(kind, id);
+      return res.found && res.data_base64 ? res : null;
+    });
+  }
+
+  /** Resolve a group chat's own picture to a local blob object URL, fetching the
+   *  bytes through the media proxy — the same path an inline chat image takes,
+   *  since a chat picture is an authenticated hosted-content object (its URL comes
+   *  from `Conversation.picture_url`). Deliberately NOT the media cache: that one
+   *  evicts by byte budget, and an avatar stays on screen for the whole session.
+   *  Returns `null` immediately for an empty URL. */
+  loadAvatarPicture(url: string): Promise<string | null> {
+    if (!url) return Promise.resolve(null);
+    return this.cacheAvatar(`picture:${url}`, () => this.backend.fetchMedia(url));
+  }
+
+  /** Fetch avatar bytes once per `key` and hand back a blob object URL that lives
+   *  as long as the session (avatars are small, few, and always on screen).
+   *
+   *  `fetch` resolves to `null` when the subject simply HAS no photo: that null is
+   *  cached so it is never re-requested, while a transient failure is evicted so a
+   *  later render retries (mirrors the media cache). */
+  private cacheAvatar(
+    key: string,
+    fetch: () => Promise<{ content_type?: string; data_base64?: string } | null>,
+  ): Promise<string | null> {
     const cached = this.avatarCache.get(key);
     if (cached) return cached;
 
     const pending = (async () => {
-      const res = await this.backend.fetchAvatar(kind, id);
-      if (!res.found || !res.data_base64) return null;
+      const res = await fetch();
+      if (!res || !res.data_base64) return null;
       const blob = new Blob([base64ToArrayBuffer(res.data_base64)], {
         type: res.content_type || "application/octet-stream",
       });
@@ -1860,8 +1887,6 @@ export class TeamsController {
     })();
 
     this.avatarCache.set(key, pending);
-    // Evict only on a transient failure (network/backend error), so it can retry;
-    // a resolved `null` (no photo) stays cached to avoid re-asking.
     pending.catch(() => this.avatarCache.delete(key));
     return pending;
   }

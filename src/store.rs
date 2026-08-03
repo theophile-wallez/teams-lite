@@ -31,7 +31,10 @@ CREATE TABLE IF NOT EXISTS conversations (
     is_pinned             INTEGER NOT NULL DEFAULT 0,
     is_hidden             INTEGER NOT NULL DEFAULT 0,
     thread_type           TEXT NOT NULL DEFAULT '',
-    draft                 TEXT NOT NULL DEFAULT ''
+    draft                 TEXT NOT NULL DEFAULT '',
+    -- A group chat's own uploaded picture, as an absolute media-proxy URL. Empty
+    -- for a chat with none (see `teams_read::parse_thread_picture`).
+    picture_url           TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS messages (
     id              TEXT NOT NULL,
@@ -269,7 +272,11 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 ///
 /// v5 adds the Web Push tables (`push_subscriptions`, `push_deliveries`), so a
 /// phone that installed the app keeps its subscription across restarts.
-const SCHEMA_VERSION: i64 = 5;
+///
+/// v6 adds `conversations.picture_url`, the picture a group chat's members gave it.
+/// Without the bump an existing store never grows the column and every query that
+/// names it fails outright — the sidebar goes empty, which is how this was caught.
+const SCHEMA_VERSION: i64 = 6;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -444,6 +451,11 @@ pub struct ConversationRow {
     /// Empty for groups (no single face) and for 1:1s where we hold no message
     /// from the other party yet; the UI then falls back to tinted initials.
     pub avatar_mri: String,
+    /// The picture the members gave this group chat, as an absolute media-proxy
+    /// URL. Empty when the chat has none; the UI then falls back to its tinted
+    /// initials. The 1:1 counterpart is `avatar_mri` — a group has no single face,
+    /// but it can have a face of its own.
+    pub picture_url: String,
 }
 
 /// Rich conversation metadata from a CSA sync, fed to [`Store::upsert_conversation_full`].
@@ -467,6 +479,10 @@ pub struct ConversationUpdate<'a> {
     pub is_pinned: bool,
     pub is_hidden: bool,
     pub thread_type: &'a str,
+    /// The group chat's own picture as an absolute media-proxy URL, or "" when it
+    /// has none. Written verbatim — including empty — so a picture the members
+    /// REMOVE disappears on the next sync instead of lingering forever.
+    pub picture_url: &'a str,
 }
 
 /// A channel row for the sidebar's channel tree, carrying the same preview/unread
@@ -979,6 +995,11 @@ fn migrate(conn: &Connection) -> Result<()> {
     // Stores created before this column existed get '' (no photo → tinted glyph);
     // the next CSA sync backfills the real id.
     add_column("ALTER TABLE channels ADD COLUMN team_group_id TEXT NOT NULL DEFAULT ''")?;
+
+    // picture_url: a group chat's own uploaded picture. Stores created before this
+    // column existed get '' (no picture → tinted initials, exactly what they showed
+    // already); the next CSA sync backfills the real URL.
+    add_column("ALTER TABLE conversations ADD COLUMN picture_url TEXT NOT NULL DEFAULT ''")?;
     Ok(())
 }
 
@@ -1492,8 +1513,8 @@ impl Store {
             "INSERT INTO conversations (
                 id, display_name, last_message_time, kind,
                 last_message_preview, last_message_sender, last_message_from_me,
-                is_read, is_muted, is_pinned, is_hidden, thread_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                is_read, is_muted, is_pinned, is_hidden, thread_type, picture_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 display_name = CASE
                     WHEN excluded.display_name IS NOT NULL AND excluded.display_name <> ''
@@ -1523,7 +1544,10 @@ impl Store {
                 is_hidden = excluded.is_hidden,
                 thread_type = CASE
                     WHEN excluded.thread_type <> '' THEN excluded.thread_type
-                    ELSE conversations.thread_type END
+                    ELSE conversations.thread_type END,
+                -- the group's own picture: latest snapshot wins outright, so a
+                -- picture the members remove is cleared instead of lingering
+                picture_url = excluded.picture_url
              WHERE
                 -- report a change ONLY when a column would actually move, so an
                 -- identical re-sync emits no `conversations_changed`
@@ -1539,7 +1563,8 @@ impl Store {
                 OR excluded.is_muted  <> conversations.is_muted
                 OR excluded.is_pinned <> conversations.is_pinned
                 OR excluded.is_hidden <> conversations.is_hidden
-                OR (excluded.thread_type <> '' AND excluded.thread_type <> conversations.thread_type)",
+                OR (excluded.thread_type <> '' AND excluded.thread_type <> conversations.thread_type)
+                OR excluded.picture_url <> conversations.picture_url",
             params![
                 u.id,
                 u.display_name,
@@ -1553,6 +1578,7 @@ impl Store {
                 u.is_pinned as i64,
                 u.is_hidden as i64,
                 u.thread_type,
+                u.picture_url,
             ],
         )?;
         Ok(changed > 0)
@@ -2734,7 +2760,10 @@ impl Store {
                           AND m.sender_mri IS NOT NULL AND m.sender_mri <> ''
                           AND m.sender <> '' AND m.sender <> ?1
                         ORDER BY m.seq DESC LIMIT 1
-                    ), '') ELSE '' END AS avatar_mri
+                    ), '') ELSE '' END AS avatar_mri,
+                    -- the group's own uploaded picture (empty for a 1:1, which has a
+                    -- face already, and for a group that never set one)
+                    c.picture_url
              FROM conversations c
              -- a channel that leaked into the conversations table (a live post that
              -- landed before the CSA sync classified it) must never show in the chat
@@ -2762,6 +2791,7 @@ impl Store {
                 thread_type: r.get(11)?,
                 draft: r.get(12)?,
                 avatar_mri: r.get(13)?,
+                picture_url: r.get(14)?,
             })
         })?;
         // Canonical chat/channel gate, mirroring the live-message path in the
@@ -2913,6 +2943,7 @@ mod tests {
             is_pinned: false,
             is_hidden: false,
             thread_type: "",
+            picture_url: "",
         }
     }
 
@@ -3054,6 +3085,46 @@ mod tests {
             !indexes.iter().any(|i| i == "idx_msg_conv_seq"),
             "the narrow index is superseded and must be dropped: {indexes:?}"
         );
+        drop(s);
+        remove_db(&path);
+    }
+
+    /// A column added to `migrate()` only reaches an EXISTING store when
+    /// SCHEMA_VERSION is bumped with it: `open` runs the pass ONLY when the file's
+    /// recorded version differs from the current one.
+    ///
+    /// Regression: `conversations.picture_url` shipped without the bump. Every store
+    /// already at the previous version kept the old column set, so every query naming
+    /// the column failed outright — an empty sidebar, on the user's own machine, with
+    /// a full test suite passing on fresh in-memory stores.
+    #[test]
+    fn open_grows_a_column_the_previous_version_lacked() {
+        let path = temp_db("column_bump");
+        let p = path.to_str().unwrap();
+        // A store as the previous build left it: a `conversations` table without the
+        // column, carrying real rows, and STAMPED — which is the whole point, since a
+        // stamped store is the one `open` would otherwise leave alone.
+        {
+            let conn = Connection::open(p).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY,
+                    display_name TEXT,
+                    last_message_time INTEGER NOT NULL DEFAULT 0);
+                 INSERT INTO conversations (id, display_name) VALUES ('c1', 'Chat');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION - 1).unwrap();
+        }
+
+        let s = Store::open(p).unwrap();
+
+        // The pass ran: the column is back with its default, the row survived, and
+        // the sidebar query that names the column answers instead of failing.
+        let rows = s.conversations("").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].display_name, "Chat");
+        assert_eq!(rows[0].picture_url, "");
         drop(s);
         remove_db(&path);
     }
@@ -4072,6 +4143,7 @@ mod tests {
             is_pinned: true,
             is_hidden: false,
             thread_type: "chat",
+            picture_url: "",
         };
         assert!(s.upsert_conversation_full(&u).unwrap());
         let convs = s.conversations("").unwrap();
@@ -4251,6 +4323,27 @@ mod tests {
         };
         assert_eq!(by_id("dm").avatar_mri, "8:orgid:leonor");
         assert_eq!(by_id("grp").avatar_mri, "", "a group has no single-person avatar");
+    }
+
+    #[test]
+    fn group_picture_round_trips_and_a_removed_one_is_cleared() {
+        let s = Store::open_in_memory().unwrap();
+        let picture = "https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frs-d4-abc/views/avatar_fullsize";
+        let with_picture = |url: &'static str| ConversationUpdate {
+            picture_url: url,
+            ..upd("grp", "Saturn Core", 100, ConversationKind::Group)
+        };
+
+        assert!(s.upsert_conversation_full(&with_picture(picture)).unwrap());
+        assert_eq!(s.conversations("").unwrap()[0].picture_url, picture);
+        // Re-syncing the same picture is NOT a change (else the UI's
+        // refresh->sync->conversations_changed->refresh loop spins).
+        assert!(!s.upsert_conversation_full(&with_picture(picture)).unwrap());
+
+        // The members remove the picture: CSA drops the field, and the row must
+        // clear rather than keep serving a picture the chat no longer has.
+        assert!(s.upsert_conversation_full(&with_picture("")).unwrap());
+        assert_eq!(s.conversations("").unwrap()[0].picture_url, "");
     }
 
     #[test]

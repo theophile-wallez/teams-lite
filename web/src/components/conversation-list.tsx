@@ -15,7 +15,7 @@ import {
 } from "~/lib/protocol";
 import type { SidebarTab } from "~/lib/store";
 import { cn } from "~/lib/utils";
-import { Avatar } from "./avatar";
+import { Avatar, conversationPhoto } from "./avatar";
 import { BrokerBanner } from "./broker-banner";
 import { CalendarSidebar } from "./calendar-sidebar";
 import { useAppState, useController } from "./controller-context";
@@ -466,7 +466,7 @@ function ConversationRow(props: {
       <Avatar
         seed={c.id}
         label={label}
-        photo={c.avatar_mri ? { kind: "user", id: c.avatar_mri } : undefined}
+        photo={conversationPhoto(c)}
         fallback={c.kind === "one_on_one" ? "person" : "initials"}
       />
 

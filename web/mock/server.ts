@@ -84,6 +84,10 @@ type Conversation = {
   is_hidden: boolean;
   thread_type: string;
   draft: string;
+  /** A group chat's own uploaded picture, as a hosted-content URL fetched through
+   *  `fetch_media` — the shape the real backend reports (see the Rust
+   *  `teams_read::parse_thread_picture`). Absent for a chat with none. */
+  picture_url?: string;
 };
 
 // One team channel, as returned by the `channels` method (mirrors protocol.ts
@@ -691,6 +695,8 @@ function addConversation(input: {
   isRead: boolean;
   isMuted: boolean;
   isPinned: boolean;
+  /** A custom group picture, as on a real tenant where some groups have one. */
+  pictureUrl?: string;
 }): void {
   const newestTime = Date.now() - Math.floor(rand() * 6 * 24 * 3_600_000); // 0..~6 days ago
   const messages = generateBacklog(input.id, input.kind, input.participants, newestTime);
@@ -708,6 +714,7 @@ function addConversation(input: {
     is_hidden: false,
     thread_type: input.kind === "one_on_one" || input.kind === "group" ? "chat" : "",
     draft: "",
+    picture_url: input.pictureUrl,
   };
   const cs: ConvState = { conv, messages, participants: input.participants };
   recomputeSummary(cs);
@@ -747,6 +754,12 @@ function seed(): void {
       isRead: rand() >= 0.4,
       isMuted: rand() < 0.12,
       isPinned: idx === 0, // pin one group
+      // Every other group carries a custom picture, so the sidebar shows both
+      // states side by side — a real tenant is mixed the same way.
+      pictureUrl:
+        idx % 2 === 0
+          ? `https://eu-prod.asyncgw.teams.microsoft.com/v1/objects/mock-group-${slug}/views/avatar_fullsize`
+          : undefined,
     });
   });
 
@@ -1892,6 +1905,7 @@ function hashString(s: string): number {
  *  synthesize a labeled colored SVG so every hosted-content URL renders as a
  *  distinct, visible image in the UI without any real tenant. */
 function mockMedia(url: string): { content_type: string; data_base64: string } {
+  if (url.endsWith("/views/avatar_fullsize")) return mockGroupPicture(url);
   const hue = hashString(url) % 360;
   const label = (url.split("/").filter(Boolean).pop() ?? "media").slice(0, 24);
   const svg =
@@ -1899,6 +1913,29 @@ function mockMedia(url: string): { content_type: string; data_base64: string } {
     `<rect width="320" height="200" rx="12" fill="hsl(${hue} 65% 52%)"/>` +
     `<text x="160" y="104" font-family="system-ui,sans-serif" font-size="16" fill="white" ` +
     `text-anchor="middle" dominant-baseline="middle">${escapeHtml(label)}</text></svg>`;
+  return {
+    content_type: "image/svg+xml",
+    data_base64: Buffer.from(svg, "utf8").toString("base64"),
+  };
+}
+
+/** A group chat's own picture: a square emblem on a per-URL gradient, so it reads
+ *  as a picture the members chose rather than as a person's photo (the silhouette
+ *  in `mockAvatar`) or a shared image (the labeled landscape card above). Teams
+ *  serves these as `…/views/avatar_fullsize` objects, which is how `mockMedia`
+ *  recognizes one. */
+function mockGroupPicture(url: string): { content_type: string; data_base64: string } {
+  const hue = hashString(url) % 360;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">` +
+    `<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">` +
+    `<stop offset="0%" stop-color="hsl(${hue} 78% 58%)"/>` +
+    `<stop offset="100%" stop-color="hsl(${(hue + 70) % 360} 72% 40%)"/>` +
+    `</linearGradient></defs>` +
+    `<rect width="192" height="192" fill="url(#g)"/>` +
+    `<circle cx="74" cy="82" r="30" fill="rgba(255,255,255,0.9)"/>` +
+    `<circle cx="124" cy="112" r="38" fill="rgba(255,255,255,0.55)"/>` +
+    `</svg>`;
   return {
     content_type: "image/svg+xml",
     data_base64: Buffer.from(svg, "utf8").toString("base64"),

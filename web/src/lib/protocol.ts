@@ -186,6 +186,11 @@ export type Conversation = {
    *  photo (see `TeamsController.loadAvatar`). Empty/absent for groups and for
    *  1:1s with no message from the other party yet; the UI falls back to initials. */
   avatar_mri?: string;
+  /** For a group chat, the picture its members gave it — an absolute URL the
+   *  backend's media proxy can fetch (see `TeamsController.loadAvatarPicture`).
+   *  Empty/absent when the chat has none, which keeps its tinted initials. The
+   *  group counterpart of `avatar_mri`: no single face, but a face of its own. */
+  picture_url?: string;
 };
 
 /** One team channel, as returned by the `channels` method (mirrors the Rust

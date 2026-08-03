@@ -1,6 +1,6 @@
 import { useNavigate } from "@tanstack/react-router";
 import { convLabel } from "~/lib/protocol";
-import { Avatar } from "./avatar";
+import { Avatar, conversationPhoto } from "./avatar";
 import { useAppState } from "./controller-context";
 import {
   CommandDialog,
@@ -37,7 +37,7 @@ export function CommandPalette(props: { open: boolean; onOpenChange: (open: bool
               <Avatar
                 seed={c.id}
                 label={convLabel(c)}
-                photo={c.avatar_mri ? { kind: "user", id: c.avatar_mri } : undefined}
+                photo={conversationPhoto(c)}
                 fallback={c.kind === "one_on_one" ? "person" : "initials"}
                 className="size-6 rounded-lg text-[10px]"
               />
