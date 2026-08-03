@@ -1427,6 +1427,91 @@ function seedGitLabSamples(): void {
   order.push(convId);
 }
 
+/** A conversation of Linear links — one per resource kind, plus a bare URL — so the
+ *  preview cards and the "link-only message" layout can be seen and asserted on.
+ *  Mirrors seedGitLabSamples so the two providers are exercised the same way. */
+function seedLinearSamples(): void {
+  const convId = "19:linear-links-demo@thread.v2";
+  const other = PEOPLE[2]!;
+  // Dated in the past so it never sorts to the top of the sidebar (other specs
+  // assume index 0 has a full backlog); tests reach it by name.
+  const base = Date.now() - 19 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      // The link on its own line, which is how it usually arrives: the card
+      // replaces the anchor, so a sentence built around one reads with a hole in
+      // it. The bubble still carries text, so this exercises the card-with-text
+      // layout rather than the link-only one.
+      content:
+        `<p>This one is blocking the release — can you take a look?</p>` +
+        `<p><a href="https://linear.app/acme/issue/ENG-1/show-linear-links-as-cards">ENG-1</a></p>`,
+      is_self: false,
+    },
+    0,
+  );
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content:
+        `<p>On it. It sits under the Chat integrations project:</p>` +
+        `<p><a href="https://linear.app/acme/project/chat-integrations-a05573177921">Chat integrations</a></p>`,
+      is_self: true,
+    },
+    60_000,
+  );
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        `<p>The design is written up here:</p>` +
+        `<p><a href="https://linear.app/acme/document/link-previews-ebc85c4d4d74">system design</a></p>`,
+      is_self: false,
+    },
+    120_000,
+  );
+  // A message that is ONLY a link (as Teams autolinks a pasted URL — the anchor
+  // text is the URL itself). It should render as just the integration card, with
+  // no message bubble around it.
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content:
+        `<a href="https://linear.app/acme/issue/ENG-3/freeze-actions-on-an-archived-trace">` +
+        `https://linear.app/acme/issue/ENG-3/freeze-actions-on-an-archived-trace</a>`,
+      is_self: true,
+    },
+    180_000,
+  );
+
+  const conv: Conversation = {
+    id: convId,
+    name: "Linear Links",
+    last_message_time: 0,
+    kind: "group",
+    last_message_preview: "",
+    last_message_sender: "",
+    last_message_from_me: false,
+    is_read: true,
+    is_muted: false,
+    is_pinned: false,
+    is_hidden: false,
+    thread_type: "chat",
+    draft: "",
+  };
+  const cs: ConvState = { conv, messages, participants: [other] };
+  recomputeSummary(cs);
+  store.set(convId, cs);
+  order.push(convId);
+}
+
 /** Push helper shared by the fixture seeds below: assigns ids/seq/compose_time so a
  *  seed only states what a message IS. */
 function pusher(convId: string, base: number, messages: ChatMessage[]) {
@@ -2072,14 +2157,22 @@ function mockPresence(mri: string): MockPresence {
 }
 
 // ---------------------------------------------------------------------------
-// App settings + GitLab link enrichment — stand-in for the Rust store settings
-// table (`get_settings`/`set_settings`) and the `gitlab` module (`enrich_link`).
-// Deterministic, self-contained: no real GitLab tenant is ever contacted.
+// App settings + link enrichment — stand-in for the Rust store settings table
+// (`get_settings`/`set_settings`) and the `link_preview` dispatch over the
+// `gitlab` and `linear` modules (`enrich_link`). Deterministic and
+// self-contained: no real GitLab or Linear workspace is ever contacted.
 // ---------------------------------------------------------------------------
 
-/** In-memory settings (the real backend persists these in SQLite). The token is
+/** In-memory settings (the real backend persists these in SQLite). A token is
  *  write-only from the UI's side, so only its presence is ever reported back. */
-const mockSettings = { gitlab_host: "gitlab.com", gitlab_token: "" };
+const mockSettings = {
+  gitlab_host: "gitlab.com",
+  gitlab_token: "",
+  // Pre-configured, unlike GitLab's: Linear has no anonymous read, so without a key
+  // the seeded Linear conversation would show four bare URLs and no cards. Any
+  // non-empty string does — this mock never contacts Linear.
+  linear_token: "lin_api_mock",
+};
 
 /** Devices that "subscribed" to push notifications, keyed by endpoint (the real
  *  backend keeps these in SQLite). In memory, so a mock restart forgets them. */
@@ -2115,9 +2208,17 @@ function pushStatusView(): {
 }
 
 /** Non-secret settings view, matching the Rust `get_settings` result. */
-function settingsView(): { gitlab_host: string; gitlab_token_set: boolean } {
+function settingsView(): {
+  gitlab_host: string;
+  gitlab_token_set: boolean;
+  linear_token_set: boolean;
+} {
   const host = mockSettings.gitlab_host.trim() || "gitlab.com";
-  return { gitlab_host: host, gitlab_token_set: mockSettings.gitlab_token.length > 0 };
+  return {
+    gitlab_host: host,
+    gitlab_token_set: mockSettings.gitlab_token.length > 0,
+    linear_token_set: mockSettings.linear_token.length > 0,
+  };
 }
 
 type GitLabKind = "merge_request" | "issue" | "project";
@@ -2170,6 +2271,7 @@ function mockGitLabMetadata(url: string): Record<string, unknown> | null {
     // GitLab's `head_pipeline.status`). !42 → success, !99 → running.
     const pipeline_status = ["failed", "pending", "success", "canceled", "running"][iid % 5]!;
     return {
+      provider: "gitlab",
       kind: "merge_request",
       url,
       title: `Add rich link previews for GitLab (!${iid})`,
@@ -2189,6 +2291,7 @@ function mockGitLabMetadata(url: string): Record<string, unknown> | null {
   if (parsed.kind === "issue") {
     const iid = parsed.iid!;
     return {
+      provider: "gitlab",
       kind: "issue",
       url,
       title: `Links should show a preview card (#${iid})`,
@@ -2201,12 +2304,110 @@ function mockGitLabMetadata(url: string): Record<string, unknown> | null {
     };
   }
   return {
+    provider: "gitlab",
     kind: "project",
     url,
     title: project_path,
     project_path,
     reference: "",
     description: "A sample GitLab project used by the teams-lite mock backend.",
+  };
+}
+
+type LinearKind = "issue" | "project" | "document";
+type ParsedLinear = { kind: LinearKind; id: string };
+
+/** Parse a Linear web URL into a supported resource, mirroring src/linear.rs. The
+ *  path is `/<workspace>/<kind>/<id>`; an issue is named by its identifier, a
+ *  project and a document by the slug id ending their segment. */
+function parseLinearUrl(url: string): ParsedLinear | null {
+  const match = url.match(/^https:\/\/([^/?#]+)([^?#]*)/i);
+  if (!match) return null;
+  const host = (match[1]!.split("@").pop() ?? "").split(":")[0]!.toLowerCase();
+  if (host !== "linear.app") return null;
+
+  const segments = (match[2] ?? "").split("/").filter(Boolean);
+  const [, kind, id] = segments;
+  if (!kind || !id) return null;
+
+  if (kind === "issue") {
+    return /^[a-z0-9]+-\d+$/i.test(id) ? { kind: "issue", id: id.toUpperCase() } : null;
+  }
+  if (kind !== "project" && kind !== "document") return null;
+  const slugId = id.split("-").pop() ?? "";
+  return /^[0-9a-f]{8,36}$/.test(slugId) ? { kind, id: slugId } : null;
+}
+
+/** Deterministic metadata for a parsed Linear URL — canned, but varied by the
+ *  issue number so the UI shows realistic, distinct cards without any workspace.
+ *  Returns null when no key is configured, matching the real module: Linear has no
+ *  anonymous read, so an unconfigured integration enriches nothing. */
+function mockLinearMetadata(url: string): Record<string, unknown> | null {
+  const parsed = parseLinearUrl(url);
+  if (!parsed || mockSettings.linear_token.length === 0) return null;
+
+  if (parsed.kind === "issue") {
+    const number = Number(parsed.id.split("-").pop());
+    // One issue per state category, so every icon and tint is exercised.
+    const states = [
+      { name: "Backlog", type: "backlog", color: "#bec2c8" },
+      { name: "Todo", type: "unstarted", color: "#e2e2e2" },
+      { name: "In Progress", type: "started", color: "#f2c94c" },
+      { name: "Done", type: "completed", color: "#5e6ad2" },
+      { name: "Canceled", type: "canceled", color: "#95a2b3" },
+    ];
+    const state = states[number % states.length]!;
+    return {
+      provider: "linear",
+      kind: "issue",
+      url,
+      identifier: parsed.id,
+      title: `Show Linear links as rich cards (${parsed.id})`,
+      team: "Engineering",
+      state: state.name,
+      state_type: state.type,
+      state_color: state.color,
+      assignee_name: "Ada Lovelace",
+      // ENG-1 is urgent, ENG-2 high, the rest unbadged — see `badgedPriority`.
+      priority: number % 5,
+      priority_label: ["No priority", "Urgent", "High", "Medium", "Low"][number % 5],
+      project: "Chat integrations",
+      ...(number % 3 === 0 ? { parent: "ENG-100" } : {}),
+      labels: [
+        { name: "frontend", color: "#bb87fc" },
+        { name: "enhancement", color: "#4cb782" },
+      ],
+      description:
+        "A bare Linear URL says nothing; show the title, the state and who owns it.",
+      due_date: "2026-09-11",
+    };
+  }
+  if (parsed.kind === "project") {
+    return {
+      provider: "linear",
+      kind: "project",
+      url,
+      identifier: "",
+      title: "Chat integrations",
+      team: "Engineering, Platform",
+      state: "In Progress",
+      state_type: "started",
+      state_color: "#f2c94c",
+      lead_name: "Grace Hopper",
+      progress: 0.42,
+      target_date: "2026-10-02",
+      description: "Bring the trackers the team lives in into the chat itself.",
+    };
+  }
+  return {
+    provider: "linear",
+    kind: "document",
+    url,
+    identifier: "",
+    title: "Link previews — system design",
+    creator_name: "Ada Lovelace",
+    project: "Chat integrations",
+    description: "How a link in a message becomes a card, and what each provider knows.",
   };
 }
 
@@ -3257,12 +3458,14 @@ function dispatch(method: string, params: unknown): unknown {
       const o = asObject(params);
       if (typeof o.gitlab_host === "string") mockSettings.gitlab_host = o.gitlab_host.trim();
       if (typeof o.gitlab_token === "string") mockSettings.gitlab_token = o.gitlab_token.trim();
+      if (typeof o.linear_token === "string") mockSettings.linear_token = o.linear_token.trim();
       return settingsView();
     }
 
+    // Each provider claims its own host, exactly as `link_preview::enrich` does.
     case "enrich_link": {
       const url = requireString(params, "url");
-      return { metadata: mockGitLabMetadata(url) };
+      return { metadata: mockGitLabMetadata(url) ?? mockLinearMetadata(url) };
     }
 
     // ---- mail (read-only) --------------------------------------------------
@@ -4098,6 +4301,7 @@ seedCallEvents();
 seedDeletedMessages();
 seedMentionSamples();
 seedGitLabSamples();
+seedLinearSamples();
 seedAppCards();
 seedThreadActivity();
 seedForwardedMessages();

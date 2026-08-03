@@ -36,6 +36,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/mail --mail        # the Mail surface
 //   bun run web/scripts/preview.ts --out /tmp/cal --calendar     # the Calendar surface
 //   bun run web/scripts/preview.ts --out /tmp/chan --channels    # the team → channel tree
+//   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
 //   bun run web/scripts/preview.ts --out /tmp/preview --scrolled # history scrolled up (jump button)
 //
@@ -699,6 +700,33 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-tree-light.png, ${out}-open-light.png, ` +
           `${out}-collapsed-light.png and ${out}-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // The rich link previews: the cards each integration renders for a link pasted
+  // into a chat. Both providers, because they share one frame on purpose and the
+  // thing worth looking at is whether they still read as one list of cards.
+  if (args.includes("--links")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openConversation(page, "Linear Links");
+      await page.waitForSelector('[data-testid="linear-link-card"]');
+      // Settle the four lookups before capturing, so no card is caught mid-arrival.
+      await page.waitForTimeout(600);
+      await shot(`${out}-linear-light.png`);
+      await openConversation(page, "GitLab Links");
+      await page.waitForSelector('[data-testid="gitlab-link-card"]');
+      await page.waitForTimeout(600);
+      await shot(`${out}-gitlab-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-gitlab-dark.png`);
+      await openConversation(page, "Linear Links");
+      await page.waitForSelector('[data-testid="linear-link-card"]');
+      await page.waitForTimeout(600);
+      await shot(`${out}-linear-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-{linear,gitlab}-light.png and ${out}-{gitlab,linear}-dark.png`,
       );
     });
     process.exit(0);

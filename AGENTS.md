@@ -95,6 +95,36 @@ The app reads the user's Teams/Outlook calendar over Microsoft Graph
   `OUTWARD_METHODS`, its own write-lock coverage — never a quiet addition to the read
   path.
 
+## The trackers are READ-ONLY (MANDATORY)
+
+The app enriches a tracker link pasted into a chat into a rich preview card
+(`src/link_preview.rs`, over `src/gitlab.rs` and `src/linear.rs`). It reads those
+trackers. It must never write to them.
+
+- **Never create, edit, comment on, assign, move or close an issue, a merge request
+  or a project** — in either tracker. A comment posted from here reaches everyone
+  watching the issue, under the user's name, and looks like they wrote it.
+- The credentials carry the consent: a Linear personal API key has **full write
+  access**, and a GitLab token has whatever scopes the user granted it. So nothing
+  at the API level stops a write. What stops it is that **no code names a write**:
+  `gitlab` issues GET requests only, `linear` sends GraphQL **queries** only, and a
+  test in `linear::tests` scans that module's own source for `mutation`. Do not
+  weaken, skip, or work around it.
+- **The Linear endpoint is a constant** (`linear::API_URL`), never derived from the
+  link being enriched, so the key can only ever reach Linear. GitLab's host IS
+  configurable, so it is *pinned* instead: a URL whose host is not the configured one
+  is never enriched and never sees the token. Both rails exist to stop the same thing
+  — a token leaving for an attacker-supplied host — so never widen either.
+- `set_settings` (which stores those credentials, and the GitLab host the token is
+  pinned to) is a `MACHINE_METHODS` entry: it needs the write token and is refused
+  read-only. `get_settings` stays open because it returns no token, only whether one
+  is set. A token is **write-only from the UI's side** — never send a raw one back to
+  a client, and never log one.
+- Reading, enriching and rendering a link are fine and are what the feature is for.
+  If writing to a tracker is ever wanted, it is a deliberate feature: its own consent
+  gate, its own entry in `OUTWARD_METHODS`, its own write-lock coverage — never a
+  quiet addition to the read path.
+
 ## Automation safety (MANDATORY — read before driving the UI)
 
 **This section exists because of a real incident.** An agent was screenshotting a
@@ -263,8 +293,10 @@ an outward action, so it is gated on purpose:
 - Backend: Rust (`src/`, binary `server` in `src/bin/server.rs`) — auth broker over
   D-Bus, real-time trouter client, local-first SQLite store, send, name resolution,
   Web Push to the user's own devices (`src/push.rs` + `src/push_policy.rs`), the
-  READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`) and the
-  READ-ONLY Teams/Outlook calendar (`src/calendar.rs`).
+  READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`), the
+  READ-ONLY Teams/Outlook calendar (`src/calendar.rs`) and the READ-ONLY rich link
+  previews for the trackers the user works in (`src/link_preview.rs` dispatching to
+  `src/gitlab.rs` and `src/linear.rs`).
   Exposed over a local WebSocket (`ws://127.0.0.1:19420`).
 - Two front-ends, both talking to the backend only through that WebSocket. Local-first
   is enforced server-side; neither front-end touches the network or SQLite directly.

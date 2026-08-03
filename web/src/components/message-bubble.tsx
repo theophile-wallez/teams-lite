@@ -19,12 +19,13 @@ import {
   parseRichMessage,
   urlHost,
   type ChatMessage,
-  type GitLabLinkMetadata,
+  type LinkMetadata,
   type ParsedRichMessage,
   type Reaction,
 } from "~/lib/protocol";
 import { reactionEmoji, REACTION_PICKER } from "~/lib/teams-emoji";
 import { hasActivePipeline } from "~/lib/gitlab-pipeline";
+import { LINEAR_WEB_HOST } from "~/lib/linear";
 import {
   containsImage,
   dropLinks,
@@ -46,6 +47,7 @@ import {
 import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
 import { FileAttachment, MediaImage, RecordingAttachment } from "./media-image";
 import { GitLabLinkCard } from "./gitlab-link-card";
+import { LinearLinkCard } from "./linear-link-card";
 import { PersonHoverCard } from "./person-card";
 import { Emoji } from "./emoji";
 import { useAppState, useController } from "./controller-context";
@@ -66,8 +68,15 @@ const REACTION_OVERHANG = "mb-6";
 
 /** Resolved enrichment for a set of links, keyed by URL: `undefined` while a
  *  lookup is in flight, `null` when the link is not an enrichable integration,
- *  or the metadata once resolved. */
-type LinkResults = Map<string, GitLabLinkMetadata | null | undefined>;
+ *  or the provider-tagged metadata once resolved. */
+type LinkResults = Map<string, LinkMetadata | null | undefined>;
+
+/** Whether a resolved link is a merge request whose CI is still in flight — the
+ *  one thing worth re-polling. Narrowed on the provider first: only GitLab has a
+ *  pipeline, and both providers use the kind "issue". */
+function isPollable(meta: LinkMetadata | null | undefined): boolean {
+  return meta?.provider === "gitlab" && hasActivePipeline(meta);
+}
 
 /** How often to re-fetch a merge request whose pipeline is still running. Kept
  *  conservative: only links with an in-progress pipeline are polled (see
@@ -111,7 +120,7 @@ function useEnrichedLinks(urls: string[]): LinkResults {
   // follows the running CI. The interval is armed only when something is active
   // and torn down as soon as everything is terminal; it pauses while the tab is
   // hidden, and a transient refresh failure keeps the last-known status.
-  const anyActive = urls.some((url) => hasActivePipeline(results.get(url)));
+  const anyActive = urls.some((url) => isPollable(results.get(url)));
   const resultsRef = useRef(results);
   resultsRef.current = results;
 
@@ -121,7 +130,7 @@ function useEnrichedLinks(urls: string[]): LinkResults {
     const id = setInterval(() => {
       if (document.visibilityState === "hidden") return;
       for (const url of urls) {
-        if (!hasActivePipeline(resultsRef.current.get(url))) continue;
+        if (!isPollable(resultsRef.current.get(url))) continue;
         controller
           .refreshLink(url)
           .then((meta) => alive && meta && setResults((prev) => new Map(prev).set(url, meta)))
@@ -201,15 +210,16 @@ function MessageBubbleImpl(props: {
   // their card on hover (the span itself only carries an index — see
   // `mentionsByItemId`).
   const mentions = useMemo(() => mentionsByItemId(props.message), [props.message]);
-  // Candidate GitLab links in the authored body (not the quoted reply) that
-  // target the configured host. Filtering by host keeps enrichment to real
-  // GitLab links; the backend is authoritative on whether one is enrichable.
+  // Candidate integration links in the authored body (not the quoted reply): the
+  // configured GitLab host, and Linear's fixed one. Filtering by host keeps
+  // enrichment to links an integration could plausibly claim, so an ordinary link
+  // costs no round-trip; the backend stays authoritative on whether one really is
+  // enrichable.
   const gitlabHost = useAppState((s) => s.settings.gitlab_host);
   const candidateLinks = useMemo(() => {
-    const host = gitlabHost.trim().toLowerCase();
-    if (!host) return [];
+    const hosts = new Set([gitlabHost.trim().toLowerCase(), LINEAR_WEB_HOST].filter(Boolean));
     const body = `${parsed.beforeHtml ?? ""}\n${parsed.bodyHtml}`;
-    return extractLinks(body, format).filter((u) => urlHost(u) === host);
+    return extractLinks(body, format).filter((u) => hosts.has(urlHost(u) ?? ""));
   }, [parsed, format, gitlabHost]);
 
   const enrichment = useEnrichedLinks(candidateLinks);
@@ -217,7 +227,7 @@ function MessageBubbleImpl(props: {
   // The links that resolved to an integration → shown as cards and hidden from
   // the body, and the cards themselves (in document order).
   const cards = useMemo(() => {
-    const out: { url: string; meta: GitLabLinkMetadata }[] = [];
+    const out: { url: string; meta: LinkMetadata }[] = [];
     for (const url of candidateLinks) {
       const meta = enrichment.get(url);
       if (meta) out.push({ url, meta });
@@ -624,9 +634,13 @@ function MessageBubbleImpl(props: {
 
             {cards.length > 0 ? (
               <div className={cn("flex flex-col gap-1.5", !linkOnly && "mt-1.5")}>
-                {cards.map(({ url, meta }) => (
-                  <GitLabLinkCard key={url} metadata={meta} />
-                ))}
+                {cards.map(({ url, meta }) =>
+                  meta.provider === "linear" ? (
+                    <LinearLinkCard key={url} metadata={meta} />
+                  ) : (
+                    <GitLabLinkCard key={url} metadata={meta} />
+                  ),
+                )}
               </div>
             ) : null}
 

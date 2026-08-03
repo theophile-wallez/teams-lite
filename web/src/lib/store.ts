@@ -35,8 +35,8 @@ import {
   type Channel,
   type ChatMessage,
   type Conversation,
-  type GitLabLinkMetadata,
   type IncomingCall,
+  type LinkMetadata,
   type LiveStatus,
   type MailBody,
   type MailFolder,
@@ -50,6 +50,7 @@ import {
   type ReadReceipt,
   type ReadReceiptSignal,
   type ReplyTo,
+  type SettingsPatch,
   type TypingName,
   type TypingSignal,
   type UpdateInfo,
@@ -217,8 +218,9 @@ export type AppState = {
   /** Whether curated interaction sounds play (client-only preference). Gates the
    *  cuelume engine globally — imperative cues and `data-cuelume-*` alike. */
   soundsEnabled: boolean;
-  /** Non-secret app settings (GitLab host + whether a token is stored), loaded
-   *  from the backend on start. Drives which links get rich previews. */
+  /** Non-secret app settings (the GitLab host + whether each integration's token
+   *  is stored), loaded from the backend on start. Drives which links get rich
+   *  previews. */
   settings: AppSettings;
   /** Push notifications for THIS device: what the browser supports, what stands in
    *  the way, and which devices the backend notifies. The only path that reaches a
@@ -382,7 +384,7 @@ function initialState(): AppState {
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
     soundsEnabled: DEFAULT_SOUNDS_ENABLED,
-    settings: { gitlab_host: "gitlab.com", gitlab_token_set: false },
+    settings: { gitlab_host: "gitlab.com", gitlab_token_set: false, linear_token_set: false },
     push: INITIAL_PUSH_STATE,
     mailFolders: [],
     mailFolderId: null,
@@ -468,11 +470,11 @@ export class TeamsController {
   private avatarCache = new Map<string, Promise<string | null>>();
   private avatarObjectUrls: string[] = [];
 
-  // GitLab link-enrichment cache: URL -> a promise of its metadata (or null when
-  // not enrichable). Deduplicates concurrent/repeat lookups of the same link
-  // across message re-renders and scrolling. A failed (transient) lookup is
+  // Link-enrichment cache: URL -> a promise of its metadata (or null when no
+  // integration recognizes it). Deduplicates concurrent/repeat lookups of the same
+  // link across message re-renders and scrolling. A failed (transient) lookup is
   // evicted so a later render can retry, matching the media cache.
-  private linkCache = new Map<string, Promise<GitLabLinkMetadata | null>>();
+  private linkCache = new Map<string, Promise<LinkMetadata | null>>();
 
   // Person-card caches, both keyed by MRI. A directory card barely changes, so it
   // is cached for the whole session (a "not found" too — asking again would answer
@@ -565,8 +567,9 @@ export class TeamsController {
       this.set({ ready: true });
       // The activity feed is best-effort and must never block startup.
       void this.refreshNotifications();
-      // App settings (GitLab host/token state) are best-effort too — a failure
-      // just leaves the defaults, so link previews target gitlab.com.
+      // App settings (the GitLab host, and which integration tokens are stored)
+      // are best-effort too — a failure just leaves the defaults, which enrich
+      // nothing but public gitlab.com links.
       void this.loadSettings();
       // Where this device stands on push notifications, and a re-registration if it
       // is already subscribed (a browser may have rotated the subscription while the
@@ -1928,10 +1931,10 @@ export class TeamsController {
     return pending;
   }
 
-  // ---- settings + GitLab link enrichment ----------------------------------
+  // ---- settings + link enrichment -----------------------------------------
 
   /** Load the non-secret app settings from the backend into reactive state.
-   *  Best-effort: on failure the defaults remain (host gitlab.com, no token). */
+   *  Best-effort: on failure the defaults remain (host gitlab.com, no tokens). */
   private async loadSettings(): Promise<void> {
     try {
       const settings = await this.backend.getSettings();
@@ -1943,8 +1946,9 @@ export class TeamsController {
 
   /** Persist app settings (partial) and reflect the fresh non-secret view in
    *  state. Clears the link cache so previews re-evaluate against the new host /
-   *  token. Rejects on failure so the caller (the settings form) can surface it. */
-  async saveSettings(patch: { gitlabHost?: string; gitlabToken?: string }): Promise<AppSettings> {
+   *  tokens — including the links that resolved to nothing before a token was
+   *  stored. Rejects on failure so the caller (the settings form) can surface it. */
+  async saveSettings(patch: SettingsPatch): Promise<AppSettings> {
     const settings = await this.backend.setSettings(patch);
     this.set({ settings });
     this.linkCache.clear();
@@ -2102,10 +2106,10 @@ export class TeamsController {
     }
   }
 
-  /** Resolve rich metadata for a GitLab link (or null when not enrichable),
-   *  going through the backend. Cached and de-duplicated per URL; a transient
-   *  failure is evicted so a later render can retry. */
-  enrichLink(url: string): Promise<GitLabLinkMetadata | null> {
+  /** Resolve rich metadata for a tracker link (or null when no integration
+   *  recognizes it), going through the backend. Cached and de-duplicated per URL;
+   *  a transient failure is evicted so a later render can retry. */
+  enrichLink(url: string): Promise<LinkMetadata | null> {
     const cached = this.linkCache.get(url);
     if (cached) return cached;
 
@@ -2119,7 +2123,7 @@ export class TeamsController {
    *  render sees the freshest result. Used to keep a live signal current — a
    *  merge request's pipeline status while its CI is still running. A transient
    *  failure is evicted (not cached) so a subsequent lookup can retry. */
-  refreshLink(url: string): Promise<GitLabLinkMetadata | null> {
+  refreshLink(url: string): Promise<LinkMetadata | null> {
     const pending = this.backend.enrichLink(url).then((res) => res.metadata ?? null);
     this.linkCache.set(url, pending);
     pending.catch(() => this.linkCache.delete(url));

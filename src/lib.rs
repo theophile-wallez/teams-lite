@@ -2,6 +2,8 @@ pub mod auth;
 pub mod calendar;
 pub mod gitlab;
 pub mod graph_time;
+pub mod linear;
+pub mod link_preview;
 pub mod mail;
 pub mod mail_html;
 pub mod push;

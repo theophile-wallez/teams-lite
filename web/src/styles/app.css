@@ -615,6 +615,31 @@ html[data-virtual-keyboard-open] .composer-shell {
   --event-meta: color-mix(in srgb, var(--event-color) 26%, var(--text-dim));
 }
 
+/* Linear link cards: ONE state colour in, two legible treatments out.
+   A workspace colours its own workflow states, so the colour arrives from the API as
+   an arbitrary hex and cannot be a fixed set of named classes — the same problem
+   calendar events have, solved the same way: the component sets `--state-color`
+   inline and these mixes derive from it.
+   The mix is what makes it usable. Linear's palette is tuned for Linear's own UI, so
+   an "unstarted" grey is #e2e2e2 — invisible on our light card, and the amber and
+   indigo states are only a little better. Pulling every colour toward --foreground
+   (light theme) or --text-dim (dark) keeps the HUE that tells two started states
+   apart, while contrast stops depending on what someone picked in Linear. */
+.linear-state {
+  --linear-state-icon: color-mix(in srgb, var(--state-color) 58%, var(--foreground));
+  --linear-state-label: color-mix(in srgb, var(--state-color) 42%, var(--text-dim));
+}
+[data-theme="dark"] .linear-state {
+  --linear-state-icon: color-mix(in srgb, var(--state-color) 62%, var(--text-dim));
+  --linear-state-label: color-mix(in srgb, var(--state-color) 46%, var(--text-dim));
+}
+.linear-state-icon {
+  color: var(--linear-state-icon);
+}
+.linear-state-label {
+  color: var(--linear-state-label);
+}
+
 /* Calendar: the diagonal hatch every calendar uses for a TENTATIVE event, so
    "maybe" is legible without a colour of its own (colour is reserved for which
    calendar an event belongs to). Drawn over the block's own tint at low contrast,

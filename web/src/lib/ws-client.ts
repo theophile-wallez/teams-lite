@@ -27,6 +27,7 @@ import type {
   PresenceResult,
   ReadReceiptsResult,
   ReplyTo,
+  SettingsPatch,
 } from "./protocol";
 import type { PushStatus, SubscriptionPayload } from "./push";
 
@@ -599,21 +600,28 @@ export class Backend {
     });
   }
 
-  /** Read the non-secret app settings (GitLab host + whether a token is stored). */
+  /** Read the non-secret app settings (GitLab host + whether each integration's
+   *  token is stored). A read, so it needs no write token — the view carries no
+   *  token, and the UI needs it before the user has done anything. */
   getSettings(): Promise<AppSettings> {
     return this.request<AppSettings>("get_settings");
   }
-  /** Persist app settings (partial). Omit a field to leave it unchanged; pass
-   *  `gitlabToken: ""` to clear the stored token. Returns the fresh non-secret
-   *  view so the caller updates in one round-trip. */
-  setSettings(patch: { gitlabHost?: string; gitlabToken?: string }): Promise<AppSettings> {
+  /** Persist app settings (partial). Omit a field to leave it unchanged; pass a
+   *  token as `""` to clear the stored one. Returns the fresh non-secret view so
+   *  the caller updates in one round-trip.
+   *
+   *  Gated by the write token: these are the integration credentials this machine
+   *  holds, and the GitLab host decides where its token may be sent (see
+   *  MACHINE_METHODS in src/bin/server.rs). */
+  setSettings(patch: SettingsPatch): Promise<AppSettings> {
     const params: Record<string, string> = {};
     if (patch.gitlabHost !== undefined) params.gitlab_host = patch.gitlabHost;
     if (patch.gitlabToken !== undefined) params.gitlab_token = patch.gitlabToken;
-    return this.request<AppSettings>("set_settings", params);
+    if (patch.linearToken !== undefined) params.linear_token = patch.linearToken;
+    return this.writeRequest<AppSettings>("set_settings", params);
   }
-  /** Enrich a GitLab link with metadata for a rich preview card. Resolves with
-   *  `{ metadata: null }` when the link is not an enrichable GitLab resource (or
+  /** Enrich a tracker link with metadata for a rich preview card. Resolves with
+   *  `{ metadata: null }` when no integration recognizes the link (or the resource
    *  is private); rejects only on a transient backend/network failure. */
   enrichLink(url: string): Promise<LinkMetadataResult> {
     return this.request<LinkMetadataResult>("enrich_link", { url });

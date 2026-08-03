@@ -3,6 +3,7 @@ import {
   Bell,
   Check,
   ChevronLeft,
+  CircleDotDashed,
   ExternalLink,
   GitPullRequestArrow,
   Loader2,
@@ -15,6 +16,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { APPEARANCES, appearanceLabel, type Appearance } from "~/lib/appearance";
+import type { SettingsPatch } from "~/lib/protocol";
 import { pushBlockerMessage } from "~/lib/push";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
@@ -31,10 +33,10 @@ type SaveState = { kind: "idle" | "saving" | "saved" } | { kind: "error"; messag
 
 /**
  * The Settings surface, rendered in the right pane in place of a conversation
- * (see components/app.tsx). It hosts integration configuration — currently the
- * GitLab host + access token that power rich link previews — and the appearance
- * preference. All values persist through the backend (the token is write-only:
- * the UI only ever learns whether one is stored, never its value).
+ * (see components/app.tsx). It hosts integration configuration — the GitLab host
+ * and the access tokens that power rich link previews — and the appearance
+ * preference. All values persist through the backend (a token is write-only: the
+ * UI only ever learns whether one is stored, never its value).
  */
 export function SettingsPane(props: { onBack?: () => void }) {
   return (
@@ -66,6 +68,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
       <div className="flex-1 overflow-y-auto px-4 py-6 md:px-5">
         <div className="mx-auto flex max-w-xl flex-col gap-8 pb-[env(safe-area-inset-bottom)]">
           <GitLabSettings />
+          <LinearSettings />
           <NotificationSettings />
           <AppearanceSettings />
           <SoundsSettings />
@@ -91,7 +94,7 @@ function GitLabSettings() {
   const tokenSet = settings.gitlab_token_set;
   const tokenHelpUrl = `https://${(host || "gitlab.com").trim()}/-/user_settings/personal_access_tokens`;
 
-  const persist = async (patch: { gitlabHost?: string; gitlabToken?: string }) => {
+  const persist = async (patch: SettingsPatch) => {
     setSave({ kind: "saving" });
     try {
       await controller.saveSettings(patch);
@@ -103,7 +106,7 @@ function GitLabSettings() {
   };
 
   const onSave = () => {
-    const patch: { gitlabHost?: string; gitlabToken?: string } = { gitlabHost: host.trim() };
+    const patch: SettingsPatch = { gitlabHost: host.trim() };
     // Only send the token when the user actually typed one; an empty field means
     // "leave the stored token unchanged".
     if (token.trim().length > 0) patch.gitlabToken = token;
@@ -215,6 +218,125 @@ function GitLabSettings() {
           )}
           {save.kind === "error" && (
             <span data-testid="gitlab-save-status" className="text-xs text-destructive">
+              {save.message}
+            </span>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Linear integration: an API key for rich link previews.
+ *
+ * Simpler than the GitLab section by one field, and deliberately so: Linear is
+ * SaaS-only, so there is no host to configure — and no anonymous read either, which
+ * is why the key is not optional here. Without one, a Linear link stays a bare URL.
+ */
+function LinearSettings() {
+  const controller = useController();
+  const tokenSet = useAppState((s) => s.settings.linear_token_set);
+
+  const [token, setToken] = useState("");
+  const [save, setSave] = useState<SaveState>({ kind: "idle" });
+
+  const persist = async (patch: SettingsPatch) => {
+    setSave({ kind: "saving" });
+    try {
+      await controller.saveSettings(patch);
+      setToken("");
+      setSave({ kind: "saved" });
+    } catch (e) {
+      setSave({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
+  return (
+    <section className="flex flex-col gap-4">
+      <div className="flex items-start gap-3">
+        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
+          <CircleDotDashed className="size-5" strokeWidth={1.5} />
+        </div>
+        <div className="flex flex-col">
+          <h3 className="text-[15px] font-medium text-foreground">Linear</h3>
+          <p className="text-[13px] text-text-faint">
+            Show rich previews for Linear links (issues, projects, documents).
+          </p>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-4 rounded-xl bg-card p-4 shadow-chip">
+        <label className="flex flex-col gap-1.5">
+          <span className="flex items-center gap-2 text-[13px] font-medium text-foreground">
+            API key
+            {tokenSet && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/12 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                <Check className="size-3" strokeWidth={2.5} /> Saved
+              </span>
+            )}
+          </span>
+          <Input
+            data-testid="linear-token-input"
+            type="password"
+            value={token}
+            placeholder={tokenSet ? "•••••••••• (leave blank to keep)" : "lin_api_…"}
+            autoComplete="off"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            onChange={(e) => setToken(e.target.value)}
+          />
+          <span className="text-[11px] text-text-faint">
+            A personal API key from your Linear settings. Linear has no public read
+            access, so previews need one.{" "}
+            <a
+              href="https://linear.app/settings/account/security"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 text-primary underline underline-offset-2 hover:opacity-80"
+            >
+              Create one <ExternalLink className="size-3" strokeWidth={1.6} />
+            </a>
+          </span>
+        </label>
+
+        <div className="flex items-center gap-3 pt-1">
+          <Button
+            size="sm"
+            data-testid="linear-save"
+            disabled={save.kind === "saving" || token.trim().length === 0}
+            onClick={() => void persist({ linearToken: token })}
+          >
+            {save.kind === "saving" ? (
+              <>
+                <Loader2 className="size-4 animate-spin" strokeWidth={1.8} /> Saving…
+              </>
+            ) : (
+              "Save"
+            )}
+          </Button>
+          {tokenSet && (
+            <Button
+              size="sm"
+              variant="ghost"
+              data-testid="linear-remove-token"
+              disabled={save.kind === "saving"}
+              onClick={() => void persist({ linearToken: "" })}
+            >
+              Remove key
+            </Button>
+          )}
+          {save.kind === "saved" && (
+            <span
+              data-testid="linear-save-status"
+              className="flex items-center gap-1 text-xs text-emerald-600 animate-in fade-in-0 zoom-in-95 duration-200 ease-out dark:text-emerald-400"
+            >
+              <Check className="size-3.5" strokeWidth={2} /> Saved
+            </span>
+          )}
+          {save.kind === "error" && (
+            <span data-testid="linear-save-status" className="text-xs text-destructive">
               {save.message}
             </span>
           )}

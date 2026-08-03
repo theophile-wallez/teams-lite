@@ -46,6 +46,13 @@
 // session where the UI is driven by tooling rather than by a human. See
 // `read_only`, and the "Automation safety" section of AGENTS.md.
 //
+// `enrich_link` turns a tracker link in a message into a rich preview card, through
+// whichever integration recognizes its host (see `link_preview`): `gitlab` for merge
+// requests, issues and projects, `linear` for issues, projects and documents. Both
+// are READ-ONLY like mail and the calendar — a Linear API key can create and edit
+// issues as the user, so `linear` sends GraphQL queries only and `linear::tests`
+// enforce that on the source.
+//
 // No raw tokens are ever logged or sent.
 
 use anyhow::{Context, Result};
@@ -65,7 +72,7 @@ use teams_lite::{
     teams_media, teams_presence, teams_profiles, teams_read, teams_readstate, teams_send, trouter,
     trouter_events,
 };
-use teams_lite::gitlab;
+use teams_lite::{gitlab, link_preview};
 
 /// The port the user's own backend owns: what `teams`, `teams-web` and the TUI
 /// dial by default.
@@ -91,10 +98,13 @@ const INITIAL_CLIENT_GRACE: Duration = Duration::from_secs(30);
 /// grace window for UI restarts/reconnects, then terminate the backend ourselves.
 const DISCONNECTED_CLIENT_GRACE: Duration = Duration::from_secs(10);
 
-/// Settings keys (see `store::Store::{get,set}_setting`). The GitLab host and a
-/// personal access token drive rich link previews (see `gitlab`).
+/// Settings keys (see `store::Store::{get,set}_setting`). The GitLab host plus one
+/// access token per integration drive rich link previews (see `link_preview`).
 const SETTING_GITLAB_HOST: &str = "gitlab_host";
 const SETTING_GITLAB_TOKEN: &str = "gitlab_token";
+/// A Linear personal API key. Linear is SaaS-only, so unlike GitLab it has no host
+/// to configure — only whether we hold a key (see `linear`).
+const SETTING_LINEAR_TOKEN: &str = "linear_token";
 /// This machine's VAPID private key (base64url), generated on first use. It must
 /// stay stable: every device's subscription embeds the matching public half, so a
 /// new key silently stops every phone that already opted in (see
@@ -125,8 +135,15 @@ const OUTWARD_METHODS: [&str; 3] = ["send", "edit", "react"];
 /// then POSTed to it. Even with [`teams_lite::push::is_supported_endpoint`] confining
 /// that to the browser vendors' push services, deciding which devices a machine
 /// notifies is not something a client that merely found this socket gets to do.
-const MACHINE_METHODS: [&str; 4] =
-    ["repair_broker", "push_subscribe", "push_unsubscribe", "push_test"];
+///
+/// `set_settings` stores the integration credentials (see `link_preview`), and one
+/// of them is host-pinned rather than fixed: a client that could write
+/// `gitlab_host` would repoint the pin at a host it controls, and the next
+/// `enrich_link` for a link on that host would hand it the user's stored GitLab
+/// token. Reading the settings back stays open — it never returns a token, only
+/// whether one is set.
+const MACHINE_METHODS: [&str; 5] =
+    ["repair_broker", "push_subscribe", "push_unsubscribe", "push_test", "set_settings"];
 
 /// What a {@link MACHINE_METHODS} entry actually does to the machine, for its
 /// refusal text. Per method, not per class: "restarts the Intune container" would be
@@ -138,6 +155,7 @@ fn machine_effect(method: &str) -> &'static str {
         "push_subscribe" | "push_unsubscribe" | "push_test" => {
             "changes which devices this machine sends push notifications to"
         }
+        "set_settings" => "stores the integration credentials kept on this machine",
         // Unreachable while the two lists agree; the test below pins that they do.
         _ => "changes this machine",
     }
@@ -1728,50 +1746,48 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         }
 
         // Read the non-secret view of the app settings: the configured GitLab
-        // host and whether a token is stored. The raw token is NEVER returned —
-        // it is write-only from the UI's perspective, matching the "no raw tokens
-        // are ever sent" rule.
+        // host and whether each integration's token is stored. A raw token is
+        // NEVER returned — it is write-only from the UI's perspective, matching
+        // the "no raw tokens are ever sent" rule.
         "get_settings" => {
             let store = ctx.store()?;
-            gitlab_settings_json(&store)
+            settings_json(&store)
         }
 
         // Persist app settings (partial update). Only keys present in `params`
-        // are written, so the UI can save the host without resending the token.
-        // `gitlab_token: ""` explicitly clears the token. Returns the same
-        // non-secret view as `get_settings` so the UI updates in one round-trip.
+        // are written, so the UI can save the host without resending a token, and
+        // save one integration's token without touching the other's. An explicit
+        // `""` clears that token. Returns the same non-secret view as
+        // `get_settings` so the UI updates in one round-trip.
         "set_settings" => {
             let store = ctx.store()?;
             if let Some(host) = params.get("gitlab_host").and_then(Value::as_str) {
                 store.set_setting(SETTING_GITLAB_HOST, host.trim())?;
             }
-            if let Some(token) = params.get("gitlab_token").and_then(Value::as_str) {
-                store.set_setting(SETTING_GITLAB_TOKEN, token.trim())?;
+            for (param, key) in [
+                ("gitlab_token", SETTING_GITLAB_TOKEN),
+                ("linear_token", SETTING_LINEAR_TOKEN),
+            ] {
+                if let Some(token) = params.get(param).and_then(Value::as_str) {
+                    store.set_setting(key, token.trim())?;
+                }
             }
-            gitlab_settings_json(&store)
+            settings_json(&store)
         }
 
-        // Enrich a GitLab link with metadata (title, state, author, …) so the UI
-        // can render a rich preview card instead of a bare URL. The configured
-        // token is read from the store and sent only to the configured host (see
-        // `gitlab`). Best-effort: a non-GitLab/private link yields `metadata:
-        // null` (the UI shows the plain link); only a transient failure errors.
+        // Enrich a tracker link with metadata (title, state, assignee, …) so the
+        // UI can render a rich preview card instead of a bare URL. Each
+        // integration answers for its own host, with its configured token read
+        // from the store (see `link_preview`). Best-effort: an unrecognized or
+        // private link yields `metadata: null` (the UI shows the plain link);
+        // only a transient failure errors.
         "enrich_link" => {
             let url = param_str(params, "url")?;
-            let (host, token) = {
+            let settings = {
                 let store = ctx.store()?;
-                (
-                    store.get_setting(SETTING_GITLAB_HOST)?,
-                    store.get_setting(SETTING_GITLAB_TOKEN)?,
-                )
+                link_preview_settings(&store)?
             };
-            let host = host
-                .map(|h| h.trim().to_string())
-                .filter(|h| !h.is_empty())
-                .unwrap_or_else(|| gitlab::DEFAULT_HOST.to_string());
-            let token = token.filter(|t| !t.is_empty());
-            let metadata =
-                gitlab::fetch_metadata(&ctx.http, &host, token.as_deref(), &url).await?;
+            let metadata = link_preview::enrich(&ctx.http, &settings, &url).await?;
             Ok(json!({ "metadata": metadata }))
         }
 
@@ -2669,20 +2685,34 @@ fn param_str_list(params: &Value, key: &str) -> Vec<String> {
 }
 
 /// Build the non-secret view of the app settings for the UI: the configured
-/// GitLab host (falling back to the default) and whether a token is stored. The
-/// raw token is deliberately never included — the UI only needs to know it is
-/// set, never its value.
-fn gitlab_settings_json(store: &Store) -> Result<Value> {
-    let host = store
-        .get_setting(SETTING_GITLAB_HOST)?
-        .map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| gitlab::DEFAULT_HOST.to_string());
-    let token_set = store
-        .get_setting(SETTING_GITLAB_TOKEN)?
-        .map(|t| !t.is_empty())
-        .unwrap_or(false);
-    Ok(json!({ "gitlab_host": host, "gitlab_token_set": token_set }))
+/// GitLab host (falling back to the default) and whether each integration's token
+/// is stored. A raw token is deliberately never included — the UI only needs to
+/// know it is set, never its value.
+fn settings_json(store: &Store) -> Result<Value> {
+    let settings = link_preview_settings(store)?;
+    Ok(json!({
+        "gitlab_host": settings.gitlab_host,
+        "gitlab_token_set": settings.gitlab_token.is_some(),
+        "linear_token_set": settings.linear_token.is_some(),
+    }))
+}
+
+/// Read what the link-preview integrations need from the store: the GitLab host
+/// (falling back to the default) and one token per provider. A stored empty
+/// string means "no token", which is how the UI clears one.
+fn link_preview_settings(store: &Store) -> Result<link_preview::Settings> {
+    let token = |key: &str| -> Result<Option<String>> {
+        Ok(store.get_setting(key)?.filter(|t| !t.is_empty()))
+    };
+    Ok(link_preview::Settings {
+        gitlab_host: store
+            .get_setting(SETTING_GITLAB_HOST)?
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| gitlab::DEFAULT_HOST.to_string()),
+        gitlab_token: token(SETTING_GITLAB_TOKEN)?,
+        linear_token: token(SETTING_LINEAR_TOKEN)?,
+    })
 }
 
 /// Resolve the persistent SQLite path, following the XDG Base Directory spec:
@@ -3719,6 +3749,64 @@ mod tests {
         }
         // Reading the status is open, like every other read.
         assert_eq!(write_class("push_status"), None);
+    }
+
+    #[test]
+    fn storing_the_integration_credentials_is_gated_but_is_not_outward_facing() {
+        // Writing the settings can move the GitLab host the stored token is pinned
+        // to, which would send that token somewhere the user never configured. It
+        // posts nothing to Teams, so it is gated as a machine change, not as an
+        // outward action.
+        assert!(!OUTWARD_METHODS.contains(&"set_settings"));
+        assert_eq!(write_class("set_settings"), Some(WriteClass::Machine));
+        let err = check_write_allowed("set_settings", &json!({}), Some("tok"))
+            .expect_err("must refuse a tokenless settings write");
+        assert!(err.contains("write token"), "{err}");
+        assert!(err.contains("integration credentials"), "{err}");
+        assert!(
+            check_write_allowed("set_settings", &json!({ "write_token": "tok" }), Some("tok"))
+                .is_ok()
+        );
+        // Reading them back stays open: the view carries no token, only whether one
+        // is set, and the UI needs it before the user has done anything.
+        assert_eq!(write_class("get_settings"), None);
+        // Enriching a link is a read as well — it is how every preview card loads.
+        assert_eq!(write_class("enrich_link"), None);
+    }
+
+    #[test]
+    fn the_settings_view_reports_each_token_without_revealing_it() {
+        let store = Store::open_in_memory().unwrap();
+
+        // Untouched: the GitLab default host, and neither integration configured.
+        let fresh = settings_json(&store).unwrap();
+        assert_eq!(fresh["gitlab_host"], gitlab::DEFAULT_HOST);
+        assert_eq!(fresh["gitlab_token_set"], false);
+        assert_eq!(fresh["linear_token_set"], false);
+
+        store.set_setting(SETTING_LINEAR_TOKEN, "lin_api_secret").unwrap();
+        store.set_setting(SETTING_GITLAB_HOST, "gitlab.example.com").unwrap();
+        let configured = settings_json(&store).unwrap();
+        assert_eq!(configured["gitlab_host"], "gitlab.example.com");
+        assert_eq!(configured["linear_token_set"], true);
+        // One integration's token says nothing about the other's.
+        assert_eq!(configured["gitlab_token_set"], false);
+        // THE point of the non-secret view: no raw token is anywhere in it.
+        assert!(
+            !configured.to_string().contains("lin_api_secret"),
+            "the settings view must never carry a raw token: {configured}"
+        );
+    }
+
+    #[test]
+    fn an_emptied_token_reads_back_as_unset() {
+        // How the UI clears a token: it sends "", which must not count as a stored
+        // one — otherwise the pane would keep offering "Remove token" forever.
+        let store = Store::open_in_memory().unwrap();
+        store.set_setting(SETTING_LINEAR_TOKEN, "lin_api_secret").unwrap();
+        store.set_setting(SETTING_LINEAR_TOKEN, "").unwrap();
+        assert_eq!(settings_json(&store).unwrap()["linear_token_set"], false);
+        assert_eq!(link_preview_settings(&store).unwrap().linear_token, None);
     }
 
     #[test]

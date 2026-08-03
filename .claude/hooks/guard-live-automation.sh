@@ -233,11 +233,13 @@ if ! sanctioned_automation; then
       scripts_sending_mail="$scripts_sending_mail $script"
     fi
     # READING the live backend is fine and often the point (inspecting real data
-    # beats guessing). WRITING is not: `send`/`edit`/`react` post as the user, and
+    # beats guessing). WRITING is not: `send`/`edit`/`react` post as the user,
     # `push_subscribe`/`push_unsubscribe`/`push_test` change which devices the machine
     # sends the user's message previews to — a phone buzzed by tooling, or a stream
-    # aimed at a new endpoint. So a script that addresses the backend is blocked only
-    # when it also names a write method or carries a write token.
+    # aimed at a new endpoint — and `set_settings` writes the integration credentials,
+    # including the GitLab host its stored token may be sent to. So a script that
+    # addresses the backend is blocked only when it also names a write method or
+    # carries a write token.
     #
     # "Addresses the backend" includes the app's own server: it relays every
     # WebSocket upgrade to the same backend (see web/server.ts), so its port — and
@@ -248,7 +250,7 @@ if ! sanctioned_automation; then
     # user's hands-on dev pair (bin/teams-dev-server.sh and `bun run dev`), which is
     # just as send-capable. Only 19430 — read-only — is absent, by design.
     if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|react|push_subscribe|push_unsubscribe|push_test)"|'\''(send|edit|react|push_subscribe|push_unsubscribe|push_test)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|react|push_subscribe|push_unsubscribe|push_test|set_settings)"|'\''(send|edit|react|push_subscribe|push_unsubscribe|push_test|set_settings)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that

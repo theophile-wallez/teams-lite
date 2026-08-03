@@ -519,13 +519,25 @@ export const NOTIFICATION_TABS = ["activity", "mentions", "following"] as const;
 export type NotificationTab = (typeof NOTIFICATION_TABS)[number];
 
 /** Non-secret view of the app settings (mirrors the Rust `get_settings` /
- *  `set_settings` result in src/bin/server.rs). The GitLab token is write-only
- *  from the UI's side: we only ever learn whether one is stored, never its value. */
+ *  `set_settings` result in src/bin/server.rs). Every token is write-only from the
+ *  UI's side: we only ever learn whether one is stored, never its value. */
 export type AppSettings = {
   /** GitLab host used for link previews, e.g. "gitlab.com" or a self-hosted host. */
   gitlab_host: string;
   /** True when a GitLab access token is stored on the backend. */
   gitlab_token_set: boolean;
+  /** True when a Linear API key is stored on the backend. Linear is SaaS-only, so
+   *  it has no host to configure — only whether we hold a key. */
+  linear_token_set: boolean;
+};
+
+/** A partial settings update. An omitted field is left unchanged, so one
+ *  integration's form never clears the other's token; an explicit `""` clears the
+ *  stored token it names. */
+export type SettingsPatch = {
+  gitlabHost?: string;
+  gitlabToken?: string;
+  linearToken?: string;
 };
 
 /** Kind discriminant for an enriched GitLab link (mirrors the Rust `LinkMetadata`
@@ -561,9 +573,70 @@ export type GitLabLinkMetadata = {
   pipeline_status?: string;
 };
 
-/** Result of an `enrich_link` request: the metadata, or `null` when the link is
- *  not an enrichable GitLab resource (or is private/absent). */
-export type LinkMetadataResult = { metadata: GitLabLinkMetadata | null };
+/** Kind discriminant for an enriched Linear link (mirrors the Rust `LinkMetadata`
+ *  `kind` in src/linear.rs). */
+export type LinearLinkKind = "issue" | "project" | "document";
+
+/** One Linear label, with the colour Linear itself shows it in. */
+export type LinearLabel = { name: string; color?: string };
+
+/** Rich metadata for a Linear link, returned by `enrich_link` (mirrors the Rust
+ *  `LinkMetadata` in src/linear.rs). Optional fields are absent when Linear did
+ *  not provide them or they do not apply to the resource kind. */
+export type LinearLinkMetadata = {
+  kind: LinearLinkKind;
+  /** Canonical web URL of the resource (what the card links to). */
+  url: string;
+  title: string;
+  /** Human reference for an issue, e.g. "ENG-123"; "" for the other kinds. */
+  identifier: string;
+  /** Owning team name (an issue), or the joined names of a project's teams. */
+  team?: string;
+  /** Workflow state (issue) or status (project) name, as shown in Linear. */
+  state?: string;
+  /** The state's *category*, which is what the card colours and shapes its icon
+   *  from: "backlog" | "unstarted" | "started" | "completed" | "canceled" |
+   *  "triage", plus "planned" and "paused" for a project. Stable across
+   *  workspaces, unlike `state`, which anyone can rename. */
+  state_type?: string;
+  /** The state's colour in Linear, as a CSS hex string ("#5e6ad2"). */
+  state_color?: string;
+  assignee_name?: string;
+  /** Project lead. */
+  lead_name?: string;
+  /** Document author. */
+  creator_name?: string;
+  /** Linear's numeric priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. */
+  priority?: number;
+  /** The priority's own label ("Urgent", "High", …). */
+  priority_label?: string;
+  /** The project an issue or document belongs to. */
+  project?: string;
+  /** Parent issue identifier, for a sub-issue. */
+  parent?: string;
+  labels?: LinearLabel[];
+  description?: string;
+  /** Issue due date, as Linear's plain "YYYY-MM-DD". */
+  due_date?: string;
+  /** Project target date, same format. */
+  target_date?: string;
+  /** Project completion, 0–1. The card draws a progress bar from it. */
+  progress?: number;
+};
+
+/** Metadata for one enriched link, tagged with the integration it came from
+ *  (mirrors the Rust `link_preview::Preview`).
+ *
+ *  The `provider` tag is what the union discriminates on, and it is load-bearing
+ *  rather than cosmetic: both providers have an "issue" and a "project" kind, so
+ *  `kind` alone is ambiguous and only the pair names a card. */
+export type LinkMetadata =
+  | ({ provider: "gitlab" } & GitLabLinkMetadata)
+  | ({ provider: "linear" } & LinearLinkMetadata);
+
+/** Result of an `enrich_link` request: the metadata, or `null` when no integration
+ *  recognizes the link (or the resource is private/absent). */
+export type LinkMetadataResult = { metadata: LinkMetadata | null };
 
 // ---- message content parsing (ported from ui/src/message-content.ts) -------
 
