@@ -385,9 +385,13 @@ user. Two independent mechanisms enforce that split:
   service.
 - **Check the port before running the E2E suite.** `reuseExistingServer` is on
   outside CI, so anything already listening on the suite's mock port gets adopted
-  and the specs send through it. `e2e/global-setup.ts` aborts when the answer is not
-  the mock; still pass explicit ports when another session may be running one:
-  `E2E_MOCK_PORT=19467 E2E_WEB_PORT=19468`.
+  and the specs send through it. `e2e/global-setup.ts` aborts when the answer is not the
+  mock — but NOT when the answer is a mock another run left behind, which
+  `reuseExistingServer` then adopts: its code is not the code under test, and a stale one
+  serving an older `agent_status` reads exactly like a bug in the app. That check cannot
+  live in `global-setup.ts` either, because the suite starts its own server first, so the
+  check cannot tell ours from a squatter. Pass explicit free ports whenever another
+  session may be running one: `E2E_MOCK_PORT=19467 E2E_WEB_PORT=19468`.
 - **Screenshots are not proof of the target.** Before trusting a captured UI, look
   at *what it shows*: the mock's fixtures are in English with names like "Lucas
   Silva". Real conversations mean you were live all along.
