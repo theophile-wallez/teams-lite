@@ -548,8 +548,11 @@ async function waitForHttp(url: string, what: string): Promise<void> {
  * Newest cached Playwright chromium. The MCP browser is not installed in this
  * environment, and `playwright-core` ships no browser of its own, so we point at
  * the revision the Playwright test runner already downloaded.
+ *
+ * Exported for `scripts/sandbox-live.ts`, the live-account twin of this file: one
+ * way of finding a browser, so a second driver never grows its own.
  */
-function findChromium(): string {
+export function findChromium(): string {
   const root = join(process.env.HOME ?? "", ".cache", "ms-playwright");
   const revisions = readdirSync(root)
     .filter((name) => /^chromium-\d+$/.test(name))

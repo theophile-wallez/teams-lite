@@ -17,6 +17,23 @@ test.describe("messaging", () => {
     await expect(composer).toHaveValue("");
   });
 
+  // The live sentinel. `web/scripts/sandbox-live.ts` may type into the user's real
+  // account in exactly one conversation, and it proves which one is open by reading
+  // this attribute before every keystroke — so it has to name the thread that is
+  // actually on screen, and it has to follow a switch (AGENTS.md § Sending messages).
+  test("the composer names the conversation it would post to", async ({ page }) => {
+    await gotoApp(page);
+    const shell = page.locator('[data-testid="composer-shell"]');
+
+    const first = await openConversationAt(page, 0);
+    expect(first).not.toBe("");
+    await expect(shell).toHaveAttribute("data-conversation-id", first);
+
+    const second = await openConversationAt(page, 1);
+    expect(second).not.toBe(first);
+    await expect(shell).toHaveAttribute("data-conversation-id", second);
+  });
+
   test("Shift+Enter inserts a newline instead of sending", async ({ page }) => {
     await gotoApp(page);
     await openConversationAt(page, 0);

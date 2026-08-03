@@ -9,6 +9,15 @@
             "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-live-automation.sh\""
           }
         ]
+      },
+      {
+        "matcher": "mcp__playwright__browser_.*|mcp__t3-code__preview_.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-prod-chat-target.sh\""
+          }
+        ]
       }
     ],
     "PostToolUse": [

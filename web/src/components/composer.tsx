@@ -230,6 +230,13 @@ export function Composer(props: { focusToken: unknown }) {
   return (
     <div
       data-testid="composer-shell"
+      // The live sentinel. `web/scripts/sandbox-live.ts` is allowed to type into the
+      // REAL account in exactly one conversation (the sandbox chat in AGENTS.md), and
+      // it proves which one is open by reading this attribute before every keystroke.
+      // It carries the app's own `openId`, not the URL and not the script's
+      // assumption, so a redirect or a click that moved the thread cannot fool it —
+      // the live counterpart of `[data-testid="backend-badge"]`. Keep it stable.
+      data-conversation-id={openId ?? ""}
       className="composer-shell relative shrink-0 bg-background px-4"
     >
       {/* The history dissolves into the page immediately above the bar. The overlay

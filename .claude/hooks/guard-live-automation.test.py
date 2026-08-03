@@ -160,6 +160,12 @@ def cases(tmp: Path):
         # Tracked scripts are reviewed code, including from a subdirectory.
         ("ALLOW", WEB, "bun run scripts/scroll-probe.ts --steps 10"),
         ("ALLOW", WEB, "bun run preview -- --out /tmp/shot"),
+        # The sanctioned live driver: it types in the designated sandbox chat and
+        # proves that from the app's own state before every key, so it must reach the
+        # shell — a guard that blocked it would leave hand-rolling as the only way.
+        ("ALLOW", WEB, "bun run sandbox"),
+        ("ALLOW", WEB, 'bun run sandbox -- --type "hello" --send'),
+        ("ALLOW", WEB, "bun run scripts/sandbox-live.ts --local"),
         ("ALLOW", WEB, "bun run dev:mock"),
         ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 cargo run --bin server"),
         # Stopping or inspecting a process is cleanup, whatever it names.

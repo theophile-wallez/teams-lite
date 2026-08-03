@@ -14,7 +14,9 @@
 # WRITING is what gets blocked, in every shape it can take:
 #   1. browser automation (playwright / puppeteer / chromium) that does not go
 #      through web/scripts/preview.ts — the helper that proves it is on the mock
-#      before it types;
+#      before it types. Its live twin, web/scripts/sandbox-live.ts, is the one path
+#      to a real keystroke: it types only in the designated sandbox chat, and proves
+#      that from the app's own state before every key;
 #   2. a script that calls send/edit/react against the live backend — on its own
 #      port (19420 for the always-on service, 19421 for the dev one) or through an
 #      app server that relays to it (19440 / 19441, and whatever tailnet name it is
@@ -38,6 +40,9 @@
 # The backend enforces the same boundary independently: writes require a capability
 # token it publishes only for the user's own frontends (see `write_token` in
 # src/bin/server.rs), so even a client this hook never saw cannot post.
+#
+# This hook only sees `Bash`. Its sibling, guard-prod-chat-target.sh, covers the other
+# door: a browser driven by an MCP tool, which needs no command line at all.
 #
 # Contract: read the tool call as JSON on stdin, exit 0 to allow, exit 2 with a
 # reason on stderr to block and tell the model why.
@@ -347,7 +352,13 @@ it, and asserts the MOCK sentinel badge before it types anything:
 
 Or import it as a library (withPreview / typeInComposer / openFirstConversation)
 from web/scripts/preview.ts for anything more elaborate. Extend that helper if it
-lacks something — do not hand-roll a driver around it."
+lacks something — do not hand-roll a driver around it.
+
+If the answer genuinely needs the real account, there is one place and one tool for
+it — the designated sandbox chat, driven by web/scripts/sandbox-live.ts, which reads
+the open conversation id out of the app's own state before every keystroke:
+
+  cd web && bun run sandbox -- --type \"hello\" --send"
   fi
 fi
 

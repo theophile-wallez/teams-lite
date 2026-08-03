@@ -9,15 +9,34 @@
 - This covers anything that posts to Teams on the user's behalf — new messages,
   replies, reactions, edits — whether triggered through the UI, the backend
   `server`, a script, or a direct API/WebSocket call.
-- **The one standing exception is the designated sandbox channel**
-  `19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2`
-  (`http://localhost:19440/c/19%3A21d2695ae8ff4e25ace9c662e5c326cb%40thread.v2`).
+- **The one standing exception is the designated sandbox chat**
+  `19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2`, at this address:
+
+      https://theophile-remote.taild26c06.ts.net:8443/c/19%3A21d2695ae8ff4e25ace9c662e5c326cb%40thread.v2
+
   Sending there is pre-authorized — it is the only place a send is allowed without
   asking first. Treat every other channel and chat as off-limits absent explicit
-  consent.
+  consent. (That URL is the tailnet front of the always-on web unit; the same
+  conversation on this machine's own front is
+  `http://127.0.0.1:19440/c/19%3A21d2695ae8ff4e25ace9c662e5c326cb%40thread.v2`.
+  One chat, two doors.)
+- **A chat feature that must be exercised against the real account is exercised in
+  that chat and nowhere else.** One thread, chosen once, so a mistake lands where a
+  mistake is harmless. The mock comes first — `cd web && bun run preview` exercises
+  send, edit and react with nothing leaving the machine — and prod is only for what
+  the mock cannot show.
+- **`cd web && bun run sandbox` is the only sanctioned way to type into the live
+  app.** It opens the URL above, reads the open conversation id out of the app's own
+  state (`[data-testid="composer-shell"]`'s `data-conversation-id`) and refuses every
+  keystroke unless it is the sandbox thread — the live counterpart of the MOCK
+  sentinel in `web/scripts/preview.ts`. Add `--local` when the tailnet name does not
+  resolve on this machine: it is the same chat through `127.0.0.1:19440`, which is
+  what `tailscale serve` proxies 8443 to. Never click through the sidebar of a live
+  app, and never drive a live page with the browser MCP tools: neither can prove
+  which conversation a keystroke lands in.
 - Reading, searching, drafting, and showing a proposed message to the user for
   review are always fine. Only the actual send requires a green light.
-- Outside the sandbox channel, consent is per-message and never standing: approval
+- Outside the sandbox chat, consent is per-message and never standing: approval
   to send one message is not permission to send others. When in doubt, draft it and
   ask first.
 
@@ -88,8 +107,9 @@ colleagues.** Nothing in the chain was able to notice, and the mistake was
 invisible until the screenshots came back full of real conversations.
 
 The rules below are therefore not style preferences. They are the guardrails that
-make that failure impossible, and they are enforced mechanically by
-`.claude/hooks/guard-live-automation.sh` (a `PreToolUse` hook).
+make that failure impossible, and they are enforced mechanically by two `PreToolUse`
+hooks: `.claude/hooks/guard-live-automation.sh` on every `Bash` command, and
+`.claude/hooks/guard-prod-chat-target.sh` on every browser MCP tool.
 
 **Reading the real backend is allowed. Writing to it is not.** Inspecting real
 conversations, history and DB rows is useful and encouraged — guessing is worse.
@@ -130,6 +150,25 @@ user. Two independent mechanisms enforce that split:
   `[data-testid="backend-badge"][data-backend="mock"]`, which comes from the
   backend's own `backend_info` sentinel (only `web/mock/server.ts` emits it). No
   badge means *unproven*, which means live.
+- **One chat, and only one, may be typed into for real.** When a chat feature can
+  only be shown against the real account, the target is the sandbox chat named in
+  § Sending messages and nothing else, driven by `cd web && bun run sandbox`
+  (`web/scripts/sandbox-live.ts`). That script is the live twin of `preview.ts`: it
+  hard-codes the sandbox thread and its URL, hands out no raw `page` to navigate
+  away with, and re-reads `[data-testid="composer-shell"]`'s `data-conversation-id`
+  — the app's own state, not our assumption — immediately before every keystroke and
+  again before Enter. It types nothing at all in any other conversation, so a wrong
+  assumption ends in a thrown error rather than in a colleague's chat.
+- **The browser MCP tools may look at the live app; they may never type in it.**
+  `guard-prod-chat-target.sh` reads the URL of every `*_navigate` / `preview_open`
+  call, and once the target is a live front (19420 / 19421 / 19440 / 19441, or a
+  `*.ts.net` name) it allows only the calls that observe a page — snapshot,
+  screenshot, console, network log, wait, hover, close — and blocks everything else:
+  click, type, press, fill, drag, upload, evaluate, and any tool either server grows
+  tomorrow. Reading prod stays normal work; typing in it is not possible. The same
+  block applies when *no* navigation has been seen in the session, because a browser
+  whose page nobody declared is exactly the "unproven means live" case. Declare it
+  with a navigate; do not phrase around the block.
 - **A dev server must name its backend.** Use `bun run dev:mock` (mock on 19455,
   app on 19445). `bun run dev` is the *user's* shortcut to their live account — not
   yours to start. A bare `vite dev` refuses to run at all: there is no default
@@ -344,8 +383,10 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   - The automation guard (`.claude/hooks/`): `python3
     .claude/hooks/guard-live-automation.test.py` whenever you touch the hook, a
     launcher name, or a port. It pins both halves — what must block, and the ordinary
-    work that must not. Run `python3 .claude/hooks/sync-service-to-master.test.py`
-    alongside it when you touch the service auto-update hook or `teams-lite-service.sh`.
+    work that must not. Run `python3 .claude/hooks/guard-prod-chat-target.test.py`
+    alongside it when you touch the browser-MCP guard, and `python3
+    .claude/hooks/sync-service-to-master.test.py` when you touch the service
+    auto-update hook or `teams-lite-service.sh`.
   - A change that only touches a frontend does not need `cargo test`, and a
     backend-only change does not need the frontend suites. When a change spans
     both (e.g. a protocol or WebSocket contract), run the suites on both sides.
