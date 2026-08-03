@@ -5,3 +5,8 @@
 
 # git worktree copies created for parallel sessions
 .worktrees/
+
+# dependencies. No trailing slash, so a `node_modules` SYMLINK — how a worktree
+# borrows the main checkout's install — is ignored too, and can never be staged by
+# mistake (web/.gitignore says the same for the web app's own install).
+node_modules
