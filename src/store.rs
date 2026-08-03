@@ -261,6 +261,38 @@ CREATE TABLE IF NOT EXISTS push_deliveries (
     dedupe_key TEXT PRIMARY KEY,
     claimed_ms INTEGER NOT NULL DEFAULT 0
 );
+-- One row per agent run in flight: the message it is writing into, from the moment the
+-- placeholder is posted until the final edit lands (see `agent_reply` in
+-- src/bin/server.rs).
+--
+-- It exists for the one case nothing else covers: the process is KILLED mid-run — the
+-- always-on service restarts on every re-stage, and a run outlives no restart — so the
+-- terminal edit never goes out and the message keeps its "claude is thinking…" body
+-- forever, in a thread everybody reads. The row is what a later process reads to find
+-- that message and close it honestly.
+--
+-- Hence durable rather than in-memory: the question "was this message left mid-answer"
+-- has to be answerable by a process that is not the one that left it.
+--
+-- `heartbeat_ms` is what separates a dead run from a live one. A run refreshes it while
+-- it writes, so a stale row is an abandoned one — and that test holds ACROSS processes,
+-- which is what matters here: the service (19420) and the user's dev backend (19421)
+-- share this store, and neither may close a run the other is still writing.
+CREATE TABLE IF NOT EXISTS agent_runs (
+    conversation_id TEXT NOT NULL,
+    -- The posted message being edited into the answer — what a repair rewrites.
+    message_id      TEXT NOT NULL,
+    -- The TRIGGER's message id, i.e. the `run_id` every `agent_stream` frame carries.
+    -- Kept so a repair can also tell the app's own pages that the run they are drawing
+    -- is over, instead of leaving a bubble writing until their staleness guard fires.
+    trigger_id      TEXT NOT NULL DEFAULT '',
+    -- Which CLI is answering (`agent_policy::BACKENDS`), because the body a repair
+    -- writes names it.
+    backend         TEXT NOT NULL DEFAULT '',
+    started_ms      INTEGER NOT NULL DEFAULT 0,
+    heartbeat_ms    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (conversation_id, message_id)
+);
 "#;
 
 /// Indexes, applied AFTER [`migrate`] because several of them cover columns that a
@@ -327,13 +359,17 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// v9 adds `channels.team_collapsed`, the parent team's fold state in the user's own
 /// Teams client. Additive, so an older binary keeps working on a v9 store.
 ///
+/// v10 adds `agent_runs`, the runs in flight, so a run killed by a restart can be told
+/// from one still writing. A whole new table rather than columns, and additive: an
+/// older binary never names it.
+///
 /// v8 renames `channels.is_favorite` to `channels.is_shown` (the CSA flag means
 /// Show/Hide, not a favorites list) and adds `channels.is_pinned`, Teams' real
 /// channel pin. The FIRST migration to rename rather than add, so it is also the
 /// first that an OLDER binary cannot read: a backend still running the previous
 /// build queries `is_favorite` and gets nothing. Restart every backend that shares
 /// the store — the always-on service does it on re-stage.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -886,6 +922,19 @@ pub struct PushSubscriptionRow {
     pub created_ms: i64,
     pub last_ok_ms: i64,
     pub last_error: String,
+}
+
+/// One agent run in flight, as stored (see the `agent_runs` note in [`SCHEMA`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRun {
+    pub conversation_id: String,
+    /// The posted message the answer is being edited into.
+    pub message_id: String,
+    /// The trigger's message id — the `run_id` an `agent_stream` frame carries.
+    pub trigger_id: String,
+    pub backend: String,
+    pub started_ms: i64,
+    pub heartbeat_ms: i64,
 }
 
 pub struct Store {
@@ -3015,6 +3064,102 @@ impl Store {
         )? > 0)
     }
 
+    /// Record a run as in flight, from the moment its placeholder is in the thread.
+    ///
+    /// Replaces any row on the same message: a re-registration is the same run saying
+    /// so again, never a second one — a Teams message has exactly one body.
+    pub fn begin_agent_run(&self, run: &AgentRun) -> Result<()> {
+        self.exec(
+            "INSERT OR REPLACE INTO agent_runs
+                 (conversation_id, message_id, trigger_id, backend, started_ms, heartbeat_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                run.conversation_id,
+                run.message_id,
+                run.trigger_id,
+                run.backend,
+                run.started_ms,
+                run.heartbeat_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Say the run is still writing. The absence of these beats is the ONLY signal
+    /// that a run died, so this must keep ticking through a long silent tool call.
+    pub fn touch_agent_run(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        self.exec(
+            "UPDATE agent_runs SET heartbeat_ms = ?3
+             WHERE conversation_id = ?1 AND message_id = ?2",
+            params![conversation_id, message_id, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a run that ended, however it ended. Called on every exit path of a
+    /// reply: the row means "left mid-answer", and a run that reached its own last
+    /// edit did not.
+    pub fn finish_agent_run(&self, conversation_id: &str, message_id: &str) -> Result<()> {
+        self.exec(
+            "DELETE FROM agent_runs WHERE conversation_id = ?1 AND message_id = ?2",
+            params![conversation_id, message_id],
+        )?;
+        Ok(())
+    }
+
+    /// Every run that has not said anything since `quiet_before_ms` — the runs a
+    /// process abandoned, oldest first.
+    pub fn abandoned_agent_runs(&self, quiet_before_ms: i64) -> Result<Vec<AgentRun>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT conversation_id, message_id, trigger_id, backend, started_ms, heartbeat_ms
+             FROM agent_runs WHERE heartbeat_ms < ?1 ORDER BY started_ms ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![quiet_before_ms], |row| {
+                Ok(AgentRun {
+                    conversation_id: row.get(0)?,
+                    message_id: row.get(1)?,
+                    trigger_id: row.get(2)?,
+                    backend: row.get(3)?,
+                    started_ms: row.get(4)?,
+                    heartbeat_ms: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Take an abandoned run for repair. `true` means it is yours to close.
+    ///
+    /// The DELETE itself is the arbitration, exactly like [`Store::claim_once`]: two
+    /// backends sweeping the same store both see the row, and only one of them removes
+    /// it — so only one edits the message. The heartbeat is re-checked here rather than
+    /// trusted from the listing, because a run whose process came back to life between
+    /// the two must keep its message.
+    ///
+    /// A caller whose repair then FAILS puts the row back
+    /// ([`Store::begin_agent_run`]), so the next sweep tries again. That is why the
+    /// claim is the row and not a `push_deliveries` key: a key, once taken, is taken
+    /// for a day, and a message left frozen is the thing this whole table exists to
+    /// prevent.
+    pub fn take_abandoned_agent_run(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        quiet_before_ms: i64,
+    ) -> Result<bool> {
+        Ok(self.exec(
+            "DELETE FROM agent_runs
+             WHERE conversation_id = ?1 AND message_id = ?2 AND heartbeat_ms < ?3",
+            params![conversation_id, message_id, quiet_before_ms],
+        )? > 0)
+    }
+
     /// Drop claims older than `before_ms`. They only exist to stop two backends
     /// acting twice on a LIVE message, and every policy already refuses anything older
     /// than a few minutes, so keeping them forever would grow a table nobody reads.
@@ -3573,7 +3718,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (9, 0xb85d_7321_4a6b_1492);
+        const PINNED: (i64, u64) = (10, 0x5b08_a2be_8c18_60b9);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -6051,5 +6196,61 @@ mod tests {
         // Pruned claims are re-claimable, which is fine: every policy refuses a
         // message that old anyway.
         assert!(s.claim_once("c1/m1", 2_000).unwrap());
+    }
+
+    fn a_run(message_id: &str, heartbeat_ms: i64) -> AgentRun {
+        AgentRun {
+            conversation_id: "19:c@thread.v2".into(),
+            message_id: message_id.into(),
+            trigger_id: "1000".into(),
+            backend: "claude".into(),
+            started_ms: 1_000,
+            heartbeat_ms,
+        }
+    }
+
+    #[test]
+    fn a_run_is_abandoned_only_once_its_heartbeat_goes_quiet() {
+        let s = Store::open_in_memory().unwrap();
+        s.begin_agent_run(&a_run("2000", 1_000)).unwrap();
+        assert!(s.abandoned_agent_runs(1_000).unwrap().is_empty(), "not quiet yet");
+
+        // A run that keeps saying so keeps its message, however long it takes. This is
+        // the case that must never be repaired: an agent thinking for five minutes.
+        s.touch_agent_run("19:c@thread.v2", "2000", 9_000).unwrap();
+        assert!(s.abandoned_agent_runs(5_000).unwrap().is_empty());
+
+        let abandoned = s.abandoned_agent_runs(10_000).unwrap();
+        assert_eq!(abandoned.len(), 1);
+        assert_eq!(abandoned[0].message_id, "2000");
+        assert_eq!(abandoned[0].trigger_id, "1000", "the run id a stream frame needs");
+        assert_eq!(abandoned[0].heartbeat_ms, 9_000);
+    }
+
+    #[test]
+    fn a_finished_run_leaves_nothing_to_repair() {
+        let s = Store::open_in_memory().unwrap();
+        s.begin_agent_run(&a_run("2000", 1_000)).unwrap();
+        s.finish_agent_run("19:c@thread.v2", "2000").unwrap();
+        assert!(s.abandoned_agent_runs(i64::MAX).unwrap().is_empty());
+        // Registering twice is the same run, not two: one message, one body.
+        s.begin_agent_run(&a_run("2000", 1_000)).unwrap();
+        s.begin_agent_run(&a_run("2000", 2_000)).unwrap();
+        assert_eq!(s.abandoned_agent_runs(i64::MAX).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_one_sweeper_takes_an_abandoned_run() {
+        // Two backends share this store and both sweep it; the message must be edited
+        // once. The DELETE is the arbitration, so the loser gets `false`.
+        let s = Store::open_in_memory().unwrap();
+        s.begin_agent_run(&a_run("2000", 1_000)).unwrap();
+        assert!(s.take_abandoned_agent_run("19:c@thread.v2", "2000", 5_000).unwrap());
+        assert!(!s.take_abandoned_agent_run("19:c@thread.v2", "2000", 5_000).unwrap());
+
+        // A run that spoke again between the listing and the take keeps its message.
+        s.begin_agent_run(&a_run("2001", 9_000)).unwrap();
+        assert!(!s.take_abandoned_agent_run("19:c@thread.v2", "2001", 5_000).unwrap());
+        assert_eq!(s.abandoned_agent_runs(i64::MAX).unwrap().len(), 1);
     }
 }

@@ -299,4 +299,40 @@ mod tests {
             );
         }
     }
+
+    /// The restart must not cut a local-agent reply in half.
+    ///
+    /// This is the second half of a real failure. A run was answering in the sandbox
+    /// channel when `.claude/hooks/sync-service-to-master.sh` re-staged master and
+    /// restarted the units; the child died with the backend, the final edit never went
+    /// out, and the thread was left saying "claude is thinking…" — for ten minutes,
+    /// until the user asked what was happening. The other half is the repair
+    /// (`repair_abandoned_agent_runs` in src/bin/server.rs), which closes a reply
+    /// nobody can finish. This one is the part that keeps the answer instead.
+    ///
+    /// The test reads the script, like the one above: the wait lives on the other side
+    /// of the process boundary, and no Rust test would see it go missing.
+    #[test]
+    fn the_installer_waits_for_the_agent_before_it_restarts() {
+        let installer = include_str!("../bin/teams-lite-service.sh");
+
+        let restart = installer
+            .find("try-restart")
+            .expect("bin/teams-lite-service.sh restarts the units");
+        let wait = installer.find("|| wait_for_quiet_agent").expect(
+            "`update` must wait for a quiet agent, or a restart freezes a reply mid-answer",
+        );
+        assert!(wait < restart, "the wait must come BEFORE the restart, not after it");
+
+        // Bounded, and it proceeds when the bound is reached: a run that never ends must
+        // not keep the user's phone on an old commit for good.
+        assert!(
+            installer.contains("AGENT_WAIT_SECONDS"),
+            "the wait must be bounded, and the bound must be overridable"
+        );
+        assert!(
+            installer.contains(r#"[ "$wait_for_agent" = no ]"#),
+            "`update --now` must be able to skip the wait"
+        );
+    }
 }

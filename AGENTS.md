@@ -167,7 +167,7 @@ Five rules hold it together. Each one is load-bearing, and each is pinned by a t
   from its environment: an agent holding it could `send` to any chat directly, around
   every gate above. A read-only backend never answers at all.
 
-Four more things worth knowing before touching it:
+Five more things worth knowing before touching it:
 
 - **The providers live in Settings, and the model with them.** Settings › AI providers
   (`web/src/components/ai-providers-settings.tsx`) shows every CLI in
@@ -199,6 +199,26 @@ Four more things worth knowing before touching it:
 - **The reply signs itself.** The message is posted under the user's name, so the last
   line says a machine wrote it (`— claude, via teams-lite`). That is honesty about
   authorship, not decoration.
+- **A run does not survive its process, so a restart is handled on both sides.** The
+  child dies with the backend, the final edit never goes out, and the thread keeps the
+  `claude is thinking…` placeholder — for everybody in it, for good. It happened: a
+  re-stage restarted the service mid-answer and the user waited ten minutes in front of a
+  frozen message. Two halves fix it, and neither replaces the other:
+  - **The restart waits.** `bin/teams-lite-service.sh update` holds the `try-restart`
+    while a run is writing (`wait_for_quiet_agent`), because nothing can resume a run —
+    waiting is the only way the reader gets the answer they asked for. A live run
+    publishes a marker file under `$XDG_RUNTIME_DIR/teams-lite/agent-runs/` naming its
+    pid, which is what lets a SHELL see it without opening the store. The wait is bounded
+    and then proceeds: a stuck run must not keep the user's phone on an old commit.
+    `--now` skips it and is the user's switch — the automation hook refuses it.
+  - **What is left behind is closed.** Every run is recorded in `agent_runs` while it is
+    in flight, with a heartbeat, so a run whose process is GONE can be told from one that
+    is quietly reading files. Whichever backend comes up sweeps for the quiet ones and
+    rewrites their message with `agent_policy::interrupted_html`
+    (`repair_abandoned_agent_runs`). That body is deliberately the failure shape every
+    client already reads, so no client needed a new case — and it says to ask again,
+    because that is the one thing the reader can do. It sweeps rather than checking once
+    at boot: the run this restart killed still has a fresh heartbeat a second later.
 
 `examples/agent_stream_probe.rs` drives the whole chain against the real tenant —
 pinned to the sandbox channel, and the only sanctioned way to try it live:
@@ -335,7 +355,9 @@ user. Two independent mechanisms enforce that split:
   § The user's own status), dev servers with no declared backend, a production web server with no
   declared backend, a send-capable backend started by tooling — including `systemctl
   --user start` on the always-on service's units, and including the `teams` command
-  itself, which is that backend plus the real app on 19440 in one word. It reads the
+  itself, which is that backend plus the real app on 19440 in one word — and
+  `teams-lite-service.sh update --now`, the switch that skips the wait for a live
+  `@claude` run and so freezes a half-written reply in the thread. It reads the
   *contents* of what a command runs, including an untracked `examples/*.rs` a `cargo
   run --example` names. Searching, stopping and inspecting stay allowed on purpose: a
   `grep` whose pattern names a launcher runs nothing, and a guard that fired on it
@@ -685,6 +707,11 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   commit from days ago. It acts **only when a unit is already active** and **only from a
   clean `master`**, so it can neither bring the send-capable backend up nor promote a
   working tree. `.claude/hooks/sync-service-to-master.test.py` pins both refusals.
+- **The restart waits for a live `@claude` run.** A run dies with the process it is in,
+  and the reply it was writing keeps its "thinking…" body in front of the whole thread, so
+  `update` holds the `try-restart` until the agent is quiet — bounded, then it proceeds
+  (see § The local agent for the other half, which closes what a restart did leave
+  behind). `--now` skips the wait and is the user's: the hook refuses it.
 - **What is yours:** `install`, `update`, `units`, `status`, `logs`, `stop`,
   `uninstall`, and every `systemctl --user status|cat|show` /
   `journalctl --user -u …`. Diagnosing the service is normal work.

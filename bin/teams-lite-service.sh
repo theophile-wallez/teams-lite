@@ -3,6 +3,7 @@
 #
 #   bin/teams-lite-service.sh install     # build + stage + write the units (starts nothing)
 #   bin/teams-lite-service.sh update      # rebuild + restage, then restart what is running
+#   bin/teams-lite-service.sh update --now # the same, without waiting for a live agent run
 #   bin/teams-lite-service.sh units       # rewrite + verify the units only (no build)
 #   bin/teams-lite-service.sh status      # units, ports, artifact, broker, tailscale
 #   bin/teams-lite-service.sh logs [-f]   # journal for both units
@@ -25,6 +26,14 @@
 # send-capable — it is the user's real Teams client — so bringing it up is the user's
 # call, and `install` prints the one command that does it. That boundary is also
 # enforced mechanically for agents by .claude/hooks/guard-live-automation.sh.
+#
+# WHY `update` WAITS. A restart kills a local-agent run (`@claude` in a thread) with the
+# child process, and the reply it was writing keeps its "claude is thinking…" body in
+# front of everybody in the thread. So the restart waits for the agent to be quiet — see
+# `wait_for_quiet_agent`, and `agent_run_marker_dir` in src/bin/server.rs for the markers
+# it reads. The wait is bounded and then restarts anyway: the run left behind is closed
+# by whichever backend comes up (`repair_abandoned_agent_runs`), so the thread ends up
+# honest either way, and a staged commit is never held hostage by one stuck run.
 set -euo pipefail
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -73,6 +82,16 @@ INTUNE_CONTAINER="${INTUNE_CONTAINER:-$(command -v intune-container || echo "$HO
 # directories come first, because a self-updating CLI lives there and must win over an
 # older packaged copy.
 AGENT_PATH="${TEAMS_LITE_AGENT_PATH:-$HOME/.local/bin:$HOME/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+
+# Where a live agent run publishes its marker (`agent_run_marker_dir` in
+# src/bin/server.rs), and how long a restart waits for one. Ten minutes is over the
+# longest run seen against the real tenant; past it the restart proceeds, because the
+# staged commit must reach the user's phone and the abandoned reply is closed by the
+# backend that comes up.
+# No runtime directory means no markers are published at all (see the Rust side), so the
+# variable stays empty rather than naming a path at the root that can never exist.
+AGENT_RUN_DIR="${TEAMS_LITE_AGENT_RUN_DIR:-${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/teams-lite/agent-runs}}"
+AGENT_WAIT_SECONDS="${TEAMS_LITE_AGENT_WAIT:-600}"
 
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
@@ -304,6 +323,56 @@ configure_tailscale() {
   check_tailscale
 }
 
+# --- the local agent ---------------------------------------------------------
+
+# How many agent runs are writing a reply right now.
+#
+# One marker file per run, holding the pid of the backend that owns it. The pid is what
+# makes a leftover different from a live run: a marker whose process is gone belongs to a
+# run something already killed — most often a previous restart — and waiting for it would
+# hold every update back for as long as the file sits there.
+live_agent_runs() {
+  local file pid count=0
+  if [ -n "$AGENT_RUN_DIR" ] && [ -d "$AGENT_RUN_DIR" ]; then
+    for file in "$AGENT_RUN_DIR"/*; do
+      [ -f "$file" ] || continue
+      pid="$(sed -n 's/^pid=//p' "$file" | head -1)"
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        count=$((count + 1))
+      fi
+    done
+  fi
+  printf '%s' "$count"
+}
+
+# Hold the restart while the local agent is mid-answer.
+#
+# A restart kills the CLI child, so the reply stops growing where it stood and the thread
+# is left with a body that says the agent is thinking. Waiting is the only way the reader
+# gets the answer they asked for — nothing can resume a run.
+#
+# Bounded, and it never fails: after AGENT_WAIT_SECONDS it says so and lets the restart
+# through, because the alternative is a stuck run keeping the user's phone on an old
+# commit indefinitely. The reply that dies then is closed by the backend that comes up.
+wait_for_quiet_agent() {
+  local live waited=0
+  live="$(live_agent_runs)"
+  [ "$live" = 0 ] && return 0
+
+  say "Waiting for the local agent to finish…"
+  info "$live run(s) writing a reply — a restart would freeze it mid-answer"
+  while [ "$(live_agent_runs)" != 0 ] && [ "$waited" -lt "$AGENT_WAIT_SECONDS" ]; do
+    sleep 5
+    waited=$((waited + 5))
+    [ $((waited % 60)) = 0 ] && info "still writing after ${waited}s"
+  done
+  if [ "$(live_agent_runs)" != 0 ]; then
+    warn "gave up after ${waited}s: restarting anyway — the reply will be marked interrupted"
+  else
+    info "the agent is quiet after ${waited}s"
+  fi
+}
+
 # --- reporting ---------------------------------------------------------------
 
 print_units_state() {
@@ -360,9 +429,20 @@ cmd_install() {
 }
 
 cmd_update() {
+  local wait_for_agent=yes
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --now) wait_for_agent=no ;;
+      *) die "unknown option '$1' for update (try --now)" ;;
+    esac
+    shift
+  done
+
   build_artifacts
   stage_artifacts
   install_units
+  # The staged artifacts are in place; only the restart can still cut a reply short.
+  [ "$wait_for_agent" = no ] || wait_for_quiet_agent
   # Restart only what is already running: an update must not start a service the
   # user chose to keep down.
   say "Restarting whatever is running…"
@@ -374,6 +454,9 @@ cmd_update() {
 cmd_status() {
   print_units_state
   print_artifact
+  # Why an update may be sitting there doing nothing: it is waiting for this.
+  say "Local agent"
+  info "$(live_agent_runs) run(s) writing a reply"
   check_environment
   check_tailscale
 }
@@ -403,7 +486,9 @@ cmd_uninstall() {
 }
 
 usage() {
-  sed -n '2,20p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'
+  # The title and the subcommand list — up to the blank line that ends it, so a note
+  # added to the header below never spills half a paragraph into the help.
+  sed -n '2,13p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'
 }
 
 main() {

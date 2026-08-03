@@ -505,6 +505,25 @@ pub fn failure_html(backend: &Backend, reason: &str) -> String {
     )
 }
 
+/// Why a run has no answer when nobody was there to see it end.
+///
+/// A run does not survive its process, and the always-on service restarts on every
+/// re-stage of the staged artifacts. What the thread was left with was the placeholder:
+/// "claude is thinking…", forever, with nothing saying otherwise. The reason names the
+/// cause and says what to do about it, because the reader can do exactly one thing.
+pub const INTERRUPTED_REASON: &str = "the backend restarted before the answer arrived — ask again";
+
+/// The message body for a run a restart cut short, written by whichever process finds
+/// the run abandoned (see `repair_abandoned_agent_runs` in src/bin/server.rs).
+///
+/// A FAILURE body on purpose, not a fifth shape: it is a run that produced no answer,
+/// every client already reads that shape as one (`agentAuthorship` in
+/// web/src/lib/agent-message.ts matches "<name> could not answer: …"), and a shape the
+/// UI does not know would render an interrupted run as a message the user wrote.
+pub fn interrupted_html(backend: &Backend) -> String {
+    failure_html(backend, INTERRUPTED_REASON)
+}
+
 fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -876,6 +895,16 @@ mod tests {
             html,
             "<p><em>opencode could not answer: opencode exited 1 &lt;script&gt;</em></p>"
         );
+    }
+
+    #[test]
+    fn an_interrupted_run_is_reported_as_a_failure_the_clients_already_read() {
+        let html = interrupted_html(&BACKENDS[0]);
+        assert_eq!(html, failure_html(&BACKENDS[0], INTERRUPTED_REASON));
+        // The prefix web/src/lib/agent-message.ts matches. A body outside the four
+        // known shapes renders as an ordinary message the user typed.
+        assert!(html.starts_with("<p><em>claude could not answer: "));
+        assert!(html.contains("ask again"), "the reader can do exactly one thing");
     }
 
     #[test]

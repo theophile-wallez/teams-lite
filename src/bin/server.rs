@@ -79,9 +79,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_policy, auth, calendar, mail, push, push_policy, retry, teams, teams_activity,
-    teams_avatars, teams_media, teams_members, teams_presence, teams_profiles, teams_read,
-    teams_readstate, teams_send, trouter, trouter_events,
+    agent, agent_policy, auth, calendar, mail, push, push_policy, retry, store, teams,
+    teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
+    teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
 use teams_lite::{gitlab, link_preview};
 
@@ -1171,6 +1171,12 @@ async fn main() -> Result<()> {
     // presence: keep the user's own status green, but ONLY while they asked for it
     // (off by default, and never in read-only mode — see `spawn_presence_heartbeat`).
     spawn_presence_heartbeat(ctx.clone());
+
+    // the local agent: a run does not survive this process, so anything left in flight
+    // by the process before us is a message frozen mid-answer in a thread. Drop the
+    // markers of runs whose process is gone, then sweep for the replies to close.
+    clear_dead_agent_run_markers();
+    spawn_agent_run_repair(ctx.clone());
 
     // one-shot, best-effort: is a newer rolling `latest` build available?
     spawn_update_check(ctx.clone());
@@ -4026,6 +4032,106 @@ const AGENT_MAX_EDITS: usize = 100;
 /// web/src/components/agent-reply.tsx).
 const AGENT_STREAM_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How often a live run says it is still writing, in the store and in its marker file.
+///
+/// It has to keep ticking through a silent minute of tool calls, because its ABSENCE is
+/// the only thing that tells an abandoned run from a slow one.
+const AGENT_RUN_HEARTBEAT: Duration = Duration::from_secs(5);
+
+/// How long a run may say nothing before another process may close its message.
+///
+/// An order of magnitude over the heartbeat: a dozen missed beats is a dead process, a
+/// paused container or a machine under load — never a run that is merely thinking. The
+/// cost of waiting too long is a placeholder in the thread for another minute; the cost
+/// of not waiting long enough is overwriting the answer of a run that was still writing.
+const AGENT_RUN_ABANDONED_AFTER: Duration = Duration::from_secs(60);
+
+/// How often abandoned runs are swept for.
+///
+/// A sweep, not a one-shot at startup: the run killed by THIS restart still has a fresh
+/// heartbeat when the next process boots (a restart takes a second), so a single pass
+/// would find nothing and the message would stay frozen — the exact bug being fixed.
+const AGENT_REPAIR_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Where a live run publishes its marker, for tooling that must not cut it short.
+///
+/// The runtime directory ONLY (tmpfs, wiped on logout), unlike the write token's two
+/// locations: a marker names a process id, and a marker that outlived a reboot could
+/// name a pid something else now holds. No `XDG_RUNTIME_DIR`, no markers — a shell
+/// without one then reads "no run is live", which is what it would have assumed anyway.
+///
+/// It exists because the reader is a SHELL: `bin/teams-lite-service.sh` waits for a
+/// quiet agent before it restarts the units, and the alternative was a build script
+/// opening the app's SQLite store or guessing from a process tree.
+fn agent_run_marker_dir() -> Option<std::path::PathBuf> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
+    let runtime = std::path::PathBuf::from(runtime);
+    runtime.is_absolute().then(|| runtime.join("teams-lite/agent-runs"))
+}
+
+/// Publish one live run's marker, named after the message it is writing into.
+///
+/// Best-effort throughout: a marker is a courtesy to tooling, and no run must fail
+/// because a tmpfs would not take a file.
+fn publish_agent_run_marker(run: &store::AgentRun) {
+    let Some(dir) = agent_run_marker_dir() else { return };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let body = format!(
+        "pid={}\nbackend={}\nconversation={}\nmessage={}\nstarted_ms={}\n",
+        std::process::id(),
+        run.backend,
+        run.conversation_id,
+        run.message_id,
+        run.started_ms,
+    );
+    let _ = std::fs::write(dir.join(marker_name(&run.message_id)), body);
+}
+
+/// Take a finished run's marker away. Called on every exit path, so the directory
+/// holds live runs and leftovers of killed processes — nothing else.
+fn remove_agent_run_marker(message_id: &str) {
+    if let Some(dir) = agent_run_marker_dir() {
+        let _ = std::fs::remove_file(dir.join(marker_name(message_id)));
+    }
+}
+
+/// A file name that cannot escape the directory, whatever a message id turns out to
+/// hold. Teams ids are digits today; a path separator arriving from the network must
+/// still land inside the marker directory.
+fn marker_name(message_id: &str) -> String {
+    message_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// Drop the markers of runs that no longer have a process, once, at startup.
+///
+/// Every one of them is a run this machine killed — most likely by restarting us. Left
+/// behind they would tell `bin/teams-lite-service.sh` to wait for an agent that stopped
+/// answering days ago. The store row is NOT dropped here: that one is the record a
+/// repair still has to act on (see `repair_abandoned_agent_runs`).
+fn clear_dead_agent_run_markers() {
+    let Some(dir) = agent_run_marker_dir() else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let alive = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|body| {
+                body.lines()
+                    .find_map(|line| line.strip_prefix("pid="))
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+            })
+            .is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
+        if !alive {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// Say at startup which local agents this process can run, and where.
 ///
 /// A CLI that is not on `PATH` turns every `@claude` message into a no-op, and the only
@@ -4195,6 +4301,10 @@ fn agent_session_key(conversation_id: &str, backend: &str) -> String {
 /// render the answer token by token. Neither path is authoritative over the other; the
 /// message in the thread is the record, and the stream is how this app shows it being
 /// written.
+///
+/// Everything after the placeholder runs inside [`agent_run_to_completion`], so the one
+/// thing that must happen however the run ends — dropping the "this message was left
+/// mid-answer" record — happens on every path, including the ones that return an error.
 async fn agent_reply(
     ctx: &Ctx,
     command: &agent_policy::Command,
@@ -4217,15 +4327,60 @@ async fn agent_reply(
         }
     }
 
+    // From here the thread holds a message this process alone can finish, so record the
+    // run before anything can go wrong with it. A restart from here on is what leaves a
+    // "claude is thinking…" body in the thread for good, and this row plus its marker
+    // are the two things that make that recoverable (see the `agent_runs` note in
+    // src/store.rs and `agent_run_marker_dir`).
+    let run = store::AgentRun {
+        conversation_id: command.conversation_id.clone(),
+        message_id: sent.id.clone(),
+        trigger_id: command.message_id.clone(),
+        backend: backend.name.to_string(),
+        started_ms: now_ms(),
+        heartbeat_ms: now_ms(),
+    };
+    if let Ok(store) = ctx.store() {
+        if let Err(e) = store.begin_agent_run(&run) {
+            eprintln!("[agent] could not record the run on {}: {e}", sent.id);
+        }
+    }
+    publish_agent_run_marker(&run);
+
+    let outcome = agent_run_to_completion(ctx, command, request, &sent.id).await;
+
+    // The run is over, whatever it produced. Clearing the record BEFORE the result is
+    // propagated is deliberate: a failed final edit is a finished run whose answer was
+    // lost, and rewriting its body an hour later with "the backend restarted" would be
+    // a repair inventing a cause.
+    if let Ok(store) = ctx.store() {
+        if let Err(e) = store.finish_agent_run(&command.conversation_id, &sent.id) {
+            eprintln!("[agent] could not clear the run on {}: {e}", sent.id);
+        }
+    }
+    remove_agent_run_marker(&sent.id);
+    outcome
+}
+
+/// Run the agent and write its answer into the message [`agent_reply`] posted.
+async fn agent_run_to_completion(
+    ctx: &Ctx,
+    command: &agent_policy::Command,
+    request: agent::Request,
+    message_id: &str,
+) -> Result<()> {
+    let backend = command.backend;
+
     // The run starts: say so at once, so a page that has the thread open shows the
     // agent taking the question rather than a lone "thinking…" placeholder.
     ctx.emit(
         "agent_stream",
-        agent_stream_frame(command, &sent.id, "thinking", &agent::Progress::default(), None),
+        agent_stream_frame(command, message_id, "thinking", &agent::Progress::default(), None),
     );
 
     let (progress, mut watch_edits) = tokio::sync::watch::channel(agent::Progress::default());
     let mut watch_local = progress.subscribe();
+    let mut watch_alive = progress.subscribe();
     // The sender is dropped the moment the run ends, which is what stops both loops
     // below. Without that explicit drop the futures would wait on each other:
     // `tokio::join!` keeps every branch alive until all of them finish.
@@ -4234,11 +4389,12 @@ async fn agent_reply(
         drop(progress);
         outcome
     };
-    let edits = agent_stream_edits(ctx, command, &sent.id, &mut watch_edits);
-    let local = agent_stream_local(ctx, command, &sent.id, &mut watch_local);
-    // All three at once: the child's output drives the watch channel, and the two
+    let edits = agent_stream_edits(ctx, command, message_id, &mut watch_edits);
+    let local = agent_stream_local(ctx, command, message_id, &mut watch_local);
+    let alive = agent_run_heartbeat(ctx, &command.conversation_id, message_id, &mut watch_alive);
+    // All four at once: the child's output drives the watch channel, and the three
     // consumers drain it at the pace each one can afford.
-    let (outcome, edits, ()) = tokio::join!(run, edits, local);
+    let (outcome, edits, (), ()) = tokio::join!(run, edits, local, alive);
     if let Err(e) = edits {
         eprintln!("[agent] a progress edit failed (the answer still lands): {e}");
     }
@@ -4258,7 +4414,7 @@ async fn agent_reply(
     // web/src/lib/store.ts). If "done" arrived first, the message it fell back to would
     // still be the second-to-last edit — so the answer would visibly lose its last
     // sentence for as long as it takes Teams to echo the final one back.
-    let edited = agent_edit(ctx, command, &sent.id, &final_html).await;
+    let edited = agent_edit(ctx, &command.conversation_id, message_id, &final_html).await;
     let final_progress = agent::Progress {
         phase: agent::Phase::Writing,
         text: outcome.as_ref().map(|o| o.text.clone()).unwrap_or_default(),
@@ -4269,11 +4425,11 @@ async fn agent_reply(
     match &outcome {
         Ok(_) => ctx.emit(
             "agent_stream",
-            agent_stream_frame(command, &sent.id, "done", &final_progress, None),
+            agent_stream_frame(command, message_id, "done", &final_progress, None),
         ),
         Err(e) => ctx.emit(
             "agent_stream",
-            agent_stream_frame(command, &sent.id, "error", &final_progress, Some(&e.to_string())),
+            agent_stream_frame(command, message_id, "error", &final_progress, Some(&e.to_string())),
         ),
     }
     edited?;
@@ -4298,12 +4454,129 @@ async fn agent_reply(
     outcome.map(|_| ())
 }
 
+/// Say every [`AGENT_RUN_HEARTBEAT`] that this run is still writing, until it ends.
+///
+/// On a CLOCK rather than on progress, which is the whole point: an agent reading files
+/// for a minute emits nothing, and a run judged dead because it went quiet would have
+/// its answer overwritten by a repair while it was still working (see
+/// [`repair_abandoned_agent_runs`]). What a missed beat must mean is a missing process.
+///
+/// Returns when the runner drops its end of the channel, i.e. when the run is over.
+async fn agent_run_heartbeat(
+    ctx: &Ctx,
+    conversation_id: &str,
+    message_id: &str,
+    progress: &mut tokio::sync::watch::Receiver<agent::Progress>,
+) {
+    loop {
+        // The inner future returns only when the channel closes, so the timeout IS the
+        // beat: `Ok` means the run ended, `Err` means it is still going.
+        let ended = tokio::time::timeout(AGENT_RUN_HEARTBEAT, async {
+            while progress.changed().await.is_ok() {}
+        })
+        .await;
+        if ended.is_ok() {
+            return;
+        }
+        if let Ok(store) = ctx.store() {
+            if let Err(e) = store.touch_agent_run(conversation_id, message_id, now_ms()) {
+                eprintln!("[agent] could not refresh the run on {message_id}: {e}");
+            }
+        }
+    }
+}
+
+/// Close the messages of runs no process is writing any more, for as long as this one
+/// lives.
+///
+/// The failure it repairs: the always-on service is restarted — a re-stage, a broker bus
+/// that moved — while an agent is answering. The child dies with the process, the final
+/// edit never goes out, and the message sits in the thread saying "claude is thinking…"
+/// forever, for everybody in it. Nothing else notices, because nothing is left that
+/// knows a run existed.
+///
+/// It sweeps rather than checking once at boot: the run this restart just killed still
+/// carries a fresh heartbeat when we come up a second later, so a single startup pass
+/// would find nothing at all.
+fn spawn_agent_run_repair(ctx: Ctx) {
+    // A read-only backend must never edit the user's messages — the screenshot backend
+    // shares this store, and the message belongs to the run that is still writing it in
+    // the send-capable one.
+    if read_only() {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            repair_abandoned_agent_runs(&ctx).await;
+            tokio::time::sleep(AGENT_REPAIR_INTERVAL).await;
+        }
+    });
+}
+
+/// One sweep: every run quiet for longer than [`AGENT_RUN_ABANDONED_AFTER`] has its
+/// message closed with [`agent_policy::interrupted_html`].
+async fn repair_abandoned_agent_runs(ctx: &Ctx) {
+    let Ok(store) = ctx.store() else { return };
+    let quiet_before = now_ms() - AGENT_RUN_ABANDONED_AFTER.as_millis() as i64;
+    let abandoned = match store.abandoned_agent_runs(quiet_before) {
+        Ok(runs) => runs,
+        Err(e) => {
+            eprintln!("[agent] could not look for abandoned runs: {e}");
+            return;
+        }
+    };
+    for run in abandoned {
+        // Two backends share the store and both sweep it. Taking the row is what makes
+        // exactly one of them edit the message.
+        match store.take_abandoned_agent_run(&run.conversation_id, &run.message_id, quiet_before) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                eprintln!("[agent] could not take the run on {}: {e}", run.message_id);
+                continue;
+            }
+        }
+        let backend =
+            agent_policy::backend_named(&run.backend).unwrap_or(&agent_policy::BACKENDS[0]);
+        let html = agent_policy::interrupted_html(backend);
+        if let Err(e) = agent_edit(ctx, &run.conversation_id, &run.message_id, &html).await {
+            // Put it back rather than lose it: a transient 429 or a re-locked broker
+            // must not be the reason a message stays "thinking…" for good.
+            eprintln!("[agent] could not close the run on {}: {e:#}", run.message_id);
+            if let Err(e) = store.begin_agent_run(&run) {
+                eprintln!("[agent] could not keep the run on {} for a retry: {e}", run.message_id);
+            }
+            continue;
+        }
+        // The app's own pages may still be drawing this run as an overlay. Tell them it
+        // is over, so they fall back to the message they can now read (rather than
+        // waiting for their own staleness guard).
+        ctx.emit(
+            "agent_stream",
+            agent_run_frame(
+                &run.conversation_id,
+                &run.trigger_id,
+                &run.message_id,
+                backend.name,
+                "error",
+                &agent::Progress::default(),
+                Some(agent_policy::INTERRUPTED_REASON),
+            ),
+        );
+        remove_agent_run_marker(&run.message_id);
+        eprintln!(
+            "[agent] {} left a reply unfinished in {} — closed it ({})",
+            backend.name, run.conversation_id, agent_policy::INTERRUPTED_REASON
+        );
+    }
+}
+
 /// Edit the reply in place whenever the answer changed, at most every
 /// [`AGENT_EDIT_INTERVAL`] and at most [`AGENT_MAX_EDITS`] times.
 ///
 /// Returns when the runner drops its end of the channel, i.e. when the run is over.
-/// The final text is NOT posted here — [`agent_reply`] does that once, from the
-/// authoritative outcome — so a missed last tick costs nothing.
+/// The final text is NOT posted here — [`agent_run_to_completion`] does that once, from
+/// the authoritative outcome — so a missed last tick costs nothing.
 async fn agent_stream_edits(
     ctx: &Ctx,
     command: &agent_policy::Command,
@@ -4324,7 +4597,7 @@ async fn agent_stream_edits(
             continue;
         }
         let html = agent_policy::reply_html(command.backend, &text, false);
-        agent_edit(ctx, command, message_id, &html).await?;
+        agent_edit(ctx, &command.conversation_id, message_id, &html).await?;
         posted = text;
         edits += 1;
         // Rate limit AFTER the edit, so the first piece of the answer appears as soon
@@ -4342,8 +4615,8 @@ async fn agent_stream_edits(
 /// [`AGENT_STREAM_INTERVAL`] so a fast model does not become a frame per token.
 ///
 /// Returns when the runner drops its end of the channel. The terminal frame is NOT
-/// sent here: [`agent_reply`] sends it from the authoritative outcome, which is the
-/// only place that knows whether the run succeeded.
+/// sent here: [`agent_run_to_completion`] sends it from the authoritative outcome, which
+/// is the only place that knows whether the run succeeded.
 async fn agent_stream_local(
     ctx: &Ctx,
     command: &agent_policy::Command,
@@ -4379,11 +4652,35 @@ fn agent_stream_frame(
     progress: &agent::Progress,
     error: Option<&str>,
 ) -> Value {
+    agent_run_frame(
+        &command.conversation_id,
+        &command.message_id,
+        message_id,
+        command.backend.name,
+        phase,
+        progress,
+        error,
+    )
+}
+
+/// The same frame, from the parts a stored run holds rather than from a live
+/// [`agent_policy::Command`] — which a process that only found the run in the store no
+/// longer has (see [`repair_abandoned_agent_runs`]).
+#[allow(clippy::too_many_arguments)]
+fn agent_run_frame(
+    conversation_id: &str,
+    trigger_id: &str,
+    message_id: &str,
+    backend: &str,
+    phase: &str,
+    progress: &agent::Progress,
+    error: Option<&str>,
+) -> Value {
     json!({
-        "run_id": format!("{}/{}", command.conversation_id, command.message_id),
-        "conversation": command.conversation_id,
+        "run_id": format!("{conversation_id}/{trigger_id}"),
+        "conversation": conversation_id,
         "message_id": message_id,
-        "backend": command.backend.name,
+        "backend": backend,
         "phase": phase,
         "text": progress.text,
         "thinking": progress.thinking,
@@ -4449,14 +4746,17 @@ async fn agent_send(
 }
 
 /// Replace the reply's content with the answer as it stands.
+///
+/// Takes the conversation rather than the whole [`agent_policy::Command`]: the repair
+/// sweep edits a message whose trigger is long gone, and an edit needs nothing else.
 async fn agent_edit(
     ctx: &Ctx,
-    command: &agent_policy::Command,
+    conversation_id: &str,
     message_id: &str,
     html: &str,
 ) -> Result<()> {
     let http = ctx.http.clone();
-    let conversation = command.conversation_id.clone();
+    let conversation = conversation_id.to_string();
     let message_id = message_id.to_string();
     let html = html.to_string();
     ctx.retry_on_auth(move |session, _csa| {
@@ -5903,5 +6203,58 @@ mod lifecycle_tests {
         assert!(mail_has_more_older(&store, "f", &[]).unwrap());
         store.set_mail_frontier("f", "2026-07-01T09:00:00Z", false).unwrap();
         assert!(!mail_has_more_older(&store, "f", &[]).unwrap());
+    }
+
+    #[test]
+    fn a_run_marker_never_leaves_its_directory() {
+        // The name comes from a message id, which arrives from the network. A separator
+        // in it would put the file — and the deletion that follows — somewhere else.
+        assert_eq!(marker_name("1785799174107"), "1785799174107");
+        assert_eq!(marker_name("../../write-token"), "______write-token");
+        assert_eq!(marker_name("19:c@thread.v2"), "19_c_thread_v2");
+    }
+
+    #[test]
+    fn a_repair_waits_far_longer_than_a_heartbeat() {
+        // The margin IS the safety of the repair: it may only ever close a run whose
+        // process is gone, never one that is quietly reading files. A dozen missed beats
+        // is the difference between the two.
+        assert!(
+            AGENT_RUN_ABANDONED_AFTER >= AGENT_RUN_HEARTBEAT * 6,
+            "an abandoned run must be many missed beats, not one"
+        );
+        // And the sweep has to keep coming back: the run killed by a restart still has a
+        // fresh heartbeat when the next process boots.
+        assert!(AGENT_REPAIR_INTERVAL <= AGENT_RUN_ABANDONED_AFTER);
+    }
+
+    #[test]
+    fn a_repair_frame_names_the_run_a_page_is_drawing() {
+        // A repair has no `Command` left — only the stored row — and a frame whose
+        // `run_id` did not match would leave the overlay writing forever.
+        let progress = agent::Progress::default();
+        let command = agent_policy::Command {
+            conversation_id: "19:c@thread.v2".into(),
+            message_id: "1000".into(),
+            prompt: "hi".into(),
+            sender: "Ada".into(),
+            sender_mri: "8:orgid:ada".into(),
+            compose_time: 1,
+            backend: &agent_policy::BACKENDS[0],
+        };
+        let live = agent_stream_frame(&command, "2000", "thinking", &progress, None);
+        let repaired = agent_run_frame(
+            "19:c@thread.v2",
+            "1000",
+            "2000",
+            "claude",
+            "error",
+            &progress,
+            Some(agent_policy::INTERRUPTED_REASON),
+        );
+        assert_eq!(live["run_id"], repaired["run_id"]);
+        assert_eq!(live["message_id"], repaired["message_id"]);
+        assert_eq!(live["backend"], repaired["backend"]);
+        assert_eq!(repaired["phase"], "error");
     }
 }

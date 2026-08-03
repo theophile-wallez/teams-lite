@@ -308,6 +308,10 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "systemctl --user stop teams-lite.target && systemctl --user start teams-lite.target"),
         ("BLOCK", PROJECT, "bin/teams-lite-service.sh start"),
         ("BLOCK", PROJECT, "bin/teams-lite-service.sh restart --web-only"),
+        # `--now` skips the wait for a live @claude run, so the restart freezes the
+        # reply it was writing in front of the whole thread. The user's switch, not ours.
+        ("BLOCK", PROJECT, "bin/teams-lite-service.sh update --now"),
+        ("BLOCK", PROJECT, "TEAMS_LITE_AGENT_WAIT=0 bin/teams-lite-service.sh update --now"),
         # The staged copy the service runs is a second path to the same binary.
         ("BLOCK", PROJECT, "$HOME/.local/share/teams-lite/service/server"),
         ("BLOCK", PROJECT, "bin/teams-lite-backend.sh"),
@@ -454,6 +458,11 @@ def cases(tmp: Path):
         # is the user's call, so everything that only looks or stops stays allowed.
         ("ALLOW", PROJECT, "bin/teams-lite-service.sh install"),
         ("ALLOW", PROJECT, "bin/teams-lite-service.sh status"),
+        # Plain `update` is how a staged commit reaches the user's phone, and it waits
+        # for a live @claude run on its own.
+        ("ALLOW", PROJECT, "bin/teams-lite-service.sh update"),
+        # Prose naming the flag runs nothing.
+        ("ALLOW", PROJECT, "git commit -m 'feat(service): wait unless --now'"),
         ("ALLOW", PROJECT, "systemctl --user status teams-lite-backend.service"),
         ("ALLOW", PROJECT, "systemctl --user cat teams-lite-backend.service"),
         ("ALLOW", PROJECT, "systemctl --user stop teams-lite.target"),

@@ -734,6 +734,31 @@ Then ask the user to run:
 To exercise the app yourself, use the mock: cd web && bun run preview."
 fi
 
+# --- 3a. an update may not cut a live agent reply in half -----------------------
+# `update` restarts the units, and a restart kills a running @claude child: the reply it
+# was writing stops where it stood, and the thread keeps a "claude is thinking…" body in
+# front of everybody in it. So `update` waits for the agent to be quiet
+# (`wait_for_quiet_agent` in bin/teams-lite-service.sh), and `--now` is the switch that
+# skips the wait. That switch is the USER's — they are the one who can decide their own
+# half-written reply is worth losing.
+#
+# Plain `update` stays allowed: it is how a staged artifact reaches the user's phone, and
+# it now waits on its own.
+skips_the_agent_wait="${at_command_start}[A-Za-z0-9_./~\${}-]*teams-lite-service\.sh[^;&|]*[[:space:]]--now([[:space:]]|\$)"
+if ! searching_text &&
+  printf '%s' "$command_line" | grep -qE "$skips_the_agent_wait"; then
+  block "\`update --now\` skips the wait for a live @claude run. A restart kills the CLI child, so
+the reply being written stops mid-sentence and the thread is left with a message that
+says the agent is thinking — read by everybody in it.
+
+Run the update without the flag: it waits for the agent, then restarts.
+
+  bin/teams-lite-service.sh update
+
+Only the user may decide a half-written reply is worth losing. If an update must go out
+now, say why and let them run it."
+fi
+
 # --- 3b. the Intune container is the user's sign-in, not a toy ------------------
 # `intune-container stop` takes the identity broker down, and with it every token the
 # backend holds: the app goes empty for whoever is using it, on a phone included. A

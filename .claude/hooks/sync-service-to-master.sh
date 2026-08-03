@@ -27,6 +27,11 @@
 #      master from the main checkout, not its own branch.
 #   4. It never runs twice at once. The background job holds an flock, so a burst of
 #      git commands produces one build.
+#   5. It never cuts a local-agent reply in half. `update` waits for the agent to be
+#      quiet before it restarts anything (see `wait_for_quiet_agent` in
+#      bin/teams-lite-service.sh), because a restart kills the CLI child and leaves a
+#      "claude is thinking…" body in a thread everybody reads. The wait is bounded, so
+#      this job can take longer than the build alone.
 #
 # Everything it does is logged to $XDG_STATE_HOME/teams-lite/service-auto-update.log.
 set -euo pipefail
@@ -193,7 +198,7 @@ main() {
   mkdir -p "$(dirname "$LOG_FILE")"
   setsid nohup "$(readlink -f "${BASH_SOURCE[0]}")" --run "$checkout" >/dev/null 2>&1 &
   [ "$gap" = yes ] || exit 0
-  report "Updating the always-on service: ${staged:0:12} → ${head:0:12}. It rebuilds in the background (about a minute), then restarts the running units, so open pages reconnect. Log: $LOG_FILE"
+  report "Updating the always-on service: ${staged:0:12} → ${head:0:12}. It rebuilds in the background (about a minute), waits for any live @claude run to finish, then restarts the running units, so open pages reconnect. Log: $LOG_FILE"
 }
 
 if [ "${1:-}" = --run ]; then

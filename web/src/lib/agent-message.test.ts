@@ -59,6 +59,24 @@ describe("agentAuthorship", () => {
     expect(failed!.pending).toBe(false);
   });
 
+  it("reads a run a restart cut short, and stops calling it pending", () => {
+    // `agent_policy::interrupted_html` — the body a backend writes over a reply no
+    // process is finishing any more (a restart killed the CLI). It reuses the failure
+    // shape precisely so this path needs no new pattern; the test pins the string, which
+    // is the only thing holding the two languages together.
+    const interrupted = agentAuthorship(
+      message({
+        content:
+          "<p><em>claude could not answer: the backend restarted before the answer arrived — ask again</em></p>",
+      }),
+    );
+    expect(interrupted!.backend).toBe("claude");
+    expect(interrupted!.pending).toBe(false);
+    expect(interrupted!.failure).toBe(
+      "the backend restarted before the answer arrived — ask again",
+    );
+  });
+
   it("survives the whitespace Teams inserts when it stores a body", () => {
     // Teams pretty-prints what it keeps: `</p>\r\n<p>` for our `</p><p>`.
     const found = agentAuthorship(
