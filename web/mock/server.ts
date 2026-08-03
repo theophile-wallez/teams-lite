@@ -109,7 +109,12 @@ type Channel = {
   team_group_id: string;
   name: string;
   is_general: boolean;
-  is_favorite: boolean;
+  /** Whether Teams SHOWS the channel in its team (its Show/Hide switch, which CSA
+   *  still spells `isFavorite`) — not a favorites list. A false one renders under the
+   *  team's "Hidden channels" entry. */
+  is_shown: boolean;
+  /** Whether the user pinned the channel to the top of the sidebar. */
+  is_pinned: boolean;
   alerts: ChannelAlerts;
   last_message_time: number;
   last_message_preview: string;
@@ -439,7 +444,7 @@ const TEAM_SEEDS: { id: string; name: string; channels: string[] }[] = [
   {
     id: "team-engineering",
     name: "Engineering",
-    channels: ["General", "Frontend", "Backend", "Incidents"],
+    channels: ["General", "Frontend", "Backend", "Incidents", "Archive"],
   },
   {
     id: "team-design",
@@ -466,6 +471,15 @@ const CHANNEL_ALERTS: Record<string, ChannelAlerts> = {
   "Engineering/Incidents": "all_new_posts",
   "Product/Roadmap": "all_new_posts_and_replies",
 };
+
+/** The channels Teams HIDES, keyed `"Team/Channel"` — every other seeded channel is
+ *  shown. Fixed for the same reason as the alerts above, and there is exactly one, so
+ *  a spec knows which team grows a "Hidden channels" entry.
+ *
+ *  A real tenant hides plenty (34 of this user's 75 channels), which is precisely why
+ *  the flag behind it must not group anything: see `channelIsShown` in
+ *  web/src/lib/protocol.ts. */
+const HIDDEN_CHANNELS = new Set(["Engineering/Archive"]);
 
 const MESSAGE_POOL = [
   "Morning! Did you get a chance to look at the deploy from last night?",
@@ -824,7 +838,10 @@ function seedChannels(): void {
         team_group_id: team.id,
         name: channelName,
         is_general: isGeneral,
-        is_favorite: false,
+        is_shown: !HIDDEN_CHANNELS.has(`${team.name}/${channelName}`),
+        // Nothing is pinned out of the box, exactly as the tenant reports (0 of 75):
+        // the Pinned section only appears once the user pins something.
+        is_pinned: false,
         alerts: CHANNEL_ALERTS[`${team.name}/${channelName}`] ?? "mentions_only",
         last_message_time: 0,
         last_message_preview: "",

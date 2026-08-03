@@ -118,12 +118,13 @@ test.describe("channels", () => {
     await expect(composer).toHaveValue("");
   });
 
-  test("favoriting a channel lifts it into a Favorites section and back", async ({ page }) => {
+  test("pinning a channel lifts it into the Pinned section and back", async ({ page }) => {
     await gotoApp(page);
     await openChannelsTab(page);
 
-    // The mock seeds no favorites, so there is no Favorites section to start.
-    await expect(page.locator('[data-testid="favorites-group"]')).toHaveCount(0);
+    // The mock pins nothing, so there is no Pinned section to start — and there is no
+    // Favorites section at all: Teams has none (see channelIsShown in protocol.ts).
+    await expect(page.locator('[data-testid="pinned-group"]')).toHaveCount(0);
 
     const firstRow = page.locator('[data-testid="channel-row"]').first();
     const channelId = await firstRow.getAttribute("data-channel-id");
@@ -132,52 +133,91 @@ test.describe("channels", () => {
     ).trim();
     expect(channelId).toBeTruthy();
 
-    // Reveal (on hover) and click the row's star toggle.
+    // Reveal (on hover) and click the row's pin toggle.
     await firstRow.hover();
-    await page.locator('[data-testid="channel-favorite"]').first().click();
+    await page.locator('[data-testid="channel-pin"]').first().click();
 
-    // The channel is lifted into a pinned Favorites section and marked favorite,
-    // and is no longer listed under its team group.
-    const favorites = page.locator('[data-testid="favorites-group"]');
-    await expect(favorites).toBeVisible();
-    await expect(favorites.locator('[data-testid="channel-name"]').first()).toHaveText(channelName);
-    await expect(favorites.locator(`[data-channel-id="${channelId}"]`)).toHaveAttribute(
-      "data-favorite",
+    // The channel is lifted into the Pinned section and marked pinned, and is no
+    // longer listed under its team group.
+    const pinned = page.locator('[data-testid="pinned-group"]');
+    await expect(pinned).toBeVisible();
+    await expect(pinned.locator('[data-testid="channel-name"]').first()).toHaveText(channelName);
+    await expect(pinned.locator(`[data-channel-id="${channelId}"]`)).toHaveAttribute(
+      "data-pinned",
       "true",
     );
     await expect(
       page.locator(`[data-testid="team-group"] [data-channel-id="${channelId}"]`),
     ).toHaveCount(0);
 
-    // Unfavoriting returns it to its team and drops the now-empty Favorites section.
-    await favorites.locator('[data-testid="channel-favorite"]').first().click();
-    await expect(page.locator('[data-testid="favorites-group"]')).toHaveCount(0);
+    // Unpinning returns it to its team and drops the now-empty Pinned section.
+    await pinned.locator('[data-testid="channel-pin"]').first().click();
+    await expect(page.locator('[data-testid="pinned-group"]')).toHaveCount(0);
     await expect(
       page.locator(`[data-testid="team-group"] [data-channel-id="${channelId}"]`),
     ).toHaveCount(1);
   });
 
-  test("a favorited channel persists across a reload", async ({ page }) => {
+  test("a pinned channel persists across a reload", async ({ page }) => {
     await gotoApp(page);
     await openChannelsTab(page);
 
     const firstRow = page.locator('[data-testid="channel-row"]').first();
     const channelId = await firstRow.getAttribute("data-channel-id");
     await firstRow.hover();
-    await page.locator('[data-testid="channel-favorite"]').first().click();
-    await expect(page.locator('[data-testid="favorites-group"]')).toBeVisible();
+    await page.locator('[data-testid="channel-pin"]').first().click();
+    await expect(page.locator('[data-testid="pinned-group"]')).toBeVisible();
 
-    // The favorite override is persisted client-side, so it survives a reload even
-    // though the backend still reports the channel as non-favorite.
+    // The pin override is persisted client-side, so it survives a reload even though
+    // the backend still reports the channel as unpinned.
     await page.reload();
     await openChannelsTab(page);
 
-    const favorites = page.locator('[data-testid="favorites-group"]');
-    await expect(favorites).toBeVisible();
-    await expect(favorites.locator(`[data-channel-id="${channelId}"]`)).toHaveAttribute(
-      "data-favorite",
+    const pinned = page.locator('[data-testid="pinned-group"]');
+    await expect(pinned).toBeVisible();
+    await expect(pinned.locator(`[data-channel-id="${channelId}"]`)).toHaveAttribute(
+      "data-pinned",
       "true",
     );
+  });
+
+  test("keeps a channel Teams hides out of the team list, under Hidden channels", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    await openChannelsTab(page);
+
+    // The mock hides exactly one channel (Engineering · Archive — see HIDDEN_CHANNELS
+    // in web/mock/server.ts), so the treatment is pinned to one known row.
+    const engineering = page
+      .locator('[data-testid="team-group"]')
+      .filter({ has: page.locator('[data-testid="team-name"]', { hasText: "Engineering" }) })
+      .first();
+    const hidden = engineering.locator('[data-testid="hidden-group"]');
+    await expect(hidden).toBeVisible();
+    await expect(hidden.locator('[data-testid="hidden-name"]')).toHaveText("Hidden channels (1)");
+
+    // It starts folded: the user hid the channel in Teams, so it is out of the way —
+    // and it is nowhere in the team's own list of channels.
+    await expect(hidden.locator('[data-testid="hidden-header"]')).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    await expect(hidden.locator('[data-testid="channel-row"]')).toHaveCount(0);
+    await expect(engineering.locator('[data-testid="channel-name"]', { hasText: "Archive" })).toHaveCount(0);
+
+    // One click reveals it, and the row says it is a hidden one. It is still a normal
+    // channel: it opens through the same pipeline.
+    await hidden.locator('[data-testid="hidden-header"]').click();
+    const row = hidden.locator('[data-testid="channel-row"]');
+    await expect(row).toHaveCount(1);
+    await expect(row).toHaveAttribute("data-hidden", "true");
+    await expect(row.locator('[data-testid="channel-name"]')).toHaveText("Archive");
+    await row.click();
+    await expect(page.locator('[data-testid="conversation-title"]')).toHaveText("Archive");
+
+    // No other row claims to be hidden.
+    await expect(page.locator('[data-testid="channel-row"][data-hidden="true"]')).toHaveCount(1);
   });
 
   test("collapses a team section and remembers it across a reload", async ({ page }) => {

@@ -81,7 +81,13 @@ CREATE TABLE IF NOT EXISTS channels (
     team_group_id         TEXT NOT NULL DEFAULT '',
     display_name          TEXT NOT NULL DEFAULT '',
     is_general            INTEGER NOT NULL DEFAULT 0,
-    is_favorite           INTEGER NOT NULL DEFAULT 0,
+    -- Whether the channel is SHOWN in the user's team list (CSA calls it
+    -- `isFavorite`, its historical name for Show/Hide) and whether the user pinned
+    -- it. Two different things: see `crate::teams_read::Channel`. Both default to
+    -- the visible, ungrouped answer, so a row written before these columns existed
+    -- reads as a plain shown channel.
+    is_shown              INTEGER NOT NULL DEFAULT 1,
+    is_pinned             INTEGER NOT NULL DEFAULT 0,
     last_message_time     INTEGER NOT NULL DEFAULT 0,
     last_message_preview  TEXT NOT NULL DEFAULT '',
     last_message_sender   TEXT NOT NULL DEFAULT '',
@@ -304,7 +310,14 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// exactly the v6 consequence: the user's store kept the old column set and both
 /// sidebar queries failed outright. Hence [`schema_columns_are_pinned_to_the_version`],
 /// which now refuses the next such change mechanically.
-const SCHEMA_VERSION: i64 = 7;
+///
+/// v8 renames `channels.is_favorite` to `channels.is_shown` (the CSA flag means
+/// Show/Hide, not a favorites list) and adds `channels.is_pinned`, Teams' real
+/// channel pin. The FIRST migration to rename rather than add, so it is also the
+/// first that an OLDER binary cannot read: a backend still running the previous
+/// build queries `is_favorite` and gets nothing. Restart every backend that shares
+/// the store — the always-on service does it on re-stage.
+const SCHEMA_VERSION: i64 = 8;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -607,7 +620,12 @@ pub struct ChannelRow {
     pub team_group_id: String,
     pub display_name: String,
     pub is_general: bool,
-    pub is_favorite: bool,
+    /// Whether Teams shows the channel in the team list; see
+    /// [`crate::teams_read::Channel::is_shown`].
+    pub is_shown: bool,
+    /// Whether the user pinned the channel in Teams; see
+    /// [`crate::teams_read::Channel::is_pinned`].
+    pub is_pinned: bool,
     pub last_message_time: i64,
     pub last_message_preview: String,
     pub last_message_sender: String,
@@ -636,7 +654,8 @@ pub struct ChannelUpdate<'a> {
     pub team_group_id: &'a str,
     pub display_name: &'a str,
     pub is_general: bool,
-    pub is_favorite: bool,
+    pub is_shown: bool,
+    pub is_pinned: bool,
     pub last_message_time: i64,
     pub last_message_preview: &'a str,
     pub last_message_sender: &'a str,
@@ -1050,6 +1069,24 @@ fn migrate(conn: &Connection) -> Result<()> {
         }
     };
 
+    // Rename a column, but only on a store that still carries the old name — the
+    // table's own shape decides, so this is a no-op on a fresh store (SCHEMA already
+    // declares the new name), on one that has run this pass before, and on a missing
+    // table. Same idempotence contract as `add_column`, which is what makes a rename
+    // safe to keep in the migration list forever. It reads `table_info` rather than
+    // sniffing an error message because a failed rename is reported as an input
+    // error, not as the `SqliteFailure` an ALTER's other refusals produce.
+    let rename_column = |table: &str, from: &str, to: &str| -> Result<()> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns: Vec<String> =
+            stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<_>>()?;
+        let has = |name: &str| columns.iter().any(|c| c == name);
+        if has(from) && !has(to) {
+            conn.execute(&format!("ALTER TABLE {table} RENAME COLUMN {from} TO {to}"), [])?;
+        }
+        Ok(())
+    };
+
     // kind: distinguishes 1:1 / group / notes conversations. Defaults to
     // 'unknown' for legacy rows; the next network sync backfills the real value.
     add_column("ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'unknown'")?;
@@ -1125,6 +1162,18 @@ fn migrate(conn: &Connection) -> Result<()> {
     // reports what the user actually chose.
     add_column("ALTER TABLE channels ADD COLUMN alerts TEXT NOT NULL DEFAULT 'mentions_only'")?;
 
+    // is_shown: the column that used to be called `is_favorite`, after the CSA key it
+    // is read from. The name was a mistranslation — `isFavorite` is Teams' Show/Hide
+    // switch, true on most channels — and it made the sidebar lift half the user's
+    // channels into a "Favorites" group Teams has no equivalent of. The values carry
+    // over unchanged; only what they mean (and where they render) is corrected.
+    rename_column("channels", "is_favorite", "is_shown")?;
+    // A store so old it has neither name gets the column outright.
+    add_column("ALTER TABLE channels ADD COLUMN is_shown INTEGER NOT NULL DEFAULT 1")?;
+    // is_pinned: the real Teams channel pin, which the parser never read before.
+    // Legacy rows get 0 — nothing is pinned until the next CSA sync says so, which is
+    // also what this tenant reports (0 of 75 channels).
+    add_column("ALTER TABLE channels ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")?;
 
     // local_read_time / local_read_ghost: our own read position, held locally (see the
     // DDL above). Legacy rows get 0/0, which means "never read here" — so the marker
@@ -1732,11 +1781,11 @@ impl Store {
     pub fn upsert_channel_full(&self, u: &ChannelUpdate) -> Result<bool> {
         let changed = self.exec(
             "INSERT INTO channels (
-                id, team_id, team_name, display_name, is_general, is_favorite,
+                id, team_id, team_name, display_name, is_general, is_shown,
                 last_message_time, last_message_preview, last_message_sender,
                 last_message_from_me, is_read, team_pos, channel_pos, team_group_id,
-                alerts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                alerts, is_pinned)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(id) DO UPDATE SET
                 team_id = excluded.team_id,
                 team_name = CASE
@@ -1749,7 +1798,8 @@ impl Store {
                     WHEN excluded.display_name <> '' THEN excluded.display_name
                     ELSE channels.display_name END,
                 is_general = excluded.is_general,
-                is_favorite = excluded.is_favorite,
+                is_shown = excluded.is_shown,
+                is_pinned = excluded.is_pinned,
                 alerts = excluded.alerts,
                 team_pos = excluded.team_pos,
                 channel_pos = excluded.channel_pos,
@@ -1776,7 +1826,8 @@ impl Store {
                 OR (excluded.team_group_id <> '' AND excluded.team_group_id <> channels.team_group_id)
                 OR (excluded.display_name <> '' AND excluded.display_name <> channels.display_name)
                 OR excluded.is_general <> channels.is_general
-                OR excluded.is_favorite <> channels.is_favorite
+                OR excluded.is_shown <> channels.is_shown
+                OR excluded.is_pinned <> channels.is_pinned
                 OR excluded.alerts <> channels.alerts
                 OR excluded.team_pos <> channels.team_pos
                 OR excluded.channel_pos <> channels.channel_pos
@@ -1792,7 +1843,7 @@ impl Store {
                 u.team_name,
                 u.display_name,
                 u.is_general as i64,
-                u.is_favorite as i64,
+                u.is_shown as i64,
                 u.last_message_time,
                 u.last_message_preview,
                 u.last_message_sender,
@@ -1802,6 +1853,7 @@ impl Store {
                 u.channel_pos,
                 u.team_group_id,
                 u.alerts.as_str(),
+                u.is_pinned as i64,
             ],
         )?;
         Ok(changed > 0)
@@ -1865,10 +1917,10 @@ impl Store {
     /// (see [`Store::derived_preview`]).
     pub fn channels(&self) -> Result<Vec<ChannelRow>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, team_id, team_name, display_name, is_general, is_favorite,
+            "SELECT id, team_id, team_name, display_name, is_general, is_shown,
                     last_message_time, last_message_preview, last_message_sender,
                     last_message_from_me, is_read, draft, team_group_id, alerts,
-                    local_read_time, local_read_ghost
+                    local_read_time, local_read_ghost, is_pinned
              FROM channels
              ORDER BY team_pos ASC, team_name ASC, team_id ASC,
                       is_general DESC, channel_pos ASC, display_name ASC, id ASC",
@@ -1887,7 +1939,8 @@ impl Store {
                 team_name: r.get(2)?,
                 display_name: r.get(3)?,
                 is_general: r.get::<_, i64>(4)? != 0,
-                is_favorite: r.get::<_, i64>(5)? != 0,
+                is_shown: r.get::<_, i64>(5)? != 0,
+                is_pinned: r.get::<_, i64>(16)? != 0,
                 last_message_time,
                 last_message_preview: r.get(7)?,
                 last_message_sender: r.get(8)?,
@@ -3201,7 +3254,8 @@ mod tests {
             team_group_id: "",
             display_name: name,
             is_general: false,
-            is_favorite: false,
+            is_shown: true,
+            is_pinned: false,
             last_message_time: time,
             last_message_preview: "",
             last_message_sender: "",
@@ -3438,7 +3492,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (7, 0xeacc_ad58_6e36_714d);
+        const PINNED: (i64, u64) = (8, 0xe07e_def2_8abd_1bd1);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -4284,6 +4338,41 @@ mod tests {
             .query_row("SELECT messagetype FROM messages WHERE id = 'm1'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(messagetype, "", "a legacy row defaults to an unknown type");
+    }
+
+    #[test]
+    fn migration_renames_is_favorite_and_keeps_its_values() {
+        // A store from before the rename: the column is `is_favorite`, and it holds
+        // Teams' Show/Hide answer for each channel.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE channels (id TEXT PRIMARY KEY, is_favorite INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO channels (id, is_favorite) VALUES ('shown', 1), ('hidden', 0);",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        // The values carry over under the honest name — a rename, not a reset.
+        let shown: i64 = conn
+            .query_row("SELECT is_shown FROM channels WHERE id = 'shown'", [], |r| r.get(0))
+            .unwrap();
+        let hidden: i64 = conn
+            .query_row("SELECT is_shown FROM channels WHERE id = 'hidden'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((shown, hidden), (1, 0));
+        // And the pin arrives empty: nothing is pinned until the next CSA sync.
+        let pinned: i64 = conn
+            .query_row("SELECT is_pinned FROM channels WHERE id = 'shown'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pinned, 0);
+
+        // Running the pass again changes nothing (a second open must not fail).
+        migrate(&conn).unwrap();
+        let still: i64 = conn
+            .query_row("SELECT is_shown FROM channels WHERE id = 'shown'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(still, 1);
     }
 
     #[test]
@@ -5773,7 +5862,8 @@ mod tests {
             team_group_id: "",
             display_name: "General",
             is_general: true,
-            is_favorite: false,
+            is_shown: true,
+            is_pinned: false,
             last_message_time: 100,
             last_message_preview: "",
             last_message_sender: "",

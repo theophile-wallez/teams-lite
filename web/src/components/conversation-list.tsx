@@ -5,19 +5,21 @@ import {
   BellOff,
   CalendarDays,
   ChevronRight,
+  EyeOff,
   Ghost,
   Hash,
   Mail as MailIcon,
   MessagesSquare,
   MoonStar,
+  Pin,
   Search,
   Settings as SettingsIcon,
-  Star,
   Sun,
 } from "lucide-react";
 import {
-  channelIsFavorite,
   channelIsMuted,
+  channelIsPinned,
+  channelIsShown,
   channelLabel,
   convLabel,
   mailUnreadBadge,
@@ -320,25 +322,30 @@ function ChatList(props: { selectedIndex: number; onSelect: (index: number) => v
   );
 }
 
-/** The channel surface (the Channels tab): a pinned Favorites section on top, then
- *  the team → channel tree. Teams and channels render in the user's own Microsoft
- *  Teams order — the backend preserves the CSA array order and `organizeChannels`
- *  keeps it, with General first within each team. Favorited channels are lifted
- *  out of their team into the Favorites section.
+/** The channel surface (the Channels tab): the Pinned section on top, then the team →
+ *  channel tree. Teams and channels render in the user's own Microsoft Teams order —
+ *  the backend preserves the CSA array order and `organizeChannels` keeps it, with
+ *  General first within each team.
  *
  *  The tree follows Microsoft Teams' own shape: each team is a collapsible section
  *  whose header carries the team's picture and its name at full size, and the
  *  channels below it are plain indented names — no per-channel glyph, because Teams
- *  has none and the indent alone already says "inside this team". */
+ *  has none and the indent alone already says "inside this team".
+ *
+ *  Teams gives a channel exactly two placements beyond its team, and this renders
+ *  both: a PINNED channel is lifted to the top section, and a HIDDEN one drops to its
+ *  team's own "Hidden channels" entry. Nothing else groups — in particular there is no
+ *  Favorites section, because Teams has none: `isFavorite` is its Show/Hide switch
+ *  (true on most channels), which is what `is_shown` now carries. */
 function ChannelTree() {
   const channels = useAppState((s) => s.channels);
   const openId = useAppState((s) => s.openId);
-  const favorites = useAppState((s) => s.channelFavorites);
+  const pins = useAppState((s) => s.channelPins);
   const controller = useController();
   const navigate = useNavigate();
-  const { favorites: pinned, teams } = useMemo(
-    () => organizeChannels(channels, favorites),
-    [channels, favorites],
+  const { pinned, teams } = useMemo(
+    () => organizeChannels(channels, pins),
+    [channels, pins],
   );
 
   if (channels.length === 0) {
@@ -357,8 +364,8 @@ function ChannelTree() {
       key={c.id}
       channel={c}
       open={openId === c.id}
-      favorite={channelIsFavorite(c, favorites)}
-      onToggleFavorite={() => controller.toggleChannelFavorite(c.id)}
+      pinned={channelIsPinned(c, pins)}
+      onTogglePin={() => controller.toggleChannelPin(c.id)}
       onClick={() =>
         void navigate({ to: "/c/$conversationId", params: { conversationId: c.id } })
       }
@@ -372,16 +379,10 @@ function ChannelTree() {
     >
       {pinned.length > 0 && (
         <ChannelSection
-          sectionId="favorites"
-          testId="favorites-group"
-          label="Favorites"
-          glyph={
-            <Star
-              className="size-4 shrink-0 fill-amber-400 text-amber-400"
-              strokeWidth={1.6}
-              aria-hidden
-            />
-          }
+          sectionId="pinned"
+          testId="pinned-group"
+          label="Pinned"
+          glyph={<Pin className="size-4 shrink-0 text-text-dim" strokeWidth={1.6} aria-hidden />}
           channels={pinned}
           openId={openId}
           renderRow={renderRow}
@@ -403,6 +404,7 @@ function ChannelTree() {
             />
           }
           channels={team.channels}
+          hidden={team.hidden}
           openId={openId}
           renderRow={renderRow}
         />
@@ -412,14 +414,18 @@ function ChannelTree() {
 }
 
 /**
- * One collapsible section of the channel tree — a team, or the pinned Favorites.
- * The whole header is the toggle, as in Microsoft Teams, where clicking a team
- * folds it away; the state is persisted per section, so a user who works out of
- * two of their fifteen teams keeps the rest folded across reloads.
+ * One collapsible section of the channel tree — a team, the Pinned list, or a team's
+ * hidden channels. The whole header is the toggle, as in Microsoft Teams, where
+ * clicking a team folds it away; the state is persisted per section, so a user who
+ * works out of two of their fifteen teams keeps the rest folded across reloads.
  *
  * A collapsed section still reports what it hides: the team name turns bold when
  * one of its channels is unread, and a dot marks the section holding the open
  * channel. Otherwise folding a team would look like losing it.
+ *
+ * `collapsedByDefault` inverts the initial state for the hidden-channels section: the
+ * user hid those channels in Teams, so the honest default is folded — visible enough
+ * to say the channels exist, quiet enough not to undo their decision.
  */
 function ChannelSection(props: {
   sectionId: string;
@@ -430,14 +436,28 @@ function ChannelSection(props: {
   channels: Channel[];
   openId: string | null;
   renderRow: (c: Channel) => ReactNode;
+  /** Prefix of the header's own test ids (`<prefix>-header` / `<prefix>-name`), so a
+   *  nested section is addressable apart from the team header that contains it. */
+  headerPrefix?: string;
+  /** Start folded rather than open. */
+  collapsedByDefault?: boolean;
+  /** Sit one level deeper, as a sub-entry of a team rather than a top-level group. */
+  indented?: boolean;
+  /** The channels Teams hides in this team. They render as a nested, folded
+   *  sub-section after the rows, and they still count towards what a folded team
+   *  reports — a hidden channel is out of the way, not gone. */
+  hidden?: Channel[];
 }) {
   const controller = useController();
-  const collapsed = useAppState((s) => s.collapsedTeams[props.sectionId] === true);
+  const stored = useAppState((s) => s.collapsedTeams[props.sectionId]);
+  const collapsed = stored === undefined ? props.collapsedByDefault === true : stored;
+  const hidden = props.hidden ?? [];
+  const headerPrefix = props.headerPrefix ?? "team";
+  const folded = collapsed ? [...props.channels, ...hidden] : [];
   // A muted channel is not something a folded team should shout about, exactly as
   // it raises no unread marker of its own.
-  const hidesUnread =
-    collapsed && props.channels.some((c) => !c.is_read && !channelIsMuted(c));
-  const hidesOpen = collapsed && props.channels.some((c) => c.id === props.openId);
+  const hidesUnread = folded.some((c) => !c.is_read && !channelIsMuted(c));
+  const hidesOpen = folded.some((c) => c.id === props.openId);
 
   return (
     <section
@@ -445,14 +465,17 @@ function ChannelSection(props: {
       data-team-id={props.teamId}
       data-collapsed={collapsed ? "true" : undefined}
     >
-      <h3 className="pt-2">
+      <h3 className={props.indented ? "pt-1" : "pt-2"}>
         <button
           type="button"
-          data-testid="team-header"
+          data-testid={`${headerPrefix}-header`}
           data-cuelume-press=""
           aria-expanded={!collapsed}
-          onClick={() => controller.toggleTeamCollapsed(props.sectionId)}
-          className="flex w-full items-center gap-1.5 rounded-lg py-1 pl-1 pr-2 text-left transition-colors hover:bg-row-hovered"
+          onClick={() => controller.setTeamCollapsed(props.sectionId, !collapsed)}
+          className={cn(
+            "flex w-full items-center gap-1.5 rounded-lg py-1 pr-2 text-left transition-colors hover:bg-row-hovered",
+            props.indented ? "pl-6" : "pl-1",
+          )}
         >
           <ChevronRight
             className={cn(
@@ -464,9 +487,10 @@ function ChannelSection(props: {
           />
           {props.glyph}
           <span
-            data-testid="team-name"
+            data-testid={`${headerPrefix}-name`}
             className={cn(
-              "min-w-0 flex-1 truncate text-[13px] text-foreground",
+              "min-w-0 flex-1 truncate text-[13px]",
+              props.indented ? "text-text-dim" : "text-foreground",
               hidesUnread ? "font-semibold" : "font-medium",
             )}
           >
@@ -476,6 +500,23 @@ function ChannelSection(props: {
         </button>
       </h3>
       {!collapsed && props.channels.map(props.renderRow)}
+      {!collapsed && hidden.length > 0 && (
+        <ChannelSection
+          sectionId={`hidden:${props.sectionId}`}
+          testId="hidden-group"
+          teamId={props.teamId}
+          label={`Hidden channels (${hidden.length})`}
+          headerPrefix="hidden"
+          collapsedByDefault
+          indented
+          glyph={
+            <EyeOff className="size-3.5 shrink-0 text-text-faint" strokeWidth={1.6} aria-hidden />
+          }
+          channels={hidden}
+          openId={props.openId}
+          renderRow={props.renderRow}
+        />
+      )}
     </section>
   );
 }
@@ -601,14 +642,15 @@ function ConversationRow(props: {
  *  its team header — the Microsoft Teams shape, which gives a channel no glyph of
  *  its own and states membership through the indent. Unread is a bold name
  *  (Teams-style) and the open channel carries a coloured rail on its leading edge.
- *  A star toggles the channel's favorite state: revealed on hover, and shown filled
- *  at all times once favorited. A channel the user muted in Teams reads as muted:
- *  the name is faint, a crossed bell states why, and no unread marker appears. */
+ *  A pin toggles the channel into the sidebar's top Pinned section: revealed on
+ *  hover, and shown filled at all times once pinned. A channel the user muted in
+ *  Teams reads as muted: the name is faint, a crossed bell states why, and no unread
+ *  marker appears. */
 function ChannelRow(props: {
   channel: Channel;
   open: boolean;
-  favorite: boolean;
-  onToggleFavorite: () => void;
+  pinned: boolean;
+  onTogglePin: () => void;
   onClick: () => void;
 }) {
   const c = props.channel;
@@ -627,7 +669,8 @@ function ChannelRow(props: {
         data-team-id={c.team_id}
         data-open={props.open ? "true" : undefined}
         data-unread={unread ? "true" : undefined}
-        data-favorite={props.favorite ? "true" : undefined}
+        data-pinned={props.pinned ? "true" : undefined}
+        data-hidden={channelIsShown(c) ? undefined : "true"}
         data-muted={muted ? "true" : undefined}
         aria-current={props.open ? "true" : undefined}
         className={cn(
@@ -673,13 +716,13 @@ function ChannelRow(props: {
           </span>
         )}
         <GhostReadMark on={c.is_ghost_read} />
-        {/* Date, hidden on hover and once favorited so the star can take its place. */}
+        {/* Date, hidden on hover and once pinned so the pin can take its place. */}
         {time && (
           <time
             className={cn(
               "shrink-0 text-[11px] tabular-nums text-text-faint transition-opacity",
               "group-hover/chan:opacity-0",
-              props.favorite && "opacity-0",
+              props.pinned && "opacity-0",
             )}
           >
             {time}
@@ -687,24 +730,27 @@ function ChannelRow(props: {
         )}
       </button>
 
-      {/* Favorite toggle in the trailing corner: revealed on hover/focus and shown
-          filled at all times once the channel is favorited. */}
+      {/* Pin toggle in the trailing corner: revealed on hover/focus and shown filled
+          at all times once the channel is pinned. */}
       <button
         type="button"
-        data-testid="channel-favorite"
-        aria-label={props.favorite ? "Unfavorite channel" : "Favorite channel"}
-        aria-pressed={props.favorite}
+        data-testid="channel-pin"
+        aria-label={props.pinned ? "Unpin channel" : "Pin channel"}
+        aria-pressed={props.pinned}
         data-cuelume-toggle=""
-        onClick={props.onToggleFavorite}
+        onClick={props.onTogglePin}
         className={cn(
           "absolute right-2 top-1/2 grid size-6 -translate-y-1/2 place-items-center rounded-md",
           "text-text-faint transition-opacity hover:text-foreground focus-visible:opacity-100",
           "opacity-0 group-hover/chan:opacity-100",
-          props.favorite && "opacity-100",
+          props.pinned && "opacity-100",
         )}
       >
-        <Star
-          className={cn("size-3.5", props.favorite && "fill-amber-400 text-amber-400")}
+        {/* A pinned row states its state without shouting it: the glyph fills, and
+            stays in the dim tone the section header uses, so the channel's own name
+            keeps the row's attention. */}
+        <Pin
+          className={cn("size-3.5", props.pinned && "fill-current text-text-dim")}
           strokeWidth={1.8}
         />
       </button>

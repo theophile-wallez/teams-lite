@@ -195,8 +195,18 @@ pub struct Channel {
     /// True for the team's General channel (its id equals the team id, or CSA
     /// flags it `isGeneral`). The UI sorts General first within a team.
     pub is_general: bool,
-    /// True when the user favorited/followed the channel (`isFavorite`).
-    pub is_favorite: bool,
+    /// True when the channel is SHOWN in the user's team list — CSA spells this
+    /// `isFavorite`, which is Teams' own historical name for its Show/Hide switch,
+    /// NOT a hand-picked favorites list. It is true on most of a user's channels
+    /// (and on every General), so it groups nothing: a shown channel belongs inside
+    /// its team, and a hidden one under that team's "Hidden channels" entry.
+    /// Verified against the real tenant by `examples/channel_pin_recon.rs`.
+    pub is_shown: bool,
+    /// True when the user PINNED the channel in Microsoft Teams (`isPinned`) — the
+    /// one channel flag that does lift a channel out of its team, into the sidebar's
+    /// top "Pinned" section. Distinct from [`Channel::is_shown`] and carried as its
+    /// own CSA key.
+    pub is_pinned: bool,
     /// The user's own notification setting for this channel in Microsoft Teams,
     /// derived by [`channel_alerts`]. Drives the sidebar's muted treatment and the
     /// push policy.
@@ -534,7 +544,8 @@ fn upsert_channels(store: &Store, teams: &[Team]) -> (usize, usize) {
                 team_group_id: &c.team_group_id,
                 display_name: &c.display_name,
                 is_general: c.is_general,
-                is_favorite: c.is_favorite,
+                is_shown: c.is_shown,
+                is_pinned: c.is_pinned,
                 last_message_time: c.last_message_time,
                 last_message_preview: &c.last_message_preview,
                 last_message_sender: &c.last_message_sender,
@@ -811,7 +822,11 @@ fn parse_teams_with_self(v: &Value, _self_mri: &str) -> Vec<Team> {
             let Some(id) = ch.get("id").and_then(|x| x.as_str()) else { continue };
             let is_general = ch.get("isGeneral").and_then(|x| x.as_bool()).unwrap_or(false)
                 || id == team_id;
-            let is_favorite = ch.get("isFavorite").and_then(|x| x.as_bool()).unwrap_or(false);
+            // `isFavorite` is Teams' Show/Hide switch (see `Channel::is_shown`), so an
+            // absent key must read as SHOWN: a partial payload that hid channels would
+            // empty a team in the sidebar.
+            let is_shown = ch.get("isFavorite").and_then(|x| x.as_bool()).unwrap_or(true);
+            let is_pinned = ch.get("isPinned").and_then(|x| x.as_bool()).unwrap_or(false);
             let alerts = channel_alerts(ch, team_muted);
             let lm = parse_last_message(ch);
             channels.push(Channel {
@@ -821,7 +836,8 @@ fn parse_teams_with_self(v: &Value, _self_mri: &str) -> Vec<Team> {
                 team_group_id: group_id.clone(),
                 display_name: name_of(ch),
                 is_general,
-                is_favorite,
+                is_shown,
+                is_pinned,
                 alerts,
                 last_message_time: lm.time,
                 is_empty: !lm.has_message,
@@ -3848,9 +3864,21 @@ mod tests {
                         "id": "19:announcements@thread.tacv2",
                         "name": "Announcements",
                         "isGeneral": false,
+                        "isFavorite": true,
+                        "isPinned": true,
                         "lastMessage": {
                             "id": "2", "composeTime": "2026-07-16T17:00:00.000Z",
                             "content": "<p>ship day</p>", "imDisplayName": "Grace",
+                            "messageType": "RichText/Html"
+                        }
+                    },
+                    {
+                        "id": "19:hidden@thread.tacv2",
+                        "name": "Archive",
+                        "isFavorite": false,
+                        "lastMessage": {
+                            "id": "3", "composeTime": "2026-07-16T18:00:00.000Z",
+                            "content": "<p>old news</p>", "imDisplayName": "Grace",
                             "messageType": "RichText/Html"
                         }
                     }
@@ -3864,13 +3892,14 @@ mod tests {
         // The AAD group id (for the team photo) is lifted from teamSiteInformation
         // and denormalized onto every channel of the team.
         assert_eq!(teams[0].group_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        assert_eq!(teams[0].channels.len(), 2);
+        assert_eq!(teams[0].channels.len(), 3);
 
         let general = &teams[0].channels[0];
         assert_eq!(general.team_group_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         assert_eq!(general.display_name, "General");
         assert!(general.is_general, "id == team id -> General");
-        assert!(general.is_favorite);
+        assert!(general.is_shown);
+        assert!(!general.is_pinned, "isPinned absent -> not pinned");
         assert!(!general.is_read); // unread
         assert!(general.last_message_from_me);
         assert_eq!(general.last_message_preview, "welcome & hi");
@@ -3885,6 +3914,15 @@ mod tests {
         assert!(ann.is_read); // absent isRead -> read
         assert!(!ann.last_message_from_me);
         assert_eq!(ann.last_message_preview, "ship day");
+        // The two placement flags are independent CSA keys, and only the pin groups.
+        assert!(ann.is_shown);
+        assert!(ann.is_pinned);
+
+        // `isFavorite: false` is Teams' "hidden", not "not favorited".
+        let hidden = &teams[0].channels[2];
+        assert_eq!(hidden.display_name, "Archive");
+        assert!(!hidden.is_shown);
+        assert!(!hidden.is_pinned);
     }
 
     #[test]
@@ -4004,7 +4042,8 @@ mod tests {
                 team_group_id: String::new(),
                 display_name: "Standup".into(),
                 is_general: false,
-                is_favorite: false,
+                is_shown: true,
+                is_pinned: false,
                 alerts: ChannelAlerts::Muted,
                 last_message_time: 100,
                 is_empty: false,
@@ -4114,7 +4153,8 @@ mod tests {
             team_group_id: "00000000-1111-2222-3333-444444444444".into(),
             display_name: "Standup".into(),
             is_general: false,
-            is_favorite: false,
+            is_shown: true,
+            is_pinned: false,
             last_message_time: 100,
             is_empty: false,
             last_message_preview: "hi".into(),

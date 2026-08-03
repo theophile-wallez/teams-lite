@@ -225,7 +225,17 @@ export type Channel = {
   name: string;
   /** The team's General channel; sorted first within its team. */
   is_general: boolean;
-  is_favorite: boolean;
+  /** Whether Microsoft Teams SHOWS this channel in the team list. Teams' own
+   *  Show/Hide switch (CSA still spells it `isFavorite`), true on most channels and
+   *  on every General — so it groups nothing: a shown channel renders inside its
+   *  team, a hidden one under that team's "Hidden channels" entry. Absent from a
+   *  backend older than the field, and the reader then assumes shown, because a
+   *  channel wrongly hidden is a channel the user cannot reach. */
+  is_shown?: boolean;
+  /** Whether the user PINNED this channel in Microsoft Teams — the one flag that
+   *  lifts a channel out of its team, into the sidebar's top Pinned section.
+   *  Absent from an older backend; the reader then assumes unpinned. */
+  is_pinned?: boolean;
   /** The user's own per-channel notification setting in Microsoft Teams (see
    *  {@link ChannelAlerts}). Absent from a backend older than the field; the
    *  reader then assumes Teams' default. */
@@ -248,6 +258,10 @@ export type TeamGroup = {
   /** The team's AAD group id (bare GUID), for its photo. Empty when unknown. */
   group_id: string;
   channels: Channel[];
+  /** The team's channels that Teams hides (see {@link Channel.is_shown}). They render
+   *  under their own "Hidden channels" entry at the foot of the team, as in Teams —
+   *  reachable, and out of the way. Empty for a team that hides none. */
+  hidden: Channel[];
 };
 
 export type ChatMessage = {
@@ -1319,27 +1333,41 @@ export function groupChannelsByTeam(channels: Channel[]): TeamGroup[] {
         team_name: c.team_name,
         group_id: c.team_group_id ?? "",
         channels: [],
+        hidden: [],
       };
       byTeam.set(c.team_id, group);
       groups.push(group);
     }
     // A later row may carry the group id when the first (e.g. General) lacked it.
     if (!group.group_id && c.team_group_id) group.group_id = c.team_group_id;
-    group.channels.push(c);
+    if (channelIsShown(c)) group.channels.push(c);
+    else group.hidden.push(c);
   }
   return groups;
 }
 
 /**
- * Whether a channel is favorited, honouring a local override. The backend seeds
- * `is_favorite` from Teams' own favorite/pinned state; the user can then toggle
- * it locally (persisted client-side), and that override wins. Absent an override
- * we fall back to Teams' value, so channels favorited in real Teams show as
- * favorites out of the box.
+ * Whether Microsoft Teams shows this channel in its team, as opposed to hiding it.
+ *
+ * There is no local override, and deliberately so: Show/Hide belongs to the user's
+ * Teams account, and hiding a channel here that their phone still lists would make
+ * the two disagree about what they are a member of. The pin (see
+ * {@link channelIsPinned}) is the one placement the user changes locally.
  */
-export function channelIsFavorite(c: Channel, overrides: Record<string, boolean>): boolean {
+export function channelIsShown(c: Channel): boolean {
+  return c.is_shown !== false;
+}
+
+/**
+ * Whether a channel is pinned to the top of the sidebar, honouring a local
+ * override. The backend seeds `is_pinned` from Teams' own channel pin; the user can
+ * then toggle it here (persisted client-side), and that override wins. Absent an
+ * override we fall back to Teams' value, so a channel pinned in real Teams is
+ * pinned here out of the box.
+ */
+export function channelIsPinned(c: Channel, overrides: Record<string, boolean>): boolean {
   const override = overrides[c.id];
-  return override === undefined ? c.is_favorite : override;
+  return override === undefined ? c.is_pinned === true : override;
 }
 
 /**
@@ -1347,7 +1375,7 @@ export function channelIsFavorite(c: Channel, overrides: Record<string, boolean>
  * the whole team, which the backend folds into the same setting.
  *
  * A muted channel is dimmed and never marked unread, exactly like a muted chat.
- * There is no local override (unlike a favorite): mute belongs to the user's Teams
+ * There is no local override (unlike the pin): mute belongs to the user's Teams
  * account, and a local "unmute" would claim a channel is loud when their phone
  * stays silent.
  */
@@ -1355,32 +1383,32 @@ export function channelIsMuted(c: Channel): boolean {
   return c.alerts === "muted";
 }
 
-/** The sidebar's channel sections: a flat Favorites list pinned at the top, then
- *  the team → channel tree for everything else. Mirrors Microsoft Teams, where a
- *  favorited channel is lifted into a top "Favorites" area. */
+/** The sidebar's channel sections: the pinned channels on top, then the team →
+ *  channel tree. Mirrors Microsoft Teams, whose channel list has exactly one
+ *  top-level group — Pinned — and keeps every other channel inside its team. */
 export type ChannelSections = {
-  favorites: Channel[];
+  pinned: Channel[];
   teams: TeamGroup[];
 };
 
 /**
- * Split the (Teams-ordered) channel list into the pinned Favorites and the
- * remaining team tree. Favorited channels are lifted out of their team into a
- * single flat Favorites list, preserving the incoming order (the user's own
- * Microsoft Teams order); the rest keep their team grouping via
- * {@link groupChannelsByTeam}. Pure, so the sidebar re-renders deterministically.
+ * Split the (Teams-ordered) channel list into the pinned section and the team tree.
+ * A pinned channel is lifted out of its team into a single flat list, preserving the
+ * incoming order (the user's own Microsoft Teams order); everything else keeps its
+ * team grouping via {@link groupChannelsByTeam}, which also splits each team's
+ * hidden channels out. Pure, so the sidebar re-renders deterministically.
  */
 export function organizeChannels(
   channels: Channel[],
-  overrides: Record<string, boolean>,
+  pins: Record<string, boolean>,
 ): ChannelSections {
-  const favorites: Channel[] = [];
+  const pinned: Channel[] = [];
   const rest: Channel[] = [];
   for (const c of channels) {
-    if (channelIsFavorite(c, overrides)) favorites.push(c);
+    if (channelIsPinned(c, pins)) pinned.push(c);
     else rest.push(c);
   }
-  return { favorites, teams: groupChannelsByTeam(rest) };
+  return { pinned, teams: groupChannelsByTeam(rest) };
 }
 
 /** Should an incoming message raise a notification? Pure, so it is testable. */

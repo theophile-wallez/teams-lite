@@ -763,6 +763,19 @@ if (import.meta.main) {
       await toggleTeamSection(page, 0);
       await shot(`${out}-collapsed-light.png`);
       await toggleTeamSection(page, 0);
+      // The two placements Teams gives a channel beyond its team. A pin lifts one to
+      // the top; the channels Teams HIDES sit folded at the foot of their team, which
+      // is what the flag the sidebar used to call "favorite" actually means.
+      // The pin sits beside its row, not inside it, so both are addressed by index.
+      await page.locator('[data-testid="channel-row"]').nth(1).hover();
+      await page.locator('[data-testid="channel-pin"]').nth(1).click();
+      await page.waitForSelector('[data-testid="pinned-group"]');
+      await page.locator('[data-testid="hidden-header"]').first().click();
+      await page.waitForTimeout(250); // the chevron rotates; capture it settled
+      await shot(`${out}-placement-light.png`);
+      // Leave the tree as every other shot expects it.
+      await page.locator('[data-testid="hidden-header"]').first().click();
+      await page.locator('[data-testid="pinned-group"] [data-testid="channel-pin"]').click();
       // A post that is nothing but an app card — a whole class of channel. The
       // thread's own card is that post's surface, so the card renders flush on it
       // instead of as a card inside a card.
@@ -782,8 +795,8 @@ if (import.meta.main) {
       await shot(`${out}-dark.png`);
       console.log(
         `[preview] wrote ${out}-tree-light.png, ${out}-open-light.png, ` +
-          `${out}-collapsed-light.png, ${out}-card-light.png, ${out}-card-dark.png, ` +
-          `${out}-card-actions-dark.png and ${out}-dark.png`,
+          `${out}-collapsed-light.png, ${out}-placement-light.png, ${out}-card-light.png, ` +
+          `${out}-card-dark.png, ${out}-card-actions-dark.png and ${out}-dark.png`,
       );
     });
     process.exit(0);

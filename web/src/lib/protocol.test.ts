@@ -26,8 +26,9 @@ import {
   channelLabel,
   channelPreviewLine,
   groupChannelsByTeam,
-  channelIsFavorite,
   channelIsMuted,
+  channelIsPinned,
+  channelIsShown,
   organizeChannels,
   shouldNotify,
   replyToPayload,
@@ -876,7 +877,6 @@ function channel(overrides: Partial<Channel> = {}): Channel {
     team_name: "Engineering",
     name: "General",
     is_general: true,
-    is_favorite: false,
     last_message_time: 0,
     last_message_preview: "",
     last_message_sender: "",
@@ -960,22 +960,38 @@ describe("groupChannelsByTeam", () => {
   });
 });
 
-describe("channelIsFavorite", () => {
+describe("channelIsPinned", () => {
   it("falls back to the Teams-sourced value when there is no override", () => {
-    expect(channelIsFavorite(channel({ id: "x", is_favorite: true }), {})).toBe(true);
-    expect(channelIsFavorite(channel({ id: "x", is_favorite: false }), {})).toBe(false);
+    expect(channelIsPinned(channel({ id: "x", is_pinned: true }), {})).toBe(true);
+    expect(channelIsPinned(channel({ id: "x", is_pinned: false }), {})).toBe(false);
+  });
+
+  it("treats an absent flag as unpinned, never as pinned", () => {
+    // A backend older than the field reports none; assuming "pinned" would lift a
+    // channel out of its team on a placement the user never chose.
+    expect(channelIsPinned(channel({ id: "x", is_pinned: undefined }), {})).toBe(false);
   });
 
   it("lets a local override win over the Teams value", () => {
-    const fav = channel({ id: "x", is_favorite: false });
-    expect(channelIsFavorite(fav, { x: true })).toBe(true);
-    const unfav = channel({ id: "x", is_favorite: true });
-    expect(channelIsFavorite(unfav, { x: false })).toBe(false);
+    expect(channelIsPinned(channel({ id: "x", is_pinned: false }), { x: true })).toBe(true);
+    expect(channelIsPinned(channel({ id: "x", is_pinned: true }), { x: false })).toBe(false);
   });
 
   it("treats only its own id's override, ignoring others", () => {
-    const c = channel({ id: "x", is_favorite: false });
-    expect(channelIsFavorite(c, { y: true })).toBe(false);
+    expect(channelIsPinned(channel({ id: "x", is_pinned: false }), { y: true })).toBe(false);
+  });
+});
+
+describe("channelIsShown", () => {
+  it("reads Teams' own Show/Hide switch", () => {
+    expect(channelIsShown(channel({ is_shown: true }))).toBe(true);
+    expect(channelIsShown(channel({ is_shown: false }))).toBe(false);
+  });
+
+  it("treats an absent flag as shown, never as hidden", () => {
+    // A backend older than the field reports none. Hiding on that would bury a
+    // channel the user can reach in Teams — and every channel, since none says so.
+    expect(channelIsShown(channel({ is_shown: undefined }))).toBe(true);
   });
 });
 
@@ -995,35 +1011,60 @@ describe("channelIsMuted", () => {
 });
 
 describe("organizeChannels", () => {
-  it("lifts favorites into a flat top list, preserving incoming order", () => {
+  it("lifts pinned channels into a flat top list, preserving incoming order", () => {
     const channels = [
       channel({ id: "a-general", team_id: "A", team_name: "Alpha", name: "General" }),
-      channel({ id: "a-random", team_id: "A", team_name: "Alpha", name: "Random", is_favorite: true }),
-      channel({ id: "b-general", team_id: "B", team_name: "Beta", name: "General", is_favorite: true }),
+      channel({ id: "a-random", team_id: "A", team_name: "Alpha", name: "Random", is_pinned: true }),
+      channel({ id: "b-general", team_id: "B", team_name: "Beta", name: "General", is_pinned: true }),
     ];
-    const { favorites, teams } = organizeChannels(channels, {});
-    // Favorites keep their incoming (Teams) order and are removed from their teams.
-    expect(favorites.map((c) => c.id)).toEqual(["a-random", "b-general"]);
+    const { pinned, teams } = organizeChannels(channels, {});
+    // Pins keep their incoming (Teams) order and are removed from their teams.
+    expect(pinned.map((c) => c.id)).toEqual(["a-random", "b-general"]);
     expect(teams.map((g) => g.team_id)).toEqual(["A"]);
     expect(teams[0]!.channels.map((c) => c.id)).toEqual(["a-general"]);
   });
 
-  it("honours local overrides when deciding favorites", () => {
+  it("honours local overrides when deciding what is pinned", () => {
     const channels = [
-      channel({ id: "a", team_id: "A", team_name: "Alpha", is_favorite: true }),
-      channel({ id: "b", team_id: "A", team_name: "Alpha", is_favorite: false }),
+      channel({ id: "a", team_id: "A", team_name: "Alpha", is_pinned: true }),
+      channel({ id: "b", team_id: "A", team_name: "Alpha", is_pinned: false }),
     ];
-    // Override unfavorites the Teams-favorite and favorites the other.
-    const { favorites, teams } = organizeChannels(channels, { a: false, b: true });
-    expect(favorites.map((c) => c.id)).toEqual(["b"]);
+    // The override unpins the Teams-pinned channel and pins the other.
+    const { pinned, teams } = organizeChannels(channels, { a: false, b: true });
+    expect(pinned.map((c) => c.id)).toEqual(["b"]);
     expect(teams[0]!.channels.map((c) => c.id)).toEqual(["a"]);
   });
 
-  it("has no favorites section when nothing is favorited", () => {
-    const channels = [channel({ id: "a", team_id: "A", team_name: "Alpha", is_favorite: false })];
-    const { favorites, teams } = organizeChannels(channels, {});
-    expect(favorites).toEqual([]);
+  it("has no pinned section when nothing is pinned", () => {
+    const channels = [channel({ id: "a", team_id: "A", team_name: "Alpha" })];
+    const { pinned, teams } = organizeChannels(channels, {});
+    expect(pinned).toEqual([]);
     expect(teams.map((g) => g.team_id)).toEqual(["A"]);
+  });
+
+  it("keeps a shown channel in its team and drops a hidden one into `hidden`", () => {
+    // The whole point of the CSA flag: `isFavorite` is Show/Hide, so a channel it
+    // marks false belongs under its team's Hidden entry, NOT in a top group — and a
+    // channel it marks true is an ordinary member of its team, not a favorite.
+    const channels = [
+      channel({ id: "a-general", team_id: "A", team_name: "Alpha", is_shown: true }),
+      channel({ id: "a-old", team_id: "A", team_name: "Alpha", is_shown: false }),
+    ];
+    const { pinned, teams } = organizeChannels(channels, {});
+    expect(pinned).toEqual([]);
+    expect(teams).toHaveLength(1);
+    expect(teams[0]!.channels.map((c) => c.id)).toEqual(["a-general"]);
+    expect(teams[0]!.hidden.map((c) => c.id)).toEqual(["a-old"]);
+  });
+
+  it("pins a hidden channel the user pinned anyway, an explicit choice winning", () => {
+    const channels = [
+      channel({ id: "a-general", team_id: "A", team_name: "Alpha", is_shown: true }),
+      channel({ id: "a-old", team_id: "A", team_name: "Alpha", is_shown: false }),
+    ];
+    const { pinned, teams } = organizeChannels(channels, { "a-old": true });
+    expect(pinned.map((c) => c.id)).toEqual(["a-old"]);
+    expect(teams[0]!.hidden).toEqual([]);
   });
 });
 

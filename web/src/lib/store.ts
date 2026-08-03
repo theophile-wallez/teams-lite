@@ -145,14 +145,16 @@ export type AppState = {
   channels: Channel[];
   /** The active sidebar tab (chats vs. channels). */
   sidebarTab: SidebarTab;
-  /** Local per-channel favorite overrides (channel id → favorited), persisted to
-   *  localStorage. Overrides the backend's Teams-sourced `is_favorite`; a channel
-   *  absent here falls back to that value. Drives the sidebar's pinned Favorites
-   *  section (see `channelIsFavorite`/`organizeChannels`). */
-  channelFavorites: Record<string, boolean>;
+  /** Local per-channel pin overrides (channel id → pinned), persisted to
+   *  localStorage. Overrides the backend's Teams-sourced `is_pinned`; a channel
+   *  absent here falls back to that value. Drives the sidebar's top Pinned
+   *  section (see `channelIsPinned`/`organizeChannels`). */
+  channelPins: Record<string, boolean>;
   /** Which sidebar sections the user has collapsed, keyed by team id (and
-   *  `"favorites"` for the pinned section), persisted to localStorage. A section
-   *  absent here is expanded, so a fresh install shows the whole tree. */
+   *  `"pinned"` for the top section, `"hidden:<team id>"` for a team's hidden
+   *  channels), persisted to localStorage. A team section absent here is expanded,
+   *  so a fresh install shows the whole tree; a hidden-channels section is the one
+   *  exception and defaults to collapsed, exactly as in Microsoft Teams. */
   collapsedTeams: Record<string, boolean>;
   openId: string | null;
   messages: ChatMessage[];
@@ -302,8 +304,10 @@ const CALL_RING_TIMEOUT_MS = 45_000;
  *  the next hover, long enough that re-hovering the same name (or several
  *  mentions of the same person in one thread) costs a single round-trip. */
 const PRESENCE_TTL_MS = 30_000;
-// Where local channel-favorite overrides are persisted (client-only).
-const CHANNEL_FAVORITES_KEY = "teams-lite:channel-favorites";
+// Where local channel-pin overrides are persisted (client-only). The key is new: the
+// map it replaces held the misread `is_favorite` flag (Teams' Show/Hide switch, see
+// `channelIsShown`), so an old entry would pin channels the user never pinned.
+const CHANNEL_PINS_KEY = "teams-lite:channel-pins";
 // And which sidebar team sections the user has collapsed (client-only too — Teams
 // keeps this per install, not per account).
 const COLLAPSED_TEAMS_KEY = "teams-lite:collapsed-teams";
@@ -324,7 +328,7 @@ const MEDIA_CACHE_BYTES = 48 * 1024 * 1024;
 // durably in SQLite, so re-opening an evicted mail is a local round-trip.
 const RETAINED_MAIL_BODIES = 12;
 // Where the locally-chosen visible calendars are persisted (client-only, like the
-// channel-favorite overrides).
+// channel-pin overrides).
 const VISIBLE_CALENDARS_KEY = "teams-lite:visible-calendars";
 // And the view menu's display preferences.
 const CALENDAR_SETTINGS_KEY = "teams-lite:calendar-settings";
@@ -361,7 +365,7 @@ function initialState(): AppState {
     conversations: [],
     channels: [],
     sidebarTab: "chats",
-    channelFavorites: {},
+    channelPins: {},
     collapsedTeams: {},
     openId: null,
     messages: [],
@@ -560,7 +564,7 @@ export class TeamsController {
 
     this.applyPersistedAppearance();
     this.applyPersistedSounds();
-    this.applyPersistedFavorites();
+    this.applyPersistedChannelPins();
     this.applyPersistedCollapsedTeams();
     this.applyPersistedVisibleCalendars();
     this.applyPersistedCalendarSettings();
@@ -1308,39 +1312,44 @@ export class TeamsController {
     }
   }
 
-  /** Load the persisted local channel-favorite overrides into state. Best-effort
+  /** Load the persisted local channel-pin overrides into state. Best-effort
    *  and SSR-safe: any failure (no localStorage, malformed JSON) leaves the empty
-   *  default, so the backend's Teams-sourced `is_favorite` stands alone. */
-  private applyPersistedFavorites(): void {
-    const overrides = readFlagMap(CHANNEL_FAVORITES_KEY);
-    if (overrides) this.set({ channelFavorites: overrides });
+   *  default, so the backend's Teams-sourced `is_pinned` stands alone. */
+  private applyPersistedChannelPins(): void {
+    const pins = readFlagMap(CHANNEL_PINS_KEY);
+    if (pins) this.set({ channelPins: pins });
   }
 
   /** Load the persisted collapsed sidebar sections. Same best-effort contract as
-   *  the favorites: on any failure every section stays expanded. */
+   *  the pins: on any failure every section keeps its default state. */
   private applyPersistedCollapsedTeams(): void {
     const collapsed = readFlagMap(COLLAPSED_TEAMS_KEY);
     if (collapsed) this.set({ collapsedTeams: collapsed });
   }
 
-  /** Toggle a channel's favorite state, pinning it into (or out of) the sidebar's
-   *  Favorites section. Records a local override that wins over Teams' own
-   *  `is_favorite`, updates reactive state, and persists it. */
-  toggleChannelFavorite(id: string): void {
-    const base = this.get().channels.find((c) => c.id === id)?.is_favorite ?? false;
-    const overrides = this.get().channelFavorites;
-    const current = overrides[id] ?? base;
-    const next = { ...overrides, [id]: !current };
-    this.set({ channelFavorites: next });
-    writeFlagMap(CHANNEL_FAVORITES_KEY, next);
+  /** Toggle a channel's pin, lifting it into (or out of) the sidebar's top Pinned
+   *  section. Records a local override that wins over Teams' own `is_pinned`,
+   *  updates reactive state, and persists it. */
+  toggleChannelPin(id: string): void {
+    const base = this.get().channels.find((c) => c.id === id)?.is_pinned === true;
+    const pins = this.get().channelPins;
+    const current = pins[id] ?? base;
+    const next = { ...pins, [id]: !current };
+    this.set({ channelPins: next });
+    writeFlagMap(CHANNEL_PINS_KEY, next);
   }
 
-  /** Collapse or expand one sidebar section — a team by its id, or the pinned
-   *  Favorites section by `"favorites"`. Persisted, so a user who works out of two
-   *  of their fifteen teams keeps the other thirteen folded away across reloads. */
-  toggleTeamCollapsed(id: string): void {
-    const collapsed = this.get().collapsedTeams;
-    const next = { ...collapsed, [id]: !collapsed[id] };
+  /** Collapse or expand one sidebar section — a team by its id, the Pinned section
+   *  by `"pinned"`, or a team's hidden channels by `"hidden:<team id>"`. Persisted,
+   *  so a user who works out of two of their fifteen teams keeps the other thirteen
+   *  folded away across reloads.
+   *
+   *  The caller states the target, rather than this deriving it from the stored map:
+   *  a section absent from the map is not necessarily expanded (the hidden-channels
+   *  one defaults to folded), so flipping the stored value would need a first click
+   *  that appears to do nothing. */
+  setTeamCollapsed(id: string, collapsed: boolean): void {
+    const next = { ...this.get().collapsedTeams, [id]: collapsed };
     this.set({ collapsedTeams: next });
     writeFlagMap(COLLAPSED_TEAMS_KEY, next);
   }
