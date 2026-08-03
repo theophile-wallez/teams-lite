@@ -298,7 +298,13 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// v6 adds `conversations.picture_url`, the picture a group chat's members gave it.
 /// Without the bump an existing store never grows the column and every query that
 /// names it fails outright — the sidebar goes empty, which is how this was caught.
-const SCHEMA_VERSION: i64 = 6;
+///
+/// v7 adds `local_read_time` / `local_read_ghost` on `conversations` AND `channels`,
+/// our own read position (see [`read_state`]). Shipped without the bump first, with
+/// exactly the v6 consequence: the user's store kept the old column set and both
+/// sidebar queries failed outright. Hence [`schema_columns_are_pinned_to_the_version`],
+/// which now refuses the next such change mechanically.
+const SCHEMA_VERSION: i64 = 7;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -3360,6 +3366,91 @@ mod tests {
         assert_eq!(rows[0].picture_url, "");
         drop(s);
         remove_db(&path);
+    }
+
+    /// Every column this file can create, in one canonical list: the `SCHEMA` batch's
+    /// own definitions plus every `ADD COLUMN` in [`migrate`]. Read out of the module's
+    /// own source, so it cannot drift from what the code actually does.
+    fn declared_columns(source: &str) -> Vec<String> {
+        let mut columns = Vec::new();
+        let mut table = String::new();
+        for raw in source.lines() {
+            let line = raw.trim();
+            if let Some(rest) = line.strip_prefix("CREATE TABLE IF NOT EXISTS ") {
+                table = rest.split_whitespace().next().unwrap_or("").to_string();
+                continue;
+            }
+            if line.starts_with(')') {
+                table.clear();
+                continue;
+            }
+            // `ALTER TABLE <t> ADD COLUMN <c> …`, in either spelling migrate uses
+            // (a literal, or a `format!` whose table name is `{table}`).
+            if let Some(rest) = line.split(" ADD COLUMN ").nth(1) {
+                if let Some(alter) = line.split("ALTER TABLE ").nth(1) {
+                    let altered = alter.split_whitespace().next().unwrap_or("");
+                    let column = rest.split_whitespace().next().unwrap_or("");
+                    columns.push(format!("{altered}.{column}"));
+                }
+                continue;
+            }
+            // A column definition inside the SCHEMA batch: `name TYPE …,`. Comments,
+            // table constraints and index DDL are skipped.
+            if table.is_empty() || line.starts_with("--") || line.is_empty() {
+                continue;
+            }
+            let mut words = line.split_whitespace();
+            let (Some(name), Some(kind)) = (words.next(), words.next()) else { continue };
+            if !matches!(kind.trim_end_matches(','), "TEXT" | "INTEGER" | "REAL" | "BLOB") {
+                continue;
+            }
+            columns.push(format!("{table}.{name}"));
+        }
+        columns.sort();
+        columns.dedup();
+        columns
+    }
+
+    /// A stable fingerprint (FNV-1a) of that list. No dependency, and stable across
+    /// runs and machines, which a `DefaultHasher` is explicitly not.
+    fn fingerprint(columns: &[String]) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in columns.join(",").bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    /// The column set this file creates, pinned to [`SCHEMA_VERSION`].
+    ///
+    /// THE BUG THIS EXISTS FOR, twice over: a column was added to `SCHEMA`/[`migrate`]
+    /// and the version was not bumped. `open` runs the DDL pass only when the file's
+    /// recorded `user_version` differs, so every EXISTING store — the user's own —
+    /// kept the old column set, and every query naming the new column failed outright.
+    /// The sidebar went empty on a live machine while the whole suite passed, because a
+    /// fresh in-memory store always has every column.
+    ///
+    /// `open_grows_a_column_the_previous_version_lacked` cannot catch it: it stamps a
+    /// store one version behind, so the pass runs whether or not the bump happened.
+    /// This test compares the DDL itself against a recorded fingerprint, so touching a
+    /// column forces the same change that makes existing stores grow it.
+    #[test]
+    fn schema_columns_are_pinned_to_the_version() {
+        // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
+        const PINNED: (i64, u64) = (7, 0xeacc_ad58_6e36_714d);
+        let columns = declared_columns(include_str!("store.rs"));
+        let actual = fingerprint(&columns);
+        assert_eq!(
+            (SCHEMA_VERSION, actual),
+            PINNED,
+            "the store's column set changed ({} columns).\n\
+             Bump SCHEMA_VERSION (existing stores only run the DDL pass when it moves) \
+             and set PINNED to ({}, {:#018x}).",
+            columns.len(),
+            SCHEMA_VERSION,
+            actual,
+        );
     }
 
     #[test]
