@@ -14,7 +14,7 @@
  *   switch that would do nothing.
  */
 
-/** One agent CLI the backend knows how to run. */
+/** One agent CLI the backend knows how to run — an AI provider, in the Settings pane. */
 export type AgentBackend = {
   /** How it is named to the user: "claude", "opencode". */
   name: string;
@@ -22,6 +22,20 @@ export type AgentBackend = {
   prefix: string;
   /** Whether the backend's machine has that CLI on its PATH. */
   available: boolean;
+  /** Whether the user left this provider on. Every installed one is on by default. */
+  enabled: boolean;
+  /** The model the user chose, or null to leave the CLI its own configured default. */
+  model: string | null;
+  /** Models worth offering as suggestions — never a limit on what may be typed. */
+  models: string[];
+};
+
+/** What one `agent_set_provider` call changes. Both halves are optional, so a switch
+ *  can be flipped without restating the model. */
+export type AgentProviderPatch = {
+  enabled?: boolean;
+  /** A model name, or "" to go back to the CLI's own default. */
+  model?: string;
 };
 
 /** What one conversation does with a trigger the user writes in it. */
@@ -82,14 +96,21 @@ export function agentModeFor(
 }
 
 /** Whether the backend could answer at all: not read-only, and holding at least one
- *  CLI it can actually run. */
+ *  provider that is both installed and switched on. */
 export function agentRunnable(status: AgentStatus | null): boolean {
-  return !!status && status.enabled && status.backends.some((b) => b.available);
+  return !!status && status.enabled && usableBackends(status).length > 0;
 }
 
-/** The backends this machine can run, in the order the backend listed them. */
+/** The providers this machine has a CLI for, in the order the backend listed them.
+ *  Installed says nothing about whether the user left it on — see {@link usableBackends}. */
 export function availableBackends(status: AgentStatus | null): AgentBackend[] {
   return status?.backends.filter((b) => b.available) ?? [];
+}
+
+/** The providers that would actually answer a trigger: installed AND enabled. This is
+ *  what a hint may name, because a disabled provider ignores its own prefix. */
+export function usableBackends(status: AgentStatus | null): AgentBackend[] {
+  return availableBackends(status).filter((b) => b.enabled);
 }
 
 /** The groups this backend offers. Empty before it has answered, and on a backend too
@@ -143,10 +164,15 @@ export function agentToolsWithGrant(
 export function agentHint(status: AgentStatus | null): string {
   if (!status) return "The backend has not said yet.";
   if (!status.enabled) return "This backend is read-only, so it never answers.";
-  const runnable = availableBackends(status);
-  if (runnable.length === 0) {
+  const installed = availableBackends(status);
+  if (installed.length === 0) {
     const names = status.backends.map((b) => b.name).join(" or ");
     return `No agent is installed on this machine (${names}).`;
   }
-  return `Write ${runnable.map((b) => b.prefix).join(" or ")} to ask for an answer.`;
+  const usable = usableBackends(status);
+  if (usable.length === 0) {
+    const names = installed.map((b) => b.name).join(" and ");
+    return `Every provider is switched off (${names}). Turn one on in Settings.`;
+  }
+  return `Write ${usable.map((b) => b.prefix).join(" or ")} to ask for an answer.`;
 }

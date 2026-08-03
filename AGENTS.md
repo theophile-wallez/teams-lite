@@ -96,8 +96,24 @@ Four rules hold it together. Each one is load-bearing, and each is pinned by a t
   from its environment: an agent holding it could `send` to any chat directly, around
   every gate above. A read-only backend never answers at all.
 
-Three more things worth knowing before touching it:
+Four more things worth knowing before touching it:
 
+- **The providers live in Settings, and the model with them.** Settings › AI providers
+  (`web/src/components/ai-providers-settings.tsx`) shows every CLI in
+  `agent_policy::BACKENDS`, says which ones this machine actually holds
+  (`agent::is_available`, so a missing CLI is stated instead of offering a dead switch),
+  and lets the user turn one off or choose the model it runs — `agent_set_provider`, a
+  third write-token-gated `MACHINE_METHODS` entry, because it decides which program a
+  chat message starts and which model reads the thread. Two defaults are deliberate and
+  run opposite ways: a **conversation** is off until the user names it, and a
+  **provider** the machine holds is on out of the box (`agent_policy::Providers`) — the
+  first is consent to post, the second is only which installed CLI answers once that
+  consent exists. A disabled provider ignores its own prefix everywhere, and says so in
+  the journal. A model is a free-form name (an alias, a full id, or opencode's
+  `provider/model`) rather than a fixed list, because `opencode models` depends on the
+  providers that machine authenticated — but it is shape-checked
+  (`agent_policy::is_valid_model`) at the RPC and again in `agent::model_of`, so it can
+  never arrive at the CLI as another flag.
 - **The CLI has to be on the backend's own PATH, and a service has almost none.** The
   systemd user manager's PATH holds neither `~/.local/bin` (where `claude` installs
   itself) nor `~/.bun/bin`, so the always-on service found no program, dropped every
@@ -118,7 +134,7 @@ pinned to the sandbox channel, and the only sanctioned way to try it live:
 
 ```
 . bin/broker-env.sh && teams_lite_export_broker_bus && \
-  cargo run --example agent_stream_probe -- "your prompt" [claude|opencode]
+  cargo run --example agent_stream_probe -- "your prompt" [claude|opencode] [model]
 ```
 
 It also pins the fact the streaming rests on: a send returns no `id`, only

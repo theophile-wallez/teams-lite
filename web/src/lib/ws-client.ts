@@ -7,7 +7,7 @@
 //   response <- { id, result } | { id, error }
 //   event    <- { event, data }        (server push)
 
-import type { AgentMode, AgentStatus } from "./agent";
+import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { SendImage } from "./composer-image";
 import type {
@@ -500,6 +500,15 @@ export class Backend {
    *  in one place, and a caller that widens it has to say what the full answer is. */
   agentSetTools(tools: string[]): Promise<AgentStatus> {
     return this.writeRequest<AgentStatus>("agent_set_tools", { tools });
+  }
+  /** Enable or disable one AI provider, and/or choose the model it runs.
+   *
+   *  A WRITE request: it decides which program a chat message starts on the backend's
+   *  machine, and which model reads the thread (a `MACHINE_METHODS` entry in
+   *  src/bin/server.rs, refused read-only). Returns the whole status, so the pane draws
+   *  the backend's own answer rather than a local guess. */
+  agentSetProvider(provider: string, patch: AgentProviderPatch): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_set_provider", { provider, ...patch });
   }
   /** Fetch the notifications panel's three activity streams — Activity, Mentions
    *  and Following — in one round-trip. None is a chat: the backend fetches them

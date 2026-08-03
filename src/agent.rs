@@ -211,6 +211,9 @@ pub struct Request {
     pub workspace: PathBuf,
     /// The tools it may use without being asked.
     pub tools: Vec<String>,
+    /// The model to run, when the user chose one for this backend. `None` leaves the
+    /// choice to the CLI's own configuration, which is the default.
+    pub model: Option<String>,
 }
 
 /// What one run produced.
@@ -358,6 +361,9 @@ fn build_command(command: &mut Command, request: &Request) -> Option<String> {
             if !request.tools.is_empty() {
                 command.arg("--allowed-tools").args(&request.tools);
             }
+            if let Some(model) = model_of(request) {
+                command.arg("--model").arg(model);
+            }
             if let Some(session) = &request.resume_session {
                 command.arg("--resume").arg(session);
             }
@@ -369,6 +375,9 @@ fn build_command(command: &mut Command, request: &Request) -> Option<String> {
         _ => {
             command.args(["run", "--format", "json"]);
             command.arg("--dir").arg(&request.workspace);
+            if let Some(model) = model_of(request) {
+                command.arg("--model").arg(model);
+            }
             if let Some(session) = &request.resume_session {
                 command.arg("--session").arg(session);
             }
@@ -377,6 +386,19 @@ fn build_command(command: &mut Command, request: &Request) -> Option<String> {
             None
         }
     }
+}
+
+/// The model to put on the command line, or `None` to leave the CLI its own default.
+///
+/// The shape is re-checked here rather than trusted from the store: this is the last
+/// point before the value becomes an argument, and a name that could pass for a flag
+/// must never get there (see [`agent_policy::is_valid_model`]).
+fn model_of(request: &Request) -> Option<&str> {
+    request
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| crate::agent_policy::is_valid_model(model))
 }
 
 /// Read the child's JSON event stream, updating `progress` as the answer grows.
@@ -636,6 +658,7 @@ mod tests {
             resume_session: None,
             workspace: PathBuf::from("/tmp/agent-workspace"),
             tools: vec!["Read".into(), "Grep".into()],
+            model: None,
         }
     }
 
@@ -680,6 +703,29 @@ mod tests {
         request.tools.clear();
         let (args, _) = argv(&request);
         assert!(!args.contains(&"--allowed-tools".to_string()));
+    }
+
+    #[test]
+    fn a_chosen_model_reaches_both_clis_and_a_refused_one_reaches_neither() {
+        for backend in [CLAUDE, OPENCODE] {
+            let mut request = request(backend);
+            request.model = Some("opus".into());
+            let (args, _) = argv(&request);
+            let at = args.iter().position(|a| a == "--model").expect("a model flag");
+            assert_eq!(args[at + 1], "opus", "{}", backend.name);
+
+            // No choice is the default: the CLI keeps its own configured model.
+            request.model = None;
+            let (args, _) = argv(&request);
+            assert!(!args.contains(&"--model".to_string()), "{}", backend.name);
+
+            // A stored value that could pass for a flag never becomes one, even if it
+            // somehow got past the RPC that stored it.
+            request.model = Some("--dangerously-skip-permissions".into());
+            let (args, _) = argv(&request);
+            assert!(!args.contains(&"--model".to_string()), "{}", backend.name);
+            assert!(!args.iter().any(|a| a.contains("dangerously")), "{}", backend.name);
+        }
     }
 
     #[test]
@@ -890,7 +936,7 @@ mod tests {
         // resume and the fresh retry fail: the fallback must not mask the error, and
         // must not loop.
         static ALWAYS_FAILS: Backend =
-            Backend { name: "opencode", prefix: "@opencode", program: "false" };
+            Backend { name: "opencode", prefix: "@opencode", program: "false", models: &[] };
         let mut request = request(OPENCODE);
         request.backend = &ALWAYS_FAILS;
         request.resume_session = Some("ses_gone".into());
@@ -901,8 +947,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_program_fails_before_anything_runs() {
-        static MISSING: Backend =
-            Backend { name: "nope", prefix: "@nope", program: "teams-lite-no-such-agent" };
+        static MISSING: Backend = Backend {
+            name: "nope",
+            prefix: "@nope",
+            program: "teams-lite-no-such-agent",
+            models: &[],
+        };
         let mut request = request(CLAUDE);
         request.backend = &MISSING;
         let (progress, _rx) = watch::channel(String::new());

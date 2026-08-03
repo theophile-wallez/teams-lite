@@ -259,6 +259,56 @@ describe("Backend request/response", () => {
     }
   });
 
+  // Choosing a provider decides which program the backend's machine starts for a chat
+  // message, and which model reads the thread, so it travels as a WRITE — the backend
+  // refuses it without the capability token (MACHINE_METHODS in src/bin/server.rs).
+  it("frames agent_set_provider as a write, carrying the write token", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("tok");
+
+    const promise = backend.agentSetProvider("claude", { enabled: false, model: "opus" });
+
+    const frame = JSON.parse(socket.sent[0]!) as {
+      id: number;
+      method: string;
+      params?: Record<string, unknown>;
+    };
+    expect(frame.method).toBe("agent_set_provider");
+    expect(frame.params).toEqual({
+      provider: "claude",
+      enabled: false,
+      model: "opus",
+      write_token: "tok",
+    });
+
+    socket.simulateMessage(
+      JSON.stringify({
+        id: frame.id,
+        result: {
+          backends: [
+            {
+              name: "claude",
+              prefix: "@claude",
+              available: true,
+              enabled: false,
+              model: "opus",
+              models: ["opus"],
+            },
+          ],
+          conversations: [],
+          tools: ["Read"],
+          workspace: "/tmp",
+          enabled: true,
+          sandbox_conversation: "19:sandbox@thread.v2",
+        },
+      }),
+    );
+    await expect(promise).resolves.toMatchObject({
+      backends: [{ name: "claude", enabled: false, model: "opus" }],
+    });
+    backend.close();
+  });
+
   it("frames a fetch_avatar request with kind and id, resolving the photo result", async () => {
     const { backend, socket } = await connected();
 

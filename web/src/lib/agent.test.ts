@@ -7,11 +7,27 @@ import {
   agentToolGrants,
   agentToolsWithGrant,
   availableBackends,
+  usableBackends,
+  type AgentBackend,
   type AgentStatus,
   type AgentToolGrant,
 } from "./agent";
 
 const SANDBOX = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
+
+/** One provider, installed and enabled unless the test says otherwise — the state a
+ *  fresh backend reports. */
+function backend(over: Partial<AgentBackend> = {}): AgentBackend {
+  return {
+    name: "claude",
+    prefix: "@claude",
+    available: true,
+    enabled: true,
+    model: null,
+    models: ["opus", "sonnet"],
+    ...over,
+  };
+}
 
 const FILES: AgentToolGrant = {
   key: "files",
@@ -29,8 +45,8 @@ const GRAFANA: AgentToolGrant = {
 function status(over: Partial<AgentStatus> = {}): AgentStatus {
   return {
     backends: [
-      { name: "claude", prefix: "@claude", available: true },
-      { name: "opencode", prefix: "@opencode", available: false },
+      backend(),
+      backend({ name: "opencode", prefix: "@opencode", available: false, models: [] }),
     ],
     conversations: [{ conversation: SANDBOX, mode: "reply" }],
     tools: ["Read", "Glob", "Grep"],
@@ -66,7 +82,7 @@ describe("agentRunnable", () => {
 
   it("is false when no CLI is installed", () => {
     const none = status({
-      backends: [{ name: "claude", prefix: "@claude", available: false }],
+      backends: [backend({ available: false })],
     });
     expect(agentRunnable(none)).toBe(false);
   });
@@ -77,6 +93,13 @@ describe("agentRunnable", () => {
     expect(agentRunnable(status({ enabled: false }))).toBe(false);
   });
 
+  // The user switched every provider off in Settings: the CLI is there, and nothing
+  // answers. Arming a conversation would be as silent as a missing CLI.
+  it("is false when every installed provider is switched off", () => {
+    const off = status({ backends: [backend({ enabled: false })] });
+    expect(agentRunnable(off)).toBe(false);
+  });
+
   it("is false before the backend has answered", () => {
     expect(agentRunnable(null)).toBe(false);
   });
@@ -85,6 +108,20 @@ describe("agentRunnable", () => {
 describe("availableBackends", () => {
   it("keeps only the CLIs the machine has", () => {
     expect(availableBackends(status()).map((b) => b.name)).toEqual(["claude"]);
+  });
+});
+
+describe("usableBackends", () => {
+  it("keeps only the providers that are installed AND switched on", () => {
+    const mixed = status({
+      backends: [
+        backend(),
+        backend({ name: "opencode", prefix: "@opencode", enabled: false }),
+        backend({ name: "ghost", prefix: "@ghost", available: false }),
+      ],
+    });
+    expect(availableBackends(mixed).map((b) => b.name)).toEqual(["claude", "opencode"]);
+    expect(usableBackends(mixed).map((b) => b.name)).toEqual(["claude"]);
   });
 });
 
@@ -155,11 +192,26 @@ describe("agentHint", () => {
     expect(agentHint(status())).toContain("@claude");
   });
 
+  // Never tell somebody to type a prefix that a setting of theirs will drop.
+  it("names only the providers that are switched on", () => {
+    const mixed = status({
+      backends: [backend(), backend({ name: "opencode", prefix: "@opencode", enabled: false })],
+    });
+    expect(agentHint(mixed)).toContain("@claude");
+    expect(agentHint(mixed)).not.toContain("@opencode");
+  });
+
+  it("says so when the CLI is installed but every provider is off", () => {
+    const off = status({ backends: [backend({ enabled: false })] });
+    expect(agentHint(off)).toContain("switched off");
+    expect(agentHint(off)).toContain("claude");
+  });
+
   it("says the machine has no agent installed, and which ones it looked for", () => {
     const none = status({
       backends: [
-        { name: "claude", prefix: "@claude", available: false },
-        { name: "opencode", prefix: "@opencode", available: false },
+        backend({ available: false }),
+        backend({ name: "opencode", prefix: "@opencode", available: false }),
       ],
     });
     expect(agentHint(none)).toBe("No agent is installed on this machine (claude or opencode).");

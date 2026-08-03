@@ -56,17 +56,141 @@ pub struct Backend {
     pub prefix: &'static str,
     /// The executable, resolved on `PATH`.
     pub program: &'static str,
+    /// Models worth offering in a picker, in the CLI's own spelling. A suggestion
+    /// list, never a limit: `claude` takes an alias or a full model id, and
+    /// `opencode` takes `provider/model` for whichever providers THIS machine has
+    /// configured — a hard-coded catalogue would be wrong on the next machine.
+    pub models: &'static [&'static str],
 }
 
 /// Every backend, in the order a status reply lists them.
 pub const BACKENDS: [Backend; 2] = [
-    Backend { name: "claude", prefix: "@claude", program: "claude" },
-    Backend { name: "opencode", prefix: "@opencode", program: "opencode" },
+    Backend {
+        name: "claude",
+        prefix: "@claude",
+        program: "claude",
+        // The aliases Claude Code documents for `--model`; a full id such as
+        // `claude-opus-4-5` is accepted too, which is why the field is a suggestion.
+        models: &["fable", "opus", "sonnet", "haiku"],
+    },
+    Backend {
+        name: "opencode",
+        prefix: "@opencode",
+        program: "opencode",
+        // Deliberately empty: `opencode models` lists only the providers the user
+        // authenticated, so the honest answer is the one they type.
+        models: &[],
+    },
 ];
 
 /// Find a backend by its `name` (the RPC spelling).
 pub fn backend_named(name: &str) -> Option<&'static Backend> {
     BACKENDS.iter().find(|b| b.name.eq_ignore_ascii_case(name))
+}
+
+/// The store key holding the per-provider settings, as
+/// `{"<backend name>": {"enabled": false, "model": "opus"}}`. Absent means every
+/// provider this machine can run is on, with the CLI's own default model.
+pub const SETTING_PROVIDERS: &str = "agent_providers";
+
+/// The longest model name accepted. A model is one argument to the CLI, so length is
+/// the only thing worth bounding beyond the shape below.
+const MAX_MODEL_CHARS: usize = 80;
+
+/// Whether a string is a model name this crate will pass to a CLI.
+///
+/// The charset is an allowlist, and it excludes a leading `-`: a model name arrives
+/// from a client, and the one thing it must never become is another flag on the
+/// command line. It reaches the child as a single argument and never through a shell
+/// (see `the_prompt_is_never_run_through_a_shell` in [`crate::agent`]), so this is a
+/// second floor rather than the only one.
+pub fn is_valid_model(model: &str) -> bool {
+    let count = model.chars().count();
+    count > 0
+        && count <= MAX_MODEL_CHARS
+        && !model.starts_with('-')
+        && model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
+}
+
+/// What the user decided about each agent CLI: whether it may answer at all, and
+/// which model it runs.
+///
+/// The default for a provider nobody configured is ON, unlike a conversation's
+/// [`Mode`]: the two defaults answer different questions. A conversation is a place
+/// this machine posts in the user's name, so it stays off until they name it; a
+/// provider is only *which* installed CLI answers once a conversation is opted in, so
+/// every CLI on the machine is available out of the box.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Providers(serde_json::Map<String, serde_json::Value>);
+
+impl Providers {
+    /// Read the stored [`SETTING_PROVIDERS`] value (`None` when unset).
+    pub fn parse(json: Option<&str>) -> Self {
+        Providers(
+            json.and_then(|raw| serde_json::from_str(raw).ok()).unwrap_or_default(),
+        )
+    }
+
+    /// Whether this provider may answer a trigger. Unknown or unreadable means yes —
+    /// see the type docs for why the default runs the other way from [`Mode`].
+    pub fn is_enabled(&self, name: &str) -> bool {
+        self.0
+            .get(name)
+            .and_then(|entry| entry.get("enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+    }
+
+    /// The model this provider runs, when the user chose one. An unreadable or
+    /// malformed stored value reads as "no choice", so a bad setting falls back to the
+    /// CLI's own default rather than failing every run.
+    pub fn model(&self, name: &str) -> Option<String> {
+        self.0
+            .get(name)
+            .and_then(|entry| entry.get("model"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|model| is_valid_model(model))
+            .map(str::to_string)
+    }
+
+    pub fn set_enabled(&mut self, name: &str, enabled: bool) {
+        self.entry(name).insert("enabled".into(), serde_json::Value::Bool(enabled));
+    }
+
+    /// Choose a model, or `None` to go back to the CLI's own default.
+    pub fn set_model(&mut self, name: &str, model: Option<&str>) {
+        let entry = self.entry(name);
+        match model {
+            Some(model) => {
+                entry.insert("model".into(), serde_json::Value::String(model.to_string()));
+            }
+            None => {
+                entry.remove("model");
+            }
+        }
+    }
+
+    /// The value to persist. Merging is what makes this a struct rather than two pure
+    /// functions: writing one provider must never drop the others.
+    pub fn to_json(&self) -> String {
+        serde_json::Value::Object(self.0.clone()).to_string()
+    }
+
+    fn entry(&mut self, name: &str) -> &mut serde_json::Map<String, serde_json::Value> {
+        self.0
+            .entry(name.to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        // Replace a stored non-object (a typo, an older shape) rather than ignoring the
+        // write: the user asked for this setting and must get it.
+        let entry = self.0.get_mut(name).expect("just inserted");
+        if !entry.is_object() {
+            *entry = serde_json::Value::Object(serde_json::Map::new());
+        }
+        entry.as_object_mut().expect("an object")
+    }
 }
 
 /// What the agent may do in one conversation.
@@ -158,15 +282,31 @@ pub struct Command {
 ///
 /// `from_me` comes from the caller because it already resolved it: identity matching
 /// needs both the display name and the MRI (see `is_self` in `src/bin/server.rs`).
+///
+/// Two settings can refuse the same message, and both are the user's: the
+/// conversation's [`Mode`], and whether they left that provider enabled in
+/// [`Providers`].
 pub fn command_for(
     message: &Message,
     from_me: bool,
     mode: Mode,
+    providers: &Providers,
     now_ms: i64,
 ) -> Option<Command> {
     if mode == Mode::Off {
         return None;
     }
+    let command = trigger_for(message, from_me, now_ms)?;
+    if !providers.is_enabled(command.backend.name) {
+        return None;
+    }
+    Some(command)
+}
+
+/// Every rule about the message itself: who wrote it, whether it is fresh, and which
+/// prefix it opens with. Knows nothing about the user's settings — [`command_for`]
+/// applies those, and [`ignored_trigger`] applies none of them on purpose.
+fn trigger_for(message: &Message, from_me: bool, now_ms: i64) -> Option<Command> {
     // THE gate: only the user summons the agent. See the module docs.
     if !from_me {
         return None;
@@ -193,25 +333,25 @@ pub fn command_for(
     })
 }
 
-/// The backend a message asked for, applying every rule EXCEPT the conversation's
-/// mode — for one purpose: saying so in the journal.
+/// The backend a message asked for, applying every rule about the MESSAGE but none of
+/// the user's settings — for one purpose: saying so in the journal.
 ///
 /// [`command_for`] refuses on [`Mode::Off`] before it ever looks at the text, which is
 /// the right order (almost no message is a trigger). That order leaves one question
 /// unanswered, and it is the question a user asks when the thread stays quiet: was
-/// that silence a message about nothing, or my own request dropped in a conversation
-/// nobody opted in? A feature that looks broken with no line naming the cause is the
-/// failure this exists to prevent.
+/// that silence a message about nothing, or my own request dropped by a setting I
+/// cannot see from the thread? A feature that looks broken with no line naming the
+/// cause is the failure this exists to prevent.
 ///
 /// It decides nothing and authorizes nothing: it returns a name to print, never a
-/// [`Command`] to run. Every gate — `from_me` included — still applies, so a
-/// colleague's `@claude` is not even worth a log line.
+/// [`Command`] to run. Every gate on the message — `from_me` included — still applies,
+/// so a colleague's `@claude` is not even worth a log line.
 pub fn ignored_trigger(
     message: &Message,
     from_me: bool,
     now_ms: i64,
 ) -> Option<&'static Backend> {
-    command_for(message, from_me, Mode::Reply, now_ms).map(|command| command.backend)
+    trigger_for(message, from_me, now_ms).map(|command| command.backend)
 }
 
 /// Split `@claude do the thing` into its backend and its prompt.
@@ -407,6 +547,11 @@ pub fn prompt_with_context(prompt: &str, transcript: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The provider settings a fresh machine has: nothing stored, everything on.
+    fn on() -> Providers {
+        Providers::default()
+    }
+
     fn message(content: &str) -> Message {
         Message {
             id: "1785773946196".into(),
@@ -429,9 +574,14 @@ mod tests {
 
     #[test]
     fn a_prefixed_message_from_the_user_is_a_command() {
-        let command =
-            command_for(&message("<p>@claude what is the port?</p>"), true, Mode::Reply, 1_000_000)
-                .expect("the trigger is a command");
+        let command = command_for(
+            &message("<p>@claude what is the port?</p>"),
+            true,
+            Mode::Reply,
+            &on(),
+            1_000_000,
+        )
+        .expect("the trigger is a command");
         assert_eq!(command.backend.name, "claude");
         assert_eq!(command.prompt, "what is the port?");
         assert_eq!(command.message_id, "1785773946196");
@@ -440,7 +590,8 @@ mod tests {
     #[test]
     fn each_backend_has_its_own_prefix() {
         let command =
-            command_for(&message("@opencode ship it"), true, Mode::Reply, 1_000_000).unwrap();
+            command_for(&message("@opencode ship it"), true, Mode::Reply, &on(), 1_000_000)
+                .unwrap();
         assert_eq!(command.backend.name, "opencode");
         assert_eq!(command.prompt, "ship it");
     }
@@ -448,7 +599,7 @@ mod tests {
     #[test]
     fn the_prefix_is_case_insensitive_and_tolerates_punctuation() {
         for text in ["@Claude, hello", "@CLAUDE: hello", "  @claude   hello"] {
-            let command = command_for(&message(text), true, Mode::Reply, 1_000_000)
+            let command = command_for(&message(text), true, Mode::Reply, &on(), 1_000_000)
                 .unwrap_or_else(|| panic!("{text} is a command"));
             assert_eq!(command.prompt, "hello", "{text}");
         }
@@ -457,12 +608,17 @@ mod tests {
     #[test]
     fn a_message_from_somebody_else_never_triggers() {
         // The rule that keeps this feature from being remote code execution.
-        assert!(command_for(&message("@claude rm -rf ~"), false, Mode::Reply, 1_000_000).is_none());
+        assert!(
+            command_for(&message("@claude rm -rf ~"), false, Mode::Reply, &on(), 1_000_000)
+                .is_none()
+        );
     }
 
     #[test]
     fn a_conversation_that_is_off_never_triggers() {
-        assert!(command_for(&message("@claude hello"), true, Mode::Off, 1_000_000).is_none());
+        assert!(
+            command_for(&message("@claude hello"), true, Mode::Off, &on(), 1_000_000).is_none()
+        );
     }
 
     #[test]
@@ -488,23 +644,23 @@ mod tests {
     fn a_replayed_or_undated_frame_never_triggers() {
         let mut old = message("@claude hello");
         old.compose_time = 1_000_000 - MAX_AGE_MS - 1;
-        assert!(command_for(&old, true, Mode::Reply, 1_000_000).is_none());
+        assert!(command_for(&old, true, Mode::Reply, &on(), 1_000_000).is_none());
         let mut undated = message("@claude hello");
         undated.compose_time = 0;
-        assert!(command_for(&undated, true, Mode::Reply, 1_000_000).is_none());
+        assert!(command_for(&undated, true, Mode::Reply, &on(), 1_000_000).is_none());
         let mut future = message("@claude hello");
         future.compose_time = 1_000_000 + MAX_AGE_MS + 1;
-        assert!(command_for(&future, true, Mode::Reply, 1_000_000).is_none());
+        assert!(command_for(&future, true, Mode::Reply, &on(), 1_000_000).is_none());
     }
 
     #[test]
     fn a_deleted_or_system_message_never_triggers() {
         let mut deleted = message("@claude hello");
         deleted.deleted = true;
-        assert!(command_for(&deleted, true, Mode::Reply, 1_000_000).is_none());
+        assert!(command_for(&deleted, true, Mode::Reply, &on(), 1_000_000).is_none());
         let mut system = message("@claude hello");
         system.system_event = r#"{"kind":"call"}"#.into();
-        assert!(command_for(&system, true, Mode::Reply, 1_000_000).is_none());
+        assert!(command_for(&system, true, Mode::Reply, &on(), 1_000_000).is_none());
     }
 
     #[test]
@@ -516,7 +672,7 @@ mod tests {
             "<p>hello</p>",                           // no prefix
         ] {
             assert!(
-                command_for(&message(text), true, Mode::Reply, 1_000_000).is_none(),
+                command_for(&message(text), true, Mode::Reply, &on(), 1_000_000).is_none(),
                 "{text} must not be a command"
             );
         }
@@ -524,17 +680,102 @@ mod tests {
 
     #[test]
     fn a_multi_line_prompt_keeps_its_lines() {
-        let command =
-            command_for(&message("<p>@claude one</p><p>two</p>"), true, Mode::Reply, 1_000_000)
-                .unwrap();
+        let command = command_for(
+            &message("<p>@claude one</p><p>two</p>"),
+            true,
+            Mode::Reply,
+            &on(),
+            1_000_000,
+        )
+        .unwrap();
         assert_eq!(command.prompt, "one\ntwo");
     }
 
     #[test]
     fn an_oversized_prompt_is_refused() {
         let long = "x".repeat(MAX_PROMPT_CHARS + 1);
-        assert!(command_for(&message(&format!("@claude {long}")), true, Mode::Reply, 1_000_000)
+        assert!(
+            command_for(&message(&format!("@claude {long}")), true, Mode::Reply, &on(), 1_000_000)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn every_provider_is_enabled_out_of_the_box() {
+        // The answer to "what happens on a machine nobody configured": every CLI it
+        // holds may answer, with the CLI's own default model.
+        let providers = Providers::parse(None);
+        for backend in BACKENDS.iter() {
+            assert!(providers.is_enabled(backend.name), "{}", backend.name);
+            assert_eq!(providers.model(backend.name), None, "{}", backend.name);
+        }
+        // A broken setting must not silently turn the feature off either.
+        assert!(Providers::parse(Some("not json")).is_enabled("claude"));
+    }
+
+    #[test]
+    fn a_disabled_provider_never_answers_and_the_others_still_do() {
+        let mut providers = Providers::default();
+        providers.set_enabled("claude", false);
+        assert!(command_for(&message("@claude hello"), true, Mode::Reply, &providers, 1_000_000)
             .is_none());
+        let opencode =
+            command_for(&message("@opencode hello"), true, Mode::Reply, &providers, 1_000_000)
+                .expect("the other provider is untouched");
+        assert_eq!(opencode.backend.name, "opencode");
+        // …and the drop is still nameable for the journal, so the silence has a cause.
+        assert_eq!(
+            ignored_trigger(&message("@claude hello"), true, 1_000_000).map(|b| b.name),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn a_provider_write_merges_and_survives_a_round_trip() {
+        let mut providers = Providers::default();
+        providers.set_enabled("claude", false);
+        providers.set_model("claude", Some("opus"));
+        providers.set_model("opencode", Some("amazon-bedrock/anthropic.claude-opus-5"));
+        let stored = providers.to_json();
+
+        let reread = Providers::parse(Some(&stored));
+        assert!(!reread.is_enabled("claude"));
+        assert_eq!(reread.model("claude").as_deref(), Some("opus"));
+        // Writing one provider never drops the other.
+        assert!(reread.is_enabled("opencode"));
+        assert_eq!(
+            reread.model("opencode").as_deref(),
+            Some("amazon-bedrock/anthropic.claude-opus-5")
+        );
+
+        // Clearing the model goes back to the CLI's own default, and keeps the switch.
+        let mut cleared = reread.clone();
+        cleared.set_model("claude", None);
+        let cleared = Providers::parse(Some(&cleared.to_json()));
+        assert_eq!(cleared.model("claude"), None);
+        assert!(!cleared.is_enabled("claude"));
+    }
+
+    #[test]
+    fn a_model_name_can_never_become_another_flag() {
+        for model in ["opus", "claude-opus-5", "amazon-bedrock/anthropic.claude-opus-4-6-v1:0"] {
+            assert!(is_valid_model(model), "{model}");
+        }
+        for model in [
+            "",
+            "--dangerously-skip-permissions",
+            "-p",
+            "opus; rm -rf ~",
+            "opus $(whoami)",
+            "opus model",
+            &"x".repeat(MAX_MODEL_CHARS + 1),
+        ] {
+            assert!(!is_valid_model(model), "{model} must be refused");
+        }
+        // A stored value that would not pass reads as "no choice", never as a run that
+        // fails forever with an argument nobody can see.
+        let stored = r#"{"claude":{"model":"--dangerously-skip-permissions"}}"#;
+        assert_eq!(Providers::parse(Some(stored)).model("claude"), None);
     }
 
     #[test]

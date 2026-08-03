@@ -391,15 +391,16 @@ if ! sanctioned_automation; then
     # user's hands-on dev pair (bin/teams-dev-server.sh and `bun run dev`), which is
     # just as send-capable. Only 19430 — read-only — is absent, by design.
     #
-    # `agent_set_mode`/`agent_set_tools` are in that list for the same reason: they
-    # arm the local agent that answers `@claude` in a Teams thread AS the user, and
-    # decide what it may run on this machine (MACHINE_METHODS in src/bin/server.rs).
+    # `agent_set_mode`/`agent_set_tools`/`agent_set_provider` are in that list for the
+    # same reason: they arm the local agent that answers `@claude` in a Teams thread AS
+    # the user, decide what it may run on this machine, and decide which program and
+    # model it starts (MACHINE_METHODS in src/bin/server.rs).
     #
     # `set_always_available` publishes the user's own status: it posts no message, but
     # the green dot it turns on is what every colleague reads (OUTWARD_METHODS in
     # src/bin/server.rs).
     if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)"|'\''(send|edit|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider)"|'\''(send|edit|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that

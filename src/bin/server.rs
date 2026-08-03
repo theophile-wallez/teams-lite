@@ -14,7 +14,7 @@
 //          | set_settings | set_always_available | enrich_link
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | calendars | calendar_view
-//          | agent_status | agent_set_mode | agent_set_tools
+//          | agent_status | agent_set_mode | agent_set_tools | agent_set_provider
 // Events:  status | message | conversations_changed | notifications_changed | typing
 //          | read_receipt | call | call_signal | update_available
 //          | mail_folders_changed | mail_list_updated | mail_list_error
@@ -184,12 +184,13 @@ const OUTWARD_METHODS: [&str; 5] = ["send", "edit", "react", "mark_read", "set_a
 /// token. Reading the settings back stays open — it never returns a token, only
 /// whether one is set.
 ///
-/// The `agent_*` methods are the sharpest case of that reasoning. Neither one posts,
-/// so neither belongs above — but `agent_set_mode` decides which conversations this
-/// machine will later answer in the user's name, and `agent_set_tools` decides what a
-/// chat message may make a local agent do. A client that merely found this socket
-/// gets to do neither.
-const MACHINE_METHODS: [&str; 7] = [
+/// The `agent_*` methods are the sharpest case of that reasoning. None of them posts,
+/// so none belongs above — but `agent_set_mode` decides which conversations this
+/// machine will later answer in the user's name, `agent_set_tools` decides what a chat
+/// message may make a local agent do, and `agent_set_provider` decides which CLI a
+/// chat message starts and which model reads the thread. A client that merely found
+/// this socket gets to do none of it.
+const MACHINE_METHODS: [&str; 8] = [
     "repair_broker",
     "push_subscribe",
     "push_unsubscribe",
@@ -197,6 +198,7 @@ const MACHINE_METHODS: [&str; 7] = [
     "set_settings",
     "agent_set_mode",
     "agent_set_tools",
+    "agent_set_provider",
 ];
 
 /// What a {@link MACHINE_METHODS} entry actually does to the machine, for its
@@ -215,6 +217,10 @@ fn machine_effect(method: &str) -> &'static str {
              agent"
         }
         "agent_set_tools" => "decides what a local agent this machine runs may do",
+        "agent_set_provider" => {
+            "decides which coding agent this machine starts for a chat message, and which \
+             model reads the thread"
+        }
         // Unreachable while the two lists agree; the test below pins that they do.
         _ => "changes this machine",
     }
@@ -1363,8 +1369,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // ---- the local agent (see src/agent.rs and src/agent_policy.rs) --------
         // What answers an `@claude` / `@opencode` message the USER writes, by running
         // that CLI on this machine and streaming its answer into the thread. Only
-        // `agent_status` reads; the other two are MACHINE methods, because one decides
-        // where this machine answers as the user and the other what it may run.
+        // `agent_status` reads; the other three are MACHINE methods, because they
+        // decide where this machine answers as the user, what it may run, and which
+        // program and model it starts.
 
         // Which backends exist here, which conversations are opted in, what an agent
         // may do, and where it runs.
@@ -1405,6 +1412,48 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let store = ctx.store()?;
             store.set_setting(agent::SETTING_TOOLS, &serde_json::to_string(&tools)?)?;
             eprintln!("[agent] the tool allowlist is now {tools:?}");
+            agent_status_json(&store)
+        }
+
+        // Enable or disable one AI provider, and choose the model it runs. Both halves
+        // are optional, so the UI can flip a switch without restating the model.
+        //
+        // A provider this machine holds is enabled out of the box (see
+        // `agent_policy::Providers`), so this method is how the user narrows the set —
+        // and disabling one means its prefix stops answering anywhere, which is why it
+        // is gated like the other two.
+        "agent_set_provider" => {
+            let name = param_str(params, "provider")?;
+            let backend = agent_policy::backend_named(&name)
+                .with_context(|| format!("no such provider: {name}"))?;
+            let store = ctx.store()?;
+            let stored = store.get_setting(agent_policy::SETTING_PROVIDERS)?;
+            let mut providers = agent_policy::Providers::parse(stored.as_deref());
+            if let Some(enabled) = params.get("enabled").and_then(Value::as_bool) {
+                providers.set_enabled(backend.name, enabled);
+            }
+            // An absent `model` leaves the stored choice alone; an empty one clears it,
+            // which is how the UI goes back to the CLI's own default.
+            if let Some(model) = params.get("model").and_then(Value::as_str) {
+                let model = model.trim();
+                if model.is_empty() {
+                    providers.set_model(backend.name, None);
+                } else {
+                    anyhow::ensure!(
+                        agent_policy::is_valid_model(model),
+                        "`{model}` is not a model name (letters, digits and . _ : / - only, \
+                         and never leading with `-`)"
+                    );
+                    providers.set_model(backend.name, Some(model));
+                }
+            }
+            store.set_setting(agent_policy::SETTING_PROVIDERS, &providers.to_json())?;
+            eprintln!(
+                "[agent] {} is now {} on model {}",
+                backend.name,
+                if providers.is_enabled(backend.name) { "enabled" } else { "disabled" },
+                providers.model(backend.name).unwrap_or_else(|| "<the CLI's default>".into())
+            );
             agent_status_json(&store)
         }
 
@@ -3774,16 +3823,27 @@ fn agent_live_message(ctx: &Ctx, store: &Store, message: &Message, from_me: bool
     }
     let modes = store.get_setting(agent_policy::SETTING_MODES).unwrap_or_default();
     let mode = agent_policy::mode_for(&message.conversation_id, modes.as_deref());
-    let Some(command) = agent_policy::command_for(message, from_me, mode, now_ms()) else {
-        // Say when the user's own request was dropped because nobody opted this
-        // conversation in. Silence here reads as a broken feature, and the cause —
-        // `off` is the default everywhere — is invisible from the thread.
-        if mode == agent_policy::Mode::Off {
-            if let Some(backend) = agent_policy::ignored_trigger(message, from_me, now_ms()) {
+    let providers = agent_policy::Providers::parse(
+        store.get_setting(agent_policy::SETTING_PROVIDERS).unwrap_or_default().as_deref(),
+    );
+    let Some(command) = agent_policy::command_for(message, from_me, mode, &providers, now_ms())
+    else {
+        // Say when the user's own request was dropped by one of their own settings.
+        // Silence here reads as a broken feature, and neither cause — `off` is the
+        // default in every conversation, and a provider can be switched off in Settings
+        // — is visible from the thread.
+        if let Some(backend) = agent_policy::ignored_trigger(message, from_me, now_ms()) {
+            if mode == agent_policy::Mode::Off {
                 eprintln!(
                     "[agent] {} is `off` in {} — ignoring the trigger. Turn it on from that \
                      conversation's own header.",
                     backend.name, message.conversation_id
+                );
+            } else if !providers.is_enabled(backend.name) {
+                eprintln!(
+                    "[agent] the {} provider is disabled — ignoring the trigger. Turn it on \
+                     under Settings › AI providers.",
+                    backend.name
                 );
             }
         }
@@ -3825,7 +3885,8 @@ fn agent_live_message(ctx: &Ctx, store: &Store, message: &Message, from_me: bool
 }
 
 /// Assemble everything a run needs from the store: the thread as context, the tool
-/// allowlist, the workspace, and the agent session this thread already has.
+/// allowlist, the workspace, the model this provider runs, and the agent session this
+/// thread already has.
 fn agent_request(store: &Store, command: &agent_policy::Command) -> Result<agent::Request> {
     let history = store
         .messages_before(&command.conversation_id, i64::MAX, 60)
@@ -3847,6 +3908,10 @@ fn agent_request(store: &Store, command: &agent_policy::Command) -> Result<agent
             .filter(|session| !session.trim().is_empty()),
         workspace,
         tools: agent::tools_from_setting(store.get_setting(agent::SETTING_TOOLS)?.as_deref()),
+        model: agent_policy::Providers::parse(
+            store.get_setting(agent_policy::SETTING_PROVIDERS)?.as_deref(),
+        )
+        .model(command.backend.name),
     })
 }
 
@@ -4034,17 +4099,26 @@ async fn agent_edit(
     .await
 }
 
-/// What `agent_status` reports: which backends this machine can run, which
-/// conversations are opted in, and what an agent is allowed to do.
+/// What `agent_status` reports: which backends this machine can run, which of them the
+/// user left enabled and on which model, which conversations are opted in, and what an
+/// agent is allowed to do.
 fn agent_status_json(store: &Store) -> Result<Value> {
     let modes = store.get_setting(agent_policy::SETTING_MODES)?;
+    let stored_providers = store.get_setting(agent_policy::SETTING_PROVIDERS)?;
+    let providers = agent_policy::Providers::parse(stored_providers.as_deref());
     let backends: Vec<Value> = agent_policy::BACKENDS
         .iter()
         .map(|backend| {
             json!({
                 "name": backend.name,
                 "prefix": backend.prefix,
+                // Two different facts, and a UI needs both: whether the CLI exists on
+                // this machine, and whether the user left it on.
                 "available": agent::is_available(backend),
+                "enabled": providers.is_enabled(backend.name),
+                "model": providers.model(backend.name),
+                // Suggestions for a picker, not a limit — see `Backend::models`.
+                "models": backend.models,
             })
         })
         .collect();
@@ -4623,12 +4697,15 @@ mod tests {
 
     #[test]
     fn the_agent_methods_are_gated_but_are_not_outward_facing() {
-        // Neither one posts, so neither is outward — but `agent_set_mode` decides
-        // which conversations this machine will later answer in the user's name, and
-        // `agent_set_tools` decides what a chat message may make a local agent do.
-        for (method, phrase) in
-            [("agent_set_mode", "in the user's name"), ("agent_set_tools", "local agent")]
-        {
+        // None of them posts, so none is outward — but `agent_set_mode` decides which
+        // conversations this machine will later answer in the user's name,
+        // `agent_set_tools` decides what a chat message may make a local agent do, and
+        // `agent_set_provider` decides which program it starts.
+        for (method, phrase) in [
+            ("agent_set_mode", "in the user's name"),
+            ("agent_set_tools", "local agent"),
+            ("agent_set_provider", "which coding agent"),
+        ] {
             assert!(!OUTWARD_METHODS.contains(&method), "{method}");
             assert_eq!(write_class(method), Some(WriteClass::Machine), "{method}");
             let err = check_write_allowed(method, &json!({}), Some("tok"))
@@ -4646,7 +4723,7 @@ mod tests {
         // The reply path checks `read_only()` on its own (an agent answering in the
         // user's name is the loudest thing a screenshot script could do), and the
         // gate refuses the switch that would arm it in the first place.
-        for method in ["agent_set_mode", "agent_set_tools"] {
+        for method in ["agent_set_mode", "agent_set_tools", "agent_set_provider"] {
             let err = check_write_allowed(method, &json!({ "write_token": "tok" }), None)
                 .expect_err("read-only must refuse");
             assert!(err.contains("read-only"), "{err}");
@@ -4703,6 +4780,40 @@ mod tests {
             .unwrap()
             .iter()
             .any(|t| t == "mcp__grafana__query_prometheus"));
+    }
+
+    #[test]
+    fn the_agent_status_reports_every_provider_as_enabled_on_no_model() {
+        // What the AI providers pane draws on a machine nobody configured: every
+        // provider on, each running whatever its own CLI is configured for.
+        let store = Store::open_in_memory().unwrap();
+        let status = agent_status_json(&store).unwrap();
+        for backend in status["backends"].as_array().unwrap() {
+            assert_eq!(backend["enabled"], true, "{backend}");
+            assert_eq!(backend["model"], Value::Null, "{backend}");
+            assert!(backend["models"].is_array(), "{backend}");
+            // `available` is this machine's own PATH, so it is a fact, not a default.
+            assert!(backend["available"].is_boolean(), "{backend}");
+        }
+        assert_eq!(status["backends"][0]["models"], json!(["fable", "opus", "sonnet", "haiku"]));
+    }
+
+    #[test]
+    fn a_stored_provider_choice_shows_up_in_the_status() {
+        let store = Store::open_in_memory().unwrap();
+        let mut providers = agent_policy::Providers::default();
+        providers.set_enabled("opencode", false);
+        providers.set_model("claude", Some("opus"));
+        store.set_setting(agent_policy::SETTING_PROVIDERS, &providers.to_json()).unwrap();
+
+        let status = agent_status_json(&store).unwrap();
+        let backends = status["backends"].as_array().unwrap();
+        let claude = backends.iter().find(|b| b["name"] == "claude").unwrap();
+        let opencode = backends.iter().find(|b| b["name"] == "opencode").unwrap();
+        assert_eq!(claude["enabled"], true);
+        assert_eq!(claude["model"], "opus");
+        assert_eq!(opencode["enabled"], false);
+        assert_eq!(opencode["model"], Value::Null);
     }
 
     #[test]

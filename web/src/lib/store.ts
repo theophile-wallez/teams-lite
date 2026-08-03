@@ -55,7 +55,7 @@ import {
   type TypingSignal,
   type UpdateInfo,
 } from "./protocol";
-import type { AgentMode, AgentStatus } from "./agent";
+import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import { coalesce } from "./singleflight";
 import {
   requestRange,
@@ -2136,6 +2136,29 @@ export class TeamsController {
     let status: AgentStatus;
     try {
       status = await this.backend.agentSetTools(tools);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ agent: status });
+    playCue("success");
+    return status;
+  }
+
+  /**
+   * Enable or disable one AI provider, and/or choose the model it runs.
+   *
+   * A write request like the ones above, and for the same reason: it decides which
+   * program a chat message starts on the backend's machine. The status that lands in
+   * state is the backend's own — never a local guess — so a refused write leaves the
+   * pane showing what is really stored.
+   *
+   * Rejects on failure, so the row that called it can say why.
+   */
+  async setAgentProvider(provider: string, patch: AgentProviderPatch): Promise<AgentStatus> {
+    let status: AgentStatus;
+    try {
+      status = await this.backend.agentSetProvider(provider, patch);
     } catch (e) {
       playCue("error");
       throw e;

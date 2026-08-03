@@ -150,6 +150,11 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19440');\n"
         "ws.send(JSON.stringify({ method: 'agent_set_tools' }));\n"
     ),
+    "agent-provider-setter.ts": (
+        "// Chooses which coding agent and model a Teams message starts.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19421');\n"
+        "ws.send(JSON.stringify({ method: 'agent_set_provider' }));\n"
+    ),
     "agent-status-reader.ts": (
         "// Reads which conversations are armed, which is allowed.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
@@ -238,6 +243,7 @@ def cases(tmp: Path):
         # The local agent: arming it, or widening what it may run, is a write.
         ("BLOCK", PROJECT, f"bun run {tmp}/agent-armer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/agent-tooler.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/agent-provider-setter.ts"),
         # A cargo example reaches Teams with a broker token, past every port rule.
         ("BLOCK", PROJECT, "cargo run --example guard-test-loose-send"),
         ("BLOCK", PROJECT, "cargo run --example guard-test-real-send"),

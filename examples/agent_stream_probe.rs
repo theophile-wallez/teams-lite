@@ -18,7 +18,8 @@
 // to run one.
 //
 //   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example agent_stream_probe -- "what does the Ports table say?"
+//     cargo run --example agent_stream_probe -- "what does the Ports table say?" \
+//       [claude|opencode] [model]
 //
 use anyhow::{Context, Result};
 
@@ -37,6 +38,12 @@ async fn main() -> Result<()> {
         &std::env::args().nth(2).unwrap_or_else(|| "claude".to_string()),
     )
     .context("unknown backend — pass `claude` or `opencode`")?;
+    // A third argument runs a chosen model, the way Settings › AI providers does.
+    // Absent, the CLI keeps its own configured one.
+    let model = std::env::args().nth(3).filter(|m| !m.trim().is_empty());
+    if let Some(model) = &model {
+        anyhow::ensure!(agent_policy::is_valid_model(model), "`{model}` is not a model name");
+    }
     anyhow::ensure!(
         agent::is_available(backend),
         "`{}` is not on PATH",
@@ -72,6 +79,7 @@ async fn main() -> Result<()> {
         resume_session: None,
         workspace: agent::default_workspace(),
         tools: agent::tools_from_setting(None),
+        model,
     };
     let (progress, mut watch) = tokio::sync::watch::channel(String::new());
     let run = async move {

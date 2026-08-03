@@ -7,7 +7,7 @@ import {
   agentRunnable,
   agentToolGrants,
   agentToolsWithGrant,
-  availableBackends,
+  usableBackends,
   type AgentToolGrant,
 } from "~/lib/agent";
 import { cn } from "~/lib/utils";
@@ -56,7 +56,9 @@ export function AgentMenu(props: { conversationId: string }) {
   const mode = agentModeFor(status, props.conversationId);
   const on = mode === "reply";
   const runnable = agentRunnable(status);
-  const backends = availableBackends(status);
+  // Only the providers that would actually answer: a hint must never name a prefix
+  // one of the user's own settings drops (see lib/agent.ts).
+  const backends = usableBackends(status);
   const grants = agentToolGrants(status);
 
   const toggle = async (next: boolean) => {

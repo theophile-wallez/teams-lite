@@ -20,6 +20,7 @@ import { APPEARANCES, appearanceLabel, type Appearance } from "~/lib/appearance"
 import type { SettingsPatch } from "~/lib/protocol";
 import { pushBlockerMessage } from "~/lib/push";
 import { cn } from "~/lib/utils";
+import { AiProvidersSettings } from "./ai-providers-settings";
 import { useAppState, useController } from "./controller-context";
 import { LinearLogo } from "./linear-logo";
 import { Button } from "./ui/button";
@@ -35,10 +36,11 @@ type SaveState = { kind: "idle" | "saving" | "saved" } | { kind: "error"; messag
 
 /**
  * The Settings surface, rendered in the right pane in place of a conversation
- * (see components/app.tsx). It hosts integration configuration — the GitLab host
- * and the access tokens that power rich link previews — and the appearance
- * preference. All values persist through the backend (a token is write-only: the
- * UI only ever learns whether one is stored, never its value).
+ * (see components/app.tsx). It hosts the AI providers this machine can run, the
+ * integration configuration — the GitLab host and the access tokens that power rich
+ * link previews — and the appearance preference. All values persist through the
+ * backend (a token is write-only: the UI only ever learns whether one is stored,
+ * never its value).
  */
 export function SettingsPane(props: { onBack?: () => void }) {
   return (
@@ -64,13 +66,14 @@ export function SettingsPane(props: { onBack?: () => void }) {
         <div className="flex min-w-0 flex-col">
           <h2 className="truncate text-sm font-medium text-foreground">Settings</h2>
           <p className="truncate text-[11px] text-text-faint">
-            Integrations, privacy, appearance, and sounds
+            AI providers, integrations, privacy, appearance, and sounds
           </p>
         </div>
       </header>
 
       <div className="flex-1 overflow-y-auto px-4 py-6 md:px-5">
         <div className="mx-auto flex max-w-xl flex-col gap-8 pb-[env(safe-area-inset-bottom)]">
+          <AiProvidersSettings />
           <GitLabSettings />
           <LinearSettings />
           <GhostModeSettings />

@@ -2439,11 +2439,40 @@ const MOCK_AGENT_TOOL_GRANTS = [
  *  the Rust `DEFAULT_TOOLS` holds, so a spec can tell the default from a grant. */
 let mockAgentTools: string[] = ["Read", "Glob", "Grep"];
 
-/** The `agent_status` result, matching the Rust one. Both backends are reported as
- *  available: the mock exists to drive the UI, and a switch that refuses itself would
- *  make the interesting half of the flow untestable. */
+/** Which AI providers this "machine" holds, and what the user chose for each — the
+ *  state the Settings › AI providers pane draws.
+ *
+ *  `claude` is installed and `opencode` is not, on purpose: both halves of the pane
+ *  matter, and the "Not installed" row with its disabled switch is exactly the state a
+ *  real machine with one CLI is in. `enabled` starts true for both, as the Rust default
+ *  does (`agent_policy::Providers`), and `models` mirrors `Backend::models`. */
+const mockAgentProviders = new Map<
+  string,
+  { prefix: string; available: boolean; enabled: boolean; model: string | null; models: string[] }
+>([
+  [
+    "claude",
+    {
+      prefix: "@claude",
+      available: true,
+      enabled: true,
+      model: null,
+      models: ["fable", "opus", "sonnet", "haiku"],
+    },
+  ],
+  ["opencode", { prefix: "@opencode", available: false, enabled: true, model: null, models: [] }],
+]);
+
+/** The `agent_status` result, matching the Rust one. */
 function agentStatusView(): {
-  backends: { name: string; prefix: string; available: boolean }[];
+  backends: {
+    name: string;
+    prefix: string;
+    available: boolean;
+    enabled: boolean;
+    model: string | null;
+    models: string[];
+  }[];
   conversations: { conversation: string; mode: string }[];
   tools: string[];
   tool_grants: { key: string; label: string; detail: string; tools: string[] }[];
@@ -2452,10 +2481,7 @@ function agentStatusView(): {
   sandbox_conversation: string;
 } {
   return {
-    backends: [
-      { name: "claude", prefix: "@claude", available: true },
-      { name: "opencode", prefix: "@opencode", available: true },
-    ],
+    backends: [...mockAgentProviders].map(([name, provider]) => ({ name, ...provider })),
     conversations: [...mockAgentModes].map(([conversation, mode]) => ({ conversation, mode })),
     tools: [...mockAgentTools],
     tool_grants: MOCK_AGENT_TOOL_GRANTS,
@@ -2463,6 +2489,17 @@ function agentStatusView(): {
     enabled: true,
     sandbox_conversation: MOCK_AGENT_SANDBOX,
   };
+}
+
+/** The model shape the Rust RPC accepts (`agent_policy::is_valid_model`). The mock
+ *  enforces it too, so a spec can prove the refusal without a real backend. */
+function isValidMockModel(model: string): boolean {
+  return (
+    model.length > 0 &&
+    model.length <= 80 &&
+    !model.startsWith("-") &&
+    /^[A-Za-z0-9._:/-]+$/.test(model)
+  );
 }
 
 /** Non-secret settings view, matching the Rust `get_settings` result. */
@@ -3760,6 +3797,24 @@ function dispatch(method: string, params: unknown): unknown {
       return agentStatusView();
     }
 
+    case "agent_set_provider": {
+      const name = requireString(params, "provider");
+      const provider = mockAgentProviders.get(name);
+      if (!provider) throw new Error(`no such provider: ${name}`);
+      const o = asObject(params);
+      if (typeof o.enabled === "boolean") provider.enabled = o.enabled;
+      if (typeof o.model === "string") {
+        const model = o.model.trim();
+        if (model.length === 0) {
+          provider.model = null;
+        } else {
+          if (!isValidMockModel(model)) throw new Error(`\`${model}\` is not a model name`);
+          provider.model = model;
+        }
+      }
+      return agentStatusView();
+    }
+
     case "get_settings":
       return settingsView();
 
@@ -4301,6 +4356,12 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       // The other half of the same consent: what the agent may reach. Asserted here for
       // the same reason — a switch is only meaningful if the backend stored it.
       tools: [...mockAgentTools],
+      providers: [...mockAgentProviders].map(([name, p]) => ({
+        name,
+        available: p.available,
+        enabled: p.enabled,
+        model: p.model,
+      })),
     });
   }
   if (req.method === "GET" && url.pathname === "/__test/channels") {
