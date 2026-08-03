@@ -1,5 +1,5 @@
 // Coalesce repeated async work into a single in-flight run plus at most one
-// trailing re-run. Ported verbatim from ui/src/singleflight.ts.
+// trailing re-run.
 //
 // Some backend events trigger a refresh which — via the backend — can trigger
 // another event, which triggers another refresh. Mapping every event 1:1 to a

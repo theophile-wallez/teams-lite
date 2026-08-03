@@ -1,10 +1,10 @@
 // teams-lite web — application store + controller.
 //
-// The controller owns the backend WebSocket client and mirrors the terminal
-// UI's business logic (ui/src/app.tsx): local-first opens with a per-session
-// message cache, coalesced conversation refreshes, durable drafts, live-message
-// fan-in, and infinite history. React components stay dumb: they read fine-
-// grained slices from the TanStack Store and call controller methods.
+// The controller owns the backend WebSocket client and all of the business logic:
+// local-first opens with a per-session message cache, coalesced conversation
+// refreshes, durable drafts, live-message fan-in, and infinite history. React
+// components stay dumb: they read fine-grained slices from the TanStack Store and
+// call controller methods.
 //
 // State lives in a TanStack Store so components subscribe to just the slice they
 // use (selector-based), which keeps re-renders cheap under a stream of live

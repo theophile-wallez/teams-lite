@@ -7,8 +7,8 @@
 // This wrapper serves the static assets, relays the page's WebSocket to the local
 // Rust backend, and falls back to the SSR handler for everything else. It is
 // intentionally a plain Bun fetch server (no Nitro, no Node): that keeps it
-// self-contained so the `teams --web` launcher can run it in-process with the
-// embedded Bun runtime, preserving the single-binary promise.
+// self-contained so the `teams` launcher can run it in-process with the embedded
+// Bun runtime, preserving the single-binary promise.
 //
 // Env: PORT (default 19440), HOST (default 127.0.0.1),
 //      TEAMS_LITE_WS_URL (default ws://127.0.0.1:19420 — the backend to relay to).

@@ -1,9 +1,7 @@
 // Browser WebSocket client to the teams-lite Rust backend.
 //
-// Ported from ui/src/client.ts (the terminal UI's client) with the same wire
-// protocol and reconnect policy. The only differences: it targets the browser
-// `WebSocket` global and is safe to construct during SSR (it only opens a socket
-// when connect() is called on the client).
+// It targets the browser `WebSocket` global and is safe to construct during SSR (it
+// only opens a socket when connect() is called on the client).
 //
 //   request  -> { id, method, params }
 //   response <- { id, result } | { id, error }
@@ -104,7 +102,7 @@ function reachableFromThisPage(configured: string): string {
  * The backend URL to use when a caller does not name one.
  *
  * In a production build this is the local Rust backend — the whole point of
- * `teams --web`. In DEV there is deliberately **no default**: a dev server must
+ * `teams`. In DEV there is deliberately **no default**: a dev server must
  * state its target through `VITE_TEAMS_WS_URL`, or this throws.
  *
  * That asymmetry is a safety catch, not pedantry. A dev server that silently

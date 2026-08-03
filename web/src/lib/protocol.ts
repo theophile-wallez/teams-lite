@@ -1,8 +1,6 @@
-// Shared protocol types + pure message logic for the web UI.
+// Shared protocol types + pure message logic for the web app.
 //
-// These mirror the Rust backend's WebSocket protocol (see src/bin/server.rs) and
-// port the terminal UI's pure helpers (ui/src/message-content.ts,
-// ui/src/message-history.ts) so the web and terminal clients behave identically.
+// These mirror the Rust backend's WebSocket protocol (see src/bin/server.rs).
 // Nothing here touches the DOM, the network, or any runtime-specific API.
 
 // Mirrors the Rust `ConversationKind` (src/store.rs).
@@ -684,7 +682,7 @@ export type LinkMetadata =
  *  recognizes the link (or the resource is private/absent). */
 export type LinkMetadataResult = { metadata: LinkMetadata | null };
 
-// ---- message content parsing (ported from ui/src/message-content.ts) -------
+// ---- message content parsing ------------------------------------------------
 
 /** How a message body must be read: as the bounded Teams HTML subset, or verbatim
  *  as plain text (escaped, never parsed as markup). */
@@ -1150,7 +1148,7 @@ export function replyToPayload(message: ChatMessage, before: string, after: stri
   };
 }
 
-// ---- history merge logic (ported from ui/src/message-history.ts) -----------
+// ---- history merge logic ----------------------------------------------------
 
 export const HISTORY_PREFETCH_MESSAGES = 20;
 
@@ -1269,7 +1267,7 @@ export function computeReadReceiptAnchors(
   return anchors;
 }
 
-// ---- conversation display helpers (ported from ui/src/app.tsx) -------------
+// ---- conversation display helpers -------------------------------------------
 
 export function convLabel(c: Conversation): string {
   if (c.name && c.name.length > 0) return c.name;

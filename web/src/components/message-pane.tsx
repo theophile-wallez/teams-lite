@@ -72,7 +72,7 @@ type HistoryRow =
 /**
  * The right pane: conversation title, the scrolling message history (virtualized,
  * with infinite upward loading + scroll anchoring + sticky-to-bottom), and the
- * composer. Mirrors the TUI's MessagePane (ui/src/app.tsx).
+ * composer.
  */
 export function MessagePane(props: { onBack?: () => void }) {
   const controller = useController();

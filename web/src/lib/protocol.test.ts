@@ -1,7 +1,5 @@
 // Behavior tests for the pure protocol helpers (message content parsing, history
-// merge semantics, and sidebar/notification display logic). Mirrors the terminal
-// UI's original tests (ui/src/message-content.test.ts, ui/src/message-history.test.ts)
-// so the web and terminal clients stay observably identical.
+// merge semantics, and sidebar/notification display logic).
 import { describe, it, expect } from "vitest";
 import {
   brokerNeedsAttention,

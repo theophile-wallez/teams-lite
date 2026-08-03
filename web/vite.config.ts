@@ -22,8 +22,8 @@ import { BACKEND_WS_ROUTE } from "./src/lib/backend-route";
 // and, worse, would win the port on the boot where it started first, quietly putting
 // a hot-reloading dev build behind the tailnet HTTPS address the phone bookmarks.
 const DEV_PORT = Number(process.env.PORT ?? 19441);
-// The dev server host. `teams --web-dev` sets HOST to bind the same interface as
-// the production launcher; unset lets Vite pick its default (localhost).
+// The dev server host. `teams --dev` sets HOST to bind the same interface as the
+// production launcher; unset lets Vite pick its default (localhost).
 const DEV_HOST = process.env.HOST || undefined;
 
 /**
@@ -107,10 +107,10 @@ export default defineConfig(({ command }) => ({
   ssr: {
     // For the production BUILD, bundle every dependency into the SSR output so
     // dist/server/server.js is self-contained (only node: builtins stay
-    // external) — this is what lets `teams --web` run the server from the
-    // compiled binary's embedded, extracted bundle (no node_modules there).
+    // external) — this is what lets `teams` run the server from the compiled
+    // binary's embedded, extracted bundle (no node_modules there).
     //
-    // In DEV (`vite dev` / `teams --web-dev`) we must NOT inline them: Vite's
+    // In DEV (`vite dev` / `teams --dev`) we must NOT inline them: Vite's
     // dev SSR module runner can't execute CommonJS deps such as react (they use
     // `module.exports`). `noExternal` has no valid "false" value, so we leave it
     // undefined in dev, which externalizes deps and lets the runtime require

@@ -450,8 +450,8 @@ Reading is open to any local client precisely BECAUSE writing needs this token, 
 taking it collapses the split the whole design rests on (see the write lock in
 src/bin/server.rs, and web/write-token.ts for the endpoint that serves the page).
 
-It is published for the user's own frontends — the browser page and the TUI — and
-was not handed to you. Nothing you legitimately need requires it:
+It is published for the user's own frontend — the browser page — and was not handed
+to you. Nothing you legitimately need requires it:
 
   read real data     TEAMS_LITE_READ_ONLY=1 cargo run --bin server   (ws on 19430)
   exercise a write   cd web && bun run preview                       (mock backend)
