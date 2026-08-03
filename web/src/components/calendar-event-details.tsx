@@ -1,15 +1,16 @@
 import { useMemo } from "react";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  Bell,
-  CalendarDays,
-  Clock,
-  ExternalLink,
-  MapPin,
-  Repeat,
-  Users,
-  Video,
-  X,
-} from "lucide-react";
+  BellIcon,
+  CalendarDaysIcon,
+  Cancel01Icon,
+  Clock01Icon,
+  ExternalLinkIcon,
+  MapPinIcon,
+  RepeatIcon,
+  UserMultiple02Icon,
+  Video01Icon,
+} from "@hugeicons/core-free-icons";
 import {
   calendarLabel,
   eventRepeats,
@@ -109,19 +110,19 @@ export function CalendarEventDetails(props: {
           data-testid="calendar-event-close"
           className="-mr-1 -mt-1 grid size-7 shrink-0 place-items-center rounded-lg text-text-faint transition-colors hover:bg-accent hover:text-foreground"
         >
-          <X className="size-4" strokeWidth={1.8} />
+          <HugeiconsIcon icon={Cancel01Icon} className="size-4" strokeWidth={1.8} />
         </button>
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-3.5">
         {statusLine(event) && (
-          <Row icon={<Clock className="size-4" strokeWidth={1.6} />}>
+          <Row icon={<HugeiconsIcon icon={Clock01Icon} className="size-4" strokeWidth={1.6} />}>
             <span className="text-[13px] text-text-dim">{statusLine(event)}</span>
           </Row>
         )}
 
         {eventRepeats(event) && (
-          <Row icon={<Repeat className="size-4" strokeWidth={1.6} />}>
+          <Row icon={<HugeiconsIcon icon={RepeatIcon} className="size-4" strokeWidth={1.6} />}>
             <span className="text-[13px] text-text-dim">
               {RECURRENCE_LABELS[event.recurrence] ?? "Part of a series"}
               {event.series === "exception" && " · this occurrence was moved"}
@@ -130,13 +131,13 @@ export function CalendarEventDetails(props: {
         )}
 
         {event.location && (
-          <Row icon={<MapPin className="size-4" strokeWidth={1.6} />}>
+          <Row icon={<HugeiconsIcon icon={MapPinIcon} className="size-4" strokeWidth={1.6} />}>
             <span className="text-[13px] text-text-dim">{event.location}</span>
           </Row>
         )}
 
         {event.reminder_minutes >= 0 && (
-          <Row icon={<Bell className="size-4" strokeWidth={1.6} />}>
+          <Row icon={<HugeiconsIcon icon={BellIcon} className="size-4" strokeWidth={1.6} />}>
             <span className="text-[13px] text-text-dim">
               {event.reminder_minutes === 0
                 ? "Reminder at the start"
@@ -145,7 +146,7 @@ export function CalendarEventDetails(props: {
           </Row>
         )}
 
-        <Row icon={<CalendarDays className="size-4" strokeWidth={1.6} />}>
+        <Row icon={<HugeiconsIcon icon={CalendarDaysIcon} className="size-4" strokeWidth={1.6} />}>
           <span className="text-[13px] text-text-dim">
             {calendar ? calendarLabel(calendar) : "Calendar"} · read-only
           </span>
@@ -189,7 +190,7 @@ export function CalendarEventDetails(props: {
               rel="noreferrer noopener"
               className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
             >
-              <Video className="size-3.5" strokeWidth={1.8} />
+              <HugeiconsIcon icon={Video01Icon} className="size-3.5" strokeWidth={1.8} />
               Join meeting
             </a>
           )}
@@ -201,7 +202,7 @@ export function CalendarEventDetails(props: {
               rel="noreferrer noopener"
               className="flex items-center gap-1.5 rounded-lg bg-card px-3 py-1.5 text-[13px] text-text-dim shadow-chip transition-colors hover:text-foreground"
             >
-              <ExternalLink className="size-3.5" strokeWidth={1.8} />
+              <HugeiconsIcon icon={ExternalLinkIcon} className="size-3.5" strokeWidth={1.8} />
               Open in Outlook
             </a>
           )}
@@ -240,7 +241,7 @@ function Attendees(props: { event: CalendarEvent }) {
   const hidden = total - attendees.length;
 
   return (
-    <Row icon={<Users className="size-4" strokeWidth={1.6} />}>
+    <Row icon={<HugeiconsIcon icon={UserMultiple02Icon} className="size-4" strokeWidth={1.6} />}>
       <span className="text-[13px] text-text-dim">
         {total} {total === 1 ? "attendee" : "attendees"}
       </span>

@@ -1,4 +1,5 @@
-import { Sparkles } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { SparklesIcon } from "@hugeicons/core-free-icons";
 import { cn } from "~/lib/utils";
 
 /**
@@ -84,7 +85,8 @@ export function AgentLogo(props: { backend: string; className?: string; title?: 
       return <ClaudeLogo className={props.className} title={props.title} />;
     default:
       return (
-        <Sparkles
+        <HugeiconsIcon
+          icon={SparklesIcon}
           className={cn("text-primary", props.className)}
           strokeWidth={1.6}
           role={props.title ? "img" : undefined}

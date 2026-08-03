@@ -1,21 +1,21 @@
 import { useEffect, useState } from "react";
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
-  Bell,
-  Check,
-  ChevronLeft,
-  CircleDot,
-  ExternalLink,
-  Ghost,
-  GitPullRequestArrow,
-  Loader2,
-  Monitor,
-  MoonStar,
-  Settings as SettingsIcon,
-  Sun,
-  Volume2,
-  VolumeX,
-  type LucideIcon,
-} from "lucide-react";
+  BellIcon,
+  CheckIcon,
+  ChevronLeftIcon,
+  CircleDotIcon,
+  ComputerIcon,
+  ExternalLinkIcon,
+  GhostIcon,
+  GitPullRequestArrowIcon,
+  Loading02Icon,
+  Moon02Icon,
+  Settings02Icon,
+  Sun03Icon,
+  VolumeHighIcon,
+  VolumeOffIcon,
+} from "@hugeicons/core-free-icons";
 import { APPEARANCES, appearanceLabel, type Appearance } from "~/lib/appearance";
 import type { SettingsPatch } from "~/lib/protocol";
 import { pushBlockerMessage } from "~/lib/push";
@@ -26,10 +26,10 @@ import { LinearLogo } from "./linear-logo";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
-const APPEARANCE_ICONS: Record<Appearance, LucideIcon> = {
-  system: Monitor,
-  light: Sun,
-  dark: MoonStar,
+const APPEARANCE_ICONS: Record<Appearance, IconSvgElement> = {
+  system: ComputerIcon,
+  light: Sun03Icon,
+  dark: Moon02Icon,
 };
 
 type SaveState = { kind: "idle" | "saving" | "saved" } | { kind: "error"; message: string };
@@ -57,11 +57,11 @@ export function SettingsPane(props: { onBack?: () => void }) {
             data-testid="back-to-list"
             className="-ml-1 grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground md:hidden"
           >
-            <ChevronLeft className="size-5" strokeWidth={1.6} />
+            <HugeiconsIcon icon={ChevronLeftIcon} className="size-5" strokeWidth={1.6} />
           </button>
         )}
         <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
-          <SettingsIcon className="size-5" strokeWidth={1.5} />
+          <HugeiconsIcon icon={Settings02Icon} className="size-5" strokeWidth={1.5} />
         </div>
         <div className="flex min-w-0 flex-col">
           <h2 className="truncate text-sm font-medium text-foreground">Settings</h2>
@@ -126,7 +126,7 @@ function GitLabSettings() {
     <section className="flex flex-col gap-4">
       <div className="flex items-start gap-3">
         <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
-          <GitPullRequestArrow className="size-5" strokeWidth={1.5} />
+          <HugeiconsIcon icon={GitPullRequestArrowIcon} className="size-5" strokeWidth={1.5} />
         </div>
         <div className="flex flex-col">
           <h3 className="text-[15px] font-medium text-foreground">GitLab</h3>
@@ -158,7 +158,7 @@ function GitLabSettings() {
             Personal access token
             {tokenSet && (
               <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/12 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
-                <Check className="size-3" strokeWidth={2.5} /> Saved
+                <HugeiconsIcon icon={CheckIcon} className="size-3" strokeWidth={2.5} /> Saved
               </span>
             )}
           </span>
@@ -186,7 +186,8 @@ function GitLabSettings() {
               rel="noopener noreferrer"
               className="inline-flex items-center gap-0.5 text-primary underline underline-offset-2 hover:opacity-80"
             >
-              Create one <ExternalLink className="size-3" strokeWidth={1.6} />
+              Create one{" "}
+              <HugeiconsIcon icon={ExternalLinkIcon} className="size-3" strokeWidth={1.6} />
             </a>
           </span>
         </label>
@@ -200,7 +201,12 @@ function GitLabSettings() {
           >
             {save.kind === "saving" ? (
               <>
-                <Loader2 className="size-4 animate-spin" strokeWidth={1.8} /> Saving…
+                <HugeiconsIcon
+                  icon={Loading02Icon}
+                  className="size-4 animate-spin"
+                  strokeWidth={1.8}
+                />{" "}
+                Saving…
               </>
             ) : (
               "Save"
@@ -222,7 +228,7 @@ function GitLabSettings() {
               data-testid="gitlab-save-status"
               className="flex items-center gap-1 text-xs text-emerald-600 animate-in fade-in-0 zoom-in-95 duration-200 ease-out dark:text-emerald-400"
             >
-              <Check className="size-3.5" strokeWidth={2} /> Saved
+              <HugeiconsIcon icon={CheckIcon} className="size-3.5" strokeWidth={2} /> Saved
             </span>
           )}
           {save.kind === "error" && (
@@ -285,7 +291,7 @@ function LinearSettings() {
             API key
             {tokenSet && (
               <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/12 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
-                <Check className="size-3" strokeWidth={2.5} /> Saved
+                <HugeiconsIcon icon={CheckIcon} className="size-3" strokeWidth={2.5} /> Saved
               </span>
             )}
           </span>
@@ -309,7 +315,8 @@ function LinearSettings() {
               rel="noopener noreferrer"
               className="inline-flex items-center gap-0.5 text-primary underline underline-offset-2 hover:opacity-80"
             >
-              Create one <ExternalLink className="size-3" strokeWidth={1.6} />
+              Create one{" "}
+              <HugeiconsIcon icon={ExternalLinkIcon} className="size-3" strokeWidth={1.6} />
             </a>
           </span>
         </label>
@@ -323,7 +330,12 @@ function LinearSettings() {
           >
             {save.kind === "saving" ? (
               <>
-                <Loader2 className="size-4 animate-spin" strokeWidth={1.8} /> Saving…
+                <HugeiconsIcon
+                  icon={Loading02Icon}
+                  className="size-4 animate-spin"
+                  strokeWidth={1.8}
+                />{" "}
+                Saving…
               </>
             ) : (
               "Save"
@@ -345,7 +357,7 @@ function LinearSettings() {
               data-testid="linear-save-status"
               className="flex items-center gap-1 text-xs text-emerald-600 animate-in fade-in-0 zoom-in-95 duration-200 ease-out dark:text-emerald-400"
             >
-              <Check className="size-3.5" strokeWidth={2} /> Saved
+              <HugeiconsIcon icon={CheckIcon} className="size-3.5" strokeWidth={2} /> Saved
             </span>
           )}
           {save.kind === "error" && (
@@ -390,7 +402,7 @@ function GhostModeSettings() {
     <section className="flex flex-col gap-4" data-testid="ghost-mode-settings">
       <div className="flex items-start gap-3">
         <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
-          <Ghost className="size-5" strokeWidth={1.5} />
+          <HugeiconsIcon icon={GhostIcon} className="size-5" strokeWidth={1.5} />
         </div>
         <div className="flex flex-col">
           <h3 className="text-[15px] font-medium text-foreground">Ghost mode</h3>
@@ -477,7 +489,7 @@ function AlwaysAvailableSettings() {
     <section className="flex flex-col gap-4" data-testid="always-available-settings">
       <div className="flex items-start gap-3">
         <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
-          <CircleDot className="size-5" strokeWidth={1.5} />
+          <HugeiconsIcon icon={CircleDotIcon} className="size-5" strokeWidth={1.5} />
         </div>
         <div className="flex flex-col">
           <h3 className="text-[15px] font-medium text-foreground">Always available</h3>
@@ -588,7 +600,7 @@ function NotificationSettings() {
     <section className="flex flex-col gap-4" data-testid="notification-settings">
       <div className="flex items-start gap-3">
         <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
-          <Bell className="size-5" strokeWidth={1.5} />
+          <HugeiconsIcon icon={BellIcon} className="size-5" strokeWidth={1.5} />
         </div>
         <div className="flex flex-col">
           <h3 className="text-[15px] font-medium text-foreground">Notifications</h3>
@@ -689,7 +701,7 @@ function AppearanceSettings() {
 
       <div className="grid grid-cols-3 gap-2">
         {APPEARANCES.map((pref) => {
-          const Icon = APPEARANCE_ICONS[pref];
+          const icon = APPEARANCE_ICONS[pref];
           const active = appearance === pref;
           return (
             <button
@@ -710,10 +722,11 @@ function AppearanceSettings() {
             >
               {active && (
                 <span className="absolute right-2 top-2 text-primary">
-                  <Check className="size-3.5" strokeWidth={2} />
+                  <HugeiconsIcon icon={CheckIcon} className="size-3.5" strokeWidth={2} />
                 </span>
               )}
-              <Icon
+              <HugeiconsIcon
+                icon={icon}
                 className={cn("size-5", active ? "text-primary" : "text-current")}
                 strokeWidth={1.4}
               />
@@ -747,9 +760,9 @@ function SoundsSettings() {
         <div className="flex min-w-0 items-center gap-3">
           <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
             {enabled ? (
-              <Volume2 className="size-5" strokeWidth={1.5} />
+              <HugeiconsIcon icon={VolumeHighIcon} className="size-5" strokeWidth={1.5} />
             ) : (
-              <VolumeX className="size-5" strokeWidth={1.5} />
+              <HugeiconsIcon icon={VolumeOffIcon} className="size-5" strokeWidth={1.5} />
             )}
           </div>
           <div className="flex min-w-0 flex-col">

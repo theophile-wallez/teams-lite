@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronLeft, ChevronRight, Loader2, MessagesSquare, WifiOff } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  Loading02Icon,
+  MessageMultiple01Icon,
+  WifiDisconnected01Icon,
+} from "@hugeicons/core-free-icons";
 import {
   channelLabel,
   computeReadReceiptAnchors,
@@ -513,7 +520,7 @@ export function MessagePane(props: { onBack?: () => void }) {
     return (
       <section className="flex flex-1 flex-col items-center justify-center gap-4 bg-background">
         <div className="grid size-14 place-items-center rounded-2xl bg-primary/10 text-primary shadow-chip">
-          <MessagesSquare className="size-6" strokeWidth={1.4} />
+          <HugeiconsIcon icon={MessageMultiple01Icon} className="size-6" strokeWidth={1.4} />
         </div>
         <div className="flex flex-col items-center gap-1 text-center">
           <p className="text-sm font-medium text-foreground">No conversation open</p>
@@ -543,7 +550,7 @@ export function MessagePane(props: { onBack?: () => void }) {
             data-testid="back-to-list"
             className="-ml-1 grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground md:hidden"
           >
-            <ChevronLeft className="size-5" strokeWidth={1.6} />
+            <HugeiconsIcon icon={ChevronLeftIcon} className="size-5" strokeWidth={1.6} />
           </button>
         )}
         {(openConv || openChannel) && (
@@ -650,8 +657,12 @@ export function MessagePane(props: { onBack?: () => void }) {
                 >
                   {loadingOlder ? (
                     <span className="flex items-center gap-2 text-xs text-text-faint">
-                      <Loader2 className="size-3 animate-spin" strokeWidth={1.6} /> Loading earlier
-                      messages…
+                      <HugeiconsIcon
+                        icon={Loading02Icon}
+                        className="size-3 animate-spin"
+                        strokeWidth={1.6}
+                      />{" "}
+                      Loading earlier messages…
                     </span>
                   ) : olderError ? (
                     <span className="text-xs text-destructive">
@@ -749,7 +760,8 @@ function ThreadGroup(props: {
             // padding stays a hit area for the hover background.
             className="-ml-1.5 mt-1 flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
           >
-            <ChevronRight
+            <HugeiconsIcon
+              icon={ChevronRightIcon}
               className={cn("size-3.5 transition-transform duration-200 ease-out", expanded && "rotate-90")}
               strokeWidth={1.8}
             />
@@ -820,7 +832,7 @@ function EmptyState(props: { loading: boolean; error: string | null; onRetry: ()
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
         <div className="grid size-12 place-items-center rounded-2xl bg-destructive/10 text-destructive shadow-chip">
-          <WifiOff className="size-5" strokeWidth={1.4} />
+          <HugeiconsIcon icon={WifiDisconnected01Icon} className="size-5" strokeWidth={1.4} />
         </div>
         <p className="text-sm font-medium text-foreground">Couldn't load messages</p>
         <p className="max-w-sm text-xs text-text-faint">{props.error}</p>
@@ -833,7 +845,12 @@ function EmptyState(props: { loading: boolean; error: string | null; onRetry: ()
   if (props.loading) {
     return (
       <div className="flex h-full items-center justify-center gap-2 text-sm text-text-faint">
-        <Loader2 className="size-4 animate-spin" strokeWidth={1.6} /> Loading messages…
+        <HugeiconsIcon
+          icon={Loading02Icon}
+          className="size-4 animate-spin"
+          strokeWidth={1.6}
+        />{" "}
+        Loading messages…
       </div>
     );
   }

@@ -1,17 +1,17 @@
 import type { CSSProperties } from "react";
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
-  Circle,
-  CircleCheck,
-  CircleDashed,
-  CircleDotDashed,
-  CircleX,
-  CornerDownRight,
-  FileText,
-  SignalHigh,
-  SquareKanban,
-  TriangleAlert,
-  type LucideIcon,
-} from "lucide-react";
+  Alert02Icon,
+  CircleCheckIcon,
+  CircleDashedIcon,
+  CircleDotDashedIcon,
+  CircleIcon,
+  CircleXIcon,
+  CornerDownRightIcon,
+  File02Icon,
+  KanbanIcon,
+  SignalMedium01Icon,
+} from "@hugeicons/core-free-icons";
 import {
   badgedPriority,
   formatDueDate,
@@ -28,12 +28,12 @@ import { LinearLogo } from "./linear-logo";
 /** The icon each state category is drawn with, following Linear's own set: an
  *  empty circle before work starts, a dashed one in the backlog, a half-filled one
  *  in progress, a tick when done, a cross when dropped. */
-const STATE_ICON: Record<StateShape, LucideIcon> = {
-  backlog: CircleDashed,
-  unstarted: Circle,
-  started: CircleDotDashed,
-  completed: CircleCheck,
-  canceled: CircleX,
+const STATE_ICON: Record<StateShape, IconSvgElement> = {
+  backlog: CircleDashedIcon,
+  unstarted: CircleIcon,
+  started: CircleDotDashedIcon,
+  completed: CircleCheckIcon,
+  canceled: CircleXIcon,
 };
 
 /** The fallback tint per category, for a workspace whose state carries no usable
@@ -48,13 +48,13 @@ const STATE_FALLBACK: Record<StateShape, string> = {
 
 /** The icon that stands for the resource itself, shown when there is no state to
  *  draw (a project's status is optional; a document has none at all). */
-const KIND_ICON: Record<LinearLinkKind, LucideIcon> = {
-  issue: Circle,
-  project: SquareKanban,
-  document: FileText,
+const KIND_ICON: Record<LinearLinkKind, IconSvgElement> = {
+  issue: CircleIcon,
+  project: KanbanIcon,
+  document: File02Icon,
 };
 
-type PriorityStyle = { label: string; badge: string; Icon: LucideIcon };
+type PriorityStyle = { label: string; badge: string; icon: IconSvgElement };
 
 /** Urgent and High only — see `badgedPriority`. Urgent gets the alarming colour
  *  because it is the one a reader must not scroll past. */
@@ -62,12 +62,12 @@ const PRIORITY_STYLE: Record<BadgedPriority, PriorityStyle> = {
   1: {
     label: "Urgent",
     badge: "bg-rose-500/12 text-rose-600 dark:text-rose-400",
-    Icon: TriangleAlert,
+    icon: Alert02Icon,
   },
   2: {
     label: "High",
     badge: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-    Icon: SignalHigh,
+    icon: SignalMedium01Icon,
   },
 };
 
@@ -93,10 +93,9 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
   const shape = stateShape(meta.state_type);
   const color = stateColor(meta.state_color);
   // The state icon when Linear gave us a category, else the resource's own icon.
-  const Icon = shape ? STATE_ICON[shape] : KIND_ICON[meta.kind];
+  const icon = shape ? STATE_ICON[shape] : KIND_ICON[meta.kind];
   const level = badgedPriority(meta.priority);
   const priority = level ? PRIORITY_STYLE[level] : undefined;
-  const PriorityIcon = priority?.Icon;
   const labels = meta.labels ?? [];
   const extraLabels = labels.length - MAX_LABELS;
   const percent = progressPercent(meta.progress);
@@ -123,7 +122,8 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
       style={color ? ({ "--state-color": color } as CSSProperties) : undefined}
     >
       <div className="flex items-start gap-2.5">
-        <Icon
+        <HugeiconsIcon
+          icon={icon}
           className={cn(
             "mt-0.5 size-4 shrink-0",
             // The workspace's colour when it gave us one, our own category tint
@@ -148,7 +148,7 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
                 {meta.state}
               </span>
             )}
-            {priority && PriorityIcon && (
+            {priority && (
               <span
                 data-testid="linear-priority"
                 data-priority={meta.priority}
@@ -158,7 +158,12 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
                   priority.badge,
                 )}
               >
-                <PriorityIcon className="size-3" strokeWidth={2} aria-hidden />
+                <HugeiconsIcon
+                  icon={priority.icon}
+                  className="size-3"
+                  strokeWidth={2}
+                  aria-hidden
+                />
                 {priority.label}
               </span>
             )}
@@ -190,7 +195,12 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
 
           {meta.parent && (
             <div className="flex items-center gap-1 text-[11px] text-text-faint">
-              <CornerDownRight className="size-3 shrink-0" strokeWidth={1.6} aria-hidden />
+              <HugeiconsIcon
+                icon={CornerDownRightIcon}
+                className="size-3 shrink-0"
+                strokeWidth={1.6}
+                aria-hidden
+              />
               <span className="truncate">Sub-issue of {meta.parent}</span>
             </div>
           )}

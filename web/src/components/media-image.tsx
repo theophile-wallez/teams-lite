@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { Download, ExternalLink, Film, ImageOff, Loader2, Play } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  Download04Icon,
+  ExternalLinkIcon,
+  Film01Icon,
+  ImageNotFound01Icon,
+  Loading02Icon,
+  PlayIcon,
+} from "@hugeicons/core-free-icons";
 import Zoom from "react-medium-image-zoom";
 import { formatCallDuration, mediaNeedsProxy, type Attachment } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
@@ -57,7 +65,7 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
           props.className,
         )}
       >
-        <ImageOff className="size-4 shrink-0" strokeWidth={1.6} />
+        <HugeiconsIcon icon={ImageNotFound01Icon} className="size-4 shrink-0" strokeWidth={1.6} />
         <span className="truncate">{props.alt || "Image unavailable"}</span>
       </div>
     );
@@ -71,7 +79,11 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
           props.className,
         )}
       >
-        <Loader2 className="size-4 animate-spin text-text-faint" strokeWidth={1.6} />
+        <HugeiconsIcon
+          icon={Loading02Icon}
+          className="size-4 animate-spin text-text-faint"
+          strokeWidth={1.6}
+        />
       </div>
     );
   }
@@ -139,7 +151,11 @@ export function FileAttachment(props: { attachment: Attachment }) {
       className="flex items-center gap-2 rounded-lg bg-element/80 px-3 py-2 text-left text-xs text-foreground shadow-chip transition-colors hover:bg-element"
     >
       {busy ? (
-        <Loader2 className="size-4 shrink-0 animate-spin text-text-faint" strokeWidth={1.6} />
+        <HugeiconsIcon
+          icon={Loading02Icon}
+          className="size-4 shrink-0 animate-spin text-text-faint"
+          strokeWidth={1.6}
+        />
       ) : (
         <FileTypeIcon
           name={props.attachment.name}
@@ -148,7 +164,11 @@ export function FileAttachment(props: { attachment: Attachment }) {
         />
       )}
       <span className="truncate">{props.attachment.name}</span>
-      <Download className="ml-auto size-3.5 shrink-0 text-text-faint" strokeWidth={1.6} />
+      <HugeiconsIcon
+        icon={Download04Icon}
+        className="ml-auto size-3.5 shrink-0 text-text-faint"
+        strokeWidth={1.6}
+      />
     </button>
   );
 }
@@ -220,17 +240,25 @@ export function RecordingAttachment(props: { attachment: Attachment }) {
           />
         ) : hasThumb && !posterFailed ? (
           <div className="absolute inset-0 flex items-center justify-center">
-            <Loader2 className="size-5 animate-spin text-text-faint" strokeWidth={1.6} />
+            <HugeiconsIcon
+              icon={Loading02Icon}
+              className="size-5 animate-spin text-text-faint"
+              strokeWidth={1.6}
+            />
           </div>
         ) : (
           <div className="absolute inset-0 flex items-center justify-center">
-            <Film className="size-8 text-text-faint" strokeWidth={1.4} />
+            <HugeiconsIcon icon={Film01Icon} className="size-8 text-text-faint" strokeWidth={1.4} />
           </div>
         )}
         {/* Play affordance over a subtle scrim, so the poster reads as a video. */}
         <div className="absolute inset-0 flex items-center justify-center bg-black/20 transition-colors group-hover:bg-black/30">
           <span className="flex items-center justify-center rounded-full bg-black/55 p-3 shadow-card backdrop-blur-sm transition-transform group-hover:scale-105">
-            <Play className="size-6 fill-white text-white" strokeWidth={1.6} />
+            <HugeiconsIcon
+              icon={PlayIcon}
+              className="size-6 fill-white text-white"
+              strokeWidth={1.6}
+            />
           </span>
         </div>
         {duration && (
@@ -241,7 +269,11 @@ export function RecordingAttachment(props: { attachment: Attachment }) {
       </div>
       <div className="flex items-center gap-2 px-3 py-2">
         <span className="truncate text-xs font-medium text-foreground">{name}</span>
-        <ExternalLink className="ml-auto size-3.5 shrink-0 text-text-faint" strokeWidth={1.6} />
+        <HugeiconsIcon
+          icon={ExternalLinkIcon}
+          className="ml-auto size-3.5 shrink-0 text-text-faint"
+          strokeWidth={1.6}
+        />
       </div>
     </button>
   );

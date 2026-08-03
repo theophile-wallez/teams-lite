@@ -1,4 +1,5 @@
-import { ArrowDown } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { ArrowDown01Icon } from "@hugeicons/core-free-icons";
 import { cn } from "~/lib/utils";
 
 /**
@@ -34,7 +35,7 @@ export function JumpToLatest(props: { visible: boolean; onClick: () => void }) {
           : "pointer-events-none translate-y-1 scale-95 opacity-0",
       )}
     >
-      <ArrowDown className="size-4" strokeWidth={1.8} />
+      <HugeiconsIcon icon={ArrowDown01Icon} className="size-4" strokeWidth={1.8} />
     </button>
   );
 }

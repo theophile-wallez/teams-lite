@@ -1,8 +1,9 @@
-import { Command } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { CommandIcon } from "@hugeicons/core-free-icons";
 import { formatShortcut, type ModifierLabel } from "~/lib/platform";
 
 /**
- * The command modifier as a mark: Lucide's Command icon on Apple hardware, the word
+ * The command modifier as a mark: Hugeicons' Command icon on Apple hardware, the word
  * "Ctrl" on every other keyboard.
  *
  * U+2318 is in none of Inter's served subsets, so the ⌘ character is drawn by a
@@ -17,7 +18,12 @@ export function ModifierKey(props: { modifier: ModifierLabel }) {
   if (props.modifier !== "⌘") return <>{props.modifier}</>;
   return (
     <>
-      <Command aria-hidden className="size-[0.745em] translate-y-[0.11em]" strokeWidth={3.4} />
+      <HugeiconsIcon
+        icon={CommandIcon}
+        aria-hidden
+        className="size-[0.745em] translate-y-[0.11em]"
+        strokeWidth={3.4}
+      />
       <span className="sr-only">Command </span>
     </>
   );

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Bot, Check, Loader2, Sparkles } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { BotIcon, CheckIcon, Loading02Icon, SparklesIcon } from "@hugeicons/core-free-icons";
 import type { AgentBackend } from "~/lib/agent";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
@@ -35,7 +36,7 @@ export function AiProvidersSettings() {
     <section className="flex flex-col gap-4" data-testid="ai-providers-settings">
       <div className="flex items-start gap-3">
         <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
-          <Sparkles className="size-5" strokeWidth={1.5} />
+          <HugeiconsIcon icon={SparklesIcon} className="size-5" strokeWidth={1.5} />
         </div>
         <div className="flex flex-col">
           <h3 className="text-[15px] font-medium text-foreground">AI providers</h3>
@@ -121,7 +122,7 @@ function ProviderRow(props: { backend: AgentBackend }) {
               on ? "bg-primary/10 text-primary" : "bg-element text-text-faint",
             )}
           >
-            <Bot className="size-5" strokeWidth={1.5} />
+            <HugeiconsIcon icon={BotIcon} className="size-5" strokeWidth={1.5} />
           </div>
           <div className="flex min-w-0 flex-col">
             <span className="flex items-center gap-2 text-[13px] font-medium text-foreground">
@@ -132,7 +133,7 @@ function ProviderRow(props: { backend: AgentBackend }) {
                   data-state="installed"
                   className="inline-flex items-center gap-1 rounded-full bg-emerald-500/12 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400"
                 >
-                  <Check className="size-3" strokeWidth={2.5} /> Installed
+                  <HugeiconsIcon icon={CheckIcon} className="size-3" strokeWidth={2.5} /> Installed
                 </span>
               ) : (
                 <span
@@ -202,7 +203,15 @@ function ProviderRow(props: { backend: AgentBackend }) {
               disabled={busy || !dirty}
               onClick={() => void save({ model: model.trim() })}
             >
-              {busy ? <Loader2 className="size-4 animate-spin" strokeWidth={1.8} /> : "Save"}
+              {busy ? (
+                <HugeiconsIcon
+                  icon={Loading02Icon}
+                  className="size-4 animate-spin"
+                  strokeWidth={1.8}
+                />
+              ) : (
+                "Save"
+              )}
             </Button>
           </div>
 
@@ -265,7 +274,7 @@ function ProviderRow(props: { backend: AgentBackend }) {
             data-testid="ai-provider-saved"
             className="flex items-center gap-1 text-xs text-emerald-600 animate-in fade-in-0 zoom-in-95 duration-200 ease-out dark:text-emerald-400"
           >
-            <Check className="size-3.5" strokeWidth={2} /> Saved
+            <HugeiconsIcon icon={CheckIcon} className="size-3.5" strokeWidth={2} /> Saved
           </span>
         )
       )}

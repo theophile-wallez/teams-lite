@@ -13,7 +13,8 @@
 // an outage that leaves cached reads working does not deserve the same treatment.
 
 import { useState } from "react";
-import { Loader2, ShieldAlert } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Loading02Icon, SecurityIcon } from "@hugeicons/core-free-icons";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { useAppState, useController } from "./controller-context";
@@ -54,7 +55,11 @@ export function BrokerBanner() {
       className="mx-3 mb-2 flex shrink-0 flex-col gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 shadow-chip"
     >
       <div className="flex items-start gap-2">
-        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-destructive" strokeWidth={1.8} />
+        <HugeiconsIcon
+          icon={SecurityIcon}
+          className="mt-0.5 size-4 shrink-0 text-destructive"
+          strokeWidth={1.8}
+        />
         <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold text-destructive">Sign-in is broken</p>
           <p data-testid="broker-banner-message" className="mt-0.5 text-[11px] leading-snug text-text-dim">
@@ -74,7 +79,12 @@ export function BrokerBanner() {
           >
             {busy ? (
               <>
-                <Loader2 className="size-4 animate-spin" strokeWidth={1.8} /> Repairing…
+                <HugeiconsIcon
+                  icon={Loading02Icon}
+                  className="size-4 animate-spin"
+                  strokeWidth={1.8}
+                />{" "}
+                Repairing…
               </>
             ) : (
               "Repair sign-in"

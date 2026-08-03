@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { ChevronLeft, ChevronRight, Loader2, Lock } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  Loading02Icon,
+  LockIcon,
+} from "@hugeicons/core-free-icons";
 import {
   WEEK_STARTS_ON,
   daysIn,
@@ -166,7 +172,7 @@ export function CalendarPane(props: { onBack?: () => void }) {
             data-testid="back-to-list"
             className="-ml-1 grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground md:hidden"
           >
-            <ChevronLeft className="size-5" strokeWidth={1.6} />
+            <HugeiconsIcon icon={ChevronLeftIcon} className="size-5" strokeWidth={1.6} />
           </button>
         )}
 
@@ -194,11 +200,12 @@ export function CalendarPane(props: { onBack?: () => void }) {
             // to a letter. The details panel still says it on every screen.
             className="hidden shrink-0 items-center gap-1 rounded-md bg-element px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-text-faint sm:flex"
           >
-            <Lock className="size-2.5" strokeWidth={2.2} aria-hidden />
+            <HugeiconsIcon icon={LockIcon} className="size-2.5" strokeWidth={2.2} aria-hidden />
             Read-only
           </span>
           {loading && (
-            <Loader2
+            <HugeiconsIcon
+              icon={Loading02Icon}
               data-testid="calendar-loading"
               className="size-3.5 shrink-0 animate-spin text-text-faint"
               strokeWidth={1.6}
@@ -230,7 +237,7 @@ export function CalendarPane(props: { onBack?: () => void }) {
             onClick={() => controller.shiftCalendar(-1)}
             className="grid size-8 place-items-center rounded-lg text-text-faint transition-colors hover:bg-accent hover:text-foreground"
           >
-            <ChevronLeft className="size-4" strokeWidth={1.8} />
+            <HugeiconsIcon icon={ChevronLeftIcon} className="size-4" strokeWidth={1.8} />
           </button>
           <button
             type="button"
@@ -239,7 +246,7 @@ export function CalendarPane(props: { onBack?: () => void }) {
             onClick={() => controller.shiftCalendar(1)}
             className="grid size-8 place-items-center rounded-lg text-text-faint transition-colors hover:bg-accent hover:text-foreground"
           >
-            <ChevronRight className="size-4" strokeWidth={1.8} />
+            <HugeiconsIcon icon={ChevronRightIcon} className="size-4" strokeWidth={1.8} />
           </button>
         </div>
       </header>

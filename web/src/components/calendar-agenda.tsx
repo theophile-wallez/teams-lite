@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { CalendarDays, MapPin, Video } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { CalendarDaysIcon, MapPinIcon, Video01Icon } from "@hugeicons/core-free-icons";
 import {
   dayKey,
   daysIn,
@@ -50,7 +51,7 @@ export function CalendarAgenda(props: {
         className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-8 text-center"
       >
         <span className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary">
-          <CalendarDays className="size-6" strokeWidth={1.4} />
+          <HugeiconsIcon icon={CalendarDaysIcon} className="size-6" strokeWidth={1.4} />
         </span>
         <p className="text-sm text-text-dim">Nothing scheduled in this window.</p>
       </div>
@@ -167,9 +168,19 @@ function AgendaRow(props: {
         {(event.location || event.join_url) && (
           <span className="flex min-w-0 items-center gap-1 truncate text-[12px] text-text-faint">
             {event.join_url ? (
-              <Video className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
+              <HugeiconsIcon
+                icon={Video01Icon}
+                className="size-3 shrink-0"
+                strokeWidth={1.8}
+                aria-hidden
+              />
             ) : (
-              <MapPin className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
+              <HugeiconsIcon
+                icon={MapPinIcon}
+                className="size-3 shrink-0"
+                strokeWidth={1.8}
+                aria-hidden
+              />
             )}
             <span className="truncate">{event.location || "Microsoft Teams Meeting"}</span>
           </span>

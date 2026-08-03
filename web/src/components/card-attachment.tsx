@@ -1,5 +1,6 @@
 import { Fragment, useMemo } from "react";
-import { ExternalLink, LayoutTemplate } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { ExternalLinkIcon, Layout01Icon } from "@hugeicons/core-free-icons";
 import type { Attachment, CardPayload } from "~/lib/protocol";
 import { parseCardMarkdown } from "~/lib/card-markdown";
 import { cn } from "~/lib/utils";
@@ -83,7 +84,8 @@ export function CardAttachment(props: {
             loading="lazy"
           />
         ) : (
-          <LayoutTemplate
+          <HugeiconsIcon
+            icon={Layout01Icon}
             className="mt-0.5 size-4 shrink-0 text-primary"
             strokeWidth={1.6}
             aria-hidden
@@ -137,7 +139,12 @@ export function CardAttachment(props: {
                     className="inline-flex w-fit items-center gap-1.5 rounded-md border border-border/60 bg-card/60 px-2 py-1 text-xs font-medium transition-colors hover:bg-accent"
                   >
                     {action.title}
-                    <ExternalLink className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
+                    <HugeiconsIcon
+                      icon={ExternalLinkIcon}
+                      className="size-3 shrink-0"
+                      strokeWidth={1.8}
+                      aria-hidden
+                    />
                   </a>
                 ) : (
                   // Not a link: a vote, a form submit — something only real Teams

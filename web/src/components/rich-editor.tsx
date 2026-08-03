@@ -8,16 +8,17 @@ import { EditorContent, useEditor, useEditorState, type Editor } from "@tiptap/r
 import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  Bold,
-  Code,
-  Italic,
-  Link2,
-  List,
-  ListOrdered,
-  Strikethrough,
-  Underline,
-} from "lucide-react";
+  BoldIcon,
+  CodeIcon,
+  LeftToRightListBulletIcon,
+  LeftToRightListNumberIcon,
+  Link02Icon,
+  TextItalicIcon,
+  TextStrikethroughIcon,
+  TextUnderlineIcon,
+} from "@hugeicons/core-free-icons";
 import { COMPOSER_FIELD_CLASS } from "~/lib/composer-field";
 import { serializeTeamsHtml } from "~/lib/rich-text";
 import { cn } from "~/lib/utils";
@@ -191,15 +192,25 @@ export function RichEditor(props: {
 /** The marks and lists the bar offers, in the order it shows them. `null` draws the
  *  separator between the character formats and the two list formats. */
 const FORMATS = [
-  { name: "bold", label: "Bold", icon: Bold, toggle: "toggleBold" },
-  { name: "italic", label: "Italic", icon: Italic, toggle: "toggleItalic" },
-  { name: "underline", label: "Underline", icon: Underline, toggle: "toggleUnderline" },
-  { name: "strike", label: "Strikethrough", icon: Strikethrough, toggle: "toggleStrike" },
-  { name: "code", label: "Inline code", icon: Code, toggle: "toggleCode" },
-  { name: "link", label: "Link", icon: Link2, toggle: null },
+  { name: "bold", label: "Bold", icon: BoldIcon, toggle: "toggleBold" },
+  { name: "italic", label: "Italic", icon: TextItalicIcon, toggle: "toggleItalic" },
+  { name: "underline", label: "Underline", icon: TextUnderlineIcon, toggle: "toggleUnderline" },
+  { name: "strike", label: "Strikethrough", icon: TextStrikethroughIcon, toggle: "toggleStrike" },
+  { name: "code", label: "Inline code", icon: CodeIcon, toggle: "toggleCode" },
+  { name: "link", label: "Link", icon: Link02Icon, toggle: null },
   null,
-  { name: "bulletList", label: "Bulleted list", icon: List, toggle: "toggleBulletList" },
-  { name: "orderedList", label: "Numbered list", icon: ListOrdered, toggle: "toggleOrderedList" },
+  {
+    name: "bulletList",
+    label: "Bulleted list",
+    icon: LeftToRightListBulletIcon,
+    toggle: "toggleBulletList",
+  },
+  {
+    name: "orderedList",
+    label: "Numbered list",
+    icon: LeftToRightListNumberIcon,
+    toggle: "toggleOrderedList",
+  },
 ] as const;
 
 /**
@@ -237,7 +248,7 @@ export function FormatToolbar(props: { editor: Editor }) {
                 : editor.chain().focus()[format.toggle]().run()
             }
           >
-            <format.icon className="size-4" strokeWidth={1.8} />
+            <HugeiconsIcon icon={format.icon} className="size-4" strokeWidth={1.8} />
           </FmtButton>
         ),
       )}

@@ -1,4 +1,5 @@
-import { Loader2 } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Loading02Icon } from "@hugeicons/core-free-icons";
 
 /**
  * Full-screen boot splash shown until the client connects to the backend.
@@ -17,7 +18,7 @@ export function Splash(props: { message: string }) {
         </h1>
       </div>
       <div className="flex items-center gap-2 text-sm text-text-faint">
-        <Loader2 className="size-4 animate-spin" strokeWidth={1.6} />
+        <HugeiconsIcon icon={Loading02Icon} className="size-4 animate-spin" strokeWidth={1.6} />
         <span>{props.message}…</span>
       </div>
     </div>

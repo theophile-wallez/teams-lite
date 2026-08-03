@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Bot, Loader2 } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { BotIcon, Loading02Icon } from "@hugeicons/core-free-icons";
 import {
   agentGrantIsOn,
   agentHint,
@@ -123,7 +124,7 @@ export function AgentMenu(props: { conversationId: string }) {
           on ? "text-primary" : "text-text-faint hover:text-foreground",
         )}
       >
-        <Bot className="size-5" strokeWidth={1.6} />
+        <HugeiconsIcon icon={BotIcon} className="size-5" strokeWidth={1.6} />
       </DropdownMenuTrigger>
 
       <DropdownMenuContent align="end" className="w-72">
@@ -139,7 +140,13 @@ export function AgentMenu(props: { conversationId: string }) {
           onSelect={(event) => event.preventDefault()}
         >
           Answer here
-          {busy && <Loader2 className="ml-auto size-3.5 animate-spin" strokeWidth={1.8} />}
+          {busy && (
+            <HugeiconsIcon
+              icon={Loading02Icon}
+              className="ml-auto size-3.5 animate-spin"
+              strokeWidth={1.8}
+            />
+          )}
         </DropdownMenuCheckboxItem>
 
         <DropdownMenuSeparator />

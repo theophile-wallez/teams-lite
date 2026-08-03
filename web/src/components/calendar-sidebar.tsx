@@ -1,5 +1,12 @@
 import { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Eye, EyeOff, Loader2 } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  EyeIcon,
+  EyeOffIcon,
+  Loading02Icon,
+} from "@hugeicons/core-free-icons";
 import {
   WEEK_STARTS_ON,
   addDays,
@@ -80,7 +87,7 @@ export function CalendarSidebar() {
   if (calendars.length === 0) {
     return (
       <p className="flex items-center justify-center gap-2 px-4 py-6 text-[13px] text-text-faint">
-        <Loader2 className="size-3.5 animate-spin" strokeWidth={1.6} />
+        <HugeiconsIcon icon={Loading02Icon} className="size-3.5 animate-spin" strokeWidth={1.6} />
         Loading calendars…
       </p>
     );
@@ -185,7 +192,7 @@ function MiniMonth(props: {
           onClick={() => setOffset((o) => o - 1)}
           className="grid size-6 place-items-center rounded-md text-text-faint transition-colors hover:bg-accent hover:text-foreground"
         >
-          <ChevronLeft className="size-3.5" strokeWidth={1.8} />
+          <HugeiconsIcon icon={ChevronLeftIcon} className="size-3.5" strokeWidth={1.8} />
         </button>
         <button
           type="button"
@@ -194,7 +201,7 @@ function MiniMonth(props: {
           onClick={() => setOffset((o) => o + 1)}
           className="grid size-6 place-items-center rounded-md text-text-faint transition-colors hover:bg-accent hover:text-foreground"
         >
-          <ChevronRight className="size-3.5" strokeWidth={1.8} />
+          <HugeiconsIcon icon={ChevronRightIcon} className="size-3.5" strokeWidth={1.8} />
         </button>
       </header>
 
@@ -347,9 +354,9 @@ function CalendarToggle(props: {
         )}
       >
         {props.checked ? (
-          <Eye className="size-3.5" strokeWidth={1.8} />
+          <HugeiconsIcon icon={EyeIcon} className="size-3.5" strokeWidth={1.8} />
         ) : (
-          <EyeOff className="size-3.5" strokeWidth={1.8} />
+          <HugeiconsIcon icon={EyeOffIcon} className="size-3.5" strokeWidth={1.8} />
         )}
       </span>
     </button>
@@ -383,7 +390,9 @@ function UpNext(props: { events: CalendarEvent[]; loading: boolean }) {
     <section data-testid="calendar-up-next" className="flex flex-col gap-1 pb-2">
       <h3 className="flex items-center gap-1.5 px-1.5 pb-0.5 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
         Up next
-        {props.loading && <Loader2 className="size-3 animate-spin" strokeWidth={1.6} />}
+        {props.loading && (
+          <HugeiconsIcon icon={Loading02Icon} className="size-3 animate-spin" strokeWidth={1.6} />
+        )}
       </h3>
       {next.map((event) => (
         <div key={event.id} className="flex flex-col">

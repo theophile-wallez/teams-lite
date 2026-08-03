@@ -1,4 +1,5 @@
-import { Check, Clock, Minus, X } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Cancel01Icon, CheckIcon, Clock01Icon, MinusSignIcon } from "@hugeicons/core-free-icons";
 import type { PersonPresence } from "~/lib/protocol";
 import { presenceLabel, presenceTone, type PresenceTone } from "~/lib/presence";
 import { cn } from "~/lib/utils";
@@ -38,13 +39,13 @@ function ToneGlyph({ tone }: { tone: PresenceTone }) {
   const glyph = "size-[0.62em]";
   switch (tone) {
     case "available":
-      return <Check className={glyph} strokeWidth={4} aria-hidden />;
+      return <HugeiconsIcon icon={CheckIcon} className={glyph} strokeWidth={4} aria-hidden />;
     case "busy":
-      return <Minus className={glyph} strokeWidth={4} aria-hidden />;
+      return <HugeiconsIcon icon={MinusSignIcon} className={glyph} strokeWidth={4} aria-hidden />;
     case "away":
-      return <Clock className={glyph} strokeWidth={3.5} aria-hidden />;
+      return <HugeiconsIcon icon={Clock01Icon} className={glyph} strokeWidth={3.5} aria-hidden />;
     case "oof":
-      return <X className={glyph} strokeWidth={4} aria-hidden />;
+      return <HugeiconsIcon icon={Cancel01Icon} className={glyph} strokeWidth={4} aria-hidden />;
     default:
       return null;
   }

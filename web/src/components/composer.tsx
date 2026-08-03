@@ -1,6 +1,13 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ClipboardEvent } from "react";
 import type { Editor } from "@tiptap/react";
-import { ArrowUp, ImagePlus, LoaderCircle, Type, X } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  ArrowUp01Icon,
+  Cancel01Icon,
+  ImageAdd01Icon,
+  Loading02Icon,
+  TextFontIcon,
+} from "@hugeicons/core-free-icons";
 import { COMPOSER_FIELD_CLASS } from "~/lib/composer-field";
 import {
   composerImageAccept,
@@ -256,7 +263,7 @@ export function Composer(props: { focusToken: unknown }) {
               onClick={() => controller.cancelReply()}
               className="grid size-6 shrink-0 place-items-center rounded-md text-text-dim transition-colors hover:bg-accent hover:text-foreground"
             >
-              <X className="size-4" strokeWidth={1.6} />
+              <HugeiconsIcon icon={Cancel01Icon} className="size-4" strokeWidth={1.6} />
             </button>
           </div>
         )}
@@ -306,7 +313,7 @@ export function Composer(props: { focusToken: unknown }) {
                 onClick={removeImage}
                 className="absolute -right-2 -top-2 grid size-7 place-items-center rounded-full bg-popover text-foreground shadow-pop hover:bg-accent"
               >
-                <X className="size-4" strokeWidth={1.8} />
+                <HugeiconsIcon icon={Cancel01Icon} className="size-4" strokeWidth={1.8} />
               </button>
               <div className="mt-1 text-xs text-text-faint">
                 {image.width} × {image.height}
@@ -359,7 +366,7 @@ export function Composer(props: { focusToken: unknown }) {
                     "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
                 )}
               >
-                <Type className="size-4" strokeWidth={1.6} />
+                <HugeiconsIcon icon={TextFontIcon} className="size-4" strokeWidth={1.6} />
               </button>
               {/* The picker itself: hidden, opened by the button beside it. Its value is
                   cleared on every change so re-picking the same file still fires. */}
@@ -385,9 +392,13 @@ export function Composer(props: { focusToken: unknown }) {
                 className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-50"
               >
                 {imageLoading ? (
-                  <LoaderCircle className="size-4 animate-spin" strokeWidth={1.6} />
+                  <HugeiconsIcon
+                    icon={Loading02Icon}
+                    className="size-4 animate-spin"
+                    strokeWidth={1.6}
+                  />
                 ) : (
-                  <ImagePlus className="size-4" strokeWidth={1.6} />
+                  <HugeiconsIcon icon={ImageAdd01Icon} className="size-4" strokeWidth={1.6} />
                 )}
               </button>
             </div>
@@ -407,9 +418,13 @@ export function Composer(props: { focusToken: unknown }) {
               )}
             >
               {sending ? (
-                <LoaderCircle className="size-4 animate-spin" strokeWidth={1.8} />
+                <HugeiconsIcon
+                  icon={Loading02Icon}
+                  className="size-4 animate-spin"
+                  strokeWidth={1.8}
+                />
               ) : (
-                <ArrowUp className="size-4" strokeWidth={2} />
+                <HugeiconsIcon icon={ArrowUp01Icon} className="size-4" strokeWidth={2} />
               )}
             </button>
           </div>

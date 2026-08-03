@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Phone, PhoneMissed } from "lucide-react";
+import { CallIcon, CallMissed01Icon } from "@hugeicons/core-free-icons";
 import { formatCallEvent, type CallSystemEvent } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { Avatar, type AvatarPhoto } from "./avatar";
@@ -36,7 +36,7 @@ export function CallEventLine(props: { event: CallSystemEvent }) {
   return (
     <SystemLine
       kind={event.kind}
-      icon={missed ? PhoneMissed : Phone}
+      icon={missed ? CallMissed01Icon : CallIcon}
       label={formatCallEvent(event)}
       alert={missed}
       data={{ "data-call-event": event.event }}

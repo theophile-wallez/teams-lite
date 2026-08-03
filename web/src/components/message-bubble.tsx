@@ -1,18 +1,19 @@
 import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  Ban,
-  Copy,
-  Eye,
-  EyeOff,
-  Forward,
-  MessageSquareDashed,
-  MoreHorizontal,
-  Pencil,
-  Reply,
-  SmilePlus,
-  Trash2,
-} from "lucide-react";
+  ArrowTurnBackwardIcon,
+  ArrowTurnForwardIcon,
+  BanIcon,
+  CopyIcon,
+  Delete02Icon,
+  EyeIcon,
+  EyeOffIcon,
+  MessageSquareDashedIcon,
+  MoreHorizontalIcon,
+  PencilIcon,
+  SmilePlusIcon,
+} from "@hugeicons/core-free-icons";
 import {
   bodyFormat,
   copyableMessageText,
@@ -450,7 +451,12 @@ function MessageBubbleImpl(props: {
               mine ? "text-sender-name-mine" : "text-sender-name",
             )}
           >
-            <Forward className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
+            <HugeiconsIcon
+              icon={ArrowTurnForwardIcon}
+              className="size-3 shrink-0"
+              strokeWidth={1.8}
+              aria-hidden
+            />
             Forwarded
           </div>
         ) : null}
@@ -607,7 +613,7 @@ function MessageBubbleImpl(props: {
               mine ? "left-full ml-2" : "right-full mr-2",
             )}
           >
-            <Reply className="size-4" strokeWidth={1.8} />
+            <HugeiconsIcon icon={ArrowTurnBackwardIcon} className="size-4" strokeWidth={1.8} />
           </motion.span>
         ) : null}
 
@@ -828,7 +834,7 @@ function MessageActionsMenu(props: {
               : cn("top-1/2 -translate-y-1/2", props.mine ? "-left-9" : "-right-9"),
           )}
         >
-          <MoreHorizontal className="size-4" strokeWidth={1.6} />
+          <HugeiconsIcon icon={MoreHorizontalIcon} className="size-4" strokeWidth={1.6} />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -845,16 +851,16 @@ function MessageActionsMenu(props: {
         <DropdownMenuSeparator />
         {props.mine && (
           <DropdownMenuItem data-testid="action-edit" onSelect={props.onEdit}>
-            <Pencil className="size-4" strokeWidth={1.6} />
+            <HugeiconsIcon icon={PencilIcon} className="size-4" strokeWidth={1.6} />
             Edit
           </DropdownMenuItem>
         )}
         <DropdownMenuItem data-testid="action-reply" onSelect={props.onReply}>
-          <Reply className="size-4" strokeWidth={1.6} />
+          <HugeiconsIcon icon={ArrowTurnBackwardIcon} className="size-4" strokeWidth={1.6} />
           Reply
         </DropdownMenuItem>
         <DropdownMenuItem data-testid="action-copy" onSelect={props.onCopy}>
-          <Copy className="size-4" strokeWidth={1.6} />
+          <HugeiconsIcon icon={CopyIcon} className="size-4" strokeWidth={1.6} />
           Copy
         </DropdownMenuItem>
         {props.mine && (
@@ -866,7 +872,7 @@ function MessageActionsMenu(props: {
                 destructive
                 onSelect={props.onDelete}
               >
-                <Trash2 className="size-4" strokeWidth={1.6} />
+                <HugeiconsIcon icon={Delete02Icon} className="size-4" strokeWidth={1.6} />
                 Delete for everyone
               </DropdownMenuItem>
             ) : (
@@ -880,7 +886,7 @@ function MessageActionsMenu(props: {
                   setConfirmingDelete(true);
                 }}
               >
-                <Trash2 className="size-4" strokeWidth={1.6} />
+                <HugeiconsIcon icon={Delete02Icon} className="size-4" strokeWidth={1.6} />
                 Delete
               </DropdownMenuItem>
             )}
@@ -905,7 +911,12 @@ function MessageActionsMenu(props: {
 function UnsupportedContent() {
   return (
     <div data-testid="unsupported-message" className="flex items-center gap-2">
-      <MessageSquareDashed className="size-3.5 shrink-0" strokeWidth={1.6} aria-hidden />
+      <HugeiconsIcon
+        icon={MessageSquareDashedIcon}
+        className="size-3.5 shrink-0"
+        strokeWidth={1.6}
+        aria-hidden
+      />
       <span className="italic">Unsupported message</span>
     </div>
   );
@@ -968,7 +979,7 @@ function DeletedContent(props: { mine: boolean; revealable: boolean; children: R
               onClick={hide}
               className="mt-1 inline-flex items-center gap-1 text-xs text-text-dim transition-colors hover:text-foreground"
             >
-              <EyeOff className="size-3" strokeWidth={1.6} />
+              <HugeiconsIcon icon={EyeOffIcon} className="size-3" strokeWidth={1.6} />
               Hide
             </button>
           </motion.div>
@@ -980,7 +991,12 @@ function DeletedContent(props: { mine: boolean; revealable: boolean; children: R
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
           >
-            <Ban className="size-3.5 shrink-0" strokeWidth={1.6} aria-hidden />
+            <HugeiconsIcon
+              icon={BanIcon}
+              className="size-3.5 shrink-0"
+              strokeWidth={1.6}
+              aria-hidden
+            />
             <span className="italic">
               {props.mine ? "You deleted this message" : "This message was deleted"}
             </span>
@@ -991,7 +1007,7 @@ function DeletedContent(props: { mine: boolean; revealable: boolean; children: R
                 onClick={reveal}
                 className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-xs not-italic text-primary transition-colors hover:bg-primary/10"
               >
-                <Eye className="size-3" strokeWidth={1.6} />
+                <HugeiconsIcon icon={EyeIcon} className="size-3" strokeWidth={1.6} />
                 Reveal
               </button>
             ) : null}
@@ -1053,7 +1069,7 @@ function ReactionPicker(props: {
         onClick={props.onMore}
         className="grid size-7 place-items-center rounded-full text-text-dim transition-transform hover:bg-accent hover:text-foreground"
       >
-        <SmilePlus className="size-[18px]" strokeWidth={1.6} />
+        <HugeiconsIcon icon={SmilePlusIcon} className="size-[18px]" strokeWidth={1.6} />
       </button>
     </div>
   );

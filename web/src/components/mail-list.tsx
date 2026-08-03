@@ -1,7 +1,8 @@
 import { useCallback, useMemo, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronDown, Loader2, Paperclip } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Attachment01Icon, ChevronDownIcon, Loading02Icon } from "@hugeicons/core-free-icons";
 import {
   mailFolderLabel,
   mailReceivedMs,
@@ -141,7 +142,11 @@ export function MailList() {
           </div>
           {loadingOlder && (
             <p className="flex items-center justify-center gap-2 py-3 text-[12px] text-text-faint">
-              <Loader2 className="size-3.5 animate-spin" strokeWidth={1.6} />
+              <HugeiconsIcon
+                icon={Loading02Icon}
+                className="size-3.5 animate-spin"
+                strokeWidth={1.6}
+              />
               Loading earlier mail…
             </p>
           )}
@@ -231,7 +236,11 @@ function FolderPicker(props: {
               {props.selected.unread_count}
             </span>
           )}
-          <ChevronDown className="size-3.5 shrink-0 text-text-faint" strokeWidth={1.6} />
+          <HugeiconsIcon
+            icon={ChevronDownIcon}
+            className="size-3.5 shrink-0 text-text-faint"
+            strokeWidth={1.6}
+          />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-[240px]">
           {props.folders.map((folder) => (
@@ -295,7 +304,11 @@ function MailRow(props: { mail: MailHeader; open: boolean; onClick: () => void }
             {sender}
           </span>
           {mail.has_attachments && (
-            <Paperclip className="size-3 shrink-0 text-text-faint" strokeWidth={1.6} />
+            <HugeiconsIcon
+              icon={Attachment01Icon}
+              className="size-3 shrink-0 text-text-faint"
+              strokeWidth={1.6}
+            />
           )}
           {date && (
             <time className="shrink-0 text-[11px] tabular-nums text-text-faint">{date}</time>

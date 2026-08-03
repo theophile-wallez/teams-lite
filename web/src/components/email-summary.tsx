@@ -1,4 +1,5 @@
-import { ExternalLink, Mail } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { ExternalLinkIcon, Mail01Icon } from "@hugeicons/core-free-icons";
 import type { RelayedEmail } from "~/lib/rich-text";
 import { cn } from "~/lib/utils";
 
@@ -22,7 +23,12 @@ export function EmailSummaryCard(props: { email: RelayedEmail; className?: strin
       className={cn("flex min-w-0 flex-col gap-1.5", props.className)}
     >
       <div className="flex items-center gap-1.5 text-xs text-text-dim">
-        <Mail className="size-3.5 shrink-0" strokeWidth={1.6} aria-hidden />
+        <HugeiconsIcon
+          icon={Mail01Icon}
+          className="size-3.5 shrink-0"
+          strokeWidth={1.6}
+          aria-hidden
+        />
         <span>Email</span>
       </div>
 
@@ -61,7 +67,12 @@ export function EmailSummaryCard(props: { email: RelayedEmail; className?: strin
           className="mt-0.5 inline-flex w-fit items-center gap-1.5 rounded-md border border-border/60 bg-card/60 px-2 py-1 text-xs font-medium transition-colors hover:bg-accent"
         >
           {action.label}
-          <ExternalLink className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
+          <HugeiconsIcon
+            icon={ExternalLinkIcon}
+            className="size-3 shrink-0"
+            strokeWidth={1.8}
+            aria-hidden
+          />
         </a>
       ) : null}
     </div>

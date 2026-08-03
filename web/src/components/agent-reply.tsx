@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { AlertTriangle, Wrench } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Alert02Icon, Wrench01Icon } from "@hugeicons/core-free-icons";
 import { agentMarkdownToHtml } from "~/lib/agent-markdown";
 import { agentPhaseLabel, agentRunIsLive, type AgentRun } from "~/lib/agent-run";
 import type { AgentBackendName } from "~/lib/agent-message";
@@ -209,7 +210,12 @@ function AgentStatus(props: { run: AgentRun; hasBody: boolean }) {
         data-testid="agent-error"
         className="mt-1.5 flex items-start gap-1.5 text-xs text-destructive"
       >
-        <AlertTriangle className="mt-px size-3.5 shrink-0" strokeWidth={1.8} aria-hidden />
+        <HugeiconsIcon
+          icon={Alert02Icon}
+          className="mt-px size-3.5 shrink-0"
+          strokeWidth={1.8}
+          aria-hidden
+        />
         <span>{agentPhaseLabel(run)}</span>
       </div>
     );
@@ -258,7 +264,12 @@ function AgentStatus(props: { run: AgentRun; hasBody: boolean }) {
             transition={{ duration: 0.18, ease: [0.2, 0.65, 0.3, 0.9] }}
             className="flex min-w-0 items-center gap-1.5 self-start rounded-md bg-black/5 px-1.5 py-0.5 text-[11px] text-text-dim dark:bg-white/10"
           >
-            <Wrench className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
+            <HugeiconsIcon
+              icon={Wrench01Icon}
+              className="size-3 shrink-0"
+              strokeWidth={1.8}
+              aria-hidden
+            />
             <span className="font-medium">{activity.tool}</span>
             {activity.target ? (
               <span className="min-w-0 truncate font-mono opacity-80">{activity.target}</span>
@@ -325,7 +336,12 @@ export function AgentStoredStatus(props: {
           props.hasBody && "mt-1.5",
         )}
       >
-        <AlertTriangle className="mt-px size-3.5 shrink-0" strokeWidth={1.8} aria-hidden />
+        <HugeiconsIcon
+          icon={Alert02Icon}
+          className="mt-px size-3.5 shrink-0"
+          strokeWidth={1.8}
+          aria-hidden
+        />
         <span>{authorship.failure}</span>
       </div>
     );

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { AtSign, Bell, MessagesSquare } from "lucide-react";
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
+import { AtSignIcon, BellIcon, MessageMultiple01Icon } from "@hugeicons/core-free-icons";
 import { cn } from "~/lib/utils";
 import {
   NOTIFICATION_TABS,
@@ -28,23 +29,23 @@ import {
  *  and each panel stay in sync from one source. */
 const TAB_META: Record<
   NotificationTab,
-  { label: string; icon: typeof Bell; emptyTitle: string; emptyHint: string }
+  { label: string; icon: IconSvgElement; emptyTitle: string; emptyHint: string }
 > = {
   activity: {
     label: "Activity",
-    icon: Bell,
+    icon: BellIcon,
     emptyTitle: "You're all caught up",
     emptyHint: "Reactions, mentions and replies show up here.",
   },
   mentions: {
     label: "Mentions",
-    icon: AtSign,
+    icon: AtSignIcon,
     emptyTitle: "No mentions yet",
     emptyHint: "When someone @mentions you, it shows up here.",
   },
   following: {
     label: "Following",
-    icon: MessagesSquare,
+    icon: MessageMultiple01Icon,
     emptyTitle: "Nothing new to follow",
     emptyHint: "Replies in threads you follow show up here.",
   },
@@ -99,7 +100,7 @@ export function NotificationsBell() {
           data-unread={badge ? "true" : undefined}
           className="relative grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground data-[state=open]:bg-accent data-[state=open]:text-foreground"
         >
-          <Bell className="size-4" strokeWidth={1.4} />
+          <HugeiconsIcon icon={BellIcon} className="size-4" strokeWidth={1.4} />
           {badge && (
             <span
               data-testid="notifications-badge"
@@ -146,7 +147,7 @@ export function NotificationsBell() {
                     : "text-text-dim hover:bg-accent/50 hover:text-foreground",
                 )}
               >
-                <t.icon className="size-3.5" strokeWidth={1.6} />
+                <HugeiconsIcon icon={t.icon} className="size-3.5" strokeWidth={1.6} />
                 {t.label}
               </button>
             );
@@ -159,7 +160,7 @@ export function NotificationsBell() {
             data-testid="notifications-empty"
             className="flex flex-col items-center gap-1 px-6 py-10 text-center"
           >
-            <meta.icon className="size-6 text-text-faint" strokeWidth={1.3} />
+            <HugeiconsIcon icon={meta.icon} className="size-6 text-text-faint" strokeWidth={1.3} />
             <p className="text-sm font-medium text-text-dim">{meta.emptyTitle}</p>
             <p className="text-xs text-text-faint">{meta.emptyHint}</p>
           </div>

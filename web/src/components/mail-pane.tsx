@@ -1,5 +1,11 @@
 import { useMemo } from "react";
-import { ChevronLeft, Download, Loader2, Mail as MailIcon } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  ChevronLeftIcon,
+  Download04Icon,
+  Loading02Icon,
+  Mail01Icon,
+} from "@hugeicons/core-free-icons";
 import {
   formatAttachmentSize,
   mailFileAttachments,
@@ -60,7 +66,7 @@ export function MailPane(props: { onBack?: () => void }) {
             data-testid="back-to-list"
             className="-ml-1 grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground md:hidden"
           >
-            <ChevronLeft className="size-5" strokeWidth={1.6} />
+            <HugeiconsIcon icon={ChevronLeftIcon} className="size-5" strokeWidth={1.6} />
           </button>
         )}
         <div className="flex min-w-0 flex-1 flex-col">
@@ -84,7 +90,11 @@ export function MailPane(props: { onBack?: () => void }) {
             </p>
           ) : bodyLoading || !body ? (
             <p className="flex items-center gap-2 py-6 text-[13px] text-text-faint">
-              <Loader2 className="size-3.5 animate-spin" strokeWidth={1.6} />
+              <HugeiconsIcon
+                icon={Loading02Icon}
+                className="size-3.5 animate-spin"
+                strokeWidth={1.6}
+              />
               Loading message…
             </p>
           ) : (
@@ -171,7 +181,8 @@ function MailAttachments(props: { messageId: string; attachments: MailAttachment
               <FileTypeIcon name={file.name} contentType={file.content_type} className="size-4" />
               <span className="min-w-0 flex-1 truncate">{file.name || "Attachment"}</span>
               {size && <span className="shrink-0 tabular-nums text-text-faint">{size}</span>}
-              <Download
+              <HugeiconsIcon
+                icon={Download04Icon}
                 className="size-3.5 shrink-0 text-text-faint opacity-0 transition-opacity group-hover:opacity-100"
                 strokeWidth={1.6}
               />
@@ -192,7 +203,7 @@ function MailEmptyState() {
     >
       <div className="flex max-w-xs flex-col items-center gap-3 text-center">
         <span className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary">
-          <MailIcon className="size-6" strokeWidth={1.4} />
+          <HugeiconsIcon icon={Mail01Icon} className="size-6" strokeWidth={1.4} />
         </span>
         <p className="text-sm text-text-dim">Pick a message to read it.</p>
         <p className="text-[12px] text-text-faint">

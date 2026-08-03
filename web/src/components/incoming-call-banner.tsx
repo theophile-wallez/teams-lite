@@ -1,6 +1,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Phone, X } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { CallIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
 import { incomingCallTitle, type Channel, type Conversation, type IncomingCall } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
 import { CallParticipants } from "./call-event-line";
@@ -78,7 +79,7 @@ function IncomingCallCard(props: { call: IncomingCall }) {
     >
       <div className="flex items-center gap-3">
         <span className="grid size-10 shrink-0 place-items-center rounded-full bg-success/10 text-success">
-          <Phone className="size-5 animate-pulse" strokeWidth={2} />
+          <HugeiconsIcon icon={CallIcon} className="size-5 animate-pulse" strokeWidth={2} />
         </span>
         <div className="min-w-0 flex-1">
           <p data-testid="incoming-call-title" className="truncate text-sm font-semibold text-foreground">
@@ -93,7 +94,7 @@ function IncomingCallCard(props: { call: IncomingCall }) {
           onClick={() => controller.dismissIncomingCall(call.conversationId)}
           className="grid size-7 shrink-0 place-items-center rounded-lg text-text-faint transition-colors hover:bg-element hover:text-foreground"
         >
-          <X className="size-4" />
+          <HugeiconsIcon icon={Cancel01Icon} className="size-4" />
         </button>
       </div>
 

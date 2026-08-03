@@ -1,4 +1,5 @@
-import { Check, Monitor, MoonStar, Sun, type LucideIcon } from "lucide-react";
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
+import { CheckIcon, ComputerIcon, Moon02Icon, Sun03Icon } from "@hugeicons/core-free-icons";
 import { APPEARANCES, appearanceLabel, type Appearance } from "~/lib/appearance";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
@@ -10,10 +11,10 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 
-const ICONS: Record<Appearance, LucideIcon> = {
-  system: Monitor,
-  light: Sun,
-  dark: MoonStar,
+const ICONS: Record<Appearance, IconSvgElement> = {
+  system: ComputerIcon,
+  light: Sun03Icon,
+  dark: Moon02Icon,
 };
 
 const HINTS: Record<Appearance, string> = {
@@ -54,7 +55,7 @@ export function SettingsDialog(props: { open: boolean; onOpenChange: (open: bool
           onMouseLeave={() => controller.previewAppearance(appearance)}
         >
           {APPEARANCES.map((pref) => {
-            const Icon = ICONS[pref];
+            const icon = ICONS[pref];
             const active = appearance === pref;
             return (
               <button
@@ -76,10 +77,11 @@ export function SettingsDialog(props: { open: boolean; onOpenChange: (open: bool
               >
                 {active && (
                   <span className="absolute right-2 top-2 text-primary">
-                    <Check className="size-3.5" strokeWidth={2} />
+                    <HugeiconsIcon icon={CheckIcon} className="size-3.5" strokeWidth={2} />
                   </span>
                 )}
-                <Icon
+                <HugeiconsIcon
+                  icon={icon}
                   className={cn("size-5", active ? "text-primary" : "text-current")}
                   strokeWidth={1.4}
                 />

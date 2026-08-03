@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { CheckIcon, ChevronDownIcon } from "@hugeicons/core-free-icons";
 import type { CalendarViewMode } from "~/lib/calendar";
 import type { CalendarSettings } from "~/lib/store";
 import { cn } from "~/lib/utils";
@@ -59,7 +60,11 @@ export function CalendarViewMenu(props: {
         className="flex shrink-0 items-center gap-1 rounded-lg bg-card px-2.5 py-1.5 text-[13px] font-medium text-text-dim shadow-chip transition-colors hover:text-foreground data-[state=open]:text-foreground"
       >
         {current?.label ?? "View"}
-        <ChevronDown className="size-3.5 text-text-faint" strokeWidth={2} />
+        <HugeiconsIcon
+          icon={ChevronDownIcon}
+          className="size-3.5 text-text-faint"
+          strokeWidth={2}
+        />
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
@@ -87,7 +92,8 @@ export function CalendarViewMenu(props: {
             className="pl-2"
           >
             <span className="grid size-4 shrink-0 place-items-center text-primary">
-              <Check
+              <HugeiconsIcon
+                icon={CheckIcon}
                 className={cn("size-3.5", props.mode !== view.value && "invisible")}
                 strokeWidth={2.4}
               />

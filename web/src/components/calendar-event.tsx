@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { Video } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Video01Icon } from "@hugeicons/core-free-icons";
 import {
   calendarColor,
   eventTitle,
@@ -151,7 +152,8 @@ export function EventBlock(props: EventVisualProps & { compact?: boolean }) {
         </span>
       )}
       {event.join_url && !props.compact && (
-        <Video
+        <HugeiconsIcon
+          icon={Video01Icon}
           className="absolute right-1 top-1 size-2.5 text-[var(--event-meta)]"
           strokeWidth={2}
           aria-hidden
@@ -245,7 +247,12 @@ export function EventItem(props: EventVisualProps & { hideTime?: boolean }) {
         {eventTitle(event)}
       </span>
       {event.join_url && (
-        <Video className="size-2.5 shrink-0 text-[var(--event-meta)]" strokeWidth={2} aria-hidden />
+        <HugeiconsIcon
+          icon={Video01Icon}
+          className="size-2.5 shrink-0 text-[var(--event-meta)]"
+          strokeWidth={2}
+          aria-hidden
+        />
       )}
     </button>
   );

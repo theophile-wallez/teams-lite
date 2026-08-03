@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Pin, PinOff, UserPlus } from "lucide-react";
+import { PinIcon, PinOffIcon, UserAdd01Icon } from "@hugeicons/core-free-icons";
 import { formatThreadActivity, type ThreadActivityEvent } from "~/lib/protocol";
 import { SystemLine } from "./system-line";
 import { useController } from "./controller-context";
@@ -8,9 +8,9 @@ import { useController } from "./controller-context";
  *  reaches here (see {@link formatThreadActivity}), so the fallback is only there
  *  to keep this total. */
 const ACTIVITY_ICON = {
-  member_added: UserPlus,
-  pinned: Pin,
-  unpinned: PinOff,
+  member_added: UserAdd01Icon,
+  pinned: PinIcon,
+  unpinned: PinOffIcon,
 } as const;
 
 /**
@@ -78,11 +78,11 @@ export function ThreadActivityLine(props: { event: ThreadActivityEvent }) {
   const names = useMemberNames(event.members ?? [], event.member_mris ?? []);
   const label = formatThreadActivity(event, names);
   if (!label) return null;
-  const Icon = ACTIVITY_ICON[event.event as keyof typeof ACTIVITY_ICON] ?? UserPlus;
+  const icon = ACTIVITY_ICON[event.event as keyof typeof ACTIVITY_ICON] ?? UserAdd01Icon;
   return (
     <SystemLine
       kind={event.kind}
-      icon={Icon}
+      icon={icon}
       label={label}
       data={{ "data-thread-activity": event.event }}
     />

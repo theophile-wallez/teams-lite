@@ -1,4 +1,9 @@
-import { CalendarClock, CalendarX2, ExternalLink } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  CalendarClockIcon,
+  CalendarRemove01Icon,
+  ExternalLinkIcon,
+} from "@hugeicons/core-free-icons";
 import {
   formatMeetingEvent,
   formatMeetingSchedule,
@@ -10,9 +15,9 @@ import { SystemLine } from "./system-line";
  *  scheduling and updating share the calendar-with-clock. An event we have no words
  *  for never reaches here (see {@link formatMeetingEvent}). */
 const MEETING_ICON = {
-  scheduled: CalendarClock,
-  cancelled: CalendarX2,
-  updated: CalendarClock,
+  scheduled: CalendarClockIcon,
+  cancelled: CalendarRemove01Icon,
+  updated: CalendarClockIcon,
 } as const;
 
 /**
@@ -35,10 +40,10 @@ export function MeetingEventLine(props: { event: MeetingSystemEvent }) {
   const schedule = formatMeetingSchedule(event);
   const location = event.location?.trim() ?? "";
   const joinUrl = event.event === "cancelled" ? "" : (event.join_url?.trim() ?? "");
-  const Icon = MEETING_ICON[event.event as keyof typeof MEETING_ICON] ?? CalendarClock;
+  const icon = MEETING_ICON[event.event as keyof typeof MEETING_ICON] ?? CalendarClockIcon;
 
   return (
-    <SystemLine kind={event.kind} icon={Icon} label={label} data={{ "data-meeting": event.event }}>
+    <SystemLine kind={event.kind} icon={icon} label={label} data={{ "data-meeting": event.event }}>
       {schedule ? (
         <span data-testid="meeting-schedule" className="text-text-faint">
           {schedule}
@@ -60,7 +65,12 @@ export function MeetingEventLine(props: { event: MeetingSystemEvent }) {
           className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
         >
           Join
-          <ExternalLink className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
+          <HugeiconsIcon
+            icon={ExternalLinkIcon}
+            className="size-3 shrink-0"
+            strokeWidth={1.8}
+            aria-hidden
+          />
         </a>
       ) : null}
     </SystemLine>

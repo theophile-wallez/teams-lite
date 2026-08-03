@@ -1,24 +1,24 @@
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
-  ArrowRight,
-  CircleCheck,
-  CircleDashed,
-  CircleDot,
-  CirclePlay,
-  CircleSlash,
-  CircleX,
-  Clock,
-  FolderGit2,
-  GitPullRequestArrow,
-  LoaderCircle,
-  type LucideIcon,
-} from "lucide-react";
+  ArrowRight01Icon,
+  CircleCheckIcon,
+  CircleDashedIcon,
+  CircleDotIcon,
+  CircleSlashTwoIcon,
+  CircleXIcon,
+  Clock01Icon,
+  FolderGitTwoIcon,
+  GitPullRequestArrowIcon,
+  Loading02Icon,
+  PlayCircleIcon,
+} from "@hugeicons/core-free-icons";
 import type { GitLabLinkKind, GitLabLinkMetadata } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 
-const KIND_ICON: Record<GitLabLinkKind, LucideIcon> = {
-  merge_request: GitPullRequestArrow,
-  issue: CircleDot,
-  project: FolderGit2,
+const KIND_ICON: Record<GitLabLinkKind, IconSvgElement> = {
+  merge_request: GitPullRequestArrowIcon,
+  issue: CircleDotIcon,
+  project: FolderGitTwoIcon,
 };
 
 type StatusStyle = { label: string; badge: string; icon: string };
@@ -70,7 +70,7 @@ function statusStyle(meta: GitLabLinkMetadata): StatusStyle | null {
   }
 }
 
-type PipelineStyle = { label: string; badge: string; Icon: LucideIcon; spin?: boolean };
+type PipelineStyle = { label: string; badge: string; icon: IconSvgElement; spin?: boolean };
 
 /** Map a merge request's CI/CD pipeline status to a small status badge. The
  *  in-progress states (queued/running) share a "working" look — the card is
@@ -83,19 +83,19 @@ function pipelineStyle(status: string | undefined): PipelineStyle | null {
       return {
         label: "Passed",
         badge: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400",
-        Icon: CircleCheck,
+        icon: CircleCheckIcon,
       };
     case "failed":
       return {
         label: "Failed",
         badge: "bg-rose-500/12 text-rose-600 dark:text-rose-400",
-        Icon: CircleX,
+        icon: CircleXIcon,
       };
     case "running":
       return {
         label: "Running",
         badge: "bg-sky-500/12 text-sky-600 dark:text-sky-400",
-        Icon: LoaderCircle,
+        icon: Loading02Icon,
         spin: true,
       };
     case "created":
@@ -106,31 +106,31 @@ function pipelineStyle(status: string | undefined): PipelineStyle | null {
       return {
         label: "Pending",
         badge: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-        Icon: Clock,
+        icon: Clock01Icon,
       };
     case "canceled":
       return {
         label: "Canceled",
         badge: "bg-zinc-500/12 text-zinc-600 dark:text-zinc-400",
-        Icon: CircleSlash,
+        icon: CircleSlashTwoIcon,
       };
     case "skipped":
       return {
         label: "Skipped",
         badge: "bg-zinc-500/12 text-zinc-600 dark:text-zinc-400",
-        Icon: CircleSlash,
+        icon: CircleSlashTwoIcon,
       };
     case "manual":
       return {
         label: "Manual",
         badge: "bg-zinc-500/12 text-zinc-600 dark:text-zinc-400",
-        Icon: CirclePlay,
+        icon: PlayCircleIcon,
       };
     default:
       return {
         label: status.charAt(0).toUpperCase() + status.slice(1),
         badge: "bg-zinc-500/12 text-zinc-600 dark:text-zinc-400",
-        Icon: CircleDashed,
+        icon: CircleDashedIcon,
       };
   }
 }
@@ -149,11 +149,10 @@ const MAX_LABELS = 4;
  */
 export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
   const meta = props.metadata;
-  const Icon = KIND_ICON[meta.kind];
+  const kindIcon = KIND_ICON[meta.kind];
   const status = statusStyle(meta);
   // Only merge requests carry a pipeline; issues/projects never do.
   const pipeline = meta.kind === "merge_request" ? pipelineStyle(meta.pipeline_status) : null;
-  const PipelineIcon = pipeline?.Icon;
   const labels = meta.labels ?? [];
   const extraLabels = labels.length - MAX_LABELS;
 
@@ -167,7 +166,8 @@ export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
       className="block w-full rounded-xl bg-card px-3 py-2.5 text-foreground shadow-chip transition-shadow hover:shadow-card"
     >
       <div className="flex items-start gap-2.5">
-        <Icon
+        <HugeiconsIcon
+          icon={kindIcon}
           className={cn("mt-0.5 size-4 shrink-0", status?.icon ?? "text-primary")}
           strokeWidth={1.6}
         />
@@ -186,7 +186,7 @@ export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
                 {status.label}
               </span>
             )}
-            {pipeline && PipelineIcon && (
+            {pipeline && (
               <span
                 data-testid="gitlab-pipeline-status"
                 data-status={meta.pipeline_status}
@@ -196,7 +196,8 @@ export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
                   pipeline.badge,
                 )}
               >
-                <PipelineIcon
+                <HugeiconsIcon
+                  icon={pipeline.icon}
                   className={cn("size-3", pipeline.spin && "animate-spin")}
                   strokeWidth={2}
                   aria-hidden
@@ -227,7 +228,11 @@ export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
               <code className="rounded bg-element px-1 py-0.5 font-mono text-[10px] text-text-dim">
                 {meta.source_branch}
               </code>
-              <ArrowRight className="size-3 shrink-0" strokeWidth={1.6} />
+              <HugeiconsIcon
+                icon={ArrowRight01Icon}
+                className="size-3 shrink-0"
+                strokeWidth={1.6}
+              />
               <code className="rounded bg-element px-1 py-0.5 font-mono text-[10px] text-text-dim">
                 {meta.target_branch}
               </code>

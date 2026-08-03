@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { LucideIcon } from "lucide-react";
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import { cn } from "~/lib/utils";
 
 /**
@@ -15,14 +15,14 @@ import { cn } from "~/lib/utils";
 export function SystemLine(props: {
   /** The `SystemEvent.kind` this line renders, surfaced as `data-system-event`. */
   kind: string;
-  icon: LucideIcon;
+  icon: IconSvgElement;
   label: string;
   /** Draw attention rather than blend in (a missed call). */
   alert?: boolean;
   data?: Record<string, string>;
   children?: ReactNode;
 }) {
-  const { icon: Icon } = props;
+  const { icon } = props;
   return (
     <div
       data-testid="system-event"
@@ -37,7 +37,7 @@ export function SystemLine(props: {
         )}
       >
         <span className="flex items-center gap-1.5">
-          <Icon className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
+          <HugeiconsIcon icon={icon} className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
           {props.label}
         </span>
         {props.children}

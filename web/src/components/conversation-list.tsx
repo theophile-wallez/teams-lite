@@ -1,21 +1,22 @@
 import { useMemo, useRef, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  BellOff,
-  CalendarDays,
-  ChevronRight,
-  EyeOff,
-  Ghost,
-  Hash,
-  Mail as MailIcon,
-  MessagesSquare,
-  MoonStar,
-  Pin,
-  Search,
-  Settings as SettingsIcon,
-  Sun,
-} from "lucide-react";
+  BellOffIcon,
+  CalendarDaysIcon,
+  ChevronRightIcon,
+  EyeOffIcon,
+  GhostIcon,
+  HashIcon,
+  Mail01Icon,
+  MessageMultiple01Icon,
+  Moon02Icon,
+  PinIcon,
+  Search01Icon,
+  Settings02Icon,
+  Sun03Icon,
+} from "@hugeicons/core-free-icons";
 import {
   channelIsMuted,
   channelIsPinned,
@@ -122,9 +123,9 @@ export function ConversationList(props: {
           className="grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground"
         >
           {resolvedTheme === "dark" ? (
-            <MoonStar className="size-4" strokeWidth={1.4} />
+            <HugeiconsIcon icon={Moon02Icon} className="size-4" strokeWidth={1.4} />
           ) : (
-            <Sun className="size-4" strokeWidth={1.4} />
+            <HugeiconsIcon icon={Sun03Icon} className="size-4" strokeWidth={1.4} />
           )}
         </button>
         <button
@@ -142,7 +143,7 @@ export function ConversationList(props: {
               : "text-text-dim hover:bg-accent hover:text-foreground",
           )}
         >
-          <SettingsIcon className="size-4" strokeWidth={1.4} />
+          <HugeiconsIcon icon={Settings02Icon} className="size-4" strokeWidth={1.4} />
         </button>
       </div>
 
@@ -154,7 +155,7 @@ export function ConversationList(props: {
           onClick={props.onOpenPalette}
           className="flex w-full items-center gap-2 rounded-lg bg-card px-3 py-2 text-left text-text-faint shadow-chip transition-colors hover:text-text-dim"
         >
-          <Search className="size-4 shrink-0" strokeWidth={1.4} />
+          <HugeiconsIcon icon={Search01Icon} className="size-4 shrink-0" strokeWidth={1.4} />
           <span className="flex-1 text-[13px]">Search conversations</span>
           <kbd
             data-testid="search-shortcut"
@@ -179,7 +180,11 @@ export function ConversationList(props: {
               title="Chats"
               className={TAB_ICON}
             >
-              <MessagesSquare className="size-[19px]" strokeWidth={1.6} />
+              <HugeiconsIcon
+                icon={MessageMultiple01Icon}
+                className="size-[19px]"
+                strokeWidth={1.6}
+              />
             </TabsTrigger>
             <TabsTrigger
               value="channels"
@@ -188,7 +193,7 @@ export function ConversationList(props: {
               title="Channels"
               className={TAB_ICON}
             >
-              <Hash className="size-[19px]" strokeWidth={1.8} />
+              <HugeiconsIcon icon={HashIcon} className="size-[19px]" strokeWidth={1.8} />
             </TabsTrigger>
             <TabsTrigger
               value="mail"
@@ -197,7 +202,7 @@ export function ConversationList(props: {
               title="Mail"
               className={cn(TAB_ICON, "relative")}
             >
-              <MailIcon className="size-[19px]" strokeWidth={1.6} />
+              <HugeiconsIcon icon={Mail01Icon} className="size-[19px]" strokeWidth={1.6} />
               <MailUnreadBadge />
             </TabsTrigger>
             <TabsTrigger
@@ -207,7 +212,7 @@ export function ConversationList(props: {
               title="Calendar"
               className={TAB_ICON}
             >
-              <CalendarDays className="size-[19px]" strokeWidth={1.6} />
+              <HugeiconsIcon icon={CalendarDaysIcon} className="size-[19px]" strokeWidth={1.6} />
             </TabsTrigger>
           </TabsList>
         </div>
@@ -384,7 +389,14 @@ function ChannelTree() {
           sectionId="pinned"
           testId="pinned-group"
           label="Pinned"
-          glyph={<Pin className="size-4 shrink-0 text-text-dim" strokeWidth={1.6} aria-hidden />}
+          glyph={
+            <HugeiconsIcon
+              icon={PinIcon}
+              className="size-4 shrink-0 text-text-dim"
+              strokeWidth={1.6}
+              aria-hidden
+            />
+          }
           channels={pinned}
           openId={openId}
           renderRow={renderRow}
@@ -487,7 +499,8 @@ function ChannelSection(props: {
             props.indented ? "pl-6" : "pl-1",
           )}
         >
-          <ChevronRight
+          <HugeiconsIcon
+            icon={ChevronRightIcon}
             className={cn(
               "size-3.5 shrink-0 text-text-faint transition-transform duration-150",
               !collapsed && "rotate-90",
@@ -520,7 +533,12 @@ function ChannelSection(props: {
           collapsedByDefault
           indented
           glyph={
-            <EyeOff className="size-3.5 shrink-0 text-text-faint" strokeWidth={1.6} aria-hidden />
+            <HugeiconsIcon
+              icon={EyeOffIcon}
+              className="size-3.5 shrink-0 text-text-faint"
+              strokeWidth={1.6}
+              aria-hidden
+            />
           }
           channels={hidden}
           openId={props.openId}
@@ -543,7 +561,12 @@ function GhostReadMark(props: { on?: boolean }) {
       title="Read in Ghost mode — Teams still shows this as unread, and the sender saw no read receipt."
       className="shrink-0 text-text-faint"
     >
-      <Ghost className="size-3.5" strokeWidth={1.6} aria-label="Read in Ghost mode" />
+      <HugeiconsIcon
+        icon={GhostIcon}
+        className="size-3.5"
+        strokeWidth={1.6}
+        aria-label="Read in Ghost mode"
+      />
     </span>
   );
 }
@@ -722,7 +745,7 @@ function ChannelRow(props: {
             title="Muted in Microsoft Teams"
             className="grid shrink-0 place-items-center text-text-faint"
           >
-            <BellOff className="size-3" aria-hidden />
+            <HugeiconsIcon icon={BellOffIcon} className="size-3" aria-hidden />
           </span>
         )}
         <GhostReadMark on={c.is_ghost_read} />
@@ -759,7 +782,8 @@ function ChannelRow(props: {
         {/* A pinned row states its state without shouting it: the glyph fills, and
             stays in the dim tone the section header uses, so the channel's own name
             keeps the row's attention. */}
-        <Pin
+        <HugeiconsIcon
+          icon={PinIcon}
           className={cn("size-3.5", props.pinned && "fill-current text-text-dim")}
           strokeWidth={1.8}
         />

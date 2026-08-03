@@ -1,5 +1,6 @@
 import { Fragment, useMemo, useState, type ReactNode } from "react";
-import { Globe, Link2Off } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { GlobeIcon, Unlink02Icon } from "@hugeicons/core-free-icons";
 import {
   dropLinks,
   hasVisibleContent,
@@ -200,7 +201,8 @@ function LinkFavicon({ href }: { href?: string }) {
   return (
     <span className="relative mr-1 inline-flex size-[1.05em] shrink-0 items-center justify-center overflow-hidden rounded-[0.25em] align-middle text-zinc-500 ring-1 ring-black/5">
       {/* Fallback globe — visible until (and unless) the favicon paints. */}
-      <Globe
+      <HugeiconsIcon
+        icon={GlobeIcon}
         className={cn("size-[0.72em] transition-opacity", showFavicon && "opacity-0")}
         strokeWidth={2}
         aria-hidden
@@ -457,7 +459,12 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
           data-testid="app-card-unavailable"
           className={cn(BLOCK_SPACING, "flex items-center gap-1.5 text-xs text-text-dim")}
         >
-          <Link2Off className="size-3.5 shrink-0" strokeWidth={1.6} aria-hidden />
+          <HugeiconsIcon
+            icon={Unlink02Icon}
+            className="size-3.5 shrink-0"
+            strokeWidth={1.6}
+            aria-hidden
+          />
           Link preview unavailable
         </div>
       );

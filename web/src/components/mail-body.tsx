@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ImageOff, Scissors } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { ImageNotFound01Icon, ScissorIcon } from "@hugeicons/core-free-icons";
 import type { MailBody as MailBodyData } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 
@@ -131,7 +132,11 @@ export function MailBody(props: { body: MailBodyData; className?: string }) {
               data-testid="mail-blocked-images"
               className="flex items-center gap-2 text-[12px] text-text-faint"
             >
-              <ImageOff className="size-3.5 shrink-0" strokeWidth={1.5} />
+              <HugeiconsIcon
+                icon={ImageNotFound01Icon}
+                className="size-3.5 shrink-0"
+                strokeWidth={1.5}
+              />
               <span>
                 {body.blocked_remote_images} remote{" "}
                 {body.blocked_remote_images === 1 ? "image" : "images"} blocked — loading
@@ -144,7 +149,7 @@ export function MailBody(props: { body: MailBodyData; className?: string }) {
               data-testid="mail-truncated"
               className="flex items-center gap-2 text-[12px] text-text-faint"
             >
-              <Scissors className="size-3.5 shrink-0" strokeWidth={1.5} />
+              <HugeiconsIcon icon={ScissorIcon} className="size-3.5 shrink-0" strokeWidth={1.5} />
               <span>This message was unusually large and has been shortened.</span>
             </p>
           )}

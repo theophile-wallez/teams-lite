@@ -1,6 +1,7 @@
 import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
-import { Check } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { CheckIcon } from "@hugeicons/core-free-icons";
 import { cn } from "~/lib/utils";
 
 export const DropdownMenu = DropdownMenuPrimitive.Root;
@@ -80,7 +81,7 @@ export const DropdownMenuCheckboxItem = React.forwardRef<
   >
     <span className="grid size-4 shrink-0 place-items-center text-primary">
       <DropdownMenuPrimitive.ItemIndicator>
-        <Check className="size-3.5" strokeWidth={2.4} />
+        <HugeiconsIcon icon={CheckIcon} className="size-3.5" strokeWidth={2.4} />
       </DropdownMenuPrimitive.ItemIndicator>
     </span>
     {children}

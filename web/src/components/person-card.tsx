@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import * as HoverCardPrimitive from "@radix-ui/react-hover-card";
-import { Briefcase, Building2, Mail, MapPin } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  Briefcase01Icon,
+  Building02Icon,
+  Mail01Icon,
+  MapPinIcon,
+} from "@hugeicons/core-free-icons";
 import type { PersonProfile } from "~/lib/protocol";
 import { lastSeenLabel, presenceIsUnknown, presenceLabel } from "~/lib/presence";
 import { cn } from "~/lib/utils";
@@ -158,7 +164,7 @@ export function PersonCard(props: { identity: PersonIdentity; open: boolean }) {
           {profile.email ? (
             <DetailRow
               testid="person-card-email"
-              icon={<Mail className="size-3.5" strokeWidth={1.8} />}
+              icon={<HugeiconsIcon icon={Mail01Icon} className="size-3.5" strokeWidth={1.8} />}
               href={`mailto:${profile.email}`}
             >
               {profile.email}
@@ -167,7 +173,7 @@ export function PersonCard(props: { identity: PersonIdentity; open: boolean }) {
           {profile.department ? (
             <DetailRow
               testid="person-card-department"
-              icon={<Briefcase className="size-3.5" strokeWidth={1.8} />}
+              icon={<HugeiconsIcon icon={Briefcase01Icon} className="size-3.5" strokeWidth={1.8} />}
             >
               {profile.department}
             </DetailRow>
@@ -175,7 +181,7 @@ export function PersonCard(props: { identity: PersonIdentity; open: boolean }) {
           {profile.company_name ? (
             <DetailRow
               testid="person-card-company"
-              icon={<Building2 className="size-3.5" strokeWidth={1.8} />}
+              icon={<HugeiconsIcon icon={Building02Icon} className="size-3.5" strokeWidth={1.8} />}
             >
               {profile.company_name}
             </DetailRow>
@@ -183,7 +189,7 @@ export function PersonCard(props: { identity: PersonIdentity; open: boolean }) {
           {profile.office_location ? (
             <DetailRow
               testid="person-card-location"
-              icon={<MapPin className="size-3.5" strokeWidth={1.8} />}
+              icon={<HugeiconsIcon icon={MapPinIcon} className="size-3.5" strokeWidth={1.8} />}
             >
               {profile.office_location}
             </DetailRow>
