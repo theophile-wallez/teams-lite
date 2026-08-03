@@ -33,15 +33,16 @@ describe("CardAttachment", () => {
     expect(render(card({ title: "" }))).toContain("n-Alerts");
   });
 
-  it("prints the text verbatim, with its block breaks preserved", () => {
+  it("renders each of the text's blocks as its own paragraph", () => {
     const out = render(card({ text: "3 fatal log lines.\nCluster: eu-central-1" }));
-    expect(out).toContain("3 fatal log lines.\nCluster: eu-central-1");
-    // The breaks come from the wrapping, not from markup injected into the body.
-    expect(out).toContain("whitespace-pre-wrap");
+    expect(out).toContain("<p");
+    expect(out).toContain("3 fatal log lines.");
+    expect(out).toContain("Cluster: eu-central-1");
   });
 
-  it("escapes the card text instead of treating it as markup", () => {
-    // `card.text` is PLAIN text from the backend, even when it reads like HTML.
+  it("escapes HTML in the card text instead of treating it as markup", () => {
+    // The backend already stripped a card's HTML: what is left is literal text, and
+    // it is React that escapes it — no `dangerouslySetInnerHTML` anywhere near a card.
     const out = render(card({ text: "<b>level</b>: error" }));
     expect(out).toContain("&lt;b&gt;level&lt;/b&gt;: error");
     expect(out).not.toContain("<b>level</b>");
@@ -147,5 +148,44 @@ describe("CardAttachment — card text", () => {
 
   it("renders no text paragraph at all when nothing survives", () => {
     expect(render(card({ text: "•\n|\n   " }))).not.toContain('data-testid="card-text"');
+  });
+
+  it("renders the card's markdown — bold labels and short link text", () => {
+    // The shape a Grafana alert relayed by Workflows arrives in: a bold severity and
+    // a two-word link over a URL long enough to fill the bubble on its own.
+    const out = render(
+      card({
+        text: "**critical** — metabase restarted 12 times.\n[🪵 Logs](https://grafana.example/explore?left=%7B%22datasource%22%3A%22loki%22%7D)",
+      }),
+    );
+    expect(out).toContain("<strong");
+    expect(out).toContain("critical");
+    expect(out).not.toContain("**critical**");
+    expect(out).toContain('href="https://grafana.example/explore?left=%7B%22datasource%22%3A%22loki%22%7D"');
+    expect(out).toContain("Logs");
+    // The URL is the link's target, not its text.
+    expect(out).not.toContain(">https://grafana.example");
+  });
+
+  it("renders a bullet list as a list", () => {
+    const out = render(card({ text: "Impacted:\n- metabase\n- trace-api" }));
+    expect(out).toContain("<ul");
+    expect(out).toContain("<li");
+    expect(out).toContain("metabase");
+  });
+
+  it("drops the generic 'Card' name once the card has content of its own", () => {
+    // A bot's card often has no title: Teams shows its first block as the headline,
+    // and printing the word "Card" above it says nothing the glyph does not.
+    const bot: Attachment = { ...card(), name: "Card", card: { title: "", text: "✅ RESOLVED · release-us", facts: [], actions: [] } };
+    const out = render(bot);
+    expect(out).not.toContain('data-testid="card-title"');
+    expect(out).toContain("✅ RESOLVED · release-us");
+  });
+
+  it("keeps the generic name when the card has nothing else to show", () => {
+    // Losing the fact that a card was posted would be worse than a generic label.
+    const empty: Attachment = { ...card(), name: "Card", card: undefined };
+    expect(render(empty)).toContain("Card");
   });
 });

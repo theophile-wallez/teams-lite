@@ -1547,6 +1547,45 @@ function seedAppCards(): void {
     120_000,
   );
 
+  // A monitoring alert relayed by the Workflows bot — the card the whole markdown
+  // path exists for. It has NO title of its own (Teams shows its first block as the
+  // headline), one block per alert holding bold labels and two short links over
+  // URLs long enough to fill the bubble, and a footer block. Printed verbatim it is
+  // a wall of asterisks and query strings; see `parseCardMarkdown`.
+  const grafana = "https://grafana.example.com";
+  const logs = `${grafana}/explore?left=%7B%22datasource%22%3A%22loki%22%2C%22queries%22%3A%5B%7B%22expr%22%3A%22%7Bnamespace%3D%5C%22metabase%5C%22%7D%22%7D%5D%7D`;
+  const silence = `${grafana}/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Dcfto40tofrhfka&matcher=severity%3Dcritical`;
+  push(
+    {
+      sender: "Workflows",
+      content: "",
+      attachments: [
+        {
+          name: "Card",
+          content_type: "application/vnd.microsoft.card.adaptive",
+          url: "",
+          kind: "card",
+          card: {
+            title: "",
+            text: [
+              "✅ RESOLVED · ContainerRestartStorm · release-us",
+              "**critical** — metabase in metabase-58b9cd89d-f2vz8 (release-us) restarted 12 times in the last hour.",
+              "**Debug:** kubectl -n metabase describe pod metabase-58b9cd89d-f2vz8",
+              `[🪵 Logs](${logs}) · [🔕 Silence](${silence})`,
+              "**critical** — trace-api in trace-api-68b956c4b6-4tbzc (release-us) restarted 11 times in the last hour.",
+              `[🪵 Logs](${logs}) · [🔕 Silence](${silence})`,
+              "Lucas Silva used a Workflow template to send this card.",
+            ].join("\n"),
+            facts: [],
+            actions: [{ title: "View URL", url: `${grafana}/alerting/list` }],
+          },
+        },
+      ],
+      is_self: false,
+    },
+    150_000,
+  );
+
   // A link unfurl: the app that produced the preview is named (and iconed) beside
   // the card, and the body keeps the link the unfurl is about. The `InputExtension`
   // span Teams leaves in the body renders as nothing now that the real card arrived

@@ -434,8 +434,11 @@ const BARE_URL = /https?:\/\/[^\s<>"']+/g;
 
 /** Trailing punctuation that belongs to the sentence, not to the URL — "see
  *  https://example.com." links to `example.com`, not to `example.com.`. A closing
- *  bracket is only trimmed when the URL has no matching opener. */
-function trimUrlPunctuation(url: string): string {
+ *  bracket is only trimmed when the URL has no matching opener.
+ *
+ *  Exported for the card-text parser, which linkifies bare URLs the same way (see
+ *  `parseCardMarkdown`) — one rule for where a URL ends, not two that drift. */
+export function trimUrlPunctuation(url: string): string {
   let end = url.length;
   while (end > 0) {
     const ch = url[end - 1]!;

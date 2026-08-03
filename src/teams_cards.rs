@@ -25,11 +25,16 @@
 //
 //   { "title": "…", "text": "…", "facts": [{"title","value"}], "actions": [{"title","url"}] }
 //
-// `text` is PLAIN text (tags stripped, `\n` between blocks) so a front-end can
-// print it verbatim; nothing here is ever HTML. Images, styling, input widgets and
-// submit payloads are deliberately dropped — a chat bubble is not a card host.
-// Everything is bounded (see the MAX_* constants) so a pathological card cannot
-// bloat a stored row.
+// `text` is never HTML: tags are stripped, entities decoded, and one line is one
+// visible block. What it DOES keep is the card's own markdown — an Adaptive Card
+// `TextBlock` is markdown by specification ("**critical** … [🪵 Logs](https://…)"),
+// so stripping the asterisks would throw away the card's emphasis and turn every
+// link into the bare 500-character URL behind it. The front-end parses that subset
+// back (see `parseCardMarkdown` in web/src/lib/card-markdown.ts).
+//
+// Images, styling, input widgets and submit payloads are deliberately dropped — a
+// chat bubble is not a card host. Everything is bounded (see the MAX_* constants) so
+// a pathological card cannot bloat a stored row.
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -40,6 +45,8 @@ use crate::teams_read::{xml_attr, xml_first_value};
 /// these; the caps exist so a hostile or generated card cannot grow a message row
 /// without limit.
 const MAX_TEXT_CHARS: usize = 4000;
+/// The cap on lines of card text — a block that writes several lines of its own
+/// spends several of them (see [`Card::push_block`]).
 const MAX_TEXT_BLOCKS: usize = 64;
 const MAX_FACTS: usize = 32;
 const MAX_ACTIONS: usize = 8;
@@ -210,9 +217,15 @@ impl Card {
         text
     }
 
-    fn push_line(&mut self, line: &str) {
-        let line = html_to_text(line);
-        if !line.is_empty() && self.lines.len() < MAX_TEXT_BLOCKS {
+    /// Add one visible block's text, keeping the lines the block writes itself: a
+    /// monitoring card puts its alert, its `Debug:` command and its links in ONE
+    /// `TextBlock` separated by blank lines, and collapsing those into a single line
+    /// is what makes the alert read as one unbroken paragraph.
+    fn push_block(&mut self, block: &str) {
+        for line in html_to_lines(block) {
+            if self.lines.len() >= MAX_TEXT_BLOCKS {
+                break;
+            }
             self.lines.push(line);
         }
     }
@@ -243,7 +256,7 @@ impl Card {
             .filter(|t| !t.is_empty());
         // Connector card: a flat `text` (HTML) plus sections and potential actions.
         if let Some(text) = content.get("text").and_then(Value::as_str) {
-            self.push_line(text);
+            self.push_block(text);
         }
         for section in array(content.get("sections")) {
             self.collect_section(section);
@@ -260,7 +273,7 @@ impl Card {
     fn collect_section(&mut self, section: &Value) {
         for key in ["title", "activityTitle", "activitySubtitle", "text"] {
             if let Some(v) = section.get(key).and_then(Value::as_str) {
-                self.push_line(v);
+                self.push_block(v);
             }
         }
         for fact in array(section.get("facts")) {
@@ -303,7 +316,7 @@ impl Card {
             match element.get("type").and_then(Value::as_str).unwrap_or_default() {
                 "TextBlock" | "RichTextBlock" => {
                     if let Some(text) = element.get("text").and_then(Value::as_str) {
-                        self.push_line(text);
+                        self.push_block(text);
                     }
                 }
                 "FactSet" => {
@@ -315,11 +328,11 @@ impl Card {
                 }
                 _ => {
                     if let Some(label) = element.get("label").and_then(Value::as_str) {
-                        self.push_line(label);
+                        self.push_block(label);
                     }
                     for choice in array(element.get("choices")) {
                         if let Some(title) = choice.get("title").and_then(Value::as_str) {
-                            self.push_line(title);
+                            self.push_block(title);
                         }
                     }
                 }
@@ -354,34 +367,96 @@ fn array(v: Option<&Value>) -> &[Value] {
     v.and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
 }
 
-/// Flatten a card string to plain, single-spaced text: block boundaries become
-/// spaces, tags are stripped, the entities Teams emits are decoded, and whitespace
-/// is collapsed. Connector cards ship HTML in `text`, and even an Adaptive Card's
-/// `TextBlock` can carry a mention `<span>`, so nothing from a card is trusted to be
-/// plain. Not a sanitizer: it removes markup, it does not neutralise it — which is
-/// why the stored `card` payload never contains HTML in the first place.
+/// Flatten a card string to plain, single-spaced text on ONE line: tags are
+/// stripped, the entities Teams emits are decoded, and every run of whitespace
+/// becomes a single space. For a title, a fact and an action label, which are single
+/// lines by nature — a block of text keeps its lines instead (see [`html_to_lines`]).
+///
+/// Connector cards ship HTML in `text`, and even an Adaptive Card's `TextBlock` can
+/// carry a mention `<span>`, so nothing from a card is trusted to be plain. Not a
+/// sanitizer: it removes markup, it does not neutralise it — which is why the stored
+/// `card` payload never contains HTML in the first place.
 fn html_to_text(s: &str) -> String {
+    let text = strip_tags(s, false);
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Flatten a card's block of text to its lines: the same stripping, except that a
+/// line break the card wrote — a `\n` of its own, or a `<br>` / `<p>` boundary in
+/// connector HTML — stays a line break. Blank lines and edge whitespace go, so the
+/// result is exactly the visible lines, in order.
+///
+/// This is what keeps a monitoring alert readable: Grafana relays one alert as a
+/// single `TextBlock` holding its summary, its `Debug:` command and its links on
+/// separate lines, and collapsing all of it into one line gives the wall of text the
+/// card was written to avoid.
+fn html_to_lines(s: &str) -> Vec<String> {
+    strip_tags(s, true)
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// Tags whose boundary is a LINE boundary in the text they contain. Everything else
+/// is inline (`<span>`, `<b>`, `<a>`), where the tag separates words at most.
+const LINE_BREAK_TAGS: &[&str] = &[
+    "br",
+    "p",
+    "div",
+    "li",
+    "ul",
+    "ol",
+    "tr",
+    "hr",
+    "table",
+    "blockquote",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+];
+
+/// Remove every tag, replacing it with the whitespace it stood for — a space, or a
+/// newline for a block boundary when `break_lines` — and decode the entities Teams
+/// emits. A `>` outside a tag is text and survives as itself.
+fn strip_tags(s: &str, break_lines: bool) -> String {
     let mut text = String::with_capacity(s.len());
+    let mut tag = String::new();
     let mut in_tag = false;
     for c in s.chars() {
         match c {
             '<' => {
                 in_tag = true;
-                text.push(' ');
+                tag.clear();
             }
-            '>' => in_tag = false,
-            _ if in_tag => {}
+            '>' if in_tag => {
+                in_tag = false;
+                text.push(if break_lines && is_line_break_tag(&tag) { '\n' } else { ' ' });
+            }
+            _ if in_tag => tag.push(c),
             _ => text.push(c),
         }
     }
-    let text = text
-        .replace("&nbsp;", " ")
+    text.replace("&nbsp;", " ")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
-        .replace("&amp;", "&");
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+        .replace("&amp;", "&")
+}
+
+/// Whether the inside of a tag — `br /`, `/p`, `div class="x"` — names a block.
+fn is_line_break_tag(tag: &str) -> bool {
+    let name = tag
+        .trim_start_matches('/')
+        .split(|c: char| c.is_whitespace() || c == '/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    LINE_BREAK_TAGS.contains(&name.as_str())
 }
 
 #[cfg(test)]
@@ -457,8 +532,8 @@ mod tests {
         let card = &attachment["card"];
         assert_eq!(card["title"], "n-Alerts");
         assert_eq!(
-            card["text"], "Filebeat error(s): https://kibana/app\nproduction",
-            "HTML is flattened to plain text, one line per block"
+            card["text"], "Filebeat error(s):\nhttps://kibana/app\nproduction",
+            "HTML is flattened to plain text, one line per visible line of the card"
         );
         assert_eq!(card["facts"], json!([{ "title": "level", "value": "error" }]));
         assert_eq!(
@@ -515,6 +590,52 @@ mod tests {
                 { "title": "Open", "url": "https://forms/x" }
             ]),
             "a submit action keeps its label with no link",
+        );
+    }
+
+    #[test]
+    fn a_text_block_keeps_its_own_lines_and_its_markdown() {
+        // How Grafana relays an alert through Workflows: ONE TextBlock holding the
+        // summary, the debug command and the links, separated by blank lines, with
+        // the emphasis and the links written in markdown. Both must survive — the
+        // lines are what keeps it from becoming a wall of text, and the markdown is
+        // what keeps a 200-character URL out of the middle of a sentence.
+        let body = swift_body(
+            json!({
+                "attachments": [{
+                    "contentType": ADAPTIVE_CONTENT_TYPE,
+                    "content": { "type": "AdaptiveCard", "body": [
+                        { "type": "TextBlock", "text": "✅ RESOLVED · release-us" },
+                        { "type": "TextBlock", "text": "**critical** — metabase restarted 12   times.\n\n**Debug:** kubectl -n metabase describe pod metabase-58b9\n\n[🪵 Logs](https://grafana/explore?left=%7B%22a%22%3A1%7D)" }
+                    ]}
+                }]
+            }),
+            "Card",
+        );
+        assert_eq!(
+            card_of(&body)["card"]["text"],
+            "✅ RESOLVED · release-us\n\
+             **critical** — metabase restarted 12 times.\n\
+             **Debug:** kubectl -n metabase describe pod metabase-58b9\n\
+             [🪵 Logs](https://grafana/explore?left=%7B%22a%22%3A1%7D)",
+        );
+    }
+
+    #[test]
+    fn connector_html_line_breaks_become_lines_and_inline_tags_do_not() {
+        // A `<br>` and a paragraph boundary are lines; a `<b>`/`<a>` inside one is not.
+        let body = swift_body(
+            json!({
+                "attachments": [{
+                    "contentType": "application/vnd.microsoft.teams.card.o365connector",
+                    "content": { "text": "<p><b>3</b> fatal lines<br/>cluster: <i>eu-central-1</i></p><p>level: error</p>" }
+                }]
+            }),
+            "Card",
+        );
+        assert_eq!(
+            card_of(&body)["card"]["text"],
+            "3 fatal lines\ncluster: eu-central-1\nlevel: error",
         );
     }
 

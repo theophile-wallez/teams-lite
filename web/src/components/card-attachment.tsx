@@ -1,7 +1,15 @@
-import { Fragment } from "react";
+import { Fragment, useMemo } from "react";
 import { ExternalLink, LayoutTemplate } from "lucide-react";
 import type { Attachment, CardPayload } from "~/lib/protocol";
+import { parseCardMarkdown } from "~/lib/card-markdown";
 import { cn } from "~/lib/utils";
+import { RichNodes } from "./rich-content";
+
+/** The generic label the backend gives a card that has no title of its own
+ *  (`PLACEHOLDER_TITLE` in src/teams_cards.rs). It exists so a generic attachment
+ *  renderer and the sidebar preview always find a name; as a heading it says nothing
+ *  the card's own glyph does not, so a card with real content drops it. */
+const PLACEHOLDER_NAME = "Card";
 
 /**
  * An adaptive / connector card posted by an app or a bot — a poll, a monitoring
@@ -12,40 +20,35 @@ import { cn } from "~/lib/utils";
  *
  * It wears the same clothes as the other cards in the app (see `GitLabLinkCard`
  * and `EmailSummaryCard`): one `bg-card` panel with a leading glyph, a title, and
- * quiet supporting lines. What it deliberately does NOT do is pretend to be a card
- * host: `text` is printed verbatim as plain text (its `\n` block breaks preserved,
- * never parsed as markup), and an action that is not a link — a poll vote, a bot
+ * quiet supporting lines. The text is the card's own markdown — an Adaptive Card
+ * `TextBlock` is markdown by specification — so it is parsed by
+ * {@link parseCardMarkdown} and rendered by the message renderer itself: bold labels
+ * stay bold, and a link shows its two-word label instead of the 500-character
+ * monitoring URL behind it.
+ *
+ * What it deliberately does NOT do is pretend to be a card host: nothing in the text
+ * is ever read as HTML, and an action that is not a link — a poll vote, a bot
  * `Action.Submit` — renders as inert text. Acting on one would mean posting to
  * Teams as the user, which nothing in this client does behind their back.
  */
-/** A line made of nothing but separator punctuation — Adaptive Cards lay out
- *  "Rust • 12 Stars" as separate blocks, so flattening them to `\n` leaves a lone
- *  "•" or "|" on its own line. It carried a horizontal rhythm we do not reproduce
- *  and no information, so it goes. */
-const SEPARATOR_LINE = /^[\s•·|—–\-*]+$/;
-
-/** Drop the card text's information-free separator lines, keeping everything else
- *  verbatim (including blank runs collapsed to a single break). */
-function cardText(text: string): string {
-  return text
-    .split("\n")
-    .filter((line) => line.trim() !== "" && !SEPARATOR_LINE.test(line))
-    .join("\n");
-}
-
 export function CardAttachment(props: { attachment: Attachment; className?: string }) {
   const { attachment } = props;
   // A card entry whose payload never made it through still names itself, so the
   // fact that a card was posted is not lost.
   const card: CardPayload = attachment.card ?? { title: "", text: "", facts: [], actions: [] };
-  const title = card.title.trim() || attachment.name.trim();
   const facts = card.facts ?? [];
   const actions = card.actions ?? [];
   // A link unfurl also says which app produced it (see `card.app_name`); a card a
   // bot posted directly carries neither, and its title already names the source.
   const appName = card.app_name?.trim() ?? "";
   const appIcon = card.app_icon?.trim() ?? "";
-  const text = cardText(card.text);
+  const text = useMemo(() => parseCardMarkdown(card.text), [card.text]);
+  // The placeholder name is a label of last resort: it titles a card whose payload
+  // never came through — losing the fact that a card was posted would be worse —
+  // and steps aside as soon as the card has content of its own to show.
+  const name = attachment.name.trim();
+  const hasBody = text.length > 0 || facts.length > 0 || actions.length > 0;
+  const title = card.title.trim() || (name === PLACEHOLDER_NAME && hasBody ? "" : name);
 
   return (
     <div
@@ -85,12 +88,12 @@ export function CardAttachment(props: { attachment: Attachment; className?: stri
             </div>
           ) : null}
 
-          {text ? (
-            // The card's blocks arrive as one string with `\n` between them, so the
-            // breaks are honoured by the wrapping rather than by markup.
-            <p data-testid="card-text" className="whitespace-pre-wrap break-words text-xs text-text-dim">
-              {text}
-            </p>
+          {text.length > 0 ? (
+            // The card's blocks arrive as one string with `\n` between them; each is
+            // a block of markdown, rendered as its own paragraph or list item.
+            <div data-testid="card-text" className="text-xs text-text-dim">
+              <RichNodes nodes={text} />
+            </div>
           ) : null}
 
           {facts.length > 0 ? (

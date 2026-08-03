@@ -64,10 +64,38 @@ export function RichContent(props: {
     return hiddenHrefs && hiddenHrefs.size > 0 ? dropLinks(parsed, hiddenHrefs) : parsed;
   }, [html, format, hiddenHrefs]);
   if (email) return <EmailSummaryCard email={email} className={props.className} />;
-  if (!hasVisibleContent(nodes)) return null;
   return (
-    <div className={cn("whitespace-pre-wrap break-words", props.className)}>
-      {nodes.map((node, i) =>
+    <RichNodes
+      nodes={nodes}
+      className={cn("whitespace-pre-wrap", props.className)}
+      mentions={props.mentions}
+      cardShownSeparately={props.cardShownSeparately}
+    />
+  );
+}
+
+/**
+ * Render an already-parsed node tree — the half of {@link RichContent} that turns
+ * nodes into elements, without the assumption that they came from Teams HTML.
+ *
+ * A card's text is markdown, not HTML, and it is parsed by `parseCardMarkdown`
+ * (lib/card-markdown.ts); going through this renderer is what makes a card's bold,
+ * links and lists look exactly like a message body's instead of a second, drifting
+ * implementation of the same styles.
+ *
+ * Renders nothing at all when the tree holds nothing visible, so a caller never has
+ * to guard against an empty block.
+ */
+export function RichNodes(props: {
+  nodes: RichNode[];
+  className?: string;
+  mentions?: Map<number, MessageMention>;
+  cardShownSeparately?: boolean;
+}) {
+  if (!hasVisibleContent(props.nodes)) return null;
+  return (
+    <div className={cn("break-words", props.className)}>
+      {props.nodes.map((node, i) =>
         renderNode(node, i, {
           mentions: props.mentions,
           cardShownSeparately: props.cardShownSeparately,

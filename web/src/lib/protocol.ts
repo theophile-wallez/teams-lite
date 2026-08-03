@@ -19,8 +19,10 @@ export type CardAction = { title: string; url: string };
 
 /** An adaptive / connector card, already flattened by the backend (see
  *  src/teams_cards.rs) into the four presentation-free parts a chat bubble can
- *  show. `text` is PLAIN text — never HTML — with `\n` between the card's blocks,
- *  so it is printed verbatim (block breaks preserved), never parsed. */
+ *  show. `text` is never HTML, and one line is one visible block of the card; what
+ *  it does carry is the card's own markdown — an Adaptive Card `TextBlock` is
+ *  markdown by specification — parsed by `parseCardMarkdown` (lib/card-markdown.ts)
+ *  so bold stays bold and a link shows its label instead of its URL. */
 export type CardPayload = {
   title: string;
   text: string;
