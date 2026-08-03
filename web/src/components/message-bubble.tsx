@@ -60,11 +60,11 @@ const EmojiPicker = lazy(() => import("./emoji-picker"));
 /** Room reserved below a bubble that carries reactions. The chip row straddles
  *  the bubble's bottom edge — a third of a pill inside it, the rest hanging out
  *  (see {@link ReactionChips}) — and is positioned absolutely, so it takes no
- *  layout space of its own. This margin is that overhang (~17px of a 26px pill)
+ *  layout space of its own. This margin is that overhang (~20px of a 30px pill)
  *  plus enough air that the chips read as belonging to their own message rather
  *  than crowding whatever follows: the next message, or this message's "seen by"
  *  line. */
-const REACTION_OVERHANG = "mb-6";
+const REACTION_OVERHANG = "mb-7";
 
 /** Resolved enrichment for a set of links, keyed by URL: `undefined` while a
  *  lookup is in flight, `null` when the link is not an enrichable integration,
@@ -957,8 +957,13 @@ function ReactionPicker(props: {
  * reactions read as attached to the message without eating into its text. It is
  * absolutely positioned so it never widens the bubble; the bubble row reserves
  * the overhang below itself instead (see {@link REACTION_OVERHANG}). That
- * straddling is also why the pills carry an opaque fill and a drop shadow: they
- * sit *on top of* the bubble's edge rather than beside it.
+ * straddling is also why the pills carry a blurred fill and a drop shadow: they
+ * sit *on top of* the bubble's edge rather than beside it, so a translucent fill
+ * needs the blur to keep the emoji legible over whatever shows through.
+ *
+ * A count of one is implicit and stays unwritten: the emoji alone says one
+ * person reacted, so the pill becomes a circle around it. The number appears
+ * from two reactions upward, where it carries information.
  */
 function ReactionChips(props: {
   reactions: Reaction[];
@@ -986,16 +991,23 @@ function ReactionChips(props: {
           aria-label={`${r.mine ? "Remove your" : "Add"} ${r.key} reaction`}
           onClick={() => props.onToggle(r.key)}
           className={cn(
-            "flex cursor-pointer items-center gap-1 rounded-full border px-2 py-1 leading-none shadow-card transition-colors",
+            "flex cursor-pointer items-center rounded-full border leading-none shadow-card backdrop-blur-md transition-colors",
+            // One pill height either way (30px): a counted pill pads a 20px
+            // emoji, a lone one is a circle of the same size around it.
+            r.count > 1 ? "gap-1 px-2 py-1" : "size-[30px] justify-center",
             r.mine
               ? "border-primary/40 bg-reaction-chip-mine text-foreground"
               : "border-reaction-chip-border bg-reaction-chip text-muted-foreground hover:bg-accent hover:text-foreground",
           )}
         >
-          {/* Emoji at message-text size (not label size) — the reaction, not its
-              count, is what the eye should land on. */}
-          <Emoji emoji={reactionEmoji(r.key)} className="size-4" />
-          <span className="text-[11px] font-medium tabular-nums">{r.count}</span>
+          {/* The emoji is the reaction; it reads above message-text size so the
+              eye lands on it rather than on the count beside it. */}
+          <Emoji emoji={reactionEmoji(r.key)} className="size-5" />
+          {r.count > 1 && (
+            <span data-testid="reaction-count" className="text-[11px] font-medium tabular-nums">
+              {r.count}
+            </span>
+          )}
         </button>
       ))}
     </div>

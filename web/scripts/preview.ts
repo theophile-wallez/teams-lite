@@ -987,14 +987,17 @@ if (import.meta.main) {
       if (react) {
         // Chips first (from the mock, not from us clicking): one classic key and one
         // of the extended ones a real tenant sends, so a capture shows both paths.
+        // Their counts differ for the same reason — a lone reaction is a circle
+        // around the emoji, a shared one adds the number.
         const messages = page.locator("[data-message-id]");
         const count = await messages.count();
-        for (const [index, key] of [
-          [Math.max(0, count - 4), "1f389_partypopper"],
-          [Math.max(0, count - 3), "heart"],
+        for (const [index, key, reacted] of [
+          [Math.max(0, count - 4), "1f389_partypopper", 1],
+          [Math.max(0, count - 3), "heart", 2],
         ] as const) {
           const id = await messages.nth(index).getAttribute("data-message-id");
-          if (id) await emit({ kind: "reaction", conversation, message_id: id, key, count: 2 });
+          if (id)
+            await emit({ kind: "reaction", conversation, message_id: id, key, count: reacted });
         }
         await page.waitForTimeout(400);
         // Three states worth reviewing: chips, the menu's quick row, then the full

@@ -74,11 +74,12 @@
   --sender-name: #3849dc; /* indigo-600 for legibility on white */
   --sender-name-mine: rgba(255, 255, 255, 0.92);
 
-  /* Reaction pills straddle the bubble's bottom edge, so their fill must be
-   * opaque — a translucent one would let the bubble's edge show through the
-   * chip. `-mine` is the same pill tinted toward the accent. */
-  --reaction-chip: #ffffff;
-  --reaction-chip-mine: #eceffc;
+  /* Reaction pills straddle the bubble's bottom edge, and their fill is
+   * translucent so that edge shows faintly through the chip. The chip pairs it
+   * with a backdrop blur, which keeps the emoji legible over whatever is behind.
+   * `-mine` is the same pill tinted toward the accent. */
+  --reaction-chip: rgba(255, 255, 255, 0.72);
+  --reaction-chip-mine: rgba(236, 239, 252, 0.78);
   /* Crisper than `--border`: the neutral pill is white on a white incoming
    * bubble, so its edge is the only thing separating the two. */
   --reaction-chip-border: #dedee3;
@@ -186,8 +187,8 @@
   --sender-name: #97a2fc; /* indigo-300 */
   --sender-name-mine: rgba(255, 255, 255, 0.92);
 
-  --reaction-chip: #2e2e2e;
-  --reaction-chip-mine: #3a4180;
+  --reaction-chip: rgba(46, 46, 46, 0.7);
+  --reaction-chip-mine: rgba(58, 65, 128, 0.76);
   --reaction-chip-border: #3d3d3d;
 
   --image-mat: #242424;

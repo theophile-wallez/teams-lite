@@ -24,10 +24,11 @@ test.describe("message reactions", () => {
       .locator('[data-testid="menu-reaction-picker"] [data-testid="reaction-option-heart"]')
       .click();
 
-    // A chip appears under the message: count 1, highlighted as ours.
+    // A chip appears under the message, highlighted as ours. A single reaction
+    // writes no count: the emoji alone already says one person reacted.
     const chip = bubble.locator('[data-testid="reaction-chip-heart"]');
     await expect(chip).toBeVisible();
-    await expect(chip).toContainText("1");
+    await expect(chip.locator('[data-testid="reaction-count"]')).toHaveCount(0);
     await expect(chip).toHaveAttribute("data-mine", "true");
 
     // Reacting closes the menu. Wait for it to fully dismiss before reopening —
