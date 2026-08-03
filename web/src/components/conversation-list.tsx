@@ -407,6 +407,7 @@ function ChannelTree() {
           }
           channels={team.channels}
           hidden={team.hidden}
+          collapsedByDefault={team.collapsed}
           openId={openId}
           renderRow={renderRow}
         />
@@ -425,9 +426,16 @@ function ChannelTree() {
  * one of its channels is unread, and a dot marks the section holding the open
  * channel. Otherwise folding a team would look like losing it.
  *
- * `collapsedByDefault` inverts the initial state for the hidden-channels section: the
- * user hid those channels in Teams, so the honest default is folded — visible enough
- * to say the channels exist, quiet enough not to undo their decision.
+ * `collapsedByDefault` decides how a section OPENS, before the user has folded it here.
+ * Two things set it, and both come from a decision the user already made:
+ *
+ *   - a TEAM opens the way it stands in their own Teams client (`isCollapsed`, which the
+ *     backend reads on every sync), so a sidebar of fifteen teams arrives arranged
+ *     rather than fully unrolled;
+ *   - the HIDDEN-channels entry opens folded, because they hid those channels there.
+ *
+ * A fold made here wins from then on, and stays here: writing it back would change a
+ * setting on the user's account, which this app does not do without a consent gate.
  */
 function ChannelSection(props: {
   sectionId: string;

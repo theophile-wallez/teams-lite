@@ -171,6 +171,16 @@ pub struct Team {
     /// [`Channel::alerts`] — the store has no teams table, and a sidebar row is a
     /// channel.
     pub is_user_muted: bool,
+    /// True when the user has this team FOLDED in their own Microsoft Teams client
+    /// (`isCollapsed`). It tracks that client live — it flips within seconds of a fold
+    /// there — so the sidebar can open showing what they left open, instead of every
+    /// team of a long list. Denormalized onto each channel row for the same reason as
+    /// [`Team::is_user_muted`]: the store has no teams table.
+    ///
+    /// READ ONLY, and it must stay that way. Folding a section HERE stays here: writing
+    /// the fold back would change a setting on the user's account, which is an outward
+    /// action and would need its own consent gate (see § Sending messages in CLAUDE.md).
+    pub is_collapsed: bool,
     pub channels: Vec<Channel>,
 }
 
@@ -554,6 +564,7 @@ fn upsert_channels(store: &Store, teams: &[Team]) -> (usize, usize) {
                 team_pos: team_idx as i64,
                 channel_pos: chan_idx as i64,
                 alerts: c.alerts,
+                team_collapsed: team.is_collapsed,
             };
             if store.upsert_channel_full(&update).unwrap_or(false) {
                 changed += 1;
@@ -855,6 +866,9 @@ fn parse_teams_with_self(v: &Value, _self_mri: &str) -> Vec<Team> {
             display_name: team_name,
             group_id,
             is_user_muted: team_muted,
+            // Absent -> expanded, which is what a sidebar that knows nothing must show:
+            // a team wrongly folded is a team the user cannot find.
+            is_collapsed: team.get("isCollapsed").and_then(|x| x.as_bool()).unwrap_or(false),
             channels,
         });
     }
@@ -4035,6 +4049,7 @@ mod tests {
             display_name: "Ops".into(),
             group_id: String::new(),
             is_user_muted: false,
+            is_collapsed: false,
             channels: vec![Channel {
                 id: "19:c@thread.tacv2".into(),
                 team_id: "19:t@thread.tacv2".into(),
@@ -4064,6 +4079,58 @@ mod tests {
         assert_eq!(persist_channels(&store, &unmuted), (1, 0));
         assert_eq!(store.channel_alerts("19:c@thread.tacv2").unwrap(), ChannelAlerts::AllNewPosts);
         assert_eq!(store.channel_alerts("19:nope@thread.tacv2").unwrap(), ChannelAlerts::MentionsOnly);
+    }
+
+    #[test]
+    fn a_teams_fold_state_reaches_every_channel_of_it() {
+        // `isCollapsed` belongs to the TEAM, and the sidebar reads it off a channel row
+        // — there is no teams table — so it has to land on each of them, and a fold in
+        // the user's own client has to move it.
+        let store = Store::open_in_memory().unwrap();
+        let mut teams = vec![Team {
+            id: "19:t@thread.tacv2".into(),
+            display_name: "Ops".into(),
+            group_id: String::new(),
+            is_user_muted: false,
+            is_collapsed: true,
+            channels: vec![Channel {
+                id: "19:c1@thread.tacv2".into(),
+                team_id: "19:t@thread.tacv2".into(),
+                team_name: "Ops".into(),
+                team_group_id: String::new(),
+                display_name: "Standup".into(),
+                is_general: false,
+                is_shown: true,
+                is_pinned: false,
+                alerts: ChannelAlerts::MentionsOnly,
+                last_message_time: 100,
+                is_empty: false,
+                last_message_preview: "hi".into(),
+                last_message_sender: "Ada".into(),
+                last_message_from_me: false,
+                is_read: true,
+            }],
+        }];
+        // A second channel of the same team, so "every channel of it" means something.
+        let second = Channel {
+            id: "19:c2@thread.tacv2".into(),
+            display_name: "Releases".into(),
+            ..teams[0].channels[0].clone()
+        };
+        teams[0].channels.push(second);
+
+        assert_eq!(persist_channels(&store, &teams), (2, 0));
+        let rows = store.channels().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.team_collapsed), "every channel of a folded team says so");
+
+        // Unfolding the team in Teams is a real change on every one of its rows.
+        teams[0].is_collapsed = false;
+        assert_eq!(persist_channels(&store, &teams), (2, 0));
+        assert!(store.channels().unwrap().iter().all(|r| !r.team_collapsed));
+
+        // And an unchanged re-sync reports nothing, so the sidebar does not re-render.
+        assert_eq!(persist_channels(&store, &teams), (0, 0));
     }
 
     #[test]
@@ -4168,6 +4235,7 @@ mod tests {
             display_name: "Ops".into(),
             group_id: "00000000-1111-2222-3333-444444444444".into(),
             is_user_muted: false,
+            is_collapsed: false,
             channels: vec![ch.clone()],
         }];
 
@@ -4191,6 +4259,7 @@ mod tests {
             display_name: "Ops".into(),
             group_id: "00000000-1111-2222-3333-444444444444".into(),
             is_user_muted: false,
+            is_collapsed: false,
             channels: vec![Channel { id: "19:empty@thread.tacv2".into(), is_empty: true, ..ch.clone() }],
         }];
         assert_eq!(persist_channels(&store, &empty_teams), (0, 0));

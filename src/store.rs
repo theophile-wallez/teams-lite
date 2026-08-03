@@ -96,6 +96,11 @@ CREATE TABLE IF NOT EXISTS channels (
     -- reads as a plain shown channel.
     is_shown              INTEGER NOT NULL DEFAULT 1,
     is_pinned             INTEGER NOT NULL DEFAULT 0,
+    -- Whether the user has this channel's TEAM folded in their own Teams client, from
+    -- that team's `isCollapsed`. Denormalized onto every channel of the team, like
+    -- `team_name` above, because a sidebar row is a channel and there is no teams
+    -- table. 0 (expanded) is the safe default: a team wrongly folded looks lost.
+    team_collapsed        INTEGER NOT NULL DEFAULT 0,
     last_message_time     INTEGER NOT NULL DEFAULT 0,
     last_message_preview  TEXT NOT NULL DEFAULT '',
     last_message_sender   TEXT NOT NULL DEFAULT '',
@@ -319,13 +324,16 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// sidebar queries failed outright. Hence [`schema_columns_are_pinned_to_the_version`],
 /// which now refuses the next such change mechanically.
 ///
+/// v9 adds `channels.team_collapsed`, the parent team's fold state in the user's own
+/// Teams client. Additive, so an older binary keeps working on a v9 store.
+///
 /// v8 renames `channels.is_favorite` to `channels.is_shown` (the CSA flag means
 /// Show/Hide, not a favorites list) and adds `channels.is_pinned`, Teams' real
 /// channel pin. The FIRST migration to rename rather than add, so it is also the
 /// first that an OLDER binary cannot read: a backend still running the previous
 /// build queries `is_favorite` and gets nothing. Restart every backend that shares
 /// the store — the always-on service does it on re-stage.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -634,6 +642,10 @@ pub struct ChannelRow {
     /// Whether the user pinned the channel in Teams; see
     /// [`crate::teams_read::Channel::is_pinned`].
     pub is_pinned: bool,
+    /// Whether the user has this channel's TEAM folded in their own Teams client; see
+    /// [`crate::teams_read::Team::is_collapsed`]. Every channel of a team carries the
+    /// same value.
+    pub team_collapsed: bool,
     pub last_message_time: i64,
     pub last_message_preview: String,
     pub last_message_sender: String,
@@ -678,6 +690,9 @@ pub struct ChannelUpdate<'a> {
     pub channel_pos: i64,
     /// What the user's own Microsoft Teams notification setting allows here.
     pub alerts: ChannelAlerts,
+    /// The parent team's fold state in the user's own Teams client, denormalized onto
+    /// every channel of the team (see [`ChannelRow::team_collapsed`]).
+    pub team_collapsed: bool,
 }
 
 /// A mail folder row for the sidebar, in `position` order.
@@ -1183,6 +1198,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     // Legacy rows get 0 — nothing is pinned until the next CSA sync says so, which is
     // also what this tenant reports (0 of 75 channels).
     add_column("ALTER TABLE channels ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")?;
+    // team_collapsed: the parent team's own fold state in the user's Teams client.
+    // Legacy rows get 0, so every team stays expanded until the next CSA sync reports
+    // what the user actually left folded.
+    add_column("ALTER TABLE channels ADD COLUMN team_collapsed INTEGER NOT NULL DEFAULT 0")?;
 
     // local_read_time / local_read_ghost: our own read position, held locally (see the
     // DDL above). Legacy rows get 0/0, which means "never read here" — so the marker
@@ -1793,8 +1812,8 @@ impl Store {
                 id, team_id, team_name, display_name, is_general, is_shown,
                 last_message_time, last_message_preview, last_message_sender,
                 last_message_from_me, is_read, team_pos, channel_pos, team_group_id,
-                alerts, is_pinned)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                alerts, is_pinned, team_collapsed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(id) DO UPDATE SET
                 team_id = excluded.team_id,
                 team_name = CASE
@@ -1809,6 +1828,7 @@ impl Store {
                 is_general = excluded.is_general,
                 is_shown = excluded.is_shown,
                 is_pinned = excluded.is_pinned,
+                team_collapsed = excluded.team_collapsed,
                 alerts = excluded.alerts,
                 team_pos = excluded.team_pos,
                 channel_pos = excluded.channel_pos,
@@ -1837,6 +1857,7 @@ impl Store {
                 OR excluded.is_general <> channels.is_general
                 OR excluded.is_shown <> channels.is_shown
                 OR excluded.is_pinned <> channels.is_pinned
+                OR excluded.team_collapsed <> channels.team_collapsed
                 OR excluded.alerts <> channels.alerts
                 OR excluded.team_pos <> channels.team_pos
                 OR excluded.channel_pos <> channels.channel_pos
@@ -1863,6 +1884,7 @@ impl Store {
                 u.team_group_id,
                 u.alerts.as_str(),
                 u.is_pinned as i64,
+                u.team_collapsed as i64,
             ],
         )?;
         Ok(changed > 0)
@@ -1929,7 +1951,7 @@ impl Store {
             "SELECT id, team_id, team_name, display_name, is_general, is_shown,
                     last_message_time, last_message_preview, last_message_sender,
                     last_message_from_me, is_read, draft, team_group_id, alerts,
-                    local_read_time, local_read_ghost, is_pinned
+                    local_read_time, local_read_ghost, is_pinned, team_collapsed
              FROM channels
              ORDER BY team_pos ASC, team_name ASC, team_id ASC,
                       is_general DESC, channel_pos ASC, display_name ASC, id ASC",
@@ -1950,6 +1972,7 @@ impl Store {
                 is_general: r.get::<_, i64>(4)? != 0,
                 is_shown: r.get::<_, i64>(5)? != 0,
                 is_pinned: r.get::<_, i64>(16)? != 0,
+                team_collapsed: r.get::<_, i64>(17)? != 0,
                 last_message_time,
                 last_message_preview: r.get(7)?,
                 last_message_sender: r.get(8)?,
@@ -3265,6 +3288,7 @@ mod tests {
             is_general: false,
             is_shown: true,
             is_pinned: false,
+            team_collapsed: false,
             last_message_time: time,
             last_message_preview: "",
             last_message_sender: "",
@@ -3501,7 +3525,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (8, 0xe07e_def2_8abd_1bd1);
+        const PINNED: (i64, u64) = (9, 0xb85d_7321_4a6b_1492);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -5873,6 +5897,7 @@ mod tests {
             is_general: true,
             is_shown: true,
             is_pinned: false,
+            team_collapsed: false,
             last_message_time: 100,
             last_message_preview: "",
             last_message_sender: "",

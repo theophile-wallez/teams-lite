@@ -42,8 +42,12 @@ test.describe("channels", () => {
     const count = await groups.count();
     expect(count).toBeGreaterThan(1);
     for (let i = 0; i < count; i++) {
-      const firstChannel = groups.nth(i).locator('[data-testid="channel-name"]').first();
-      await expect(firstChannel).toHaveText("General");
+      const group = groups.nth(i);
+      // A team the user folded in Teams opens folded, so unfold it before reading it.
+      if ((await group.getAttribute("data-collapsed")) === "true") {
+        await group.locator('[data-testid="team-header"]').click();
+      }
+      await expect(group.locator('[data-testid="channel-name"]').first()).toHaveText("General");
     }
   });
 
@@ -249,6 +253,43 @@ test.describe("channels", () => {
     // Expanding it brings every channel back.
     await reopened.locator('[data-testid="team-header"]').click();
     await expect(reopened.locator('[data-testid="channel-row"]')).toHaveCount(shown);
+  });
+
+  test("opens a team folded when the user folded it in Teams", async ({ page }) => {
+    await gotoApp(page);
+    await openChannelsTab(page);
+
+    // The mock folds exactly one team (Product — see TEAM_SEEDS in web/mock/server.ts),
+    // mirroring the `isCollapsed` its own Teams client reports for it.
+    const folded = page
+      .locator('[data-testid="team-group"]')
+      .filter({ has: page.locator('[data-testid="team-name"]', { hasText: "Product" }) })
+      .first();
+    await expect(folded).toHaveAttribute("data-collapsed", "true");
+    await expect(folded.locator('[data-testid="team-header"]')).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    await expect(folded.locator('[data-testid="channel-row"]')).toHaveCount(0);
+
+    // Every other team opens, because Teams reports them open.
+    const open = page.locator('[data-testid="team-group"]:not([data-collapsed="true"])');
+    expect(await open.count()).toBeGreaterThan(1);
+
+    // A fold made HERE wins from then on: unfolding the folded team survives a reload,
+    // even though the backend still reports it as folded in Teams.
+    await folded.locator('[data-testid="team-header"]').click();
+    await expect(folded.locator('[data-testid="channel-row"]').first()).toBeVisible();
+    await page.reload();
+    await openChannelsTab(page);
+    const reopened = page
+      .locator('[data-testid="team-group"]')
+      .filter({ has: page.locator('[data-testid="team-name"]', { hasText: "Product" }) })
+      .first();
+    await expect(reopened.locator('[data-testid="team-header"]')).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
   });
 
   test("reads a channel the user muted in Teams as muted", async ({ page }) => {

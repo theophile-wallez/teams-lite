@@ -234,6 +234,12 @@ export type Channel = {
    *  lifts a channel out of its team, into the sidebar's top Pinned section.
    *  Absent from an older backend; the reader then assumes unpinned. */
   is_pinned?: boolean;
+  /** Whether the user has this channel's TEAM folded in their own Teams client. The
+   *  backend denormalizes the team's `isCollapsed` onto each of its channels, so every
+   *  channel of a team carries the same value. It decides how the team's section OPENS;
+   *  a fold made here overrides it from then on, and is never written back to Teams.
+   *  Absent from an older backend; the reader then opens the team. */
+  team_collapsed?: boolean;
   /** The user's own per-channel notification setting in Microsoft Teams (see
    *  {@link ChannelAlerts}). Absent from a backend older than the field; the
    *  reader then assumes Teams' default. */
@@ -260,6 +266,10 @@ export type TeamGroup = {
    *  under their own "Hidden channels" entry at the foot of the team, as in Teams —
    *  reachable, and out of the way. Empty for a team that hides none. */
   hidden: Channel[];
+  /** Whether the user has this team folded in their own Teams client (see
+   *  {@link Channel.team_collapsed}). Decides how the section opens, until the user
+   *  folds it here. */
+  collapsed: boolean;
 };
 
 export type ChatMessage = {
@@ -1361,12 +1371,17 @@ export function groupChannelsByTeam(channels: Channel[]): TeamGroup[] {
         group_id: c.team_group_id ?? "",
         channels: [],
         hidden: [],
+        collapsed: c.team_collapsed === true,
       };
       byTeam.set(c.team_id, group);
       groups.push(group);
     }
     // A later row may carry the group id when the first (e.g. General) lacked it.
     if (!group.group_id && c.team_group_id) group.group_id = c.team_group_id;
+    // Every channel of a team reports the same fold state, so any of them may set it —
+    // but one that says "folded" is the one to believe: a row from a backend older than
+    // the field carries nothing at all, and must not unfold what Teams folded.
+    if (c.team_collapsed === true) group.collapsed = true;
     if (channelIsShown(c)) group.channels.push(c);
     else group.hidden.push(c);
   }

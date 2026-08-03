@@ -993,6 +993,37 @@ describe("groupChannelsByTeam", () => {
     const groups = groupChannelsByTeam([channel({ team_id: "A", team_group_id: undefined })]);
     expect(groups[0]!.group_id).toBe("");
   });
+
+  it("lifts the team's own fold state out of its channels", () => {
+    // The backend denormalizes the team's `isCollapsed` onto every channel of it, so
+    // the group takes it from whichever channel is read first.
+    const groups = groupChannelsByTeam([
+      channel({ id: "a1", team_id: "A", team_name: "Alpha", team_collapsed: true }),
+      channel({ id: "a2", team_id: "A", team_name: "Alpha", team_collapsed: true }),
+      channel({ id: "b1", team_id: "B", team_name: "Beta", team_collapsed: false }),
+    ]);
+    expect(groups.map((g) => [g.team_id, g.collapsed])).toEqual([
+      ["A", true],
+      ["B", false],
+    ]);
+  });
+
+  it("believes the channel that says folded, never the one that says nothing", () => {
+    // A row from a backend older than the field carries no answer at all. It must not
+    // unfold a team the user folded in Teams.
+    const groups = groupChannelsByTeam([
+      channel({ id: "a1", team_id: "A", team_name: "Alpha", team_collapsed: undefined }),
+      channel({ id: "a2", team_id: "A", team_name: "Alpha", team_collapsed: true }),
+    ]);
+    expect(groups[0]!.collapsed).toBe(true);
+  });
+
+  it("opens a team when nothing reports a fold state", () => {
+    const groups = groupChannelsByTeam([
+      channel({ id: "a1", team_id: "A", team_name: "Alpha", team_collapsed: undefined }),
+    ]);
+    expect(groups[0]!.collapsed).toBe(false);
+  });
 });
 
 describe("channelIsPinned", () => {

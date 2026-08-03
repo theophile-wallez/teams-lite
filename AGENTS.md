@@ -431,6 +431,35 @@ an outward action, so it is gated on purpose:
   dim a muted channel. A **chat**'s `is_muted` is NOT yet wired into any notification
   path: it only dims the sidebar row, so a muted chat still pushes.
 
+## The channel sidebar mirrors Teams, and mirrors it READ-ONLY
+
+The team → channel tree reads four pieces of the user's own Teams arrangement, and
+`examples/channel_pin_recon.rs` and `examples/team_order_recon.rs` measure every one of
+them against the real tenant. Read those before touching this area: CSA names two of
+these fields after something they are not.
+
+- **`isFavorite` on a channel is Teams' Show/Hide switch**, not a favorites list. It is
+  true on most channels and on every General (41 of 75 here), so it groups NOTHING:
+  `store::ChannelRow::is_shown` keeps a channel inside its team, and a hidden one goes
+  under that team's own "Hidden channels" entry. There is no Favorites section, because
+  Teams has none.
+- **`isPinned` is the real pin**, and the only flag that lifts a channel out of its team
+  — into the sidebar's top Pinned section.
+- **`isCollapsed` on a team is that team's fold state in the user's own client**, and it
+  tracks that client live. It decides how a section OPENS
+  (`ChannelRow::team_collapsed`, denormalized onto every channel of the team because
+  there is no teams table).
+- **The order is CSA's array order**, which is the only order the payload states — no
+  team and no channel carries a rank — and it IS the user's own: verified against their
+  client, and it moves when they re-arrange. Read the **v1** aggregator; v2 answers 200
+  with a different, non-client order. General is the one correction we make: CSA puts it
+  LAST in a team.
+
+**A fold, a pin or a hide made HERE stays here.** Each is a local override that wins
+over the Teams-sourced value from then on, and nothing writes any of them back:
+publishing a setting to the user's account is an outward action and would need its own
+consent gate and its own `OUTWARD_METHODS` entry, exactly like a send.
+
 ## The user's own status (outward, and gated like one)
 
 The app can hold the user's Teams status green — the **Always available** setting, off

@@ -119,6 +119,9 @@ type Channel = {
   is_shown: boolean;
   /** Whether the user pinned the channel to the top of the sidebar. */
   is_pinned: boolean;
+  /** Whether the user has this channel's TEAM folded in their own Teams client. Every
+   *  channel of a team carries the same value, as the Rust backend denormalizes it. */
+  team_collapsed: boolean;
   alerts: ChannelAlerts;
   last_message_time: number;
   last_message_preview: string;
@@ -450,7 +453,7 @@ const MEETING_GROUP_NAMES = new Set(["Design Sync", "Product Standup"]);
  *  default channel and always sorts first within its team. `team_id` is any
  *  stable key (the sidebar groups by it); channel ids end in `@thread.tacv2`,
  *  the discriminant the backend uses to route a thread to the channel pipeline. */
-const TEAM_SEEDS: { id: string; name: string; channels: string[] }[] = [
+const TEAM_SEEDS: { id: string; name: string; channels: string[]; collapsed?: boolean }[] = [
   {
     id: "team-engineering",
     name: "Engineering",
@@ -465,6 +468,10 @@ const TEAM_SEEDS: { id: string; name: string; channels: string[] }[] = [
     id: "team-product",
     name: "Product",
     channels: ["General", "Roadmap"],
+    // Folded in the user's own Teams client, so the sidebar opens it folded too. One
+    // team, and the LAST one, so every spec that reaches for the first team still finds
+    // its channels.
+    collapsed: true,
   },
 ];
 
@@ -865,6 +872,7 @@ function seedChannels(): void {
         // Nothing is pinned out of the box, exactly as the tenant reports (0 of 75):
         // the Pinned section only appears once the user pins something.
         is_pinned: false,
+        team_collapsed: team.collapsed === true,
         alerts: CHANNEL_ALERTS[`${team.name}/${channelName}`] ?? "mentions_only",
         last_message_time: 0,
         last_message_preview: "",
