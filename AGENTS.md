@@ -618,6 +618,16 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   the commit recorded in `VERSION`. That is deliberate: a `git pull`, a rebuild, or an
   E2E run (which rewrites `web/dist` with its mock's URL baked in) would otherwise
   change what the service serves at a moment nobody chose.
+- **`VERSION` names the commit that was BUILT, and the script reads `HEAD` once.** The
+  build takes about a minute, and a hook, another session's push or the user's own
+  `git pull` can fast-forward the checkout inside it. A second read at staging time
+  therefore wrote a `VERSION` naming a commit the binary did not hold — and nothing
+  healed it, because the auto-update hook compares `VERSION` with `HEAD`, read the two
+  as equal and never rebuilt. The service served a backend from before a feature while
+  `VERSION` named the commit that added it, so a new RPC answered `unknown method` in
+  the user's own app while every test passed. `BUILD_REV` pins the commit before the
+  build, `build_artifacts` builds again when the tree moved under it, and
+  `update::tests::the_installer_stages_the_commit_it_built` pins both halves.
 - **Re-staging is automatic; starting is not.** `.claude/hooks/sync-service-to-master.sh`
   (a `PostToolUse` hook on `Bash`) fires after a git command that can move master. It
   fast-forwards the checkout, compares `VERSION`'s commit with `HEAD`, and on a gap runs

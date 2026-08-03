@@ -258,4 +258,45 @@ mod tests {
     fn short_rev_passes_through_non_sha() {
         assert_eq!(short_rev("dev"), "dev");
     }
+
+    /// The staged `VERSION` must name the commit the artifacts were BUILT from.
+    ///
+    /// This is the bug that made a shipped feature look broken. The installer read
+    /// `git rev-parse HEAD` once for the build and again for `VERSION`; a hook
+    /// fast-forwarded the checkout inside the minute between the two, so `VERSION`
+    /// named a commit the staged backend did not hold. Nothing healed it either:
+    /// `.claude/hooks/sync-service-to-master.sh` compares `VERSION` with `HEAD`, read
+    /// them as equal, and never rebuilt. The user's own app answered `unknown method`
+    /// on a new RPC while every test in the repo passed.
+    ///
+    /// So the installer reads `HEAD` in exactly ONE place, pins it in `BUILD_REV`, and
+    /// writes that. The test reads the script, because the failure lives on the other
+    /// side of the process boundary and no Rust test would see it.
+    #[test]
+    fn the_installer_stages_the_commit_it_built() {
+        let installer = include_str!("../bin/teams-lite-service.sh");
+
+        let reads_head: Vec<&str> = installer
+            .lines()
+            .filter(|line| line.contains("rev-parse HEAD") && line.contains("git -C"))
+            .collect();
+        assert_eq!(
+            reads_head.len(),
+            1,
+            "bin/teams-lite-service.sh must read HEAD in one place only, or the build \
+             and the staged VERSION can name two different commits: {reads_head:?}"
+        );
+
+        assert!(
+            installer.contains(r#"local commit="$BUILD_REV""#),
+            "the VERSION file must record the pinned BUILD_REV, not a fresh read of HEAD"
+        );
+        for baked in ["TEAMS_BUILD_REV=\"$BUILD_REV\""] {
+            assert_eq!(
+                installer.matches(baked).count(),
+                2,
+                "both builds (backend and web) must bake the pinned commit: {baked}"
+            );
+        }
+    }
 }

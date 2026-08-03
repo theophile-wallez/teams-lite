@@ -144,7 +144,18 @@ export function AgentMenu(props: { conversationId: string }) {
 
         <DropdownMenuSeparator />
 
-        <p data-testid="agent-hint" className="px-2 py-1.5 text-[11px] leading-snug text-text-faint">
+        {/* One line, two meanings — so the colour has to say which one it is. A refused
+            write in the faint grey of a hint reads as advice about how the feature
+            works, which is exactly how a backend that does not know the method reads as
+            a working switch. */}
+        <p
+          data-testid="agent-hint"
+          data-error={error ? "true" : undefined}
+          className={cn(
+            "px-2 py-1.5 text-[11px] leading-snug",
+            error ? "text-destructive" : "text-text-faint",
+          )}
+        >
           {error ?? agentHint(status)}
         </p>
 

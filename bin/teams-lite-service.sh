@@ -84,15 +84,30 @@ die() {
 
 # --- build -------------------------------------------------------------------
 
-build_artifacts() {
-  command -v cargo >/dev/null 2>&1 || die "cargo not found; install Rust first"
-  [ -x "$BUN" ] || die "bun not found at $BUN (set BUN=/path/to/bun)"
+# The commit the artifacts are built FROM, pinned for the whole run by
+# build_artifacts and read again by stage_artifacts.
+#
+# WHY IT IS PINNED. The build takes about a minute, and something else can
+# fast-forward the checkout inside that minute: the auto-pull hook in
+# ~/.claude/settings.json, another session's push, or the user's own `git pull`. A
+# second `git rev-parse HEAD` at staging time then writes a VERSION that names a
+# commit the binary does not hold. That lie does not heal, because
+# .claude/hooks/sync-service-to-master.sh compares VERSION with HEAD: it reads the
+# two as equal, logs "already serving", and never rebuilds. The service kept a
+# backend from before the feature while VERSION named the commit that added it, so a
+# new RPC answered `unknown method` in the user's own app and every test passed.
+BUILD_REV=""
 
+repo_head() { git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown; }
+
+build_backend() {
   say "Building the backend (release)…"
   # Bake the commit so the running service can say what it serves (build.rs reads it).
-  TEAMS_BUILD_REV="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)" \
+  TEAMS_BUILD_REV="$BUILD_REV" \
     cargo build --release --manifest-path "$REPO/Cargo.toml" --bin server
+}
 
+build_web() {
   [ -d "$REPO/web/node_modules" ] || {
     say "Installing web dependencies…"
     (cd "$REPO/web" && "$BUN" install)
@@ -106,8 +121,28 @@ build_artifacts() {
   rm -rf "$REPO/web/dist"
   (cd "$REPO/web" &&
     env -u VITE_TEAMS_WS_URL -u PORT -u HOST \
-      TEAMS_BUILD_REV="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)" \
+      TEAMS_BUILD_REV="$BUILD_REV" \
       "$BUN" run build)
+}
+
+build_artifacts() {
+  command -v cargo >/dev/null 2>&1 || die "cargo not found; install Rust first"
+  [ -x "$BUN" ] || die "bun not found at $BUN (set BUN=/path/to/bun)"
+
+  # Build the commit that was checked out when the build started, then check that it
+  # is still the one checked out. A tree that moved under the build produced half an
+  # artifact set, so the only honest answer is to build it again.
+  local attempt moved
+  for attempt in 1 2 3; do
+    BUILD_REV="$(repo_head)"
+    build_backend
+    build_web
+    moved="$(repo_head)"
+    [ "$moved" = "$BUILD_REV" ] && return 0
+    warn "the checkout moved from ${BUILD_REV:0:12} to ${moved:0:12} during the build \
+(attempt $attempt of 3) — building it again"
+  done
+  die "the checkout keeps moving during the build; run 'update' again once it is still"
 }
 
 # --- stage -------------------------------------------------------------------
@@ -132,8 +167,11 @@ stage_artifacts() {
   # and launcher/build.ts cannot drift apart on what the server needs.
   (cd "$REPO/web" && "$BUN" run scripts/stage-bundle.ts "$SERVICE_DIR/web")
 
-  local commit
-  commit="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+  # The commit the ARTIFACTS hold, never a fresh read of HEAD — see BUILD_REV for the
+  # gap a second read opens.
+  local commit="$BUILD_REV"
+  [ -n "$commit" ] ||
+    die "stage_artifacts runs after build_artifacts, which pins the commit it built"
   cat >"$SERVICE_DIR/VERSION" <<EOF
 commit=$commit
 staged_from=$REPO
