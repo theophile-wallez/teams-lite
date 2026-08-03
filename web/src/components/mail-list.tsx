@@ -103,10 +103,7 @@ export function MailList() {
           {error}
         </p>
       ) : loading && messages.length === 0 ? (
-        <p className="flex items-center justify-center gap-2 px-4 py-6 text-[13px] text-text-faint">
-          <Loader2 className="size-3.5 animate-spin" strokeWidth={1.6} />
-          Loading mail…
-        </p>
+        <MailListSkeleton />
       ) : messages.length === 0 ? (
         <p
           data-testid="mail-empty"
@@ -150,6 +147,60 @@ export function MailList() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** How many placeholder rows the skeleton draws. Enough to fill a tall sidebar; the
+ *  surplus is clipped rather than scrolled. */
+const SKELETON_ROWS = 10;
+
+/** Per-row bar widths, so the placeholder reads as mail rather than as a table.
+ *  A fixed cycle, not a random draw: the same folder must not re-shuffle on every
+ *  render, and a screenshot has to be reproducible. */
+const SKELETON_WIDTHS = [
+  { sender: "w-24", subject: "w-44", preview: "w-52" },
+  { sender: "w-32", subject: "w-36", preview: "w-40" },
+  { sender: "w-20", subject: "w-52", preview: "w-32" },
+  { sender: "w-28", subject: "w-28", preview: "w-48" },
+];
+
+/** The first load of a folder: the rows that are coming, drawn as quiet bars.
+ *  A skeleton over a spinner because the list's shape is known before its content
+ *  is — the sidebar keeps its geometry, so nothing jumps when the mail lands. */
+function MailListSkeleton() {
+  return (
+    <div
+      data-testid="mail-loading"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden px-2 pb-2"
+      aria-busy="true"
+      aria-hidden
+    >
+      {Array.from({ length: SKELETON_ROWS }, (_, index) => {
+        const width = SKELETON_WIDTHS[index % SKELETON_WIDTHS.length]!;
+        return (
+          <div
+            key={index}
+            className="my-0.5 flex h-[74px] shrink-0 animate-pulse items-start gap-3 px-2.5 py-2"
+            // Staggered so the column breathes down the list instead of blinking
+            // as one block.
+            style={{ animationDelay: `${index * 90}ms` }}
+          >
+            {/* Tinted from --text-faint, not from --accent: the hover fill is within a
+                percent of the sidebar itself in light mode, so a bar made of it is
+                invisible. The faint text colour reads on both themes. */}
+            <span className="size-9 shrink-0 rounded-full bg-text-faint/20" />
+            <span className="flex min-w-0 flex-1 flex-col gap-2 pt-1">
+              <span className="flex items-center gap-2">
+                <span className={cn("h-3 rounded bg-text-faint/25", width.sender)} />
+                <span className="ml-auto h-2.5 w-8 rounded bg-text-faint/15" />
+              </span>
+              <span className={cn("h-3 rounded bg-text-faint/20", width.subject)} />
+              <span className={cn("h-2.5 rounded bg-text-faint/15", width.preview)} />
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
