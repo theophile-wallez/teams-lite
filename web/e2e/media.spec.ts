@@ -40,6 +40,29 @@ test.describe("media (images + attachments)", () => {
     const file = page.locator('[data-testid="message-file"]').first();
     await expect(file).toBeVisible();
     await expect(file).toContainText("quarterly-report.pdf");
+    // The chip names the document family with its own icon, not a generic page.
+    await expect(file.locator('[data-testid="file-type-icon"]')).toHaveAttribute(
+      "data-file-kind",
+      "pdf",
+    );
+  });
+
+  test("gives each shared file the icon of its own type", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    // The last message of the thread carries five files of five families — the last
+    // of them named with no extension at all, which falls back to the MIME type.
+    const stack = page
+      .locator("[data-message-id]")
+      .filter({ hasText: "All the workshop material" })
+      .locator('[data-testid="message-attachments"]');
+    const icons = stack.locator('[data-testid="file-type-icon"]');
+    await expect.poll(() => icons.count()).toBe(5);
+    const kinds = await icons.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-file-kind")),
+    );
+    expect(kinds).toEqual(["word", "excel", "powerpoint", "archive", "audio"]);
   });
 
   test("opens an image in the lightbox and dismisses it with Escape", async ({

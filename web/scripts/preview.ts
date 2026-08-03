@@ -47,6 +47,11 @@
 // The window is 1200x850. A layout that caps its own width needs a wider one:
 //
 //   PREVIEW_VIEWPORT=1920x900 bun run web/scripts/preview.ts --out /tmp/wide
+//
+// To review a small detail — an icon, a chip, a badge — crop to it and ask for more
+// pixels per CSS pixel, instead of squinting at a 16px glyph in a 1200px page:
+//
+//   bun run web/scripts/preview.ts --out /tmp/chip --element '[data-testid="message-file"]' --dpr 4
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -96,12 +101,21 @@ export type PreviewSession = {
   setTheme: (theme: "light" | "dark") => Promise<void>;
 };
 
+export type PreviewOptions = {
+  /** Pixels captured per CSS pixel. Raise it to review a small detail (an icon, a
+   *  chip) without changing the layout the app renders at. */
+  deviceScaleFactor?: number;
+};
+
 /**
  * Boot a mock-backed preview of the web app, run `body` against it, then tear
  * everything down. Throws — before `body` runs — if the app is not provably
  * talking to the mock.
  */
-export async function withPreview<T>(body: (session: PreviewSession) => Promise<T>): Promise<T> {
+export async function withPreview<T>(
+  body: (session: PreviewSession) => Promise<T>,
+  options: PreviewOptions = {},
+): Promise<T> {
   assertPortsAreNotTheBackend();
   await assertPortsAreFree();
   const children: Array<ReturnType<typeof Bun.spawn>> = [];
@@ -113,7 +127,10 @@ export async function withPreview<T>(body: (session: PreviewSession) => Promise<
     await waitForHttp(`${WEB_ORIGIN}/`, "vite dev server");
 
     browser = await chromium.launch({ executablePath: findChromium() });
-    const page = await browser.newPage({ viewport: VIEWPORT });
+    const page = await browser.newPage({
+      viewport: VIEWPORT,
+      deviceScaleFactor: options.deviceScaleFactor,
+    });
     await page.goto(WEB_ORIGIN, { waitUntil: "domcontentloaded" });
     await page.waitForSelector('[data-testid="conversation-row"]', {
       timeout: APP_READY_TIMEOUT_MS,
@@ -128,8 +145,14 @@ export async function withPreview<T>(body: (session: PreviewSession) => Promise<
         if (!res.ok()) throw new Error(`mock /__test/emit failed: ${res.status()}`);
       },
       shot: async (path, selector) => {
-        const target = selector ? page.locator(selector).first() : page;
-        await target.screenshot({ path });
+        if (!selector) {
+          await page.screenshot({ path });
+          return;
+        }
+        // An element capture waits for the element to stop moving, so a looping
+        // animation anywhere in it never settles and the call times out. Finishing
+        // every animation first also makes the crop reproducible.
+        await page.locator(selector).first().screenshot({ path, animations: "disabled" });
       },
       setTheme: async (theme) => {
         // Passed as source text, not a closure: this file type-checks under the
@@ -598,6 +621,12 @@ if (import.meta.main) {
   const incoming = flag("--incoming");
   const react = args.includes("--react");
   const named = flag("--conversation");
+  /** Crop every capture of the default branch to one element, for detail review. */
+  const element = flag("--element");
+  const dpr = Number(flag("--dpr") ?? 1);
+  if (!Number.isFinite(dpr) || dpr < 1 || dpr > 8) {
+    throw new Error(`--dpr must be a number between 1 and 8, got "${flag("--dpr")}"`);
+  }
 
   // The sign-in banner: what the sidebar shows when the identity broker stops minting
   // tokens. Driven through the mock's own control plane, so no Intune container is
@@ -726,52 +755,55 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  await withPreview(async ({ page, shot, setTheme, emit }) => {
-    const conversation = named
-      ? await openConversation(page, named)
-      : await openFirstConversation(page);
-    // Inject the other side's message first, so a `--type` draft (or the message
-    // it sends) stays the last thing in the thread.
-    if (incoming !== undefined) {
-      await emit({ conversation, content: incoming });
-      await page.waitForTimeout(500);
-    }
-    if (text) await typeInComposer(page, text, { send });
-    // The history scrolled up: the state that shows the jump-to-latest button
-    // floating over the bottom of the messages, above the composer.
-    if (args.includes("--scrolled")) {
-      await scrollHistoryUp(page);
-      await shot(`${out}-scrolled-light.png`);
-      await setTheme("dark");
-      await shot(`${out}-scrolled-dark.png`);
-      await setTheme("light");
-    }
-    if (react) {
-      // Chips first (from the mock, not from us clicking): one classic key and one
-      // of the extended ones a real tenant sends, so a capture shows both paths.
-      const messages = page.locator("[data-message-id]");
-      const count = await messages.count();
-      for (const [index, key] of [
-        [Math.max(0, count - 4), "1f389_partypopper"],
-        [Math.max(0, count - 3), "heart"],
-      ] as const) {
-        const id = await messages.nth(index).getAttribute("data-message-id");
-        if (id) await emit({ kind: "reaction", conversation, message_id: id, key, count: 2 });
+  await withPreview(
+    async ({ page, shot, setTheme, emit }) => {
+      const conversation = named
+        ? await openConversation(page, named)
+        : await openFirstConversation(page);
+      // Inject the other side's message first, so a `--type` draft (or the message
+      // it sends) stays the last thing in the thread.
+      if (incoming !== undefined) {
+        await emit({ conversation, content: incoming });
+        await page.waitForTimeout(500);
       }
-      await page.waitForTimeout(400);
-      // Three states worth reviewing: chips, the menu's quick row, then the full
-      // picker.
-      await shot(`${out}-chips-light.png`);
+      if (text) await typeInComposer(page, text, { send });
+      // The history scrolled up: the state that shows the jump-to-latest button
+      // floating over the bottom of the messages, above the composer.
+      if (args.includes("--scrolled")) {
+        await scrollHistoryUp(page);
+        await shot(`${out}-scrolled-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-scrolled-dark.png`);
+        await setTheme("light");
+      }
+      if (react) {
+        // Chips first (from the mock, not from us clicking): one classic key and one
+        // of the extended ones a real tenant sends, so a capture shows both paths.
+        const messages = page.locator("[data-message-id]");
+        const count = await messages.count();
+        for (const [index, key] of [
+          [Math.max(0, count - 4), "1f389_partypopper"],
+          [Math.max(0, count - 3), "heart"],
+        ] as const) {
+          const id = await messages.nth(index).getAttribute("data-message-id");
+          if (id) await emit({ kind: "reaction", conversation, message_id: id, key, count: 2 });
+        }
+        await page.waitForTimeout(400);
+        // Three states worth reviewing: chips, the menu's quick row, then the full
+        // picker.
+        await shot(`${out}-chips-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-chips-dark.png`);
+        await setTheme("light");
+        await openMessageActions(page);
+        await shot(`${out}-row-light.png`);
+        await openReactionPicker(page);
+      }
+      await shot(`${out}-light.png`, element);
       await setTheme("dark");
-      await shot(`${out}-chips-dark.png`);
-      await setTheme("light");
-      await openMessageActions(page);
-      await shot(`${out}-row-light.png`);
-      await openReactionPicker(page);
-    }
-    await shot(`${out}-light.png`);
-    await setTheme("dark");
-    await shot(`${out}-dark.png`);
-    console.log(`[preview] wrote ${out}-light.png and ${out}-dark.png`);
-  });
+      await shot(`${out}-dark.png`, element);
+      console.log(`[preview] wrote ${out}-light.png and ${out}-dark.png`);
+    },
+    { deviceScaleFactor: dpr },
+  );
 }

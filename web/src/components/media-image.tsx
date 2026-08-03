@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Download, ExternalLink, FileText, Film, ImageOff, Loader2, Play } from "lucide-react";
+import { Download, ExternalLink, Film, ImageOff, Loader2, Play } from "lucide-react";
 import Zoom from "react-medium-image-zoom";
 import { formatCallDuration, mediaNeedsProxy, type Attachment } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
+import { FileTypeIcon } from "./file-type-icon";
 
 /**
  * An image from a chat message. Authenticated Teams hosted content (inline
@@ -109,9 +110,10 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
 }
 
 /**
- * A non-image attachment (file/card) rendered as a chip. Clicking it loads the
- * bytes through the media proxy and opens them in a new tab, so a file shared in
- * a chat is actually reachable from the web UI.
+ * A non-image attachment (file/card) rendered as a chip, led by the coloured icon
+ * of its own document type (see {@link FileTypeIcon}). Clicking it loads the bytes
+ * through the media proxy and opens them in a new tab, so a file shared in a chat
+ * is actually reachable from the web UI.
  */
 export function FileAttachment(props: { attachment: Attachment }) {
   const controller = useController();
@@ -139,7 +141,11 @@ export function FileAttachment(props: { attachment: Attachment }) {
       {busy ? (
         <Loader2 className="size-4 shrink-0 animate-spin text-text-faint" strokeWidth={1.6} />
       ) : (
-        <FileText className="size-4 shrink-0 text-text-faint" strokeWidth={1.6} />
+        <FileTypeIcon
+          name={props.attachment.name}
+          contentType={props.attachment.content_type}
+          className="size-4"
+        />
       )}
       <span className="truncate">{props.attachment.name}</span>
       <Download className="ml-auto size-3.5 shrink-0 text-text-faint" strokeWidth={1.6} />

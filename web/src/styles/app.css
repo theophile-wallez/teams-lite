@@ -82,6 +82,20 @@
   --container-chat: 60rem;
   --container-composer: calc(60rem + 20px);
 
+  /* File-type icon hues — `text-file-word`, `text-file-pdf`, … one per document
+   * family (see components/file-type-icon.tsx). */
+  --color-file-word: var(--file-word);
+  --color-file-excel: var(--file-excel);
+  --color-file-powerpoint: var(--file-powerpoint);
+  --color-file-pdf: var(--file-pdf);
+  --color-file-image: var(--file-image);
+  --color-file-video: var(--file-video);
+  --color-file-audio: var(--file-audio);
+  --color-file-archive: var(--file-archive);
+  --color-file-code: var(--file-code);
+  --color-file-text: var(--file-text);
+  --color-file-generic: var(--file-generic);
+
   /* Elevation — shadow-as-border utilities (shadow-chip / -card / -pop). */
   --shadow-chip: var(--elev-chip);
   --shadow-card: var(--elev-card);

@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { ChevronLeft, Download, Loader2, Mail as MailIcon, Paperclip } from "lucide-react";
+import { ChevronLeft, Download, Loader2, Mail as MailIcon } from "lucide-react";
 import {
   formatAttachmentSize,
   mailFileAttachments,
@@ -13,6 +13,7 @@ import {
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { useAppState, useController } from "./controller-context";
+import { FileTypeIcon } from "./file-type-icon";
 import { MailBody } from "./mail-body";
 
 // The reading pane for one mail. Occupies the same slot as `MessagePane`, so the
@@ -167,7 +168,7 @@ function MailAttachments(props: { messageId: string; attachments: MailAttachment
                 "text-left text-[12px] text-text-dim shadow-chip transition-colors hover:text-foreground",
               )}
             >
-              <Paperclip className="size-3.5 shrink-0 text-text-faint" strokeWidth={1.6} />
+              <FileTypeIcon name={file.name} contentType={file.content_type} className="size-4" />
               <span className="min-w-0 flex-1 truncate">{file.name || "Attachment"}</span>
               {size && <span className="shrink-0 tabular-nums text-text-faint">{size}</span>}
               <Download

@@ -450,7 +450,10 @@ function MessageBubbleImpl(props: {
       ) : null}
 
       {hasAttachments ? (
-        <div className={cn("flex flex-col gap-1.5", !cardOnly && "mt-1.5")}>
+        <div
+          data-testid="message-attachments"
+          className={cn("flex flex-col gap-1.5", !cardOnly && "mt-1.5")}
+        >
           {attachments.map((att, i) =>
             att.kind === "image" ? (
               <MediaImage key={`att-${i}-${att.url}`} src={att.url} alt={att.name} />

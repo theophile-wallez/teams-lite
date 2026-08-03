@@ -142,7 +142,10 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/cal --calendar`, or `openCalendarTab` /
   `openCalendarView` / `openFirstEvent`. For the team → channel tree:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
-  `toggleTeamSection` from the same file.
+  `toggleTeamSection` from the same file. To review a detail too small to read in a
+  1200px page — a 16px icon, a chip, a badge — crop to it and raise the pixel
+  density: `bun run preview -- --out /tmp/chip --element
+  '[data-testid="message-file"]' --dpr 4`.
   `web/scripts/scroll-probe.ts` is what a diagnostic built on top of it looks like
   (it measures history scroll smoothness frame by frame): a tracked script that
   drives the app *through* `withPreview`, never around it.

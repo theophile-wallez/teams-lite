@@ -89,6 +89,23 @@
   --image-mat: #f3f3f5;
   --image-mat-line: rgba(17, 17, 17, 0.05);
 
+  /* File-type icons — the one place the single-accent rule bends, because here the
+   * colour IS the information: it names the document family before the file name is
+   * read (see components/file-type-icon.tsx). Office and PDF keep the hues people
+   * already know; the rest are spread around the wheel so two families never read
+   * as one. Light values are darkened for white cards, dark ones lightened. */
+  --file-word: #2b579a;
+  --file-excel: #1f7a45;
+  --file-powerpoint: #d24726;
+  --file-pdf: #c4322a;
+  --file-image: #0e8f88;
+  --file-video: #6d4fd8;
+  --file-audio: #b23e9c;
+  --file-archive: #a67c14;
+  --file-code: #4a5568;
+  --file-text: #6b7280;
+  --file-generic: #9e9e9e; /* = --text-faint: an unknown type stays quiet */
+
   /* The emoji picker (emoji-mart) composes its surfaces with `rgb()`, so it
    * needs its palette as bare RGB triplets. Mirrors --popover / --foreground /
    * --primary / --element above; keep the pairs in step. */
@@ -175,6 +192,19 @@
 
   --image-mat: #242424;
   --image-mat-line: rgba(255, 255, 255, 0.055);
+
+  /* File-type icons, lightened for the dark page (see :root for the reasoning). */
+  --file-word: #6aa1ff;
+  --file-excel: #57c98a;
+  --file-powerpoint: #f2825d;
+  --file-pdf: #f4776b;
+  --file-image: #45c9c0;
+  --file-video: #a08cff;
+  --file-audio: #e07cce;
+  --file-archive: #dfae4a;
+  --file-code: #98a2b8;
+  --file-text: #9ca3af;
+  --file-generic: #7a7a7a; /* = --text-faint */
 
   --emoji-picker-background: 31, 31, 31;
   --emoji-picker-color: 229, 229, 229;

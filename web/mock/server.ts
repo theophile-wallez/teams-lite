@@ -952,6 +952,54 @@ function seedMediaSamples(): void {
     360_000,
   );
 
+  // 7. Several files at once, of different types: the chips must name each family
+  //    by its own coloured icon (see components/file-type-icon.tsx), and the last
+  //    one carries a name with no extension — the case that falls back to the MIME
+  //    type, and then to a plain page.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: `<p>All the workshop material</p>`,
+      attachments: [
+        {
+          name: "Kickoff minutes.docx",
+          content_type:
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          url: "https://eu-api.asm.skype.com/v1/objects/mock-file-2/content",
+          kind: "file",
+        },
+        {
+          name: "Budget 2026.xlsx",
+          content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          url: "https://eu-api.asm.skype.com/v1/objects/mock-file-3/content",
+          kind: "file",
+        },
+        {
+          name: "20260730 - Streams Introduction.pptx",
+          content_type:
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          url: "https://eu-api.asm.skype.com/v1/objects/mock-file-4/content",
+          kind: "file",
+        },
+        {
+          name: "logs.zip",
+          content_type: "application/zip",
+          url: "https://eu-api.asm.skype.com/v1/objects/mock-file-5/content",
+          kind: "file",
+        },
+        {
+          name: "voice-note",
+          content_type: "audio/mp4",
+          url: "https://eu-api.asm.skype.com/v1/objects/mock-file-6/content",
+          kind: "file",
+        },
+      ],
+      is_self: false,
+    },
+    420_000,
+  );
+
   const conv: Conversation = {
     id: convId,
     name: "Media Gallery",
