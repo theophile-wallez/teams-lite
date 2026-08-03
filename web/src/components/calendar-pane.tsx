@@ -67,9 +67,12 @@ export function CalendarPane(props: { onBack?: () => void }) {
     () => withoutDeclined(allEvents, settings.showDeclined),
     [allEvents, settings.showDeclined],
   );
+  // The "Weekends" setting shapes a WEEK: five columns instead of seven. It never
+  // applies to the Day view, where the day is the one the user asked for — a Saturday
+  // picked from the mini month must draw that Saturday, not an empty grid.
   const gridDays = useMemo(
-    () => workdaysOnly(daysIn(range), settings.showWeekends),
-    [range, settings.showWeekends],
+    () => (mode === "week" ? workdaysOnly(daysIn(range), settings.showWeekends) : daysIn(range)),
+    [mode, range, settings.showWeekends],
   );
 
   const openEvent = useMemo(

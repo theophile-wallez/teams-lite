@@ -4343,10 +4343,26 @@ function seedCalendar(): void {
   // A recurring stand-up on every weekday of the surrounding five weeks: the case
   // that proves the backend expands recurrence and the grid draws one row per
   // occurrence.
+  //
+  // Each weekday also carries one event on the PRIMARY calendar, so the app's own
+  // defaults — the working week, with the primary calendar alone switched on — are
+  // never an empty grid. The fixtures are relative to today, so a suite run on a
+  // Saturday looks at a week made entirely of other days.
   for (let offset = -14; offset <= 21; offset++) {
     const day = new Date(mockToday().getFullYear(), mockToday().getMonth(), mockToday().getDate() + offset);
     const weekday = day.getDay();
     if (weekday === 0 || weekday === 6) continue;
+    addMockEvent({
+      id: `ev-focus-${offset}`,
+      subject: "Focus block",
+      preview: "Head down. No meetings.",
+      start: mockAt(offset, 8, 0),
+      end: mockAt(offset, 8, 45),
+      is_organizer: true,
+      response: "organizer",
+      show_as: "busy",
+      reminder_minutes: -1,
+    });
     addMockEvent({
       id: `ev-standup-${offset}`,
       subject: "Platform stand-up",

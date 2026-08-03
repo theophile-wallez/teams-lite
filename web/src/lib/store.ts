@@ -347,10 +347,12 @@ export type CalendarSettings = {
 };
 
 const DEFAULT_CALENDAR_SETTINGS: CalendarSettings = {
-  showWeekends: true,
-  // Shown by default and struck through: a declined meeting is still information —
-  // it tells the user why an hour of their day is quiet.
-  showDeclined: true,
+  // Off by default: this is a work calendar, so the five-column working week is what
+  // the user came to look at, and two empty columns cost a third of the grid's width.
+  showWeekends: false,
+  // Off by default too: a meeting the user declined is not on their day. Turning it on
+  // draws it struck through, which is what explains a quiet hour when they want that.
+  showDeclined: false,
   showWeekNumbers: false,
 };
 
@@ -410,7 +412,9 @@ function initialState(): AppState {
     mailBodyError: null,
     calendars: [],
     visibleCalendarIds: [],
-    calendarMode: "month",
+    // The working week, which is the question a work calendar answers: what is on my
+    // plate now. The month grid is one keystroke away (M) for the wider look.
+    calendarMode: "week",
     calendarSettings: DEFAULT_CALENDAR_SETTINGS,
     // Midnight today: the anchor is a DAY, and carrying a wall-clock time in it
     // would make "is this the anchor's month" depend on when the app was opened.

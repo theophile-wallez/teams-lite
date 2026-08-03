@@ -1,3 +1,4 @@
+import type { Locator } from "@playwright/test";
 import {
   test,
   expect,
@@ -30,7 +31,7 @@ test.describe("calendar", () => {
     await emitCalendarChange(page, { reset: true });
   });
 
-  test("has a Calendar tab that reveals the month grid", async ({ page }) => {
+  test("has a Calendar tab that reveals the working week", async ({ page }) => {
     await gotoApp(page);
 
     await expect(page.locator('[data-testid="tab-calendar"]')).toBeVisible();
@@ -39,12 +40,20 @@ test.describe("calendar", () => {
 
     await openCalendarTab(page);
 
-    // The month grid is the default view, and it always shows six full weeks so its
+    // The working week is the default view: this is a work calendar, so five columns
+    // and no weekend.
+    await expect(page.locator('[data-testid="calendar-time-grid"]')).toBeVisible();
+    const columns = page.locator('[data-testid="calendar-day-column"]');
+    await expect(columns).toHaveCount(5);
+    expect(await weekdaysOf(columns)).toEqual([1, 2, 3, 4, 5]);
+
+    // And the month grid is still there, one keystroke away, with six full weeks so its
     // height never jumps between months.
-    await expect(page.locator('[data-testid="calendar-month"]')).toBeVisible();
-    await expect(page.locator('[data-testid="calendar-day"]')).toHaveCount(42);
-    // Exactly one cell is today.
-    await expect(page.locator('[data-testid="calendar-day"][data-today="true"]')).toHaveCount(1);
+    await openCalendarView(page, "month");
+    await expect(page.locator('[data-testid="calendar-day"]')).toHaveCount(30);
+    await expect(page.locator('[data-testid="calendar-day"][data-today="true"]')).toHaveCount(
+      isWeekendToday() ? 0 : 1,
+    );
   });
 
   test("offers no way to create or answer an event", async ({ page }) => {
@@ -93,6 +102,7 @@ test.describe("calendar", () => {
   test("navigates months and returns to today", async ({ page }) => {
     await gotoApp(page);
     await openCalendarTab(page);
+    await openCalendarView(page, "month");
 
     const title = page.locator('[data-testid="calendar-title"]');
     const thisMonth = (await title.textContent())!.trim();
@@ -115,16 +125,24 @@ test.describe("calendar", () => {
     await expect(title).not.toHaveText(thisMonth);
     await page.locator('[data-testid="calendar-today"]').click();
     await expect(title).toHaveText(thisMonth);
-    await expect(page.locator('[data-testid="calendar-day"][data-today="true"]')).toHaveCount(1);
+    // Today is back in the grid — unless today IS a weekend, which the default grid
+    // does not draw at all.
+    await expect(page.locator('[data-testid="calendar-day"][data-today="true"]')).toHaveCount(
+      isWeekendToday() ? 0 : 1,
+    );
   });
 
   test("switches between the month, week, day and agenda views", async ({ page }) => {
     await gotoApp(page);
     await openCalendarTab(page);
 
+    await openCalendarView(page, "month");
+    await expect(page.locator('[data-testid="calendar-month"]')).toBeVisible();
+
     await openCalendarView(page, "week");
-    // Seven day columns and a 24-hour body.
-    await expect(page.locator('[data-testid="calendar-day-column"]')).toHaveCount(7);
+    // Five day columns — the working week, weekends being off by default — and a
+    // 24-hour body.
+    await expect(page.locator('[data-testid="calendar-day-column"]')).toHaveCount(5);
     await expect(page.locator('[data-testid="calendar-hours"]')).toBeVisible();
 
     await openCalendarView(page, "day");
@@ -144,6 +162,7 @@ test.describe("calendar", () => {
     await gotoApp(page);
     await openCalendarTab(page);
 
+    await openCalendarView(page, "month");
     const { calendars, events } = await fetchTestCalendar(page);
     const leave = events.find((e) => e.id === "ev-leave")!;
     expect(leave.is_all_day).toBe(true);
@@ -156,10 +175,12 @@ test.describe("calendar", () => {
     await expect(bar.first()).toBeVisible();
     // ONE element for the whole run of days (a week row may clip it into at most two).
     expect(await bar.count()).toBeLessThanOrEqual(2);
-    // It is genuinely wider than a single day cell.
-    const barBox = (await bar.first().boundingBox())!;
+    // And that element is genuinely wider than a single day cell. Measured on the widest
+    // piece: a run clipped by a row boundary leaves a short remainder on one side, and a
+    // week that starts on the leave's last day is one cell wide for a good reason.
+    const boxes = await bar.evaluateAll((bars) => bars.map((el) => el.getBoundingClientRect().width));
     const cellBox = (await page.locator('[data-testid="calendar-day"]').first().boundingBox())!;
-    expect(barBox.width).toBeGreaterThan(cellBox.width * 1.5);
+    expect(Math.max(...boxes)).toBeGreaterThan(cellBox.width * 1.5);
 
     expect(calendars.length).toBeGreaterThan(1);
   });
@@ -197,7 +218,11 @@ test.describe("calendar", () => {
     await openCalendarTab(page);
     await openCalendarView(page, "week");
 
-    const event = calendarEvent(page, "ev-overlap-a");
+    // A timed block in the hour body, so it occupies one day column and the panel has
+    // room beside it — and one taken from the grid rather than by id, because which of
+    // the fixture's events the working week holds depends on the day the suite runs on.
+    const event = page.locator('[data-testid="calendar-hours"] [data-testid="calendar-event"]').first();
+    await expect(event).toBeVisible();
     const eventBox = (await event.boundingBox())!;
     await event.click();
 
@@ -245,22 +270,25 @@ test.describe("calendar", () => {
     await expect(details).toHaveCount(0);
   });
 
-  test("draws the working week, and week numbers, when the view menu says so", async ({ page }) => {
+  test("adds the weekend, and week numbers, when the view menu says so", async ({ page }) => {
     await gotoApp(page);
     await openCalendarTab(page);
     await openCalendarView(page, "week");
-    await expect(page.locator('[data-testid="calendar-day-column"]')).toHaveCount(7);
+    // The working week by default: five columns, Monday to Friday.
+    const columns = page.locator('[data-testid="calendar-day-column"]');
+    await expect(columns).toHaveCount(5);
+    expect(await weekdaysOf(columns)).toEqual([1, 2, 3, 4, 5]);
 
     await toggleCalendarSetting(page, "showWeekends");
-    // Five columns, and the same window: hiding weekends is a display choice, so it
+    // Seven columns, and the same window: drawing the weekend is a display choice, so it
     // must never change which events were fetched.
-    await expect(page.locator('[data-testid="calendar-day-column"]')).toHaveCount(5);
-    await expect(page.locator('[data-testid="calendar-day-column"][data-day$="-25"]')).toHaveCount(0);
+    await expect(columns).toHaveCount(7);
+    expect(await weekdaysOf(columns)).toEqual([1, 2, 3, 4, 5, 6, 0]);
 
     await openCalendarView(page, "month");
-    await expect(page.locator('[data-testid="calendar-day"]')).toHaveCount(30);
-    await toggleCalendarSetting(page, "showWeekends");
     await expect(page.locator('[data-testid="calendar-day"]')).toHaveCount(42);
+    await toggleCalendarSetting(page, "showWeekends");
+    await expect(page.locator('[data-testid="calendar-day"]')).toHaveCount(30);
 
     // Week numbers are off by default and gate the month grid's leading column.
     await expect(page.locator('[data-testid="calendar-week-number"]')).toHaveCount(0);
@@ -270,22 +298,26 @@ test.describe("calendar", () => {
     await expect(page.locator('[data-testid="calendar-week-number"]')).toHaveCount(0);
   });
 
-  test("hides declined and cancelled events when the view menu says so", async ({ page }) => {
+  test("draws declined and cancelled events only when the view menu says so", async ({ page }) => {
     await gotoApp(page);
     await openCalendarTab(page);
+    // The agenda, so the assertion holds whichever day the suite runs on: the declined
+    // meeting is two days out, which a single week does not always contain.
+    await openCalendarView(page, "agenda");
 
-    // A meeting the user declined (this one was cancelled by its organizer too) is
-    // shown struck through by default — it still explains a quiet hour.
+    // A meeting the user declined (this one was cancelled by its organizer too) is not
+    // on their day, so it is not drawn by default.
     const declined = calendarEvent(page, "ev-cancelled");
-    await expect(declined).toBeVisible();
-
-    await toggleCalendarSetting(page, "showDeclined");
     await expect(declined).toHaveCount(0);
     // Everything else is untouched.
     await expect(calendarEvent(page, "ev-overlap-a")).toBeVisible();
 
     await toggleCalendarSetting(page, "showDeclined");
+    // Turned on, it comes back struck through: it still explains a quiet hour.
     await expect(declined).toBeVisible();
+
+    await toggleCalendarSetting(page, "showDeclined");
+    await expect(declined).toHaveCount(0);
   });
 
   test("switches views and steps the period from the keyboard", async ({ page }) => {
@@ -297,8 +329,10 @@ test.describe("calendar", () => {
     // calendar — which is correct for a tablist and not what this spec is about.
     await title.click();
 
+    await page.keyboard.press("m");
+    await expect(page.locator('[data-testid="calendar-month"]')).toBeVisible();
     await page.keyboard.press("w");
-    await expect(page.locator('[data-testid="calendar-day-column"]')).toHaveCount(7);
+    await expect(page.locator('[data-testid="calendar-day-column"]')).toHaveCount(5);
     await expect(page.locator('[data-testid="calendar-subtitle"]')).toContainText(/week \d+/i);
 
     const thisWeek = (await page.locator('[data-testid="calendar-subtitle"]').textContent())!;
@@ -333,9 +367,11 @@ test.describe("calendar", () => {
   test("picks a day from the month grid and from the mini month", async ({ page }) => {
     await gotoApp(page);
     await openCalendarTab(page);
+    await openCalendarView(page, "month");
 
-    // Clicking a day number in the grid zooms into that day.
-    const cell = page.locator('[data-testid="calendar-day"][data-today="true"]');
+    // Clicking a day number in the grid zooms into that day. Any cell will do — today's
+    // is not in the default grid when today is a Saturday.
+    const cell = page.locator('[data-testid="calendar-day"]').nth(7);
     const day = await cell.getAttribute("data-day");
     await cell.locator("button").first().click();
     await expect(page.locator('[data-testid="calendar-time-grid"]')).toBeVisible();
@@ -355,6 +391,18 @@ test.describe("calendar", () => {
       "data-day",
       otherKey!,
     );
+
+    // A Saturday picked from the mini month draws that Saturday. The default grid leaves
+    // the weekend out of a WEEK, and the Day view is the one place that must not apply
+    // it: the user asked for that day.
+    const miniDays = page.locator('[data-testid="calendar-mini-day"]');
+    const weekdays = await weekdaysOf(miniDays);
+    const saturday = miniDays.nth(weekdays.indexOf(6));
+    const saturdayKey = await saturday.getAttribute("data-day");
+    await saturday.click();
+    const column = page.locator('[data-testid="calendar-day-column"]');
+    await expect(column).toHaveCount(1);
+    await expect(column).toHaveAttribute("data-day", saturdayKey!);
   });
 
   test("reconciles a meeting rescheduled elsewhere, live", async ({ page }) => {
@@ -417,3 +465,27 @@ test.describe("calendar", () => {
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 });
+
+/**
+ * The weekdays a set of day columns (or month cells) draws, as `Date.getDay()` numbers
+ * and in the grid's own order — read from each element's `data-day`.
+ *
+ * The fixtures are relative to today, so the suite runs on every weekday and both
+ * weekend days. Asserting the SHAPE of the week this way keeps those runs identical.
+ */
+async function weekdaysOf(days: Locator): Promise<number[]> {
+  const keys = await days.evaluateAll((nodes) =>
+    nodes.map((node) => node.getAttribute("data-day") ?? ""),
+  );
+  return keys.map((key) => {
+    const [year, month, day] = key.split("-").map(Number);
+    return new Date(year!, month! - 1, day!).getDay();
+  });
+}
+
+/** Whether today is a Saturday or a Sunday — the one case where the default grid, which
+ *  draws the working week only, has no cell for today at all. */
+function isWeekendToday(): boolean {
+  const weekday = new Date().getDay();
+  return weekday === 0 || weekday === 6;
+}

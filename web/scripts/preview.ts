@@ -799,28 +799,30 @@ if (import.meta.main) {
   if (args.includes("--calendar")) {
     await withPreview(async ({ page, shot, setTheme }) => {
       await openCalendarTab(page);
-      await shot(`${out}-month-light.png`);
+      // The working week, which is the view the calendar opens on.
+      await shot(`${out}-week-light.png`);
       // Again with every calendar on: multi-day bars, lanes and the colour coding
       // only show once there is more than one source.
       await enableAllCalendars(page);
-      await shot(`${out}-month-all-light.png`);
-      await openCalendarView(page, "week");
-      await shot(`${out}-week-light.png`);
+      await shot(`${out}-week-all-light.png`);
       // The details panel opens BESIDE the event it describes, so it is only worth
       // looking at over a view that has something around it.
       await openFirstEvent(page);
       await shot(`${out}-details-light.png`);
       await page.keyboard.press("Escape");
       await page.waitForTimeout(250);
+      await openCalendarView(page, "month");
+      await shot(`${out}-month-light.png`);
       await openCalendarView(page, "day");
       await shot(`${out}-day-light.png`);
       await openCalendarView(page, "agenda");
       await shot(`${out}-agenda-light.png`);
-      // Weekends off + week numbers on: the five-column working week.
+      // Weekends and week numbers on: the two columns and the leading column the view
+      // menu adds to the default grid.
       await openCalendarView(page, "month");
       await toggleCalendarSetting(page, "showWeekends");
       await toggleCalendarSetting(page, "showWeekNumbers");
-      await shot(`${out}-workweek-light.png`);
+      await shot(`${out}-weekends-light.png`);
       await toggleCalendarSetting(page, "showWeekends");
       await toggleCalendarSetting(page, "showWeekNumbers");
       // Mobile: the grid IS the page there, and the details arrive as a dialog — a
@@ -838,7 +840,7 @@ if (import.meta.main) {
       await openCalendarView(page, "week");
       await shot(`${out}-week-dark.png`);
       console.log(
-        `[preview] wrote ${out}-{month,month-all,week,details,day,agenda,workweek,mobile,` +
+        `[preview] wrote ${out}-{week,week-all,details,month,day,agenda,weekends,mobile,` +
           `mobile-details}-light.png and ${out}-{month,week}-dark.png`,
       );
     });
