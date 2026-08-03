@@ -231,9 +231,15 @@ function AgentStatus(props: { run: AgentRun; hasBody: boolean }) {
         </span>
         <span
           data-testid="agent-phase"
-          // The shimmer paints the text out of `currentColor`, so the colour class
-          // stays on either branch — it is what the highlight is derived from.
-          className={cn("min-w-0 truncate text-text-dim", waiting && !reduce && "agent-shimmer")}
+          // shadcn's `shimmer` (ui.shadcn.com/docs/utils/shimmer): it paints the text
+          // out of `currentColor` and sweeps a brighter copy of it across, so the colour
+          // class stays — it is what the highlight is derived from — and the dark theme
+          // needs nothing said about it. `prefers-reduced-motion` is handled by the
+          // utility itself, which is why only `waiting` gates it here.
+          className={cn(
+            "min-w-0 truncate text-text-dim",
+            waiting && "shimmer shimmer-duration-2100",
+          )}
         >
           {run.phase === "working" ? `${run.backend} is working` : agentPhaseLabel(run)}
         </span>
@@ -271,10 +277,9 @@ function AgentStatus(props: { run: AgentRun; hasBody: boolean }) {
             animate={reduce ? { opacity: 1 } : { opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
             transition={{ duration: 0.2, ease: [0.2, 0.65, 0.3, 0.9] }}
-            className={cn(
-              "min-w-0 overflow-hidden text-[11px] italic text-text-faint",
-              !reduce && "agent-shimmer",
-            )}
+            // Slower and wider than the phase line above it: this is a whole sentence,
+            // and a band sized for two words reads as a flicker crossing it.
+            className="shimmer shimmer-duration-2600 shimmer-spread-[6rem] min-w-0 overflow-hidden text-[11px] italic text-text-faint"
           >
             {thinking}
           </motion.p>

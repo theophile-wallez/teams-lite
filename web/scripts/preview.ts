@@ -900,6 +900,12 @@ if (import.meta.main) {
           console.log("[preview] no tool call on screen — capturing the run as it stands"),
         );
       await shot(`${out}-working-light.png`);
+      // Both themes while the run is WAITING, because that is the state the shimmer
+      // stands in for — and shadcn's utility derives its highlight from the text's own
+      // colour through a dark-only branch, so one theme proves half of it.
+      await setTheme("dark");
+      await shot(`${out}-working-dark.png`);
+      await setTheme("light");
       // Also best-effort, for the same reason: the run is a real clock, and a preview
       // that arrives after a phase should capture the next one rather than die.
       await page
