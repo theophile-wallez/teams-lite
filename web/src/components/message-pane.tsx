@@ -500,7 +500,10 @@ export function MessagePane(props: { onBack?: () => void }) {
           // How much history is loaded, which the rendered row count no longer
           // reveals now that the list is virtualized (used by the E2E suite).
           data-loaded-count={messages.length}
-          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 md:px-5"
+          // The bottom padding clears the composer's fade overlay (`h-14`, 56px):
+          // at 40px the gradient is down to ~9% of the background, so the last
+          // message reads at full contrast instead of sitting under the fade.
+          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-10 pt-4 md:px-5"
         >
           {messages.length === 0 ? (
             <EmptyState
