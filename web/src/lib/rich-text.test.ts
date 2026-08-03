@@ -873,4 +873,43 @@ describe("serializeTeamsHtml", () => {
     expect(serializeTeamsHtml("<p></p>")).toBe("");
     expect(serializeTeamsHtml("<p>   </p>")).toBe("");
   });
+
+  it("trims the blank edges of the body", () => {
+    // The empty paragraph a trailing Enter opened, at either edge.
+    expect(serializeTeamsHtml("<p></p><p>hi</p><p></p>")).toBe("<p>hi</p>");
+    // The hard break a Shift+Enter left on the last line, inside the block.
+    expect(serializeTeamsHtml("<p>hi<br></p>")).toBe("<p>hi</p>");
+    expect(serializeTeamsHtml("<p><br>hi<br><br></p>")).toBe("<p>hi</p>");
+    // The spaces around the words, at the edges only.
+    expect(serializeTeamsHtml("<p>  hi  there  </p>")).toBe("<p>hi  there</p>");
+    // A break between two lines is content, not an edge.
+    expect(serializeTeamsHtml("<p>one<br>two</p>")).toBe("<p>one<br>two</p>");
+    // A block emptied by the trim goes with it, and the block behind becomes the
+    // new edge.
+    expect(serializeTeamsHtml("<p>hi</p><p><br></p><p> </p>")).toBe("<p>hi</p>");
+    // The edge of a list, of a quote, and of a nested mark. Only the two edges of
+    // the MESSAGE are trimmed, so the first item loses its leading space and the
+    // last its trailing break — a space inside the list is left where it is, as
+    // HTML collapses it anyway.
+    expect(serializeTeamsHtml("<ul><li> a </li><li> b<br></li></ul>")).toBe(
+      "<ul><li>a </li><li> b</li></ul>",
+    );
+    expect(serializeTeamsHtml("<blockquote><p> q<br></p></blockquote>")).toBe(
+      "<blockquote><p>q</p></blockquote>",
+    );
+    expect(serializeTeamsHtml("<p><strong> bold </strong></p>")).toBe(
+      "<p><strong>bold</strong></p>",
+    );
+  });
+
+  it("keeps the whitespace a code block owns", () => {
+    // Indentation is content in a code block, so the edge trim stops at one.
+    expect(serializeTeamsHtml("<pre><code>  indented\n</code></pre>")).toBe(
+      "<pre><code>  indented\n</code></pre>",
+    );
+    // The blank blocks around it still go.
+    expect(serializeTeamsHtml("<p></p><pre><code> x </code></pre><p><br></p>")).toBe(
+      "<pre><code> x </code></pre>",
+    );
+  });
 });

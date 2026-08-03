@@ -1696,7 +1696,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 let session = ctx.session().await?;
                 (session.self_name.to_string(), session.self_mri.to_string())
             };
-            let new_content = teams_send::escape_html(&text);
+            // `trim()` mirrors what the edit request itself sent (see
+            // `build_edit_body`), so the local row and the network agree.
+            let new_content = teams_send::escape_html(text.trim());
             if let Ok(store) = ctx.store() {
                 if let Some(updated) =
                     store.update_message_content(&conv, &message_id, &new_content)?

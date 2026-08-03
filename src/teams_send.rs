@@ -496,12 +496,50 @@ fn reply_quote(reply: &ReplyTo) -> String {
     )
 }
 
+/// The empty blocks an editor leaves at the edge of a body: the paragraph a
+/// trailing Enter opened, and the hard break a trailing Shift+Enter added. The
+/// tokens are lowercase, as every client of this crate emits them (the web
+/// serializer in `web/src/lib/rich-text.ts`, and `agent_markdown`).
+const EMPTY_EDGE_BLOCKS: [&str; 6] = [
+    "<p></p>",
+    "<p><br></p>",
+    "<p>&nbsp;</p>",
+    "<br>",
+    "<br/>",
+    "<br />",
+];
+
+/// Trim an outbound HTML body: drop the whitespace and the empty blocks at both
+/// edges. A leading or a trailing blank line carries nothing, and Teams keeps it
+/// for as long as the message exists.
+///
+/// This is the last net, and it is deliberately coarse: it reads no structure, so
+/// it only removes what sits at an edge of the string. A client that knows the
+/// tree — the web serializer — also trims the edge *inside* the first and the last
+/// block. Both are needed: a body reaches this function from the terminal UI, from
+/// the local agent and from an example too.
+pub fn trim_message_html(html: &str) -> &str {
+    let mut trimmed = html.trim();
+    loop {
+        let before = trimmed;
+        for token in EMPTY_EDGE_BLOCKS {
+            trimmed = trimmed.strip_prefix(token).unwrap_or(trimmed).trim_start();
+            trimmed = trimmed.strip_suffix(token).unwrap_or(trimmed).trim_end();
+        }
+        if trimmed == before {
+            return trimmed;
+        }
+    }
+}
+
 fn message_content(
     text: &str,
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
     image: Option<&AmsImage>,
 ) -> String {
+    let text = text.trim();
+    let content_html = content_html.map(trim_message_html);
     let body = if let Some(html) = content_html.filter(|h| !h.is_empty()) {
         match reply_to {
             Some(reply) => format!("{}{}", reply_quote(reply), html),
@@ -545,6 +583,9 @@ fn escape_html_attribute(value: &str) -> String {
 }
 
 fn paragraph(text: &str) -> String {
+    // The two paragraphs around a reply quote are trimmed one by one: each is its
+    // own block, so a blank at its edge is a blank line next to the quote.
+    let text = text.trim();
     if text.is_empty() {
         return String::new();
     }
@@ -575,15 +616,17 @@ fn build_body(
 
 /// Build the edit request body (pure, unit-tested). There is no reply markup and —
 /// unlike a send — no `clientmessageid`; `content_html` wins over the escaped text.
+/// The body is trimmed exactly as a send is: an edit writes the same message
+/// content, so it must not be the way a blank edge gets in.
 fn build_edit_body(
     text: &str,
     content_html: Option<&str>,
     self_name: &str,
 ) -> serde_json::Value {
     json!({
-        "content": match content_html.filter(|html| !html.is_empty()) {
+        "content": match content_html.map(trim_message_html).filter(|html| !html.is_empty()) {
             Some(html) => html.to_string(),
-            None => escape_html(text),
+            None => escape_html(text.trim()),
         },
         "messagetype": "RichText/Html",
         "contenttype": "text",
@@ -946,6 +989,64 @@ mod tests {
         // An empty html falls back to the escaped text, like a send does.
         let b = build_edit_body("plain", Some(""), "Me");
         assert_eq!(b["content"], "plain");
+    }
+
+    #[test]
+    fn plain_text_is_trimmed_before_it_goes_out() {
+        let b = build_body("1", "  hi there\n\n", "Me", None, None, None);
+        assert_eq!(b["content"], "hi there");
+        // A body of whitespace only becomes empty rather than a blank message.
+        let b = build_body("1", " \n\t ", "Me", None, None, None);
+        assert_eq!(b["content"], "");
+        // An edit trims the same way.
+        let b = build_edit_body("\n updated \n", None, "Me");
+        assert_eq!(b["content"], "updated");
+    }
+
+    #[test]
+    fn html_body_loses_its_whitespace_and_empty_edge_blocks() {
+        // The paragraph a trailing Enter opened, and the break a Shift+Enter added.
+        assert_eq!(trim_message_html("<p>hi</p><p></p>"), "<p>hi</p>");
+        assert_eq!(
+            trim_message_html("<p>hi</p><p><br></p><p>&nbsp;</p>"),
+            "<p>hi</p>"
+        );
+        assert_eq!(trim_message_html("<p></p>\n<p>hi</p>\n<br />"), "<p>hi</p>");
+        assert_eq!(trim_message_html("  <p>hi</p>  "), "<p>hi</p>");
+        // An empty block inside the body is content: only an edge is trimmed.
+        assert_eq!(
+            trim_message_html("<p>a</p><p></p><p>b</p>"),
+            "<p>a</p><p></p><p>b</p>"
+        );
+        // Nothing left but spacers means nothing to send.
+        assert_eq!(trim_message_html("<p></p><br>"), "");
+    }
+
+    #[test]
+    fn html_body_is_trimmed_on_send_and_on_edit() {
+        let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), None);
+        assert_eq!(b["content"], "<p>hi</p>");
+        let b = build_edit_body("", Some(" <p>answer</p><p></p>"), "Me");
+        assert_eq!(b["content"], "<p>answer</p>");
+        // An html body of spacers only falls back to the plain text, as an empty
+        // one already did.
+        let b = build_body("9", "plain", "Me", None, Some("<p><br></p>"), None);
+        assert_eq!(b["content"], "plain");
+    }
+
+    #[test]
+    fn reply_paragraphs_are_trimmed_one_by_one() {
+        let reply = ReplyTo {
+            compose_time: 42,
+            sender: "Alice".into(),
+            sender_mri: "8:alice".into(),
+            preview: "quoted".into(),
+            before: "  before \n".into(),
+            after: "\n after  ".into(),
+        };
+        let content = message_content("", Some(&reply), None, None);
+        assert!(content.starts_with("<p>before</p><blockquote"));
+        assert!(content.ends_with("</blockquote><p>after</p>"));
     }
 
     #[test]

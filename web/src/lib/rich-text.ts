@@ -990,16 +990,64 @@ function serializeNodes(nodes: RichNode[]): string {
   return out;
 }
 
+/** Which edge of a message body a trim works on. */
+type Edge = "start" | "end";
+
+// Tags whose own whitespace is content, so an edge trim stops at them: a code
+// block keeps the indentation of its first line, and an image or a card IS the
+// edge of the message.
+const UNTRIMMED_EDGE_TAGS = new Set<RichTag>(["pre", "code", "img", "card"]);
+
+/**
+ * Trim one edge of a message body, in place of the text `trim()` a plain send
+ * gets: drop the whitespace and the hard breaks the editor leaves there, and
+ * drop a block that holds nothing else.
+ *
+ * `normalize` already drops an empty paragraph and the whitespace between two
+ * blocks, so what is left for this pass is the edge *inside* the first and the
+ * last block — the `<br>` a Shift+Enter added on the last line, and the spaces
+ * around the words.
+ */
+function trimEdge(nodes: RichNode[], edge: Edge): RichNode[] {
+  const at = edge === "start" ? 0 : nodes.length - 1;
+  const node = nodes[at];
+  if (node === undefined) return nodes;
+  const trimmed = trimEdgeNode(node, edge);
+  const out = [...nodes];
+  if (trimmed === null) {
+    out.splice(at, 1);
+    return trimEdge(out, edge); // the node behind it is the new edge
+  }
+  out[at] = trimmed;
+  return out;
+}
+
+/** Trim one node standing at `edge`, or return null when nothing of it is left. */
+function trimEdgeNode(node: RichNode, edge: Edge): RichNode | null {
+  if (node.type === "text") {
+    const text = edge === "start" ? node.text.trimStart() : node.text.trimEnd();
+    return text.length === 0 ? null : { type: "text", text };
+  }
+  if (node.tag === "br") return null;
+  if (UNTRIMMED_EDGE_TAGS.has(node.tag)) return node;
+  const children = trimEdge(node.children, edge);
+  return hasVisibleContent(children) ? { ...node, children } : null;
+}
+
 /**
  * Normalize arbitrary editor HTML (e.g. TipTap's `getHTML()`) into the bounded,
  * Teams-safe HTML subset by round-tripping it through the same allowlist used to
  * render inbound messages. Only allowlisted tags/attributes survive, so this is
  * the single choke point that guarantees what we send matches what we render.
  * Returns an empty string when there is no visible content.
+ *
+ * The body is also trimmed at both edges, because a leading or a trailing blank
+ * line is not content: the reader gets nothing from it, and Teams keeps it for
+ * as long as the message exists.
  */
 export function serializeTeamsHtml(html: string): string {
   const nodes = parseRichHtml(html);
   if (!hasVisibleContent(nodes)) return "";
-  return serializeNodes(nodes);
+  return serializeNodes(trimEdge(trimEdge(nodes, "start"), "end"));
 }
 

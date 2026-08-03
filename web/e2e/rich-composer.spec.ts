@@ -1,4 +1,4 @@
-import { test, expect, gotoApp, openConversationAt } from "./helpers";
+import { test, expect, fetchCapturedSends, gotoApp, openConversationAt } from "./helpers";
 
 // The composer defaults to the rich-text editor (TipTap). The shared `helpers`
 // fixture opts every test out to the plain textarea; this suite clears that key
@@ -43,6 +43,23 @@ test.describe("rich composer (default)", () => {
     await expect(echoed.first()).toHaveAttribute("data-mine", "true");
     // The editor is cleared after sending.
     await expect(page.locator(editable)).toHaveText("");
+  });
+
+  test("trims the blank lines off the body it sends", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    const marker = `trim-${Date.now()}`;
+    await page.locator(editable).click();
+    // A Shift+Enter on the last line leaves a hard break, and Enter sends. The
+    // reader must get the words, not the empty line under them.
+    await page.keyboard.type(marker);
+    await page.keyboard.press("Shift+Enter");
+    await page.keyboard.press("Shift+Enter");
+    await page.keyboard.press("Enter");
+    await expect(page.locator('[data-testid="message"]', { hasText: marker })).toBeVisible();
+    const sends = await fetchCapturedSends(page);
+    const sent = sends.filter((send) => send.content_html?.includes(marker)).pop();
+    expect(sent?.content_html).toBe(`<p>${marker}</p>`);
   });
 
   test("Ctrl+B bolds the selection without any visible toolbar", async ({ page }) => {
