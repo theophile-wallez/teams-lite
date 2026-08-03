@@ -4,6 +4,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   BellOff,
   ChevronRight,
+  Command,
   Ghost,
   MoonStar,
   Search,
@@ -140,8 +141,20 @@ export function ConversationList(props: {
         >
           <Search className="size-4 shrink-0" strokeWidth={1.4} />
           <span className="flex-1 text-[13px]">Search conversations</span>
-          <kbd className="rounded bg-element px-1.5 py-0.5 text-[10px] font-medium text-text-faint">
-            ⌘K
+          {/* U+2318 is in none of Inter's subsets, so a fallback font draws the ⌘
+           * character — shorter and lighter than the K beside it, and different on
+           * every platform. Lucide's Command icon is the same mark under our own
+           * control. It is baseline-aligned like a letter, and its size, offset and
+           * stroke are calibrated against the K's cap box and stem: measured at 8x
+           * device scale, both marks are 53 device pixels tall with a 9 pixel
+           * stroke. Every value is in `em`, so the pair stays matched at any font
+           * size. */}
+          <kbd
+            data-testid="search-shortcut"
+            className="inline-flex items-baseline gap-px rounded bg-element px-1.5 py-0.5 text-[10px] font-medium text-text-faint"
+          >
+            <Command aria-hidden className="size-[0.745em] translate-y-[0.11em]" strokeWidth={3.4} />
+            <span className="sr-only">Command </span>K
           </kbd>
         </button>
       </div>
