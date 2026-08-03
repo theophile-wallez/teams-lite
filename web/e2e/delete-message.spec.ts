@@ -1,4 +1,4 @@
-import { test, expect, gotoApp, openConversationAt } from "./helpers";
+import { test, expect, gotoApp, openConversationAt, sendFromComposer } from "./helpers";
 
 test.describe("deleting a message", () => {
   test("deletes my own message from the actions menu, after a confirmation", async ({ page }) => {
@@ -7,10 +7,7 @@ test.describe("deleting a message", () => {
 
     // Send a fresh message of our own so the target is deterministic.
     const original = `delete-me-${Date.now()}`;
-    const composer = page.locator('[data-testid="composer"]');
-    await composer.click();
-    await composer.fill(original);
-    await composer.press("Enter");
+    await sendFromComposer(page, original);
 
     const bubble = page.locator('[data-testid="message"]', { hasText: original });
     await expect(bubble).toBeVisible();
@@ -42,10 +39,7 @@ test.describe("deleting a message", () => {
     await openConversationAt(page, 0);
 
     const original = `keep-me-${Date.now()}`;
-    const composer = page.locator('[data-testid="composer"]');
-    await composer.click();
-    await composer.fill(original);
-    await composer.press("Enter");
+    await sendFromComposer(page, original);
 
     const bubble = page.locator('[data-testid="message"]', { hasText: original });
     await expect(bubble).toBeVisible();

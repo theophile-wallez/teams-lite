@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { test, fetchAgentModes, gotoApp, openConversationAt } from "./helpers";
+import { test, fetchAgentModes, fillComposer, gotoApp, openConversationAt } from "./helpers";
 
 // The per-conversation switch that lets the local agent answer an `@claude` message
 // (see web/src/components/agent-menu.tsx, src/agent_policy.rs), and how the answer is
@@ -159,7 +159,7 @@ test.describe("The local agent's answer", () => {
     await openConversationAt(page, 2);
     await optIn(page);
 
-    await page.locator('[data-testid="composer"]').fill("@claude which port is it?");
+    await fillComposer(page, "@claude which port is it?");
     await page.keyboard.press("Enter");
 
     // The run is on screen before a word of the answer is: the mark of the CLI that is
@@ -212,7 +212,7 @@ test.describe("The local agent's answer", () => {
     await gotoApp(page);
     await openConversationAt(page, 3);
 
-    await page.locator('[data-testid="composer"]').fill("@claude are you there?");
+    await fillComposer(page, "@claude are you there?");
     await page.keyboard.press("Enter");
     // Our own message lands, and nothing answers it. `off` is the default everywhere but
     // the sandbox, and this is the gate that makes the switch mean something.
