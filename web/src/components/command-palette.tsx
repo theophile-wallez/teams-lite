@@ -1,6 +1,6 @@
 import { useNavigate } from "@tanstack/react-router";
 import { convLabel } from "~/lib/protocol";
-import { Avatar, conversationPhoto } from "./avatar";
+import { Avatar, conversationFallback, conversationPhoto } from "./avatar";
 import { useAppState } from "./controller-context";
 import {
   CommandDialog,
@@ -38,7 +38,7 @@ export function CommandPalette(props: { open: boolean; onOpenChange: (open: bool
                 seed={c.id}
                 label={convLabel(c)}
                 photo={conversationPhoto(c)}
-                fallback={c.kind === "one_on_one" ? "person" : "initials"}
+                fallback={conversationFallback(c)}
                 className="size-6 rounded-lg text-[10px]"
               />
               <span className="truncate">{convLabel(c)}</span>

@@ -1277,6 +1277,34 @@ export function convLabel(c: Conversation): string {
   return "(untitled)";
 }
 
+/** True for a multi-party chat, which is every conversation but a 1:1 and Notes.
+ *  `unknown` counts: the backend writes it for a thread it has synced an id for
+ *  and nothing else, and every such row observed so far is a meeting thread. */
+export function isGroupChat(c: Conversation): boolean {
+  return c.kind === "group" || c.kind === "unknown";
+}
+
+/**
+ * True when Microsoft Teams created this group thread FOR a meeting or a call,
+ * rather than a person starting a chat by writing in it. The distinction is the
+ * thread's origin and it never changes: a call placed inside an existing group
+ * chat posts a call line into that chat and creates no thread of its own.
+ *
+ * Two independent signals, and either one alone is enough (they agree on all 494
+ * multi-party threads of the tenant this was measured against):
+ *  - the id, which Teams mints as `19:meeting_<base64 GUID>@thread.v2` for a
+ *    meeting-backed thread and as `19:<32 hex digits>@thread.v2` for a chat;
+ *  - `thread_type`, which is CSA's own `threadType` — `meeting` or `chat`.
+ *
+ * Both are read because each covers the other's gap: `thread_type` is empty on a
+ * store row written before the column existed, and the id shape is Teams'
+ * convention rather than a documented contract.
+ */
+export function isMeetingChat(c: Conversation): boolean {
+  if (!isGroupChat(c)) return false;
+  return c.thread_type === "meeting" || c.id.startsWith("19:meeting_");
+}
+
 function firstName(full: string): string {
   const head = full.trim().split(/\s+/)[0];
   return head || full;
@@ -1290,8 +1318,9 @@ export function previewLine(c: Conversation): string {
   const body = c.last_message_preview ?? "";
   if (!body) return "";
   if (c.last_message_from_me) return `You: ${body}`;
-  const isGroup = c.kind === "group" || c.kind === "unknown";
-  if (isGroup && c.last_message_sender) return `${firstName(c.last_message_sender)}: ${body}`;
+  if (isGroupChat(c) && c.last_message_sender) {
+    return `${firstName(c.last_message_sender)}: ${body}`;
+  }
   return body;
 }
 

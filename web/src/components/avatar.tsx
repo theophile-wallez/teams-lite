@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import type { Conversation } from "~/lib/protocol";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { UserMultiple02Icon, ZoomIcon } from "@hugeicons/core-free-icons";
+import { isMeetingChat, type Conversation } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
 import { PersonCoin } from "./person-coin";
@@ -54,6 +56,32 @@ export function conversationPhoto(c: Conversation): AvatarPhoto | undefined {
   if (c.picture_url) return { kind: "chat", url: c.picture_url };
   return undefined;
 }
+
+/** What an avatar shows when the subject has no picture to load.
+ *   - "initials" — the tinted monogram on a rounded square (a team, a channel);
+ *   - "person"   — a circle, for a single human;
+ *   - "group"    — two people, for a chat somebody started by writing in it;
+ *   - "meeting"  — a video camera, for a thread Teams created for a meeting/call.
+ *  The last two are glyphs rather than initials because a multi-party thread's
+ *  monogram says nothing: "[Stratumn] Daily" and "Daily standup" both read "SD",
+ *  while the origin is what tells the two threads apart. */
+export type AvatarFallback = "initials" | "person" | "group" | "meeting";
+
+/** The fallback a conversation's avatar takes. One mapping, so the sidebar, the
+ *  header and the command palette can never disagree about a thread's origin. */
+export function conversationFallback(c: Conversation): AvatarFallback {
+  if (c.kind === "one_on_one") return "person";
+  // Notes is the user's own thread. It is neither a meeting nor a group of
+  // people, so it keeps its monogram.
+  if (c.kind === "notes") return "initials";
+  return isMeetingChat(c) ? "meeting" : "group";
+}
+
+/** The glyph each of the two icon fallbacks draws. */
+const FALLBACK_ICON = {
+  meeting: ZoomIcon,
+  group: UserMultiple02Icon,
+} as const;
 
 /** The cache/effect key of a photo: whichever of `id` / `url` addresses it. */
 function photoKey(photo?: AvatarPhoto): string {
@@ -112,13 +140,15 @@ function useAvatarPhoto(photo?: AvatarPhoto): string | null {
  * fallback once fetched (and fades in), and the fallback remains while loading,
  * when the subject has no photo, or if the image fails to decode.
  *
- * `fallback` chooses that pre-photo layer's shape and its no-photo placeholder.
- * "initials" (default) is the tinted monogram on a rounded square, for teams /
- * channels / group chats (no single face). "person" is circular, for a single
+ * `fallback` chooses that pre-photo layer's shape and its no-photo placeholder
+ * (see `AvatarFallback`). "initials" (default) is the tinted monogram on a
+ * rounded square, for teams and channels. "person" is circular, for a single
  * human (a 1:1 chat, a reader, a call participant): it shows their tinted
  * initials like Teams, and only falls back to a faceless circular <PersonCoin>
  * when the subject has no nameable label. A person avatar is always circular (so
  * initials, coin and any photo match), regardless of the caller's radius class.
+ * "group" and "meeting" draw a glyph on the same tinted square, so a multi-party
+ * thread states its origin and still keeps a colour of its own.
  */
 export function Avatar(props: {
   seed: string;
@@ -126,10 +156,14 @@ export function Avatar(props: {
   initials?: string;
   className?: string;
   photo?: AvatarPhoto;
-  fallback?: "initials" | "person";
+  fallback?: AvatarFallback;
 }) {
   const photoUrl = useAvatarPhoto(props.photo);
   const person = props.fallback === "person";
+  const glyph =
+    props.fallback === "meeting" || props.fallback === "group"
+      ? FALLBACK_ICON[props.fallback]
+      : undefined;
   const initials = props.initials ?? avatarInitials(props.label);
   // A named person shows tinted initials (like Teams); the faceless coin is only
   // for a human we can't name (a bare MRI / phone number → avatarInitials → "?").
@@ -147,10 +181,17 @@ export function Avatar(props: {
         // (which pass rounded-md/lg) still get circular avatars.
         person && "rounded-full",
       )}
+      data-testid={glyph ? "avatar-glyph" : undefined}
+      data-fallback={glyph ? props.fallback : undefined}
       aria-hidden
     >
       {coin ? (
         <PersonCoin seed={props.seed} className="size-full" />
+      ) : glyph ? (
+        // Sized as a share of the avatar, not in pixels, so one glyph serves the
+        // 36px sidebar row and the 24px palette line alike. It inherits the
+        // tint's own text colour, like the initials it stands in for.
+        <HugeiconsIcon icon={glyph} className="size-[58%]" strokeWidth={1.8} />
       ) : (
         initials
       )}

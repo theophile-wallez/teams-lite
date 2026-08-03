@@ -435,6 +435,12 @@ const GROUP_NAMES = [
   "Coffee Chat",
 ];
 
+/** The group chats Microsoft Teams opened FOR a recurring meeting, as opposed to
+ *  the ones a person started by writing in them. A real tenant is mostly these
+ *  (398 of 499 multi-party threads on the account this was measured against), so
+ *  the seed carries both origins and the sidebar shows both glyphs. */
+const MEETING_GROUP_NAMES = new Set(["Design Sync", "Product Standup"]);
+
 /** Teams and their channels. Each channel gets a full backlog and lives under
  *  the Channels tab only — never in the Chats list. "General" is the team's
  *  default channel and always sorts first within its team. `team_id` is any
@@ -735,6 +741,9 @@ function addConversation(input: {
   isPinned: boolean;
   /** A custom group picture, as on a real tenant where some groups have one. */
   pictureUrl?: string;
+  /** CSA's own `threadType`. Pass `"meeting"` for a thread Teams opened for a
+   *  meeting or a call; omitted, a chat gets `"chat"` like the tenant sends. */
+  threadType?: string;
 }): void {
   const newestTime = Date.now() - Math.floor(rand() * 6 * 24 * 3_600_000); // 0..~6 days ago
   const messages = generateBacklog(input.id, input.kind, input.participants, newestTime);
@@ -751,7 +760,9 @@ function addConversation(input: {
     is_muted: input.isMuted,
     is_pinned: input.isPinned,
     is_hidden: false,
-    thread_type: input.kind === "one_on_one" || input.kind === "group" ? "chat" : "",
+    thread_type:
+      input.threadType ??
+      (input.kind === "one_on_one" || input.kind === "group" ? "chat" : ""),
     draft: "",
     picture_url: input.pictureUrl,
   };
@@ -785,10 +796,14 @@ function seed(): void {
     const memberCount = 3 + Math.floor(rand() * 3); // 3..5 teammates
     const members = sample(PEOPLE, memberCount, rand);
     const slug = groupName.toLowerCase().replace(/[^a-z]+/g, "-");
+    // A meeting-backed thread carries BOTH signals the app reads: the
+    // `19:meeting_…@thread.v2` id Teams mints, and `threadType: "meeting"`.
+    const isMeeting = MEETING_GROUP_NAMES.has(groupName);
     addConversation({
-      id: `19:${slug}-mock@thread.v2`,
+      id: isMeeting ? `19:meeting_${slug}-mock@thread.v2` : `19:${slug}-mock@thread.v2`,
       name: groupName,
       kind: "group",
+      threadType: isMeeting ? "meeting" : undefined,
       participants: members,
       isRead: rand() >= 0.4,
       isMuted: rand() < 0.12,
@@ -1182,9 +1197,12 @@ function seedMediaSamples(): void {
 /** Register a dedicated "Call Events" conversation whose messages are call/meeting
  *  system events (ended with a duration and roster, a missed call, a 1:1 call),
  *  so the UI's centered `CallEventLine` (not a chat bubble) is exercised. Reached
- *  by name in the command palette. */
+ *  by name in the command palette.
+ *
+ *  It is a meeting-backed thread, like every thread that carries these events on a
+ *  real tenant: Teams mints the `19:meeting_…` id when the call starts it. */
 function seedCallEvents(): void {
-  const convId = "19:call-events-demo@thread.v2";
+  const convId = "19:meeting_call-events-demo@thread.v2";
   const other = PEOPLE[0]!;
   const base = Date.now() - 20 * 24 * 60 * 60_000;
   const messages: ChatMessage[] = [];
@@ -1292,7 +1310,7 @@ function seedCallEvents(): void {
     is_muted: false,
     is_pinned: false,
     is_hidden: false,
-    thread_type: "chat",
+    thread_type: "meeting",
     draft: "",
   };
   const cs: ConvState = { conv, messages, participants: [other] };

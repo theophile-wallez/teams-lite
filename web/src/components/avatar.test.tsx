@@ -1,9 +1,11 @@
-// Which picture an avatar loads for a conversation. The rule is per-kind and easy
-// to get subtly wrong, because the two sources are addressed differently: a person
-// by MRI (a profile-photo lookup) and a group chat by URL (hosted content). Every
-// render site goes through `conversationPhoto`, so these pin the mapping once.
+// Which picture an avatar loads for a conversation, and what it draws when there is
+// none. Both rules are per-kind and easy to get subtly wrong: the two picture
+// sources are addressed differently (a person by MRI — a profile-photo lookup — and
+// a group chat by URL — hosted content), and the no-picture glyph states the
+// thread's origin. Every render site goes through `conversationPhoto` and
+// `conversationFallback`, so these pin both mappings once.
 import { describe, it, expect } from "vitest";
-import { conversationPhoto } from "./avatar";
+import { conversationFallback, conversationPhoto } from "./avatar";
 import type { Conversation } from "~/lib/protocol";
 
 function conv(patch: Partial<Conversation>): Conversation {
@@ -47,5 +49,27 @@ describe("conversationPhoto", () => {
     expect(conversationPhoto(conv({ avatar_mri: "", picture_url: "" }))).toBeUndefined();
     // A store row written before the field existed carries neither key.
     expect(conversationPhoto(conv({ kind: "notes" }))).toBeUndefined();
+  });
+});
+
+describe("conversationFallback", () => {
+  it("draws a camera for a thread a meeting or a call created", () => {
+    expect(conversationFallback(conv({ thread_type: "meeting" }))).toBe("meeting");
+    // The id alone is enough, so a row synced before `thread_type` existed still
+    // reads as a meeting.
+    expect(
+      conversationFallback(conv({ id: "19:meeting_YWI2Y2E5MDI@thread.v2", thread_type: "" })),
+    ).toBe("meeting");
+  });
+
+  it("draws two people for a chat somebody started by writing in it", () => {
+    expect(conversationFallback(conv({}))).toBe("group");
+    // A group thread the backend could not classify at all.
+    expect(conversationFallback(conv({ kind: "unknown", thread_type: "" }))).toBe("group");
+  });
+
+  it("leaves a single human and Notes as they were", () => {
+    expect(conversationFallback(conv({ kind: "one_on_one" }))).toBe("person");
+    expect(conversationFallback(conv({ kind: "notes", id: "48:notes" }))).toBe("initials");
   });
 });

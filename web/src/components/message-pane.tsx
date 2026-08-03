@@ -6,13 +6,14 @@ import {
   computeReadReceiptAnchors,
   convLabel,
   copyableMessageText,
+  isMeetingChat,
   type Channel,
   type ChatMessage,
   type Conversation,
 } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
 import { AgentMenu } from "./agent-menu";
-import { Avatar, conversationPhoto, type AvatarPhoto } from "./avatar";
+import { Avatar, conversationFallback, conversationPhoto, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
 import { SystemEventLine } from "./system-event-line";
 import { ReadReceipts } from "./read-receipts";
@@ -472,7 +473,8 @@ export function MessagePane(props: { onBack?: () => void }) {
             seed={openId}
             label={headerLabel}
             photo={headerPhoto}
-            fallback={openConv?.kind === "one_on_one" ? "person" : "initials"}
+            // A channel keeps its team's monogram; a chat states its own kind.
+            fallback={openConv ? conversationFallback(openConv) : "initials"}
             className="size-9"
           />
         )}
@@ -490,7 +492,12 @@ export function MessagePane(props: { onBack?: () => void }) {
             </h2>
           </PersonHoverCard>
           {openConv ? (
-            <p className="truncate text-[11px] text-text-faint">{paneSubtitle(openConv)}</p>
+            <p
+              data-testid="conversation-subtitle"
+              className="truncate text-[11px] text-text-faint"
+            >
+              {paneSubtitle(openConv)}
+            </p>
           ) : openChannel ? (
             <p data-testid="channel-subtitle" className="truncate text-[11px] text-text-faint">
               {channelSubtitle(openChannel)}
@@ -693,12 +700,17 @@ function channelSubtitle(channel: Channel): string {
   return `${team} · Channel`;
 }
 
-/** A short, calm subtitle describing the open conversation. */
+/** A short, calm subtitle describing the open conversation.
+ *
+ *  A multi-party thread names its ORIGIN, because that is what the title cannot
+ *  say: "[Stratumn] Daily" is a thread Teams opened for a recurring meeting, and
+ *  the people in it never chose to chat there. Knowing which of the two a thread
+ *  is tells the reader who is watching it and why it exists. */
 function paneSubtitle(conv: Conversation): string {
   switch (conv.kind) {
     case "group":
     case "unknown":
-      return "Group chat";
+      return isMeetingChat(conv) ? "Meeting chat" : "Group chat";
     case "notes":
       return "Your notes";
     default:

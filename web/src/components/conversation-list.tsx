@@ -32,7 +32,7 @@ import {
 import { formatShortcut, useModifierLabel } from "~/lib/platform";
 import type { SidebarTab } from "~/lib/store";
 import { cn } from "~/lib/utils";
-import { Avatar, conversationPhoto } from "./avatar";
+import { Avatar, conversationFallback, conversationPhoto } from "./avatar";
 import { BrokerBanner } from "./broker-banner";
 import { CalendarSidebar } from "./calendar-sidebar";
 import { useAppState, useController } from "./controller-context";
@@ -580,7 +580,7 @@ function ConversationRow(props: {
         seed={c.id}
         label={label}
         photo={conversationPhoto(c)}
-        fallback={c.kind === "one_on_one" ? "person" : "initials"}
+        fallback={conversationFallback(c)}
       />
 
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">

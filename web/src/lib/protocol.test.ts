@@ -23,6 +23,8 @@ import {
   trimHistoryPage,
   previewLine,
   convLabel,
+  isGroupChat,
+  isMeetingChat,
   channelLabel,
   channelPreviewLine,
   groupChannelsByTeam,
@@ -867,6 +869,41 @@ describe("convLabel", () => {
 
   it("falls back to '(untitled)' otherwise", () => {
     expect(convLabel(conversation({ name: "", kind: "group" }))).toBe("(untitled)");
+  });
+});
+
+describe("isGroupChat / isMeetingChat", () => {
+  // The two signals a tenant sends, each measured against the real account: the id
+  // Teams mints, and CSA's own `threadType`.
+  const MEETING_ID = "19:meeting_YWI2Y2E5MDItNmNhZi00OTM2LTgzZDQ@thread.v2";
+  const CHAT_ID = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
+
+  it("counts every multi-party thread as a group chat", () => {
+    expect(isGroupChat(conversation({ kind: "group" }))).toBe(true);
+    expect(isGroupChat(conversation({ kind: "unknown" }))).toBe(true);
+    expect(isGroupChat(conversation({ kind: "one_on_one" }))).toBe(false);
+    expect(isGroupChat(conversation({ kind: "notes" }))).toBe(false);
+  });
+
+  it("reads a meeting origin from either signal alone", () => {
+    expect(isMeetingChat(conversation({ id: CHAT_ID, thread_type: "meeting" }))).toBe(true);
+    expect(isMeetingChat(conversation({ id: MEETING_ID, thread_type: "" }))).toBe(true);
+    expect(isMeetingChat(conversation({ id: MEETING_ID, thread_type: "meeting" }))).toBe(true);
+  });
+
+  it("leaves a chat a person started as a chat", () => {
+    expect(isMeetingChat(conversation({ id: CHAT_ID, thread_type: "chat" }))).toBe(false);
+    // A row synced before the column existed carries no thread type at all.
+    expect(isMeetingChat(conversation({ id: CHAT_ID, thread_type: "" }))).toBe(false);
+  });
+
+  it("never calls a 1:1 or Notes a meeting", () => {
+    // A meeting thread is always multi-party, so a 1:1 that somehow carried the
+    // signal is bad data — not a meeting.
+    expect(isMeetingChat(conversation({ kind: "one_on_one", thread_type: "meeting" }))).toBe(
+      false,
+    );
+    expect(isMeetingChat(conversation({ kind: "notes", id: "48:notes" }))).toBe(false);
   });
 });
 

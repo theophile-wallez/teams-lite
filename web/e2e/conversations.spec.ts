@@ -41,13 +41,46 @@ test.describe("conversations", () => {
     await row.click();
     await expect(page.locator('[data-testid="conversation-title"]')).toHaveText("Platform Team");
     await expect(page.locator("header img").first()).toBeVisible();
-    // A group WITHOUT a picture keeps its tinted initials — no image at all, which
-    // is what proves the picture is per-chat and not a blanket group avatar.
+    // A group WITHOUT a picture keeps its tinted fallback glyph — no image at all,
+    // which is what proves the picture is per-chat and not a blanket group avatar.
     const plain = page
       .locator('[data-testid="conversation-row"]', { hasText: "Incident Response" })
       .first();
     await expect(plain).toBeVisible();
     await expect(plain.locator("img")).toHaveCount(0);
+  });
+
+  test("a chat states whether a meeting or a person started it", async ({ page }) => {
+    await gotoApp(page);
+    // "Design Sync" is a mock thread Teams opened for a meeting: the sidebar shows
+    // the camera glyph and the header says so in words.
+    const meeting = page
+      .locator('[data-testid="conversation-row"]', { hasText: "Design Sync" })
+      .first();
+    await expect(meeting.locator('[data-testid="avatar-glyph"]')).toHaveAttribute(
+      "data-fallback",
+      "meeting",
+    );
+    await meeting.click();
+    await expect(page.locator('[data-testid="conversation-subtitle"]')).toHaveText("Meeting chat");
+
+    // "Incident Response" is a chat somebody started by writing in it.
+    const group = page
+      .locator('[data-testid="conversation-row"]', { hasText: "Incident Response" })
+      .first();
+    await expect(group.locator('[data-testid="avatar-glyph"]')).toHaveAttribute(
+      "data-fallback",
+      "group",
+    );
+    await group.click();
+    await expect(page.locator('[data-testid="conversation-subtitle"]')).toHaveText("Group chat");
+
+    // A 1:1 is neither, and keeps the person avatar it always had.
+    const direct = page
+      .locator('[data-testid="conversation-row"][data-conversation-id*="unq.gbl.spaces"]')
+      .first();
+    await expect(direct).toBeVisible();
+    await expect(direct.locator('[data-testid="avatar-glyph"]')).toHaveCount(0);
   });
 
   test("virtualized sidebar scrolls to reveal more conversations", async ({ page }) => {
