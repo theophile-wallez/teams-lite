@@ -308,8 +308,11 @@ const PRESENCE_TTL_MS = 30_000;
 // map it replaces held the misread `is_favorite` flag (Teams' Show/Hide switch, see
 // `channelIsShown`), so an old entry would pin channels the user never pinned.
 const CHANNEL_PINS_KEY = "teams-lite:channel-pins";
-// And which sidebar team sections the user has collapsed (client-only too — Teams
-// keeps this per install, not per account).
+// And which sidebar team sections the user has collapsed. Client-only, and that is a
+// choice rather than a limit: CSA does report a team's own fold state (`isCollapsed`,
+// false on all 12 teams here — see examples/team_order_recon.rs), so wiring it is
+// possible. Folding a team is a per-screen decision, and a 320px column is not the
+// window their desktop client has.
 const COLLAPSED_TEAMS_KEY = "teams-lite:collapsed-teams";
 // How many conversations keep a cached message page at all. Re-opening one of
 // these is instant; beyond that the least-recently-opened page is dropped, so a

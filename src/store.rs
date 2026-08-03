@@ -72,8 +72,13 @@ CREATE TABLE IF NOT EXISTS settings (
 -- table keyed by its thread id, so open/backfill/send/react reuse the same
 -- pipeline unchanged. Fresh stores get the full column set here; stores created
 -- before a column was added are healed by the guarded ALTERs in migrate().
--- `team_pos`/`channel_pos` hold the CSA array order so the sidebar mirrors the
--- user's own team/channel order in Microsoft Teams (not an alphabetical sort).
+-- `team_pos`/`channel_pos` hold the CSA array order, which is the ONLY order the
+-- payload states: no team and no channel carries a rank, an order or a position key
+-- (measured — see examples/team_order_recon.rs). The array order matches no sort of
+-- any field CSA does send, so it is a server-held arrangement and the honest thing to
+-- mirror. It is not an alphabetical sort, and it is not the display order outright:
+-- CSA puts General LAST in a team (index 41 of 42 in one team here), so the read
+-- forces General first the way Microsoft Teams shows it.
 CREATE TABLE IF NOT EXISTS channels (
     id                    TEXT PRIMARY KEY,
     team_id               TEXT NOT NULL DEFAULT '',
@@ -661,11 +666,12 @@ pub struct ChannelUpdate<'a> {
     pub last_message_sender: &'a str,
     pub last_message_from_me: bool,
     pub is_read: bool,
-    /// Zero-based index of the parent team in the CSA `teams` array — the user's
-    /// own team order in Microsoft Teams. Drives the sidebar's team ordering.
+    /// Zero-based index of the parent team in the CSA `teams` array. Drives the
+    /// sidebar's team ordering, because CSA states no rank of its own (see the
+    /// `channels` DDL above).
     pub team_pos: i64,
-    /// Zero-based index of the channel within its team's `channels` array — the
-    /// user's own channel order (General is still pinned first by the query).
+    /// Zero-based index of the channel within its team's `channels` array. General is
+    /// still pinned first by the query — CSA does not put it there.
     pub channel_pos: i64,
     /// What the user's own Microsoft Teams notification setting allows here.
     pub alerts: ChannelAlerts,
@@ -1905,9 +1911,9 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// All channels, grouped for the sidebar tree in the user's own Microsoft Teams
-    /// order: by the team's CSA position, then General first within a team, then the
-    /// channel's CSA position. Alphabetical tie-breakers keep the order deterministic
+    /// All channels, grouped for the sidebar tree in the order CSA reported them: by
+    /// the team's CSA position, then General first within a team, then the channel's
+    /// CSA position. Alphabetical tie-breakers keep the order deterministic
     /// for rows that share a position (e.g. legacy rows synced before positions
     /// existed, which all default to 0). Empty channels are never inserted, so every
     /// row here has content.

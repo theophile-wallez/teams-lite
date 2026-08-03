@@ -1392,9 +1392,9 @@ export type ChannelSections = {
 };
 
 /**
- * Split the (Teams-ordered) channel list into the pinned section and the team tree.
+ * Split the (backend-ordered) channel list into the pinned section and the team tree.
  * A pinned channel is lifted out of its team into a single flat list, preserving the
- * incoming order (the user's own Microsoft Teams order); everything else keeps its
+ * incoming order (the order CSA reported, General first); everything else keeps its
  * team grouping via {@link groupChannelsByTeam}, which also splits each team's
  * hidden channels out. Pure, so the sidebar re-renders deterministically.
  */

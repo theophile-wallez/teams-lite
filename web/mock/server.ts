@@ -3476,11 +3476,11 @@ function dispatch(method: string, params: unknown): unknown {
     }
 
     case "channels": {
-      // The user's own Microsoft Teams order: the seed insertion order
-      // (team-by-team, General first within each team), which is exactly what the
-      // Rust `channels()` query now returns (team_pos, General-first, channel_pos)
-      // — NOT an alphabetical sort. `channelOrder` already holds ids in that order,
-      // and the sidebar's `groupChannelsByTeam` preserves it.
+      // The order the Rust `channels()` query returns: the seed insertion order
+      // (team-by-team, General first within each team), which is what team_pos,
+      // General-first and channel_pos add up to — NOT an alphabetical sort.
+      // `channelOrder` already holds ids in that order, and the sidebar's
+      // `groupChannelsByTeam` preserves it.
       return channelOrder.map((id) => ({ ...channelStore.get(id)!.channel }));
     }
 
