@@ -34,6 +34,10 @@
 #   2c. a cargo EXAMPLE that posts to Teams without pinning the sandbox channel. An
 #      example holds a broker token and talks to Teams directly, so no port and no
 #      write token stands between it and a colleague's chat;
+#   2d. a WRITE of the user's read position straight to Teams
+#      (`PUT …/properties?name=consumptionhorizon`), which marks a thread read on
+#      every device they own and shows the sender a read receipt. The gated
+#      `mark_read` RPC is the only way that may happen;
 #   5. anything that would send MAIL. The mailbox is read-only here and has no
 #      sandbox equivalent (see AGENTS.md § Mail is READ-ONLY): the broker token
 #      already carries `Mail.Send`, so the only thing standing between this
@@ -257,9 +261,11 @@ while IFS= read -r source; do
   [ -z "$source" ] && continue
   path="$project_dir/$source"
   [ -f "$path" ] || continue
-  # Does it act outward at all? Either through this crate's send path, or by naming
-  # the chatService messages endpoint itself.
-  grep -qE 'teams_send::(send_message|edit_message|set_reaction)|/v1/users/ME/conversations/[^"]*/messages' \
+  # Does it act outward at all? Through this crate's send path, by naming the
+  # chatService messages endpoint itself, or by publishing our read position — a
+  # horizon write tells the other party the user read their message, which reaches
+  # them exactly as a post does (see `set_consumption_horizon`).
+  grep -qE 'teams_send::(send_message|edit_message|set_reaction)|/v1/users/ME/conversations/[^"]*/messages|set_consumption_horizon|name=consumptionhorizon([^s]|$)' \
     "$path" || continue
   # Then every conversation it names must be the sandbox one — and it must name one.
   # A send whose target comes from an argument is a send waiting for a typo.
@@ -272,6 +278,7 @@ done <<<"$(example_sources_the_command_runs)"
 scripts_driving_a_browser=""
 scripts_writing_to_the_backend=""
 scripts_sending_mail=""
+scripts_writing_the_read_state=""
 scripts_fetching_the_write_token=""
 if ! sanctioned_automation; then
   while IFS= read -r script; do
@@ -285,8 +292,18 @@ if ! sanctioned_automation; then
     if grep -qiE 'sendMail|/messages/[^"'\'' ]*/send|graph\.microsoft\.com[^"'\'' ]*/(move|copy)' "$script"; then
       scripts_sending_mail="$scripts_sending_mail $script"
     fi
+    # The read state, straight to Teams: WRITING our own consumption horizon marks a
+    # thread read on every device the user owns and shows the sender a read receipt.
+    # Only the singular `properties?name=consumptionhorizon` PUT (and the function that
+    # issues it) is matched — the PLURAL `consumptionhorizons` GET is how "seen by" is
+    # read, which is ordinary recon and must stay open.
+    if grep -qiE 'name=consumptionhorizon([^s]|$)|set_consumption_horizon' "$script"; then
+      scripts_writing_the_read_state="$scripts_writing_the_read_state $script"
+    fi
     # READING the live backend is fine and often the point (inspecting real data
     # beats guessing). WRITING is not: `send`/`edit`/`react` post as the user,
+    # `mark_read` publishes the user's read position (which clears the unread marker
+    # on every device they own and shows the sender a read receipt), and
     # `push_subscribe`/`push_unsubscribe`/`push_test` change which devices the machine
     # sends the user's message previews to — a phone buzzed by tooling, or a stream
     # aimed at a new endpoint — and `set_settings` writes the integration credentials,
@@ -307,7 +324,7 @@ if ! sanctioned_automation; then
     # arm the local agent that answers `@claude` in a Teams thread AS the user, and
     # decide what it may run on this machine (MACHINE_METHODS in src/bin/server.rs).
     if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|react|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)"|'\''(send|edit|react|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|react|mark_read|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)"|'\''(send|edit|react|mark_read|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that
@@ -326,10 +343,11 @@ a tailnet name):
    ${scripts_writing_to_the_backend# }
 
 Reading the live backend is fine — inspect all the real data you need. Writing is
-not: send/edit/react post to real people as the user, and the push_* methods decide
-which of the user's devices this machine notifies. The backend refuses writes
-without the capability token it publishes for the user's own frontends (see the
-write lock in src/bin/server.rs), and this hook refuses to run the attempt at all.
+not: send/edit/react post to real people as the user, mark_read tells them the user
+read their message, and the push_* methods decide which of the user's devices this
+machine notifies. The backend refuses writes without the capability token it
+publishes for the user's own frontends (see the write lock in src/bin/server.rs),
+and this hook refuses to run the attempt at all.
 
 Exercise write flows against the mock: cd web && bun run preview."
 fi
@@ -405,6 +423,37 @@ the conversation as a const:
 and name no other, so the file cannot post anywhere the user has not pre-authorized
 (AGENTS.md § Sending messages). See examples/agent_stream_probe.rs for the shape.
 A send to any other conversation needs the user's consent for that exact message."
+fi
+
+# --- 1d. the read state goes to Teams through the gated RPC, or not at all -----
+# `mark_read` is guarded as a backend write by rule 1, but the horizon can also be
+# PUT straight to Teams with the skypetoken, which bypasses the backend entirely (the
+# write token, read-only mode, Ghost mode — all of it). So the endpoint is matched
+# inside ad-hoc scripts, and on the command line.
+#
+# On the command line, only behind an HTTP CLIENT — the same restriction rule 1a puts
+# on the write token, and for the same reason: `grep -rn name=consumptionhorizon src`
+# reads the code that implements this and must stay allowed, or the guard's next reader
+# learns to phrase searches around it.
+if printf '%s' "$command_line" |
+  grep -qiE '(curl|wget|xh|httpie|http)[^;&|]*name=consumptionhorizon' ||
+  [ -n "$scripts_writing_the_read_state" ]; then
+  [ -n "$scripts_writing_the_read_state" ] &&
+    printf 'note: a read-state write was found inside%s\n' "$scripts_writing_the_read_state" >&2
+  block "This command would WRITE the user's read position straight to Teams
+(PUT …/properties?name=consumptionhorizon).
+
+That is outward-facing twice over: the unread marker clears on every device the user
+is signed in on, and the sender is shown a read receipt saying the user read their
+message. Neither can be undone.
+
+Going direct also bypasses every gate the feature has: the write token, read-only
+mode, and Ghost mode (which exists precisely so a read can stay local).
+
+READING horizons is fine and is how \"seen by\" works — GET …/consumptionhorizons
+(plural) is untouched by this rule. To exercise the write, use the mock:
+cd web && bun run preview. Against the real account it needs the user's consent,
+through the app's own gated mark_read RPC."
 fi
 
 # `probing_processes` and `recording_a_message` exempt only the COMMAND-LINE half: a

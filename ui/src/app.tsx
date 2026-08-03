@@ -189,6 +189,25 @@ function cancelReply(): void {
   }
 }
 
+// The newest message id already declared as read, per thread — marking read is a
+// network write, so a re-open of an unchanged thread must not repeat it.
+const markedReadUpTo = new Map<string, string>();
+
+/// Tell the backend the user has read this thread up to the newest message we hold.
+/// Why it exists: Teams owns the unread flag, so without this an unread conversation
+/// keeps coming back unread on every sync. Unless Ghost mode is on, the backend also
+/// publishes the position to Teams, which clears the marker on the user's phone and
+/// desktop app.
+///
+/// Best-effort: a failure leaves the marker alone (the next open retries) rather than
+/// putting an error in front of someone who only wanted to read a chat.
+function markThreadRead(id: string) {
+  const newest = messageCache.get(id)?.messages.at(-1)?.id;
+  if (!newest || markedReadUpTo.get(id) === newest) return;
+  markedReadUpTo.set(id, newest);
+  backend.markRead(id).catch(() => markedReadUpTo.delete(id));
+}
+
 async function openConversation(id: string) {
   const previousId = openId();
   if (previousId && previousId !== id) flushDraft(previousId);
@@ -228,6 +247,7 @@ async function openConversation(id: string) {
       setMessages(history.messages);
       setHasMoreOlderMessages(history.has_more);
     }
+    markThreadRead(id);
   } catch (e: any) {
     // Only surface the error if we have nothing cached to fall back on.
     if (openId() === id && !cached) setMessagesError(e?.message ?? String(e));
@@ -370,8 +390,11 @@ function ConversationList() {
               isOpen() ? theme().text : c.is_muted ? theme().textMuted : unread() ? theme().text : theme().textDim;
             const previewFg = () =>
               isOpen() ? theme().textDim : unread() && !c.is_muted ? theme().textMuted : theme().textFaint;
-            // The attention dot: only for unread, non-muted threads.
-            const dot = () => (unread() && !c.is_muted ? "●" : " ");
+            // The attention dot: only for unread, non-muted threads. A hollow dot
+            // stands where it would have been when the thread was read in Ghost mode —
+            // read here, still unread on Teams, so the sender was never told.
+            const dot = () =>
+              unread() && !c.is_muted ? "●" : c.is_ghost_read ? "◌" : " ";
             const preview = () => clip(previewLine(c), 29);
             return (
               <box
@@ -380,7 +403,10 @@ function ConversationList() {
                 onMouseOver={() => setHoveredId(c.id)}
                 onMouseOut={() => setHoveredId((h) => (h === c.id ? null : h))}
               >
-                <text content={dot()} style={{ fg: theme().unreadDot }} />
+                <text
+                  content={dot()}
+                  style={{ fg: unread() ? theme().unreadDot : theme().textFaint }}
+                />
                 <box style={{ flexDirection: "column", flexGrow: 1, paddingLeft: 1 }}>
                   <text content={clip(convLabel(c), 29)} style={{ fg: titleFg() }} />
                   <text content={preview()} style={{ fg: previewFg() }} />

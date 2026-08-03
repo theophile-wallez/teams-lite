@@ -39,6 +39,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
 //   bun run web/scripts/preview.ts --out /tmp/preview --scrolled # history scrolled up (jump button)
+//   bun run web/scripts/preview.ts --out /tmp/ghost --ghost     # read state + Ghost mode
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -468,6 +469,39 @@ export async function openReactionPicker(page: Page): Promise<void> {
 }
 
 /**
+ * Open the Settings pane and set Ghost mode on or off, then return to a state a
+ * capture can use. Ghost mode decides whether reading a chat is declared to Teams
+ * (see the `mark_read` RPC), so the switch is a write affordance like the others
+ * here — hence the sentinel — and against the mock it changes nothing but the mock's
+ * own settings row.
+ */
+export async function setGhostMode(page: Page, on: boolean): Promise<void> {
+  await assertMockBackend(page);
+  await page.locator('[data-testid="open-settings"]').click();
+  const toggle = page.locator('[data-testid="ghost-mode-toggle"]');
+  await toggle.waitFor({ state: "visible" });
+  if ((await toggle.getAttribute("aria-checked")) !== String(on)) await toggle.click();
+  // Source text, not a closure: this file type-checks under the node tsconfig (no DOM
+  // lib), and the body runs in the page — same idiom as `setTheme` above.
+  await page.waitForFunction(
+    `document.querySelector('[data-testid="ghost-mode-toggle"]')` +
+      `?.getAttribute("aria-checked") === ${JSON.stringify(String(on))}`,
+  );
+  await page.waitForTimeout(200);
+}
+
+/**
+ * Open the first UNREAD chat, which is what has an unread marker to clear. Returns
+ * its id like {@link openFirstConversation}, or throws when the fixture set has no
+ * unread row left (a previous open in the same session reads them one by one).
+ */
+export async function openFirstUnreadConversation(page: Page): Promise<string> {
+  const row = page.locator('[data-testid="conversation-row"][data-unread="true"]').first();
+  if ((await row.count()) === 0) throw new Error("[preview] no unread conversation in the sidebar");
+  return openRow(page, row);
+}
+
+/**
  * Read the open conversation upward by `screens` viewports, then wait for the
  * history to settle. This is what puts the pane in the one state where the
  * jump-to-latest button matters: the newest message off-screen below.
@@ -778,6 +812,42 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-{month,month-all,week,details,day,agenda,workweek,mobile,` +
           `mobile-details}-light.png and ${out}-{month,week}-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // The read state: an unread chat losing its marker when it is opened, and the same
+  // read taken in Ghost mode — where the marker clears but Teams is never told, which
+  // the row says with a ghost beside it. Both halves are only visible in the sidebar,
+  // so each capture is of the whole window.
+  if (args.includes("--ghost")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      // The setting itself first: off by default, which is the state to review.
+      await setGhostMode(page, false);
+      await shot(`${out}-settings-light.png`);
+
+      // A normal read: the marker goes, and nothing takes its place.
+      await openFirstUnreadConversation(page);
+      await page.waitForTimeout(400);
+      await shot(`${out}-read-light.png`);
+
+      // The same read with Ghost mode on: marker gone, ghost shown.
+      await setGhostMode(page, true);
+      await shot(`${out}-settings-on-light.png`);
+      await openFirstUnreadConversation(page);
+      await page.waitForSelector('[data-testid="ghost-read-mark"]');
+      await page.waitForTimeout(400);
+      await shot(`${out}-ghost-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-ghost-dark.png`);
+
+      // Leave the shared mock as it was found, or a later capture runs in Ghost mode.
+      await setTheme("light");
+      await setGhostMode(page, false);
+      console.log(
+        `[preview] wrote ${out}-{settings,read,settings-on,ghost}-light.png and ` +
+          `${out}-ghost-dark.png`,
       );
     });
     process.exit(0);

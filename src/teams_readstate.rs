@@ -15,9 +15,12 @@
 // so it maps directly onto a message's `id`/`seq`); the reader has seen every
 // message up to and including it. Field 1 is when they read it.
 //
-// STRICTLY READ-ONLY: this module only ever GETs horizons and decodes pushes. It
-// never PUTs our own horizon — marking a thread read is a write to Teams, which
-// (like sending) requires explicit user consent and is out of scope here.
+// One WRITE lives here — [`set_consumption_horizon`], which moves OUR OWN horizon
+// and is what marks a thread read (see the `mark_read` RPC in src/bin/server.rs).
+// It is outward-facing: it clears the unread marker in every Teams client the user
+// owns AND shows a read receipt to the other party, so it is gated exactly like
+// sending — the write token, refused read-only, and an `OUTWARD_METHODS` entry.
+// Nothing else in this module writes: the two fetches above only GET.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -73,6 +76,57 @@ pub async fn fetch_consumption_horizons(
     }
     let v: Value = serde_json::from_str(&body).context("parse consumptionhorizons")?;
     Ok(parse_consumption_horizons(&v))
+}
+
+/// Move OUR OWN read position to `last_read_message_id` — the write that marks a
+/// conversation read.
+///
+/// OUTWARD: Teams propagates the new horizon to every client the user is signed in
+/// on (the unread marker clears on their phone and in the desktop app) and shows it
+/// to the other party as a read receipt. Only the gated `mark_read` RPC calls this.
+///
+/// Hits the conversation's `consumptionhorizon` property with the skypetoken, the
+/// same auth scheme the fetch above uses. `read_time_ms` is when the user read it
+/// (epoch ms); the third horizon field is a client message id Teams does not need
+/// here, so it is `0`. Verified against the live tenant: the PUT answers 200 and the
+/// CSA aggregator then reports the thread as read.
+pub async fn set_consumption_horizon(
+    http: &reqwest::Client,
+    session: &crate::teams::Session,
+    conversation_id: &str,
+    last_read_message_id: &str,
+    read_time_ms: i64,
+) -> Result<()> {
+    let chat_service = session
+        .endpoint("chatService")
+        .context("no chatService endpoint in regionGtms")?
+        .trim_end_matches('/');
+    let url = format!(
+        "{chat_service}/v1/users/ME/conversations/{}/properties?name=consumptionhorizon",
+        urlencoding::encode(conversation_id)
+    );
+    let resp = http
+        .put(&url)
+        .header("authentication", format!("skypetoken={}", session.skypetoken))
+        .json(&serde_json::json!({
+            "consumptionhorizon": horizon_value(last_read_message_id, read_time_ms)
+        }))
+        .send()
+        .await
+        .context("consumptionhorizon PUT")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("consumptionhorizon PUT -> {status} {}", body.trim());
+    }
+    Ok(())
+}
+
+/// Format a horizon for the wire: `"<lastReadMessageId>;<readTimeMs>;<clientMessageId>"`,
+/// the exact shape [`parse_horizon`] decodes. Pure, so the wire format is pinned by a
+/// unit test instead of by a live call.
+pub fn horizon_value(last_read_message_id: &str, read_time_ms: i64) -> String {
+    format!("{last_read_message_id};{read_time_ms};0")
 }
 
 /// Parse the `consumptionhorizons` response into read positions, dropping members
@@ -169,6 +223,21 @@ mod tests {
     fn live_push_never_read_is_none() {
         let content = json!({ "user": "8:orgid:x", "consumptionhorizon": "0;0;0" }).to_string();
         assert!(parse_horizon_update_content(&content).is_none());
+    }
+
+    // The horizon we write must be the exact shape we read back, or Teams silently
+    // keeps the thread unread. Round-tripping our own formatter through the parser
+    // pins both halves at once.
+    #[test]
+    fn our_horizon_round_trips_through_the_parser() {
+        let wire = horizon_value("1784217926767", 1784217930000);
+        assert_eq!(wire, "1784217926767;1784217930000;0");
+        let v = json!({
+            "consumptionhorizons": [{ "id": "8:orgid:me", "consumptionhorizon": wire }]
+        });
+        let h = &parse_consumption_horizons(&v)[0];
+        assert_eq!(h.last_read_message_id, "1784217926767");
+        assert_eq!(h.read_time_ms, 1784217930000);
     }
 
     #[test]

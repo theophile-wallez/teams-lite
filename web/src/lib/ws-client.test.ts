@@ -201,6 +201,29 @@ describe("Backend request/response", () => {
     backend.close();
   });
 
+  // mark_read publishes the user's read position to Teams, so it must travel as a
+  // WRITE: the backend refuses it without the capability token, exactly like a send.
+  it("frames mark_read as a write, carrying the write token", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("tok");
+
+    const promise = backend.markRead("c1");
+
+    const frame = JSON.parse(socket.sent[0]!) as {
+      id: number;
+      method: string;
+      params?: Record<string, unknown>;
+    };
+    expect(frame.method).toBe("mark_read");
+    expect(frame.params).toEqual({ conversation: "c1", write_token: "tok" });
+
+    socket.simulateMessage(
+      JSON.stringify({ id: frame.id, result: { read: true, ghost: false } }),
+    );
+    await expect(promise).resolves.toEqual({ read: true, ghost: false });
+    backend.close();
+  });
+
   it("frames a fetch_avatar request with kind and id, resolving the photo result", async () => {
     const { backend, socket } = await connected();
 

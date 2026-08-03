@@ -57,7 +57,12 @@ export type Conversation = {
   last_message_preview: string;
   last_message_sender: string;
   last_message_from_me: boolean;
+  // Teams' own read flag OR our local read position, so opening a thread clears the
+  // marker for good (see `mark_read` in src/bin/server.rs).
   is_read: boolean;
+  // Read HERE ONLY: the user read it in Ghost mode, so Teams still holds it unread and
+  // the sender saw no read receipt.
+  is_ghost_read?: boolean;
   is_muted: boolean;
   is_pinned: boolean;
   is_hidden: boolean;
@@ -302,6 +307,13 @@ export class Backend {
   }
   edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {
     return this.writeRequest("edit", { conversation, message_id: messageId, text });
+  }
+  /// Mark a conversation read up to its newest message — what opening an unread
+  /// thread does. Outward, hence the write token: unless Ghost mode is on the backend
+  /// publishes the read position to Teams, which clears the marker on the user's other
+  /// devices and shows the sender a read receipt. `ghost` says which happened.
+  markRead(conversation: string): Promise<{ read: boolean; ghost: boolean }> {
+    return this.writeRequest("mark_read", { conversation });
   }
 
   // ---- events -------------------------------------------------------------

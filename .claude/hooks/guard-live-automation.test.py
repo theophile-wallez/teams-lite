@@ -37,6 +37,23 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'send' }));\n"
     ),
+    # Marking a thread read is a write: the sender is shown a read receipt.
+    "mark-read-writer.ts": (
+        "// Marks a real conversation read through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'mark_read' }));\n"
+    ),
+    # The same write, straight to Teams — bypassing the backend's gate entirely.
+    "horizon-writer.ts": (
+        "// PUTs our own consumption horizon to Teams.\n"
+        "await fetch(`${chat}/v1/users/ME/conversations/${id}/properties?name=consumptionhorizon`,\n"
+        "  { method: 'PUT', body: JSON.stringify({ consumptionhorizon: '1;2;0' }) });\n"
+    ),
+    # Reading every member's position is how "seen by" works: ordinary recon.
+    "horizon-reader.ts": (
+        "// GETs the read positions of a thread.\n"
+        "await fetch(`${chat}/v1/threads/${id}/consumptionhorizons`);\n"
+    ),
     "backend-reader.ts": (
         "// Reads the real backend, which is allowed.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
@@ -146,6 +163,14 @@ EXAMPLE_FIXTURES = {
         "const SANDBOX: &str = \"19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2\";\n"
         "fn main() { teams_send::send_message(&http, &session, &ic3, SANDBOX, \"hi\"); }\n"
     ),
+    # A read-state write, pinned to nothing: outward all the same, since the sender
+    # is shown a receipt. Refused by the same rule as a send.
+    "guard-test-horizon-write.rs": (
+        "fn main() {\n"
+        "    let conversation = std::env::args().nth(1).unwrap();\n"
+        "    teams_readstate::set_consumption_horizon(&http, &session, &conversation, \"1\", 2);\n"
+        "}\n"
+    ),
     # An example that only READS needs no target at all.
     "guard-test-read-only.rs": (
         "fn main() { teams_read::history(&http, &session, \"19:whatever@thread.v2\"); }\n"
@@ -180,6 +205,19 @@ def cases(tmp: Path):
         # A cargo example reaches Teams with a broker token, past every port rule.
         ("BLOCK", PROJECT, "cargo run --example guard-test-loose-send"),
         ("BLOCK", PROJECT, "cargo run --example guard-test-real-send"),
+        # …including one that only moves the READ position: the sender is still shown
+        # a receipt saying the user read their message.
+        ("BLOCK", PROJECT, "cargo run --example guard-test-horizon-write"),
+        # Marking a thread read tells the sender the user read their message.
+        ("BLOCK", PROJECT, f"bun run {tmp}/mark-read-writer.ts"),
+        # …and going straight to Teams bypasses every gate the RPC has.
+        ("BLOCK", PROJECT, f"bun run {tmp}/horizon-writer.ts"),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X PUT 'https://fr.ng.msg.teams.microsoft.com/v1/users/ME/"
+            "conversations/19:x/properties?name=consumptionhorizon'",
+        ),
         # The write token is the capability itself — never ours to fetch.
         ("BLOCK", PROJECT, f"bun run {tmp}/token-thief.ts"),
         ("BLOCK", PROJECT, "curl -s http://127.0.0.1:19440/__write-token"),
@@ -213,6 +251,13 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/backend-reader.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/relay-reader.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/dev-backend-reader.ts"),
+        # Reading the read positions is how "seen by" works — plural GET, allowed.
+        ("ALLOW", PROJECT, f"bun run {tmp}/horizon-reader.ts"),
+        # Reading the code that implements the write is ordinary work, like any search.
+        ("ALLOW", PROJECT, 'grep -rn "name=consumptionhorizon" src'),
+        ("ALLOW", PROJECT, "grep -rn set_consumption_horizon src ui web"),
+        # A TRACKED example is reviewed code, and this one only reads.
+        ("ALLOW", PROJECT, "cargo run --example readstate_recon -- --conv 19:x"),
         # Which devices are subscribed is a read, like any other status question.
         ("ALLOW", PROJECT, f"bun run {tmp}/push-status-reader.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/settings-reader.ts"),

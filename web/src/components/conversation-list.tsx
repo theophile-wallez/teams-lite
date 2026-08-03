@@ -4,6 +4,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   BellOff,
   ChevronRight,
+  Ghost,
   MoonStar,
   Search,
   Settings as SettingsIcon,
@@ -439,6 +440,23 @@ function ChannelSection(props: {
   );
 }
 
+/** The Ghost-mode read mark: this thread is read HERE, and Teams was never told, so
+ *  the sender still sees it as unread. It stands where the unread dot stood, because it
+ *  answers the question that dot's absence raises — "did they see that I read it?".
+ *  Renders nothing at all when the thread was read normally, which is the default. */
+function GhostReadMark(props: { on?: boolean }) {
+  if (!props.on) return null;
+  return (
+    <span
+      data-testid="ghost-read-mark"
+      title="Read in Ghost mode — Teams still shows this as unread, and the sender saw no read receipt."
+      className="shrink-0 text-text-faint"
+    >
+      <Ghost className="size-3.5" strokeWidth={1.6} aria-label="Read in Ghost mode" />
+    </span>
+  );
+}
+
 function ConversationRow(props: {
   conversation: Conversation;
   open: boolean;
@@ -528,8 +546,10 @@ function ConversationRow(props: {
               {preview || " "}
             </span>
           )}
-          {unread && (
+          {unread ? (
             <span className="size-2 shrink-0 rounded-full bg-unread-dot" aria-hidden />
+          ) : (
+            <GhostReadMark on={c.is_ghost_read} />
           )}
         </span>
       </span>
@@ -612,6 +632,7 @@ function ChannelRow(props: {
             <BellOff className="size-3" aria-hidden />
           </span>
         )}
+        <GhostReadMark on={c.is_ghost_read} />
         {/* Date, hidden on hover and once favorited so the star can take its place. */}
         {time && (
           <time

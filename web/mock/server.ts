@@ -12,7 +12,8 @@
 //   event    (server -> client):  { "event": "<name>", "data": <v> }   (no id)
 //
 // Methods: ping | conversations | channels | open | backfill | set_draft | send
-//          | edit | react | notifications | read_receipts | fetch_media | fetch_avatar
+//          | edit | react | mark_read | notifications | read_receipts | fetch_media
+//          | fetch_avatar
 //          | profile | presence
 //          | get_settings | set_settings | enrich_link
 //          | push_status | push_subscribe | push_unsubscribe | push_test
@@ -79,6 +80,8 @@ type Conversation = {
   last_message_sender: string;
   last_message_from_me: boolean;
   is_read: boolean;
+  /** Read HERE ONLY (Ghost mode): the marker is clear, Teams still holds it unread. */
+  is_ghost_read: boolean;
   is_muted: boolean;
   is_pinned: boolean;
   is_hidden: boolean;
@@ -113,6 +116,8 @@ type Channel = {
   last_message_sender: string;
   last_message_from_me: boolean;
   is_read: boolean;
+  /** Read HERE ONLY (Ghost mode) — see `Conversation.is_ghost_read`. */
+  is_ghost_read: boolean;
   draft: string;
 };
 
@@ -728,6 +733,7 @@ function addConversation(input: {
     last_message_sender: "",
     last_message_from_me: false,
     is_read: input.isRead,
+    is_ghost_read: false,
     is_muted: input.isMuted,
     is_pinned: input.isPinned,
     is_hidden: false,
@@ -825,6 +831,7 @@ function seedChannels(): void {
         last_message_sender: "",
         last_message_from_me: false,
         is_read: rand() >= 0.4,
+        is_ghost_read: false,
         draft: "",
       };
       const chs: ChannelState = { channel, messages, participants };
@@ -1042,6 +1049,7 @@ function seedMediaSamples(): void {
     last_message_sender: "",
     last_message_from_me: false,
     is_read: true,
+    is_ghost_read: false,
     is_muted: false,
     is_pinned: false,
     is_hidden: false,
@@ -1163,6 +1171,7 @@ function seedCallEvents(): void {
     last_message_sender: "",
     last_message_from_me: false,
     is_read: true,
+    is_ghost_read: false,
     is_muted: false,
     is_pinned: false,
     is_hidden: false,
@@ -1249,6 +1258,7 @@ function seedDeletedMessages(): void {
     last_message_sender: "",
     last_message_from_me: false,
     is_read: true,
+    is_ghost_read: false,
     is_muted: false,
     is_pinned: false,
     is_hidden: false,
@@ -1342,6 +1352,7 @@ function seedMentionSamples(): void {
     last_message_sender: "",
     last_message_from_me: false,
     is_read: true,
+    is_ghost_read: false,
     is_muted: false,
     is_pinned: false,
     is_hidden: false,
@@ -1435,6 +1446,7 @@ function seedGitLabSamples(): void {
     last_message_sender: "",
     last_message_from_me: false,
     is_read: true,
+    is_ghost_read: false,
     is_muted: false,
     is_pinned: false,
     is_hidden: false,
@@ -1520,6 +1532,7 @@ function seedLinearSamples(): void {
     last_message_sender: "",
     last_message_from_me: false,
     is_read: true,
+    is_ghost_read: false,
     is_muted: false,
     is_pinned: false,
     is_hidden: false,
@@ -1564,6 +1577,7 @@ function addFixtureConversation(convId: string, name: string, messages: ChatMess
     last_message_sender: "",
     last_message_from_me: false,
     is_read: true,
+    is_ghost_read: false,
     is_muted: false,
     is_pinned: false,
     is_hidden: false,
@@ -2192,6 +2206,8 @@ const mockSettings = {
   // the seeded Linear conversation would show four bare URLs and no cards. Any
   // non-empty string does — this mock never contacts Linear.
   linear_token: "lin_api_mock",
+  // Off, like the real backend's default: opening a chat reads it on Teams too.
+  ghost_mode: false,
 };
 
 /** Devices that "subscribed" to push notifications, keyed by endpoint (the real
@@ -2232,12 +2248,14 @@ function settingsView(): {
   gitlab_host: string;
   gitlab_token_set: boolean;
   linear_token_set: boolean;
+  ghost_mode: boolean;
 } {
   const host = mockSettings.gitlab_host.trim() || "gitlab.com";
   return {
     gitlab_host: host,
     gitlab_token_set: mockSettings.gitlab_token.length > 0,
     linear_token_set: mockSettings.linear_token.length > 0,
+    ghost_mode: mockSettings.ghost_mode,
   };
 }
 
@@ -2547,6 +2565,9 @@ type Thread = {
   getDraft: () => string;
   setDraft: (text: string) => void;
   setRead: (read: boolean) => void;
+  /** Mark the thread read up to its newest message. `ghost` records that Teams was
+   *  never told, which is what the sidebar's ghost icon reflects. */
+  markRead: (ghost: boolean) => void;
   recompute: () => void;
   changedEvent: "conversations_changed" | "channels_changed";
 };
@@ -2565,6 +2586,10 @@ function threadFor(id: string): Thread | null {
       setRead: (read) => {
         cs.conv.is_read = read;
       },
+      markRead: (ghost) => {
+        cs.conv.is_read = true;
+        cs.conv.is_ghost_read = ghost;
+      },
       recompute: () => recomputeSummary(cs),
       changedEvent: "conversations_changed",
     };
@@ -2580,6 +2605,10 @@ function threadFor(id: string): Thread | null {
       },
       setRead: (read) => {
         chs.channel.is_read = read;
+      },
+      markRead: (ghost) => {
+        chs.channel.is_read = true;
+        chs.channel.is_ghost_read = ghost;
       },
       recompute: () => recomputeChannelSummary(chs),
       changedEvent: "channels_changed",
@@ -3388,6 +3417,20 @@ function dispatch(method: string, params: unknown): unknown {
       return { reacted: on };
     }
 
+    // Mark a thread read, mirroring the Rust `mark_read`: with Ghost mode off the real
+    // backend publishes the read position to Teams (nothing to imitate here, the mock
+    // has no tenant); with it on the read stays local and the row is badged. Either way
+    // the marker clears and the list event follows — which is what a spec asserts.
+    case "mark_read": {
+      const id = requireString(params, "conversation");
+      const t = threadFor(id);
+      if (!t) throw new Error(`unknown conversation: ${id}`);
+      if (t.messages.length === 0) return { read: false, ghost: mockSettings.ghost_mode };
+      t.markRead(mockSettings.ghost_mode);
+      broadcast(t.changedEvent, {});
+      return { read: true, ghost: mockSettings.ghost_mode };
+    }
+
     case "repair_broker": {
       // Pretend the repair unit started: flip `repairing`, then report a healthy
       // broker a beat later. That is what lets a spec — and `bun run preview` — drive
@@ -3479,6 +3522,7 @@ function dispatch(method: string, params: unknown): unknown {
       if (typeof o.gitlab_host === "string") mockSettings.gitlab_host = o.gitlab_host.trim();
       if (typeof o.gitlab_token === "string") mockSettings.gitlab_token = o.gitlab_token.trim();
       if (typeof o.linear_token === "string") mockSettings.linear_token = o.linear_token.trim();
+      if (typeof o.ghost_mode === "boolean") mockSettings.ghost_mode = o.ghost_mode;
       return settingsView();
     }
 

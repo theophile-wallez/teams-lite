@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   CircleDotDashed,
   ExternalLink,
+  Ghost,
   GitPullRequestArrow,
   Loader2,
   Monitor,
@@ -61,7 +62,9 @@ export function SettingsPane(props: { onBack?: () => void }) {
         </div>
         <div className="flex min-w-0 flex-col">
           <h2 className="truncate text-sm font-medium text-foreground">Settings</h2>
-          <p className="truncate text-[11px] text-text-faint">Integrations, appearance, and sounds</p>
+          <p className="truncate text-[11px] text-text-faint">
+            Integrations, privacy, appearance, and sounds
+          </p>
         </div>
       </header>
 
@@ -69,6 +72,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
         <div className="mx-auto flex max-w-xl flex-col gap-8 pb-[env(safe-area-inset-bottom)]">
           <GitLabSettings />
           <LinearSettings />
+          <GhostModeSettings />
           <NotificationSettings />
           <AppearanceSettings />
           <SoundsSettings />
@@ -342,6 +346,90 @@ function LinearSettings() {
           )}
         </div>
       </div>
+    </section>
+  );
+}
+
+/**
+ * Ghost mode — read a conversation without telling Teams.
+ *
+ * Off by default, and deliberately so: what every chat client does, and what the user
+ * expects, is that opening a chat marks it read everywhere (their phone, the desktop
+ * app) — which is also what shows the sender a read receipt. Turning this on keeps the
+ * second half from happening: the marker clears here, Teams keeps the thread unread,
+ * and a small ghost icon on the row says so.
+ */
+function GhostModeSettings() {
+  const controller = useController();
+  const enabled = useAppState((s) => s.settings.ghost_mode);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await controller.saveSettings({ ghostMode: !enabled });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="flex flex-col gap-4" data-testid="ghost-mode-settings">
+      <div className="flex items-start gap-3">
+        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
+          <Ghost className="size-5" strokeWidth={1.5} />
+        </div>
+        <div className="flex flex-col">
+          <h3 className="text-[15px] font-medium text-foreground">Ghost mode</h3>
+          <p className="text-[13px] text-text-faint">
+            Read a conversation without telling Teams. The unread marker clears here,
+            the chat stays unread everywhere else, and the sender sees no read receipt.
+          </p>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4 shadow-chip">
+        <div className="flex min-w-0 flex-col">
+          <span className="text-[13px] font-medium text-foreground">Read invisibly</span>
+          <span className="text-[11px] text-text-faint">
+            {enabled
+              ? "On — a ghost icon marks the chats read only here"
+              : "Off — opening a chat marks it read on Teams too"}
+          </span>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label="Ghost mode"
+          data-testid="ghost-mode-toggle"
+          disabled={busy}
+          onClick={() => void toggle()}
+          className={cn(
+            "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+            busy && "opacity-60",
+            enabled ? "bg-primary" : "bg-element",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
+              enabled ? "translate-x-[22px]" : "translate-x-0.5",
+            )}
+          />
+        </button>
+      </div>
+
+      {error && (
+        <span data-testid="ghost-mode-error" className="text-xs text-destructive">
+          {error}
+        </span>
+      )}
     </section>
   );
 }

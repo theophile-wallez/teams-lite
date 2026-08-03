@@ -219,8 +219,8 @@ export type AppState = {
    *  cuelume engine globally — imperative cues and `data-cuelume-*` alike. */
   soundsEnabled: boolean;
   /** Non-secret app settings (the GitLab host + whether each integration's token
-   *  is stored), loaded from the backend on start. Drives which links get rich
-   *  previews. */
+   *  is stored + Ghost mode), loaded from the backend on start. Drives which links
+   *  get rich previews, and whether reading a chat is declared to Teams. */
   settings: AppSettings;
   /** Push notifications for THIS device: what the browser supports, what stands in
    *  the way, and which devices the backend notifies. The only path that reaches a
@@ -384,7 +384,12 @@ function initialState(): AppState {
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
     soundsEnabled: DEFAULT_SOUNDS_ENABLED,
-    settings: { gitlab_host: "gitlab.com", gitlab_token_set: false, linear_token_set: false },
+    settings: {
+      gitlab_host: "gitlab.com",
+      gitlab_token_set: false,
+      linear_token_set: false,
+      ghost_mode: false,
+    },
     push: INITIAL_PUSH_STATE,
     mailFolders: [],
     mailFolderId: null,
@@ -654,7 +659,12 @@ export class TeamsController {
   private watchWakeups(): void {
     if (typeof document === "undefined" || typeof window === "undefined") return;
     const onVisible = () => {
-      if (document.visibilityState === "visible") this.backend.retryNow();
+      if (document.visibilityState !== "visible") return;
+      this.backend.retryNow();
+      // Messages that arrived while the tab was hidden were deliberately NOT marked
+      // read (see the `message` handler). Coming back to a thread on screen reads it.
+      const openId = this.get().openId;
+      if (openId) this.markThreadRead(openId);
     };
     const onOnline = () => this.backend.retryNow();
     // A third wake-up, specific to iOS Safari: a page restored from the back/forward
@@ -692,6 +702,10 @@ export class TeamsController {
         this.set({
           messages: this.messageCache.get(m.conversation_id)!.messages,
         });
+        // A message that arrives in the thread on screen is read as it lands — but
+        // only if the user is actually looking: a background tab reads nothing, and
+        // claiming otherwise would tell the sender the user saw a message they did not.
+        if (document.visibilityState === "visible") this.markThreadRead(m.conversation_id);
       } else if (shouldNotify(m, this.get().openId)) {
         // The message's own text, read the way its type says it must be (a `Text`
         // body is plain, not HTML) — so a notification never eats what it quotes.
@@ -748,6 +762,9 @@ export class TeamsController {
           messagesError: null,
           loadingMessages: false,
         });
+        // The refresh may have brought messages newer than the position we declared
+        // when the thread opened; read up to the new newest one.
+        if (document.visibilityState === "visible") this.markThreadRead(d.conversation);
       }
     });
 
@@ -1606,6 +1623,9 @@ export class TeamsController {
     // Fetch the current read positions best-effort — never blocks the open, and a
     // channel / receipts-disabled thread just resolves to no avatars.
     void this.loadReadReceipts(id);
+    // Opening a thread reads it. From the cache first, so the marker clears with the
+    // click; the newest page landing below marks again if it moved the position.
+    this.markThreadRead(id);
 
     try {
       const res = await this.backend.open(id);
@@ -1614,12 +1634,67 @@ export class TeamsController {
       if (this.get().openId === id) {
         this.set({ messages: history.messages, hasMoreOlder: history.has_more });
       }
+      this.markThreadRead(id);
     } catch (e) {
       if (this.get().openId === id && !cached) this.set({ messagesError: errText(e) });
       this.set({ status: `open error: ${errText(e)}` });
     } finally {
       if (this.get().openId === id) this.set({ loadingMessages: false });
     }
+  }
+
+  // The newest message id we have already declared as read, per thread. Teams'
+  // unread flag is server-side, so marking a thread read is a network write — this
+  // keeps a re-open, a background refresh and a live message from re-issuing the same
+  // one. Cleared for a thread when its mark fails, so the next chance retries.
+  private markedReadUpTo = new Map<string, string>();
+
+  /**
+   * Tell the backend the user has read this thread up to the newest message we hold —
+   * the reason an unread chat stops coming back unread (Teams owns that flag, and
+   * until `mark_read` nothing moved it).
+   *
+   * Called on open and whenever the open thread's newest message changes, because the
+   * read position must name the newest message the user has actually seen: `open`
+   * answers from the cache first, so the newest page can land a moment later.
+   *
+   * Best-effort and idempotent by design. A failure is not surfaced: the marker simply
+   * stays until the next open, which is much better than an error toast over a chat
+   * the user just wanted to read.
+   */
+  private markThreadRead(id: string): void {
+    if (!this.get().ready) return;
+    const newest = this.messageCache.get(id)?.messages.at(-1)?.id;
+    if (!newest || this.markedReadUpTo.get(id) === newest) return;
+    this.markedReadUpTo.set(id, newest);
+    void this.backend
+      .markRead(id)
+      .then(({ ghost }) => this.applyLocalRead(id, ghost))
+      .catch(() => {
+        // Never leave a thread looking marked when it is not — the next open retries.
+        this.markedReadUpTo.delete(id);
+      });
+  }
+
+  /** Reflect a successful mark in the sidebar immediately, instead of waiting for the
+   *  backend's `conversations_changed` round-trip. `ghost` carries whether Teams was
+   *  told: with Ghost mode on it was not, and the row is badged as read here only.
+   *
+   *  A thread is in exactly one of the two lists, and re-reading an already-read one
+   *  changes nothing — so each list is only replaced when one of its rows moves,
+   *  leaving the other list's identity (and the sidebar's rendering) untouched. */
+  private applyLocalRead(id: string, ghost: boolean): void {
+    const readHere = <T extends { id: string; is_read: boolean; is_ghost_read?: boolean }>(
+      rows: T[],
+    ): T[] | null => {
+      const row = rows.find((r) => r.id === id);
+      if (!row || (row.is_read && (row.is_ghost_read ?? false) === ghost)) return null;
+      return rows.map((r) => (r.id === id ? { ...r, is_read: true, is_ghost_read: ghost } : r));
+    };
+    const conversations = readHere(this.get().conversations);
+    const channels = readHere(this.get().channels);
+    if (conversations) this.set({ conversations });
+    if (channels) this.set({ channels });
   }
 
   /** Re-sync after the connection recovers from a drop. While disconnected we may

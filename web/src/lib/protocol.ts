@@ -176,7 +176,12 @@ export type Conversation = {
   last_message_preview: string;
   last_message_sender: string;
   last_message_from_me: boolean;
+  /** False when the chat has unread messages. Teams' own flag OR our local read
+   *  position, so opening a chat clears the marker for good (see `mark_read`). */
   is_read: boolean;
+  /** True when this chat is read HERE ONLY — the user read it in Ghost mode, so Teams
+   *  still holds it unread and the sender was shown no read receipt. */
+  is_ghost_read?: boolean;
   is_muted: boolean;
   is_pinned: boolean;
   is_hidden: boolean;
@@ -230,6 +235,8 @@ export type Channel = {
   last_message_sender: string;
   last_message_from_me: boolean;
   is_read: boolean;
+  /** Read HERE ONLY (Ghost mode) — see {@link Conversation.is_ghost_read}. */
+  is_ghost_read?: boolean;
   draft: string;
 };
 
@@ -544,6 +551,10 @@ export type AppSettings = {
   /** True when a Linear API key is stored on the backend. Linear is SaaS-only, so
    *  it has no host to configure — only whether we hold a key. */
   linear_token_set: boolean;
+  /** Ghost mode: read a conversation without telling Teams. Off by default — with it
+   *  on, opening a chat clears the marker here only, so the sender is shown no read
+   *  receipt and the chat stays unread in every other Teams client. */
+  ghost_mode: boolean;
 };
 
 /** A partial settings update. An omitted field is left unchanged, so one
@@ -553,6 +564,8 @@ export type SettingsPatch = {
   gitlabHost?: string;
   gitlabToken?: string;
   linearToken?: string;
+  /** Turn Ghost mode on or off (see {@link AppSettings.ghost_mode}). */
+  ghostMode?: boolean;
 };
 
 /** Kind discriminant for an enriched GitLab link (mirrors the Rust `LinkMetadata`

@@ -114,6 +114,12 @@ const SETTING_GITLAB_TOKEN: &str = "gitlab_token";
 /// A Linear personal API key. Linear is SaaS-only, so unlike GitLab it has no host
 /// to configure — only whether we hold a key (see `linear`).
 const SETTING_LINEAR_TOKEN: &str = "linear_token";
+/// Ghost mode (`"1"` = on, anything else = off, and OFF is the default): read a
+/// conversation without telling Teams. `mark_read` then only moves our LOCAL read
+/// position, so the marker clears here while Teams keeps the thread unread and the
+/// sender never gets a read receipt. Off by default because the normal, expected
+/// behaviour of a chat client is that opening a chat reads it everywhere.
+const SETTING_GHOST_MODE: &str = "ghost_mode";
 /// This machine's VAPID private key (base64url), generated on first use. It must
 /// stay stable: every device's subscription embeds the matching public half, so a
 /// new key silently stops every phone that already opted in (see
@@ -127,9 +133,14 @@ const SETTING_PUSH_VAPID_PRIVATE: &str = "push_vapid_private";
 const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 
 /// The RPC methods that act OUTWARD — they change what other people see in the
-/// user's real Teams account (a message posted, edited, or reacted to). Every
-/// other method only reads, or writes to the local store.
-const OUTWARD_METHODS: [&str; 3] = ["send", "edit", "react"];
+/// user's real Teams account (a message posted, edited, or reacted to, or a read
+/// receipt shown). Every other method only reads, or writes to the local store.
+///
+/// `mark_read` is outward for two reasons: it clears the unread marker on every
+/// device the user is signed in on, and Teams shows the new read position to the
+/// other party as a "seen by" receipt. Ghost mode (see [`SETTING_GHOST_MODE`]) makes
+/// it local-only, but the method can write, so the gate is on the method.
+const OUTWARD_METHODS: [&str; 4] = ["send", "edit", "react", "mark_read"];
 
 /// The RPC methods that act on THIS MACHINE, outside the store and the network.
 ///
@@ -1750,6 +1761,72 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "reacted": on }))
         }
 
+        // Mark a conversation or channel read — what a client calls when the user
+        // opens an unread thread, so the marker actually clears instead of coming
+        // back on every sync (Teams owns the unread flag; nothing here used to move
+        // it). Two halves, in this order:
+        //
+        //   1. OUTWARD, unless Ghost mode is on: publish our own consumption horizon
+        //      (see `teams_readstate::set_consumption_horizon`). Teams then reports the
+        //      thread as read to every device the user owns, and shows the sender a
+        //      read receipt. This is why the method is in OUTWARD_METHODS.
+        //   2. LOCAL, always: move our own read position in the store, which is what
+        //      clears the marker instantly — and what holds it clear in Ghost mode,
+        //      where step 1 never runs and the CSA sync keeps saying "unread".
+        //
+        // The network write comes first: a failure must leave the thread unread rather
+        // than claim a read state Teams does not have. Callers treat this as
+        // best-effort (a failed mark is retried by the next open).
+        "mark_read" => {
+            let conv = param_str(params, "conversation")?;
+            let ghost = {
+                let store = ctx.store()?;
+                ghost_mode(&store)?
+            };
+
+            if !ghost {
+                let Some(message_id) = ctx.store()?.newest_message_id(&conv)? else {
+                    // Nothing on screen means nothing to declare as read. Not an
+                    // error: an empty thread has no unread marker either.
+                    return Ok(json!({ "read": false, "ghost": false }));
+                };
+                let http = ctx.http.clone();
+                let horizon_conv = conv.clone();
+                let read_time_ms = now_ms();
+                ctx.retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let conv = horizon_conv.clone();
+                    let message_id = message_id.clone();
+                    async move {
+                        teams_readstate::set_consumption_horizon(
+                            &http,
+                            &session,
+                            &conv,
+                            &message_id,
+                            read_time_ms,
+                        )
+                        .await
+                    }
+                })
+                .await?;
+            }
+
+            // Emit the list events only on a real change, so a re-open of an
+            // already-read thread does not spin the UI's refresh loop.
+            let (moved, is_channel) = {
+                let store = ctx.store()?;
+                (store.mark_thread_read(&conv, ghost)?, store.is_channel(&conv).unwrap_or(false))
+            };
+            if moved {
+                if is_channel {
+                    ctx.emit("channels_changed", json!({}));
+                } else {
+                    ctx.emit("conversations_changed", json!({}));
+                }
+            }
+            Ok(json!({ "read": true, "ghost": ghost }))
+        }
+
         // Notifications panel — the three Teams activity streams, one per tab:
         // `48:notifications` (Activity: reactions / mentions / replies),
         // `48:mentions` (@Mentions), and `48:threads` (Following). None is a
@@ -1786,9 +1863,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
 
         // Read receipts ("seen by") for a conversation: every OTHER member's read
         // position, fetched from the dedicated `consumptionhorizons` thread
-        // sub-resource. READ-ONLY — we only ever GET horizons, never write our
-        // own. Best-effort: a thread with receipts disabled (tenant policy), too
-        // many members (Teams stops tracking past ~20), or a transient failure
+        // sub-resource. A pure READ — our own horizon is written by `mark_read` and
+        // nowhere else. Best-effort: a thread with receipts disabled (tenant policy),
+        // too many members (Teams stops tracking past ~20), or a transient failure
         // yields an empty list rather than an error, so the UI simply shows no
         // "seen by" avatars. Channels are skipped (they are large multi-party
         // threads that don't carry per-member receipts). The horizons refresh
@@ -1822,20 +1899,20 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(read_receipts_json(&store, &conv, &horizons, &self_name, &self_mri))
         }
 
-        // Read the non-secret view of the app settings: the configured GitLab
-        // host and whether each integration's token is stored. A raw token is
-        // NEVER returned — it is write-only from the UI's perspective, matching
-        // the "no raw tokens are ever sent" rule.
+        // Read the non-secret view of the app settings: the configured GitLab host,
+        // whether each integration's token is stored, and whether Ghost mode is on. A
+        // raw token is NEVER returned — it is write-only from the UI's perspective,
+        // matching the "no raw tokens are ever sent" rule.
         "get_settings" => {
             let store = ctx.store()?;
             settings_json(&store)
         }
 
         // Persist app settings (partial update). Only keys present in `params`
-        // are written, so the UI can save the host without resending a token, and
-        // save one integration's token without touching the other's. An explicit
-        // `""` clears that token. Returns the same non-secret view as
-        // `get_settings` so the UI updates in one round-trip.
+        // are written, so the UI can save the host without resending a token, save one
+        // integration's token without touching the other's, and flip Ghost mode
+        // without touching either. An explicit `""` clears that token. Returns the
+        // same non-secret view as `get_settings` so the UI updates in one round-trip.
         "set_settings" => {
             let store = ctx.store()?;
             if let Some(host) = params.get("gitlab_host").and_then(Value::as_str) {
@@ -1848,6 +1925,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 if let Some(token) = params.get(param).and_then(Value::as_str) {
                     store.set_setting(key, token.trim())?;
                 }
+            }
+            // Ghost mode is stored as "1"/"0" so the settings table stays one
+            // string-to-string map (see `ghost_mode`, which only trusts "1").
+            if let Some(ghost) = params.get("ghost_mode").and_then(Value::as_bool) {
+                store.set_setting(SETTING_GHOST_MODE, if ghost { "1" } else { "0" })?;
             }
             settings_json(&store)
         }
@@ -2762,16 +2844,24 @@ fn param_str_list(params: &Value, key: &str) -> Vec<String> {
 }
 
 /// Build the non-secret view of the app settings for the UI: the configured
-/// GitLab host (falling back to the default) and whether each integration's token
-/// is stored. A raw token is deliberately never included — the UI only needs to
-/// know it is set, never its value.
+/// GitLab host (falling back to the default), whether each integration's token is
+/// stored, and whether Ghost mode is on. A raw token is deliberately never included —
+/// the UI only needs to know it is set, never its value.
 fn settings_json(store: &Store) -> Result<Value> {
     let settings = link_preview_settings(store)?;
     Ok(json!({
         "gitlab_host": settings.gitlab_host,
         "gitlab_token_set": settings.gitlab_token.is_some(),
         "linear_token_set": settings.linear_token.is_some(),
+        "ghost_mode": ghost_mode(store)?,
     }))
+}
+
+/// Is Ghost mode on? Off unless the stored value is exactly `"1"`, so a missing,
+/// empty or malformed setting reads as off — the safe default is the one the user
+/// expects from a chat client (opening a chat reads it on Teams too).
+fn ghost_mode(store: &Store) -> Result<bool> {
+    Ok(store.get_setting(SETTING_GHOST_MODE)?.as_deref() == Some("1"))
 }
 
 /// Read what the link-preview integrations need from the store: the GitLab host
@@ -2855,6 +2945,7 @@ fn conversations_json(rows: &[teams_lite::store::ConversationRow]) -> Value {
             "last_message_sender": c.last_message_sender,
             "last_message_from_me": c.last_message_from_me,
             "is_read": c.is_read,
+            "is_ghost_read": c.is_ghost_read,
             "is_muted": c.is_muted,
             "is_pinned": c.is_pinned,
             "is_hidden": c.is_hidden,
@@ -2887,6 +2978,7 @@ fn channels_json(rows: &[teams_lite::store::ChannelRow]) -> Value {
             "last_message_from_me": c.last_message_from_me,
             "is_read": c.is_read,
             "alerts": c.alerts.as_str(),
+            "is_ghost_read": c.is_ghost_read,
             "draft": c.draft
         }))
         .collect::<Vec<_>>())
@@ -4110,6 +4202,48 @@ mod tests {
     // `repair_broker` restarts the user's Intune container. It posts nothing to
     // Teams, so it is not outward — but a client that merely found this socket must
     // not be able to take the identity broker down either.
+
+    // Marking a thread read publishes our consumption horizon: the unread marker
+    // clears on every device the user owns, and the sender sees a read receipt. That
+    // is other people seeing a change in the user's account, so it is outward and
+    // needs the token — Ghost mode does not soften the gate, because the method can
+    // still write.
+    #[test]
+    fn mark_read_is_outward_facing_and_token_gated() {
+        assert!(OUTWARD_METHODS.contains(&"mark_read"));
+        assert_eq!(write_class("mark_read"), Some(WriteClass::Outward));
+        let params = json!({ "conversation": "c1" });
+        let err = check_write_allowed("mark_read", &params, Some("tok"))
+            .expect_err("must refuse a tokenless read-state write");
+        assert!(err.contains("write token"), "{err}");
+        assert!(
+            check_write_allowed(
+                "mark_read",
+                &json!({ "conversation": "c1", "write_token": "tok" }),
+                Some("tok")
+            )
+            .is_ok()
+        );
+    }
+
+    // Ghost mode is a stored string, and only "1" means on: an unset, empty or
+    // malformed value must read as off, because off is the behaviour that matches
+    // every other chat client.
+    #[test]
+    fn ghost_mode_is_off_unless_explicitly_enabled() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(!ghost_mode(&store).unwrap(), "unset reads as off");
+        assert_eq!(settings_json(&store).unwrap()["ghost_mode"], false);
+
+        store.set_setting(SETTING_GHOST_MODE, "1").unwrap();
+        assert!(ghost_mode(&store).unwrap());
+        assert_eq!(settings_json(&store).unwrap()["ghost_mode"], true);
+
+        for off in ["0", "", "true", "yes"] {
+            store.set_setting(SETTING_GHOST_MODE, off).unwrap();
+            assert!(!ghost_mode(&store).unwrap(), "{off:?} must read as off");
+        }
+    }
 
     #[test]
     fn repair_broker_is_gated_but_is_not_outward_facing() {

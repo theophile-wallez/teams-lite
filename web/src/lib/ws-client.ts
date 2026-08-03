@@ -428,6 +428,16 @@ export class Backend {
       key,
     });
   }
+  /** Mark a conversation or channel read up to its newest message — what the app
+   *  calls when the user opens an unread thread.
+   *
+   *  A WRITE, and gated like one: unless Ghost mode is on, the backend publishes our
+   *  read position to Teams, which clears the marker on every device the user owns
+   *  and shows the sender a read receipt. `ghost` in the reply says which happened,
+   *  so the caller knows whether the thread is read only here. */
+  markRead(conversation: string): Promise<{ read: boolean; ghost: boolean }> {
+    return this.writeRequest<{ read: boolean; ghost: boolean }>("mark_read", { conversation });
+  }
   /** Ask the backend to repair sign-in: it starts a systemd unit that restarts the
    *  Intune container, because the container's login keyring re-locks and the broker
    *  then answers no token call at all.
@@ -600,9 +610,9 @@ export class Backend {
     });
   }
 
-  /** Read the non-secret app settings (GitLab host + whether each integration's
-   *  token is stored). A read, so it needs no write token — the view carries no
-   *  token, and the UI needs it before the user has done anything. */
+  /** Read the non-secret app settings (GitLab host, whether each integration's token
+   *  is stored, and whether Ghost mode is on). A read, so it needs no write token —
+   *  the view carries no token, and the UI needs it before the user has done anything. */
   getSettings(): Promise<AppSettings> {
     return this.request<AppSettings>("get_settings");
   }
@@ -614,10 +624,11 @@ export class Backend {
    *  holds, and the GitLab host decides where its token may be sent (see
    *  MACHINE_METHODS in src/bin/server.rs). */
   setSettings(patch: SettingsPatch): Promise<AppSettings> {
-    const params: Record<string, string> = {};
+    const params: Record<string, string | boolean> = {};
     if (patch.gitlabHost !== undefined) params.gitlab_host = patch.gitlabHost;
     if (patch.gitlabToken !== undefined) params.gitlab_token = patch.gitlabToken;
     if (patch.linearToken !== undefined) params.linear_token = patch.linearToken;
+    if (patch.ghostMode !== undefined) params.ghost_mode = patch.ghostMode;
     return this.writeRequest<AppSettings>("set_settings", params);
   }
   /** Enrich a tracker link with metadata for a rich preview card. Resolves with

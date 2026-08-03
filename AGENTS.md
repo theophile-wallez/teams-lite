@@ -9,6 +9,14 @@
 - This covers anything that posts to Teams on the user's behalf — new messages,
   replies, reactions, edits — whether triggered through the UI, the backend
   `server`, a script, or a direct API/WebSocket call.
+- **Marking a conversation read counts.** `mark_read` publishes the user's own
+  consumption horizon (`PUT …/properties?name=consumptionhorizon`, in
+  `src/teams_readstate.rs`): the unread marker clears on every device they are signed
+  in on, and the sender is shown a read receipt saying their message was read. It is
+  an `OUTWARD_METHODS` entry for that reason, and the hook blocks the endpoint on a
+  command line too. Reading horizons (`GET …/consumptionhorizons`, which is how "seen
+  by" works) stays open. **Ghost mode** — a setting, off by default — makes a read
+  local: the marker clears in this app only, and Teams is never told.
 - **The one standing exception is the designated sandbox chat**
   `19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2`, at this address:
 
@@ -215,11 +223,13 @@ user. Two independent mechanisms enforce that split:
   weaken the lock to get a write through.** Fetching a secret you were not handed
   is precisely the line this draws.
 - **The hook (harness).** Blocks, before execution, any command that would write:
-  ad-hoc browser drivers, scripts calling `send`/`edit`/`react` against
-  `127.0.0.1:19420` or `19421` (and the 19440 / 19441 relays in front of them), dev
-  servers with no declared backend, a production web server with no declared backend,
-  a send-capable backend started by tooling — including `systemctl --user start` on
-  the always-on service's units.
+  ad-hoc browser drivers, scripts calling `send`/`edit`/`react`/`mark_read` against
+  `127.0.0.1:19420` or `19421` (and the 19440 / 19441 relays in front of them), a
+  consumption-horizon PUT straight to Teams (which bypasses the backend's gate
+  entirely), dev servers with no declared backend, a production web server with no
+  declared backend, a send-capable backend started by tooling — including `systemctl
+  --user start` on the always-on service's units. It reads the *contents* of what a
+  command runs, including an untracked `examples/*.rs` a `cargo run --example` names.
 
 - **Never hand-roll browser automation.** `web/scripts/preview.ts` is the only
   sanctioned way to drive the web UI: it starts its own mock, points the dev

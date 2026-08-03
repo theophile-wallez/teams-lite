@@ -34,7 +34,16 @@ CREATE TABLE IF NOT EXISTS conversations (
     draft                 TEXT NOT NULL DEFAULT '',
     -- A group chat's own uploaded picture, as an absolute media-proxy URL. Empty
     -- for a chat with none (see `teams_read::parse_thread_picture`).
-    picture_url           TEXT NOT NULL DEFAULT ''
+    picture_url           TEXT NOT NULL DEFAULT '',
+    -- Our OWN read position, kept locally: the `last_message_time` the user has read
+    -- up to (0 = never). A thread counts as read when Teams says so OR when this
+    -- reaches its last message, which is what clears the marker the instant the user
+    -- opens it — before the CSA sync catches up, and for good in Ghost mode, where
+    -- Teams is never told (see `mark_thread_read`).
+    local_read_time       INTEGER NOT NULL DEFAULT 0,
+    -- 1 when that local position was NEVER sent to Teams (Ghost mode), so the UI can
+    -- say so: read here, still unread for the sender.
+    local_read_ghost      INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
     id              TEXT NOT NULL,
@@ -85,7 +94,11 @@ CREATE TABLE IF NOT EXISTS channels (
     -- as the decision (see `ChannelAlerts`) rather than the three raw CSA signals
     -- it is derived from. 'mentions_only' is Teams' default, so a row written
     -- before this column existed keeps the behaviour it already had.
-    alerts                TEXT NOT NULL DEFAULT 'mentions_only'
+    alerts                TEXT NOT NULL DEFAULT 'mentions_only',
+    -- Our own local read position and its Ghost-mode flag, exactly as on
+    -- `conversations` above.
+    local_read_time       INTEGER NOT NULL DEFAULT 0,
+    local_read_ghost      INTEGER NOT NULL DEFAULT 0
 );
 -- Outlook mail (READ-ONLY mirror; see src/mail.rs). Kept in its own tables rather
 -- than folded into conversations/messages: mail is ordered by an ISO timestamp
@@ -496,8 +509,13 @@ pub struct ConversationRow {
     pub last_message_sender: String,
     /// True when we sent the last message (UI renders "You:").
     pub last_message_from_me: bool,
-    /// False when the conversation has unread messages.
+    /// False when the conversation has unread messages. Teams' own flag OR our local
+    /// read position (see `local_read_time` in the schema), so opening a thread
+    /// clears the marker immediately and keeps it clear in Ghost mode.
     pub is_read: bool,
+    /// True when this thread is read HERE ONLY: the user read it in Ghost mode, so
+    /// Teams still holds it unread and the sender sees no read receipt.
+    pub is_ghost_read: bool,
     pub is_muted: bool,
     pub is_pinned: bool,
     pub is_hidden: bool,
@@ -513,6 +531,34 @@ pub struct ConversationRow {
     /// initials. The 1:1 counterpart is `avatar_mri` — a group has no single face,
     /// but it can have a face of its own.
     pub picture_url: String,
+}
+
+/// Decide a thread's effective read state from Teams' own flag and our local read
+/// position. The single place that rule lives — both list queries select the raw
+/// columns and come through here, so a chat and a channel can never disagree.
+///
+/// A thread is read when Teams says so, OR when the user has read it here up to its
+/// last message. The second half is what clears the marker the instant a thread is
+/// opened (before the CSA sync catches up) and what keeps it clear in Ghost mode,
+/// where Teams is never told. It is a high-water mark, so the next incoming message
+/// moves `last_message_time` past it and the thread is unread again.
+///
+/// Returns `(is_read, is_ghost_read)`. `is_ghost_read` is the narrow case the UI
+/// badges: read here only, still unread for the sender.
+///
+/// `local_read_time` must be a REAL position (`> 0`) to count. Zero is the column's
+/// default — "never read here" — and a thread with no last message carries
+/// `last_message_time = 0` too, so without that clause an unread-on-Teams thread that
+/// has never been marked would read as read. A local position can only ever CLEAR a
+/// marker, never raise one, so the default has to mean nothing at all.
+fn read_state(
+    teams_is_read: bool,
+    local_read_time: i64,
+    local_read_ghost: bool,
+    last_message_time: i64,
+) -> (bool, bool) {
+    let read_locally = local_read_time > 0 && local_read_time >= last_message_time;
+    (teams_is_read || read_locally, !teams_is_read && read_locally && local_read_ghost)
 }
 
 /// Rich conversation metadata from a CSA sync, fed to [`Store::upsert_conversation_full`].
@@ -560,7 +606,12 @@ pub struct ChannelRow {
     pub last_message_preview: String,
     pub last_message_sender: String,
     pub last_message_from_me: bool,
+    /// False when the channel has unread messages — Teams' own flag OR our local read
+    /// position, exactly as on [`ConversationRow::is_read`].
     pub is_read: bool,
+    /// True when the channel is read HERE ONLY (Ghost mode). See
+    /// [`ConversationRow::is_ghost_read`].
+    pub is_ghost_read: bool,
     /// What the user's own Microsoft Teams notification setting allows here.
     pub alerts: ChannelAlerts,
     /// Unsent composer text, stored locally and scoped to this channel.
@@ -1067,6 +1118,20 @@ fn migrate(conn: &Connection) -> Result<()> {
     // keeps notifying on an @mention and nothing else until the next CSA sync
     // reports what the user actually chose.
     add_column("ALTER TABLE channels ADD COLUMN alerts TEXT NOT NULL DEFAULT 'mentions_only'")?;
+
+
+    // local_read_time / local_read_ghost: our own read position, held locally (see the
+    // DDL above). Legacy rows get 0/0, which means "never read here" — so the marker
+    // keeps coming from Teams alone until the user next opens the thread. That is the
+    // safe default: 0 can only ever ADD an unread marker, never hide one.
+    for table in ["conversations", "channels"] {
+        add_column(&format!(
+            "ALTER TABLE {table} ADD COLUMN local_read_time INTEGER NOT NULL DEFAULT 0"
+        ))?;
+        add_column(&format!(
+            "ALTER TABLE {table} ADD COLUMN local_read_ghost INTEGER NOT NULL DEFAULT 0"
+        ))?;
+    }
     Ok(())
 }
 
@@ -1796,12 +1861,20 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, team_id, team_name, display_name, is_general, is_favorite,
                     last_message_time, last_message_preview, last_message_sender,
-                    last_message_from_me, is_read, draft, team_group_id, alerts
+                    last_message_from_me, is_read, draft, team_group_id, alerts,
+                    local_read_time, local_read_ghost
              FROM channels
              ORDER BY team_pos ASC, team_name ASC, team_id ASC,
                       is_general DESC, channel_pos ASC, display_name ASC, id ASC",
         )?;
         let rows = stmt.query_map([], |r| {
+            let last_message_time: i64 = r.get(6)?;
+            let (is_read, is_ghost_read) = read_state(
+                r.get::<_, i64>(10)? != 0,
+                r.get(14)?,
+                r.get::<_, i64>(15)? != 0,
+                last_message_time,
+            );
             Ok(ChannelRow {
                 id: r.get(0)?,
                 team_id: r.get(1)?,
@@ -1809,11 +1882,12 @@ impl Store {
                 display_name: r.get(3)?,
                 is_general: r.get::<_, i64>(4)? != 0,
                 is_favorite: r.get::<_, i64>(5)? != 0,
-                last_message_time: r.get(6)?,
+                last_message_time,
                 last_message_preview: r.get(7)?,
                 last_message_sender: r.get(8)?,
                 last_message_from_me: r.get::<_, i64>(9)? != 0,
-                is_read: r.get::<_, i64>(10)? != 0,
+                is_read,
+                is_ghost_read,
                 draft: r.get(11)?,
                 team_group_id: r.get(12)?,
                 alerts: ChannelAlerts::from_str(&r.get::<_, String>(13)?),
@@ -2606,6 +2680,64 @@ impl Store {
         Ok(())
     }
 
+    /// Move our own local read position on one conversation OR channel to its last
+    /// message — the local half of marking a thread read (see [`read_state`]).
+    ///
+    /// `ghost` records whether Teams was told: `false` after a successful
+    /// `consumptionhorizon` write, `true` in Ghost mode, where the read state never
+    /// leaves this machine. Like [`Store::set_draft`], a thread id is either a chat or
+    /// a channel, so the conversations table is tried first and channels second.
+    ///
+    /// Idempotent, and returns true only when a column actually moved, so a repeated
+    /// open emits no `conversations_changed` (the same guard the syncs use). The
+    /// position only ever moves FORWARD: re-marking a thread whose last message we have
+    /// already read is a no-op.
+    pub fn mark_thread_read(&self, thread_id: &str, ghost: bool) -> Result<bool> {
+        for table in ["conversations", "channels"] {
+            let changed = self.exec(
+                &format!(
+                    // `last_message_time > 0` because a thread with no last message has
+                    // nothing to be read up to — see [`read_state`], where 0 means
+                    // "never read here". The rest reports a real change only: a
+                    // position that moves, or a Ghost flag that flips at the same
+                    // position (the row's badge has to follow it).
+                    "UPDATE {table} SET local_read_time = last_message_time,
+                                        local_read_ghost = ?2
+                     WHERE id = ?1
+                       AND last_message_time > 0
+                       AND (local_read_time < last_message_time OR local_read_ghost <> ?2)"
+                ),
+                params![thread_id, ghost as i64],
+            )?;
+            if changed > 0 {
+                return Ok(true);
+            }
+            // 0 rows can mean "no such thread here" or "already read up to date"; the
+            // next table is tried either way, and an unknown id ends up as false.
+        }
+        Ok(false)
+    }
+
+    /// The id of the newest message we hold for a thread, oldest-to-newest by `seq` —
+    /// the read position to publish when marking it read. `None` when we hold no
+    /// message (a thread never opened, or one whose history is only a system frame we
+    /// dropped), in which case there is nothing to declare as read.
+    ///
+    /// Deliberately the NEWEST LOCAL message rather than the conversation's
+    /// `last_message_time`: a read position must name a message the user could
+    /// actually see, and only messages we hold were ever on screen.
+    pub fn newest_message_id(&self, conversation_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .query_one(
+                "SELECT id FROM messages
+                 WHERE conversation_id = ?1
+                 ORDER BY seq DESC, id DESC LIMIT 1",
+                params![conversation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
     /// Read one application setting by key. Returns `None` when the key was never
     /// set. This is a simple key/value side table (see `SCHEMA`), used for
     /// durable app configuration such as the GitLab host and access token — data
@@ -2853,7 +2985,9 @@ impl Store {
                     ), '') ELSE '' END AS avatar_mri,
                     -- the group's own uploaded picture (empty for a 1:1, which has a
                     -- face already, and for a group that never set one)
-                    c.picture_url
+                    c.picture_url,
+                    c.local_read_time,
+                    c.local_read_ghost
              FROM conversations c
              -- a channel that leaked into the conversations table (a live post that
              -- landed before the CSA sync classified it) must never show in the chat
@@ -2866,15 +3000,23 @@ impl Store {
              ORDER BY c.is_pinned DESC, c.last_message_time DESC, c.id ASC",
         )?;
         let rows = stmt.query_map(params![self_name], |r| {
+            let last_message_time: i64 = r.get(2)?;
+            let (is_read, is_ghost_read) = read_state(
+                r.get::<_, i64>(7)? != 0,
+                r.get(15)?,
+                r.get::<_, i64>(16)? != 0,
+                last_message_time,
+            );
             Ok(ConversationRow {
                 id: r.get(0)?,
                 display_name: r.get(1)?,
-                last_message_time: r.get(2)?,
+                last_message_time,
                 kind: ConversationKind::from_str(&r.get::<_, String>(3)?),
                 last_message_preview: r.get(4)?,
                 last_message_sender: r.get(5)?,
                 last_message_from_me: r.get::<_, i64>(6)? != 0,
-                is_read: r.get::<_, i64>(7)? != 0,
+                is_read,
+                is_ghost_read,
                 is_muted: r.get::<_, i64>(8)? != 0,
                 is_pinned: r.get::<_, i64>(9)? != 0,
                 is_hidden: r.get::<_, i64>(10)? != 0,
@@ -4848,6 +4990,123 @@ mod tests {
 
         // Unknown channel id is a no-op, never an error.
         assert!(!s.touch_channel("19:missing@thread.tacv2", 999, false).unwrap());
+    }
+
+    // Opening an unread thread clears the marker here even though Teams still reports
+    // it unread — the whole point of the local read position. The next message makes it
+    // unread again, because the position is a high-water mark.
+    #[test]
+    fn marking_a_conversation_read_clears_the_marker_until_the_next_message() {
+        let s = Store::open_in_memory().unwrap();
+        let mut u = upd("19:chat@thread.v2", "Chat", 100, ConversationKind::Group);
+        u.is_read = false;
+        s.upsert_conversation_full(&u).unwrap();
+        assert!(!s.conversations("me").unwrap()[0].is_read);
+
+        assert!(s.mark_thread_read("19:chat@thread.v2", false).unwrap());
+        let row = &s.conversations("me").unwrap()[0];
+        assert!(row.is_read);
+        assert!(!row.is_ghost_read, "Teams was told, so this is a normal read");
+
+        // Re-marking the same position changes nothing (no `conversations_changed`).
+        assert!(!s.mark_thread_read("19:chat@thread.v2", false).unwrap());
+
+        // A newer message arrives, still unread on Teams' side -> unread again.
+        u.last_message_time = 200;
+        s.upsert_conversation_full(&u).unwrap();
+        assert!(!s.conversations("me").unwrap()[0].is_read);
+
+        // Unknown thread id is a no-op, never an error.
+        assert!(!s.mark_thread_read("19:missing@thread.v2", false).unwrap());
+    }
+
+    // Ghost mode: read here, never declared to Teams. The CSA sync keeps reporting the
+    // thread unread, so the local position is the only thing holding the marker down —
+    // and `is_ghost_read` is what the UI badges to say so.
+    #[test]
+    fn a_ghost_read_survives_a_sync_that_still_reports_unread() {
+        let s = Store::open_in_memory().unwrap();
+        let mut u = upd("19:chat@thread.v2", "Chat", 100, ConversationKind::Group);
+        u.is_read = false;
+        s.upsert_conversation_full(&u).unwrap();
+
+        assert!(s.mark_thread_read("19:chat@thread.v2", true).unwrap());
+        let row = &s.conversations("me").unwrap()[0];
+        assert!(row.is_read);
+        assert!(row.is_ghost_read);
+
+        // Teams re-asserts "unread" on every sync; the local position outlives it.
+        s.upsert_conversation_full(&u).unwrap();
+        let row = &s.conversations("me").unwrap()[0];
+        assert!(row.is_read);
+        assert!(row.is_ghost_read);
+
+        // Teams itself reporting the thread read retires the ghost badge.
+        u.is_read = true;
+        s.upsert_conversation_full(&u).unwrap();
+        let row = &s.conversations("me").unwrap()[0];
+        assert!(row.is_read);
+        assert!(!row.is_ghost_read);
+    }
+
+    // The same rule on a channel, and the ghost flag flipping in place: a thread read in
+    // Ghost mode and then re-read with Ghost off must lose the badge.
+    #[test]
+    fn marking_a_channel_read_carries_the_ghost_flag_both_ways() {
+        let s = Store::open_in_memory().unwrap();
+        let mut u = chan_upd("19:c@thread.tacv2", "19:t@thread.tacv2", "Ops", "Standup", 100);
+        u.is_read = false;
+        s.upsert_channel_full(&u).unwrap();
+        assert!(!s.channels().unwrap()[0].is_read);
+
+        assert!(s.mark_thread_read("19:c@thread.tacv2", true).unwrap());
+        assert!(s.channels().unwrap()[0].is_ghost_read);
+
+        // Same position, Ghost off — a real change, because the badge must go.
+        assert!(s.mark_thread_read("19:c@thread.tacv2", false).unwrap());
+        let row = &s.channels().unwrap()[0];
+        assert!(row.is_read);
+        assert!(!row.is_ghost_read);
+    }
+
+    // The default local position (0) must mean "never read here", not "read": a thread
+    // with no last message carries last_message_time = 0 too, and a legacy row carries
+    // both, so a naive `>=` would silently clear a marker Teams is still raising.
+    #[test]
+    fn a_thread_with_no_local_position_keeps_teams_read_state() {
+        let s = Store::open_in_memory().unwrap();
+        let mut u = upd("19:empty@thread.v2", "Empty", 0, ConversationKind::Group);
+        u.is_read = false;
+        s.upsert_conversation_full(&u).unwrap();
+        let row = &s.conversations("me").unwrap()[0];
+        assert!(!row.is_read, "unread on Teams, never read here");
+        assert!(!row.is_ghost_read);
+
+        // And there is nothing to mark: no last message means no read position.
+        assert!(!s.mark_thread_read("19:empty@thread.v2", false).unwrap());
+        assert!(!s.mark_thread_read("19:empty@thread.v2", true).unwrap());
+        assert!(!s.conversations("me").unwrap()[0].is_read);
+    }
+
+    // The read position must name a message the user could see, so it comes from the
+    // newest message we HOLD, by `seq` — not from the conversation's last-message time.
+    #[test]
+    fn newest_message_id_is_the_read_position_we_publish() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.newest_message_id("19:chat@thread.v2").unwrap(), None);
+        for seq in [3, 1, 2] {
+            s.insert_message(&msg("19:chat@thread.v2", seq)).unwrap();
+        }
+        assert_eq!(
+            s.newest_message_id("19:chat@thread.v2").unwrap().as_deref(),
+            Some("m3")
+        );
+        // Scoped to the thread — another conversation's newer message never leaks in.
+        s.insert_message(&msg("19:other@thread.v2", 9)).unwrap();
+        assert_eq!(
+            s.newest_message_id("19:chat@thread.v2").unwrap().as_deref(),
+            Some("m3")
+        );
     }
 
     #[test]
