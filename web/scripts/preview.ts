@@ -502,6 +502,28 @@ export async function setGhostMode(page: Page, on: boolean): Promise<void> {
 }
 
 /**
+ * Open the Settings pane and set "Always available" on or off.
+ *
+ * Against the REAL backend this switch publishes the user's own presence, which every
+ * colleague reads — so the sentinel is the point of this helper, not decoration. The
+ * mock only remembers the flag, and nothing leaves the machine.
+ */
+export async function setAlwaysAvailable(page: Page, on: boolean): Promise<void> {
+  await assertMockBackend(page);
+  await page.locator('[data-testid="open-settings"]').click();
+  const toggle = page.locator('[data-testid="always-available-toggle"]');
+  await toggle.waitFor({ state: "visible" });
+  if ((await toggle.getAttribute("aria-checked")) !== String(on)) await toggle.click();
+  // Source text, not a closure: this file type-checks under the node tsconfig (no DOM
+  // lib), and the body runs in the page — same idiom as `setGhostMode` above.
+  await page.waitForFunction(
+    `document.querySelector('[data-testid="always-available-toggle"]')` +
+      `?.getAttribute("aria-checked") === ${JSON.stringify(String(on))}`,
+  );
+  await page.waitForTimeout(200);
+}
+
+/**
  * Open the first UNREAD chat, which is what has an unread marker to clear. Returns
  * its id like {@link openFirstConversation}, or throws when the fixture set has no
  * unread row left (a previous open in the same session reads them one by one).
@@ -843,6 +865,34 @@ if (import.meta.main) {
         `[preview] wrote ${out}-{week,week-all,details,month,day,agenda,weekends,mobile,` +
           `mobile-details}-light.png and ${out}-{month,week}-dark.png`,
       );
+    });
+    process.exit(0);
+  }
+
+  // "Always available": the one setting other people can see. Both states, because the
+  // copy under the switch is what tells the user who reads the green dot.
+  if (args.includes("--available")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      // The pane scrolls, and this section sits below the integrations — so bring it
+      // into view before every capture, or the shot is of GitLab's token field.
+      const section = page.locator('[data-testid="always-available-settings"]');
+      await setAlwaysAvailable(page, false);
+      await section.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(200);
+      await shot(`${out}-off-light.png`);
+      await setAlwaysAvailable(page, true);
+      await section.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(200);
+      await shot(`${out}-on-light.png`);
+      await setTheme("dark");
+      await section.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(200);
+      await shot(`${out}-on-dark.png`);
+
+      // Leave the shared mock as it was found.
+      await setTheme("light");
+      await setAlwaysAvailable(page, false);
+      console.log(`[preview] wrote ${out}-{off,on}-light.png and ${out}-on-dark.png`);
     });
     process.exit(0);
   }

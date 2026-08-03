@@ -15,7 +15,7 @@
 //          | edit | react | mark_read | notifications | read_receipts | fetch_media
 //          | fetch_avatar
 //          | profile | presence
-//          | get_settings | set_settings | enrich_link
+//          | get_settings | set_settings | set_always_available | enrich_link
 //          | push_status | push_subscribe | push_unsubscribe | push_test
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 // Events:  status | realtime_status | message | conversations_changed
@@ -2308,6 +2308,9 @@ const mockSettings = {
   linear_token: "lin_api_mock",
   // Off, like the real backend's default: opening a chat reads it on Teams too.
   ghost_mode: false,
+  // Off, like the real backend's default. Here it is only a flag: the mock publishes
+  // no presence at all, which is the whole point of driving the UI against it.
+  always_available: false,
 };
 
 /** Devices that "subscribed" to push notifications, keyed by endpoint (the real
@@ -2383,6 +2386,7 @@ function settingsView(): {
   gitlab_token_set: boolean;
   linear_token_set: boolean;
   ghost_mode: boolean;
+  always_available: boolean;
 } {
   const host = mockSettings.gitlab_host.trim() || "gitlab.com";
   return {
@@ -2390,6 +2394,7 @@ function settingsView(): {
     gitlab_token_set: mockSettings.gitlab_token.length > 0,
     linear_token_set: mockSettings.linear_token.length > 0,
     ghost_mode: mockSettings.ghost_mode,
+    always_available: mockSettings.always_available,
   };
 }
 
@@ -3671,6 +3676,16 @@ function dispatch(method: string, params: unknown): unknown {
       if (typeof o.gitlab_token === "string") mockSettings.gitlab_token = o.gitlab_token.trim();
       if (typeof o.linear_token === "string") mockSettings.linear_token = o.linear_token.trim();
       if (typeof o.ghost_mode === "boolean") mockSettings.ghost_mode = o.ghost_mode;
+      return settingsView();
+    }
+
+    // The real backend registers a Teams endpoint here and refreshes it (see
+    // `set_always_available` in src/bin/server.rs). The mock only remembers the flag:
+    // nothing leaves the machine, which is what makes driving the switch safe.
+    case "set_always_available": {
+      const o = asObject(params);
+      if (typeof o.enabled !== "boolean") throw new Error("`enabled` must be true or false");
+      mockSettings.always_available = o.enabled;
       return settingsView();
     }
 

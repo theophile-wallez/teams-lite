@@ -17,10 +17,44 @@
 //              "note": { "message": "<custom status>", … },
 //              "sourceNetwork": "SameEnterprise" } } ]
 //
-// READ-ONLY: this module never publishes or forces OUR own presence — it only
-// reads other people's, exactly as hovering a name in Teams does. (Microsoft
-// Graph `/presence` is not usable here: the broker token has no Presence.Read
-// consent and answers 403.)
+// Reading is the bulk of this module. It also holds the ONE write the app makes to
+// this service — the "Always available" setting (see below) — and nothing else:
+// everything about other people is read exactly as hovering a name in Teams does.
+// (Microsoft Graph `/presence` is not usable here: the broker token has no
+// Presence.Read consent and answers 403.)
+//
+// ---------------------------------------------------------------------------
+// PUBLISHING OUR OWN PRESENCE ("Always available")
+//
+// Proven shape (recon against the live tenant, read back through `fetch_presence`
+// after every step):
+//   PUT {unifiedPresence}/v1/me/endpoints/
+//     Auth: Bearer {PRESENCE_SCOPE token} + x-skypetoken. The profile-audience
+//       token that reads presence is REFUSED here (401, substatus 40102).
+//     Body: { "id": "<uuid>", "availability": "Available",
+//             "activity": "Available", "deviceType": "Web" }
+//     -> 201 Created, and our presence goes Offline -> Available.
+//   DELETE {unifiedPresence}/v1/me/endpoints/{id}
+//     -> 200 OK, and our presence goes back to what Teams computes (Offline when no
+//        other client of ours is running).
+//
+// WHY AN ENDPOINT, AND NOT THE MANUAL STATUS. The service also takes
+// `PUT /v1/me/forceavailability/ {"availability":"Available"}` — the manual status a
+// Teams client sets when the user picks one by hand — and it answers 200. It is NOT
+// used here, because every spelling of the matching DELETE is refused (401), so this
+// app could set that state and never take it back. A setting whose off switch cannot
+// undo its on switch is not a setting. The endpoint registration is symmetric, which
+// is the whole reason it is the mechanism.
+//
+// WHAT THE ENDPOINT MEANS. An endpoint is one running client of ours reporting that
+// it is there. The service accepts NO other availability on it (`Away`, `Busy` and
+// `DoNotDisturb` are all 400), and `deviceType` is required — so a registration says
+// exactly one thing: "this device is present and available". Teams then aggregates
+// our endpoints, which is why one always-on registration keeps us green.
+//
+// IT IS THE USER'S OWN STATUS, AND OUTWARD. Every colleague sees the green dot, so
+// the RPC that turns it on is in `OUTWARD_METHODS`, it is off by default, and a
+// read-only backend never registers anything.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -32,6 +66,16 @@ use crate::teams_profiles::is_person_mri;
 /// for a session whose directory omits it.
 const PRESENCE_HOST_KEY: &str = "unifiedPresence";
 const PRESENCE_HOST_FALLBACK: &str = "https://presence.teams.microsoft.com";
+
+/// The broker scope whose token the presence service accepts on its own `/v1/me/*`
+/// writes. The profile-audience token that READS presence is refused there, so the
+/// publish path has its own credential.
+pub const PRESENCE_SCOPE: &str = "https://presence.teams.microsoft.com/.default";
+
+/// The only availability an endpoint registration may report (the service answers
+/// 400 to every other member of its enum) and the required device label.
+const ENDPOINT_AVAILABILITY: &str = "Available";
+const ENDPOINT_DEVICE_TYPE: &str = "Web";
 
 /// How many mris one request may carry (the UI asks for one person at a time;
 /// the cap bounds the request body for any future batch caller).
@@ -89,12 +133,7 @@ pub async fn fetch_presence(
         "refusing to fetch presence for a non-person mri"
     );
 
-    let host = session
-        .endpoint(PRESENCE_HOST_KEY)
-        .filter(|h| h.starts_with("https://"))
-        .unwrap_or(PRESENCE_HOST_FALLBACK)
-        .trim_end_matches('/');
-    let url = format!("{host}/v1/presence/getpresence/");
+    let url = format!("{}/v1/presence/getpresence/", presence_host(session));
     let body = json!(mris.iter().map(|m| json!({ "mri": m })).collect::<Vec<_>>());
 
     let resp = http
@@ -112,6 +151,89 @@ pub async fn fetch_presence(
     }
     let v: Value = serde_json::from_str(&resp.text().await?).context("parse getpresence")?;
     Ok(parse_presence(&v))
+}
+
+/// The presence service's base URL for this session: the directory's own entry when
+/// it looks usable, else the fixed fallback. Never a host derived from anything a
+/// caller passed in — the skypetoken travels on every request below.
+fn presence_host(session: &Session) -> &str {
+    session
+        .endpoint(PRESENCE_HOST_KEY)
+        .filter(|h| h.starts_with("https://"))
+        .unwrap_or(PRESENCE_HOST_FALLBACK)
+        .trim_end_matches('/')
+}
+
+/// The body of an endpoint registration. Pure, so the one shape the tenant accepts
+/// is pinned by a test rather than by a live call.
+fn endpoint_body(endpoint_id: &str) -> Value {
+    json!({
+        "id": endpoint_id,
+        "availability": ENDPOINT_AVAILABILITY,
+        "activity": ENDPOINT_AVAILABILITY,
+        "deviceType": ENDPOINT_DEVICE_TYPE,
+    })
+}
+
+/// Register (or refresh) `endpoint_id` as an endpoint of ours reporting Available,
+/// which is what makes our own presence green for everybody who can see us.
+///
+/// OUTWARD: this publishes the user's own status. Callers must have the user's
+/// consent — the "Always available" setting, off by default — and a read-only backend
+/// must never reach this function.
+///
+/// Idempotent on the id: the same id re-registered is the same endpoint refreshed, so
+/// the heartbeat that keeps us green never accumulates endpoints, and two backends
+/// sharing one store refresh one registration rather than two.
+pub async fn register_available_endpoint(
+    http: &reqwest::Client,
+    session: &Session,
+    presence_token: &str,
+    endpoint_id: &str,
+) -> Result<()> {
+    anyhow::ensure!(!endpoint_id.is_empty(), "an endpoint registration needs an id");
+    let url = format!("{}/v1/me/endpoints/", presence_host(session));
+    let resp = http
+        .put(&url)
+        .bearer_auth(presence_token)
+        .header("x-skypetoken", &session.skypetoken)
+        .header("content-type", "application/json")
+        .body(endpoint_body(endpoint_id).to_string())
+        .send()
+        .await
+        .context("register presence endpoint")?;
+    let status = resp.status();
+    anyhow::ensure!(status.is_success(), "register presence endpoint -> {status}");
+    Ok(())
+}
+
+/// Remove our endpoint registration, so Teams computes our presence again exactly as
+/// it did before it existed. The undo half of [`register_available_endpoint`], and the
+/// reason that function is the mechanism this app uses.
+pub async fn remove_endpoint(
+    http: &reqwest::Client,
+    session: &Session,
+    presence_token: &str,
+    endpoint_id: &str,
+) -> Result<()> {
+    anyhow::ensure!(!endpoint_id.is_empty(), "an endpoint removal needs an id");
+    let url = format!("{}/v1/me/endpoints/{endpoint_id}", presence_host(session));
+    let resp = http
+        .delete(&url)
+        .bearer_auth(presence_token)
+        .header("x-skypetoken", &session.skypetoken)
+        .send()
+        .await
+        .context("remove presence endpoint")?;
+    let status = resp.status();
+    // A registration the service no longer knows about is already in the state the
+    // caller asked for, so 404 is success — otherwise turning the setting off could
+    // fail forever on an endpoint that expired on its own.
+    anyhow::ensure!(
+        status.is_success() || status == reqwest::StatusCode::NOT_FOUND,
+        "remove presence endpoint -> {status}"
+    );
+    Ok(())
 }
 
 /// Extract the presences from the response array. An entry without an mri or
@@ -238,5 +360,81 @@ mod tests {
         let p = Presence::unknown("8:orgid:x");
         assert_eq!(p.availability, "PresenceUnknown");
         assert_eq!(p.last_active_ms, 0);
+    }
+
+    #[test]
+    fn an_endpoint_registration_carries_the_one_body_the_service_accepts() {
+        // Pinned against the live tenant: `deviceType` is required (its absence is a
+        // 400), and `Available` is the only availability an endpoint may report
+        // (`Away`, `Busy` and `DoNotDisturb` are all 400).
+        let body = endpoint_body("39e52755-ca79-44ae-92d1-8db72a50e7f4");
+        assert_eq!(body["id"], "39e52755-ca79-44ae-92d1-8db72a50e7f4");
+        assert_eq!(body["availability"], "Available");
+        assert_eq!(body["activity"], "Available");
+        assert_eq!(body["deviceType"], "Web");
+    }
+
+    /// The code of one module, without its test module and without comments — so a
+    /// doc block may keep explaining what the code may not do. Same shape as the
+    /// scans that keep `mail` and `calendar` read-only.
+    fn code_only(source: &str) -> String {
+        source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or(source)
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The manual-status endpoint (`/v1/me/forceavailability/`) must stay out of the
+    /// crate's CODE: the service accepts that write and refuses every matching
+    /// DELETE, so an app that set it could never take it back. The endpoint
+    /// registration — which is symmetric — is the mechanism, and this test is what
+    /// keeps a later change from quietly reaching for the one-way one.
+    #[test]
+    fn no_code_names_the_one_way_manual_status_write() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(std::path::Path::new("src"), &mut files);
+        assert!(files.len() > 5, "no Rust sources found to scan");
+        for file in files {
+            let source = std::fs::read_to_string(&file).unwrap_or_default();
+            assert!(
+                !code_only(&source).contains("forceavailability"),
+                "{} names the manual-status write. This app could set it and never take it \
+                 back — every DELETE the service offers is refused — so the reversible \
+                 endpoint registration is the only mechanism allowed here.",
+                file.display()
+            );
+        }
+    }
+
+    /// Which HTTP verbs this module issues, and no more. The read path POSTs to
+    /// getpresence; the setting PUTs one endpoint registration and DELETEs it again.
+    /// A fourth verb here is a new outward action, and it needs its own consent gate
+    /// rather than a quiet addition to this file.
+    #[test]
+    fn this_module_issues_exactly_three_requests() {
+        let code = code_only(include_str!("teams_presence.rs"));
+        for (verb, expected) in [(".post(", 1), (".put(", 1), (".delete(", 1)] {
+            assert_eq!(code.matches(verb).count(), expected, "the `{verb}` count changed");
+        }
+        for verb in [".patch(", ".request("] {
+            assert!(!code.contains(verb), "`{verb}` is a new outward action, and needs a gate");
+        }
     }
 }

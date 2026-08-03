@@ -555,6 +555,10 @@ export type AppSettings = {
    *  on, opening a chat clears the marker here only, so the sender is shown no read
    *  receipt and the chat stays unread in every other Teams client. */
   ghost_mode: boolean;
+  /** Always available: keep the user's own Teams status green. Off by default — with
+   *  it on, the backend registers this machine as an endpoint reporting Available and
+   *  refreshes it, so every colleague sees the green dot until it is turned off. */
+  always_available: boolean;
 };
 
 /** A partial settings update. An omitted field is left unchanged, so one

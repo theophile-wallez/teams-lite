@@ -237,7 +237,8 @@ user. Two independent mechanisms enforce that split:
   ad-hoc browser drivers, scripts calling `send`/`edit`/`react`/`mark_read` against
   `127.0.0.1:19420` or `19421` (and the 19440 / 19441 relays in front of them), a
   consumption-horizon PUT straight to Teams (which bypasses the backend's gate
-  entirely), dev servers with no declared backend, a production web server with no
+  entirely), a presence publish straight to the presence service (same reason — see
+  § The user's own status), dev servers with no declared backend, a production web server with no
   declared backend, a send-capable backend started by tooling — including `systemctl
   --user start` on the always-on service's units. It reads the *contents* of what a
   command runs, including an untracked `examples/*.rs` a `cargo run --example` names.
@@ -371,6 +372,37 @@ an outward action, so it is gated on purpose:
   dim a muted channel. A **chat**'s `is_muted` is NOT yet wired into any notification
   path: it only dims the sidebar row, so a muted chat still pushes.
 
+## The user's own status (outward, and gated like one)
+
+The app can hold the user's Teams status green — the **Always available** setting, off
+by default (`src/teams_presence.rs`, `set_always_available` in `src/bin/server.rs`).
+Reading other people's presence is the older half of that module and stays open; the
+publish is gated, because a green dot is a claim about where the user is that every
+colleague reads.
+
+- **`set_always_available` is an `OUTWARD_METHODS` entry**, in both directions: it
+  needs the write token, a read-only backend refuses it, and the hook blocks a script
+  or a `curl` that names the presence write on a command line. Turning the setting
+  *off* is the same outward call, so it is behind the same gate.
+- **The mechanism is an endpoint registration, and that is on purpose.**
+  `PUT {presence}/v1/me/endpoints/` with `{id, availability: "Available", activity:
+  "Available", deviceType: "Web"}` reports one running client of ours; `DELETE
+  …/endpoints/{id}` takes it back. Verified against the tenant in both directions.
+  The service accepts no other availability on an endpoint, so a registration says
+  exactly one thing: "this device is present and available".
+- **Never reach for the manual status** (`PUT …/v1/me/forceavailability/`). The
+  service accepts it and refuses every matching DELETE, so this app could set it and
+  never take it back — a setting whose off switch cannot undo its on switch is not a
+  setting. A test in `teams_presence::tests` scans the crate for that endpoint, and
+  the automation hook refuses any command that names it. Do not weaken either.
+- **A registration expires after 300 s** (measured), so `spawn_presence_heartbeat`
+  refreshes it every 120 s while the setting is on, and the first tick restores the
+  state after a restart. One endpoint id lives in the store, so the always-on service
+  and the user's dev backend refresh ONE registration rather than two.
+- **A read-only backend never publishes.** `publish_presence` refuses before the
+  network, not only at the dispatch gate — the heartbeat never passes through that
+  gate, and a screenshot backend must not tell the user's colleagues they are around.
+
 ## Language policy (MANDATORY)
 
 - **All artifacts are in English.** This includes: UI strings, labels, button text,
@@ -389,7 +421,9 @@ an outward action, so it is gated on purpose:
   D-Bus, real-time trouter client, local-first SQLite store, send, name resolution,
   Web Push to the user's own devices (`src/push.rs` + `src/push_policy.rs`), the
   READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`), the
-  READ-ONLY Teams/Outlook calendar (`src/calendar.rs`), the READ-ONLY rich link
+  READ-ONLY Teams/Outlook calendar (`src/calendar.rs`), presence — reading everybody's
+  and, only when the user asks for it, publishing their own (`src/teams_presence.rs`,
+  see § The user's own status), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
   `src/gitlab.rs` and `src/linear.rs`) and the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see

@@ -3,6 +3,7 @@ import {
   Bell,
   Check,
   ChevronLeft,
+  CircleDot,
   ExternalLink,
   Ghost,
   GitPullRequestArrow,
@@ -73,6 +74,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
           <GitLabSettings />
           <LinearSettings />
           <GhostModeSettings />
+          <AlwaysAvailableSettings />
           <NotificationSettings />
           <AppearanceSettings />
           <SoundsSettings />
@@ -431,6 +433,103 @@ function GhostModeSettings() {
 
       {error && (
         <span data-testid="ghost-mode-error" className="text-xs text-destructive">
+          {error}
+        </span>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Always available — keep the user's own Teams status green.
+ *
+ * The one setting here that other people can see. With it on, the backend registers
+ * this machine as a Teams endpoint reporting Available and refreshes it every two
+ * minutes, so the status stays green while the app's backend runs — including with
+ * every window closed. With it off, the registration is removed and Teams computes
+ * the status again, exactly as before.
+ *
+ * Off by default, and the copy says plainly who sees it: a status the user did not ask
+ * for is a claim about where they are that they never made.
+ */
+function AlwaysAvailableSettings() {
+  const controller = useController();
+  const enabled = useAppState((s) => s.settings.always_available);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await controller.setAlwaysAvailable(!enabled);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="flex flex-col gap-4" data-testid="always-available-settings">
+      <div className="flex items-start gap-3">
+        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
+          <CircleDot className="size-5" strokeWidth={1.5} />
+        </div>
+        <div className="flex flex-col">
+          <h3 className="text-[15px] font-medium text-foreground">Always available</h3>
+          <p className="text-[13px] text-text-faint">
+            Keep your own Teams status green. Everyone who can see you reads it, on
+            every Teams client, until you turn it off.
+          </p>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4 shadow-chip">
+        <div className="flex min-w-0 items-center gap-3">
+          <span
+            aria-hidden
+            data-testid="always-available-dot"
+            className={cn(
+              "size-2.5 shrink-0 rounded-full transition-colors",
+              enabled ? "bg-emerald-500" : "bg-element",
+            )}
+          />
+          <div className="flex min-w-0 flex-col">
+            <span className="text-[13px] font-medium text-foreground">Show me as Available</span>
+            <span className="text-[11px] text-text-faint">
+              {enabled
+                ? "On — your status stays green while teams-lite runs, even with every window closed"
+                : "Off — Teams decides your status, as it does without this app"}
+            </span>
+          </div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label="Always available"
+          data-testid="always-available-toggle"
+          disabled={busy}
+          onClick={() => void toggle()}
+          className={cn(
+            "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+            busy && "opacity-60",
+            enabled ? "bg-primary" : "bg-element",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
+              enabled ? "translate-x-[22px]" : "translate-x-0.5",
+            )}
+          />
+        </button>
+      </div>
+
+      {error && (
+        <span data-testid="always-available-error" className="text-xs text-destructive">
           {error}
         </span>
       )}

@@ -11,7 +11,7 @@
 //
 // Methods: conversations | open | backfill | set_draft | send | edit | react | notifications
 //          | fetch_media | fetch_avatar | profile | presence | get_settings
-//          | set_settings | enrich_link
+//          | set_settings | set_always_available | enrich_link
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | calendars | calendar_view
 //          | agent_status | agent_set_mode | agent_set_tools
@@ -120,6 +120,21 @@ const SETTING_LINEAR_TOKEN: &str = "linear_token";
 /// sender never gets a read receipt. Off by default because the normal, expected
 /// behaviour of a chat client is that opening a chat reads it everywhere.
 const SETTING_GHOST_MODE: &str = "ghost_mode";
+/// Always available (`"1"` = on, anything else = off, and OFF is the default): keep
+/// the user's own Teams status green for everybody who can see them, by registering
+/// this machine as an endpoint reporting Available and refreshing it on a heartbeat
+/// (see [`teams_presence::register_available_endpoint`] and `spawn_presence_heartbeat`).
+///
+/// OUTWARD, which is why `set_always_available` is in {@link OUTWARD_METHODS}: the
+/// green dot is what every colleague reads to decide whether to write. Off by default
+/// because a status the user did not ask for is a claim about them they never made.
+const SETTING_ALWAYS_AVAILABLE: &str = "always_available";
+/// The id of the presence endpoint this store's backends register, generated on first
+/// use and then kept. Stable ON PURPOSE, twice over: re-registering the same id is the
+/// same endpoint refreshed rather than a second one, so neither the heartbeat nor the
+/// two backends that share this store (the always-on service and the user's dev one)
+/// can leave a trail of registrations Teams still counts as us.
+const SETTING_PRESENCE_ENDPOINT_ID: &str = "presence_endpoint_id";
 /// This machine's VAPID private key (base64url), generated on first use. It must
 /// stay stable: every device's subscription embeds the matching public half, so a
 /// new key silently stops every phone that already opted in (see
@@ -140,7 +155,12 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// device the user is signed in on, and Teams shows the new read position to the
 /// other party as a "seen by" receipt. Ghost mode (see [`SETTING_GHOST_MODE`]) makes
 /// it local-only, but the method can write, so the gate is on the method.
-const OUTWARD_METHODS: [&str; 4] = ["send", "edit", "react", "mark_read"];
+///
+/// `set_always_available` publishes the user's own presence (see
+/// [`SETTING_ALWAYS_AVAILABLE`]). It posts no message, but the green dot it turns on
+/// is read by every colleague as a statement about where the user is — and the same
+/// call is what takes it back, so both directions belong behind one gate.
+const OUTWARD_METHODS: [&str; 5] = ["send", "edit", "react", "mark_read", "set_always_available"];
 
 /// The RPC methods that act on THIS MACHINE, outside the store and the network.
 ///
@@ -219,6 +239,14 @@ fn write_class(method: &str) -> Option<WriteClass> {
     }
     None
 }
+
+/// How often the "Always available" endpoint registration is refreshed.
+///
+/// Measured against the tenant: one registration keeps us Available for 300 s and is
+/// gone by 330 s, because an endpoint is a claim that a client is running NOW. Two
+/// minutes leaves room for a missed tick and a retry inside a window whose end is
+/// visible to every colleague as the user going Offline.
+const PRESENCE_HEARTBEAT: Duration = Duration::from_secs(120);
 
 /// The systemd unit that repairs the broker by restarting the Intune container.
 /// Never run `intune-container` from here: one unit keeps the rate limit in one
@@ -433,7 +461,8 @@ fn check_write_allowed(method: &str, params: &Value, token: Option<&str>) -> Res
             WriteClass::Outward => format!(
                 "refused: `{method}` needs the write token this backend published for the user's \
                  own frontends. A client that was not given it (an ad-hoc script, an automated \
-                 driver) may read everything here, but must not post as the user. If you are a \
+                 driver) may read everything here, but must not act as the user — post a \
+                 message, or publish their status. If you are a \
                  frontend, read the token from {WRITE_TOKEN_ENV} or from the file the backend \
                  logged at startup; if you are automation, drive web/mock/server.ts instead."
             ),
@@ -1114,6 +1143,10 @@ async fn main() -> Result<()> {
     // calendar: poll whichever window a client is looking at (read-only, and idle
     // until one opens the calendar — see `spawn_calendar_sync`).
     spawn_calendar_sync(ctx.clone());
+
+    // presence: keep the user's own status green, but ONLY while they asked for it
+    // (off by default, and never in read-only mode — see `spawn_presence_heartbeat`).
+    spawn_presence_heartbeat(ctx.clone());
 
     // one-shot, best-effort: is a newer rolling `latest` build available?
     spawn_update_check(ctx.clone());
@@ -1934,6 +1967,30 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             if let Some(ghost) = params.get("ghost_mode").and_then(Value::as_bool) {
                 store.set_setting(SETTING_GHOST_MODE, if ghost { "1" } else { "0" })?;
             }
+            settings_json(&store)
+        }
+
+        // Turn "Always available" on or off (see SETTING_ALWAYS_AVAILABLE).
+        //
+        // OUTWARD in both directions, and its own method rather than a key of
+        // `set_settings`, for two reasons: it talks to the presence service instead of
+        // writing a row, and it changes what every colleague sees. As an
+        // OUTWARD_METHODS entry it needs the write token and a read-only backend
+        // refuses it outright.
+        //
+        // The network write comes first and the setting is stored only once it
+        // succeeded, so a switch that reads "on" always means Teams was actually told.
+        // Turning it ON registers the endpoint immediately (the heartbeat then keeps
+        // it alive); turning it OFF removes the registration, and the user's status
+        // goes back to whatever Teams computes on its own.
+        "set_always_available" => {
+            let enabled = params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .context("`enabled` must be true or false")?;
+            publish_presence(&ctx, enabled).await?;
+            let store = ctx.store()?;
+            store.set_setting(SETTING_ALWAYS_AVAILABLE, if enabled { "1" } else { "0" })?;
             settings_json(&store)
         }
 
@@ -2857,7 +2914,26 @@ fn settings_json(store: &Store) -> Result<Value> {
         "gitlab_token_set": settings.gitlab_token.is_some(),
         "linear_token_set": settings.linear_token.is_some(),
         "ghost_mode": ghost_mode(store)?,
+        "always_available": always_available(store)?,
     }))
+}
+
+/// Is "Always available" on? Off unless the stored value is exactly `"1"`, so a
+/// missing, empty or malformed setting reads as off — and the safe default of a
+/// setting that publishes the user's own status is that it publishes nothing.
+fn always_available(store: &Store) -> Result<bool> {
+    Ok(store.get_setting(SETTING_ALWAYS_AVAILABLE)?.as_deref() == Some("1"))
+}
+
+/// The presence endpoint id this store's backends register, minted once and then
+/// kept (see [`SETTING_PRESENCE_ENDPOINT_ID`]).
+fn presence_endpoint_id(store: &Store) -> Result<String> {
+    if let Some(id) = store.get_setting(SETTING_PRESENCE_ENDPOINT_ID)?.filter(|id| !id.is_empty()) {
+        return Ok(id);
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    store.set_setting(SETTING_PRESENCE_ENDPOINT_ID, &id)?;
+    Ok(id)
 }
 
 /// Is Ghost mode on? Off unless the stored value is exactly `"1"`, so a missing,
@@ -3320,6 +3396,77 @@ fn resolve_names_bg(ctx: Ctx, convs: Vec<teams_read::Conversation>) {
                     ctx.emit("conversations_changed", json!({}));
                 }
             }
+        }
+    });
+}
+
+/// Publish — or withdraw — our own "Available" endpoint. The one network half of
+/// {@link SETTING_ALWAYS_AVAILABLE}, shared by the RPC, the heartbeat and the restore
+/// on startup, so all three speak to the presence service through one place.
+///
+/// Refuses in read-only mode HERE, not only at the dispatch choke point: the heartbeat
+/// and the restore never pass through `check_write_allowed`, and a backend that
+/// screenshot tooling started must not tell the user's colleagues they are available.
+///
+/// The presence-audience token is read fresh on every attempt (like the presence READ
+/// path reads the profile one) because it is not the CSA token `retry_on_auth` hands
+/// the closure, and a 401 must retry with a refreshed one.
+async fn publish_presence(ctx: &Ctx, available: bool) -> Result<()> {
+    anyhow::ensure!(
+        !read_only(),
+        "read-only mode: this backend never publishes the user's own presence"
+    );
+    let endpoint_id = presence_endpoint_id(&ctx.store()?)?;
+    let http = ctx.http.clone();
+    let tokens = ctx.tokens.clone();
+    ctx.retry_on_auth(move |session, _csa| {
+        let http = http.clone();
+        let tokens = tokens.clone();
+        let endpoint_id = endpoint_id.clone();
+        async move {
+            let token = tokens.get(teams_presence::PRESENCE_SCOPE).await?;
+            if available {
+                teams_presence::register_available_endpoint(&http, &session, &token, &endpoint_id)
+                    .await
+            } else {
+                teams_presence::remove_endpoint(&http, &session, &token, &endpoint_id).await
+            }
+        }
+    })
+    .await
+}
+
+/// Keep the user's own status green while {@link SETTING_ALWAYS_AVAILABLE} is on.
+///
+/// A heartbeat rather than one call, because an endpoint registration expires (see
+/// {@link PRESENCE_HEARTBEAT}) — and the first tick runs immediately, which is what
+/// restores the setting after a restart. The always-on service restarts whenever the
+/// broker bus moves or a staged update lands, and a setting that only took effect
+/// while a human was clicking it would lapse without anybody seeing why.
+///
+/// Two backends may share this store; both refresh the SAME endpoint id, so Teams
+/// counts one endpoint however many of ours are running (see
+/// {@link SETTING_PRESENCE_ENDPOINT_ID}).
+fn spawn_presence_heartbeat(ctx: Ctx) {
+    if read_only() {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            let on = ctx
+                .store()
+                .ok()
+                .and_then(|store| always_available(&store).ok())
+                .unwrap_or(false);
+            if on {
+                if let Err(e) = publish_presence(&ctx, true).await {
+                    // Transient by nature (a broker that re-locked, a 429): the next
+                    // tick retries, and the only cost of a miss is the status falling
+                    // back to what Teams computes.
+                    eprintln!("[presence] refreshing the Available endpoint failed: {e:#}");
+                }
+            }
+            tokio::time::sleep(PRESENCE_HEARTBEAT).await;
         }
     });
 }
@@ -4284,6 +4431,76 @@ mod tests {
             store.set_setting(SETTING_GHOST_MODE, off).unwrap();
             assert!(!ghost_mode(&store).unwrap(), "{off:?} must read as off");
         }
+    }
+
+    // Publishing our own presence is outward: the green dot is what every colleague
+    // reads to decide whether to write, and it is the user's account making the claim.
+    // Both directions ride the same method, so the gate covers taking it back too.
+    #[test]
+    fn always_available_is_outward_facing_and_token_gated() {
+        assert!(OUTWARD_METHODS.contains(&"set_always_available"));
+        assert_eq!(write_class("set_always_available"), Some(WriteClass::Outward));
+        for enabled in [true, false] {
+            let err =
+                check_write_allowed("set_always_available", &json!({ "enabled": enabled }), Some("tok"))
+                    .expect_err("must refuse a tokenless presence publish");
+            assert!(err.contains("write token"), "{err}");
+            assert!(
+                check_write_allowed(
+                    "set_always_available",
+                    &json!({ "enabled": enabled, "write_token": "tok" }),
+                    Some("tok")
+                )
+                .is_ok()
+            );
+        }
+        // Reading the settings back stays open: it says whether the switch is on,
+        // which is not a write.
+        assert_eq!(write_class("get_settings"), None);
+    }
+
+    // Off unless the stored value is exactly "1". The default has to be off: a status
+    // the user never asked for is a claim about where they are that they never made.
+    #[test]
+    fn always_available_is_off_unless_explicitly_enabled() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(!always_available(&store).unwrap(), "unset reads as off");
+        assert_eq!(settings_json(&store).unwrap()["always_available"], false);
+
+        store.set_setting(SETTING_ALWAYS_AVAILABLE, "1").unwrap();
+        assert!(always_available(&store).unwrap());
+        assert_eq!(settings_json(&store).unwrap()["always_available"], true);
+
+        for off in ["0", "", "true", "yes"] {
+            store.set_setting(SETTING_ALWAYS_AVAILABLE, off).unwrap();
+            assert!(!always_available(&store).unwrap(), "{off:?} must read as off");
+        }
+    }
+
+    // One id, minted once and then kept. A fresh id per call would register a second
+    // endpoint on every heartbeat, and Teams would count every one of them as us.
+    #[test]
+    fn the_presence_endpoint_id_is_minted_once_and_reused() {
+        let store = Store::open_in_memory().unwrap();
+        let first = presence_endpoint_id(&store).unwrap();
+        assert!(!first.is_empty());
+        assert_eq!(first, presence_endpoint_id(&store).unwrap());
+        assert_eq!(store.get_setting(SETTING_PRESENCE_ENDPOINT_ID).unwrap(), Some(first.clone()));
+
+        // An empty stored value is not an id: it must be replaced rather than sent.
+        store.set_setting(SETTING_PRESENCE_ENDPOINT_ID, "").unwrap();
+        let second = presence_endpoint_id(&store).unwrap();
+        assert!(!second.is_empty());
+    }
+
+    // The heartbeat refreshes a registration whose lifetime we measured against the
+    // tenant (300 s). A heartbeat at or past that is a status that blinks off.
+    #[test]
+    fn the_presence_heartbeat_stays_inside_the_registration_lifetime() {
+        assert!(
+            PRESENCE_HEARTBEAT < Duration::from_secs(300),
+            "an endpoint registration expires after 300 s"
+        );
     }
 
     #[test]

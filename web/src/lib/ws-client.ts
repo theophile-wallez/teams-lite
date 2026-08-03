@@ -646,6 +646,18 @@ export class Backend {
     if (patch.ghostMode !== undefined) params.ghost_mode = patch.ghostMode;
     return this.writeRequest<AppSettings>("set_settings", params);
   }
+  /** Turn "Always available" on or off, which publishes the user's OWN presence:
+   *  on registers this machine as an endpoint reporting Available (the backend then
+   *  refreshes it on a heartbeat), off removes that registration and hands the status
+   *  back to whatever Teams computes.
+   *
+   *  Its own call rather than a `setSettings` field, because it is outward — every
+   *  colleague reads the green dot — so it is gated like a send and a read-only
+   *  backend refuses it (see OUTWARD_METHODS in src/bin/server.rs). Returns the fresh
+   *  settings view, so the switch only moves once Teams was actually told. */
+  setAlwaysAvailable(enabled: boolean): Promise<AppSettings> {
+    return this.writeRequest<AppSettings>("set_always_available", { enabled });
+  }
   /** Enrich a tracker link with metadata for a rich preview card. Resolves with
    *  `{ metadata: null }` when no integration recognizes the link (or the resource
    *  is private); rejects only on a transient backend/network failure. */

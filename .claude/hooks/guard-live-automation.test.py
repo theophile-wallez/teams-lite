@@ -49,6 +49,25 @@ FIXTURES = {
         "await fetch(`${chat}/v1/users/ME/conversations/${id}/properties?name=consumptionhorizon`,\n"
         "  { method: 'PUT', body: JSON.stringify({ consumptionhorizon: '1;2;0' }) });\n"
     ),
+    # Our own presence, published straight to Teams: the green dot appears for every
+    # colleague, past the backend's gate and past the switch's own off state.
+    "presence-publisher.ts": (
+        "// Registers an endpoint reporting Available.\n"
+        "await fetch('https://presence.teams.microsoft.com/v1/me/endpoints/',\n"
+        "  { method: 'PUT', body: JSON.stringify({ availability: 'Available' }) });\n"
+    ),
+    # The same through the backend's gated RPC, which is still a write.
+    "always-available-writer.ts": (
+        "// Turns the user's status green through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'set_always_available' }));\n"
+    ),
+    # Reading a colleague's presence is what the person card shows: ordinary recon.
+    "presence-reader.ts": (
+        "// Reads presence for a few people.\n"
+        "await fetch('https://presence.teams.microsoft.com/v1/presence/getpresence/',\n"
+        "  { method: 'POST', body: JSON.stringify([{ mri: '8:orgid:x' }]) });\n"
+    ),
     # Reading every member's position is how "seen by" works: ordinary recon.
     "horizon-reader.ts": (
         "// GETs the read positions of a thread.\n"
@@ -171,6 +190,23 @@ EXAMPLE_FIXTURES = {
         "    teams_readstate::set_consumption_horizon(&http, &session, &conversation, \"1\", 2);\n"
         "}\n"
     ),
+    # A presence publish: it turns the user's status green for every colleague, and it
+    # has no target to pin — the account IS the target — so no shape of it is allowed.
+    "guard-test-presence-publish.rs": (
+        "fn main() {\n"
+        "    teams_presence::register_available_endpoint(&http, &session, &token, &epid);\n"
+        "}\n"
+    ),
+    # The manual status, which the service will not even let us undo.
+    "guard-test-force-availability.rs": (
+        "fn main() {\n"
+        "    http.put(\"https://presence.teams.microsoft.com/v1/me/forceavailability/\");\n"
+        "}\n"
+    ),
+    # Reading a colleague's presence is what the person card is built on.
+    "guard-test-presence-read.rs": (
+        "fn main() { teams_presence::fetch_presence(&http, &session, &token, &mris); }\n"
+    ),
     # An example that only READS needs no target at all.
     "guard-test-read-only.rs": (
         "fn main() { teams_read::history(&http, &session, \"19:whatever@thread.v2\"); }\n"
@@ -218,6 +254,17 @@ def cases(tmp: Path):
             "curl -X PUT 'https://fr.ng.msg.teams.microsoft.com/v1/users/ME/"
             "conversations/19:x/properties?name=consumptionhorizon'",
         ),
+        # Publishing our own presence turns the green dot on for every colleague, in
+        # every shape: the gated RPC, the service itself, a cargo example, a curl.
+        ("BLOCK", PROJECT, f"bun run {tmp}/always-available-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/presence-publisher.ts"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-presence-publish"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-force-availability"),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X PUT 'https://presence.teams.microsoft.com/v1/me/endpoints/'",
+        ),
         # The write token is the capability itself — never ours to fetch.
         ("BLOCK", PROJECT, f"bun run {tmp}/token-thief.ts"),
         ("BLOCK", PROJECT, "curl -s http://127.0.0.1:19440/__write-token"),
@@ -256,6 +303,11 @@ def cases(tmp: Path):
         # Reading the code that implements the write is ordinary work, like any search.
         ("ALLOW", PROJECT, 'grep -rn "name=consumptionhorizon" src'),
         ("ALLOW", PROJECT, "grep -rn set_consumption_horizon src ui web"),
+        # Reading presence is what the person card is built on, in every shape.
+        ("ALLOW", PROJECT, f"bun run {tmp}/presence-reader.ts"),
+        ("ALLOW", PROJECT, "cargo run --example guard-test-presence-read"),
+        # …and so is reading the code that publishes it.
+        ("ALLOW", PROJECT, "grep -rn register_available_endpoint src"),
         # A TRACKED example is reviewed code, and this one only reads.
         ("ALLOW", PROJECT, "cargo run --example readstate_recon -- --conv 19:x"),
         # Which devices are subscribed is a read, like any other status question.

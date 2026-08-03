@@ -38,6 +38,11 @@
 #      (`PUT …/properties?name=consumptionhorizon`), which marks a thread read on
 #      every device they own and shows the sender a read receipt. The gated
 #      `mark_read` RPC is the only way that may happen;
+#   2e. a PUBLISH of the user's own presence straight to Teams
+#      (`PUT {presence}/v1/me/endpoints/`, or the manual status at
+#      `/v1/me/forceavailability/`), which turns the green dot on for every colleague
+#      who can see them. The gated `set_always_available` RPC — the switch in
+#      Settings — is the only way that may happen;
 #   5. anything that would send MAIL. The mailbox is read-only here and has no
 #      sandbox equivalent (see AGENTS.md § Mail is READ-ONLY): the broker token
 #      already carries `Mail.Send`, so the only thing standing between this
@@ -255,12 +260,28 @@ print("\n".join(dict.fromkeys(found)))
 ' 2>/dev/null || true
 }
 
-# Cargo examples that would post to Teams somewhere other than the sandbox channel.
+# The presence PUBLISH, in a file of any kind: the endpoint registration that turns the
+# user's status green, and the manual status next to it. Matched on the endpoints the
+# service exposes and on this crate's own functions — never on `fetch_presence`, which
+# READS other people's presence and is what the person card is built on.
+publishes_presence() {
+  grep -qiE 'me/endpoints|me/forceavailability|register_available_endpoint|remove_endpoint|presence\.teams\.microsoft\.com/\.default' "$1"
+}
+
+# Cargo examples that would post to Teams somewhere other than the sandbox channel,
+# and (separately) those that would publish the user's own presence.
 examples_that_send=""
+examples_publishing_presence=""
 while IFS= read -r source; do
   [ -z "$source" ] && continue
   path="$project_dir/$source"
   [ -f "$path" ] || continue
+  # A presence publish is outward too, but it has NO conversation to pin — the target
+  # is always the user's own status — so it cannot be made safe the way a send can,
+  # and it is collected on its own.
+  if publishes_presence "$path"; then
+    examples_publishing_presence="$examples_publishing_presence $source"
+  fi
   # Does it act outward at all? Through this crate's send path, by naming the
   # chatService messages endpoint itself, or by publishing our read position — a
   # horizon write tells the other party the user read their message, which reaches
@@ -279,6 +300,7 @@ scripts_driving_a_browser=""
 scripts_writing_to_the_backend=""
 scripts_sending_mail=""
 scripts_writing_the_read_state=""
+scripts_publishing_presence=""
 scripts_fetching_the_write_token=""
 if ! sanctioned_automation; then
   while IFS= read -r script; do
@@ -299,6 +321,13 @@ if ! sanctioned_automation; then
     # read, which is ordinary recon and must stay open.
     if grep -qiE 'name=consumptionhorizon([^s]|$)|set_consumption_horizon' "$script"; then
       scripts_writing_the_read_state="$scripts_writing_the_read_state $script"
+    fi
+    # Our own presence, straight to Teams: registering an endpoint turns the green dot
+    # on for every colleague, and the manual status beside it cannot even be undone.
+    # READING presence (`getpresence`, `fetch_presence`) is untouched — it is what the
+    # person card shows.
+    if publishes_presence "$script"; then
+      scripts_publishing_presence="$scripts_publishing_presence $script"
     fi
     # READING the live backend is fine and often the point (inspecting real data
     # beats guessing). WRITING is not: `send`/`edit`/`react` post as the user,
@@ -323,8 +352,12 @@ if ! sanctioned_automation; then
     # `agent_set_mode`/`agent_set_tools` are in that list for the same reason: they
     # arm the local agent that answers `@claude` in a Teams thread AS the user, and
     # decide what it may run on this machine (MACHINE_METHODS in src/bin/server.rs).
+    #
+    # `set_always_available` publishes the user's own status: it posts no message, but
+    # the green dot it turns on is what every colleague reads (OUTWARD_METHODS in
+    # src/bin/server.rs).
     if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|react|mark_read|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)"|'\''(send|edit|react|mark_read|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)"|'\''(send|edit|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that
@@ -454,6 +487,41 @@ READING horizons is fine and is how \"seen by\" works — GET …/consumptionhor
 (plural) is untouched by this rule. To exercise the write, use the mock:
 cd web && bun run preview. Against the real account it needs the user's consent,
 through the app's own gated mark_read RPC."
+fi
+
+# --- 1e. our own presence is published by the gated RPC, or not at all ----------
+# `set_always_available` is guarded as a backend write by rule 1, but the presence
+# service can be addressed straight with the broker token, which bypasses the backend
+# entirely (the write token, read-only mode, the switch's own off state). So the
+# endpoints are matched inside ad-hoc scripts and cargo examples, and on the command
+# line behind an HTTP client — the same restriction rule 1d puts on the horizon write,
+# so `grep -rn me/endpoints src` still reads the code that implements this.
+#
+# Unlike a send, this cannot be made safe by pinning a target: the account IS the
+# target. There is no sandbox status.
+if printf '%s' "$command_line" |
+  grep -qiE '(curl|wget|xh|httpie|http)[^;&|]*(me/endpoints|me/forceavailability)' ||
+  [ -n "$scripts_publishing_presence" ] || [ -n "$examples_publishing_presence" ]; then
+  [ -n "$scripts_publishing_presence" ] &&
+    printf 'note: a presence publish was found inside%s\n' "$scripts_publishing_presence" >&2
+  [ -n "$examples_publishing_presence" ] &&
+    printf 'note: a presence publish was found inside%s\n' "$examples_publishing_presence" >&2
+  block "This command would PUBLISH the user's own presence to Teams
+(PUT {presence}/v1/me/endpoints/, or the manual status at /v1/me/forceavailability/).
+
+That is outward: the green dot appears for every colleague who can see the user, on
+every Teams client, and it is their account making the claim about where they are.
+Pinning a target cannot make it safe the way it can for a send — the account is the
+target, and there is no sandbox status.
+
+The manual-status half is worse: the service accepts that write and refuses every
+DELETE, so it cannot be undone from here at all (src/teams_presence.rs has a test that
+keeps the crate from naming it).
+
+READING presence is fine and is what the person card shows — getpresence and
+fetch_presence are untouched by this rule. The one sanctioned way to turn the status
+green is the user's own switch: Settings → Always available, which goes through the
+gated set_always_available RPC and can be turned off again."
 fi
 
 # `probing_processes` and `recording_a_message` exempt only the COMMAND-LINE half: a

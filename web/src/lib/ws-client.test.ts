@@ -224,6 +224,41 @@ describe("Backend request/response", () => {
     backend.close();
   });
 
+  // "Always available" publishes the user's own status to Teams, where every
+  // colleague reads it, so it travels as a WRITE in both directions — turning it off
+  // is the same outward call as turning it on.
+  it("frames set_always_available as a write, carrying the write token", async () => {
+    for (const enabled of [true, false]) {
+      const { backend, socket } = await connected();
+      backend.setWriteToken("tok");
+
+      const promise = backend.setAlwaysAvailable(enabled);
+
+      const frame = JSON.parse(socket.sent[0]!) as {
+        id: number;
+        method: string;
+        params?: Record<string, unknown>;
+      };
+      expect(frame.method).toBe("set_always_available");
+      expect(frame.params).toEqual({ enabled, write_token: "tok" });
+
+      socket.simulateMessage(
+        JSON.stringify({
+          id: frame.id,
+          result: {
+            gitlab_host: "gitlab.com",
+            gitlab_token_set: false,
+            linear_token_set: false,
+            ghost_mode: false,
+            always_available: enabled,
+          },
+        }),
+      );
+      await expect(promise).resolves.toMatchObject({ always_available: enabled });
+      backend.close();
+    }
+  });
+
   it("frames a fetch_avatar request with kind and id, resolving the photo result", async () => {
     const { backend, socket } = await connected();
 

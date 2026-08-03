@@ -395,6 +395,7 @@ function initialState(): AppState {
       gitlab_token_set: false,
       linear_token_set: false,
       ghost_mode: false,
+      always_available: false,
     },
     push: INITIAL_PUSH_STATE,
     agent: null,
@@ -2050,6 +2051,25 @@ export class TeamsController {
     }
     this.set({ settings });
     this.linkCache.clear();
+    playCue("success");
+    return settings;
+  }
+
+  /** Turn "Always available" on or off and reflect the fresh view in state.
+   *
+   *  Not part of `saveSettings`, because this one publishes the user's own presence to
+   *  Teams: it is gated like a send, and the state only moves once the backend says
+   *  the status was actually changed. Rejects on failure so the switch can say why
+   *  instead of claiming a status nobody outside this machine can see. */
+  async setAlwaysAvailable(enabled: boolean): Promise<AppSettings> {
+    let settings: AppSettings;
+    try {
+      settings = await this.backend.setAlwaysAvailable(enabled);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ settings });
     playCue("success");
     return settings;
   }
