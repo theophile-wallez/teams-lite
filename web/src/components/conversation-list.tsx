@@ -323,11 +323,11 @@ function ChatList(props: { selectedIndex: number; onSelect: (index: number) => v
 }
 
 /** The channel surface (the Channels tab): the Pinned section on top, then the team →
- *  channel tree. Teams and channels render in the order CSA reported them — the
- *  backend preserves the array order (the only order the payload states: nothing in it
- *  carries a rank, see examples/team_order_recon.rs) and `organizeChannels` keeps it,
- *  with General first within each team, which the backend puts there because CSA does
- *  not.
+ *  channel tree. Teams render in the user's own Microsoft Teams order, verified against
+ *  the real client: CSA states no rank, but its v1 array order reproduces the client's
+ *  and moves when the user re-arranges (see examples/team_order_recon.rs). The backend
+ *  preserves that array order and `organizeChannels` keeps it, with General first
+ *  within each team, which the backend puts there because CSA does not.
  *
  *  The tree follows Microsoft Teams' own shape: each team is a collapsible section
  *  whose header carries the team's picture and its name at full size, and the

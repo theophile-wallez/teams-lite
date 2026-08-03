@@ -73,12 +73,15 @@ CREATE TABLE IF NOT EXISTS settings (
 -- pipeline unchanged. Fresh stores get the full column set here; stores created
 -- before a column was added are healed by the guarded ALTERs in migrate().
 -- `team_pos`/`channel_pos` hold the CSA array order, which is the ONLY order the
--- payload states: no team and no channel carries a rank, an order or a position key
--- (measured — see examples/team_order_recon.rs). The array order matches no sort of
--- any field CSA does send, so it is a server-held arrangement and the honest thing to
--- mirror. It is not an alphabetical sort, and it is not the display order outright:
--- CSA puts General LAST in a team (index 41 of 42 in one team here), so the read
--- forces General first the way Microsoft Teams shows it.
+-- payload states: no team and no channel carries a rank, an order or a position key,
+-- and the array order matches no sort of any field CSA does send. It is a server-held
+-- arrangement, and it IS the user's own: verified against the real Teams client on
+-- 2026-08-03, whose team order the v1 array reproduces exactly. It also moves when the
+-- user re-arranges their teams, and a sync then re-writes `team_pos` (see
+-- examples/team_order_recon.rs, which pins all of it — including that the v2
+-- aggregator returns a different, non-client order, so nothing must switch to it).
+-- One thing the array does NOT settle: CSA puts General LAST in a team (index 41 of 42
+-- in the biggest one), and the read forces it first.
 CREATE TABLE IF NOT EXISTS channels (
     id                    TEXT PRIMARY KEY,
     team_id               TEXT NOT NULL DEFAULT '',
