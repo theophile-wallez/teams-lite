@@ -19,6 +19,9 @@ import { SystemEventLine } from "./system-event-line";
 import { ReadReceipts } from "./read-receipts";
 import { ModifierKey } from "./shortcut";
 import { PersonHoverCard } from "./person-card";
+import { PresenceBadge } from "./presence-badge";
+import { usePresence } from "./use-presence";
+import { presenceIsUnknown, presenceLabel } from "~/lib/presence";
 import { useModifierLabel } from "~/lib/platform";
 import { groupThreads, type Thread } from "~/lib/threads";
 import { Composer } from "./composer";
@@ -145,6 +148,16 @@ export function MessagePane(props: { onBack?: () => void }) {
     : openChannel?.team_group_id
       ? { kind: "team", id: openChannel.team_group_id }
       : undefined;
+
+  // A 1:1 header is a person, so it carries their live presence like Teams' own:
+  // the badge on the avatar, the state in words beside the name. A group, a channel
+  // and the notes chat name no single human, so they ask for nothing (an undefined
+  // MRI fetches nothing) and show nothing.
+  const partnerMri = openConv?.kind === "one_on_one" ? openConv.avatar_mri : undefined;
+  const partnerPresence = usePresence(partnerMri, { refresh: true });
+  // Only once the state is actually known: a header that reads "Offline" while the
+  // lookup is in flight states something we have not been told.
+  const presenceKnown = partnerPresence !== undefined && !presenceIsUnknown(partnerPresence);
 
   // Channels render as threads: the flat, seq-ordered page is regrouped by
   // `thread_root_id` so a thread's root post and its replies sit together even
@@ -469,28 +482,45 @@ export function MessagePane(props: { onBack?: () => void }) {
           </button>
         )}
         {(openConv || openChannel) && (
-          <Avatar
-            seed={openId}
-            label={headerLabel}
-            photo={headerPhoto}
-            // A channel keeps its team's monogram; a chat states its own kind.
-            fallback={openConv ? conversationFallback(openConv) : "initials"}
-            className="size-9"
-          />
+          <span className="relative shrink-0">
+            <Avatar
+              seed={openId}
+              label={headerLabel}
+              photo={headerPhoto}
+              // A channel keeps its team's monogram; a chat states its own kind.
+              fallback={openConv ? conversationFallback(openConv) : "initials"}
+              className="size-9"
+            />
+            {presenceKnown && (
+              <PresenceBadge
+                presence={partnerPresence ?? null}
+                ring
+                className="absolute -bottom-0.5 -right-0.5 size-3"
+              />
+            )}
+          </span>
         )}
         <div className="flex min-w-0 flex-col">
           {/* In a 1:1 the title IS a person, so it offers their card on hover —
               like every other name in the app. A group/channel title names no
               single human, so it stays plain text (no MRI, no trigger). */}
-          <PersonHoverCard
-            mri={openConv?.kind === "one_on_one" ? openConv.avatar_mri : undefined}
-            name={headerLabel}
-            className="min-w-0"
-          >
-            <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">
-              {headerLabel}
-            </h2>
-          </PersonHoverCard>
+          <div className="flex min-w-0 items-baseline gap-2">
+            <PersonHoverCard mri={partnerMri} name={headerLabel} className="min-w-0">
+              <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">
+                {headerLabel}
+              </h2>
+            </PersonHoverCard>
+            {/* The state in words, beside the name. The name gives way first, so a
+                long one truncates rather than pushing the status out of the row. */}
+            {presenceKnown && (
+              <span
+                data-testid="header-presence"
+                className="shrink-0 whitespace-nowrap text-[11px] font-medium text-text-dim"
+              >
+                {presenceLabel(partnerPresence)}
+              </span>
+            )}
+          </div>
           {openConv ? (
             <p
               data-testid="conversation-subtitle"

@@ -27,6 +27,12 @@ const TONE_STYLES: Record<PresenceTone, string> = {
   unknown: "bg-transparent text-text-faint ring-1 ring-inset ring-current",
 };
 
+/** The tones drawn as an outlined ring rather than a filled disc. Over a surface
+ *  they stay see-through, which is the point; over a photo they need a fill of
+ *  their own (see the `ring` prop) or the picture reads through the ring as a
+ *  glyph that means nothing. */
+const HOLLOW_TONES: ReadonlySet<PresenceTone> = new Set(["offline", "unknown"]);
+
 /** The glyph inside the dot, per tone (`null` = an empty ring, for offline). */
 function ToneGlyph({ tone }: { tone: PresenceTone }) {
   const glyph = "size-[0.62em]";
@@ -48,8 +54,9 @@ export function PresenceBadge(props: {
   presence: PersonPresence | null;
   /** Sizing/positioning overrides; merged last. Defaults to a 10px dot. */
   className?: string;
-  /** Add an outline in the surface colour, so the badge stays legible when it
-   *  overlaps an avatar photo. */
+  /** Mark the badge as an overlay on an avatar: it gains an outline in the surface
+   *  colour, and a hollow tone gains that colour as its fill, so the badge stays
+   *  legible over a photo instead of showing it through. */
   ring?: boolean;
   /** Expose the state to assistive tech (the card's status line already says it in
    *  words, so the overlay badge stays decorative). */
@@ -69,6 +76,7 @@ export function PresenceBadge(props: {
         "grid size-2.5 shrink-0 place-items-center rounded-full text-[10px] leading-none",
         TONE_STYLES[tone],
         props.ring && "outline-2 outline-background",
+        props.ring && HOLLOW_TONES.has(tone) && "bg-background",
         props.className,
       )}
     >

@@ -87,6 +87,10 @@ type Conversation = {
   is_hidden: boolean;
   thread_type: string;
   draft: string;
+  /** In a 1:1, the other party's MRI — the single face the chat has. Empty for a
+   *  group or a channel, which name no one person (see `avatar_mri` in
+   *  src/store.rs). It addresses their photo, their card and their presence. */
+  avatar_mri?: string;
   /** A group chat's own uploaded picture, as a hosted-content URL fetched through
    *  `fetch_media` — the shape the real backend reports (see the Rust
    *  `teams_read::parse_thread_picture`). Absent for a chat with none. */
@@ -764,6 +768,10 @@ function addConversation(input: {
       input.threadType ??
       (input.kind === "one_on_one" || input.kind === "group" ? "chat" : ""),
     draft: "",
+    // The other party's MRI, exactly as the Rust backend derives it (see
+    // `avatar_mri` in src/store.rs: the 1:1 counterpart, empty for a group). It is
+    // what gives a 1:1 header their photo, their card and their live presence.
+    avatar_mri: input.kind === "one_on_one" ? (input.participants[0]?.mri ?? "") : "",
     picture_url: input.pictureUrl,
   };
   const cs: ConvState = { conv, messages, participants: input.participants };
@@ -1399,6 +1407,7 @@ function seedDeletedMessages(): void {
     is_hidden: false,
     thread_type: "chat",
     draft: "",
+    avatar_mri: other.mri,
   };
   const cs: ConvState = { conv, messages, participants: [other] };
   recomputeSummary(cs);

@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import * as HoverCardPrimitive from "@radix-ui/react-hover-card";
 import { Briefcase, Building2, Mail, MapPin } from "lucide-react";
-import type { PersonPresence, PersonProfile } from "~/lib/protocol";
+import type { PersonProfile } from "~/lib/protocol";
 import { lastSeenLabel, presenceIsUnknown, presenceLabel } from "~/lib/presence";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { PresenceBadge } from "./presence-badge";
+import { usePresence } from "./use-presence";
 import { useController } from "./controller-context";
 
 /**
@@ -34,11 +35,13 @@ type PersonIdentity = { mri: string; name: string };
 /** Load a person's directory card and presence for an OPEN card. Both start as
  *  `undefined` (loading) and settle to a value or `null` (nothing to show), so the
  *  card can render the useful half as soon as it lands instead of waiting for both.
- *  Nothing is requested while `open` is false — hovering is cheap by design. */
+ *  Nothing is requested while `open` is false — hovering is cheap by design. The
+ *  presence is read once per opening (a card is a glance, not a surface that stays
+ *  on screen), through the same hook the chat header uses. */
 function usePersonDetails(mri: string, open: boolean) {
   const controller = useController();
   const [profile, setProfile] = useState<PersonProfile | null | undefined>(undefined);
-  const [presence, setPresence] = useState<PersonPresence | null | undefined>(undefined);
+  const presence = usePresence(open ? mri : undefined);
 
   useEffect(() => {
     if (!open || !mri) return;
@@ -47,10 +50,6 @@ function usePersonDetails(mri: string, open: boolean) {
       .loadProfile(mri)
       .then((p) => alive && setProfile(p))
       .catch(() => alive && setProfile(null));
-    controller
-      .loadPresence(mri)
-      .then((p) => alive && setPresence(p))
-      .catch(() => alive && setPresence(null));
     return () => {
       alive = false;
     };
