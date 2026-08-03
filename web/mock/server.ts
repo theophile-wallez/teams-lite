@@ -844,6 +844,106 @@ function seedChannels(): void {
   }
 }
 
+/** The channel that carries the alert-card thread below — a spec and a screenshot
+ *  both reach it by that name. */
+const ALERT_CHANNEL = { team: "Engineering", channel: "Incidents" };
+
+/** Append an app-card thread to the Engineering / Incidents channel: a monitoring
+ *  alert relayed by a bot, which is a whole class of channel — a post whose entire
+ *  content is one adaptive card, plus a couple of human replies under it.
+ *
+ *  It exists because a channel post is already framed by its thread's card, so a
+ *  card post must render flush on that frame instead of drawing a second one inside
+ *  it. Fully deterministic (no PRNG draw), and appended after `seedChannels` so the
+ *  backlog every other spec asserts on is untouched. */
+function seedChannelAlertThread(): void {
+  const slug = (name: string) => name.toLowerCase().replace(/[^a-z]+/g, "-");
+  const id = `19:${slug(ALERT_CHANNEL.team)}-${slug(ALERT_CHANNEL.channel)}-mock@thread.tacv2`;
+  const chs = channelStore.get(id);
+  if (!chs) return;
+
+  const grafana = "https://grafana.example.com";
+  const logs = `${grafana}/explore?left=%7B%22datasource%22%3A%22loki%22%2C%22queries%22%3A%5B%7B%22expr%22%3A%22%7Benvironment%3D%5C%22preprod%5C%22%2Cnamespace%3D%5C%22checkout%5C%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-1h%22%7D%7D`;
+  const silence = `${grafana}/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Dcfto40tofrhfka`;
+  const alert = (pod: string, env: string) =>
+    [
+      `**warning** — checkout-api in ${pod} (${env}) stuck in ImagePullBackOff for 15m.`,
+      `**Debug:** kubectl -n checkout describe pod ${pod}`,
+      `[🪵 Logs](${logs}) · [🔕 Silence](${silence})`,
+    ].join("\n");
+
+  const last = chs.messages.at(-1)!;
+  let seq = last.seq;
+  const push = (
+    msg: Omit<ChatMessage, "id" | "conversation_id" | "seq" | "compose_time">,
+    offsetMs: number,
+  ): void => {
+    seq += 1;
+    chs.messages.push({
+      id: `${id}#${seq}`,
+      conversation_id: id,
+      seq,
+      compose_time: last.compose_time + offsetMs,
+      ...msg,
+    });
+  };
+
+  const rootId = `${id}#${seq + 1}`;
+  push(
+    {
+      sender: "Workflows",
+      content: "",
+      thread_root_id: rootId,
+      // A bot's alert post carries no subject at all — Teams shows the card's own
+      // first line as the headline, which is exactly why the card must own the
+      // whole post rather than sit in a box inside it.
+      attachments: [
+        {
+          name: "Card",
+          content_type: "application/vnd.microsoft.card.adaptive",
+          url: "",
+          kind: "card",
+          card: {
+            title: "🟠 FIRING:2 · ContainerCannotStartNonProd",
+            text: [
+              alert("checkout-api-6d844c5876-p66vq", "preprod"),
+              alert("checkout-api-5778775fc7-sbhjx", "preprod-us"),
+              "Lucas Silva used a Workflow template to send this card.",
+            ].join("\n"),
+            facts: [],
+            actions: [{ title: "View URL", url: `${grafana}/alerting/list` }],
+          },
+        },
+      ],
+      is_self: false,
+    },
+    60_000,
+  );
+  push(
+    {
+      sender: PEOPLE[0]!.name,
+      sender_mri: PEOPLE[0]!.mri,
+      content: "<p>The registry credentials expired — rotating them now.</p>",
+      thread_root_id: rootId,
+      is_self: false,
+    },
+    120_000,
+  );
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content: "<p>Thanks, I'll watch the rollout.</p>",
+      thread_root_id: rootId,
+      is_self: true,
+    },
+    180_000,
+  );
+
+  recomputeChannelSummary(chs);
+  chs.channel.is_read = true;
+}
+
 /** Register a dedicated "Media Gallery" conversation whose messages exercise the
  *  UI's inline-image and attachment rendering: a pasted screenshot embedded in
  *  the HTML, an image shared as an attachment, a non-image file, plus two
@@ -4373,6 +4473,9 @@ seedPlainTextSamples();
 // Seed channels LAST so the chat seed's PRNG sequence (and thus the Chats list
 // the existing specs assert on) is left completely unchanged.
 seedChannels();
+// Appended to a channel that already exists, and drawing no random numbers, so it
+// changes nothing but the one channel it names.
+seedChannelAlertThread();
 // Mail draws no random numbers at all (its fixtures are fully deterministic), so
 // its position here cannot disturb any existing spec either.
 seedMail();

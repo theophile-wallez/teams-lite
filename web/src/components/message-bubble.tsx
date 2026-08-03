@@ -187,6 +187,11 @@ function MessageBubbleImpl(props: {
   continuesAbove: boolean;
   continuesBelow: boolean;
   highlighted?: boolean;
+  /** This message already sits on a surface of its own: it is the root post of a
+   *  channel thread, and the thread's card is that surface. A message that would
+   *  otherwise bring its own panel — an app card — renders flush inside it
+   *  instead of as a card within a card. */
+  onPanel?: boolean;
   onReply: (message: ChatMessage) => void;
   onCopy: (message: ChatMessage) => void;
   onReact: (message: ChatMessage, key: string) => void;
@@ -292,6 +297,11 @@ function MessageBubbleImpl(props: {
     cardAttachments.length > 0 &&
     !bodyHasContent &&
     cardAttachments.length === attachments.length;
+
+  // The card IS the root post of a channel thread, and that thread already draws
+  // a card around the whole post. So the card renders flush on that panel and
+  // spans it, instead of being a smaller card inside a bigger one.
+  const cardOnPanel = cardOnly && props.onPanel === true;
 
   // A recording-only message: a meeting recording and nothing else (the backend
   // clears the body and any sender for these, so they always arrive this way).
@@ -470,7 +480,7 @@ function MessageBubbleImpl(props: {
             ) : att.kind === "recording" ? (
               <RecordingAttachment key={`att-${i}-${att.url}`} attachment={att} />
             ) : att.kind === "card" ? (
-              <CardAttachment key={`att-${i}-${att.name}`} attachment={att} />
+              <CardAttachment key={`att-${i}-${att.name}`} attachment={att} onPanel={cardOnPanel} />
             ) : (
               <FileAttachment key={`att-${i}-${att.url}`} attachment={att} />
             ),
@@ -512,7 +522,9 @@ function MessageBubbleImpl(props: {
           // A link card gets a tighter max width; the mat is capped at the usual
           // bubble one; a recording card sizes itself (max-w-sm).
           linkOnly && "max-w-md",
-          cardOnly && "w-full max-w-md",
+          // A card on its own panel spans it; a card that draws its own stays as
+          // narrow as the other bubbles.
+          cardOnly && (cardOnPanel ? "w-full" : "w-full max-w-md"),
           imageOnly && "max-w-[76%]",
           recordingOnly && "w-full max-w-sm",
           !bare &&
@@ -652,6 +664,7 @@ function MessageBubbleImpl(props: {
             {inert ? null : (
               <MessageActionsMenu
                 mine={mine}
+                inside={cardOnPanel}
                 open={menuOpen}
                 onOpenChange={setMenuOpen}
                 onCloseAutoFocus={(event) => {
@@ -691,9 +704,16 @@ function MessageBubbleImpl(props: {
  * message the cursor rested on, which is a lot of motion for a rare action that
  * this menu already carries — reachable by keyboard and by touch, which the hover
  * row never was.
+ *
+ * `inside` moves the trigger into the message's top-right corner, floating on its
+ * own chip. A message that spans its container — a card on a channel thread's
+ * panel — leaves no room beside it, so a trigger placed outside would be clipped
+ * by the history's own horizontal bounds.
  */
 function MessageActionsMenu(props: {
   mine: boolean;
+  /** Place the trigger inside the message box instead of beside it. */
+  inside?: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Called as the menu closes, before it restores focus to its trigger. */
@@ -716,8 +736,12 @@ function MessageActionsMenu(props: {
           className={cn(
             // Hidden until hover on a mouse. A coarse pointer opens this menu
             // with a long press, so the permanent mobile ellipsis is unnecessary.
-            "message-actions-trigger absolute top-1/2 hidden size-7 -translate-y-1/2 cursor-pointer place-items-center rounded-md text-text-dim transition hover:bg-accent hover:text-foreground focus-visible:grid data-[state=open]:grid data-[state=open]:bg-accent data-[state=open]:text-foreground [@media(pointer:fine)]:grid [@media(pointer:fine)]:opacity-0 [@media(pointer:fine)]:focus-visible:opacity-100 [@media(pointer:fine)]:group-hover:grid [@media(pointer:fine)]:group-hover:opacity-100 [@media(pointer:fine)]:data-[state=open]:opacity-100",
-            props.mine ? "-left-9" : "-right-9",
+            "message-actions-trigger absolute hidden size-7 cursor-pointer place-items-center rounded-md text-text-dim transition hover:bg-accent hover:text-foreground focus-visible:grid data-[state=open]:grid data-[state=open]:bg-accent data-[state=open]:text-foreground [@media(pointer:fine)]:grid [@media(pointer:fine)]:opacity-0 [@media(pointer:fine)]:focus-visible:opacity-100 [@media(pointer:fine)]:group-hover:grid [@media(pointer:fine)]:group-hover:opacity-100 [@media(pointer:fine)]:data-[state=open]:opacity-100",
+            props.inside
+              // Over the message's own first line, so it needs a fill of its own
+              // to stay legible against the text it covers.
+              ? "right-0 top-0 bg-card shadow-chip"
+              : cn("top-1/2 -translate-y-1/2", props.mine ? "-left-9" : "-right-9"),
           )}
         >
           <MoreHorizontal className="size-4" strokeWidth={1.6} />

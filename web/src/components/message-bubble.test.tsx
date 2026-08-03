@@ -28,7 +28,7 @@ function message(over: Partial<ChatMessage> = {}): ChatMessage {
   };
 }
 
-function render(msg: ChatMessage): string {
+function render(msg: ChatMessage, over: { onPanel?: boolean } = {}): string {
   return renderToStaticMarkup(
     <ControllerProvider url={OFFLINE_URL}>
       <MessageBubble
@@ -37,6 +37,7 @@ function render(msg: ChatMessage): string {
         editing={false}
         continuesAbove={false}
         continuesBelow={false}
+        onPanel={over.onPanel}
         onReply={() => {}}
         onCopy={() => {}}
         onReact={() => {}}
@@ -167,5 +168,20 @@ describe("MessageBubble — card attachments", () => {
     expect(out).toContain('data-testid="card-attachment"');
     expect(out).not.toContain('data-card-only="true"');
     expect(out).toContain("bg-bubble-incoming");
+  });
+
+  it("renders the card flush when the message already sits on a panel", () => {
+    // The root post of a channel thread: the thread's card IS the post's surface,
+    // so the card inside it draws no second one.
+    const out = render(message({ content: "", attachments: [cardAttachment] }), {
+      onPanel: true,
+    });
+    expect(out).toContain('data-on-panel="true"');
+    expect(out).toContain("Filebeat error(s)");
+  });
+
+  it("keeps the card's own panel elsewhere", () => {
+    const out = render(message({ content: "", attachments: [cardAttachment] }));
+    expect(out).not.toContain('data-on-panel="true"');
   });
 });

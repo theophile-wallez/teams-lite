@@ -394,8 +394,14 @@ export function MessagePane(props: { onBack?: () => void }) {
   // One rendered row: a system-event line or a message bubble, with its optional
   // "seen by" receipts underneath. `prev`/`next` drive avatar/name chaining and
   // are the visually adjacent rows (within a thread for channels, else the flat
-  // neighbours), not necessarily the raw array neighbours.
-  const renderMsg = (m: ChatMessage, prev?: ChatMessage, next?: ChatMessage) => {
+  // neighbours), not necessarily the raw array neighbours. `onPanel` marks a
+  // message the caller already framed — the root post of a channel thread.
+  const renderMsg = (
+    m: ChatMessage,
+    prev?: ChatMessage,
+    next?: ChatMessage,
+    opts?: { onPanel?: boolean },
+  ) => {
     const seenBy = readAnchors.get(m.id);
     return (
       <div key={m.id} className="contents">
@@ -407,6 +413,7 @@ export function MessagePane(props: { onBack?: () => void }) {
             showSenderName={isGroup}
             continuesAbove={sameAuthor(prev, m)}
             continuesBelow={sameAuthor(m, next)}
+            onPanel={opts?.onPanel}
             editing={editingId === m.id}
             highlighted={highlightId === m.id}
             onReply={doReply}
@@ -595,21 +602,34 @@ export function MessagePane(props: { onBack?: () => void }) {
 }
 
 /** One channel thread: the root post, an optional subject heading, and a
- *  collapsible "N replies" block (collapsed by default). */
+ *  collapsible "N replies" block (collapsed by default).
+ *
+ *  This card is the root post's own surface, so the post renders on it (`onPanel`)
+ *  rather than bringing a second one of its own — a whole notifications channel is
+ *  made of app cards, and a card inside a card frames the same words twice. */
 function ThreadGroup(props: {
   thread: Thread;
   expanded: boolean;
   onToggle: () => void;
-  renderMsg: (m: ChatMessage, prev?: ChatMessage, next?: ChatMessage) => ReactNode;
+  renderMsg: (
+    m: ChatMessage,
+    prev?: ChatMessage,
+    next?: ChatMessage,
+    opts?: { onPanel?: boolean },
+  ) => ReactNode;
 }) {
   const { thread, expanded, onToggle, renderMsg } = props;
   const { subject, lead, replies } = thread;
   return (
-    <div className="mb-3 rounded-2xl border border-border-subtle/60 bg-element/20 px-2 py-2">
-      {subject && (
-        <h3 className="px-1 pb-1 text-[13px] font-semibold text-foreground">{subject}</h3>
-      )}
-      {renderMsg(lead, undefined, undefined)}
+    // The horizontal padding is the post's own margin: the subject, the root post
+    // and the replies all start at this edge, so a flush card lines up with the
+    // heading above it.
+    <div
+      data-testid="thread-group"
+      className="mb-3 rounded-2xl border border-border-subtle/60 bg-element/20 px-3 py-2.5"
+    >
+      {subject && <h3 className="pb-1 text-[13px] font-semibold text-foreground">{subject}</h3>}
+      {renderMsg(lead, undefined, undefined, { onPanel: true })}
       {replies.length > 0 && (
         <>
           <button
@@ -617,7 +637,9 @@ function ThreadGroup(props: {
             onClick={onToggle}
             aria-expanded={expanded}
             data-testid="thread-toggle"
-            className="mt-1 flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
+            // The negative margin pulls the label back to the post's edge while the
+            // padding stays a hit area for the hover background.
+            className="-ml-1.5 mt-1 flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
           >
             <ChevronRight
               className={cn("size-3.5 transition-transform duration-200 ease-out", expanded && "rotate-90")}

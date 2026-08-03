@@ -188,4 +188,21 @@ describe("CardAttachment — card text", () => {
     const empty: Attachment = { ...card(), name: "Card", card: undefined };
     expect(render(empty)).toContain("Card");
   });
+
+  it("drops its own panel when it already sits on one", () => {
+    // A channel thread draws the card around the whole post, so the card inside it
+    // brings no fill, padding or shadow of its own — see `onPanel`.
+    const out = renderToStaticMarkup(<CardAttachment attachment={card()} onPanel />);
+    expect(out).toContain('data-on-panel="true"');
+    expect(out).not.toContain("bg-card");
+    expect(out).not.toContain("shadow-chip");
+    // The content is untouched: only the frame goes.
+    expect(out).toContain("Filebeat error(s)");
+  });
+
+  it("keeps its panel when it stands on its own", () => {
+    const out = render(card());
+    expect(out).toContain("bg-card");
+    expect(out).toContain("shadow-chip");
+  });
 });

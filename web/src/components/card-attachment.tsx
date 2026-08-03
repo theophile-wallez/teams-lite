@@ -30,8 +30,17 @@ const PLACEHOLDER_NAME = "Card";
  * is ever read as HTML, and an action that is not a link — a poll vote, a bot
  * `Action.Submit` — renders as inert text. Acting on one would mean posting to
  * Teams as the user, which nothing in this client does behind their back.
+ *
+ * `onPanel` says the card already sits on a surface of its own — a channel
+ * thread's card, where the card IS the root post — so it drops its own fill,
+ * padding and shadow and reads as the content of that panel. Two nested panels
+ * frame the same words twice and buy nothing.
  */
-export function CardAttachment(props: { attachment: Attachment; className?: string }) {
+export function CardAttachment(props: {
+  attachment: Attachment;
+  onPanel?: boolean;
+  className?: string;
+}) {
   const { attachment } = props;
   // A card entry whose payload never made it through still names itself, so the
   // fact that a card was posted is not lost.
@@ -54,7 +63,12 @@ export function CardAttachment(props: { attachment: Attachment; className?: stri
     <div
       data-testid="card-attachment"
       data-content-type={attachment.content_type}
-      className={cn("w-full rounded-xl bg-card px-3 py-2.5 text-foreground shadow-chip", props.className)}
+      data-on-panel={props.onPanel ? "true" : undefined}
+      className={cn(
+        "w-full text-foreground",
+        !props.onPanel && "rounded-xl bg-card px-3 py-2.5 shadow-chip",
+        props.className,
+      )}
     >
       <div className="flex items-start gap-2.5">
         {appIcon ? (

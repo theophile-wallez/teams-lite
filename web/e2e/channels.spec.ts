@@ -232,6 +232,46 @@ test.describe("channels", () => {
     await expect(others.locator('[data-testid="channel-muted-glyph"]')).toHaveCount(0);
   });
 
+  test("renders an app-card post on the thread's own card, not in a card inside it", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    await openChannelsTab(page);
+
+    // The mock seeds exactly one card post in a channel (Engineering · Incidents —
+    // see seedChannelAlertThread in web/mock/server.ts): a monitoring alert relayed
+    // by a bot, which is what a whole notifications channel consists of.
+    await page
+      .locator('[data-testid="channel-row"]')
+      .filter({ hasText: "Incidents" })
+      .first()
+      .click();
+    const card = page.locator('[data-testid="card-attachment"]').first();
+    await expect(card).toBeVisible();
+
+    // The thread's card is the post's surface, so the card draws none of its own
+    // and spans the post instead of sitting in a smaller box inside it.
+    await expect(card).toHaveAttribute("data-on-panel", "true");
+    const group = page.locator('[data-testid="thread-group"]').filter({ has: card });
+    const [cardBox, groupBox] = [await card.boundingBox(), await group.boundingBox()];
+    expect(cardBox && groupBox).toBeTruthy();
+    // The card is inset from the panel by the panel's own padding alone, equally on
+    // both sides — a card with a box of its own would be inset much further, and a
+    // narrower card would not be centered in it.
+    const leftInset = cardBox!.x - groupBox!.x;
+    const rightInset = groupBox!.x + groupBox!.width - (cardBox!.x + cardBox!.width);
+    expect(leftInset).toBeGreaterThan(0);
+    expect(Math.abs(leftInset - rightInset)).toBeLessThan(2);
+    expect(leftInset).toBeLessThan(20);
+
+    // The card's content is untouched by the flattening: its title, its markdown
+    // and its link action all still render.
+    await expect(card.locator('[data-testid="card-title"]')).toContainText(
+      "ContainerCannotStartNonProd",
+    );
+    await expect(card.locator('[data-testid="card-action"]')).toHaveAttribute("href", /grafana/);
+  });
+
   test("runs clean with no console errors", async ({ page, consoleErrors }) => {
     await gotoApp(page);
     await openChannelsTab(page);

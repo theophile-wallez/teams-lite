@@ -729,11 +729,27 @@ if (import.meta.main) {
       await toggleTeamSection(page, 0);
       await shot(`${out}-collapsed-light.png`);
       await toggleTeamSection(page, 0);
+      // A post that is nothing but an app card — a whole class of channel. The
+      // thread's own card is that post's surface, so the card renders flush on it
+      // instead of as a card inside a card.
+      await openConversation(page, "Incidents");
+      await page.waitForSelector('[data-testid="card-attachment"]');
+      await page.waitForTimeout(300);
+      await shot(`${out}-card-light.png`);
       await setTheme("dark");
+      await shot(`${out}-card-dark.png`);
+      // That post spans its panel, so its actions trigger has no room beside it and
+      // floats in its top-right corner instead.
+      await openMessageActions(page);
+      await shot(`${out}-card-actions-dark.png`);
+      await page.keyboard.press("Escape");
+      await page.locator('[data-testid="channel-row"]').first().click();
+      await page.waitForSelector('[data-testid="message"], [data-testid="system-event"]');
       await shot(`${out}-dark.png`);
       console.log(
         `[preview] wrote ${out}-tree-light.png, ${out}-open-light.png, ` +
-          `${out}-collapsed-light.png and ${out}-dark.png`,
+          `${out}-collapsed-light.png, ${out}-card-light.png, ${out}-card-dark.png, ` +
+          `${out}-card-actions-dark.png and ${out}-dark.png`,
       );
     });
     process.exit(0);
