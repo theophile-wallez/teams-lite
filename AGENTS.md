@@ -97,7 +97,9 @@ that surface together:
   (`web/src/lib/agent-message.ts`). That line exists for honesty about authorship and
   is required above; reading it back is what makes every reply ever posted render as
   one — including the ones answered from a phone while this app was closed, which is
-  most of them.
+  most of them. In the bubble the words are replaced by the CLI's own mark and
+  "Claude by <the account it went out under>", which says the same two things in less
+  space; the line itself is stripped from the body so it is never stated twice.
 - **The answer sits on the LEFT.** The message is genuinely the user's — it went out
   through their account and a colleague sees their name on it — but they did not write
   it, and putting it beside the things they did write is the one place this app would be

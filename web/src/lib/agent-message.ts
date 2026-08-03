@@ -29,6 +29,13 @@ export const AGENT_BACKENDS = ["claude", "opencode"] as const;
 
 export type AgentBackendName = (typeof AGENT_BACKENDS)[number];
 
+/** How a backend's name is written for a reader: each vendor's own casing. Claude is a
+ *  proper noun; opencode is lowercase on purpose. Shared, because the mark's label and
+ *  the status line under it must spell the same CLI the same way. */
+export function agentDisplayName(backend: string): string {
+  return backend === "claude" ? "Claude" : backend;
+}
+
 /** What the signature says about a message. */
 export type AgentAuthorship = {
   /** Which CLI wrote it. */

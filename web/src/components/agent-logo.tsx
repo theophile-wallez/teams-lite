@@ -98,12 +98,14 @@ export function AgentLogo(props: { backend: string; className?: string; title?: 
 }
 
 /**
- * The mark on a coin, sized like the app's other avatars — what stands where a person's
- * photo would, at the left of the bubble the agent wrote.
+ * The mark, bare — no coin, no fill, no shadow. It sits in a line of text beside the
+ * name, not where a person's photo would go: a chip behind it would read as an avatar,
+ * and the agent is not a member of the thread. Each vendor's artwork carries its own
+ * colour, so it holds up on either theme with nothing behind it.
  *
- * `busy` gives it a soft ring that breathes while the run is going, so the thread shows
- * life from the moment the trigger lands (the CSS is `.agent-coin-busy` in app.css, and
- * the global reduced-motion rule neutralizes it).
+ * `busy` makes it breathe while the run is going, so the thread shows life from the
+ * moment the trigger lands (`.agent-mark-busy` in app.css; the global reduced-motion
+ * rule neutralizes it).
  */
 export function AgentCoin(props: {
   backend: string;
@@ -115,18 +117,10 @@ export function AgentCoin(props: {
       data-testid="agent-coin"
       data-backend={props.backend}
       data-busy={props.busy ? "true" : undefined}
-      className={cn(
-        "relative grid size-7 shrink-0 place-items-center rounded-full shadow-chip",
-        // Each mark keeps the background its vendor drew it for: Claude's coral on a
-        // wash of itself, opencode's greys on their near-black/near-white paper.
-        props.backend === "opencode"
-          ? "bg-[#F1ECEC] dark:bg-[#211E1E]"
-          : "bg-[#D97757]/15 dark:bg-[#D97757]/20",
-        props.busy && "agent-coin-busy",
-        props.className,
-      )}
+      className={cn("grid shrink-0 place-items-center", props.busy && "agent-mark-busy", props.className)}
     >
-      <AgentLogo backend={props.backend} className="size-4" title={props.backend} />
+      <AgentLogo backend={props.backend} className="size-full" title={props.backend} />
     </span>
   );
 }
+

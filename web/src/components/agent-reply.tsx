@@ -4,7 +4,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Alert02Icon, Wrench01Icon } from "@hugeicons/core-free-icons";
 import { agentMarkdownToHtml } from "~/lib/agent-markdown";
 import { agentPhaseLabel, agentRunIsLive, type AgentRun } from "~/lib/agent-run";
-import type { AgentBackendName } from "~/lib/agent-message";
+import { agentDisplayName, type AgentBackendName } from "~/lib/agent-message";
 import { cn } from "~/lib/utils";
 import { AgentCoin } from "./agent-logo";
 import { RichContent } from "./rich-content";
@@ -181,7 +181,7 @@ export function AgentStream(props: { run: AgentRun; onSettled: () => void }) {
           className={cn(run.phase === "writing" && "agent-streaming")}
         />
       ) : null}
-      <AgentStatus run={run} hasBody={html !== ""} />
+      <AgentStatus run={run} />
     </div>
   );
 }
@@ -193,8 +193,15 @@ export function AgentStream(props: { run: AgentRun; onSettled: () => void }) {
  * actually waiting through, and a static "thinking…" is indistinguishable from a
  * frozen app. Once words are arriving the shimmer stops: the words are the progress
  * indicator, and two competing animations is one too many.
+ *
+ * There is no spinner and no bouncing dots beside it. The shimmer already says the same
+ * thing, in the words themselves, and a second animation next to it would say it twice.
+ *
+ * It always stands clear of whatever is above it — the quoted request, the answer as it
+ * grows, or just the signature. Something is always above it, so the gap is
+ * unconditional: a status line flush against the quote reads as part of the quote.
  */
-function AgentStatus(props: { run: AgentRun; hasBody: boolean }) {
+function AgentStatus(props: { run: AgentRun }) {
   const { run } = props;
   const reduce = useReducedMotion();
   const live = agentRunIsLive(run);
@@ -208,7 +215,7 @@ function AgentStatus(props: { run: AgentRun; hasBody: boolean }) {
     return (
       <div
         data-testid="agent-error"
-        className="mt-1.5 flex items-start gap-1.5 text-xs text-destructive"
+        className="mt-2 flex items-start gap-1.5 text-xs text-destructive"
       >
         <HugeiconsIcon
           icon={Alert02Icon}
@@ -227,14 +234,9 @@ function AgentStatus(props: { run: AgentRun; hasBody: boolean }) {
       data-testid="agent-status"
       role="status"
       aria-live="polite"
-      className={cn("flex min-w-0 flex-col gap-1 text-xs", props.hasBody && "mt-1.5")}
+      className="mt-2 flex min-w-0 flex-col gap-1 text-xs"
     >
       <div className="flex min-w-0 items-center gap-1.5">
-        <span className="typing-dots text-text-dim" aria-hidden="true">
-          <span className="typing-dot" />
-          <span className="typing-dot" />
-          <span className="typing-dot" />
-        </span>
         <span
           data-testid="agent-phase"
           // shadcn's `shimmer` (ui.shadcn.com/docs/utils/shimmer): it paints the text
@@ -247,7 +249,9 @@ function AgentStatus(props: { run: AgentRun; hasBody: boolean }) {
             waiting && "shimmer shimmer-duration-2100",
           )}
         >
-          {run.phase === "working" ? `${run.backend} is working` : agentPhaseLabel(run)}
+          {run.phase === "working"
+            ? `${agentDisplayName(run.backend)} is working`
+            : agentPhaseLabel(run)}
         </span>
       </div>
 
@@ -262,7 +266,10 @@ function AgentStatus(props: { run: AgentRun; hasBody: boolean }) {
             animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
             exit={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
             transition={{ duration: 0.18, ease: [0.2, 0.65, 0.3, 0.9] }}
-            className="flex min-w-0 items-center gap-1.5 self-start rounded-md bg-black/5 px-1.5 py-0.5 text-[11px] text-text-dim dark:bg-white/10"
+            // `max-w-full` is load-bearing next to `self-start`: a flex item aligned to
+            // the start is sized by its content, so a chip naming a long path would grow
+            // straight through the bubble's edge instead of ellipsising inside it.
+            className="flex min-w-0 max-w-full items-center gap-1.5 self-start rounded-md bg-black/5 px-1.5 py-0.5 text-[11px] text-text-dim dark:bg-white/10"
           >
             <HugeiconsIcon
               icon={Wrench01Icon}
@@ -324,17 +331,13 @@ function tail(text: string, max: number): string {
  */
 export function AgentStoredStatus(props: {
   authorship: { pending: boolean; failure: string | null };
-  hasBody: boolean;
 }) {
   const { authorship } = props;
   if (authorship.failure) {
     return (
       <div
         data-testid="agent-error"
-        className={cn(
-          "flex items-start gap-1.5 text-xs text-destructive",
-          props.hasBody && "mt-1.5",
-        )}
+        className="mt-2 flex items-start gap-1.5 text-xs text-destructive"
       >
         <HugeiconsIcon
           icon={Alert02Icon}
@@ -350,7 +353,7 @@ export function AgentStoredStatus(props: {
   return (
     <div
       data-testid="agent-stalled"
-      className={cn("text-xs italic text-text-faint", props.hasBody && "mt-1.5")}
+      className="mt-2 text-xs italic text-text-faint"
     >
       still being written…
     </div>
@@ -358,23 +361,34 @@ export function AgentStoredStatus(props: {
 }
 
 /**
- * The line that says a machine wrote this message.
+ * The line that says who wrote this message: the CLI's mark and name, then whose request
+ * it answers.
  *
- * The posted message carries the same fact as text (`— claude, via teams-lite`), and
- * that line is load-bearing in the thread — it is what a colleague in a real Teams
- * client reads. Here it becomes the mark plus the name, which says it in less space and
- * says it before the answer instead of after; the words themselves are removed from the
- * body (see `agentAuthorship`) so the bubble does not state it twice.
+ * It stands where a sender's name stands on any other incoming bubble, and it carries
+ * one more fact than a name can — "Claude by Théophile WALLEZ" names both the machine
+ * that wrote the words and the account that posted them, which is exactly the pair a
+ * reader of this thread needs.
+ *
+ * The posted message says the same thing as text (`— claude, via teams-lite`), and that
+ * line is load-bearing in the THREAD: it is what a colleague in a real Teams client
+ * reads. It is not repeated here, because here the mark says it — the words are stripped
+ * from the body (see `agentAuthorship`) rather than shown twice.
  */
-export function AgentSignature(props: { backend: AgentBackendName; busy?: boolean }) {
+export function AgentSignature(props: {
+  backend: AgentBackendName;
+  /** Whose message the agent answered — the account the reply went out under. */
+  author?: string;
+  busy?: boolean;
+}) {
+  const author = props.author?.trim();
   return (
     <div
       data-testid="agent-signature"
       className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-sender-name"
     >
-      <AgentCoin backend={props.backend} busy={props.busy} className="size-5" />
-      <span>{props.backend}</span>
-      <span className="font-normal text-text-faint">via teams-lite</span>
+      <AgentCoin backend={props.backend} busy={props.busy} className="size-4" />
+      <span>{agentDisplayName(props.backend)}</span>
+      {author ? <span className="min-w-0 truncate font-normal text-text-faint">by {author}</span> : null}
     </div>
   );
 }
@@ -388,7 +402,13 @@ export function AgentSignature(props: { backend: AgentBackendName; busy?: boolea
  * at all right after the user asked, which reads as a feature that ignored them. It is
  * also the fallback if that echo is ever lost.
  */
-export function AgentPendingBubble(props: { run: AgentRun; onSettled: () => void }) {
+export function AgentPendingBubble(props: {
+  run: AgentRun;
+  /** Whose request it answers — the pane reads it off the newest message of ours, since
+   *  this row has no message of its own yet. */
+  author?: string;
+  onSettled: () => void;
+}) {
   const reduce = useReducedMotion();
   return (
     <div className="group mt-2 flex w-full justify-start">
@@ -403,7 +423,11 @@ export function AgentPendingBubble(props: { run: AgentRun; onSettled: () => void
         {/* The same shape a real bubble has, down to the signature sitting inside it —
             this row is replaced by the posted message the moment it arrives, and a
             different layout would make that swap visible. */}
-        <AgentSignature backend={props.run.backend as AgentBackendName} busy />
+        <AgentSignature
+          backend={props.run.backend as AgentBackendName}
+          author={props.author}
+          busy
+        />
         <AgentStream run={props.run} onSettled={props.onSettled} />
       </motion.div>
     </div>

@@ -653,12 +653,14 @@ function MessageBubbleImpl(props: {
           </div>
         )}
 
-        {/* Who wrote this: the CLI's own mark, above the answer. Busy while a run is
-            still going — including a reply we are only seeing the tail of, because its
-            stored body says it was still being written. */}
+        {/* Who wrote this, and whose request it answers: the message's own sender is the
+            account it went out under, which is the user who summoned it (only they can).
+            Busy while a run is still going — including a reply we are only seeing the tail
+            of, because its stored body says it was still being written. */}
         {agent && !props.editing ? (
           <AgentSignature
             backend={agent.backend}
+            author={props.message.sender}
             busy={props.agentRun ? agentRunIsLive(props.agentRun) : agent.pending}
           />
         ) : null}
@@ -696,7 +698,7 @@ function MessageBubbleImpl(props: {
               // message itself, including whether it stopped mid-answer.
               <>
                 {mediaBody}
-                <AgentStoredStatus authorship={agent} hasBody={bodyHasContent} />
+                <AgentStoredStatus authorship={agent} />
               </>
             ) : isUnsupported ? (
               <UnsupportedContent />

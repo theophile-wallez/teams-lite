@@ -188,6 +188,27 @@ test.describe("The local agent's answer", () => {
     // exit animation, so both chips are briefly mounted.
     await expect(page.locator('[data-testid="agent-activity"]').first()).toContainText("Grep");
 
+    // It takes the gap the history puts between two AUTHORS, not the tight one it puts
+    // inside one author's run. On the wire the reply IS the user's own message — same
+    // account, same name — so it would chain against the question by default, and a reply
+    // tucked under it reads as one person talking twice.
+    //
+    // The history uses exactly two spacings, so this compares the agent's with both: it
+    // must be the wider one.
+    const gaps = await page.evaluate(`(() => {
+      const rowOf = (el) => el && el.closest("[data-testid=message]")?.parentElement;
+      const top = (el) => (el ? parseFloat(getComputedStyle(el).marginTop) : -1);
+      const all = [...document.querySelectorAll('[data-testid="message"]')].map((m) => top(m.parentElement));
+      return JSON.stringify({
+        agent: top(rowOf(document.querySelector('[data-testid="agent-signature"]'))),
+        widest: Math.max(...all),
+        tightest: Math.min(...all),
+      });
+    })()`);
+    const { agent: agentGap, widest, tightest } = JSON.parse(gaps) as Record<string, number>;
+    expect(agentGap).toBe(widest);
+    expect(widest).toBeGreaterThan(tightest);
+
     // The answer arrives, and it is the CLI's own words — formatted, not a run-on line.
     await expect(stream).toHaveAttribute("data-phase", "writing");
     await expect(bubble).toContainText("19420", { timeout: 20_000 });
@@ -198,14 +219,16 @@ test.describe("The local agent's answer", () => {
     await expect(page.locator('[data-testid="agent-status"]')).toHaveCount(0, {
       timeout: 20_000,
     });
+    // The signature names both halves of the authorship: the CLI that wrote the words,
+    // and the account they went out under.
     const signature = page.locator('[data-testid="agent-signature"]');
     await expect(signature).toBeVisible();
-    await expect(signature).toContainText("via teams-lite");
-    // Said ONCE. The posted message carries the same words as its last line — they are
-    // what a colleague reads in a real Teams client — and the bubble replaces that line
-    // with the mark rather than showing both.
-    const shown = (await bubble.innerText()).match(/via teams-lite/g) ?? [];
-    expect(shown).toHaveLength(1);
+    await expect(signature).toContainText("Claude");
+    await expect(signature).toContainText("by You");
+    // The posted message ends with `— claude, via teams-lite`; that line is what a
+    // colleague reads in a real Teams client. Here the mark says it instead, so the words
+    // are stripped from the body rather than shown under it.
+    await expect(bubble).not.toContainText("via teams-lite");
   });
 
   test("answers nothing in a conversation nobody opted in", async ({ page }) => {

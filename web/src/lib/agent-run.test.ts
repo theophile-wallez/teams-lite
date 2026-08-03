@@ -143,9 +143,10 @@ describe("agentPhaseLabel", () => {
   });
 
   it("names the CLI everywhere else, because that is who is answering", () => {
-    expect(agentPhaseLabel(run({ phase: "thinking" }))).toBe("claude is thinking");
-    expect(agentPhaseLabel(run({ phase: "writing" }))).toBe("claude is writing");
-    expect(agentPhaseLabel(run({ phase: "done" }))).toBe("claude, via teams-lite");
+    // Each CLI's own casing: Claude is a proper noun, opencode is lowercase.
+    expect(agentPhaseLabel(run({ phase: "thinking" }))).toBe("Claude is thinking");
+    expect(agentPhaseLabel(run({ phase: "writing" }))).toBe("Claude is writing");
+    expect(agentPhaseLabel(run({ phase: "done" }))).toBe("Claude");
     expect(agentPhaseLabel(run({ backend: "opencode", phase: "thinking" }))).toBe(
       "opencode is thinking",
     );
@@ -155,6 +156,6 @@ describe("agentPhaseLabel", () => {
     expect(agentPhaseLabel(run({ phase: "error", error: "claude exited 1" }))).toBe(
       "claude exited 1",
     );
-    expect(agentPhaseLabel(run({ phase: "error", error: null }))).toBe("claude could not answer");
+    expect(agentPhaseLabel(run({ phase: "error", error: null }))).toBe("Claude could not answer");
   });
 });

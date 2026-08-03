@@ -55,6 +55,8 @@ export type AgentStreamFrame = {
  *  latest state — see the module note on why frames are whole. */
 export type AgentRun = AgentStreamFrame;
 
+import { agentDisplayName } from "./agent-message";
+
 /** The phases in which a run is still going. A finished or failed run stops being an
  *  overlay: what the thread holds is then the answer. */
 export function agentRunIsLive(run: AgentRun | null | undefined): boolean {
@@ -177,8 +179,10 @@ export function withoutAgentRun(
 }
 
 /** The label for a phase, written for somebody watching a thread rather than a
- *  terminal. `backend` is the CLI's own name, which is what signs the reply. */
+ *  terminal. The CLI is named the way it names itself (see {@link agentDisplayName}),
+ *  because it is the CLI that is answering. */
 export function agentPhaseLabel(run: AgentRun): string {
+  const name = agentDisplayName(run.backend);
   switch (run.phase) {
     case "working": {
       const activity = run.activity;
@@ -186,12 +190,12 @@ export function agentPhaseLabel(run: AgentRun): string {
       return activity.target ? `${activity.tool} ${activity.target}` : activity.tool;
     }
     case "writing":
-      return `${run.backend} is writing`;
+      return `${name} is writing`;
     case "error":
-      return run.error ?? `${run.backend} could not answer`;
+      return run.error ?? `${name} could not answer`;
     case "done":
-      return `${run.backend}, via teams-lite`;
+      return name;
     default:
-      return `${run.backend} is thinking`;
+      return `${name} is thinking`;
   }
 }

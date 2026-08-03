@@ -18,6 +18,7 @@ import {
   type ChatMessage,
   type Conversation,
 } from "~/lib/protocol";
+import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
 import { useAppState, useController } from "./controller-context";
 import { AgentMenu } from "./agent-menu";
@@ -105,6 +106,13 @@ export function MessagePane(props: { onBack?: () => void }) {
   // The agent run writing in THIS thread, if any. One per conversation, and a transient
   // overlay on the message it is writing into (see lib/agent-run.ts).
   const agentRun = useAppState((s) => (s.openId ? s.agentRuns[s.openId] : undefined));
+  // Our own display name, read off the newest message of ours. The agent's signature
+  // names the account its answer went out under, and a run that has not been echoed
+  // back yet has no message of its own to read it from.
+  const selfName = useMemo(
+    () => [...messages].reverse().find((m) => m.is_self && m.sender.trim())?.sender,
+    [messages],
+  );
   const modifier = useModifierLabel();
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -411,20 +419,26 @@ export function MessagePane(props: { onBack?: () => void }) {
   // rate (see `useSmoothReveal`), not on the events this component re-renders for, so
   // an effect keyed on the run's text would lag a fifth of a second behind the words.
   //
-  // Whether to follow is read from the geometry each frame rather than from `atBottom`,
-  // because that state lands a frame after the scroll event that changes it: a reader
-  // who scrolls up would be yanked back once before it caught up. `AT_BOTTOM_PX` is the
-  // same threshold the jump-to-latest button uses, so "following" means exactly what
-  // that button means by "at the bottom".
+  // Whether to follow is decided ONCE, from the geometry at the moment the run starts,
+  // and then held until the reader scrolls up. Re-deciding it each frame from the
+  // distance to the bottom does not work: the bubble grows in steps — a quoted request,
+  // a status line, a paragraph — and one step taller than the threshold ends the follow
+  // for good, leaving the answer to write itself off the bottom of the screen. A scroll
+  // UP is the only thing that hands control back, which is what "sticky bottom" means
+  // everywhere else it exists.
   const streaming = agentRunIsLive(agentRun);
   useEffect(() => {
     if (!streaming) return;
+    const el = viewportRef.current;
+    if (!el) return;
+    let following = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_PX;
+    let previousTop = el.scrollTop;
     let frame = requestAnimationFrame(function pin() {
-      const el = viewportRef.current;
-      if (el) {
-        const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-        if (distance > 0 && distance <= AT_BOTTOM_PX) el.scrollTop = el.scrollHeight;
-      }
+      // A couple of pixels of tolerance, so momentum settling or a rounded scrollTop is
+      // not read as the reader walking away.
+      if (el.scrollTop < previousTop - 2) following = false;
+      if (following) el.scrollTop = el.scrollHeight;
+      previousTop = el.scrollTop;
       frame = requestAnimationFrame(pin);
     });
     return () => cancelAnimationFrame(frame);
@@ -693,7 +707,11 @@ export function MessagePane(props: { onBack?: () => void }) {
                         renderMsg={renderMsg}
                       />
                     ) : row.kind === "agent" ? (
-                      <AgentPendingBubble run={row.run} onSettled={doAgentSettled} />
+                      <AgentPendingBubble
+                        run={row.run}
+                        author={selfName}
+                        onSettled={doAgentSettled}
+                      />
                     ) : (
                       renderMsg(row.message, row.prev, row.next)
                     )}
@@ -780,7 +798,13 @@ function ThreadGroup(props: {
 
 /** Two adjacent messages chain when they share the same author and side. A
  *  system event (e.g. a call line) is never part of a run, so it breaks chaining
- *  for its neighbours. */
+ *  for its neighbours.
+ *
+ *  An agent's reply never chains, in either direction. On the wire it is the user's own
+ *  message — same account, same display name — so without this it would tuck itself
+ *  against the message that summoned it, at the tight spacing of one person talking
+ *  twice. It is not that: it comes from somewhere else and it renders on the other side,
+ *  so it takes the gap any other author's message would take. */
 function sameAuthor(a: ChatMessage | undefined, b: ChatMessage | undefined): boolean {
   return (
     !!a &&
@@ -788,7 +812,9 @@ function sameAuthor(a: ChatMessage | undefined, b: ChatMessage | undefined): boo
     !a.system_event &&
     !b.system_event &&
     a.is_self === b.is_self &&
-    a.sender === b.sender
+    a.sender === b.sender &&
+    !agentAuthorship(a) &&
+    !agentAuthorship(b)
   );
 }
 
