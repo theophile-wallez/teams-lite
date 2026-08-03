@@ -43,6 +43,10 @@
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
 //
 //   bun run web/scripts/preview.ts --out /tmp/cards --conversation "App Cards"
+//
+// The window is 1200x850. A layout that caps its own width needs a wider one:
+//
+//   PREVIEW_VIEWPORT=1920x900 bun run web/scripts/preview.ts --out /tmp/wide
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -59,6 +63,20 @@ const MOCK_PORT = Number(process.env.PREVIEW_MOCK_PORT ?? 19456);
 const WEB_PORT = Number(process.env.PREVIEW_WEB_PORT ?? 19446);
 const WEB_ORIGIN = `http://127.0.0.1:${WEB_PORT}`;
 const MOCK_WS_URL = `ws://127.0.0.1:${MOCK_PORT}`;
+
+/**
+ * The window every capture uses. A wider one matters for a pane that caps its own
+ * width — the chat column and the composer only reach their cap past ~1000px, so
+ * the default window never shows the gap the user sees on a large screen.
+ * Override with `PREVIEW_VIEWPORT=1920x900`.
+ */
+const VIEWPORT = parseViewport(process.env.PREVIEW_VIEWPORT) ?? { width: 1200, height: 850 };
+
+/** `1920x900` → `{ width: 1920, height: 900 }`; anything else → null. */
+function parseViewport(spec: string | undefined): { width: number; height: number } | null {
+  const match = /^(\d+)x(\d+)$/.exec(spec?.trim() ?? "");
+  return match ? { width: Number(match[1]), height: Number(match[2]) } : null;
+}
 
 const STARTUP_TIMEOUT_MS = 90_000;
 const APP_READY_TIMEOUT_MS = 60_000;
@@ -95,7 +113,7 @@ export async function withPreview<T>(body: (session: PreviewSession) => Promise<
     await waitForHttp(`${WEB_ORIGIN}/`, "vite dev server");
 
     browser = await chromium.launch({ executablePath: findChromium() });
-    const page = await browser.newPage({ viewport: { width: 1200, height: 850 } });
+    const page = await browser.newPage({ viewport: VIEWPORT });
     await page.goto(WEB_ORIGIN, { waitUntil: "domcontentloaded" });
     await page.waitForSelector('[data-testid="conversation-row"]', {
       timeout: APP_READY_TIMEOUT_MS,
@@ -694,7 +712,7 @@ if (import.meta.main) {
       await openFirstEvent(page);
       await shot(`${out}-mobile-details-light.png`);
       await page.keyboard.press("Escape");
-      await page.setViewportSize({ width: 1200, height: 850 });
+      await page.setViewportSize(VIEWPORT);
       await page.waitForTimeout(400);
       await setTheme("dark");
       await shot(`${out}-month-dark.png`);
