@@ -67,6 +67,13 @@ SYSTEMCTL="$(command -v systemctl || echo /usr/bin/systemctl)"
 # rather than broken.
 INTUNE_CONTAINER="${INTUNE_CONTAINER:-$(command -v intune-container || echo "$HOME/.local/bin/intune-container")}"
 
+# The backend PATH, baked into the unit. The systemd user manager's own PATH holds
+# neither of the two directories a coding-agent CLI installs itself into, so the local
+# agent (`@claude` in a thread) finds no program and drops every trigger. The user's
+# directories come first, because a self-updating CLI lives there and must win over an
+# older packaged copy.
+AGENT_PATH="${TEAMS_LITE_AGENT_PATH:-$HOME/.local/bin:$HOME/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*" >&2; }
@@ -153,6 +160,7 @@ install_units() {
       -e "s|@BUN@|$BUN|g" \
       -e "s|@SYSTEMCTL@|$SYSTEMCTL|g" \
       -e "s|@INTUNE_CONTAINER@|$INTUNE_CONTAINER|g" \
+      -e "s|@AGENT_PATH@|$AGENT_PATH|g" \
       -e "s|@BACKEND_PORT@|$BACKEND_PORT|g" \
       -e "s|@WEB_PORT@|$WEB_PORT|g" \
       "$REPO/packaging/systemd/$unit" >"$UNIT_DIR/$unit"

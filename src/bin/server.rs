@@ -1131,6 +1131,7 @@ async fn main() -> Result<()> {
             Err(e) => eprintln!("[write-lock] armed: token published nowhere ({e})"),
         },
     }
+    log_agent_backends();
     let clients = ClientTracker::new();
     let no_idle_exit = idle_exit_disabled();
     if no_idle_exit {
@@ -3576,6 +3577,32 @@ const AGENT_EDIT_INTERVAL: Duration = Duration::from_millis(1_200);
 /// How many progress edits one reply may make. Past this the answer only lands once,
 /// at the end: a pathological answer must not turn into a thousand PUTs.
 const AGENT_MAX_EDITS: usize = 100;
+
+/// Say at startup which local agents this process can run, and where.
+///
+/// A CLI that is not on `PATH` turns every `@claude` message into a no-op, and the only
+/// other trace is one line per dropped trigger — which nobody reads, because the
+/// symptom is a thread that stays silent. A service inherits the systemd user manager's
+/// PATH, which holds neither `~/.local/bin` nor `~/.bun/bin`, so the PATH is printed
+/// with the refusal: it names the cause instead of the effect.
+fn log_agent_backends() {
+    for backend in agent_policy::BACKENDS.iter() {
+        match agent::program_path(backend) {
+            Some(path) => eprintln!(
+                "[agent] {} ready — {} runs {}",
+                backend.name,
+                backend.prefix,
+                path.display()
+            ),
+            None => eprintln!(
+                "[agent] {} unavailable — `{}` is on no PATH entry: {}",
+                backend.name,
+                backend.program,
+                std::env::var("PATH").unwrap_or_else(|_| "<unset>".into())
+            ),
+        }
+    }
+}
 
 /// Answer one live message with a local agent, if the policy says it asked for one.
 ///

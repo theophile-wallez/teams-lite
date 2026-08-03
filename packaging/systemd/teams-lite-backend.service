@@ -44,6 +44,11 @@ Environment=TEAMS_NO_IDLE_EXIT=1
 # Stated explicitly so a stray TEAMS_LITE_READ_ONLY in the environment cannot move
 # the listener to the read-only port and leave the web unit talking to nothing.
 Environment=TEAMS_LITE_PORT=@BACKEND_PORT@
+# The local agent spawns its CLI by name (`claude`, `opencode`), and the systemd user
+# manager's PATH holds neither ~/.local/bin nor ~/.bun/bin — the same gap the web unit
+# works around with an absolute @BUN@. Without this the trigger is dropped with one
+# journal line and the thread stays silent, which reads as a broken feature.
+Environment=PATH=@AGENT_PATH@
 
 # Local overrides, e.g. TEAMS_LITE_CALLING=1. The "-" makes a missing file harmless.
 # Deliberately NOT set here: TEAMS_LITE_CALLING (it re-routes how the user's real

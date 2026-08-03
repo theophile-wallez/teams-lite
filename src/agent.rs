@@ -101,7 +101,18 @@ pub struct Outcome {
 
 /// Whether this machine can run the given backend at all (the program is on `PATH`).
 pub fn is_available(backend: &Backend) -> bool {
-    which_program(backend.program).is_some()
+    program_path(backend).is_some()
+}
+
+/// Where this machine's copy of a backend's CLI sits, when it has one.
+///
+/// Public because a CLI that is not on `PATH` is the one failure this feature cannot
+/// report in the thread: the trigger is dropped before anything is posted, so the
+/// answer has to be in the log an operator reads. The startup line in
+/// `src/bin/server.rs` prints this, and the path it prints is what says whether the
+/// process inherited the user's own bin directories.
+pub fn program_path(backend: &Backend) -> Option<PathBuf> {
+    which_program(backend.program)
 }
 
 /// Resolve a program on `PATH` without spawning a shell.
@@ -710,5 +721,44 @@ mod tests {
         let error = run(&request, &progress).await.expect_err("no such program");
         assert!(error.to_string().contains("not on PATH"), "{error}");
         assert!(!is_available(&MISSING));
+    }
+
+    /// The service unit must hand the backend a PATH that can hold a user-installed
+    /// CLI.
+    ///
+    /// This is the bug that made the feature look broken: the systemd user manager's
+    /// PATH holds neither `~/.local/bin` nor `~/.bun/bin`, so a service inherited a
+    /// PATH with no `claude` in it, [`is_available`] answered false, and every
+    /// `@claude` message was dropped with one line in the journal while the thread
+    /// stayed silent. A unit that loses this line brings that back, and no test on this
+    /// side of the process boundary would notice — so the test reads the template.
+    #[test]
+    fn the_service_unit_gives_the_backend_a_path_holding_the_users_own_bin() {
+        let unit = include_str!("../packaging/systemd/teams-lite-backend.service");
+        let path_line = unit
+            .lines()
+            .find(|line| line.starts_with("Environment=PATH="))
+            .expect("the backend unit sets PATH");
+        assert!(
+            path_line.contains("@AGENT_PATH@"),
+            "PATH must come from the installer's substitution, so it can name $HOME: {path_line}"
+        );
+        let installer = include_str!("../bin/teams-lite-service.sh");
+        assert!(
+            installer.contains("s|@AGENT_PATH@|"),
+            "bin/teams-lite-service.sh must substitute @AGENT_PATH@, or the unit \
+             refuses to install"
+        );
+        let assigned = installer
+            .lines()
+            .find(|line| line.starts_with("AGENT_PATH="))
+            .expect("bin/teams-lite-service.sh computes AGENT_PATH");
+        for dir in ["$HOME/.local/bin", "$HOME/.bun/bin"] {
+            assert!(
+                assigned.contains(dir),
+                "the installed PATH must hold {dir}, where a coding-agent CLI installs \
+                 itself: {assigned}"
+            );
+        }
     }
 }

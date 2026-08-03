@@ -85,8 +85,15 @@ Four rules hold it together. Each one is load-bearing, and each is pinned by a t
   from its environment: an agent holding it could `send` to any chat directly, around
   every gate above. A read-only backend never answers at all.
 
-Two more things worth knowing before touching it:
+Three more things worth knowing before touching it:
 
+- **The CLI has to be on the backend's own PATH, and a service has almost none.** The
+  systemd user manager's PATH holds neither `~/.local/bin` (where `claude` installs
+  itself) nor `~/.bun/bin`, so the always-on service found no program, dropped every
+  trigger with one journal line, and the thread stayed silent — a broken feature with no
+  visible cause. The unit therefore carries `Environment=PATH=@AGENT_PATH@`
+  (`bin/teams-lite-service.sh` substitutes it, and a test in `agent::tests` pins both
+  halves), and every backend says at startup which CLIs it resolved and to where.
 - **The thread transcript travels with the prompt, and it is DATA.** The appended
   system prompt says so explicitly, because the people in a thread never agreed to be
   able to steer an agent on the user's machine. Keep that instruction, keep the
