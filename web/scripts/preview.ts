@@ -41,6 +41,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/preview --scrolled # history scrolled up (jump button)
 //   bun run web/scripts/preview.ts --out /tmp/ghost --ghost     # read state + Ghost mode
 //   bun run web/scripts/preview.ts --out /tmp/set --settings    # the Settings pane
+//   bun run web/scripts/preview.ts --out /tmp/agent --agent     # the local-agent menu
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -481,6 +482,19 @@ export async function openReactionPicker(page: Page): Promise<void> {
  * pane. Every setting — the integration tokens, Ghost mode, appearance — is behind
  * this one click.
  */
+/**
+ * Open the local-agent menu in the header of the conversation on screen.
+ *
+ * That menu holds both halves of the agent's consent — where this machine answers, and
+ * what the program it runs may read (`web/src/components/agent-menu.tsx`) — so it is
+ * worth looking at as a whole rather than one switch at a time.
+ */
+export async function openAgentMenu(page: Page): Promise<void> {
+  await assertMockBackend(page);
+  await page.locator('[data-testid="agent-menu"]').click();
+  await page.waitForSelector('[data-testid="agent-mode-toggle"]');
+}
+
 export async function openSettings(page: Page): Promise<void> {
   await assertMockBackend(page);
   await page.locator('[data-testid="open-settings"]').click();
@@ -943,6 +957,28 @@ if (import.meta.main) {
           `${out}-ghost-dark.png`,
       );
     });
+    process.exit(0);
+  }
+
+  // The local-agent menu: the per-conversation switch, and the read-only tool groups
+  // the user grants under it. One capture per theme, and one with Grafana granted, so
+  // the state a switch lands in is reviewable rather than assumed.
+  if (args.includes("--agent")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        await openFirstConversation(page);
+        await openAgentMenu(page);
+        await shot(`${out}-light.png`, element);
+        await setTheme("dark");
+        await shot(`${out}-dark.png`, element);
+        await setTheme("light");
+        await page.locator('[data-testid="agent-tool-grant-grafana"]').click();
+        await page.waitForSelector('[data-testid="agent-tool-grant-grafana"][data-granted="true"]');
+        await shot(`${out}-granted-light.png`, element);
+        console.log(`[preview] wrote ${out}-{light,dark,granted-light}.png`);
+      },
+      { deviceScaleFactor: dpr },
+    );
     process.exit(0);
   }
 

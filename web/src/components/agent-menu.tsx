@@ -1,6 +1,15 @@
 import { useState } from "react";
 import { Bot, Loader2 } from "lucide-react";
-import { agentHint, agentModeFor, agentRunnable, availableBackends } from "~/lib/agent";
+import {
+  agentGrantIsOn,
+  agentHint,
+  agentModeFor,
+  agentRunnable,
+  agentToolGrants,
+  agentToolsWithGrant,
+  availableBackends,
+  type AgentToolGrant,
+} from "~/lib/agent";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
 import {
@@ -31,6 +40,12 @@ import {
  *   only effect would be a silent thread.
  * - **It waits for the backend before it looks on.** The write can be refused (a page
  *   without the write token), and the answer that lands in state is the backend's own.
+ *
+ * Under the switch sits the second half of the same consent: what the agent may READ
+ * (`agentToolGrants`, from `agent::TOOL_GRANTS`). It belongs here rather than in
+ * Settings because it is the same question asked twice — where this machine answers,
+ * and what the program it runs may reach. Every group reads only; the backend pins that,
+ * so no switch in this menu can post to Grafana, Sentry or Linear.
  */
 export function AgentMenu(props: { conversationId: string }) {
   const controller = useController();
@@ -42,12 +57,26 @@ export function AgentMenu(props: { conversationId: string }) {
   const on = mode === "reply";
   const runnable = agentRunnable(status);
   const backends = availableBackends(status);
+  const grants = agentToolGrants(status);
 
   const toggle = async (next: boolean) => {
     setBusy(true);
     setError(null);
     try {
       await controller.setAgentMode(props.conversationId, next ? "reply" : "off");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleGrant = async (grant: AgentToolGrant, next: boolean) => {
+    if (!status) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await controller.setAgentTools(agentToolsWithGrant(status, grant, next));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -100,6 +129,42 @@ export function AgentMenu(props: { conversationId: string }) {
             Only a message YOU write triggers it, and the answer is posted under your
             name, signed by {backends.map((b) => b.name).join(" or ")}.
           </p>
+        )}
+
+        {grants.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-[11px] font-normal text-text-faint">
+              It may read
+            </DropdownMenuLabel>
+
+            {grants.map((grant) => {
+              const granted = agentGrantIsOn(status, grant);
+              return (
+                <DropdownMenuCheckboxItem
+                  key={grant.key}
+                  data-testid={`agent-tool-grant-${grant.key}`}
+                  data-granted={granted}
+                  checked={granted}
+                  disabled={busy || !runnable}
+                  onCheckedChange={(next) => void toggleGrant(grant, next === true)}
+                  onSelect={(event) => event.preventDefault()}
+                  className="items-start"
+                >
+                  <span className="flex flex-col gap-0.5">
+                    <span>{grant.label}</span>
+                    <span className="text-[11px] leading-snug text-text-faint">
+                      {grant.detail}
+                    </span>
+                  </span>
+                </DropdownMenuCheckboxItem>
+              );
+            })}
+
+            <p className="px-2 pb-1.5 text-[11px] leading-snug text-text-faint">
+              Reading only — nothing here can write to Grafana, Sentry or Linear.
+            </p>
+          </>
         )}
       </DropdownMenuContent>
     </DropdownMenu>

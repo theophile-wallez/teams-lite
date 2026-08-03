@@ -2122,6 +2122,29 @@ export class TeamsController {
     return status;
   }
 
+  /**
+   * Grant, or take back, one group of tools the agent may use without being asked.
+   *
+   * The other half of the same consent: the mode says WHERE this machine answers, this
+   * says WHAT the program it runs may reach. So it is a write request too, it sends the
+   * whole allowlist rather than a difference, and the backend's own answer — never a
+   * local guess — is what lands in state.
+   *
+   * Rejects on failure, so the control that called it can say why.
+   */
+  async setAgentTools(tools: string[]): Promise<AgentStatus> {
+    let status: AgentStatus;
+    try {
+      status = await this.backend.agentSetTools(tools);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ agent: status });
+    playCue("success");
+    return status;
+  }
+
   // ---- push notifications (see lib/push.ts) --------------------------------
 
   /**

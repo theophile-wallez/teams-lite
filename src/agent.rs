@@ -23,6 +23,10 @@
 //!   explicit allowlist ([`DEFAULT_TOOLS`] is read-only) that the user widens on
 //!   purpose, and Claude Code is pinned to `--permission-mode default` so anything
 //!   outside it is refused rather than prompted for (there is no terminal to prompt).
+//!   [`TOOL_GRANTS`] is how that widening is offered — named read-only groups the user
+//!   switches on from the thread's own menu, so "it may read Grafana" is one action
+//!   instead of thirty tool names typed by hand. The RPC still takes any list, which
+//!   is the deliberate escape hatch for a tool no group names.
 //! - **The child never inherits the write token.** `TEAMS_LITE_WRITE_TOKEN` is the
 //!   capability that makes `send` possible; an agent holding it could post to any
 //!   chat directly, around every consent gate in this crate. It is removed from the
@@ -45,6 +49,128 @@ use crate::agent_policy::Backend;
 /// The tools an agent may use unless the user widens the list. Read-only on purpose:
 /// a message must not be able to write a file or run a command on the first day.
 pub const DEFAULT_TOOLS: [&str; 3] = ["Read", "Glob", "Grep"];
+
+/// One named group of tools the user can grant, or take back, in one action.
+///
+/// The allowlist itself stays a flat list of tool names ([`SETTING_TOOLS`]) — this is
+/// how that list is *offered*, so the consent is a sentence the user can read ("it may
+/// read Grafana") instead of thirty tool names they have to spell correctly.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolGrant {
+    /// Stable id, for a client that stores which switch it drew.
+    pub key: &'static str,
+    /// What the switch says.
+    pub label: &'static str,
+    /// One line of why, for the line under the switch.
+    pub detail: &'static str,
+    /// The tool names this grant adds to the allowlist.
+    pub tools: &'static [&'static str],
+}
+
+/// What the user may grant the agent from a thread's own menu.
+///
+/// # Why a hand-written catalogue
+///
+/// The agent runs Claude Code, which loads the user's own MCP servers, so the tools it
+/// *could* reach include every write those servers expose: `update_dashboard`,
+/// `create_incident`, `save_issue`, `update_issue`, and `grafana_api_request` /
+/// `execute_sentry_tool`, which are "call any endpoint" in a friendly shape. A grant
+/// spelled `mcp__grafana` would hand over all of them at once.
+///
+/// So each grant names its tools one by one, and every one of them reads. Those systems
+/// belong to the user's colleagues as much as to them — the same reason
+/// `src/gitlab.rs` and `src/linear.rs` only ever issue reads — and a thread transcript
+/// is untrusted text that travels with every prompt, so an agent holding a write is a
+/// write anybody in the thread can aim. `every_granted_tool_reads` pins the shape:
+/// three segments (never a whole server) and a verb that reads.
+///
+/// Adding a tool here is a deliberate edit, reviewed like the two modules above.
+pub const TOOL_GRANTS: [ToolGrant; 4] = [
+    ToolGrant {
+        key: "files",
+        label: "Read files",
+        detail: "Open, list and search the files in its workspace.",
+        tools: &["Read", "Glob", "Grep"],
+    },
+    ToolGrant {
+        key: "grafana",
+        label: "Read Grafana",
+        detail: "Dashboards, Prometheus and Loki queries, incidents. No dashboard edit.",
+        tools: &[
+            // What exists, and whether it answers at all.
+            "mcp__grafana__list_datasources",
+            "mcp__grafana__get_datasource",
+            "mcp__grafana__check_datasources_health",
+            // Dashboards, as they are.
+            "mcp__grafana__search_dashboards",
+            "mcp__grafana__search_folders",
+            "mcp__grafana__get_dashboard_by_uid",
+            "mcp__grafana__get_dashboard_summary",
+            "mcp__grafana__get_dashboard_property",
+            "mcp__grafana__get_dashboard_panel_queries",
+            "mcp__grafana__get_panel_image",
+            "mcp__grafana__generate_deeplink",
+            // Metrics: what a "is it up, how much memory" question is made of.
+            "mcp__grafana__query_prometheus",
+            "mcp__grafana__query_prometheus_histogram",
+            "mcp__grafana__list_prometheus_metric_names",
+            "mcp__grafana__list_prometheus_metric_metadata",
+            "mcp__grafana__list_prometheus_label_names",
+            "mcp__grafana__list_prometheus_label_values",
+            // Logs.
+            "mcp__grafana__query_loki_logs",
+            "mcp__grafana__query_loki_stats",
+            "mcp__grafana__query_loki_patterns",
+            "mcp__grafana__list_loki_label_names",
+            "mcp__grafana__list_loki_label_values",
+            // Incidents as a record to read. Declaring one is not ours to do, and
+            // neither is `find_error_pattern_logs` / `find_slow_requests`: both look
+            // like reads and both create a Sift investigation in the org.
+            "mcp__grafana__list_incidents",
+            "mcp__grafana__get_incident",
+        ],
+    },
+    ToolGrant {
+        key: "sentry",
+        label: "Read Sentry",
+        detail: "Projects, issues and events. No issue edit, and no Seer run.",
+        tools: &[
+            "mcp__sentry__find_organizations",
+            "mcp__sentry__find_projects",
+            "mcp__sentry__search_issues",
+            "mcp__sentry__search_events",
+            "mcp__sentry__get_sentry_resource",
+            "mcp__sentry__search_sentry_tools",
+        ],
+    },
+    ToolGrant {
+        key: "linear",
+        label: "Read Linear",
+        detail: "Issues, projects and comments. No issue, comment or status written.",
+        tools: &[
+            "mcp__linear__list_teams",
+            "mcp__linear__list_users",
+            "mcp__linear__list_projects",
+            "mcp__linear__list_issues",
+            "mcp__linear__list_issue_labels",
+            "mcp__linear__list_issue_statuses",
+            "mcp__linear__list_cycles",
+            "mcp__linear__list_comments",
+            "mcp__linear__list_documents",
+            "mcp__linear__list_milestones",
+            "mcp__linear__list_initiatives",
+            "mcp__linear__get_issue",
+            "mcp__linear__get_issue_status",
+            "mcp__linear__get_project",
+            "mcp__linear__get_team",
+            "mcp__linear__get_user",
+            "mcp__linear__get_document",
+            "mcp__linear__get_milestone",
+            "mcp__linear__get_initiative",
+            "mcp__linear__search_documentation",
+        ],
+    },
+];
 
 /// The store key holding the tool allowlist, as a JSON array of tool names.
 pub const SETTING_TOOLS: &str = "agent_tools";
@@ -687,6 +813,68 @@ mod tests {
         assert_eq!(tools_from_setting(Some("not json")), DEFAULT_TOOLS.to_vec());
         assert_eq!(tools_from_setting(Some("[]")), Vec::<String>::new());
         assert_eq!(tools_from_setting(Some(r#"["Bash","Read"]"#)), vec!["Bash", "Read"]);
+    }
+
+    /// The catalogue is a consent surface, so its shape is pinned rather than trusted.
+    ///
+    /// Two rules, and each one closes a hole a plausible entry would open:
+    ///
+    /// - **Three segments, never `mcp__<server>`.** A whole-server grant hands over
+    ///   that server's writes too — `update_dashboard`, `save_issue`, `update_issue` —
+    ///   and the two "call any endpoint" tools (`grafana_api_request`,
+    ///   `execute_sentry_tool`) with them.
+    /// - **A verb that reads.** Anything else in a group the UI switches on with one
+    ///   click is a write the user did not ask for, in a system their colleagues share.
+    #[test]
+    fn every_granted_tool_reads() {
+        const READ_VERBS: [&str; 7] =
+            ["list_", "get_", "search_", "find_", "query_", "check_", "generate_"];
+        for grant in TOOL_GRANTS {
+            assert!(!grant.tools.is_empty(), "{} grants nothing", grant.key);
+            for tool in grant.tools {
+                if DEFAULT_TOOLS.contains(tool) {
+                    continue; // the read-only built-ins
+                }
+                let segments: Vec<&str> = tool.split("__").collect();
+                assert_eq!(
+                    segments.len(),
+                    3,
+                    "{tool} must name one MCP tool (mcp__server__tool), never a whole \
+                     server: a server grant carries its writes too"
+                );
+                assert_eq!(segments[0], "mcp", "{tool} is neither a built-in nor an MCP tool");
+                assert!(
+                    READ_VERBS.iter().any(|verb| segments[2].starts_with(verb)),
+                    "{tool} does not start with a verb that reads ({READ_VERBS:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_catalogue_starts_at_the_read_only_default_and_has_no_duplicate_key() {
+        let files = TOOL_GRANTS.iter().find(|g| g.key == "files").expect("a files grant");
+        assert_eq!(files.tools, DEFAULT_TOOLS, "the first switch must be what a fresh store holds");
+        let mut keys: Vec<&str> = TOOL_GRANTS.iter().map(|g| g.key).collect();
+        keys.sort_unstable();
+        let count = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), count, "two grants share a key: a client cannot tell them apart");
+    }
+
+    /// The tools an MCP grant names must be spelled the way the CLI spells them, or the
+    /// switch is on and the call is still refused — a setting that lies.
+    ///
+    /// Verified against Claude Code 2.1.220 and the user's own Grafana: `claude -p
+    /// --permission-mode default --allowed-tools mcp__grafana__list_datasources`
+    /// answered with the instance's datasources and reported no permission denial.
+    #[test]
+    fn an_mcp_grant_is_spelled_the_way_the_cli_spells_a_tool() {
+        let grafana = TOOL_GRANTS.iter().find(|g| g.key == "grafana").expect("a grafana grant");
+        assert!(grafana.tools.contains(&"mcp__grafana__list_datasources"));
+        for tool in grafana.tools {
+            assert!(tool.starts_with("mcp__grafana__"), "{tool} is not a grafana tool");
+        }
     }
 
     #[test]

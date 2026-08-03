@@ -27,6 +27,27 @@ export type AgentBackend = {
 /** What one conversation does with a trigger the user writes in it. */
 export type AgentMode = "off" | "reply";
 
+/**
+ * One named group of tools the user can grant the agent, as the backend offers it
+ * (`agent::TOOL_GRANTS`).
+ *
+ * The stored allowlist is a flat list of tool names; a group is how that list is
+ * *offered*, so the consent reads as a sentence ("it may read Grafana") instead of
+ * thirty MCP tool names the user would have to spell. Every tool in every group reads —
+ * the backend pins that, because those systems belong to the user's colleagues too, and
+ * a thread transcript is untrusted text that travels with every prompt.
+ */
+export type AgentToolGrant = {
+  /** Stable id of the switch. */
+  key: string;
+  /** What the switch says. */
+  label: string;
+  /** One line of why, under the switch. */
+  detail: string;
+  /** The tool names it adds to the allowlist. */
+  tools: string[];
+};
+
 /** One conversation's stored mode. */
 export type AgentConversationMode = {
   conversation: string;
@@ -39,6 +60,9 @@ export type AgentStatus = {
   conversations: AgentConversationMode[];
   /** The tools an agent may use without being asked — read-only by default. */
   tools: string[];
+  /** The groups of tools the user may switch on. Absent from an older backend, which
+   *  is then offered no switch rather than a guessed one. */
+  tool_grants?: AgentToolGrant[];
   /** The directory an agent runs in. */
   workspace: string;
   /** False on a read-only backend, which never answers whatever the modes say. */
@@ -66,6 +90,51 @@ export function agentRunnable(status: AgentStatus | null): boolean {
 /** The backends this machine can run, in the order the backend listed them. */
 export function availableBackends(status: AgentStatus | null): AgentBackend[] {
   return status?.backends.filter((b) => b.available) ?? [];
+}
+
+/** The groups this backend offers. Empty before it has answered, and on a backend too
+ *  old to name any — a switch nobody described must not be drawn. */
+export function agentToolGrants(status: AgentStatus | null): AgentToolGrant[] {
+  return status?.tool_grants ?? [];
+}
+
+/** Whether a group is granted: EVERY tool it names is in the allowlist.
+ *
+ *  All of them, not any: a half-granted group is a switch that reads "on" while the
+ *  call the user wanted is still refused. */
+export function agentGrantIsOn(status: AgentStatus | null, grant: AgentToolGrant): boolean {
+  if (!status || grant.tools.length === 0) return false;
+  return grant.tools.every((tool) => status.tools.includes(tool));
+}
+
+/**
+ * The whole allowlist after switching one group on or off.
+ *
+ * `agent_set_tools` replaces the list rather than adding to it, so this has to compute
+ * the full answer. Two things it is careful about:
+ *
+ * - **A tool no group names is kept.** The RPC takes any list, so the user may have
+ *   granted something by hand; a switch here must not quietly take it back.
+ * - **A tool another granted group also names is kept.** Groups overlap (a built-in
+ *   read tool can appear in two), so turning one off removes only what nothing else
+ *   still asks for.
+ */
+export function agentToolsWithGrant(
+  status: AgentStatus,
+  grant: AgentToolGrant,
+  on: boolean,
+): string[] {
+  if (on) {
+    const missing = grant.tools.filter((tool) => !status.tools.includes(tool));
+    return [...status.tools, ...missing];
+  }
+  const keep = new Set(
+    agentToolGrants(status)
+      .filter((other) => other.key !== grant.key && agentGrantIsOn(status, other))
+      .flatMap((other) => other.tools),
+  );
+  const dropped = new Set(grant.tools.filter((tool) => !keep.has(tool)));
+  return status.tools.filter((tool) => !dropped.has(tool));
 }
 
 /** One line saying how to summon the agent, or why it cannot be summoned — the text a

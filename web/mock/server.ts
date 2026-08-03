@@ -2391,6 +2391,45 @@ const MOCK_AGENT_SANDBOX = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
  *  with the sandbox alone, exactly as the backend's own default does. */
 const mockAgentModes = new Map<string, "off" | "reply">([[MOCK_AGENT_SANDBOX, "reply"]]);
 
+/** The groups of tools the mock offers, in the shape `agent::TOOL_GRANTS` publishes.
+ *  The real catalogue lives in src/agent.rs and is the reviewed one; the mock carries a
+ *  representative tool or two per group, which is what a UI needs to draw a switch and
+ *  a spec needs to prove the grant travelled to the backend. */
+const MOCK_AGENT_TOOL_GRANTS = [
+  {
+    key: "files",
+    label: "Read files",
+    detail: "Open, list and search the files in its workspace.",
+    tools: ["Read", "Glob", "Grep"],
+  },
+  {
+    key: "grafana",
+    label: "Read Grafana",
+    detail: "Dashboards, Prometheus and Loki queries, incidents. No dashboard edit.",
+    tools: [
+      "mcp__grafana__list_datasources",
+      "mcp__grafana__query_prometheus",
+      "mcp__grafana__query_loki_logs",
+    ],
+  },
+  {
+    key: "sentry",
+    label: "Read Sentry",
+    detail: "Projects, issues and events. No issue edit, and no Seer run.",
+    tools: ["mcp__sentry__find_projects", "mcp__sentry__search_issues"],
+  },
+  {
+    key: "linear",
+    label: "Read Linear",
+    detail: "Issues, projects and comments. No issue, comment or status written.",
+    tools: ["mcp__linear__list_issues", "mcp__linear__get_issue"],
+  },
+];
+
+/** What an agent may do here, as the mock remembers it. Starts at the read-only default
+ *  the Rust `DEFAULT_TOOLS` holds, so a spec can tell the default from a grant. */
+let mockAgentTools: string[] = ["Read", "Glob", "Grep"];
+
 /** The `agent_status` result, matching the Rust one. Both backends are reported as
  *  available: the mock exists to drive the UI, and a switch that refuses itself would
  *  make the interesting half of the flow untestable. */
@@ -2398,6 +2437,7 @@ function agentStatusView(): {
   backends: { name: string; prefix: string; available: boolean }[];
   conversations: { conversation: string; mode: string }[];
   tools: string[];
+  tool_grants: { key: string; label: string; detail: string; tools: string[] }[];
   workspace: string;
   enabled: boolean;
   sandbox_conversation: string;
@@ -2408,7 +2448,8 @@ function agentStatusView(): {
       { name: "opencode", prefix: "@opencode", available: true },
     ],
     conversations: [...mockAgentModes].map(([conversation, mode]) => ({ conversation, mode })),
-    tools: ["Read", "Glob", "Grep"],
+    tools: [...mockAgentTools],
+    tool_grants: MOCK_AGENT_TOOL_GRANTS,
     workspace: "/home/mock/GitHub/teams-lite",
     enabled: true,
     sandbox_conversation: MOCK_AGENT_SANDBOX,
@@ -3702,6 +3743,14 @@ function dispatch(method: string, params: unknown): unknown {
       return agentStatusView();
     }
 
+    case "agent_set_tools": {
+      const tools = asObject(params).tools;
+      mockAgentTools = Array.isArray(tools)
+        ? tools.filter((tool): tool is string => typeof tool === "string" && tool.trim() !== "")
+        : [];
+      return agentStatusView();
+    }
+
     case "get_settings":
       return settingsView();
 
@@ -4240,6 +4289,9 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     return Response.json({
       sandbox: MOCK_AGENT_SANDBOX,
       conversations: [...mockAgentModes].map(([conversation, mode]) => ({ conversation, mode })),
+      // The other half of the same consent: what the agent may reach. Asserted here for
+      // the same reason — a switch is only meaningful if the backend stored it.
+      tools: [...mockAgentTools],
     });
   }
   if (req.method === "GET" && url.pathname === "/__test/channels") {

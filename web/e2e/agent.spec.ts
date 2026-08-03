@@ -66,4 +66,39 @@ test.describe("The local agent switch", () => {
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-checked", "false");
   });
+
+  // The second half of the same consent: what the agent may READ. Before this existed,
+  // the allowlist was reachable through a hand-crafted RPC only — which is the same as
+  // unreachable, so an `@claude` question about Grafana was refused with nothing the
+  // user could switch.
+  test("grants one read-only group of tools, and takes it back", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 2);
+
+    await page.locator('[data-testid="agent-menu"]').click();
+    const files = page.locator('[data-testid="agent-tool-grant-files"]');
+    const grafana = page.locator('[data-testid="agent-tool-grant-grafana"]');
+    // The read-only default is what the backend starts at, and the only group on.
+    await expect(files).toHaveAttribute("data-granted", "true");
+    await expect(grafana).toHaveAttribute("data-granted", "false");
+
+    await grafana.click();
+    await expect(grafana).toHaveAttribute("data-granted", "true");
+
+    // What the BACKEND stored, tool by tool — a switch that only changed the page would
+    // leave the call refused.
+    await expect
+      .poll(async () => (await fetchAgentModes(page)).tools)
+      .toContain("mcp__grafana__query_prometheus");
+    // Granting one group keeps the other: the RPC replaces the whole list, so this is
+    // where a lost tool would show.
+    expect((await fetchAgentModes(page)).tools).toContain("Read");
+
+    await grafana.click();
+    await expect(grafana).toHaveAttribute("data-granted", "false");
+    await expect
+      .poll(async () => (await fetchAgentModes(page)).tools)
+      .not.toContain("mcp__grafana__query_prometheus");
+    await expect(files).toHaveAttribute("data-granted", "true");
+  });
 });

@@ -4057,10 +4057,24 @@ fn agent_status_json(store: &Store) -> Result<Value> {
         .get_setting(agent::SETTING_WORKSPACE)?
         .filter(|path| !path.trim().is_empty())
         .unwrap_or_else(|| agent::default_workspace().display().to_string());
+    // What the user may switch on, so a client offers the same read-only groups this
+    // crate reviewed rather than a tool-name text field (`agent::TOOL_GRANTS`).
+    let tool_grants: Vec<Value> = agent::TOOL_GRANTS
+        .iter()
+        .map(|grant| {
+            json!({
+                "key": grant.key,
+                "label": grant.label,
+                "detail": grant.detail,
+                "tools": grant.tools,
+            })
+        })
+        .collect();
     Ok(json!({
         "backends": backends,
         "conversations": conversations,
         "tools": agent::tools_from_setting(store.get_setting(agent::SETTING_TOOLS)?.as_deref()),
+        "tool_grants": tool_grants,
         "workspace": workspace,
         // A read-only backend never answers, so a UI can say so rather than offering a
         // switch that would do nothing.
@@ -4669,6 +4683,27 @@ mod tests {
         assert_eq!(conversations[0]["mode"], "reply");
         // And a read-only default for what an agent may do.
         assert_eq!(status["tools"], json!(["Read", "Glob", "Grep"]));
+    }
+
+    /// A UI can only offer what the backend describes, so the grants travel with the
+    /// status. Without them the tool allowlist is reachable by hand-crafted RPC only,
+    /// which is the same as unreachable: the user cannot consent to a tool they have no
+    /// switch for.
+    #[test]
+    fn the_agent_status_offers_the_read_only_tool_grants() {
+        let store = Store::open_in_memory().unwrap();
+        let status = agent_status_json(&store).unwrap();
+        let grants = status["tool_grants"].as_array().unwrap();
+        assert_eq!(grants.len(), agent::TOOL_GRANTS.len());
+        let keys: Vec<&str> = grants.iter().map(|g| g["key"].as_str().unwrap()).collect();
+        assert!(keys.contains(&"grafana"), "{keys:?}");
+        let grafana = grants.iter().find(|g| g["key"] == "grafana").unwrap();
+        assert!(!grafana["label"].as_str().unwrap().is_empty());
+        assert!(grafana["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == "mcp__grafana__query_prometheus"));
     }
 
     #[test]

@@ -494,6 +494,15 @@ export class Backend {
   agentSetMode(conversation: string, mode: AgentMode): Promise<AgentStatus> {
     return this.writeRequest<AgentStatus>("agent_set_mode", { conversation, mode });
   }
+  /** Replace what an agent may do without being asked.
+   *
+   *  A WRITE request too, and the other half of the consent: it decides what a program
+   *  this machine runs on a chat message may reach (`MACHINE_METHODS`, refused
+   *  read-only). The WHOLE list, never an add — what an agent may do should be readable
+   *  in one place, and a caller that widens it has to say what the full answer is. */
+  agentSetTools(tools: string[]): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_set_tools", { tools });
+  }
   /** Fetch the notifications panel's three activity streams — Activity, Mentions
    *  and Following — in one round-trip. None is a chat: the backend fetches them
    *  fresh from Teams (concurrently) and decodes each entry. */

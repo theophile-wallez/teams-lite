@@ -1,13 +1,30 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentGrantIsOn,
   agentHint,
   agentModeFor,
   agentRunnable,
+  agentToolGrants,
+  agentToolsWithGrant,
   availableBackends,
   type AgentStatus,
+  type AgentToolGrant,
 } from "./agent";
 
 const SANDBOX = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
+
+const FILES: AgentToolGrant = {
+  key: "files",
+  label: "Read files",
+  detail: "Its workspace.",
+  tools: ["Read", "Glob", "Grep"],
+};
+const GRAFANA: AgentToolGrant = {
+  key: "grafana",
+  label: "Read Grafana",
+  detail: "Dashboards and queries.",
+  tools: ["mcp__grafana__list_datasources", "mcp__grafana__query_prometheus"],
+};
 
 function status(over: Partial<AgentStatus> = {}): AgentStatus {
   return {
@@ -17,6 +34,7 @@ function status(over: Partial<AgentStatus> = {}): AgentStatus {
     ],
     conversations: [{ conversation: SANDBOX, mode: "reply" }],
     tools: ["Read", "Glob", "Grep"],
+    tool_grants: [FILES, GRAFANA],
     workspace: "/home/u/GitHub/teams-lite",
     enabled: true,
     sandbox_conversation: SANDBOX,
@@ -67,6 +85,68 @@ describe("agentRunnable", () => {
 describe("availableBackends", () => {
   it("keeps only the CLIs the machine has", () => {
     expect(availableBackends(status()).map((b) => b.name)).toEqual(["claude"]);
+  });
+});
+
+describe("the tool grants", () => {
+  it("offers nothing before the backend answered, and nothing on a backend that names none", () => {
+    expect(agentToolGrants(null)).toEqual([]);
+    expect(agentToolGrants(status({ tool_grants: undefined }))).toEqual([]);
+  });
+
+  it("reads a group as on only when EVERY tool it names is allowed", () => {
+    expect(agentGrantIsOn(status(), FILES)).toBe(true);
+    expect(agentGrantIsOn(status(), GRAFANA)).toBe(false);
+    // Half of it is not it: the switch would read "on" while the call the user wanted
+    // is still refused.
+    const half = status({ tools: ["Read", "Glob", "Grep", "mcp__grafana__list_datasources"] });
+    expect(agentGrantIsOn(half, GRAFANA)).toBe(false);
+    expect(agentGrantIsOn(null, GRAFANA)).toBe(false);
+  });
+
+  it("adds every tool of a group it grants, and keeps what was already allowed", () => {
+    expect(agentToolsWithGrant(status(), GRAFANA, true)).toEqual([
+      "Read",
+      "Glob",
+      "Grep",
+      "mcp__grafana__list_datasources",
+      "mcp__grafana__query_prometheus",
+    ]);
+  });
+
+  it("grants no tool twice", () => {
+    const already = status({ tools: ["Read", "mcp__grafana__list_datasources"] });
+    expect(agentToolsWithGrant(already, GRAFANA, true)).toEqual([
+      "Read",
+      "mcp__grafana__list_datasources",
+      "mcp__grafana__query_prometheus",
+    ]);
+  });
+
+  it("takes a group back, and leaves alone what no group named", () => {
+    // `Bash` stands for a tool the user granted by hand through the RPC. A switch here
+    // must not quietly take it away.
+    const wide = status({
+      tools: ["Read", "Glob", "Grep", "Bash", ...GRAFANA.tools],
+    });
+    expect(agentToolsWithGrant(wide, GRAFANA, false)).toEqual(["Read", "Glob", "Grep", "Bash"]);
+  });
+
+  it("keeps a tool another granted group still asks for", () => {
+    // Two groups overlap on `Read`: turning one off must not disarm the other.
+    const overlapping: AgentToolGrant = {
+      key: "notes",
+      label: "Read notes",
+      detail: "Overlaps on Read.",
+      tools: ["Read"],
+    };
+    const both = status({ tool_grants: [FILES, overlapping], tools: ["Read", "Glob", "Grep"] });
+    expect(agentToolsWithGrant(both, FILES, false)).toEqual(["Read"]);
+  });
+
+  it("can end at no tool at all, which is a legitimate answer", () => {
+    const only = status({ tool_grants: [FILES] });
+    expect(agentToolsWithGrant(only, FILES, false)).toEqual([]);
   });
 });
 

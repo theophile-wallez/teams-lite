@@ -84,7 +84,14 @@ Four rules hold it together. Each one is load-bearing, and each is pinned by a t
   `--permission-mode default` so anything outside the list is refused rather than
   prompted for. The user's own settings may default to `bypassPermissions` for
   interactive work; a chat message must never inherit that. Widening the list is
-  `agent_set_tools`, gated the same way.
+  `agent_set_tools`, gated the same way — and it is *offered* as named read-only groups
+  (`agent::TOOL_GRANTS`, switched on from the same thread menu), because a consent the
+  user can only give through a hand-crafted RPC is a consent they cannot give. Every tool
+  in every group reads: the child loads the user's own MCP servers, so a group spelled
+  `mcp__grafana` would hand over `update_dashboard`, `create_incident` and
+  `grafana_api_request` with it. `every_granted_tool_reads` pins the shape — three
+  segments, never a whole server, and a verb that reads. The RPC still accepts any list,
+  which is the deliberate escape hatch for a tool no group names.
 - **The child never inherits the write token.** `TEAMS_LITE_WRITE_TOKEN` is removed
   from its environment: an agent holding it could `send` to any chat directly, around
   every gate above. A read-only backend never answers at all.

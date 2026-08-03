@@ -277,9 +277,11 @@ export async function fetchTestChannels(
  *
  *  A spec asserts the opt-in through this rather than through the switch it just
  *  clicked: the control is only worth anything if the BACKEND stored the consent. */
-export async function fetchAgentModes(
-  page: Page,
-): Promise<{ sandbox: string; conversations: { conversation: string; mode: string }[] }> {
+export async function fetchAgentModes(page: Page): Promise<{
+  sandbox: string;
+  conversations: { conversation: string; mode: string }[];
+  tools: string[];
+}> {
   const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/agent`);
   expect(res.ok()).toBeTruthy();
   return res.json();
