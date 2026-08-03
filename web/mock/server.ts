@@ -2343,6 +2343,40 @@ function pushStatusView(): {
   };
 }
 
+/** The conversation the Rust policy opts in out of the box (`agent_policy::
+ *  SANDBOX_THREAD`). Named here so the mock's `agent_status` has the same one entry a
+ *  fresh real backend has, and a spec can tell "on by default" from "the user
+ *  switched it on". */
+const MOCK_AGENT_SANDBOX = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
+
+/** Which conversations answer an `@claude` message, as the mock remembers it. Starts
+ *  with the sandbox alone, exactly as the backend's own default does. */
+const mockAgentModes = new Map<string, "off" | "reply">([[MOCK_AGENT_SANDBOX, "reply"]]);
+
+/** The `agent_status` result, matching the Rust one. Both backends are reported as
+ *  available: the mock exists to drive the UI, and a switch that refuses itself would
+ *  make the interesting half of the flow untestable. */
+function agentStatusView(): {
+  backends: { name: string; prefix: string; available: boolean }[];
+  conversations: { conversation: string; mode: string }[];
+  tools: string[];
+  workspace: string;
+  enabled: boolean;
+  sandbox_conversation: string;
+} {
+  return {
+    backends: [
+      { name: "claude", prefix: "@claude", available: true },
+      { name: "opencode", prefix: "@opencode", available: true },
+    ],
+    conversations: [...mockAgentModes].map(([conversation, mode]) => ({ conversation, mode })),
+    tools: ["Read", "Glob", "Grep"],
+    workspace: "/home/mock/GitHub/teams-lite",
+    enabled: true,
+    sandbox_conversation: MOCK_AGENT_SANDBOX,
+  };
+}
+
 /** Non-secret settings view, matching the Rust `get_settings` result. */
 function settingsView(): {
   gitlab_host: string;
@@ -3614,6 +3648,20 @@ function dispatch(method: string, params: unknown): unknown {
         errors: mockPushDevices.size > 0 ? ["the mock backend never sends a real push"] : [],
       };
 
+    // ---- the local agent ---------------------------------------------------
+    // The mock runs no CLI and posts nothing. It only remembers which conversations
+    // are opted in, so the consent flow itself can be driven end to end.
+
+    case "agent_status":
+      return agentStatusView();
+
+    case "agent_set_mode": {
+      const conversation = requireString(params, "conversation");
+      const mode = requireString(params, "mode") === "reply" ? "reply" : "off";
+      mockAgentModes.set(conversation, mode);
+      return agentStatusView();
+    }
+
     case "get_settings":
       return settingsView();
 
@@ -4133,6 +4181,15 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         is_all_day: e.is_all_day,
         response: e.response,
       })),
+    });
+  }
+  // Which conversations the mock has been told to answer in. A spec asserts the
+  // CONSENT through this, not through the page's memory of its own click: the switch is
+  // only meaningful if the backend stored it.
+  if (req.method === "GET" && url.pathname === "/__test/agent") {
+    return Response.json({
+      sandbox: MOCK_AGENT_SANDBOX,
+      conversations: [...mockAgentModes].map(([conversation, mode]) => ({ conversation, mode })),
     });
   }
   if (req.method === "GET" && url.pathname === "/__test/channels") {

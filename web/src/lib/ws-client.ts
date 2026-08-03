@@ -9,6 +9,7 @@
 //   response <- { id, result } | { id, error }
 //   event    <- { event, data }        (server push)
 
+import type { AgentMode, AgentStatus } from "./agent";
 import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { SendImage } from "./composer-image";
 import type {
@@ -478,6 +479,20 @@ export class Backend {
       "push_test",
       {},
     );
+  }
+  /** What the local agent can do on the backend's machine: which CLIs it holds, which
+   *  conversations are opted in, what an agent may run and where. A read. */
+  agentStatus(): Promise<AgentStatus> {
+    return this.request<AgentStatus>("agent_status", {});
+  }
+  /** Opt one conversation in or out of agent replies.
+   *
+   *  A WRITE request, and the consent gate for the whole feature: it decides where this
+   *  machine posts an answer under the user's name (a `MACHINE_METHODS` entry in
+   *  src/bin/server.rs, refused read-only). Returns the whole status, so a caller never
+   *  has to guess what the store now holds. */
+  agentSetMode(conversation: string, mode: AgentMode): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_set_mode", { conversation, mode });
   }
   /** Fetch the notifications panel's three activity streams — Activity, Mentions
    *  and Following — in one round-trip. None is a chat: the backend fetches them

@@ -11,6 +11,7 @@ import {
   type Conversation,
 } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
+import { AgentMenu } from "./agent-menu";
 import { Avatar, conversationPhoto, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
 import { SystemEventLine } from "./system-event-line";
@@ -496,6 +497,9 @@ export function MessagePane(props: { onBack?: () => void }) {
             </p>
           ) : null}
         </div>
+        {/* Whether this thread answers an `@claude` message. Per conversation on
+            purpose — see components/agent-menu.tsx. */}
+        {openId && <AgentMenu conversationId={openId} />}
       </header>
 
       {/* The history and the control that floats over it. The wrapper is what the

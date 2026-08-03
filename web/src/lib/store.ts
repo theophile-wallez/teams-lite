@@ -55,6 +55,7 @@ import {
   type TypingSignal,
   type UpdateInfo,
 } from "./protocol";
+import type { AgentMode, AgentStatus } from "./agent";
 import { coalesce } from "./singleflight";
 import {
   requestRange,
@@ -226,6 +227,9 @@ export type AppState = {
    *  the way, and which devices the backend notifies. The only path that reaches a
    *  phone whose app is closed — see lib/push.ts. */
   push: PushState;
+  /** What the local agent can do on the backend's machine, and which conversations
+   *  are opted in — null until the backend answers. See lib/agent.ts. */
+  agent: AgentStatus | null;
 
   // ---- mail (read-only Outlook surface) ------------------------------------
 
@@ -391,6 +395,7 @@ function initialState(): AppState {
       ghost_mode: false,
     },
     push: INITIAL_PUSH_STATE,
+    agent: null,
     mailFolders: [],
     mailFolderId: null,
     mailMessages: [],
@@ -576,6 +581,10 @@ export class TeamsController {
       // are best-effort too — a failure just leaves the defaults, which enrich
       // nothing but public gitlab.com links.
       void this.loadSettings();
+      // Which conversations answer an `@claude` message, and whether this machine
+      // holds an agent CLI at all. Best-effort: a failure leaves the menu saying the
+      // backend has not answered, never a switch that pretends to work.
+      void this.loadAgentStatus();
       // Where this device stands on push notifications, and a re-registration if it
       // is already subscribed (a browser may have rotated the subscription while the
       // app was closed — see syncPush).
@@ -2028,6 +2037,35 @@ export class TeamsController {
     this.set({ settings });
     this.linkCache.clear();
     return settings;
+  }
+
+  // ---- the local agent (see lib/agent.ts) ----------------------------------
+
+  /** Read what the backend's machine can do about agent replies. Best-effort: the
+   *  feature is an extra, and a failure must not keep the app from starting. */
+  private async loadAgentStatus(): Promise<void> {
+    try {
+      this.set({ agent: await this.backend.agentStatus() });
+    } catch {
+      // ignore — the menu then says the backend has not answered yet.
+    }
+  }
+
+  /**
+   * Opt one conversation in or out of agent replies.
+   *
+   * This is the consent gate of the whole feature, not a display preference: turning
+   * it on tells the machine it may post an answer under the user's name in THAT
+   * conversation, and nowhere else. So it is a write request, it names the
+   * conversation explicitly, and the backend's own answer — never a local guess — is
+   * what lands in state.
+   *
+   * Rejects on failure, so the control that called it can say why.
+   */
+  async setAgentMode(conversationId: string, mode: AgentMode): Promise<AgentStatus> {
+    const status = await this.backend.agentSetMode(conversationId, mode);
+    this.set({ agent: status });
+    return status;
   }
 
   // ---- push notifications (see lib/push.ts) --------------------------------

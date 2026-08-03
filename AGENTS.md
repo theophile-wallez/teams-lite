@@ -74,7 +74,11 @@ Four rules hold it together. Each one is load-bearing, and each is pinned by a t
   channel is the single built-in exception, because § Sending messages pre-authorizes
   it. Anything else needs `agent_set_mode`, a write-token-gated `MACHINE_METHODS`
   entry — which is the consent gate for this whole feature, and the reason it is not a
-  standing licence to post.
+  standing licence to post. The user turns one thread on from that thread's own header
+  (`web/src/components/agent-menu.tsx`, over `web/src/lib/agent.ts`), never from a
+  global list of ids: the consent belongs where they can see who reads the thread. The
+  switch stays off and disabled until `agent_status` answers, because `off` is what the
+  backend defaults to and a hopeful switch would misstate where a machine posts.
 - **The tool allowlist is read-only until the user widens it.** `Read`, `Glob`, `Grep`
   and nothing else (`agent::DEFAULT_TOOLS`), and Claude Code is pinned to
   `--permission-mode default` so anything outside the list is refused rather than
