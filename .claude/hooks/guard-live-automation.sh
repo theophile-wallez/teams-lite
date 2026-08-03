@@ -17,7 +17,7 @@
 #      before it types. Its live twin, web/scripts/sandbox-live.ts, is the one path
 #      to a real keystroke: it types only in the designated sandbox chat, and proves
 #      that from the app's own state before every key;
-#   2. a script that calls send/edit/react against the live backend — on its own
+#   2. a script that calls send/edit/delete/react against the live backend — on its own
 #      port (19420 for the always-on service, 19421 for the dev one) or through an
 #      app server that relays to it (19440 / 19441, and whatever tailnet name it is
 #      served under: see the relay in web/server.ts);
@@ -328,7 +328,7 @@ while IFS= read -r source; do
   # chatService messages endpoint itself, or by publishing our read position — a
   # horizon write tells the other party the user read their message, which reaches
   # them exactly as a post does (see `set_consumption_horizon`).
-  grep -qE 'teams_send::(send_message|edit_message|set_reaction)|/v1/users/ME/conversations/[^"]*/messages|set_consumption_horizon|name=consumptionhorizon([^s]|$)' \
+  grep -qE 'teams_send::(send_message|edit_message|delete_message|set_reaction)|/v1/users/ME/conversations/[^"]*/messages|set_consumption_horizon|name=consumptionhorizon([^s]|$)' \
     "$path" || continue
   # Then every conversation it names must be the sandbox one — and it must name one.
   # A send whose target comes from an argument is a send waiting for a typo.
@@ -372,7 +372,9 @@ if ! sanctioned_automation; then
       scripts_publishing_presence="$scripts_publishing_presence $script"
     fi
     # READING the live backend is fine and often the point (inspecting real data
-    # beats guessing). WRITING is not: `send`/`edit`/`react` post as the user,
+    # beats guessing). WRITING is not: `send`/`edit`/`delete`/`react` post as the user —
+    # and `delete` is the one nothing takes back, since the message leaves the thread
+    # for everybody in it —
     # `mark_read` publishes the user's read position (which clears the unread marker
     # on every device they own and shows the sender a read receipt), and
     # `push_subscribe`/`push_unsubscribe`/`push_test` change which devices the machine
@@ -402,7 +404,7 @@ if ! sanctioned_automation; then
     # the green dot it turns on is what every colleague reads (OUTWARD_METHODS in
     # src/bin/server.rs).
     if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)"|'\''(send|edit|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)"|'\''(send|edit|delete|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that
@@ -421,7 +423,8 @@ a tailnet name):
    ${scripts_writing_to_the_backend# }
 
 Reading the live backend is fine — inspect all the real data you need. Writing is
-not: send/edit/react post to real people as the user, mark_read tells them the user
+not: send/edit/delete/react post to real people as the user — a delete removes a
+message from the thread for everybody and nothing brings it back — mark_read tells them the user
 read their message, and the push_* methods decide which of the user's devices this
 machine notifies. The backend refuses writes without the capability token it
 publishes for the user's own frontends (see the write lock in src/bin/server.rs),
@@ -431,7 +434,7 @@ Exercise write flows against the mock: cd web && bun run preview."
 fi
 
 # --- 1a. the write token is never ours to fetch -------------------------------
-# The token IS the write capability: the backend refuses send/edit/react without it
+# The token IS the write capability: the backend refuses send/edit/delete/react without it
 # and accepts them with it, whoever presents it. So a client that never has one is
 # structurally read-only, and that is the property worth keeping — which means not
 # going looking for it, in either of the two places it exists: the 0600 file the
@@ -685,7 +688,7 @@ launched by tooling is how an accidental message reaches a colleague:
 
   TEAMS_LITE_READ_ONLY=1 cargo run --bin server
 
-That refuses send/edit/react at the dispatch choke point (src/bin/server.rs) AND
+That refuses send/edit/delete/react at the dispatch choke point (src/bin/server.rs) AND
 listens on 19430 instead of 19420, so it never takes the port the user's own backend
 wants — they can keep the always-on service running while you inspect real data
 on ws://127.0.0.1:19430. If you genuinely need a send-capable backend, ask the user

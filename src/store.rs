@@ -2687,6 +2687,31 @@ impl Store {
         Ok(Some(msg))
     }
 
+    /// Flag a message as DELETED locally and return the refreshed row — the local
+    /// half of the user deleting one of their own messages (see the `delete` RPC in
+    /// src/bin/server.rs). Returns `None` when the id is unknown or the row already
+    /// carried the flag, so callers can skip a needless live broadcast.
+    ///
+    /// The stored `content` is deliberately KEPT: a deletion arriving from Teams
+    /// keeps it too (see [`Store::insert_message`]), which is what lets the UI unveil
+    /// what it cached. Monotonic, like the inbound path — this only ever sets the
+    /// flag, never clears it.
+    pub fn mark_message_deleted(
+        &self,
+        conversation_id: &str,
+        id: &str,
+    ) -> Result<Option<Message>> {
+        let changed = self.exec(
+            "UPDATE messages SET deleted = 1
+             WHERE conversation_id = ?1 AND id = ?2 AND deleted = 0",
+            params![conversation_id, id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_message(conversation_id, id)
+    }
+
     /// Fetch a single message by id, or `None` when it is not stored. Used to
     /// emit the authoritative row after a live update, so the broadcast reflects
     /// what is persisted (including a reaction set preserved across a plain edit).
@@ -3742,6 +3767,31 @@ mod tests {
 
         // A repeat deletion frame is a no-op (already deleted, content unchanged).
         assert!(!s.insert_message(&deletion).unwrap());
+    }
+
+    // The local half of the user deleting their OWN message: the row is flagged the
+    // same way an inbound deletion flags it, so the UI shows one placeholder in both
+    // cases — and the cached body still survives for the reveal.
+    #[test]
+    fn marking_our_own_message_deleted_flags_the_row_and_keeps_the_body() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 100).unwrap();
+        let mut original = msg("c1", 1);
+        original.content = "delete me".into();
+        assert!(s.insert_message(&original).unwrap());
+
+        let row = s
+            .mark_message_deleted("c1", &original.id)
+            .unwrap()
+            .expect("a real change returns the row");
+        assert!(row.deleted);
+        assert_eq!(row.content, "delete me", "the body survives for the reveal");
+        assert_eq!(row.seq, 1, "a deletion keeps the original seq");
+
+        // Idempotent: a second call reports no change, so nothing is re-broadcast.
+        assert!(s.mark_message_deleted("c1", &original.id).unwrap().is_none());
+        // An unknown id yields None rather than an error.
+        assert!(s.mark_message_deleted("c1", "nope").unwrap().is_none());
     }
 
     #[test]

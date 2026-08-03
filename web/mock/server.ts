@@ -3685,6 +3685,13 @@ function dispatch(method: string, params: unknown): unknown {
       return { edited: true };
     }
 
+    case "delete": {
+      const id = requireString(params, "conversation");
+      const messageId = requireString(params, "message_id");
+      deleteMessage(id, messageId);
+      return { deleted: true };
+    }
+
     case "react": {
       const id = requireString(params, "conversation");
       const messageId = requireString(params, "message_id");
@@ -3960,6 +3967,21 @@ function editMessage(convId: string, messageId: string, text: string): void {
   t.recompute();
   broadcast("message", msg);
   broadcast(t.changedEvent, {});
+}
+
+/** Flag a stored message as deleted and broadcast it, mirroring the Rust backend's
+ *  `delete`: Teams keeps the message row and marks it, so the bubble becomes the
+ *  "You deleted this message" placeholder instead of vanishing — and the body stays
+ *  in the row, which is what the placeholder's Reveal unveils. */
+function deleteMessage(convId: string, messageId: string): void {
+  const t = threadFor(convId);
+  if (!t) return;
+  const msg = t.messages.find((m) => m.id === messageId);
+  if (!msg || msg.deleted) return; // unknown, or already gone: nothing to broadcast
+  msg.deleted = true;
+  // The message event only, exactly like the Rust `delete`: the sidebar preview
+  // belongs to Teams' own conversation sync, not to this call.
+  broadcast("message", msg);
 }
 
 /** Toggle OUR reaction on a message and broadcast it, mirroring the Rust

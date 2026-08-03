@@ -7,8 +7,23 @@
   send is a real, visible action performed as them — this applies to channels and
   to one-to-one/group chats alike.
 - This covers anything that posts to Teams on the user's behalf — new messages,
-  replies, reactions, edits — whether triggered through the UI, the backend
+  replies, reactions, edits, deletions — whether triggered through the UI, the backend
   `server`, a script, or a direct API/WebSocket call.
+- **A deletion is the one outward action nothing takes back.** `delete`
+  (`teams_send::delete_message`, `DELETE …/conversations/{id}/messages/{id}`) removes a
+  message from the thread for everybody in it, on every device, and no later call
+  restores it — an edit rewrites, a reaction toggles off, a deletion is final. It is an
+  `OUTWARD_METHODS` entry, the UI asks for a second explicit confirmation before it
+  calls, and the backend refuses a message that is not the user's own before the
+  network (Teams itself would let a team owner delete a colleague's channel post; this
+  app never offers that). The local row is FLAGGED, never dropped: Teams keeps the
+  message and marks it, which is what the "You deleted this message" placeholder — and
+  its Reveal of the cached body — is built on. `examples/message_delete_probe.rs` pins
+  that server-side shape against the real tenant — it posts to the sandbox channel and
+  removes what it posted, and it is the only sanctioned way to try the call live:
+
+      . bin/broker-env.sh && teams_lite_export_broker_bus && \
+        cargo run --example message_delete_probe
 - **Marking a conversation read counts.** `mark_read` publishes the user's own
   consumption horizon (`PUT …/properties?name=consumptionhorizon`, in
   `src/teams_readstate.rs`): the unread marker clears on every device they are signed
@@ -31,8 +46,8 @@
 - **A chat feature that must be exercised against the real account is exercised in
   that chat and nowhere else.** One thread, chosen once, so a mistake lands where a
   mistake is harmless. The mock comes first — `cd web && bun run preview` exercises
-  send, edit and react with nothing leaving the machine — and prod is only for what
-  the mock cannot show.
+  send, edit, delete and react with nothing leaving the machine — and prod is only for
+  what the mock cannot show.
 - **`cd web && bun run sandbox` is the only sanctioned way to type into the live
   app.** It opens the URL above, reads the open conversation id out of the app's own
   state (`[data-testid="composer-shell"]`'s `data-conversation-id`) and refuses every
@@ -298,7 +313,7 @@ hooks: `.claude/hooks/guard-live-automation.sh` on every `Bash` command, and
 
 **Reading the real backend is allowed. Writing to it is not.** Inspecting real
 conversations, history and DB rows is useful and encouraged — guessing is worse.
-What must never happen is a write: `send`/`edit`/`react` post to real people as the
+What must never happen is a write: `send`/`edit`/`delete`/`react` post to real people as the
 user. Two independent mechanisms enforce that split:
 
 - **The write lock (backend).** The backend mints a capability token per process
@@ -311,7 +326,7 @@ user. Two independent mechanisms enforce that split:
   weaken the lock to get a write through.** Fetching a secret you were not handed
   is precisely the line this draws.
 - **The hook (harness).** Blocks, before execution, any command that would write:
-  ad-hoc browser drivers, scripts calling `send`/`edit`/`react`/`mark_read` against
+  ad-hoc browser drivers, scripts calling `send`/`edit`/`delete`/`react`/`mark_read` against
   `127.0.0.1:19420` or `19421` (and the 19440 / 19441 relays in front of them), a
   consumption-horizon PUT straight to Teams (which bypasses the backend's gate
   entirely), a presence publish straight to the presence service (same reason — see
@@ -371,7 +386,7 @@ user. Two independent mechanisms enforce that split:
   yours to start. A bare `vite dev` refuses to run at all: there is no default
   backend in dev (see `defaultWsUrl` in `web/src/lib/ws-client.ts`).
 - **Start the backend read-only, or let the user start it.**
-  `TEAMS_LITE_READ_ONLY=1` refuses `send`/`edit`/`react` at the dispatch choke
+  `TEAMS_LITE_READ_ONLY=1` refuses `send`/`edit`/`delete`/`react` at the dispatch choke
   point (`src/bin/server.rs`) *and* binds **19430** instead of 19420, so it never
   competes for the port the user's own backend owns. The two run side by side on
   the same SQLite store (WAL): the user's always-on service keeps 19420 and their

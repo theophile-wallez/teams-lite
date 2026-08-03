@@ -2467,6 +2467,28 @@ export class TeamsController {
   }
 
   /**
+   * Delete one of our own messages. IRREVERSIBLE: it leaves the thread for everybody
+   * in it, on every device, so the caller must have taken an explicit confirmation
+   * from the user first (see the actions menu in `message-bubble.tsx`).
+   *
+   * Like `editMessage`, the backend does the outward call, flags its own row and
+   * broadcasts the result, which reconciles into the cache by id (see `wireEvents`) —
+   * so the bubble becomes the deletion placeholder without anything optimistic here.
+   */
+  async deleteMessage(messageId: string): Promise<boolean> {
+    const id = this.get().openId;
+    if (!id) return false;
+    try {
+      await this.backend.deleteMessage(id, messageId);
+      return true;
+    } catch (e) {
+      this.set({ status: `delete failed: ${errText(e)}` });
+      playCue("error");
+      return false;
+    }
+  }
+
+  /**
    * React to a message with an emoji, or toggle our reaction off. The backend
    * toggles (clicking our current reaction removes it), applies it optimistically
    * on its side, and re-broadcasts the message, which reconciles into the cache

@@ -460,6 +460,14 @@ export function MessagePane(props: { onBack?: () => void }) {
     if (agentRun) controller.forgetAgentRun(agentRun.conversation, agentRun.run_id);
   }, [controller, agentRun]);
 
+  // The bubble's menu has already taken the confirmation (deleting is irreversible),
+  // so this fires the call. An edit in progress on that message is dropped: its target
+  // is about to be a placeholder.
+  const doDelete = useCallback(async (m: ChatMessage) => {
+    setEditingId((current) => (current === m.id ? null : current));
+    await controller.deleteMessage(m.id);
+  }, [controller]);
+
   // One rendered row: a system-event line or a message bubble, with its optional
   // "seen by" receipts underneath. `prev`/`next` drive avatar/name chaining and
   // are the visually adjacent rows (within a thread for channels, else the flat
@@ -493,6 +501,7 @@ export function MessagePane(props: { onBack?: () => void }) {
             onStartEdit={doStartEdit}
             onSaveEdit={doSaveEdit}
             onCancelEdit={doCancelEdit}
+            onDelete={doDelete}
           />
         )}
         {seenBy && <ReadReceipts receipts={seenBy} />}

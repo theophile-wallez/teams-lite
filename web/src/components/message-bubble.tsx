@@ -11,6 +11,7 @@ import {
   Pencil,
   Reply,
   SmilePlus,
+  Trash2,
 } from "lucide-react";
 import {
   bodyFormat,
@@ -206,6 +207,7 @@ function MessageBubbleImpl(props: {
   onStartEdit: (message: ChatMessage) => void;
   onSaveEdit: (message: ChatMessage, text: string) => void;
   onCancelEdit: () => void;
+  onDelete: (message: ChatMessage) => void;
 }) {
   // A message the local agent wrote, from the line it signs itself with. It went out
   // through the user's account, so the wire calls it ours — but they did not write it,
@@ -748,6 +750,7 @@ function MessageBubbleImpl(props: {
                 onEdit={() => props.onStartEdit(props.message)}
                 onReply={() => props.onReply(props.message)}
                 onCopy={() => props.onCopy(props.message)}
+                onDelete={() => props.onDelete(props.message)}
               />
             )}
           </>
@@ -760,9 +763,17 @@ function MessageBubbleImpl(props: {
 /**
  * The ⋯ actions surface of a bubble, and the only way in to a reaction: a
  * hover-revealed trigger on the author's outer side, opening a menu that leads
- * with the reaction bar and then Edit (mine only), Reply and Copy. On a coarse
- * pointer a long press on the bubble opens the same menu. Rendered only for a
- * message there is something to do with — see `inert` in the bubble.
+ * with the reaction bar and then Edit (mine only), Reply, Copy and Delete (mine
+ * only). On a coarse pointer a long press on the bubble opens the same menu.
+ * Rendered only for a message there is something to do with — see `inert` in the
+ * bubble.
+ *
+ * Delete asks twice. Every other action here is recoverable — an edit can be edited
+ * again, a reaction toggled off — while a deletion removes the message from the
+ * thread for everybody, on every device, and nothing brings it back. So the first
+ * select does not act: it keeps the menu open and swaps the row for "Delete for
+ * everyone", which is the one that calls. The confirmation is dropped whenever the
+ * menu closes, so a menu reopened later never starts armed.
  *
  * There is deliberately no floating picker on hover: it appeared over every
  * message the cursor rested on, which is a lot of motion for a rare action that
@@ -789,7 +800,16 @@ function MessageActionsMenu(props: {
   onEdit: () => void;
   onReply: () => void;
   onCopy: () => void;
+  onDelete: () => void;
 }) {
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // A closed menu is disarmed: the next open starts at "Delete", never at the
+  // confirmation. Reset on close rather than on open so the row does not visibly
+  // change back while the menu is still fading out.
+  useEffect(() => {
+    if (!props.open) setConfirmingDelete(false);
+  }, [props.open]);
+
   return (
     <DropdownMenu open={props.open} onOpenChange={props.onOpenChange}>
       <DropdownMenuTrigger asChild>
@@ -837,6 +857,35 @@ function MessageActionsMenu(props: {
           <Copy className="size-4" strokeWidth={1.6} />
           Copy
         </DropdownMenuItem>
+        {props.mine && (
+          <>
+            <DropdownMenuSeparator />
+            {confirmingDelete ? (
+              <DropdownMenuItem
+                data-testid="action-delete-confirm"
+                destructive
+                onSelect={props.onDelete}
+              >
+                <Trash2 className="size-4" strokeWidth={1.6} />
+                Delete for everyone
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem
+                data-testid="action-delete"
+                destructive
+                onSelect={(event) => {
+                  // Hold the menu open: this select arms the confirmation above,
+                  // it does not delete.
+                  event.preventDefault();
+                  setConfirmingDelete(true);
+                }}
+              >
+                <Trash2 className="size-4" strokeWidth={1.6} />
+                Delete
+              </DropdownMenuItem>
+            )}
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -392,15 +392,7 @@ pub async fn edit_message(
     text: &str,
     content_html: Option<&str>,
 ) -> Result<()> {
-    let chat = session
-        .endpoint("chatService")
-        .context("no chatService endpoint in regionGtms")?
-        .trim_end_matches('/');
-    let url = format!(
-        "{chat}/v1/users/ME/conversations/{}/messages/{}",
-        urlencoding::encode(conversation_id),
-        urlencoding::encode(message_id)
-    );
+    let url = message_url(session, conversation_id, message_id)?;
     let body = build_edit_body(text, content_html, &session.self_name);
 
     let resp = http
@@ -419,6 +411,50 @@ pub async fn edit_message(
         let txt = resp.text().await.unwrap_or_default();
         anyhow::bail!(
             "edit -> {status}: {}",
+            txt.chars().take(160).collect::<String>()
+        );
+    }
+    Ok(())
+}
+
+/// Delete one of OUR OWN messages. Teams keeps the message row and marks it as
+/// deleted, which is why the read path recognizes a deletion by
+/// `properties.deletetime` rather than by a message that vanished (see
+/// [`crate::teams_read::parse_message`]).
+///
+/// Shape — the message resource, addressed with the verb that removes it:
+///   DELETE {chatService}/v1/users/ME/conversations/{convId}/messages/{messageId}
+///   Header: Authentication: skypetoken=...
+///
+/// There is no body: the id identifies the message being removed. The server echoes
+/// a `MessageUpdate` over the trouter carrying the same id, an empty content and a
+/// `deletetime`, so every client — ours included — converges on the placeholder.
+///
+/// IRREVERSIBLE, and outward: the message disappears for everybody in the thread,
+/// on every device. Teams is the authority on who may delete what; this app offers
+/// it on the user's own messages only (see the `delete` RPC in src/bin/server.rs).
+pub async fn delete_message(
+    http: &reqwest::Client,
+    session: &Session,
+    conversation_id: &str,
+    message_id: &str,
+) -> Result<()> {
+    let url = message_url(session, conversation_id, message_id)?;
+
+    let resp = http
+        .delete(&url)
+        .header(
+            "authentication",
+            format!("skypetoken={}", session.skypetoken),
+        )
+        .send()
+        .await
+        .context("delete message request")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let txt = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "delete -> {status}: {}",
             txt.chars().take(160).collect::<String>()
         );
     }
@@ -451,14 +487,9 @@ pub async fn set_reaction(
     key: &str,
     on: bool,
 ) -> Result<()> {
-    let chat = session
-        .endpoint("chatService")
-        .context("no chatService endpoint in regionGtms")?
-        .trim_end_matches('/');
     let url = format!(
-        "{chat}/v1/users/ME/conversations/{}/messages/{}/properties?name=emotions",
-        urlencoding::encode(conversation_id),
-        urlencoding::encode(message_id)
+        "{}/properties?name=emotions",
+        message_url(session, conversation_id, message_id)?
     );
     let value = if on { now_ms() } else { 0 };
     let body = build_reaction_body(key, value);
@@ -590,6 +621,22 @@ fn paragraph(text: &str) -> String {
         return String::new();
     }
     format!("<p>{}</p>", escape_html(text).replace('\n', "<br>"))
+}
+
+/// The chatService URL of ONE message resource — what an edit, a reaction and a
+/// deletion all address. One place, so the conversation and the message id are
+/// percent-encoded the same way in all three (a channel id carries `:` and `@`, a
+/// thread reply id carries `;`).
+fn message_url(session: &Session, conversation_id: &str, message_id: &str) -> Result<String> {
+    let chat = session
+        .endpoint("chatService")
+        .context("no chatService endpoint in regionGtms")?
+        .trim_end_matches('/');
+    Ok(format!(
+        "{chat}/v1/users/ME/conversations/{}/messages/{}",
+        urlencoding::encode(conversation_id),
+        urlencoding::encode(message_id)
+    ))
 }
 
 /// Build the request body (pure, unit-tested).
@@ -880,6 +927,37 @@ mod tests {
             "https://v1"
         );
         assert!(ams_endpoint(&session(json!({}))).is_err());
+    }
+
+    // One message resource, three verbs: an edit PUTs it, a deletion DELETEs it and a
+    // reaction PUTs a property under it. So the ids must be encoded here, once — a
+    // channel id carries `:` and `@`, and a thread reply id carries `;`.
+    #[test]
+    fn a_message_url_encodes_the_conversation_and_the_message_id() {
+        let session = Session {
+            skypetoken: String::new(),
+            region: String::new(),
+            gtms: json!({ "chatService": "https://chat.example/" }),
+            self_name: String::new(),
+            self_mri: String::new(),
+        };
+        assert_eq!(
+            message_url(&session, "19:abc@thread.v2", "1785773946196").unwrap(),
+            "https://chat.example/v1/users/ME/conversations/19%3Aabc%40thread.v2/messages/1785773946196"
+        );
+        assert_eq!(
+            message_url(&session, "19:abc@thread.v2", "1;messageid=2").unwrap(),
+            "https://chat.example/v1/users/ME/conversations/19%3Aabc%40thread.v2/messages/1%3Bmessageid%3D2"
+        );
+        // No chatService endpoint: fail before any request is built.
+        let blind = Session {
+            skypetoken: String::new(),
+            region: String::new(),
+            gtms: json!({}),
+            self_name: String::new(),
+            self_mri: String::new(),
+        };
+        assert!(message_url(&blind, "19:abc@thread.v2", "1").is_err());
     }
 
     #[test]

@@ -416,6 +416,19 @@ export class Backend {
       text,
     });
   }
+  /** Delete one of our own messages. Teams removes it from the thread for everybody,
+   *  on every device, and nothing brings it back — the one outward call in this client
+   *  that cannot be undone, which is why the UI confirms before calling it.
+   *
+   *  The backend flags the local row and re-broadcasts it, so the bubble becomes the
+   *  "You deleted this message" placeholder through the `message` event. It refuses a
+   *  message that is not ours before reaching the network. */
+  deleteMessage(conversation: string, messageId: string): Promise<{ deleted: boolean }> {
+    return this.writeRequest<{ deleted: boolean }>("delete", {
+      conversation,
+      message_id: messageId,
+    });
+  }
   /** React to a message with an emoji (Teams "emotion"), or toggle ours off.
    *  `key` is the emotion (e.g. "like", "heart"). The backend toggles — clicking
    *  our current reaction removes it — and re-broadcasts the message, so state

@@ -37,6 +37,13 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'send' }));\n"
     ),
+    # Deleting a message is a write, and the one nothing takes back: the message
+    # leaves the thread for everybody in it, on every device.
+    "delete-writer.ts": (
+        "// Deletes a real message through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'delete' }));\n"
+    ),
     # Marking a thread read is a write: the sender is shown a read receipt.
     "mark-read-writer.ts": (
         "// Marks a real conversation read through the live backend.\n"
@@ -192,6 +199,15 @@ EXAMPLE_FIXTURES = {
         "const SANDBOX: &str = \"19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2\";\n"
         "fn main() { teams_send::send_message(&http, &session, &ic3, SANDBOX, \"hi\"); }\n"
     ),
+    # A deletion whose target comes from an argument: outward, irreversible, and
+    # refused by the same rule as a loose send.
+    "guard-test-loose-delete.rs": (
+        "// A probe that deletes wherever it is told.\n"
+        "fn main() {\n"
+        "    let conversation = std::env::args().nth(1).unwrap();\n"
+        "    teams_send::delete_message(&http, &session, &conversation, \"1\");\n"
+        "}\n"
+    ),
     # A read-state write, pinned to nothing: outward all the same, since the sender
     # is shown a receipt. Refused by the same rule as a send.
     "guard-test-horizon-write.rs": (
@@ -256,6 +272,10 @@ def cases(tmp: Path):
         # …including one that only moves the READ position: the sender is still shown
         # a receipt saying the user read their message.
         ("BLOCK", PROJECT, "cargo run --example guard-test-horizon-write"),
+        # A deletion removes a real message for everybody, and nothing brings it back —
+        # through the backend, or straight from a cargo example.
+        ("BLOCK", PROJECT, f"bun run {tmp}/delete-writer.ts"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-loose-delete"),
         # Marking a thread read tells the sender the user read their message.
         ("BLOCK", PROJECT, f"bun run {tmp}/mark-read-writer.ts"),
         # …and going straight to Teams bypasses every gate the RPC has.

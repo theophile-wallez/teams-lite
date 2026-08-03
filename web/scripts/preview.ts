@@ -38,6 +38,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/chan --channels    # the team → channel tree
 //   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
+//   bun run web/scripts/preview.ts --out /tmp/del --delete      # delete: menu, confirm, placeholder
 //   bun run web/scripts/preview.ts --out /tmp/preview --scrolled # history scrolled up (jump button)
 //   bun run web/scripts/preview.ts --out /tmp/ghost --ghost     # read state + Ghost mode
 //   bun run web/scripts/preview.ts --out /tmp/set --settings    # the Settings pane
@@ -450,13 +451,36 @@ export async function toggleCalendarSetting(
  * clicked — but they are still write affordances, so these helpers re-assert the
  * mock sentinel like every other one here.
  */
-export async function openMessageActions(page: Page): Promise<void> {
+export async function openMessageActions(
+  page: Page,
+  opts: { mine?: boolean } = {},
+): Promise<void> {
   await assertMockBackend(page);
-  const message = page.locator('[data-testid="message"]').last();
+  // `mine` picks one of OUR messages, which is the only kind offering Edit and
+  // Delete — a menu on somebody else's message is a different, shorter menu.
+  const messages = opts.mine
+    ? page.locator('[data-testid="message"][data-mine="true"]')
+    : page.locator('[data-testid="message"]');
+  const message = messages.last();
   await message.hover(); // the trigger only shows on a hovered bubble
   await message.locator('[data-testid="message-actions"]').click();
   await page.waitForSelector('[data-testid="menu-reaction-picker"]');
   await page.waitForTimeout(300); // let the menu's open animation settle
+}
+
+/**
+ * Arm the deletion confirmation in the open actions menu. The first select of
+ * "Delete" deletes nothing: it holds the menu open and swaps the row for "Delete for
+ * everyone", because a deletion is the one outward action nothing takes back.
+ *
+ * Nothing leaves the machine here — the backend is the mock — but this is the
+ * approach to a write, so the sentinel is re-asserted like every other helper's.
+ */
+export async function armDeleteConfirmation(page: Page): Promise<void> {
+  await assertMockBackend(page);
+  await page.locator('[data-testid="action-delete"]').click();
+  await page.waitForSelector('[data-testid="action-delete-confirm"]');
+  await page.waitForTimeout(200);
 }
 
 /**
@@ -1213,6 +1237,17 @@ if (import.meta.main) {
         await openMessageActions(page);
         await shot(`${out}-row-light.png`);
         await openReactionPicker(page);
+      }
+      // Deleting one of our own messages: the menu that offers it, the confirmation
+      // it arms, and the placeholder the message becomes.
+      if (args.includes("--delete")) {
+        await openMessageActions(page, { mine: true });
+        await shot(`${out}-menu-light.png`);
+        await armDeleteConfirmation(page);
+        await shot(`${out}-confirm-light.png`);
+        await page.locator('[data-testid="action-delete-confirm"]').click();
+        await page.waitForSelector('[data-testid="deleted-message"]');
+        await page.waitForTimeout(400);
       }
       await shot(`${out}-light.png`, element);
       await setTheme("dark");

@@ -201,6 +201,31 @@ describe("Backend request/response", () => {
     backend.close();
   });
 
+  // A deletion removes the message for everybody in the thread and cannot be undone,
+  // so it travels as a WRITE: the backend refuses it without the capability token.
+  it("frames a delete as a write, carrying the write token", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("tok");
+
+    const promise = backend.deleteMessage("c1", "c1#5");
+
+    const frame = JSON.parse(socket.sent[0]!) as {
+      id: number;
+      method: string;
+      params?: Record<string, unknown>;
+    };
+    expect(frame.method).toBe("delete");
+    expect(frame.params).toEqual({
+      conversation: "c1",
+      message_id: "c1#5",
+      write_token: "tok",
+    });
+
+    socket.simulateMessage(JSON.stringify({ id: frame.id, result: { deleted: true } }));
+    await expect(promise).resolves.toEqual({ deleted: true });
+    backend.close();
+  });
+
   // mark_read publishes the user's read position to Teams, so it must travel as a
   // WRITE: the backend refuses it without the capability token, exactly like a send.
   it("frames mark_read as a write, carrying the write token", async () => {

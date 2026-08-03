@@ -150,8 +150,13 @@ const SETTING_PUSH_VAPID_PRIVATE: &str = "push_vapid_private";
 const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 
 /// The RPC methods that act OUTWARD — they change what other people see in the
-/// user's real Teams account (a message posted, edited, or reacted to, or a read
-/// receipt shown). Every other method only reads, or writes to the local store.
+/// user's real Teams account (a message posted, edited, deleted, or reacted to, or a
+/// read receipt shown). Every other method only reads, or writes to the local store.
+///
+/// `delete` is the one entry that cannot be taken back: an edit rewrites a message
+/// and a reaction can be cleared, but a deletion removes the message from the thread
+/// for everybody, on every device. The UI therefore asks for a second, explicit
+/// confirmation before it calls this.
 ///
 /// `mark_read` is outward for two reasons: it clears the unread marker on every
 /// device the user is signed in on, and Teams shows the new read position to the
@@ -162,7 +167,8 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// [`SETTING_ALWAYS_AVAILABLE`]). It posts no message, but the green dot it turns on
 /// is read by every colleague as a statement about where the user is — and the same
 /// call is what takes it back, so both directions belong behind one gate.
-const OUTWARD_METHODS: [&str; 5] = ["send", "edit", "react", "mark_read", "set_always_available"];
+const OUTWARD_METHODS: [&str; 6] =
+    ["send", "edit", "delete", "react", "mark_read", "set_always_available"];
 
 /// The RPC methods that act on THIS MACHINE, outside the store and the network.
 ///
@@ -1837,6 +1843,56 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "edited": true }))
         }
 
+        // delete one of our own messages. IRREVERSIBLE and outward: the message leaves
+        // the thread for everybody, on every device, and no later call brings it back
+        // (which is why the UI confirms before calling this).
+        //
+        // Teams keeps the message row and flags it, so we do the same locally rather
+        // than dropping it: the row is marked deleted and re-broadcast, and the UI
+        // paints the same "You deleted this message" placeholder an inbound deletion
+        // produces — immediately, without waiting for the trouter echo.
+        "delete" => {
+            let conv = param_str(params, "conversation")?;
+            let message_id = param_str(params, "message_id")?;
+
+            let (self_name, self_mri) = {
+                let session = ctx.session().await?;
+                (session.self_name.to_string(), session.self_mri.to_string())
+            };
+            // Only the user's OWN message, and refused before the network. Teams
+            // itself lets a team owner delete a colleague's channel post; this app
+            // never offers that, so a request for one is a bug or a rogue client
+            // rather than an intention to honour.
+            let stored = ctx
+                .store()
+                .ok()
+                .and_then(|store| store.get_message(&conv, &message_id).ok().flatten());
+            anyhow::ensure!(
+                may_delete(stored.as_ref(), &self_name, &self_mri),
+                "refused: only your own message can be deleted"
+            );
+
+            let http = ctx.http.clone();
+            let delete_conv = conv.clone();
+            let delete_id = message_id.clone();
+            ctx.retry_on_auth(move |session, _csa| {
+                let http = http.clone();
+                let conv = delete_conv.clone();
+                let message_id = delete_id.clone();
+                async move {
+                    teams_send::delete_message(&http, &session, &conv, &message_id).await
+                }
+            })
+            .await?;
+
+            if let Ok(store) = ctx.store() {
+                if let Some(updated) = store.mark_message_deleted(&conv, &message_id)? {
+                    ctx.emit("message", message_json(&updated, &self_name, &self_mri));
+                }
+            }
+            Ok(json!({ "deleted": true }))
+        }
+
         // react to a message with an emoji (Teams "emotion"), or toggle ours off.
         // `key` is the emotion the user picked (e.g. "like", "heart"). Teams keeps
         // one reaction per user per message, so we toggle: clicking our current
@@ -3168,6 +3224,22 @@ fn is_self(m: &Message, self_name: &str, self_mri: &str) -> bool {
         return m.sender_mri == self_mri;
     }
     !self_name.is_empty() && m.sender == self_name
+}
+
+/// Whether the `delete` RPC may act on this stored row: only on the user's OWN
+/// message, judged by the same rule the UI shows a bubble as ours with
+/// ([`is_self`]). A message this store does not hold (`None`) is allowed through —
+/// Teams is the authority, and refusing a message we simply never synced would break
+/// a legitimate deletion.
+///
+/// This exists because Teams is MORE permissive than this app: a team owner may
+/// delete a colleague's channel post there. The app offers no such action, so a
+/// request for one is refused here rather than sent.
+fn may_delete(stored: Option<&Message>, self_name: &str, self_mri: &str) -> bool {
+    match stored {
+        Some(m) => is_self(m, self_name, self_mri),
+        None => true,
+    }
 }
 
 fn messages_value(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
@@ -4684,6 +4756,52 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    // Deleting a message removes it from the thread for everybody, on every device,
+    // and nothing brings it back. So it is outward, token-gated, and refused
+    // read-only — exactly like the send it undoes.
+    #[test]
+    fn delete_is_outward_facing_and_token_gated() {
+        assert!(OUTWARD_METHODS.contains(&"delete"));
+        assert_eq!(write_class("delete"), Some(WriteClass::Outward));
+        let params = json!({ "conversation": "c1", "message_id": "m1" });
+        let err = check_write_allowed("delete", &params, Some("tok"))
+            .expect_err("must refuse a tokenless deletion");
+        assert!(err.contains("write token"), "{err}");
+        assert!(
+            check_write_allowed(
+                "delete",
+                &json!({ "conversation": "c1", "message_id": "m1", "write_token": "tok" }),
+                Some("tok")
+            )
+            .is_ok()
+        );
+    }
+
+    // Teams would let a team owner delete a colleague's channel post. This app never
+    // offers that, so the RPC refuses a stored message that is not ours — while a
+    // message we never synced is left to Teams to judge.
+    #[test]
+    fn only_our_own_message_may_be_deleted() {
+        let mut mine = message(1);
+        mine.sender_mri = "8:orgid:me".into();
+        mine.sender = "Me".into();
+        let mut theirs = message(2);
+        theirs.sender_mri = "8:orgid:them".into();
+        theirs.sender = "Ada Lovelace".into();
+
+        assert!(may_delete(Some(&mine), "Me", "8:orgid:me"));
+        assert!(!may_delete(Some(&theirs), "Me", "8:orgid:me"));
+        assert!(may_delete(None, "Me", "8:orgid:me"), "an unsynced message is Teams' call");
+
+        // No mri anywhere (a legacy row): the display name decides, as `is_self` does.
+        let mut nameless = message(3);
+        nameless.sender_mri = String::new();
+        nameless.sender = "Me".into();
+        assert!(may_delete(Some(&nameless), "Me", ""));
+        nameless.sender = "Ada Lovelace".into();
+        assert!(!may_delete(Some(&nameless), "Me", ""));
     }
 
     // Ghost mode is a stored string, and only "1" means on: an unset, empty or

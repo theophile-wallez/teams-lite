@@ -44,6 +44,7 @@ function render(msg: ChatMessage, over: { onPanel?: boolean } = {}): string {
         onStartEdit={() => {}}
         onSaveEdit={() => {}}
         onCancelEdit={() => {}}
+        onDelete={() => {}}
       />
     </ControllerProvider>,
   );
