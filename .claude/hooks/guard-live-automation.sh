@@ -31,6 +31,9 @@
 #      reason to run a send-capable backend; the user starts that one. This covers
 #      every spelling: the binary in target/, the staged copy the always-on service
 #      runs, the launcher scripts, and `systemctl --user start` on its units;
+#   2c. a cargo EXAMPLE that posts to Teams without pinning the sandbox channel. An
+#      example holds a broker token and talks to Teams directly, so no port and no
+#      write token stands between it and a colleague's chat;
 #   5. anything that would send MAIL. The mailbox is read-only here and has no
 #      sandbox equivalent (see AGENTS.md § Mail is READ-ONLY): the broker token
 #      already carries `Mail.Send`, so the only thing standing between this
@@ -216,6 +219,56 @@ command_line_sans_tracked_paths() {
   printf '%s' "$scrubbed"
 }
 
+# The sandbox channel from AGENTS.md § Sending messages: the ONE conversation a send
+# may target without asking first. Spelled here so this hook can tell a probe apart
+# from a post to a colleague.
+SANDBOX_THREAD='19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2'
+
+# The Rust sources a `cargo run --example NAME` is about to execute.
+#
+# Rule 1 scans INTERPRETED scripts, which left a hole this feature opened: a cargo
+# example talks to Teams directly, with a broker token, past every port and RPC the
+# other rules match. `examples/agent_stream_probe.rs` is the legitimate shape of one
+# (it posts to the sandbox channel and nowhere else); the rule below is what keeps
+# the next one honest.
+#
+# `--bin` is deliberately NOT matched: the only binary here is the backend, rule 3
+# already governs it, and it names `send_message` by definition.
+example_sources_the_command_runs() {
+  printf '%s' "$command_line" | python3 -c '
+import shlex, sys
+
+line = sys.stdin.read()
+try:
+    words = shlex.split(line, comments=False)
+except ValueError:
+    words = line.split()
+found = []
+for index, word in enumerate(words):
+    if word == "--example" and index + 1 < len(words):
+        found.append("examples/%s.rs" % words[index + 1])
+print("\n".join(dict.fromkeys(found)))
+' 2>/dev/null || true
+}
+
+# Cargo examples that would post to Teams somewhere other than the sandbox channel.
+examples_that_send=""
+while IFS= read -r source; do
+  [ -z "$source" ] && continue
+  path="$project_dir/$source"
+  [ -f "$path" ] || continue
+  # Does it act outward at all? Either through this crate's send path, or by naming
+  # the chatService messages endpoint itself.
+  grep -qE 'teams_send::(send_message|edit_message|set_reaction)|/v1/users/ME/conversations/[^"]*/messages' \
+    "$path" || continue
+  # Then every conversation it names must be the sandbox one — and it must name one.
+  # A send whose target comes from an argument is a send waiting for a typo.
+  targets="$(grep -oE '19:[A-Za-z0-9]+@thread\.v2|8:orgid:[0-9a-fA-F-]+' "$path" | sort -u)"
+  if [ "$targets" != "$SANDBOX_THREAD" ]; then
+    examples_that_send="$examples_that_send $source"
+  fi
+done <<<"$(example_sources_the_command_runs)"
+
 scripts_driving_a_browser=""
 scripts_writing_to_the_backend=""
 scripts_sending_mail=""
@@ -249,8 +302,12 @@ if ! sanctioned_automation; then
     # FOUR ports, not two. 19420/19440 are the always-on service; 19421/19441 are the
     # user's hands-on dev pair (bin/teams-dev-server.sh and `bun run dev`), which is
     # just as send-capable. Only 19430 — read-only — is absent, by design.
+    #
+    # `agent_set_mode`/`agent_set_tools` are in that list for the same reason: they
+    # arm the local agent that answers `@claude` in a Teams thread AS the user, and
+    # decide what it may run on this machine (MACHINE_METHODS in src/bin/server.rs).
     if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|react|push_subscribe|push_unsubscribe|push_test|set_settings)"|'\''(send|edit|react|push_subscribe|push_unsubscribe|push_test|set_settings)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|react|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)"|'\''(send|edit|react|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that
@@ -330,6 +387,24 @@ issues GET only, and two tests in it enforce that on the source). Keep it that w
 Reading is fine and is what the feature is for: list folders, read messages, render
 bodies. If mail SENDING is genuinely wanted, it is a deliberate feature with its own
 consent gate — ask the user, do not improvise it here."
+fi
+
+# --- 1c. a cargo example may only post to the sandbox channel ------------------
+# See `example_sources_the_command_runs` above for why this rule exists at all.
+if [ -n "$examples_that_send" ]; then
+  block "This command runs a cargo example that POSTS TO TEAMS as the user, and does not pin
+its target to the sandbox channel:
+   ${examples_that_send# }
+
+An example reaches Teams directly with a broker token, so no port rule and no write
+token stands in its way — the only thing that can is what the file names. Hard-code
+the conversation as a const:
+
+  const SANDBOX_THREAD: &str = \"$SANDBOX_THREAD\";
+
+and name no other, so the file cannot post anywhere the user has not pre-authorized
+(AGENTS.md § Sending messages). See examples/agent_stream_probe.rs for the shape.
+A send to any other conversation needs the user's consent for that exact message."
 fi
 
 # `probing_processes` and `recording_a_message` exempt only the COMMAND-LINE half: a

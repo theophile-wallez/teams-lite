@@ -102,9 +102,53 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'get_settings' }));\n"
     ),
+    # The local agent: arming it decides where this machine answers AS the user, and
+    # what a chat message may make it run (MACHINE_METHODS in src/bin/server.rs).
+    "agent-armer.ts": (
+        "// Arms the local agent on a real conversation.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'agent_set_mode' }));\n"
+    ),
+    "agent-tooler.ts": (
+        "// Widens what a Teams message may make an agent run.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19440');\n"
+        "ws.send(JSON.stringify({ method: 'agent_set_tools' }));\n"
+    ),
+    "agent-status-reader.ts": (
+        "// Reads which conversations are armed, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'agent_status' }));\n"
+    ),
     "token-thief.ts": (
         "// Fetches the write capability from the app's own server.\n"
         "const res = await fetch('http://127.0.0.1:19440/__write-token');\n"
+    ),
+}
+
+# Cargo examples, written into the repo's own examples/ directory by the test (an
+# example only exists there, and the hook resolves `--example NAME` to that path).
+EXAMPLE_FIXTURES = {
+    # A send whose target comes from an argument: the shape that must never run.
+    "guard-test-loose-send.rs": (
+        "// A probe that posts wherever it is told.\n"
+        "fn main() {\n"
+        "    let conversation = std::env::args().nth(1).unwrap();\n"
+        "    teams_send::send_message(&http, &session, &ic3, &conversation, \"hi\");\n"
+        "}\n"
+    ),
+    # A send pinned to a colleague's 1:1 chat.
+    "guard-test-real-send.rs": (
+        "const CHAT: &str = \"8:orgid:2367c029-149d-4ebd-a96c-1fe12bfc24cf\";\n"
+        "fn main() { teams_send::send_message(&http, &session, &ic3, CHAT, \"hi\"); }\n"
+    ),
+    # The legitimate shape: pinned to the sandbox channel and nothing else.
+    "guard-test-sandbox-send.rs": (
+        "const SANDBOX: &str = \"19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2\";\n"
+        "fn main() { teams_send::send_message(&http, &session, &ic3, SANDBOX, \"hi\"); }\n"
+    ),
+    # An example that only READS needs no target at all.
+    "guard-test-read-only.rs": (
+        "fn main() { teams_read::history(&http, &session, \"19:whatever@thread.v2\"); }\n"
     ),
 }
 
@@ -130,6 +174,12 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/push-subscriber.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/push-tester.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/settings-writer.ts"),
+        # The local agent: arming it, or widening what it may run, is a write.
+        ("BLOCK", PROJECT, f"bun run {tmp}/agent-armer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/agent-tooler.ts"),
+        # A cargo example reaches Teams with a broker token, past every port rule.
+        ("BLOCK", PROJECT, "cargo run --example guard-test-loose-send"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-real-send"),
         # The write token is the capability itself — never ours to fetch.
         ("BLOCK", PROJECT, f"bun run {tmp}/token-thief.ts"),
         ("BLOCK", PROJECT, "curl -s http://127.0.0.1:19440/__write-token"),
@@ -166,6 +216,15 @@ def cases(tmp: Path):
         # Which devices are subscribed is a read, like any other status question.
         ("ALLOW", PROJECT, f"bun run {tmp}/push-status-reader.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/settings-reader.ts"),
+        # …and so is which conversations the agent answers in.
+        ("ALLOW", PROJECT, f"bun run {tmp}/agent-status-reader.ts"),
+        # An example pinned to the pre-authorized channel is the sanctioned shape,
+        # and one that only reads needs no target at all.
+        ("ALLOW", PROJECT, "cargo run --example guard-test-sandbox-send"),
+        ("ALLOW", PROJECT, "cargo run --example guard-test-read-only"),
+        ("ALLOW", PROJECT, "cargo run --example broker_token"),
+        # The real probe this feature ships with must keep running.
+        ("ALLOW", PROJECT, "cargo run --example agent_stream_probe"),
         # Reading the code that implements the token endpoint is ordinary work.
         ("ALLOW", PROJECT, 'grep -rn "__write-token" web/src'),
         # Commands that only NAME a file run nothing, whatever is inside it.
@@ -246,21 +305,32 @@ def main() -> int:
         tmp = Path(raw)
         for name, body in FIXTURES.items():
             (tmp / name).write_text(body)
+        # The example fixtures have to live where cargo would find them, so they are
+        # written into examples/ and removed again in the `finally` below.
+        written_examples = []
+        for name, body in EXAMPLE_FIXTURES.items():
+            path = PROJECT / "examples" / name
+            path.write_text(body)
+            written_examples.append(path)
 
         failures = 0
-        for expected, cwd, command in cases(tmp):
-            proc = subprocess.run(
-                [str(HOOK)],
-                input=json.dumps({"tool_input": {"command": command}}),
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                env={"CLAUDE_PROJECT_DIR": str(PROJECT), "HOME": str(Path.home()), "PATH": "/usr/bin:/bin"},
-            )
-            got = "ALLOW" if proc.returncode == 0 else "BLOCK"
-            ok = got == expected
-            failures += 0 if ok else 1
-            print(f"{'ok  ' if ok else 'FAIL'} {got:5} (want {expected}) <- {command}")
+        try:
+            for expected, cwd, command in cases(tmp):
+                proc = subprocess.run(
+                    [str(HOOK)],
+                    input=json.dumps({"tool_input": {"command": command}}),
+                    capture_output=True,
+                    text=True,
+                    cwd=cwd,
+                    env={"CLAUDE_PROJECT_DIR": str(PROJECT), "HOME": str(Path.home()), "PATH": "/usr/bin:/bin"},
+                )
+                got = "ALLOW" if proc.returncode == 0 else "BLOCK"
+                ok = got == expected
+                failures += 0 if ok else 1
+                print(f"{'ok  ' if ok else 'FAIL'} {got:5} (want {expected}) <- {command}")
+        finally:
+            for path in written_examples:
+                path.unlink(missing_ok=True)
 
     total = len(cases(Path("/tmp")))
     print(f"\n{total - failures}/{total} as expected")
