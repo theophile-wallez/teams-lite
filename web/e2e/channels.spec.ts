@@ -211,6 +211,27 @@ test.describe("channels", () => {
     await expect(reopened.locator('[data-testid="channel-row"]')).toHaveCount(shown);
   });
 
+  test("reads a channel the user muted in Teams as muted", async ({ page }) => {
+    await gotoApp(page);
+    await openChannelsTab(page);
+
+    // The mock mutes exactly one channel (Design · Critique — see CHANNEL_ALERTS
+    // in web/mock/server.ts), so the treatment is pinned to one known row.
+    const muted = page.locator('[data-testid="channel-row"][data-muted="true"]');
+    await expect(muted).toHaveCount(1);
+    await expect(muted.locator('[data-testid="channel-name"]')).toHaveText("Critique");
+
+    // A muted channel states why it is quiet, and never claims attention: no
+    // unread marker, whatever its read state.
+    await expect(muted.locator('[data-testid="channel-muted-glyph"]')).toBeVisible();
+    await expect(muted).not.toHaveAttribute("data-unread", "true");
+
+    // Every other channel keeps the normal treatment.
+    const others = page.locator('[data-testid="channel-row"]:not([data-muted="true"])');
+    expect(await others.count()).toBeGreaterThan(0);
+    await expect(others.locator('[data-testid="channel-muted-glyph"]')).toHaveCount(0);
+  });
+
   test("runs clean with no console errors", async ({ page, consoleErrors }) => {
     await gotoApp(page);
     await openChannelsTab(page);

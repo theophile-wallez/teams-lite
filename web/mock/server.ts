@@ -95,6 +95,10 @@ type Conversation = {
 // Teams thread (`@thread.tacv2`) whose messages reuse the SAME pipeline as a
 // chat — open/backfill/send/edit/react all key on the thread id — so it never
 // appears in the `conversations` list; only the sidebar grouping differs.
+// How much a channel may notify: the user's own per-channel setting in Microsoft
+// Teams, as the backend derives it (see `store::ChannelAlerts`).
+type ChannelAlerts = "muted" | "mentions_only" | "all_new_posts" | "all_new_posts_and_replies";
+
 type Channel = {
   id: string;
   team_id: string;
@@ -103,6 +107,7 @@ type Channel = {
   name: string;
   is_general: boolean;
   is_favorite: boolean;
+  alerts: ChannelAlerts;
   last_message_time: number;
   last_message_preview: string;
   last_message_sender: string;
@@ -442,6 +447,20 @@ const TEAM_SEEDS: { id: string; name: string; channels: string[] }[] = [
     channels: ["General", "Roadmap"],
   },
 ];
+
+/** The notification setting each seeded channel carries — the mock's stand-in for
+ *  what a tenant reports (a channel's `isMuted`, its `channelNotificationSettings`,
+ *  and the older `isFollowed`). Keyed `"Team/Channel"`; a channel that is absent
+ *  here gets Teams' own default, `mentions_only`.
+ *
+ *  Fixed, never random: a spec and a screenshot must find the muted row in the same
+ *  place every run, and drawing from the PRNG here would shift the sequence every
+ *  existing channel spec depends on. */
+const CHANNEL_ALERTS: Record<string, ChannelAlerts> = {
+  "Design/Critique": "muted",
+  "Engineering/Incidents": "all_new_posts",
+  "Product/Roadmap": "all_new_posts_and_replies",
+};
 
 const MESSAGE_POOL = [
   "Morning! Did you get a chance to look at the deploy from last night?",
@@ -800,6 +819,7 @@ function seedChannels(): void {
         name: channelName,
         is_general: isGeneral,
         is_favorite: false,
+        alerts: CHANNEL_ALERTS[`${team.name}/${channelName}`] ?? "mentions_only",
         last_message_time: 0,
         last_message_preview: "",
         last_message_sender: "",

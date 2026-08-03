@@ -1,9 +1,18 @@
 import { useMemo, useRef, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronRight, MoonStar, Search, Settings as SettingsIcon, Star, Sun } from "lucide-react";
+import {
+  BellOff,
+  ChevronRight,
+  MoonStar,
+  Search,
+  Settings as SettingsIcon,
+  Star,
+  Sun,
+} from "lucide-react";
 import {
   channelIsFavorite,
+  channelIsMuted,
   channelLabel,
   convLabel,
   mailUnreadBadge,
@@ -383,7 +392,10 @@ function ChannelSection(props: {
 }) {
   const controller = useController();
   const collapsed = useAppState((s) => s.collapsedTeams[props.sectionId] === true);
-  const hidesUnread = collapsed && props.channels.some((c) => !c.is_read);
+  // A muted channel is not something a folded team should shout about, exactly as
+  // it raises no unread marker of its own.
+  const hidesUnread =
+    collapsed && props.channels.some((c) => !c.is_read && !channelIsMuted(c));
   const hidesOpen = collapsed && props.channels.some((c) => c.id === props.openId);
 
   return (
@@ -530,7 +542,8 @@ function ConversationRow(props: {
  *  its own and states membership through the indent. Unread is a bold name
  *  (Teams-style) and the open channel carries a coloured rail on its leading edge.
  *  A star toggles the channel's favorite state: revealed on hover, and shown filled
- *  at all times once favorited. */
+ *  at all times once favorited. A channel the user muted in Teams reads as muted:
+ *  the name is faint, a crossed bell states why, and no unread marker appears. */
 function ChannelRow(props: {
   channel: Channel;
   open: boolean;
@@ -539,7 +552,8 @@ function ChannelRow(props: {
   onClick: () => void;
 }) {
   const c = props.channel;
-  const unread = !c.is_read;
+  const muted = channelIsMuted(c);
+  const unread = !c.is_read && !muted;
   const label = channelLabel(c);
   const time = useMemo(() => formatTime(c.last_message_time), [c.last_message_time]);
 
@@ -554,6 +568,7 @@ function ChannelRow(props: {
         data-open={props.open ? "true" : undefined}
         data-unread={unread ? "true" : undefined}
         data-favorite={props.favorite ? "true" : undefined}
+        data-muted={muted ? "true" : undefined}
         aria-current={props.open ? "true" : undefined}
         className={cn(
           // The leading padding lands the name just past the header's team picture,
@@ -577,11 +592,26 @@ function ChannelRow(props: {
               ? "font-semibold text-foreground"
               : props.open
                 ? "text-foreground"
-                : "text-text-dim",
+                : muted
+                  ? "text-text-faint"
+                  : "text-text-dim",
           )}
         >
           {label}
         </span>
+        {/* The reason the row is quiet, stated rather than implied — a dim name
+            alone reads as "read", not as "muted". */}
+        {muted && (
+          <span
+            data-testid="channel-muted-glyph"
+            role="img"
+            aria-label="Muted"
+            title="Muted in Microsoft Teams"
+            className="grid shrink-0 place-items-center text-text-faint"
+          >
+            <BellOff className="size-3" aria-hidden />
+          </span>
+        )}
         {/* Date, hidden on hover and once favorited so the star can take its place. */}
         {time && (
           <time

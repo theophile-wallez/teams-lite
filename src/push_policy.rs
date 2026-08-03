@@ -7,8 +7,11 @@
 //!
 //! - **A chat message notifies.** One-to-one and group chats are addressed to the
 //!   user; that is the whole reason the app is on their Home Screen.
-//! - **A channel post notifies only when it mentions the user.** A followed channel
-//!   can produce hundreds of messages a day and none of them is a summons.
+//! - **A channel post follows the user's own Microsoft Teams setting for that
+//!   channel** ([`crate::store::ChannelAlerts`]): silent when they muted it,
+//!   otherwise an @mention only — and every post, or every post and reply, when
+//!   they asked Teams for that. A channel can produce hundreds of messages a day
+//!   and none of them is a summons, so the mention-only default stands.
 //! - **A system line never notifies.** "Call ended", "Member added" and the like
 //!   are context, not news.
 //! - **The user's own message never notifies**, and neither does anything already
@@ -19,7 +22,7 @@
 //! tested and the delivery path in `src/bin/server.rs` stays a plumbing detail.
 
 use crate::push::Notification;
-use crate::store::Message;
+use crate::store::{ChannelAlerts, Message};
 use crate::teams_activity;
 use crate::teams_read;
 use serde_json::Value;
@@ -34,12 +37,27 @@ const MAX_AGE_MS: i64 = 10 * 60 * 1000;
 const MAX_BODY_CHARS: usize = 180;
 
 /// Where a message landed, as the delivery path already knows it.
-pub struct Placement<'a> {
-    /// True for a team channel (its own tab in the app), false for a chat.
-    pub is_channel: bool,
-    /// The chat or channel display name, `""` when the store has none yet. Used to
-    /// say *where* a message came from, and only when that adds something.
-    pub title: &'a str,
+///
+/// An enum rather than a struct with an `is_channel` flag: only a channel has a
+/// notification setting, and only a channel is gated on one. A chat that carried
+/// an unused [`ChannelAlerts`] would be a state that cannot be read correctly.
+pub enum Placement<'a> {
+    /// A one-to-one or group chat. `title` is its display name, `""` when the
+    /// store has none yet.
+    Chat { title: &'a str },
+    /// A team channel, with the user's own Teams notification setting for it.
+    /// `title` is `"Team · Channel"`, `""` when the store has none yet.
+    Channel { title: &'a str, alerts: ChannelAlerts },
+}
+
+impl<'a> Placement<'a> {
+    /// The chat or channel display name. Used to say *where* a message came from,
+    /// and only when that adds something (see [`title_for`]).
+    fn title(&self) -> &'a str {
+        match *self {
+            Placement::Chat { title } | Placement::Channel { title, .. } => title,
+        }
+    }
 }
 
 /// The notification a live message deserves, or `None` when it should stay silent.
@@ -67,7 +85,9 @@ pub fn notification_for(
     if is_stale(message.compose_time, now_ms) {
         return None;
     }
-    if placement.is_channel && !mentions_user(&message.mentions, self_mri) {
+    if let Placement::Channel { alerts, .. } = *placement
+        && !channel_post_notifies(message, alerts, self_mri)
+    {
         return None;
     }
 
@@ -85,6 +105,36 @@ pub fn notification_for(
         // instead of stacking.
         tag: message.conversation_id.clone(),
     })
+}
+
+/// Whether one channel post passes the user's own Microsoft Teams setting for that
+/// channel.
+///
+/// An @mention always passes an unmuted channel: it is a summons, and Teams
+/// notifies about it at every level except "off". Above the default, the setting
+/// widens to every new post — and, when the user also asked for replies, to a reply
+/// inside a post's thread.
+fn channel_post_notifies(message: &Message, alerts: ChannelAlerts, self_mri: &str) -> bool {
+    let mentioned = mentions_user(&message.mentions, self_mri);
+    match alerts {
+        ChannelAlerts::Muted => false,
+        ChannelAlerts::MentionsOnly => mentioned,
+        ChannelAlerts::AllNewPosts => mentioned || !is_reply(message),
+        ChannelAlerts::AllNewPostsAndReplies => true,
+    }
+}
+
+/// Whether a channel message is a reply inside a post's thread, rather than the
+/// post that opened it.
+///
+/// A channel message carries the id of its thread's opening post
+/// (`rootMessageId`, or the `;messageid=` suffix of its conversation link — see
+/// `teams_read::parse_thread`). The opening post names itself, so "root is somebody
+/// else" is what makes a message a reply. An absent root — a frame that carried
+/// neither spelling — reads as a post, which is the safe way round: "All new posts"
+/// then still notifies.
+fn is_reply(message: &Message) -> bool {
+    !message.thread_root_id.is_empty() && message.thread_root_id != message.id
 }
 
 /// Whether the message is too old to be news. Also catches a clock-skewed future
@@ -105,7 +155,7 @@ fn is_stale(compose_time: i64, now_ms: i64) -> bool {
 fn title_for(message: &Message, placement: &Placement<'_>) -> String {
     let sender = message.sender.trim();
     let sender = if sender.is_empty() { "New message" } else { sender };
-    let title = placement.title.trim();
+    let title = placement.title().trim();
     if title.is_empty() || title.eq_ignore_ascii_case(sender) {
         return sender.to_string();
     }
@@ -171,7 +221,12 @@ mod tests {
     }
 
     fn chat() -> Placement<'static> {
-        Placement { is_channel: false, title: "Ada Lovelace" }
+        Placement::Chat { title: "Ada Lovelace" }
+    }
+
+    /// A channel at Teams' default: an @mention notifies, nothing else does.
+    fn channel() -> Placement<'static> {
+        Placement::Channel { title: "Engine · General", alerts: ChannelAlerts::MentionsOnly }
     }
 
     #[test]
@@ -185,7 +240,7 @@ mod tests {
 
     #[test]
     fn a_group_chat_says_where_the_message_came_from() {
-        let placement = Placement { is_channel: false, title: "Release train" };
+        let placement = Placement::Chat { title: "Release train" };
         let notification =
             notification_for(&chat_message(), &placement, SELF_MRI, false, NOW).unwrap();
         assert_eq!(notification.title, "Ada Lovelace · Release train");
@@ -235,7 +290,7 @@ mod tests {
 
     #[test]
     fn a_channel_post_notifies_only_when_it_mentions_us() {
-        let channel = Placement { is_channel: true, title: "Engine · General" };
+        let channel = channel();
         let mut message = chat_message();
         message.conversation_id = "19:abc@thread.tacv2".into();
 
@@ -249,10 +304,84 @@ mod tests {
 
     #[test]
     fn a_mention_of_somebody_else_in_a_channel_stays_silent() {
-        let channel = Placement { is_channel: true, title: "Engine · General" };
+        let channel = channel();
         let mut message = chat_message();
         message.mentions = format!(r#"[{{"itemid":0,"mri":"{OTHER_MRI}","kind":"person"}}]"#);
         assert!(notification_for(&message, &channel, SELF_MRI, false, NOW).is_none());
+    }
+
+    /// A channel post, with the thread fields a real `@thread.tacv2` message carries.
+    fn channel_post(id: &str, thread_root_id: &str) -> Message {
+        Message {
+            id: id.into(),
+            conversation_id: "19:abc@thread.tacv2".into(),
+            thread_root_id: thread_root_id.into(),
+            ..chat_message()
+        }
+    }
+
+    #[test]
+    fn a_muted_channel_stays_silent_even_for_an_mention() {
+        let muted = Placement::Channel { title: "Engine · General", alerts: ChannelAlerts::Muted };
+        let mut message = channel_post("m1", "m1");
+        message.mentions =
+            format!(r#"[{{"itemid":0,"mri":"{SELF_MRI}","kind":"person","display_name":"Ada"}}]"#);
+        assert!(notification_for(&message, &muted, SELF_MRI, false, NOW).is_none());
+    }
+
+    #[test]
+    fn all_new_posts_notifies_about_a_post_but_not_about_a_reply() {
+        let all_posts =
+            Placement::Channel { title: "Engine · General", alerts: ChannelAlerts::AllNewPosts };
+
+        // The post that opens a thread names itself as the thread's root.
+        let post = channel_post("m1", "m1");
+        assert!(notification_for(&post, &all_posts, SELF_MRI, false, NOW).is_some());
+
+        // A reply names the opening post instead.
+        let reply = channel_post("m2", "m1");
+        assert!(notification_for(&reply, &all_posts, SELF_MRI, false, NOW).is_none());
+
+        // …unless it mentions us: a summons passes at every level but muted.
+        let mut mentioning_reply = channel_post("m3", "m1");
+        mentioning_reply.mentions = format!(r#"[{{"itemid":0,"mri":"{SELF_MRI}"}}]"#);
+        assert!(notification_for(&mentioning_reply, &all_posts, SELF_MRI, false, NOW).is_some());
+
+        // A frame with no thread field at all reads as a post, never as a reply.
+        let rootless = channel_post("m4", "");
+        assert!(notification_for(&rootless, &all_posts, SELF_MRI, false, NOW).is_some());
+    }
+
+    #[test]
+    fn all_new_posts_and_replies_notifies_about_a_reply_too() {
+        let with_replies = Placement::Channel {
+            title: "Engine · General",
+            alerts: ChannelAlerts::AllNewPostsAndReplies,
+        };
+        assert!(notification_for(&channel_post("m1", "m1"), &with_replies, SELF_MRI, false, NOW)
+            .is_some());
+        assert!(notification_for(&channel_post("m2", "m1"), &with_replies, SELF_MRI, false, NOW)
+            .is_some());
+    }
+
+    #[test]
+    fn a_channel_setting_never_overrides_the_rules_above_it() {
+        // "All new posts and replies" is the widest setting Teams offers, and it
+        // still cannot make our own message, a system line or a replay notify.
+        let widest = Placement::Channel {
+            title: "Engine · General",
+            alerts: ChannelAlerts::AllNewPostsAndReplies,
+        };
+        assert!(notification_for(&channel_post("m1", "m1"), &widest, SELF_MRI, true, NOW).is_none());
+
+        let mut system = channel_post("m2", "m2");
+        system.system_event = r#"{"kind":"call","event":"ended"}"#.into();
+        system.content = String::new();
+        assert!(notification_for(&system, &widest, SELF_MRI, false, NOW).is_none());
+
+        let mut replayed = channel_post("m3", "m3");
+        replayed.compose_time = NOW - MAX_AGE_MS - 1;
+        assert!(notification_for(&replayed, &widest, SELF_MRI, false, NOW).is_none());
     }
 
     #[test]

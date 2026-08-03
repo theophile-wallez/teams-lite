@@ -20,7 +20,7 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use crate::store::{ConversationKind, Message};
+use crate::store::{ChannelAlerts, ConversationKind, Message};
 use crate::teams::Session;
 use crate::teams_cards::SwiftCard;
 
@@ -166,6 +166,11 @@ pub struct Team {
     /// `teamSiteInformation.groupId`. This — NOT the team thread id — is what the
     /// profile-picture endpoint accepts for a team photo. Empty when CSA omits it.
     pub group_id: String,
+    /// True when the user muted the WHOLE team (`isUserMuted`). Teams silences
+    /// every channel of a muted team, so this folds into each channel's
+    /// [`Channel::alerts`] — the store has no teams table, and a sidebar row is a
+    /// channel.
+    pub is_user_muted: bool,
     pub channels: Vec<Channel>,
 }
 
@@ -192,6 +197,10 @@ pub struct Channel {
     pub is_general: bool,
     /// True when the user favorited/followed the channel (`isFavorite`).
     pub is_favorite: bool,
+    /// The user's own notification setting for this channel in Microsoft Teams,
+    /// derived by [`channel_alerts`]. Drives the sidebar's muted treatment and the
+    /// push policy.
+    pub alerts: ChannelAlerts,
     /// Compose time (epoch ms) of the last message, for sort order. 0 if unknown/empty.
     pub last_message_time: i64,
     /// True when the channel has never had a (displayable) message.
@@ -533,6 +542,7 @@ fn upsert_channels(store: &Store, teams: &[Team]) -> (usize, usize) {
                 is_read: c.is_read,
                 team_pos: team_idx as i64,
                 channel_pos: chan_idx as i64,
+                alerts: c.alerts,
             };
             if store.upsert_channel_full(&update).unwrap_or(false) {
                 changed += 1;
@@ -794,12 +804,15 @@ fn parse_teams_with_self(v: &Value, _self_mri: &str) -> Vec<Team> {
             .unwrap_or("")
             .to_string();
 
+        let team_muted = team.get("isUserMuted").and_then(|x| x.as_bool()).unwrap_or(false);
+
         let mut channels = Vec::new();
         for ch in team.get("channels").and_then(|c| c.as_array()).into_iter().flatten() {
             let Some(id) = ch.get("id").and_then(|x| x.as_str()) else { continue };
             let is_general = ch.get("isGeneral").and_then(|x| x.as_bool()).unwrap_or(false)
                 || id == team_id;
             let is_favorite = ch.get("isFavorite").and_then(|x| x.as_bool()).unwrap_or(false);
+            let alerts = channel_alerts(ch, team_muted);
             let lm = parse_last_message(ch);
             channels.push(Channel {
                 id: id.to_string(),
@@ -809,6 +822,7 @@ fn parse_teams_with_self(v: &Value, _self_mri: &str) -> Vec<Team> {
                 display_name: name_of(ch),
                 is_general,
                 is_favorite,
+                alerts,
                 last_message_time: lm.time,
                 is_empty: !lm.has_message,
                 last_message_preview: lm.preview,
@@ -820,9 +834,65 @@ fn parse_teams_with_self(v: &Value, _self_mri: &str) -> Vec<Team> {
             });
         }
 
-        out.push(Team { id: team_id.to_string(), display_name: team_name, group_id, channels });
+        out.push(Team {
+            id: team_id.to_string(),
+            display_name: team_name,
+            group_id,
+            is_user_muted: team_muted,
+            channels,
+        });
     }
     out
+}
+
+/// Derive a channel's notification setting from the CSA channel object, plus its
+/// team's `isUserMuted`.
+///
+/// Three independent signals carry it, and the tenant capture behind
+/// `examples/csa_mute_recon.rs` (12 teams, 75 channels) shows all three in use:
+///
+/// - `isMuted` on the channel, and `isUserMuted` on the team. Either one silences
+///   the channel — Teams mutes every channel of a muted team.
+/// - `channelNotificationSettings`, present on 9 of 75 channels:
+///   `{"allNewPosts":"On"|"Off","includeReplies":bool,"dskNotif":"On",…}`. This is
+///   the modern, explicit setting, so it outranks the follow flag below.
+/// - `isFollowed`, true on 10 channels — and on 9 of them there is NO settings
+///   object at all, so it is the only signal those channels have. Following a
+///   channel is the older spelling of "notify me about every new post", which is
+///   what Teams itself still does for them.
+///
+/// A channel with none of the three gets [`ChannelAlerts::MentionsOnly`], which is
+/// Teams' own default and the state 66 of the 75 channels are in.
+///
+/// `dskNotif` is deliberately ignored: it splits desktop banners from the activity
+/// feed, a distinction this app does not have, and the capture never shows it off
+/// while `allNewPosts` is on.
+fn channel_alerts(channel: &Value, team_muted: bool) -> ChannelAlerts {
+    let flag = |key: &str| channel.get(key).and_then(|x| x.as_bool()).unwrap_or(false);
+    if team_muted || flag("isMuted") {
+        return ChannelAlerts::Muted;
+    }
+    let settings = channel.get("channelNotificationSettings").filter(|s| !s.is_null());
+    if let Some(settings) = settings {
+        let all_new_posts = settings
+            .get("allNewPosts")
+            .and_then(|x| x.as_str())
+            .is_some_and(|v| v.eq_ignore_ascii_case("on"));
+        if !all_new_posts {
+            return ChannelAlerts::MentionsOnly;
+        }
+        let replies =
+            settings.get("includeReplies").and_then(|x| x.as_bool()).unwrap_or(false);
+        return if replies {
+            ChannelAlerts::AllNewPostsAndReplies
+        } else {
+            ChannelAlerts::AllNewPosts
+        };
+    }
+    if flag("isFollowed") {
+        return ChannelAlerts::AllNewPosts;
+    }
+    ChannelAlerts::MentionsOnly
 }
 
 fn parse_message_page(v: &Value, conversation_id: &str, page_size: u32) -> MessagePage {
@@ -3807,6 +3877,146 @@ mod tests {
     }
 
     #[test]
+    fn parses_every_channel_notification_setting_the_tenant_sends() {
+        // The five shapes the tenant capture behind `examples/csa_mute_recon.rs`
+        // contains, in the order the derivation tests them.
+        let v = json!({
+            "teams": [{
+                "id": "19:t@thread.tacv2",
+                "displayName": "Stratumn",
+                "isUserMuted": false,
+                "channels": [
+                    { "id": "19:muted@thread.tacv2", "displayName": "Muted", "isMuted": true },
+                    {
+                        "id": "19:alerting@thread.tacv2", "displayName": "Alerting",
+                        "isFollowed": true,
+                        "channelNotificationSettings": {
+                            "allNewPosts": "On", "includeReplies": false,
+                            "dskNotif": "On", "latestCnsVersion": 1737468993000i64
+                        }
+                    },
+                    {
+                        "id": "19:wf@thread.tacv2", "displayName": "WF Testing",
+                        "channelNotificationSettings": {
+                            "allNewPosts": "On", "includeReplies": true, "dskNotif": "On"
+                        }
+                    },
+                    {
+                        "id": "19:merge@thread.tacv2", "displayName": "Config MRs",
+                        // An explicit "Off" outranks nothing here, but it must not
+                        // read as "muted": the channel still notifies on a mention.
+                        "channelNotificationSettings": {
+                            "allNewPosts": "Off", "includeReplies": false
+                        }
+                    },
+                    // Followed with NO settings object — 9 of the tenant's 75
+                    // channels are in this state, and follow is their only signal.
+                    { "id": "19:followed@thread.tacv2", "displayName": "Followed", "isFollowed": true },
+                    { "id": "19:plain@thread.tacv2", "displayName": "Plain" }
+                ]
+            }]
+        });
+        let channels = &parse_teams(&v)[0].channels;
+        let alerts_of = |name: &str| {
+            channels.iter().find(|c| c.display_name == name).expect("channel").alerts
+        };
+        assert_eq!(alerts_of("Muted"), ChannelAlerts::Muted);
+        assert_eq!(alerts_of("Alerting"), ChannelAlerts::AllNewPosts);
+        assert_eq!(alerts_of("WF Testing"), ChannelAlerts::AllNewPostsAndReplies);
+        assert_eq!(alerts_of("Config MRs"), ChannelAlerts::MentionsOnly);
+        assert_eq!(alerts_of("Followed"), ChannelAlerts::AllNewPosts);
+        assert_eq!(alerts_of("Plain"), ChannelAlerts::MentionsOnly, "Teams' own default");
+        assert!(!parse_teams(&v)[0].is_user_muted);
+    }
+
+    #[test]
+    fn a_muted_team_silences_every_channel_it_holds() {
+        // Teams silences a whole team, and the store has no teams table — so the
+        // team's mute must reach each channel row.
+        let v = json!({
+            "teams": [{
+                "id": "19:t@thread.tacv2",
+                "displayName": "Quiet",
+                "isUserMuted": true,
+                "channels": [
+                    { "id": "19:t@thread.tacv2", "displayName": "General" },
+                    {
+                        // Even an explicit "notify me about everything" loses to it,
+                        // exactly as it does in Microsoft Teams.
+                        "id": "19:loud@thread.tacv2", "displayName": "Loud",
+                        "isFollowed": true,
+                        "channelNotificationSettings": { "allNewPosts": "On", "includeReplies": true }
+                    }
+                ]
+            }]
+        });
+        let team = &parse_teams(&v)[0];
+        assert!(team.is_user_muted);
+        assert!(team.channels.iter().all(|c| c.alerts == ChannelAlerts::Muted));
+    }
+
+    #[test]
+    fn a_null_or_surprising_notification_setting_falls_back_to_the_teams_default() {
+        let v = json!({
+            "teams": [{
+                "id": "19:t@thread.tacv2", "displayName": "Odd",
+                "channels": [
+                    { "id": "19:a@thread.tacv2", "displayName": "Null",
+                      "channelNotificationSettings": null },
+                    { "id": "19:b@thread.tacv2", "displayName": "Unknown word",
+                      "channelNotificationSettings": { "allNewPosts": "Sometimes" } },
+                    { "id": "19:c@thread.tacv2", "displayName": "Wrong type",
+                      "channelNotificationSettings": { "allNewPosts": true } }
+                ]
+            }]
+        });
+        // A null settings object must fall THROUGH to the follow flag (absent here),
+        // and a value we do not recognise must never widen or silence a channel.
+        assert!(parse_teams(&v)[0]
+            .channels
+            .iter()
+            .all(|c| c.alerts == ChannelAlerts::MentionsOnly));
+    }
+
+    #[test]
+    fn a_channels_alert_setting_survives_a_round_trip_through_the_store() {
+        let store = Store::open_in_memory().unwrap();
+        let teams = vec![Team {
+            id: "19:t@thread.tacv2".into(),
+            display_name: "Ops".into(),
+            group_id: String::new(),
+            is_user_muted: false,
+            channels: vec![Channel {
+                id: "19:c@thread.tacv2".into(),
+                team_id: "19:t@thread.tacv2".into(),
+                team_name: "Ops".into(),
+                team_group_id: String::new(),
+                display_name: "Standup".into(),
+                is_general: false,
+                is_favorite: false,
+                alerts: ChannelAlerts::Muted,
+                last_message_time: 100,
+                is_empty: false,
+                last_message_preview: "hi".into(),
+                last_message_sender: "Ada".into(),
+                last_message_from_me: false,
+                is_read: true,
+            }],
+        }];
+        assert_eq!(persist_channels(&store, &teams), (1, 0));
+        assert_eq!(store.channels().unwrap()[0].alerts, ChannelAlerts::Muted);
+        assert_eq!(store.channel_alerts("19:c@thread.tacv2").unwrap(), ChannelAlerts::Muted);
+
+        // A changed setting is a real change (the sidebar must re-render), and an
+        // unknown channel answers with Teams' default rather than with silence.
+        let mut unmuted = teams.clone();
+        unmuted[0].channels[0].alerts = ChannelAlerts::AllNewPosts;
+        assert_eq!(persist_channels(&store, &unmuted), (1, 0));
+        assert_eq!(store.channel_alerts("19:c@thread.tacv2").unwrap(), ChannelAlerts::AllNewPosts);
+        assert_eq!(store.channel_alerts("19:nope@thread.tacv2").unwrap(), ChannelAlerts::MentionsOnly);
+    }
+
+    #[test]
     fn group_id_falls_back_past_a_null_team_site_group_id() {
         // A team whose `teamSiteInformation.groupId` is present but JSON null must
         // still resolve its group id from the top-level fallback — the null must
@@ -3900,11 +4110,13 @@ mod tests {
             last_message_sender: "Ada".into(),
             last_message_from_me: false,
             is_read: true,
+            alerts: ChannelAlerts::MentionsOnly,
         };
         let teams = vec![Team {
             id: "19:t@thread.tacv2".into(),
             display_name: "Ops".into(),
             group_id: "00000000-1111-2222-3333-444444444444".into(),
+            is_user_muted: false,
             channels: vec![ch.clone()],
         }];
 
@@ -3927,6 +4139,7 @@ mod tests {
             id: "19:t@thread.tacv2".into(),
             display_name: "Ops".into(),
             group_id: "00000000-1111-2222-3333-444444444444".into(),
+            is_user_muted: false,
             channels: vec![Channel { id: "19:empty@thread.tacv2".into(), is_empty: true, ..ch.clone() }],
         }];
         assert_eq!(persist_channels(&store, &empty_teams), (0, 0));

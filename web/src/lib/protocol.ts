@@ -199,6 +199,17 @@ export type Conversation = {
  *  chat — open/backfill/send/edit/react all key on the thread id — so only the
  *  sidebar grouping (under its team, on a separate tab) differs. `team_id` /
  *  `team_name` are denormalized onto every row so grouping needs no extra lookup. */
+/** How much a channel may notify — the user's own per-channel notification setting
+ *  in Microsoft Teams, mirroring `store::ChannelAlerts` on the backend. Four states,
+ *  because the two ends mean opposite things: `muted` silences a channel that
+ *  mentions the user, `all_new_posts` notifies about a post that mentions nobody.
+ *  `mentions_only` is Teams' default. */
+export type ChannelAlerts =
+  | "muted"
+  | "mentions_only"
+  | "all_new_posts"
+  | "all_new_posts_and_replies";
+
 export type Channel = {
   id: string;
   team_id: string;
@@ -210,6 +221,10 @@ export type Channel = {
   /** The team's General channel; sorted first within its team. */
   is_general: boolean;
   is_favorite: boolean;
+  /** The user's own per-channel notification setting in Microsoft Teams (see
+   *  {@link ChannelAlerts}). Absent from a backend older than the field; the
+   *  reader then assumes Teams' default. */
+  alerts?: ChannelAlerts;
   last_message_time: number;
   last_message_preview: string;
   last_message_sender: string;
@@ -1308,6 +1323,19 @@ export function groupChannelsByTeam(channels: Channel[]): TeamGroup[] {
 export function channelIsFavorite(c: Channel, overrides: Record<string, boolean>): boolean {
   const override = overrides[c.id];
   return override === undefined ? c.is_favorite : override;
+}
+
+/**
+ * Whether the user muted this channel in Microsoft Teams — directly, or by muting
+ * the whole team, which the backend folds into the same setting.
+ *
+ * A muted channel is dimmed and never marked unread, exactly like a muted chat.
+ * There is no local override (unlike a favorite): mute belongs to the user's Teams
+ * account, and a local "unmute" would claim a channel is loud when their phone
+ * stays silent.
+ */
+export function channelIsMuted(c: Channel): boolean {
+  return c.alerts === "muted";
 }
 
 /** The sidebar's channel sections: a flat Favorites list pinned at the top, then

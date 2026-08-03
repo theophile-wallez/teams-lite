@@ -81,7 +81,11 @@ export default defineConfig({
       command: "bun run build && bun run start",
       url: `http://127.0.0.1:${WEB_PORT}/`,
       reuseExistingServer: !process.env.CI,
-      timeout: 180_000,
+      // The command builds BOTH bundles (client + SSR) before it serves anything,
+      // and a cold build measures ~3 min on a machine with no warm Vite cache — a
+      // fresh worktree, or a checkout that just changed branch. A tighter budget
+      // fails the whole suite on the build step, which reads as a broken app.
+      timeout: 420_000,
       // VITE_TEAMS_WS_URL is consumed by the BUILD (baked into the client bundle),
       // which is why it must be set here and not just for the mock process.
       //

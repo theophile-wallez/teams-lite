@@ -27,6 +27,7 @@ import {
   channelPreviewLine,
   groupChannelsByTeam,
   channelIsFavorite,
+  channelIsMuted,
   organizeChannels,
   shouldNotify,
   replyToPayload,
@@ -975,6 +976,21 @@ describe("channelIsFavorite", () => {
   it("treats only its own id's override, ignoring others", () => {
     const c = channel({ id: "x", is_favorite: false });
     expect(channelIsFavorite(c, { y: true })).toBe(false);
+  });
+});
+
+describe("channelIsMuted", () => {
+  it("reads the Teams-sourced notification setting", () => {
+    expect(channelIsMuted(channel({ alerts: "muted" }))).toBe(true);
+    expect(channelIsMuted(channel({ alerts: "mentions_only" }))).toBe(false);
+    expect(channelIsMuted(channel({ alerts: "all_new_posts" }))).toBe(false);
+    expect(channelIsMuted(channel({ alerts: "all_new_posts_and_replies" }))).toBe(false);
+  });
+
+  it("treats an absent setting as unmuted, never as silence", () => {
+    // A backend older than the field reports none; assuming "muted" would hide a
+    // channel's unread marker for a setting the user never chose.
+    expect(channelIsMuted(channel({ alerts: undefined }))).toBe(false);
   });
 });
 

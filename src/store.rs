@@ -80,7 +80,12 @@ CREATE TABLE IF NOT EXISTS channels (
     is_read               INTEGER NOT NULL DEFAULT 1,
     draft                 TEXT NOT NULL DEFAULT '',
     team_pos              INTEGER NOT NULL DEFAULT 0,
-    channel_pos           INTEGER NOT NULL DEFAULT 0
+    channel_pos           INTEGER NOT NULL DEFAULT 0,
+    -- The user's own per-channel notification setting in Microsoft Teams, stored
+    -- as the decision (see `ChannelAlerts`) rather than the three raw CSA signals
+    -- it is derived from. 'mentions_only' is Teams' default, so a row written
+    -- before this column existed keeps the behaviour it already had.
+    alerts                TEXT NOT NULL DEFAULT 'mentions_only'
 );
 -- Outlook mail (READ-ONLY mirror; see src/mail.rs). Kept in its own tables rather
 -- than folded into conversations/messages: mail is ordered by an ISO timestamp
@@ -426,6 +431,54 @@ impl ConversationKind {
     }
 }
 
+/// How much a team channel is allowed to notify — the user's own per-channel
+/// notification setting in Microsoft Teams, as CSA reports it.
+///
+/// Modeled as an enum (not an `is_muted` bool) because Teams offers four states,
+/// and the two ends of the range mean opposite things: `Muted` must silence a
+/// channel that mentions the user, while `AllNewPosts` must notify about a post
+/// that mentions nobody. `MentionsOnly` is Teams' own default and the safe
+/// fallback for a channel whose setting we have not seen.
+///
+/// Where each state comes from is documented on the CSA derivation in
+/// `teams_read::channel_alerts`; the delivery rules live in
+/// [`crate::push_policy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelAlerts {
+    /// The user muted this channel, or muted the whole team it belongs to.
+    Muted,
+    /// Only an @mention of the user notifies. Teams' default for a channel.
+    MentionsOnly,
+    /// Every new post notifies, replies excepted.
+    AllNewPosts,
+    /// Every new post AND every reply inside a post's thread notifies.
+    AllNewPostsAndReplies,
+}
+
+impl ChannelAlerts {
+    /// Stable wire/storage token. Kept in sync with `from_str` and the UI union.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChannelAlerts::Muted => "muted",
+            ChannelAlerts::MentionsOnly => "mentions_only",
+            ChannelAlerts::AllNewPosts => "all_new_posts",
+            ChannelAlerts::AllNewPostsAndReplies => "all_new_posts_and_replies",
+        }
+    }
+
+    /// Parse a stored/wire token. Anything unrecognized maps to `MentionsOnly` —
+    /// Teams' own default — rather than panicking, so an unexpected value can
+    /// neither take the process down nor silence a channel.
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "muted" => ChannelAlerts::Muted,
+            "all_new_posts" => ChannelAlerts::AllNewPosts,
+            "all_new_posts_and_replies" => ChannelAlerts::AllNewPostsAndReplies,
+            _ => ChannelAlerts::MentionsOnly,
+        }
+    }
+}
+
 /// A conversation row for the list pane, most-recent first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationRow {
@@ -504,6 +557,8 @@ pub struct ChannelRow {
     pub last_message_sender: String,
     pub last_message_from_me: bool,
     pub is_read: bool,
+    /// What the user's own Microsoft Teams notification setting allows here.
+    pub alerts: ChannelAlerts,
     /// Unsent composer text, stored locally and scoped to this channel.
     pub draft: String,
 }
@@ -532,6 +587,8 @@ pub struct ChannelUpdate<'a> {
     /// Zero-based index of the channel within its team's `channels` array — the
     /// user's own channel order (General is still pinned first by the query).
     pub channel_pos: i64,
+    /// What the user's own Microsoft Teams notification setting allows here.
+    pub alerts: ChannelAlerts,
 }
 
 /// A mail folder row for the sidebar, in `position` order.
@@ -1000,6 +1057,12 @@ fn migrate(conn: &Connection) -> Result<()> {
     // column existed get '' (no picture → tinted initials, exactly what they showed
     // already); the next CSA sync backfills the real URL.
     add_column("ALTER TABLE conversations ADD COLUMN picture_url TEXT NOT NULL DEFAULT ''")?;
+
+    // alerts: the user's own per-channel notification setting (see `ChannelAlerts`).
+    // Stores created before this column existed get Teams' default, so a channel
+    // keeps notifying on an @mention and nothing else until the next CSA sync
+    // reports what the user actually chose.
+    add_column("ALTER TABLE channels ADD COLUMN alerts TEXT NOT NULL DEFAULT 'mentions_only'")?;
     Ok(())
 }
 
@@ -1596,8 +1659,9 @@ impl Store {
             "INSERT INTO channels (
                 id, team_id, team_name, display_name, is_general, is_favorite,
                 last_message_time, last_message_preview, last_message_sender,
-                last_message_from_me, is_read, team_pos, channel_pos, team_group_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                last_message_from_me, is_read, team_pos, channel_pos, team_group_id,
+                alerts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                 team_id = excluded.team_id,
                 team_name = CASE
@@ -1611,6 +1675,7 @@ impl Store {
                     ELSE channels.display_name END,
                 is_general = excluded.is_general,
                 is_favorite = excluded.is_favorite,
+                alerts = excluded.alerts,
                 team_pos = excluded.team_pos,
                 channel_pos = excluded.channel_pos,
                 last_message_time = MAX(channels.last_message_time, excluded.last_message_time),
@@ -1637,6 +1702,7 @@ impl Store {
                 OR (excluded.display_name <> '' AND excluded.display_name <> channels.display_name)
                 OR excluded.is_general <> channels.is_general
                 OR excluded.is_favorite <> channels.is_favorite
+                OR excluded.alerts <> channels.alerts
                 OR excluded.team_pos <> channels.team_pos
                 OR excluded.channel_pos <> channels.channel_pos
                 OR excluded.last_message_time > channels.last_message_time
@@ -1660,6 +1726,7 @@ impl Store {
                 u.team_pos,
                 u.channel_pos,
                 u.team_group_id,
+                u.alerts.as_str(),
             ],
         )?;
         Ok(changed > 0)
@@ -1682,6 +1749,21 @@ impl Store {
             params![id, last_message_time, from_me as i64],
         )?;
         Ok(changed > 0)
+    }
+
+    /// One channel's notification setting, for the live push path — which holds a
+    /// single message and must decide about it without loading the whole tree.
+    ///
+    /// An unknown id yields Teams' default ([`ChannelAlerts::MentionsOnly`]) rather
+    /// than `None`: a post can arrive in a channel the CSA sync has not reported
+    /// yet, and the honest answer for it is "what Teams does by default".
+    pub fn channel_alerts(&self, id: &str) -> Result<ChannelAlerts> {
+        let stored = self
+            .query_one("SELECT alerts FROM channels WHERE id = ?1", params![id], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?;
+        Ok(stored.map(|s| ChannelAlerts::from_str(&s)).unwrap_or(ChannelAlerts::MentionsOnly))
     }
 
     /// True when a thread id is a known channel (has a row in the `channels`
@@ -1710,7 +1792,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, team_id, team_name, display_name, is_general, is_favorite,
                     last_message_time, last_message_preview, last_message_sender,
-                    last_message_from_me, is_read, draft, team_group_id
+                    last_message_from_me, is_read, draft, team_group_id, alerts
              FROM channels
              ORDER BY team_pos ASC, team_name ASC, team_id ASC,
                       is_general DESC, channel_pos ASC, display_name ASC, id ASC",
@@ -1730,6 +1812,7 @@ impl Store {
                 is_read: r.get::<_, i64>(10)? != 0,
                 draft: r.get(11)?,
                 team_group_id: r.get(12)?,
+                alerts: ChannelAlerts::from_str(&r.get::<_, String>(13)?),
             })
         })?;
         let mut channels: Vec<ChannelRow> = rows.collect::<rusqlite::Result<_>>()?;
@@ -2969,6 +3052,7 @@ mod tests {
             last_message_sender: "",
             last_message_from_me: false,
             is_read: true,
+            alerts: ChannelAlerts::MentionsOnly,
             team_pos: 0,
             channel_pos: 0,
         }
@@ -5338,6 +5422,7 @@ mod tests {
             last_message_sender: "",
             last_message_from_me: false,
             is_read: true,
+            alerts: ChannelAlerts::MentionsOnly,
             team_pos: 0,
             channel_pos: 0,
         })

@@ -2809,6 +2809,7 @@ fn channels_json(rows: &[teams_lite::store::ChannelRow]) -> Value {
             "last_message_sender": c.last_message_sender,
             "last_message_from_me": c.last_message_from_me,
             "is_read": c.is_read,
+            "alerts": c.alerts.as_str(),
             "draft": c.draft
         }))
         .collect::<Vec<_>>())
@@ -3352,7 +3353,17 @@ fn push_live_message(
         return;
     }
     let context = store.conversation_context(&message.conversation_id).unwrap_or_default();
-    let placement = push_policy::Placement { is_channel, title: &context };
+    // A channel is gated on the user's own Teams notification setting for it, so the
+    // placement carries that setting. An unreadable store answers with Teams'
+    // default rather than with silence.
+    let placement = if is_channel {
+        let alerts = store
+            .channel_alerts(&message.conversation_id)
+            .unwrap_or(teams_lite::store::ChannelAlerts::MentionsOnly);
+        push_policy::Placement::Channel { title: &context, alerts }
+    } else {
+        push_policy::Placement::Chat { title: &context }
+    };
     let Some(notification) =
         push_policy::notification_for(message, &placement, self_mri, from_me, now_ms())
     else {
@@ -4206,6 +4217,7 @@ mod tests {
                 last_message_sender: "Alice",
                 last_message_from_me: false,
                 is_read: false,
+                alerts: teams_lite::store::ChannelAlerts::MentionsOnly,
                 team_pos: 0,
                 channel_pos: 0,
             })

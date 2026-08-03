@@ -271,10 +271,17 @@ an outward action, so it is gated on purpose:
   `push_deliveries` before it is sent — otherwise the service (19420) and the dev
   backend (19421) both push and the phone buzzes twice.
 - The delivery policy lives in `src/push_policy.rs` and is deliberately narrower than
-  "every live message": chats always, channels only on an @mention (matched on the
-  MRI in `Message::mentions`, never on a display name), never a system line, never
-  our own message, never a replayed frame. Widening it is a product decision, not a
-  cleanup.
+  "every live message": chats always, channels per the user's own Teams setting for
+  that channel, never a system line, never our own message, never a replayed frame.
+  Widening it is a product decision, not a cleanup.
+- **A channel follows the user's own notification setting** (`store::ChannelAlerts`,
+  derived from CSA in `teams_read::channel_alerts`): silent when they muted the
+  channel *or its whole team*, an @mention only at Teams' default (matched on the MRI
+  in `Message::mentions`, never on a display name), and every post — with or without
+  thread replies — when they asked Teams for that. The setting is stored as the
+  decision, not as the three raw CSA signals, and the sidebar reads the same field to
+  dim a muted channel. A **chat**'s `is_muted` is NOT yet wired into any notification
+  path: it only dims the sidebar row, so a muted chat still pushes.
 
 ## Language policy (MANDATORY)
 
