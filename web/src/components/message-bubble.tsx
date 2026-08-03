@@ -34,9 +34,12 @@ import {
   hasVisibleContent,
   parseMessageBody,
 } from "~/lib/rich-text";
+import { agentAuthorship } from "~/lib/agent-message";
+import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
 import { CardAttachment } from "~/components/card-attachment";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
+import { AgentSignature, AgentStoredStatus, AgentStream } from "./agent-reply";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -186,6 +189,12 @@ function MessageBubbleImpl(props: {
   continuesAbove: boolean;
   continuesBelow: boolean;
   highlighted?: boolean;
+  /** The live agent run writing INTO this message, when one is (see lib/agent-run.ts).
+   *  The pane passes it only to the message it targets; the body then comes from the
+   *  stream instead of from the stored content. */
+  agentRun?: AgentRun;
+  /** Let go of a settled run — passed straight through to {@link AgentStream}. */
+  onAgentSettled?: () => void;
   /** This message already sits on a surface of its own: it is the root post of a
    *  channel thread, and the thread's card is that surface. A message that would
    *  otherwise bring its own panel — an app card — renders flush inside it
@@ -198,17 +207,22 @@ function MessageBubbleImpl(props: {
   onSaveEdit: (message: ChatMessage, text: string) => void;
   onCancelEdit: () => void;
 }) {
-  const mine = props.message.is_self === true;
+  // A message the local agent wrote, from the line it signs itself with. It went out
+  // through the user's account, so the wire calls it ours — but they did not write it,
+  // and it takes the side of everything that arrives rather than of everything they
+  // sent (see components/agent-reply.tsx for why that is the honest choice).
+  const agent = useMemo(() => agentAuthorship(props.message), [props.message]);
+  const mine = props.message.is_self === true && !agent;
   // How this body must be read. A `Text` message is plain text: it carries no Teams
   // markup at all, so there is no quote to split out of it and nothing to parse —
   // the whole body IS the body, shown verbatim.
   const format = bodyFormat(props.message.message_type);
+  // An agent's body is the message minus its signature: the mark and the name above the
+  // bubble say the same thing, and the bubble must not say it twice.
+  const content = agent ? agent.bodyHtml : props.message.content;
   const parsed = useMemo<ParsedRichMessage>(
-    () =>
-      format === "text"
-        ? { bodyHtml: props.message.content }
-        : parseRichMessage(props.message.content),
-    [props.message.content, format],
+    () => (format === "text" ? { bodyHtml: content } : parseRichMessage(content)),
+    [content, format],
   );
   // Who the body's @mention spans point at, so each mention of a person can offer
   // their card on hover (the span itself only carries an index — see
@@ -331,9 +345,13 @@ function MessageBubbleImpl(props: {
   // hides that anything was sent, which reads as a hole in the conversation the
   // next message then replies into. So it says so, once, quietly, the way Teams
   // itself owns up to a message type it cannot render.
+  // An agent's reply is never unshowable, even when its body is empty: the placeholder
+  // the backend posts the instant a trigger lands ("claude is thinking…") IS an empty
+  // body, and it is the most informative thing on screen at that moment.
   const isUnsupported =
     !isDeleted &&
     !props.editing &&
+    !agent &&
     !bodyHasContent &&
     !hasAttachments &&
     !parsed.quote &&
@@ -348,15 +366,23 @@ function MessageBubbleImpl(props: {
   // Media- and link-only messages render without the standard rounded, colored
   // bubble — an image gets the atelier mat, a recording its video card, a link or
   // app card just the card. A deleted or unsupported message keeps a bubble: its
-  // placeholder is the body.
-  const bare = !isDeleted && (linkOnly || imageOnly || recordingOnly || cardOnly);
+  // placeholder is the body. An agent's reply keeps one too: its mark and its status
+  // line belong to a bubble, and an answer that happens to be one link is still an
+  // answer.
+  const bare = !isDeleted && !agent && (linkOnly || imageOnly || recordingOnly || cardOnly);
 
   // Only label the first message of a same-author run; continuations are clearly
   // from the same person. A message with no sender (e.g. a meeting recording,
   // whose only author hint is a bare contacts URL the backend drops) shows no
-  // name — an empty label would just be a blank gap above the card.
+  // name — an empty label would just be a blank gap above the card. An agent's reply
+  // carries its own mark instead, in every thread rather than only in a group: WHO
+  // wrote it is the whole point of the label there.
   const nameShown =
-    !mine && props.showSenderName && !props.continuesAbove && props.message.sender.trim() !== "";
+    !mine &&
+    !agent &&
+    props.showSenderName &&
+    !props.continuesAbove &&
+    props.message.sender.trim() !== "";
   const [menuOpen, setMenuOpen] = useState(false);
 
   // Reactions on this message, and which emotion (if any) is ours — the latter
@@ -399,6 +425,54 @@ function MessageBubbleImpl(props: {
     props.onReact(props.message, key);
   };
 
+  // The quoted message a reply carries. Its own variable because a streamed agent
+  // answer needs it too: the answer is posted as a native reply to the message that
+  // summoned it, and a quote that only appeared once the run finished would make the
+  // bubble jump at the moment the reader is watching it most closely.
+  const quotedBlock =
+    parsed.quote ? (
+      <div
+        className={cn(
+          "my-1 rounded-lg border-l-2 px-2.5 py-1.5",
+          mine ? "border-sender-name-mine bg-quote-mine" : "border-sender-name bg-quote-incoming",
+        )}
+      >
+        {/* A forward carries no author at all — Teams sends the forwarded content
+            and nothing else — so the block says what it is instead of standing
+            there as an unattributed quote. */}
+        {parsed.quote.kind === "forward" ? (
+          <div
+            data-testid="quote-forwarded"
+            className={cn(
+              "flex items-center gap-1 text-xs font-semibold",
+              mine ? "text-sender-name-mine" : "text-sender-name",
+            )}
+          >
+            <Forward className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
+            Forwarded
+          </div>
+        ) : null}
+        {parsed.quote.sender ? (
+          <div
+            className={cn(
+              "flex text-xs font-semibold",
+              mine ? "text-sender-name-mine" : "text-sender-name",
+            )}
+          >
+            {/* The quoted author is a person too — their card is a hover away
+                whenever the quote carried their MRI. */}
+            <PersonHoverCard mri={parsed.quote.senderMri} name={parsed.quote.sender}>
+              <span data-testid="quote-sender">{parsed.quote.sender}</span>
+            </PersonHoverCard>
+          </div>
+        ) : null}
+        <RichContent
+          html={parsed.quote.html}
+          className={cn("text-xs", mine ? "text-quote-text-mine" : "text-quote-text-incoming")}
+        />
+      </div>
+    ) : null;
+
   // The message's rendered media/body — text/rich content, a quoted reply, and
   // attachments. Pulled out so an image-only message can wrap it in the
   // "atelier" mat (a framed card) while an ordinary message renders it plainly
@@ -415,48 +489,7 @@ function MessageBubbleImpl(props: {
         />
       ) : null}
 
-      {parsed.quote ? (
-        <div
-          className={cn(
-            "my-1 rounded-lg border-l-2 px-2.5 py-1.5",
-            mine ? "border-sender-name-mine bg-quote-mine" : "border-sender-name bg-quote-incoming",
-          )}
-        >
-          {/* A forward carries no author at all — Teams sends the forwarded content
-              and nothing else — so the block says what it is instead of standing
-              there as an unattributed quote. */}
-          {parsed.quote.kind === "forward" ? (
-            <div
-              data-testid="quote-forwarded"
-              className={cn(
-                "flex items-center gap-1 text-xs font-semibold",
-                mine ? "text-sender-name-mine" : "text-sender-name",
-              )}
-            >
-              <Forward className="size-3 shrink-0" strokeWidth={1.8} aria-hidden />
-              Forwarded
-            </div>
-          ) : null}
-          {parsed.quote.sender ? (
-            <div
-              className={cn(
-                "flex text-xs font-semibold",
-                mine ? "text-sender-name-mine" : "text-sender-name",
-              )}
-            >
-              {/* The quoted author is a person too — their card is a hover away
-                  whenever the quote carried their MRI. */}
-              <PersonHoverCard mri={parsed.quote.senderMri} name={parsed.quote.sender}>
-                <span data-testid="quote-sender">{parsed.quote.sender}</span>
-              </PersonHoverCard>
-            </div>
-          ) : null}
-          <RichContent
-            html={parsed.quote.html}
-            className={cn("text-xs", mine ? "text-quote-text-mine" : "text-quote-text-incoming")}
-          />
-        </div>
-      ) : null}
+      {quotedBlock}
 
       {parsed.bodyHtml ? (
         <RichContent
@@ -537,6 +570,9 @@ function MessageBubbleImpl(props: {
                 : mine
                 ? "bg-bubble-mine text-bubble-mine-foreground shadow-chip"
                 : "bg-bubble-incoming text-bubble-incoming-foreground shadow-card",
+              // An agent's reply takes the incoming surface and one hairline more, so it
+              // reads as its own kind of message without needing a colour of its own.
+              agent && "ring-1 ring-inset ring-primary/15",
               // Chained messages (same author, adjacent) flatten the touching
               // corners on the author's anchor side — right for mine, left for
               // incoming — so a run reads as one continuous block on that edge.
@@ -609,6 +645,16 @@ function MessageBubbleImpl(props: {
           </div>
         )}
 
+        {/* Who wrote this: the CLI's own mark, above the answer. Busy while a run is
+            still going — including a reply we are only seeing the tail of, because its
+            stored body says it was still being written. */}
+        {agent && !props.editing ? (
+          <AgentSignature
+            backend={agent.backend}
+            busy={props.agentRun ? agentRunIsLive(props.agentRun) : agent.pending}
+          />
+        ) : null}
+
         {props.editing ? (
           <MessageEditor
             initialText={copyableMessageText(props.message)}
@@ -625,7 +671,26 @@ function MessageBubbleImpl(props: {
           </DeletedContent>
         ) : (
           <>
-            {isUnsupported ? (
+            {agent && props.agentRun ? (
+              // A run is writing into this message: its body comes from the stream, not
+              // from the content Teams last echoed back. The two agree — the backend
+              // edits the message with the same text — but the stream is many frames
+              // ahead of the edit, and it knows what the agent is doing between them.
+              <>
+                {quotedBlock}
+                <AgentStream
+                  run={props.agentRun}
+                  onSettled={props.onAgentSettled ?? (() => undefined)}
+                />
+              </>
+            ) : agent ? (
+              // A reply nobody watched being written: everything is known from the
+              // message itself, including whether it stopped mid-answer.
+              <>
+                {mediaBody}
+                <AgentStoredStatus authorship={agent} hasBody={bodyHasContent} />
+              </>
+            ) : isUnsupported ? (
               <UnsupportedContent />
             ) : linkOnly ? null : imageOnly ? (
               // A lone picture: frame it on the atelier mat — a neutral card

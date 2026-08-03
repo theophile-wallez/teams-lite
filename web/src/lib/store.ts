@@ -56,6 +56,14 @@ import {
   type UpdateInfo,
 } from "./protocol";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
+import {
+  AGENT_RUN_STALE_MS,
+  agentRunIsLive,
+  parseAgentFrame,
+  withAgentFrame,
+  withoutAgentRun,
+  type AgentRun,
+} from "./agent-run";
 import { coalesce } from "./singleflight";
 import {
   requestRange,
@@ -232,6 +240,10 @@ export type AppState = {
   /** What the local agent can do on the backend's machine, and which conversations
    *  are opted in — null until the backend answers. See lib/agent.ts. */
   agent: AgentStatus | null;
+  /** The agent run in flight (or the one that just finished) per conversation id, from
+   *  the backend's `agent_stream` event. A transient overlay on the message the run is
+   *  writing into — the Teams message stays the record. See lib/agent-run.ts. */
+  agentRuns: Record<string, AgentRun>;
 
   // ---- mail (read-only Outlook surface) ------------------------------------
 
@@ -406,6 +418,7 @@ function initialState(): AppState {
     },
     push: INITIAL_PUSH_STATE,
     agent: null,
+    agentRuns: {},
     mailFolders: [],
     mailFolderId: null,
     mailMessages: [],
@@ -462,6 +475,11 @@ export class TeamsController {
   // reactive list is `incomingCalls`. Each timer drops a stuck banner if no
   // terminal `call` event ever arrives (see CALL_RING_TIMEOUT_MS).
   private callTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  // The same idea for agent runs: convId -> timer, dropping a run whose backend never
+  // sent its terminal frame (it was killed, or the socket dropped mid-answer). Without
+  // it a bubble would claim to be writing forever, since only a frame re-renders it.
+  private agentRunTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   // Read receipts per conversation: convId -> (memberMri -> read position).
   // Non-reactive; the reactive `readReceipts` slice is derived for the open
@@ -650,6 +668,8 @@ export class TeamsController {
     this.typingByConv.clear();
     for (const t of this.callTimers.values()) clearTimeout(t);
     this.callTimers.clear();
+    for (const t of this.agentRunTimers.values()) clearTimeout(t);
+    this.agentRunTimers.clear();
     this.receiptsByConv.clear();
     for (const blob of this.mediaBlobs.values()) URL.revokeObjectURL(blob.objectUrl);
     this.mediaBlobs.clear();
@@ -771,6 +791,8 @@ export class TeamsController {
     });
 
     on("read_receipt", (raw) => this.onReadReceipt(raw as ReadReceiptSignal));
+
+    on("agent_stream", (raw) => this.onAgentFrame(raw));
 
     on("messages_updated", (raw) => {
       const d = raw as { conversation: string; messages: ChatMessage[]; has_more: boolean };
@@ -1052,6 +1074,46 @@ export class TeamsController {
    *  it silences the banner here and never touches the call in real Teams. */
   dismissIncomingCall(convId: string): void {
     this.clearIncomingCall(convId);
+  }
+
+  // ---- the local agent's live run ------------------------------------------
+  //
+  // A run is an overlay on the message it is writing into, never a message of its own:
+  // the backend has already posted that message and keeps editing it, so what arrives
+  // here only changes how the app DRAWS a message it already has. Nothing in this slice
+  // sends, and nothing in it is consent — see lib/agent-run.ts.
+
+  /** Fold one `agent_stream` frame in, and (re)arm the guard that drops a run whose
+   *  backend stopped talking mid-answer. */
+  private onAgentFrame(raw: unknown): void {
+    const frame = parseAgentFrame(raw);
+    if (!frame) return;
+    const runs = withAgentFrame(this.get().agentRuns, frame);
+    if (runs !== this.get().agentRuns) this.set({ agentRuns: runs });
+
+    const timer = this.agentRunTimers.get(frame.conversation);
+    if (timer) clearTimeout(timer);
+    this.agentRunTimers.delete(frame.conversation);
+    // A finished run needs no guard: the UI drops it once the answer is fully
+    // revealed, and until then it is showing text it already has.
+    if (!agentRunIsLive(frame)) return;
+    this.agentRunTimers.set(
+      frame.conversation,
+      setTimeout(() => this.forgetAgentRun(frame.conversation, frame.run_id), AGENT_RUN_STALE_MS),
+    );
+  }
+
+  /** Let go of a run: the answer is fully on screen (or the run went quiet for so long
+   *  that claiming it is still writing would be a lie). The posted message then renders
+   *  on its own, which is what it does for every reply this app never watched. */
+  forgetAgentRun(convId: string, runId: string): void {
+    const timer = this.agentRunTimers.get(convId);
+    if (timer) {
+      clearTimeout(timer);
+      this.agentRunTimers.delete(convId);
+    }
+    const runs = withoutAgentRun(this.get().agentRuns, convId, runId);
+    if (runs !== this.get().agentRuns) this.set({ agentRuns: runs });
   }
 
   /** The group/channel name to show alongside the caller, or undefined for a 1:1

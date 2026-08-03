@@ -4004,7 +4004,261 @@ function scheduleSendEcho(
     t.setDraft(""); // the accepted send clears the persisted draft
     broadcast("message", msg);
     broadcast(t.changedEvent, {});
+    maybeRunMockAgent(convId, msg);
   }, SEND_ECHO_DELAY_MS);
+}
+
+// ---------------------------------------------------------------------------
+// The local agent, simulated (mirrors `agent_reply` in src/bin/server.rs).
+//
+// The real feature runs a coding-agent CLI on the backend's machine. The mock has no
+// CLI and no tenant — but it CAN reproduce the two things the UI is built on: the
+// message that gets posted and then edited, and the `agent_stream` frames that let this
+// app draw the answer being written. Without that, the whole streaming surface would be
+// unreachable from the mock, and the only way to look at it would be the real account.
+//
+// It follows the real flow step for step: post the placeholder, narrate the run, edit
+// the message a few times on the way (as a Teams client would see it), and land the
+// signed answer. The gate is the real one too — a conversation nobody opted in gets
+// nothing, exactly as `agent_live_message` refuses.
+// ---------------------------------------------------------------------------
+
+/** How long each step of the simulated run takes. Slow enough to look at, quick enough
+ *  that a spec waiting for the answer is not waiting long. Overridable so a screenshot
+ *  can slow the run down and a spec can hurry it up. */
+const MOCK_AGENT_STEP_MS = Number(process.env.MOCK_AGENT_STEP_MS ?? 420);
+
+/** What the simulated run answers, in the Markdown a CLI would emit. */
+const MOCK_AGENT_ANSWER =
+  "The backend listens on `19420`, and that is the send-capable one the always-on " +
+  "service owns.\n\n" +
+  "Two others sit beside it:\n" +
+  "- **19421** — the hands-on dev backend, so both can run at once\n" +
+  "- **19430** — read-only, which is what tooling talks to\n\n" +
+  "```rust\nconst DEFAULT_PORT: u16 = 19420;\n```\n\n" +
+  "The table in CLAUDE.md is the authority, and the defaults live in `src/bin/server.rs`.";
+
+/** The reasoning the run reports before it starts answering. */
+const MOCK_AGENT_THINKING =
+  "The question is about the port. The table in CLAUDE.md lists them, and the defaults " +
+  "are constants in the server binary — I should read both rather than answer from memory.";
+
+/** The tool calls it makes, in order. */
+const MOCK_AGENT_TOOLS: { tool: string; target: string }[] = [
+  { tool: "Grep", target: "DEFAULT_PORT" },
+  { tool: "Read", target: "src/bin/server.rs" },
+];
+
+/** The backend a message asks for, or null — `agent_policy::split_prefix`, and the same
+ *  rule: the prefix must OPEN the message. */
+function mockAgentBackend(text: string): string | null {
+  const trimmed = text.trimStart();
+  for (const backend of ["claude", "opencode"]) {
+    const prefix = `@${backend}`;
+    if (!trimmed.toLowerCase().startsWith(prefix)) continue;
+    const rest = trimmed.slice(prefix.length);
+    // The prefix has to be a word of its own ("@claudette" summons nothing), and
+    // something has to follow it (a bare "@claude" asks nothing).
+    if (rest !== "" && !/^[\s:,]/.test(rest)) continue;
+    return rest.replace(/^[\s:,]+/, "") === "" ? null : backend;
+  }
+  return null;
+}
+
+/** Answer a trigger the user wrote, if the conversation is opted in.
+ *
+ *  The prefix is read out of the message's own CONTENT, not out of the `send` request's
+ *  `text` — which is what the backend does (`command_for` reads `message.content`), and
+ *  which matters: the rich composer puts the whole message in `content_html` and sends an
+ *  empty `text`, so a mock that trusted that field would answer nothing at all. */
+function maybeRunMockAgent(convId: string, trigger: ChatMessage): void {
+  const backend = mockAgentBackend(plain(trigger.content));
+  if (!backend) return;
+  // The consent gate, not a convenience: off is the default everywhere but the sandbox,
+  // and a mock that answered regardless would make the switch untestable.
+  if (mockAgentModes.get(convId) !== "reply") return;
+  void simulateMockAgentRun(convId, trigger, backend);
+}
+
+async function simulateMockAgentRun(
+  convId: string,
+  trigger: ChatMessage,
+  backend: string,
+): Promise<void> {
+  const t = threadFor(convId);
+  if (!t) return;
+  const step = () => new Promise((resolve) => setTimeout(resolve, MOCK_AGENT_STEP_MS));
+
+  // The answer is posted as a native reply to the message that summoned it (`agent_send`
+  // builds the same markup), so every body below opens with the trigger quoted.
+  const quote = quoteBlock({
+    compose_time: trigger.compose_time,
+    sender: trigger.sender,
+    sender_mri: trigger.sender_mri ?? "",
+    preview: previewOf(trigger.content),
+  });
+  const body = (answer: string, pending: boolean) =>
+    quote + agentSignedHtml(backend, answer, { pending });
+
+  // 1. The placeholder, posted before the run starts — its id is what the edits address.
+  const seq = nextSeq(t.messages);
+  const reply: ChatMessage = {
+    id: `${convId}#${seq}`,
+    conversation_id: convId,
+    seq,
+    compose_time: Date.now(),
+    sender: SELF_NAME,
+    sender_mri: SELF_MRI,
+    content: body("", true),
+    is_self: true,
+  };
+  t.messages.push(reply);
+  t.recompute();
+  t.setRead(true);
+  broadcast("message", reply);
+  broadcast(t.changedEvent, {});
+
+  const runId = `${convId}/${trigger.id}`;
+  let toolsUsed = 0;
+  const frame = (over: Record<string, unknown>) =>
+    broadcast("agent_stream", {
+      run_id: runId,
+      conversation: convId,
+      message_id: reply.id,
+      backend,
+      phase: "thinking",
+      text: "",
+      thinking: "",
+      activity: null,
+      tools_used: toolsUsed,
+      error: null,
+      at: Date.now(),
+      ...over,
+    });
+
+  // 2. Thinking: nothing at all for a beat (the model is being called), then the
+  // reasoning a clause at a time.
+  frame({});
+  await step();
+  await step();
+  const clauses = MOCK_AGENT_THINKING.split(". ");
+  for (let i = 0; i < clauses.length; i += 1) {
+    await step();
+    frame({ thinking: clauses.slice(0, i + 1).join(". ") });
+  }
+
+  // 3. Working: one frame per tool, held for as long as a tool call takes — which is
+  // several tokens' worth, and is why this phase has a label of its own.
+  for (const activity of MOCK_AGENT_TOOLS) {
+    toolsUsed += 1;
+    await step();
+    frame({ phase: "working", thinking: MOCK_AGENT_THINKING, activity: { ...activity, done: false } });
+    await step();
+    await step();
+    await step();
+    frame({ phase: "working", thinking: MOCK_AGENT_THINKING, activity: { ...activity, done: true } });
+  }
+
+  // 4. Writing: the answer in bursts of uneven size, which is how a model streams and
+  // therefore what the client's reveal has to smooth out.
+  const bursts = burstsOf(MOCK_AGENT_ANSWER);
+  let written = "";
+  for (let b = 0; b < bursts.length; b += 1) {
+    written += bursts[b];
+    await step();
+    frame({ phase: "writing", text: written, tools_used: toolsUsed });
+    // The Teams-visible half: the message itself is edited as the answer grows, far
+    // more coarsely than the stream (see AGENT_EDIT_INTERVAL).
+    if (b % 3 === 0) {
+      editAgentReply(convId, reply.id, body(written, true));
+    }
+  }
+
+  // 5. Done: the authoritative answer, signed, in the message and on the stream.
+  await step();
+  editAgentReply(convId, reply.id, body(MOCK_AGENT_ANSWER, false));
+  frame({ phase: "done", text: MOCK_AGENT_ANSWER, tools_used: toolsUsed });
+}
+
+/** Split an answer into uneven chunks, the way tokens actually arrive. Deterministic
+ *  (a length-driven walk, no randomness) so a screenshot of a given step is stable. */
+function burstsOf(text: string): string[] {
+  const words = text.split(/(\s+)/).filter((piece) => piece !== "");
+  const bursts: string[] = [];
+  let i = 0;
+  let size = 1;
+  while (i < words.length) {
+    bursts.push(words.slice(i, i + size * 2).join(""));
+    i += size * 2;
+    size = (size % 4) + 1;
+  }
+  return bursts;
+}
+
+/** The reply's body as `agent_policy::reply_html` / `thinking_html` build it: the answer
+ *  as HTML, then the line that says a machine wrote it. */
+function agentSignedHtml(backend: string, answer: string, opts: { pending: boolean }): string {
+  const body = agentAnswerHtml(answer);
+  if (!body) return `<p><em>${backend} is thinking…</em></p>`;
+  const footer = opts.pending
+    ? `<p><em>${backend} is writing…</em></p>`
+    : `<p><em>— ${backend}, via teams-lite</em></p>`;
+  return body + footer;
+}
+
+/** The Markdown subset src/agent_markdown.rs renders, as much of it as the fixture
+ *  needs: fenced code, bullet lists, bold, inline code, paragraphs. */
+function agentAnswerHtml(markdown: string): string {
+  const lines = markdown.split("\n");
+  let html = "";
+  let i = 0;
+  const inline = (text: string) =>
+    escapeHtml(text)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>");
+  while (i < lines.length) {
+    const line = (lines[i] ?? "").trimEnd();
+    i += 1;
+    if (line.startsWith("```")) {
+      const code: string[] = [];
+      while (i < lines.length && !(lines[i] ?? "").startsWith("```")) {
+        code.push(escapeHtml(lines[i] ?? ""));
+        i += 1;
+      }
+      i += 1;
+      html += `<pre><code>${code.join("\n")}</code></pre>`;
+      continue;
+    }
+    if (line.trim() === "") continue;
+    const isItem = (candidate: string) => /^[-*+] /.test(candidate.trimStart());
+    if (isItem(line)) {
+      const items = [line];
+      while (i < lines.length && isItem(lines[i] ?? "")) {
+        items.push((lines[i] ?? "").trimEnd());
+        i += 1;
+      }
+      html += `<ul>${items
+        .map((item) => `<li>${inline(item.trimStart().slice(2))}</li>`)
+        .join("")}</ul>`;
+      continue;
+    }
+    html += `<p>${inline(line.trim())}</p>`;
+  }
+  return html;
+}
+
+/** Replace an agent reply's HTML body and broadcast it — the mock's equivalent of the
+ *  backend editing the message it posted. Unlike `editMessage` this takes HTML, because
+ *  that is what the real edit carries. */
+function editAgentReply(convId: string, messageId: string, content: string): void {
+  const t = threadFor(convId);
+  if (!t) return;
+  const msg = t.messages.find((m) => m.id === messageId);
+  if (!msg || msg.content === content) return;
+  msg.content = content;
+  t.recompute();
+  broadcast("message", msg);
+  broadcast(t.changedEvent, {});
 }
 
 /** Every ~7s, drop an incoming (is_self:false) message into a random chat and

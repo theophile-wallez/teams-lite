@@ -14,6 +14,15 @@
 //! latest value matters, so a consumer doing a network round-trip per edit can never
 //! fall behind the model.
 //!
+//! Two consumers read that channel, and they want different things from it. A Teams
+//! edit is a network round-trip everybody in the thread pays for, so it only cares
+//! about [`Progress::text`] and is rate-limited. The app's own frontends are local,
+//! so they get the whole [`Progress`] — the reasoning, the tool that is running, the
+//! phase — and render the answer as it is written rather than in one-second jumps.
+//! That is why this module reports a struct and not a string: the edit path was never
+//! going to carry "reading src/agent.rs" into a colleague's chat, and a local UI
+//! should not be limited to what a chat message can hold.
+//!
 //! # What the child may do
 //!
 //! Two things are deliberate and load-bearing:
@@ -191,6 +200,19 @@ pub const RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// truncated here rather than in the store.
 const MAX_ANSWER_BYTES: usize = 200 * 1024;
 
+/// How much of the reasoning is kept. Only the LATEST reasoning is worth showing —
+/// a UI shows the tail of it while the model has not started answering — so this
+/// keeps the end of the text and drops the beginning.
+const MAX_THINKING_BYTES: usize = 4 * 1024;
+
+/// How many tool calls are remembered. The current one is what a UI shows; the rest
+/// are only counted, so a run with a hundred greps holds a bounded list.
+const MAX_TOOL_CALLS: usize = 32;
+
+/// How long a tool's target may be before it is cut. It is a file path or a pattern
+/// travelling into a one-line label, not a payload.
+const MAX_TARGET_CHARS: usize = 120;
+
 /// The environment variable holding the backend's write token — removed from the
 /// child's environment. Spelled here rather than imported because `src/bin/server.rs`
 /// is a binary, not a library, and one of the two copies drifting is caught by
@@ -214,6 +236,65 @@ pub struct Request {
     /// The model to run, when the user chose one for this backend. `None` leaves the
     /// choice to the CLI's own configuration, which is the default.
     pub model: Option<String>,
+}
+
+/// What an agent is doing right now, as coarsely as a label can say it.
+///
+/// Three states, because that is how many a reader can tell apart at a glance: the
+/// model is thinking, a tool is running, or the answer is being written. The terminal
+/// states (finished, failed) are not here — they belong to the run, not to its
+/// progress, and `src/bin/server.rs` adds them from the [`Outcome`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Phase {
+    /// Nothing has been said yet: the model was called, or it is reasoning.
+    #[default]
+    Thinking,
+    /// A tool is running — see [`Progress::activity`].
+    Working,
+    /// The answer is arriving.
+    Writing,
+}
+
+impl Phase {
+    /// The wire spelling, which is also what a UI keys its label off.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Phase::Thinking => "thinking",
+            Phase::Working => "working",
+            Phase::Writing => "writing",
+        }
+    }
+}
+
+/// One tool call, as it happens.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Activity {
+    /// The tool's own name: "Read", "Grep", "read", "grep".
+    pub tool: String,
+    /// What it was pointed at — a path, a pattern, a query. Empty when the call's
+    /// arguments have not arrived yet, or when the tool takes none.
+    pub target: String,
+    /// Whether it finished. A finished call stays in the progress on purpose: the
+    /// last thing the agent did is worth showing while the next token is awaited.
+    pub done: bool,
+}
+
+/// The answer as it stands, and what the agent is doing to grow it.
+///
+/// The whole state, not a delta: this rides a [`watch`] channel where only the latest
+/// value survives, so every value has to stand on its own.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Progress {
+    pub phase: Phase,
+    /// The answer so far, as the Markdown the CLI emitted.
+    pub text: String,
+    /// The tail of the model's reasoning, when it reports any (Claude Code does when
+    /// extended thinking is on; opencode does not).
+    pub thinking: String,
+    /// The tool call in flight, or the last one that ran.
+    pub activity: Option<Activity>,
+    /// How many tool calls the run has made — the count survives [`MAX_TOOL_CALLS`].
+    pub tools_used: usize,
 }
 
 /// What one run produced.
@@ -262,7 +343,7 @@ fn which_program(program: &str) -> Option<PathBuf> {
 /// fails. Sessions expire and CLI state gets cleared, and the failure looks exactly
 /// like a broken feature: every follow-up in a thread refuses, forever, because of an
 /// id nobody can see. Starting fresh loses the context and answers the question.
-pub async fn run(request: &Request, progress: &watch::Sender<String>) -> Result<Outcome> {
+pub async fn run(request: &Request, progress: &watch::Sender<Progress>) -> Result<Outcome> {
     let first = run_once(request, progress).await;
     let Err(error) = first else {
         return first;
@@ -279,7 +360,7 @@ pub async fn run(request: &Request, progress: &watch::Sender<String>) -> Result<
     run_once(&fresh, progress).await
 }
 
-async fn run_once(request: &Request, progress: &watch::Sender<String>) -> Result<Outcome> {
+async fn run_once(request: &Request, progress: &watch::Sender<Progress>) -> Result<Outcome> {
     let program = which_program(request.backend.program).with_context(|| {
         format!("`{}` is not on PATH — this machine cannot run it", request.backend.program)
     })?;
@@ -405,12 +486,12 @@ fn model_of(request: &Request) -> Option<&str> {
 async fn harvest(
     backend: &Backend,
     stdout: tokio::process::ChildStdout,
-    progress: &watch::Sender<String>,
+    progress: &watch::Sender<Progress>,
 ) -> Result<Outcome> {
     let mut lines = BufReader::new(stdout).lines();
     let mut answer = Answer::default();
     let mut outcome = Outcome::default();
-    let mut last_sent = String::new();
+    let mut last_sent = Progress::default();
 
     while let Some(line) = lines.next_line().await.context("read the agent's output")? {
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
@@ -424,13 +505,13 @@ async fn harvest(
                 other => answer.apply(other),
             }
         }
-        let text = answer.text();
-        if text != last_sent {
-            last_sent = text.clone();
+        let current = answer.progress();
+        if current != last_sent {
+            last_sent = current.clone();
             // A closed receiver is normal: the consumer stops watching once it has
             // posted the final edit. The run still finishes, so the store learns the
             // session id.
-            let _ = progress.send(text);
+            let _ = progress.send(current);
         }
     }
     // The CLI's own final text wins when it reports one; the streamed pieces are what
@@ -453,6 +534,16 @@ enum Update {
     /// The whole text of an identified part, which may arrive several times as it
     /// grows (opencode reports parts, not deltas).
     Part { key: String, text: String },
+    /// More of the model's reasoning.
+    Thinking(String),
+    /// A tool call started, or a running one was described more fully. `target` is
+    /// empty while the arguments are still arriving.
+    Tool { id: String, name: String, target: String },
+    /// A tool call finished.
+    ToolDone { id: String },
+    /// More of the open tool call's arguments, as the partial JSON Claude Code
+    /// streams. Applies to the call that started most recently.
+    ToolArgs(String),
     /// The CLI's authoritative final answer.
     Final(String),
     /// What the run cost.
@@ -475,28 +566,89 @@ fn updates_from(backend: &Backend, event: &Value) -> Vec<Update> {
                 "stream_event" => {
                     let inner = event.get("event").unwrap_or(&Value::Null);
                     match inner.get("type").and_then(Value::as_str).unwrap_or("") {
-                        // A new text block, or a new assistant turn after a tool
-                        // call: what follows is a new paragraph.
                         "content_block_start" => {
-                            if inner.pointer("/content_block/type").and_then(Value::as_str)
-                                == Some("text")
-                            {
-                                updates.push(Update::Break);
+                            let block = inner.get("content_block").unwrap_or(&Value::Null);
+                            match block.get("type").and_then(Value::as_str).unwrap_or("") {
+                                // A new text block, or a new assistant turn after a
+                                // tool call: what follows is a new paragraph.
+                                "text" => updates.push(Update::Break),
+                                // A tool call, named the moment it starts. Its
+                                // arguments follow as partial JSON, so the target is
+                                // still unknown here — and "Read" alone already says
+                                // more than a spinner does.
+                                "tool_use" => updates.push(Update::Tool {
+                                    id: block
+                                        .get("id")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    name: block
+                                        .get("name")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    target: String::new(),
+                                }),
+                                _ => {}
                             }
                         }
                         "content_block_delta" => {
-                            if let Some(text) = inner
-                                .pointer("/delta/text")
-                                .and_then(Value::as_str)
-                                .filter(|_| {
-                                    inner.pointer("/delta/type").and_then(Value::as_str)
-                                        == Some("text_delta")
-                                })
-                            {
-                                updates.push(Update::Append(text.to_string()));
+                            let delta = inner.get("delta").unwrap_or(&Value::Null);
+                            match delta.get("type").and_then(Value::as_str).unwrap_or("") {
+                                "text_delta" => {
+                                    if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                                        updates.push(Update::Append(text.to_string()));
+                                    }
+                                }
+                                "thinking_delta" => {
+                                    if let Some(text) =
+                                        delta.get("thinking").and_then(Value::as_str)
+                                    {
+                                        updates.push(Update::Thinking(text.to_string()));
+                                    }
+                                }
+                                "input_json_delta" => {
+                                    if let Some(json) =
+                                        delta.get("partial_json").and_then(Value::as_str)
+                                    {
+                                        updates.push(Update::ToolArgs(json.to_string()));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         _ => {}
+                    }
+                }
+                // The complete assistant turn, which arrives after its deltas: a
+                // tool_use block here carries the WHOLE input, so it names the target
+                // even when the streamed partial JSON never parsed.
+                "assistant" => {
+                    for block in message_content(event) {
+                        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                            continue;
+                        }
+                        updates.push(Update::Tool {
+                            id: block.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                            name: block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            target: target_from_input(block.get("input").unwrap_or(&Value::Null)),
+                        });
+                    }
+                }
+                // A tool's result comes back as a user turn — which is how a run says
+                // the call it was making has finished.
+                "user" => {
+                    for block in message_content(event) {
+                        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                            continue;
+                        }
+                        if let Some(id) = block.get("tool_use_id").and_then(Value::as_str) {
+                            updates.push(Update::ToolDone { id: id.to_string() });
+                        }
                     }
                 }
                 "result" => {
@@ -514,9 +666,9 @@ fn updates_from(backend: &Backend, event: &Value) -> Vec<Update> {
             if let Some(id) = event.get("sessionID").and_then(Value::as_str) {
                 updates.push(Update::Session(id.to_string()));
             }
+            let part = event.get("part").unwrap_or(&Value::Null);
             match kind {
                 "text" => {
-                    let part = event.get("part").unwrap_or(&Value::Null);
                     if let (Some(key), Some(text)) = (
                         part.get("id").and_then(Value::as_str),
                         part.get("text").and_then(Value::as_str),
@@ -524,8 +676,35 @@ fn updates_from(backend: &Backend, event: &Value) -> Vec<Update> {
                         updates.push(Update::Part { key: key.to_string(), text: text.to_string() });
                     }
                 }
+                // opencode reports a tool call as one part carrying its whole state,
+                // re-sent as that state changes — so the status field, not the event,
+                // is what says whether the call is still running.
+                "tool_use" => {
+                    let id = part
+                        .get("callID")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    updates.push(Update::Tool {
+                        id: id.clone(),
+                        name: part.get("tool").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        target: target_from_input(
+                            part.pointer("/state/input").unwrap_or(&Value::Null),
+                        ),
+                    });
+                    let status = part.pointer("/state/status").and_then(Value::as_str).unwrap_or("");
+                    if matches!(status, "completed" | "error") {
+                        updates.push(Update::ToolDone { id });
+                    }
+                }
+                // A reasoning part, when the model behind opencode emits one.
+                "reasoning" => {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        updates.push(Update::Thinking(text.to_string()));
+                    }
+                }
                 "step_finish" => {
-                    if let Some(cost) = event.pointer("/part/cost").and_then(Value::as_f64) {
+                    if let Some(cost) = part.get("cost").and_then(Value::as_f64) {
                         updates.push(Update::Cost(cost));
                     }
                 }
@@ -536,8 +715,54 @@ fn updates_from(backend: &Backend, event: &Value) -> Vec<Update> {
     updates
 }
 
+/// The content blocks of a Claude Code `assistant`/`user` event, or nothing.
+fn message_content(event: &Value) -> &[Value] {
+    event
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+/// What a tool call was pointed at, read out of its arguments.
+///
+/// A tool's own schema names the interesting argument differently every time
+/// (`file_path` for Claude Code's Read, `filePath` for opencode's read, `pattern` for
+/// a grep), and no CLI reports "the target" as such. So the first key that carries a
+/// human-readable subject wins, in the order a reader would care about, and anything
+/// unrecognised yields nothing rather than a guess: an empty target renders as the
+/// tool's name alone, which is honest.
+fn target_from_input(input: &Value) -> String {
+    const KEYS: [&str; 9] = [
+        "file_path",
+        "filePath",
+        "notebook_path",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "command",
+        "description",
+    ];
+    let Some(object) = input.as_object() else {
+        return String::new();
+    };
+    for key in KEYS {
+        let Some(value) = object.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        if value.is_empty() {
+            continue;
+        }
+        return value.chars().take(MAX_TARGET_CHARS).collect();
+    }
+    String::new()
+}
+
 /// The answer as it is being written: a list of paragraphs, each either appended to
-/// (a delta stream) or replaced wholesale (a part that grew).
+/// (a delta stream) or replaced wholesale (a part that grew) — plus the reasoning and
+/// the tool calls that went into it.
 ///
 /// One structure for both backends, because the difference between "append a token"
 /// and "here is the part again, longer" is not worth two accumulators.
@@ -546,6 +771,24 @@ struct Answer {
     parts: Vec<(String, String)>,
     /// Whether the next [`Update::Append`] opens a new paragraph.
     pending_break: bool,
+    /// The model's reasoning, capped to its tail (see [`MAX_THINKING_BYTES`]).
+    thinking: String,
+    /// The tool calls, oldest first, capped to the newest [`MAX_TOOL_CALLS`].
+    calls: Vec<Call>,
+    /// Every tool call ever made, including the ones the cap dropped.
+    calls_seen: usize,
+}
+
+/// One tool call being tracked while it runs.
+#[derive(Debug, Default)]
+struct Call {
+    id: String,
+    name: String,
+    target: String,
+    /// The streamed arguments, accumulated until they parse (Claude Code sends them
+    /// as partial JSON, one fragment at a time).
+    args: String,
+    done: bool,
 }
 
 impl Answer {
@@ -567,9 +810,57 @@ impl Answer {
                 Some((_, existing)) => *existing = text,
                 None => self.parts.push((key, text)),
             },
+            Update::Thinking(text) => {
+                self.thinking.push_str(&text);
+                keep_tail(&mut self.thinking, MAX_THINKING_BYTES);
+            }
+            // A call is upserted by id: it is announced when it starts (with no
+            // target), described again when the whole turn arrives (with one), and a
+            // later, fuller description must never lose what the first one said.
+            Update::Tool { id, name, target } => match self.call_mut(&id) {
+                Some(call) => {
+                    if !name.is_empty() {
+                        call.name = name;
+                    }
+                    if !target.is_empty() {
+                        call.target = target;
+                    }
+                }
+                None => {
+                    self.calls.push(Call { id, name, target, ..Call::default() });
+                    self.calls_seen += 1;
+                    if self.calls.len() > MAX_TOOL_CALLS {
+                        self.calls.remove(0);
+                    }
+                }
+            },
+            Update::ToolArgs(json) => {
+                let Some(call) = self.calls.last_mut() else {
+                    return;
+                };
+                call.args.push_str(&json);
+                // The arguments are only useful once they are a whole JSON object, so
+                // every fragment re-tries the parse and the last one wins. A call
+                // whose arguments never complete keeps the target it already had.
+                if let Ok(input) = serde_json::from_str::<Value>(&call.args) {
+                    let target = target_from_input(&input);
+                    if !target.is_empty() {
+                        call.target = target;
+                    }
+                }
+            }
+            Update::ToolDone { id } => {
+                if let Some(call) = self.call_mut(&id) {
+                    call.done = true;
+                }
+            }
             // Handled by the caller; listed so a new variant cannot be forgotten here.
             Update::Session(_) | Update::Final(_) | Update::Cost(_) => {}
         }
+    }
+
+    fn call_mut(&mut self, id: &str) -> Option<&mut Call> {
+        self.calls.iter_mut().find(|call| call.id == id)
     }
 
     fn text(&self) -> String {
@@ -589,6 +880,45 @@ impl Answer {
         }
         text
     }
+
+    /// The whole state, as a consumer sees it.
+    ///
+    /// The phase is derived rather than tracked, so it can never disagree with what
+    /// the run actually holds: a tool in flight beats everything (it is what the wait
+    /// is FOR), then an answer that has started arriving, then reasoning.
+    fn progress(&self) -> Progress {
+        let text = self.text();
+        let activity = self.calls.last().map(|call| Activity {
+            tool: call.name.clone(),
+            target: call.target.clone(),
+            done: call.done,
+        });
+        let phase = match &activity {
+            Some(activity) if !activity.done => Phase::Working,
+            _ if !text.is_empty() => Phase::Writing,
+            _ => Phase::Thinking,
+        };
+        Progress {
+            phase,
+            text,
+            thinking: self.thinking.clone(),
+            activity,
+            tools_used: self.calls_seen,
+        }
+    }
+}
+
+/// Drop the beginning of `text` until it fits `max` bytes, on a character boundary.
+/// The tail is what is worth keeping: it is the latest thing the model said.
+fn keep_tail(text: &mut String, max: usize) {
+    if text.len() <= max {
+        return;
+    }
+    let mut cut = text.len() - max;
+    while cut < text.len() && !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    text.drain(..cut);
 }
 
 /// Keep the last few hundred bytes of a stream, for an error message.
@@ -843,6 +1173,165 @@ mod tests {
         assert_eq!(answer.text(), "");
     }
 
+    // ---- progress: the reasoning, the tools, the phase -----------------------
+    //
+    // Every line below was captured from the installed CLIs, because the whole point
+    // of this half is that a UI says what the agent is actually DOING — and a guessed
+    // event shape shows a spinner that never changes.
+
+    /// The real lines a Claude Code tool call is made of: the call is announced, its
+    /// arguments stream as partial JSON, the whole turn repeats it with the arguments
+    /// complete, and the result comes back as a user turn.
+    const CLAUDE_TOOL_START: &str = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_bdrk_01J7","name":"Read","input":{}}},"session_id":"54d69776"}"#;
+    const CLAUDE_TOOL_TURN: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_bdrk_01J7","name":"Read","input":{"file_path":"/tmp/agent-probe/NOTES.md"}}]},"session_id":"54d69776"}"#;
+    const CLAUDE_TOOL_RESULT: &str = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_bdrk_01J7","type":"tool_result","content":"1\tThe answer is forty two."}]},"session_id":"54d69776"}"#;
+    /// A real opencode tool part: one part carrying the call's whole state.
+    const OPENCODE_TOOL: &str = r#"{"type":"tool_use","sessionID":"ses_036d02f8","part":{"type":"tool","tool":"read","callID":"tooluse_u8je","state":{"status":"completed","input":{"filePath":"/tmp/agent-probe/NOTES.md"},"title":"tmp/agent-probe/NOTES.md"}}}"#;
+
+    #[test]
+    fn a_claude_tool_call_is_named_when_it_starts_and_targeted_as_its_arguments_arrive() {
+        let mut answer = Answer::default();
+        apply_line(CLAUDE, CLAUDE_TOOL_START, &mut answer);
+        // Named immediately, with no target yet: "Read" already beats a spinner.
+        let progress = answer.progress();
+        assert_eq!(progress.phase, Phase::Working);
+        let activity = progress.activity.clone().expect("a running tool");
+        assert_eq!(activity.tool, "Read");
+        assert_eq!(activity.target, "");
+        assert!(!activity.done);
+
+        // The arguments arrive split mid-token, as they really do.
+        for fragment in [r#"{"file_path": "/t"#, "mp/ag", "ent-probe/NOT", "ES.md", r#""}"#] {
+            let line = CLAUDE_TOOL_START
+                .replace(
+                    r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_bdrk_01J7","name":"Read","input":{}}}"#,
+                    &format!(
+                        r#"{{"type":"content_block_delta","index":1,"delta":{{"type":"input_json_delta","partial_json":{}}}}}"#,
+                        serde_json::to_string(fragment).unwrap()
+                    ),
+                );
+            apply_line(CLAUDE, &line, &mut answer);
+        }
+        let activity = answer.progress().activity.expect("a running tool");
+        assert_eq!(activity.target, "/tmp/agent-probe/NOTES.md");
+        assert_eq!(answer.progress().tools_used, 1);
+    }
+
+    #[test]
+    fn the_whole_claude_turn_targets_a_call_whose_arguments_never_parsed() {
+        // The belt to the streamed braces' suspenders: a run that missed a fragment
+        // still learns what the tool was pointed at.
+        let mut answer = Answer::default();
+        apply_line(CLAUDE, CLAUDE_TOOL_START, &mut answer);
+        apply_line(CLAUDE, CLAUDE_TOOL_TURN, &mut answer);
+        let activity = answer.progress().activity.expect("a tool");
+        assert_eq!(activity.target, "/tmp/agent-probe/NOTES.md");
+        // And the fuller description does not lose the name the first line gave.
+        assert_eq!(activity.tool, "Read");
+        // One call, described twice.
+        assert_eq!(answer.progress().tools_used, 1);
+    }
+
+    #[test]
+    fn a_tool_result_ends_the_call_and_the_phase_moves_on() {
+        let mut answer = Answer::default();
+        apply_line(CLAUDE, CLAUDE_TOOL_START, &mut answer);
+        apply_line(CLAUDE, CLAUDE_TOOL_RESULT, &mut answer);
+        let progress = answer.progress();
+        assert!(progress.activity.expect("the finished call is still shown").done);
+        // Nothing has been written yet, so the run is thinking again — not working.
+        assert_eq!(progress.phase, Phase::Thinking);
+        apply_line(CLAUDE, CLAUDE_DELTA, &mut answer);
+        assert_eq!(answer.progress().phase, Phase::Writing);
+    }
+
+    #[test]
+    fn an_opencode_tool_part_carries_its_own_state() {
+        let mut answer = Answer::default();
+        apply_line(OPENCODE, &OPENCODE_TOOL.replace("completed", "running"), &mut answer);
+        let progress = answer.progress();
+        assert_eq!(progress.phase, Phase::Working);
+        let activity = progress.activity.expect("a running tool");
+        assert_eq!(activity.tool, "read");
+        assert_eq!(activity.target, "/tmp/agent-probe/NOTES.md");
+        assert!(!activity.done);
+        // The same part, re-sent as completed: the call ends, it is not a second one.
+        apply_line(OPENCODE, OPENCODE_TOOL, &mut answer);
+        assert!(answer.progress().activity.expect("a tool").done);
+        assert_eq!(answer.progress().tools_used, 1);
+    }
+
+    #[test]
+    fn reasoning_is_reported_apart_from_the_answer() {
+        let mut answer = Answer::default();
+        for text in ["let me ", "check the port"] {
+            let line = format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"thinking_delta","thinking":{}}}}}}}"#,
+                serde_json::to_string(text).unwrap()
+            );
+            apply_line(CLAUDE, &line, &mut answer);
+        }
+        let progress = answer.progress();
+        assert_eq!(progress.thinking, "let me check the port");
+        // Reasoning is never part of the answer that goes to Teams.
+        assert_eq!(progress.text, "");
+        assert_eq!(progress.phase, Phase::Thinking);
+    }
+
+    #[test]
+    fn only_the_tail_of_the_reasoning_is_kept() {
+        let mut answer = Answer::default();
+        answer.apply(Update::Thinking("é".repeat(MAX_THINKING_BYTES)));
+        answer.apply(Update::Thinking("the end".into()));
+        let thinking = answer.progress().thinking;
+        assert!(thinking.len() <= MAX_THINKING_BYTES);
+        // The latest reasoning is what a reader is shown, so it must survive.
+        assert!(thinking.ends_with("the end"), "{thinking}");
+    }
+
+    #[test]
+    fn the_tool_list_is_bounded_but_the_count_is_not() {
+        let mut answer = Answer::default();
+        for i in 0..MAX_TOOL_CALLS + 10 {
+            answer.apply(Update::Tool {
+                id: format!("call-{i}"),
+                name: "Grep".into(),
+                target: format!("pattern-{i}"),
+            });
+        }
+        assert_eq!(answer.calls.len(), MAX_TOOL_CALLS);
+        assert_eq!(answer.progress().tools_used, MAX_TOOL_CALLS + 10);
+        // The newest call is the one on screen.
+        assert_eq!(
+            answer.progress().activity.expect("a tool").target,
+            format!("pattern-{}", MAX_TOOL_CALLS + 9)
+        );
+    }
+
+    #[test]
+    fn a_target_is_read_from_a_known_argument_and_never_invented() {
+        let target = |json: &str| target_from_input(&serde_json::from_str(json).unwrap());
+        assert_eq!(target(r#"{"file_path":"src/agent.rs"}"#), "src/agent.rs");
+        assert_eq!(target(r#"{"filePath":"src/agent.rs"}"#), "src/agent.rs");
+        assert_eq!(target(r#"{"pattern":"fn main"}"#), "fn main");
+        // An argument set this module does not recognise yields nothing, so the label
+        // falls back to the tool's own name instead of showing a JSON blob.
+        assert_eq!(target(r#"{"unknown_argument":"x"}"#), "");
+        assert_eq!(target("null"), "");
+        // A multi-line command collapses to one line, and is cut.
+        let long = target(&format!(r#"{{"command":"echo {}"}}"#, "x".repeat(400)));
+        assert_eq!(long.chars().count(), MAX_TARGET_CHARS);
+        assert_eq!(target("{\"command\":\"a\\nb\"}"), "a b");
+    }
+
+    #[test]
+    fn the_phase_of_a_run_that_has_said_nothing_is_thinking() {
+        assert_eq!(Answer::default().progress().phase, Phase::Thinking);
+        assert_eq!(Phase::Thinking.as_str(), "thinking");
+        assert_eq!(Phase::Working.as_str(), "working");
+        assert_eq!(Phase::Writing.as_str(), "writing");
+    }
+
     #[test]
     fn the_answer_is_capped() {
         let mut answer = Answer::default();
@@ -940,7 +1429,7 @@ mod tests {
         let mut request = request(OPENCODE);
         request.backend = &ALWAYS_FAILS;
         request.resume_session = Some("ses_gone".into());
-        let (progress, _rx) = watch::channel(String::new());
+        let (progress, _rx) = watch::channel(Progress::default());
         let error = run(&request, &progress).await.expect_err("both attempts fail");
         assert!(error.to_string().contains("without saying anything"), "{error}");
     }
@@ -955,7 +1444,7 @@ mod tests {
         };
         let mut request = request(CLAUDE);
         request.backend = &MISSING;
-        let (progress, _rx) = watch::channel(String::new());
+        let (progress, _rx) = watch::channel(Progress::default());
         let error = run(&request, &progress).await.expect_err("no such program");
         assert!(error.to_string().contains("not on PATH"), "{error}");
         assert!(!is_available(&MISSING));

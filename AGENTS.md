@@ -63,6 +63,38 @@ arrives, so everybody in the thread watches the reply being written.
 one, `src/agent_markdown.rs` turns the answer into the HTML a Teams message renders,
 and `agent_reply` in `src/bin/server.rs` posts and streams it.
 
+**In teams-lite itself the answer is drawn being written.** The edited message is the
+lowest common denominator — one HTML body, once a second, for clients we do not write.
+This app is on the same machine as the CLI, so `agent_reply` also broadcasts the whole
+run on the local `agent_stream` event (`agent_stream_local`, over `agent::Progress`):
+the answer so far, the model's reasoning, the tool that is running, the phase. The web
+UI renders it word by word under the CLI's own mark (`web/src/components/agent-reply.tsx`
+and `agent-logo.tsx`, over `web/src/lib/agent-run.ts` and `agent-markdown.ts` — a port
+of the Rust markdown subset, pinned to it case for case by its tests). Four rules hold
+that surface together:
+
+- **The stream is an overlay on the posted message, never a message of its own.** The
+  row in the history IS the Teams message; only its body is replaced while a run is
+  live. So there is nothing to reconcile, nothing to clean up when a frame is lost, and
+  a reply this app never watched being written renders identically from the message
+  alone.
+- **A reply is recognised from the line it signs itself with**, not from a flag
+  (`web/src/lib/agent-message.ts`). That line exists for honesty about authorship and
+  is required above; reading it back is what makes every reply ever posted render as
+  one — including the ones answered from a phone while this app was closed, which is
+  most of them.
+- **The answer sits on the LEFT.** The message is genuinely the user's — it went out
+  through their account and a colleague sees their name on it — but they did not write
+  it, and putting it beside the things they did write is the one place this app would be
+  lying to the person it belongs to.
+- **The terminal frame goes out after the final edit.** A finished run stops being an
+  overlay, so the message it falls back to has to already hold the whole answer.
+
+`web/mock/server.ts` reproduces that flow (`simulateMockAgentRun`) with no CLI and no
+tenant, which is what makes the surface reviewable — `cd web && bun run preview --
+--out /tmp/reply --agent-reply` walks one run through every phase (`--agent` captures the
+menu instead), and `web/e2e/agent.spec.ts` pins it.
+
 Four rules hold it together. Each one is load-bearing, and each is pinned by a test:
 
 - **Only the user may summon it.** The trigger requires the message to be ours

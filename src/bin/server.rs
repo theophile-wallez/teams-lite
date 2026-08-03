@@ -19,6 +19,7 @@
 //          | read_receipt | call | call_signal | update_available
 //          | mail_folders_changed | mail_list_updated | mail_list_error
 //          | calendars_changed | calendar_view_updated | calendar_view_error
+//          | agent_stream
 //
 // The `mail_*` methods are the READ-ONLY Outlook surface (see `mail`): the same
 // broker identity carries the mailbox, and the app lists folders, reads messages and
@@ -3776,6 +3777,17 @@ const AGENT_EDIT_INTERVAL: Duration = Duration::from_millis(1_200);
 /// at the end: a pathological answer must not turn into a thousand PUTs.
 const AGENT_MAX_EDITS: usize = 100;
 
+/// How often the app's own frontends hear about a run, at most.
+///
+/// Two orders of magnitude under [`AGENT_EDIT_INTERVAL`], because these two paths cost
+/// different things: an edit is an HTTPS request that every member of the thread sees
+/// land, while this is a JSON frame on a loopback socket. The floor exists only so a
+/// model emitting a token every few milliseconds does not turn into a frame per token
+/// for every connected page; at 50 ms the answer still arrives faster than it can be
+/// read, and the client eases the reveal on top of it (see `useSmoothReveal` in
+/// web/src/components/agent-reply.tsx).
+const AGENT_STREAM_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Say at startup which local agents this process can run, and where.
 ///
 /// A CLI that is not on `PATH` turns every `@claude` message into a no-op, and the only
@@ -3927,6 +3939,14 @@ fn agent_session_key(conversation_id: &str, backend: &str) -> String {
 /// being written, rather than staring at nothing for two minutes. It is also the
 /// reason the placeholder goes out FIRST — the message must exist before it can be
 /// edited, and its id is what the send hands back (see [`teams_send::Sent`]).
+///
+/// The same run also goes out on `agent_stream`, for the app's own frontends. That is
+/// not a second implementation of the same thing: a Teams edit is the LOWEST common
+/// denominator — one HTML body, once a second, for clients we do not write — while a
+/// local page can be told the reasoning, the tool that is running and the phase, and
+/// render the answer token by token. Neither path is authoritative over the other; the
+/// message in the thread is the record, and the stream is how this app shows it being
+/// written.
 async fn agent_reply(
     ctx: &Ctx,
     command: &agent_policy::Command,
@@ -3949,18 +3969,28 @@ async fn agent_reply(
         }
     }
 
-    let (progress, mut watch_progress) = tokio::sync::watch::channel(String::new());
-    // The sender is dropped the moment the run ends, which is what stops the edit
-    // loop below. Without that explicit drop the two futures would wait on each
-    // other: `tokio::join!` keeps both alive until both finish.
+    // The run starts: say so at once, so a page that has the thread open shows the
+    // agent taking the question rather than a lone "thinking…" placeholder.
+    ctx.emit(
+        "agent_stream",
+        agent_stream_frame(command, &sent.id, "thinking", &agent::Progress::default(), None),
+    );
+
+    let (progress, mut watch_edits) = tokio::sync::watch::channel(agent::Progress::default());
+    let mut watch_local = progress.subscribe();
+    // The sender is dropped the moment the run ends, which is what stops both loops
+    // below. Without that explicit drop the futures would wait on each other:
+    // `tokio::join!` keeps every branch alive until all of them finish.
     let run = async move {
         let outcome = agent::run(&request, &progress).await;
         drop(progress);
         outcome
     };
-    let stream = agent_stream_edits(ctx, command, &sent.id, &mut watch_progress);
-    // Both at once: the child's output drives the watch channel, the edits drain it.
-    let (outcome, edits) = tokio::join!(run, stream);
+    let edits = agent_stream_edits(ctx, command, &sent.id, &mut watch_edits);
+    let local = agent_stream_local(ctx, command, &sent.id, &mut watch_local);
+    // All three at once: the child's output drives the watch channel, and the two
+    // consumers drain it at the pace each one can afford.
+    let (outcome, edits, ()) = tokio::join!(run, edits, local);
     if let Err(e) = edits {
         eprintln!("[agent] a progress edit failed (the answer still lands): {e}");
     }
@@ -3973,7 +4003,32 @@ async fn agent_reply(
         ),
         Err(e) => (agent_policy::failure_html(backend, &e.to_string()), None, None),
     };
-    agent_edit(ctx, command, &sent.id, &final_html).await?;
+    // The answer lands in the thread, and only THEN does the stream say it is over.
+    //
+    // That order matters to a client. A finished run stops being an overlay: the app
+    // lets go of it and renders the posted message instead (see `forgetAgentRun` in
+    // web/src/lib/store.ts). If "done" arrived first, the message it fell back to would
+    // still be the second-to-last edit — so the answer would visibly lose its last
+    // sentence for as long as it takes Teams to echo the final one back.
+    let edited = agent_edit(ctx, command, &sent.id, &final_html).await;
+    let final_progress = agent::Progress {
+        phase: agent::Phase::Writing,
+        text: outcome.as_ref().map(|o| o.text.clone()).unwrap_or_default(),
+        ..agent::Progress::default()
+    };
+    // Sent whatever the edit did: a client that never hears the run ended would show a
+    // bubble writing forever (until its own staleness guard fires, minutes later).
+    match &outcome {
+        Ok(_) => ctx.emit(
+            "agent_stream",
+            agent_stream_frame(command, &sent.id, "done", &final_progress, None),
+        ),
+        Err(e) => ctx.emit(
+            "agent_stream",
+            agent_stream_frame(command, &sent.id, "error", &final_progress, Some(&e.to_string())),
+        ),
+    }
+    edited?;
 
     // Remember the session so a follow-up in this thread continues the conversation.
     if let (Some(session), Ok(store)) = (session_id, ctx.store()) {
@@ -4005,7 +4060,7 @@ async fn agent_stream_edits(
     ctx: &Ctx,
     command: &agent_policy::Command,
     message_id: &str,
-    progress: &mut tokio::sync::watch::Receiver<String>,
+    progress: &mut tokio::sync::watch::Receiver<agent::Progress>,
 ) -> Result<()> {
     let mut edits = 0;
     let mut posted = String::new();
@@ -4013,7 +4068,10 @@ async fn agent_stream_edits(
         if edits >= AGENT_MAX_EDITS {
             return Ok(());
         }
-        let text = progress.borrow_and_update().clone();
+        // Only the answer travels to Teams. A reasoning delta or a tool starting
+        // changes the progress without changing the message, and spending one of the
+        // hundred edits on a body nobody can tell apart from the last one is waste.
+        let text = progress.borrow_and_update().text.clone();
         if text.trim().is_empty() || text == posted {
             continue;
         }
@@ -4026,6 +4084,70 @@ async fn agent_stream_edits(
         tokio::time::sleep(AGENT_EDIT_INTERVAL).await;
     }
     Ok(())
+}
+
+/// Report the whole run to the app's own frontends, as `agent_stream` events.
+///
+/// The local twin of [`agent_stream_edits`], and deliberately less frugal: a frame
+/// costs a JSON serialization and a loopback write, so every change is worth sending —
+/// the reasoning, the tool that started, the phase — floored only at
+/// [`AGENT_STREAM_INTERVAL`] so a fast model does not become a frame per token.
+///
+/// Returns when the runner drops its end of the channel. The terminal frame is NOT
+/// sent here: [`agent_reply`] sends it from the authoritative outcome, which is the
+/// only place that knows whether the run succeeded.
+async fn agent_stream_local(
+    ctx: &Ctx,
+    command: &agent_policy::Command,
+    message_id: &str,
+    progress: &mut tokio::sync::watch::Receiver<agent::Progress>,
+) {
+    while progress.changed().await.is_ok() {
+        let current = progress.borrow_and_update().clone();
+        ctx.emit(
+            "agent_stream",
+            agent_stream_frame(command, message_id, current.phase.as_str(), &current, None),
+        );
+        // Floor the rate AFTER the frame, so the first token appears at once and only
+        // what follows is spaced out. The channel keeps just the latest value, so a
+        // burst during the sleep collapses into one frame rather than a backlog.
+        tokio::time::sleep(AGENT_STREAM_INTERVAL).await;
+    }
+}
+
+/// One `agent_stream` frame: where a run stands, for a client that renders it.
+///
+/// `phase` is passed rather than read off the progress because the two terminal states
+/// — `done` and `error` — are not progress at all (see [`agent::Phase`]), and a client
+/// needs them to stop streaming.
+///
+/// The `run_id` names the REQUEST, not the reply: it is the trigger message's id, so a
+/// client can tell one run from the next in a thread where the user asked twice, and
+/// `message_id` says which posted message the run is writing into.
+fn agent_stream_frame(
+    command: &agent_policy::Command,
+    message_id: &str,
+    phase: &str,
+    progress: &agent::Progress,
+    error: Option<&str>,
+) -> Value {
+    json!({
+        "run_id": format!("{}/{}", command.conversation_id, command.message_id),
+        "conversation": command.conversation_id,
+        "message_id": message_id,
+        "backend": command.backend.name,
+        "phase": phase,
+        "text": progress.text,
+        "thinking": progress.thinking,
+        "activity": progress.activity.as_ref().map(|activity| json!({
+            "tool": activity.tool,
+            "target": activity.target,
+            "done": activity.done,
+        })),
+        "tools_used": progress.tools_used,
+        "error": error,
+        "at": now_ms(),
+    })
 }
 
 /// Post the agent's message as a native Teams reply to the message that summoned it.

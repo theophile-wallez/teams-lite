@@ -42,6 +42,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/ghost --ghost     # read state + Ghost mode
 //   bun run web/scripts/preview.ts --out /tmp/set --settings    # the Settings pane
 //   bun run web/scripts/preview.ts --out /tmp/agent --agent     # the local-agent menu
+//   bun run web/scripts/preview.ts --out /tmp/reply --agent-reply  # the agent answering
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -501,6 +502,86 @@ export async function openSettings(page: Page): Promise<void> {
   await page.waitForSelector('[data-testid="settings-pane"]');
 }
 
+/**
+ * Opt the open thread into agent replies, from that thread's own header — which is the
+ * only place the app offers it, and on purpose (the consent belongs where the user can
+ * see who reads the thread).
+ *
+ * A write affordance, so it re-asserts the sentinel: against the real backend this click
+ * is what tells a machine it may post under the user's name.
+ */
+export async function turnAgentOn(page: Page): Promise<void> {
+  await assertMockBackend(page);
+  const menu = page.locator('[data-testid="agent-menu"]');
+  const isOn = async () => (await menu.getAttribute("data-agent-mode")) === "reply";
+
+  // Retried, because the mock's live feed re-renders the pane every few seconds and a
+  // non-modal Radix menu can be unmounted between opening it and reaching its switch.
+  // The state that is checked is the app's own attribute, never our memory of clicking.
+  for (let attempt = 0; attempt < 3 && !(await isOn()); attempt += 1) {
+    try {
+      await menu.click({ timeout: 5_000 });
+      const toggle = page.locator('[data-testid="agent-mode-toggle"]');
+      await toggle.waitFor({ state: "visible", timeout: 5_000 });
+      await toggle.click({ timeout: 5_000 });
+      await page.waitForFunction(
+        `document.querySelector('[data-testid="agent-menu"]')?.getAttribute("data-agent-mode") === "reply"`,
+        undefined,
+        { timeout: 5_000 },
+      );
+    } catch {
+      await page.waitForTimeout(300);
+    }
+  }
+  if (!(await isOn())) throw new Error("[preview] could not opt the thread into agent replies");
+
+  // Close the menu by clicking the trigger again, NOT with Escape: the app's
+  // window-level handler reads Escape as "close the conversation", so that key would
+  // take the composer off screen along with the menu.
+  if ((await page.locator('[data-testid="agent-mode-toggle"]').count()) > 0) {
+    await menu.click();
+    await page.waitForSelector('[data-testid="agent-mode-toggle"]', { state: "detached" });
+  }
+  await page.waitForTimeout(200);
+}
+
+/**
+ * Summon the local agent in the open thread and wait for the run to reach `phase`.
+ *
+ * The mock answers an `@claude` message the same way the backend does — it posts a
+ * placeholder, narrates the run on `agent_stream`, and edits the message on the way (see
+ * `simulateMockAgentRun` in web/mock/server.ts) — so this drives the whole streaming
+ * surface without a CLI, a tenant or a single real send.
+ */
+export async function askAgent(page: Page, prompt: string): Promise<void> {
+  await typeInComposer(page, prompt, { send: true });
+  // Only that the run is on screen. Waiting for a NAMED phase would be a race the
+  // script loses: `thinking` and `working` last a beat each, and a wait that has to
+  // re-poll (a re-render detaches the node) can miss the window it was waiting for.
+  // The caller waits for the durable things instead — the tool chip, the writing phase.
+  await page.waitForSelector('[data-testid="agent-stream"]', { timeout: 30_000 });
+}
+
+/**
+ * Park the open thread back on its newest message.
+ *
+ * Needed after an element capture: Playwright scrolls a cropped element into view, and
+ * the history is virtualized — so the rows that were at the bottom get unmounted, and a
+ * following `waitForSelector` on one of them waits forever. It only scrolls, so it needs
+ * no sentinel.
+ */
+export async function scrollToNewest(page: Page): Promise<void> {
+  // Source text, not a closure: this file type-checks under the node tsconfig (no DOM
+  // lib), and the body runs in the page — the same idiom as `setTheme`.
+  await page.evaluate(
+    `(() => {
+       const el = document.querySelector('[data-testid="message-scroll"]');
+       if (el) el.scrollTop = el.scrollHeight;
+     })()`,
+  );
+  await page.waitForTimeout(300);
+}
+
 export async function setGhostMode(page: Page, on: boolean): Promise<void> {
   await openSettings(page);
   const toggle = page.locator('[data-testid="ghost-mode-toggle"]');
@@ -637,7 +718,15 @@ async function assertPortsAreFree(): Promise<void> {
 function startMock(): ReturnType<typeof Bun.spawn> {
   return Bun.spawn(["bun", "run", "mock/server.ts"], {
     cwd: WEB_DIR,
-    env: { ...process.env, PORT: String(MOCK_PORT), MOCK_TEST_HOOKS: "1" },
+    env: {
+      ...process.env,
+      PORT: String(MOCK_PORT),
+      MOCK_TEST_HOOKS: "1",
+      // Pace the simulated agent run for somebody LOOKING at it: each phase has to
+      // last long enough to be captured, and to be read in a recording. The E2E suite
+      // sets its own (faster) value, and so may the caller.
+      MOCK_AGENT_STEP_MS: process.env.MOCK_AGENT_STEP_MS ?? "650",
+    },
     stdout: "inherit",
     stderr: "inherit",
   });
@@ -760,6 +849,78 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-list-light.png, ${out}-light.png, ` +
           `${out}-attachments-light.png and ${out}-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // The local agent answering in a thread: every phase of one run, light and dark.
+  //
+  // Nothing here reaches a tenant. The mock runs no CLI — it reproduces the flow (see
+  // `simulateMockAgentRun` in web/mock/server.ts), which is what makes this surface
+  // reviewable without asking a real agent a real question in a real channel.
+  if (args.includes("--agent-reply")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openFirstConversation(page);
+      await turnAgentOn(page);
+
+      await askAgent(page, "@claude which port does the backend listen on?");
+      await shot(`${out}-thinking-light.png`);
+      // Best-effort: a tool call is a phase of the run, and a capture that arrives after
+      // it must not take the whole preview down with it. `MOCK_AGENT_STEP_MS` is what
+      // widens the window (the mock reads it — see web/mock/server.ts).
+      await page
+        .locator('[data-testid="agent-activity"]')
+        .waitFor({ state: "visible", timeout: 10_000 })
+        .catch(() =>
+          console.log("[preview] no tool call on screen — capturing the run as it stands"),
+        );
+      await shot(`${out}-working-light.png`);
+      // Also best-effort, for the same reason: the run is a real clock, and a preview
+      // that arrives after a phase should capture the next one rather than die.
+      await page
+        .locator('[data-testid="agent-stream"][data-phase="writing"]')
+        .waitFor({ state: "visible", timeout: 15_000 })
+        .catch(() => console.log("[preview] the answer was already written — capturing that"));
+      await page.waitForTimeout(900);
+      await shot(`${out}-writing-light.png`);
+      // The bubble on its own, where the detail is: the mark, the caret at the end of
+      // the answer, the status line under it. Cropped on the MESSAGE, not on the stream:
+      // the stream is an overlay that goes when the run ends, and a crop is exactly the
+      // slow operation that arrives after it.
+      await shot(
+        `${out}-bubble-light.png`,
+        '[data-testid="message"]:has([data-testid="agent-signature"])',
+      );
+      await scrollToNewest(page);
+      await setTheme("dark");
+      await shot(`${out}-writing-dark.png`);
+
+      // The finished answer, which is also what every reply this app never watched
+      // being written looks like: the stream is gone and the message renders alone.
+      await page.waitForSelector('[data-testid="agent-signature"]');
+      await page.waitForFunction(
+        `!document.querySelector('[data-testid="agent-status"]')`,
+        undefined,
+        { timeout: 30_000 },
+      );
+      await page.waitForTimeout(400);
+      await shot(`${out}-done-dark.png`);
+      await setTheme("light");
+      await shot(`${out}-done-light.png`);
+
+      // The other CLI, whose mark is drawn per theme (opencode ships one logo per
+      // background) — so it is captured on both.
+      await askAgent(page, "@opencode and where do the web ports live?");
+      await page.waitForSelector('[data-testid="agent-stream"][data-phase="writing"]');
+      await shot(`${out}-opencode-light.png`);
+      await shot(`${out}-opencode-coin-light.png`, '[data-testid="agent-coin"][data-backend="opencode"]');
+      await scrollToNewest(page);
+      await setTheme("dark");
+      await shot(`${out}-opencode-dark.png`);
+      await shot(`${out}-opencode-coin-dark.png`, '[data-testid="agent-coin"][data-backend="opencode"]');
+      console.log(
+        `[preview] wrote ${out}-{thinking,working,writing,done,opencode}-*.png`,
       );
     });
     process.exit(0);

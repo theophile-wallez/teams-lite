@@ -347,6 +347,151 @@ html[data-virtual-keyboard-open] .composer-shell {
   }
 }
 
+/* The local agent's answer being written (see components/agent-reply.tsx).
+   Three animations, each doing one job:
+
+   `.agent-token` — one word of a streamed answer. The span mounts when the word
+   arrives and the animation runs once, so the answer materializes word by word
+   instead of appearing in the jumps the model streams in. `both` is what makes it
+   safe: the word is hidden before the animation and visible after it, which is also
+   the resting state the global reduced-motion rule above lands on.
+
+   `.agent-shimmer` — a highlight travelling through text that is standing in for
+   progress: the phase line while the model is thinking, and the reasoning under it.
+   It stops the moment words start arriving, because the words are then the progress.
+   The gradient is painted into the text itself (background-clip), so there is no
+   overlay to sit on top of the bubble.
+
+   `.agent-coin-busy` — the ring around the CLI's mark, breathing while its run is
+   going. It is the one indicator that is on screen from the instant the trigger
+   lands, before there is anything to say. */
+.agent-token {
+  display: inline;
+  animation-name: teams-agent-token;
+  animation-duration: 260ms;
+  animation-timing-function: cubic-bezier(0.2, 0.65, 0.3, 0.9);
+  animation-fill-mode: both;
+}
+@keyframes teams-agent-token {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    /* A hair of rise, so a word settles into the line rather than switching on. */
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0);
+  }
+}
+
+/* Modelled on shadcn's `shimmer` utility (ui.shadcn.com/docs/utils/shimmer) rather
+   than depending on it: that one ships inside the `shadcn` package's own stylesheet,
+   which this app does not import — it takes shadcn's *components*, not its utility
+   layer. What is borrowed is the part that makes it good, and that the first version
+   here got wrong twice over.
+
+   TWO layers, not one. A base layer in `currentColor` covers the whole box, and the
+   travelling highlight rides over it. With one layer the letters the gradient did not
+   reach rendered TRANSPARENT — the word visibly lost its tail for part of every cycle
+   — and no amount of arithmetic on the position fixes that in general. Here the base
+   is always there, so the worst a mispositioned highlight can do is not shimmer.
+
+   The band is a FIXED width (`3ch + 40px`, shadcn's own default), not a percentage of
+   the element. A percentage band stretches with the text: a five-word reasoning line
+   and a two-word label would shimmer at visibly different rates, and the long one
+   would read as a slow wash rather than a highlight.
+
+   The highlight is derived from `currentColor` toward the theme's own foreground, so
+   one rule works on a light bubble and a dark one, and on dim text or bright. */
+.agent-shimmer {
+  --shimmer-duration: 2.1s;
+  --shimmer-spread: calc(3ch + 40px);
+  --shimmer-angle: 100deg;
+  --shimmer-color: color-mix(in oklab, currentColor 25%, var(--foreground));
+  background-image:
+    linear-gradient(
+      var(--shimmer-angle),
+      transparent 0%,
+      var(--shimmer-color) 50%,
+      transparent 100%
+    ),
+    linear-gradient(currentColor, currentColor);
+  background-size:
+    var(--shimmer-spread) 100%,
+    100% 100%;
+  background-repeat: no-repeat;
+  background-position:
+    -30% 0,
+    0 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  /* The FILL is cleared, not the color. `color: transparent` here would be circular:
+     both layers above are built out of `currentColor`, so clearing the color makes the
+     gradients transparent too — the text disappears except where the highlight happens
+     to be, which is how a word came to lose its tail. `-webkit-text-fill-color` hides
+     the glyph fill while leaving `color` intact for the layers to read, and a browser
+     that ignores it simply renders the text normally. */
+  -webkit-text-fill-color: transparent;
+  animation: teams-agent-shimmer var(--shimmer-duration) linear infinite;
+}
+@keyframes teams-agent-shimmer {
+  from {
+    background-position:
+      -30% 0,
+      0 0;
+  }
+  to {
+    background-position:
+      130% 0,
+      0 0;
+  }
+}
+
+.agent-coin-busy::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 9999px;
+  border: 1px solid color-mix(in oklab, var(--primary) 55%, transparent);
+  animation: teams-agent-breathe 1.9s ease-in-out infinite;
+}
+@keyframes teams-agent-breathe {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.75;
+    transform: scale(1.12);
+  }
+}
+
+/* The caret at the end of an answer that is still arriving. It rides the body's last
+   block as a pseudo-element, which is what puts it after the final word instead of on
+   a line of its own — no marker element in the text, nothing to strip out on copy. */
+.agent-streaming > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.42em;
+  height: 1em;
+  margin-left: 0.12em;
+  border-radius: 1px;
+  vertical-align: text-bottom;
+  background-color: color-mix(in oklab, currentColor 55%, transparent);
+  animation: teams-agent-caret 1.05s steps(2, jump-none) infinite;
+}
+@keyframes teams-agent-caret {
+  from {
+    opacity: 0.15;
+  }
+  to {
+    opacity: 0.9;
+  }
+}
+
 /* Word effects — the easter egg on a handful of words (see lib/word-effects.ts).
    The word stays part of the sentence — no chip, no pill, the bubble's own
    background shows through — and only the letters are dressed up: one color per

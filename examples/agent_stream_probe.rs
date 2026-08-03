@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
         tools: agent::tools_from_setting(None),
         model,
     };
-    let (progress, mut watch) = tokio::sync::watch::channel(String::new());
+    let (progress, mut watch) = tokio::sync::watch::channel(agent::Progress::default());
     let run = async move {
         let outcome = agent::run(&request, &progress).await;
         drop(progress);
@@ -89,16 +89,38 @@ async fn main() -> Result<()> {
     };
     let stream = async {
         let mut edits = 0;
+        let mut posted = String::new();
         while watch.changed().await.is_ok() {
-            let text = watch.borrow_and_update().clone();
-            if text.trim().is_empty() {
+            let current = watch.borrow_and_update().clone();
+            // What the app's own frontends are told, printed as it happens — this is
+            // the `agent_stream` event's payload in all but its JSON (see
+            // `agent_stream_local` in src/bin/server.rs).
+            println!(
+                "  [{}] {} chars{}{}",
+                current.phase.as_str(),
+                current.text.chars().count(),
+                current
+                    .activity
+                    .as_ref()
+                    .map(|a| format!(
+                        " — {}{}{}",
+                        a.tool,
+                        if a.target.is_empty() { String::new() } else { format!(" {}", a.target) },
+                        if a.done { " ✓" } else { "" }
+                    ))
+                    .unwrap_or_default(),
+                if current.thinking.is_empty() { String::new() } else { " (reasoning)".into() },
+            );
+            // Only the answer is worth an edit: Teams sees the message, not the phase.
+            if current.text.trim().is_empty() || current.text == posted {
                 continue;
             }
-            let html = agent_policy::reply_html(backend, &text, false);
+            let html = agent_policy::reply_html(backend, &current.text, false);
             teams_send::edit_message(&http, &session, SANDBOX_THREAD, &sent.id, "", Some(&html))
                 .await?;
+            posted = current.text;
             edits += 1;
-            println!("edit {edits}: {} chars", text.chars().count());
+            println!("edit {edits}: {} chars", posted.chars().count());
             tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
         }
         Ok::<usize, anyhow::Error>(edits)

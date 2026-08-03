@@ -67,7 +67,11 @@ export default defineConfig({
     {
       // Deterministic mock: no random live feed, test hooks enabled so specs can
       // inject live events on demand.
-      command: `PORT=${MOCK_PORT} MOCK_LIVE_MS=0 MOCK_TEST_HOOKS=1 bun run mock/server.ts`,
+      // `MOCK_AGENT_STEP_MS` hurries the simulated agent run along: the mock paces it
+      // for a human watching a screenshot. Not to the floor, though — a spec asserts on
+      // the tool call that is running, and a phase that lasts 150 ms is a phase a
+      // reader could not see either.
+      command: `PORT=${MOCK_PORT} MOCK_LIVE_MS=0 MOCK_TEST_HOOKS=1 MOCK_AGENT_STEP_MS=150 bun run mock/server.ts`,
       url: `http://127.0.0.1:${MOCK_PORT}/`,
       reuseExistingServer: !process.env.CI,
       timeout: 30_000,

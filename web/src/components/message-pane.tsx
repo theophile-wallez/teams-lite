@@ -11,8 +11,10 @@ import {
   type ChatMessage,
   type Conversation,
 } from "~/lib/protocol";
+import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
 import { useAppState, useController } from "./controller-context";
 import { AgentMenu } from "./agent-menu";
+import { AgentPendingBubble } from "./agent-reply";
 import { Avatar, conversationFallback, conversationPhoto, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
 import { SystemEventLine } from "./system-event-line";
@@ -66,11 +68,13 @@ function prependTriggerPx(el: HTMLElement): number {
 const MAX_SCROLL_PAGES = 20;
 const HIGHLIGHT_MS = 1600;
 
-/** One row of the virtualized history: a single chat message, or a whole channel
- *  thread (its root post plus its collapsible replies). */
+/** One row of the virtualized history: a single chat message, a whole channel thread
+ *  (its root post plus its collapsible replies), or the agent's reply before the message
+ *  it is being written into has reached us. */
 type HistoryRow =
   | { kind: "message"; key: string; message: ChatMessage; prev?: ChatMessage; next?: ChatMessage }
-  | { kind: "thread"; key: string; thread: Thread };
+  | { kind: "thread"; key: string; thread: Thread }
+  | { kind: "agent"; key: string; run: AgentRun };
 
 /**
  * The right pane: conversation title, the scrolling message history (virtualized,
@@ -91,6 +95,9 @@ export function MessagePane(props: { onBack?: () => void }) {
   const pendingScroll = useAppState((s) => s.pendingScroll);
   const scrollToBottomNonce = useAppState((s) => s.scrollToBottomNonce);
   const readReceipts = useAppState((s) => s.readReceipts);
+  // The agent run writing in THIS thread, if any. One per conversation, and a transient
+  // overlay on the message it is writing into (see lib/agent-run.ts).
+  const agentRun = useAppState((s) => (s.openId ? s.agentRuns[s.openId] : undefined));
   const modifier = useModifierLabel();
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -184,28 +191,37 @@ export function MessagePane(props: { onBack?: () => void }) {
   // thread for a channel (a thread's root post and its replies are measured and
   // scrolled as a single block, so expanding one just makes its row taller).
   // `rowOfMessage` maps a message id to the row that renders it, for deep links.
+  //
+  // A live agent run adds at most one row, and only while the message it is writing
+  // into has not reached us yet — the second Teams takes to echo our own placeholder
+  // back. Once it has, the run rides that message's row instead (see `renderMsg`), so
+  // the reply is one thing in the history and never two.
   const { rows, rowOfMessage } = useMemo(() => {
     const rowOfMessage = new Map<string, number>();
+    const rows: HistoryRow[] = [];
     if (threads) {
-      const rows: HistoryRow[] = threads.map((thread, i) => {
+      threads.forEach((thread, i) => {
         rowOfMessage.set(thread.lead.id, i);
         for (const reply of thread.replies) rowOfMessage.set(reply.id, i);
-        return { kind: "thread", key: thread.rootId, thread };
+        rows.push({ kind: "thread", key: thread.rootId, thread });
       });
-      return { rows, rowOfMessage };
+    } else {
+      messages.forEach((message, i) => {
+        rowOfMessage.set(message.id, i);
+        rows.push({
+          kind: "message",
+          key: message.id,
+          message,
+          prev: messages[i - 1],
+          next: messages[i + 1],
+        });
+      });
     }
-    const rows: HistoryRow[] = messages.map((message, i) => {
-      rowOfMessage.set(message.id, i);
-      return {
-        kind: "message",
-        key: message.id,
-        message,
-        prev: messages[i - 1],
-        next: messages[i + 1],
-      };
-    });
+    if (agentRun && !rowOfMessage.has(agentRun.message_id)) {
+      rows.push({ kind: "agent", key: `agent:${agentRun.run_id}`, run: agentRun });
+    }
     return { rows, rowOfMessage };
-  }, [threads, messages]);
+  }, [threads, messages, agentRun]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -376,6 +392,37 @@ export function MessagePane(props: { onBack?: () => void }) {
     return () => clearTimeout(t);
   }, [highlightId]);
 
+  // Follow an answer as it is written.
+  //
+  // Every other case that moves the bottom of the history APPENDS a row, which the
+  // virtualizer handles (`followOnAppend`). A streamed reply is the one case that does
+  // not: the same row grows, a word at a time, and nothing tells the scroller to keep
+  // up — so the answer would write itself off the bottom of the screen while the reader
+  // watched the top of it.
+  //
+  // The frame loop is deliberate. The reveal is animated inside the bubble at frame
+  // rate (see `useSmoothReveal`), not on the events this component re-renders for, so
+  // an effect keyed on the run's text would lag a fifth of a second behind the words.
+  //
+  // Whether to follow is read from the geometry each frame rather than from `atBottom`,
+  // because that state lands a frame after the scroll event that changes it: a reader
+  // who scrolls up would be yanked back once before it caught up. `AT_BOTTOM_PX` is the
+  // same threshold the jump-to-latest button uses, so "following" means exactly what
+  // that button means by "at the bottom".
+  const streaming = agentRunIsLive(agentRun);
+  useEffect(() => {
+    if (!streaming) return;
+    let frame = requestAnimationFrame(function pin() {
+      const el = viewportRef.current;
+      if (el) {
+        const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+        if (distance > 0 && distance <= AT_BOTTOM_PX) el.scrollTop = el.scrollHeight;
+      }
+      frame = requestAnimationFrame(pin);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [streaming]);
+
   const doReply = useCallback((m: ChatMessage) => {
     controller.startReply(m);
     setFocusToken((t) => t + 1);
@@ -406,6 +453,13 @@ export function MessagePane(props: { onBack?: () => void }) {
 
   const doCancelEdit = useCallback(() => setEditingId(null), []);
 
+  // A finished run whose last word is now on screen: let it go, and the posted message
+  // renders on its own from here (which is what it does for every reply this app never
+  // watched being written).
+  const doAgentSettled = useCallback(() => {
+    if (agentRun) controller.forgetAgentRun(agentRun.conversation, agentRun.run_id);
+  }, [controller, agentRun]);
+
   // One rendered row: a system-event line or a message bubble, with its optional
   // "seen by" receipts underneath. `prev`/`next` drive avatar/name chaining and
   // are the visually adjacent rows (within a thread for channels, else the flat
@@ -431,6 +485,8 @@ export function MessagePane(props: { onBack?: () => void }) {
             onPanel={opts?.onPanel}
             editing={editingId === m.id}
             highlighted={highlightId === m.id}
+            agentRun={agentRun?.message_id === m.id ? agentRun : undefined}
+            onAgentSettled={doAgentSettled}
             onReply={doReply}
             onCopy={doCopy}
             onReact={doReact}
@@ -616,6 +672,8 @@ export function MessagePane(props: { onBack?: () => void }) {
                         onToggle={() => toggleThread(row.thread.rootId)}
                         renderMsg={renderMsg}
                       />
+                    ) : row.kind === "agent" ? (
+                      <AgentPendingBubble run={row.run} onSettled={doAgentSettled} />
                     ) : (
                       renderMsg(row.message, row.prev, row.next)
                     )}

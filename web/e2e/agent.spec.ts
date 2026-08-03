@@ -2,14 +2,19 @@ import { expect } from "@playwright/test";
 import { test, fetchAgentModes, gotoApp, openConversationAt } from "./helpers";
 
 // The per-conversation switch that lets the local agent answer an `@claude` message
-// (see web/src/components/agent-menu.tsx, src/agent_policy.rs).
+// (see web/src/components/agent-menu.tsx, src/agent_policy.rs), and how the answer is
+// drawn as it is written (web/src/components/agent-reply.tsx).
 //
 // The switch IS the consent gate of the feature: turning it on tells the machine it may
 // post an answer under the user's name in that thread. So what this spec pins is the
 // default (off, in a conversation nobody named) and the round-trip through the backend
-// — never a local guess about the state. The reply itself is not driven here: it runs a
-// CLI on the backend's machine, which the mock has none of; `examples/agent_stream_probe
-// .rs` is what exercises that end, against the sandbox channel and nothing else.
+// — never a local guess about the state.
+//
+// The reply is driven through the mock, which reproduces the flow rather than running a
+// CLI: it posts the placeholder, narrates the run on `agent_stream` and edits the message
+// on the way (see `simulateMockAgentRun` in web/mock/server.ts). Against the real tenant
+// that end is exercised by `examples/agent_stream_probe.rs`, pinned to the sandbox
+// channel and nowhere else.
 
 test.describe("The local agent switch", () => {
   test("is off in a conversation nobody opted in, and names the prefix to type", async ({
@@ -100,5 +105,88 @@ test.describe("The local agent switch", () => {
       .poll(async () => (await fetchAgentModes(page)).tools)
       .not.toContain("mcp__grafana__query_prometheus");
     await expect(files).toHaveAttribute("data-granted", "true");
+  });
+});
+
+test.describe("The local agent's answer", () => {
+  /** Opt the open thread in through its own header — the only place the app offers it. */
+  async function optIn(page: import("@playwright/test").Page): Promise<void> {
+    await page.locator('[data-testid="agent-menu"]').click();
+    await page.locator('[data-testid="agent-mode-toggle"]').click();
+    await expect(page.locator('[data-testid="agent-menu"]')).toHaveAttribute(
+      "data-agent-mode",
+      "reply",
+    );
+    // Closed with a click, not Escape: the app reads Escape as "close the conversation".
+    await page.locator('[data-testid="agent-menu"]').click();
+  }
+
+  test("is written into the thread, on the side of what arrives", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 2);
+    await optIn(page);
+
+    await page.locator('[data-testid="composer"]').fill("@claude which port is it?");
+    await page.keyboard.press("Enter");
+
+    // The run is on screen before a word of the answer is: the mark of the CLI that is
+    // answering, and a line saying what it is doing.
+    const stream = page.locator('[data-testid="agent-stream"]');
+    await expect(stream).toBeVisible();
+    await expect(page.locator('[data-testid="agent-status"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="agent-coin"][data-backend="claude"]').first(),
+    ).toBeVisible();
+
+    // THE thing this UI exists to get right. The reply went out through the user's own
+    // account, so the wire calls it theirs — but they did not write it, and it takes the
+    // side of everything that arrives rather than of everything they sent.
+    //
+    // Located by its signature, which is on the bubble from the placeholder onward — the
+    // stream is an overlay and goes when the run ends, so a locator built on it would
+    // stop matching exactly when the answer is complete.
+    const bubble = page.locator('[data-testid="message"]', {
+      has: page.locator('[data-testid="agent-signature"]'),
+    });
+    await expect(bubble).toHaveAttribute("data-mine", "false");
+
+    // A tool call is named while it runs, which is the whole point of streaming the run
+    // rather than only the text. `.first()` because one call replaces the last through an
+    // exit animation, so both chips are briefly mounted.
+    await expect(page.locator('[data-testid="agent-activity"]').first()).toContainText("Grep");
+
+    // The answer arrives, and it is the CLI's own words — formatted, not a run-on line.
+    await expect(stream).toHaveAttribute("data-phase", "writing");
+    await expect(bubble).toContainText("19420", { timeout: 20_000 });
+
+    // And when the run ends the overlay goes: the posted message is the record, and it
+    // renders on its own from then on (which is what every reply this app never watched
+    // being written does).
+    await expect(page.locator('[data-testid="agent-status"]')).toHaveCount(0, {
+      timeout: 20_000,
+    });
+    const signature = page.locator('[data-testid="agent-signature"]');
+    await expect(signature).toBeVisible();
+    await expect(signature).toContainText("via teams-lite");
+    // Said ONCE. The posted message carries the same words as its last line — they are
+    // what a colleague reads in a real Teams client — and the bubble replaces that line
+    // with the mark rather than showing both.
+    const shown = (await bubble.innerText()).match(/via teams-lite/g) ?? [];
+    expect(shown).toHaveLength(1);
+  });
+
+  test("answers nothing in a conversation nobody opted in", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 3);
+
+    await page.locator('[data-testid="composer"]').fill("@claude are you there?");
+    await page.keyboard.press("Enter");
+    // Our own message lands, and nothing answers it. `off` is the default everywhere but
+    // the sandbox, and this is the gate that makes the switch mean something.
+    await expect(page.locator('[data-testid="message"]').last()).toContainText(
+      "are you there?",
+    );
+    await page.waitForTimeout(1_500);
+    await expect(page.locator('[data-testid="agent-stream"]')).toHaveCount(0);
   });
 });

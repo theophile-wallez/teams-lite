@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Globe, Link2Off } from "lucide-react";
 import {
   dropLinks,
@@ -53,6 +53,10 @@ export function RichContent(props: {
   mentions?: Map<number, MessageMention>;
   format?: BodyFormat;
   cardShownSeparately?: boolean;
+  /** Render each word in its own span, so a body that is still being written animates
+   *  its new words in. Only the streamed agent reply passes this — see
+   *  {@link renderTokens}. */
+  tokens?: boolean;
 }) {
   const { html, hiddenHrefs } = props;
   const format = props.format ?? "html";
@@ -70,6 +74,7 @@ export function RichContent(props: {
       className={cn("whitespace-pre-wrap", props.className)}
       mentions={props.mentions}
       cardShownSeparately={props.cardShownSeparately}
+      tokens={props.tokens}
     />
   );
 }
@@ -91,6 +96,8 @@ export function RichNodes(props: {
   className?: string;
   mentions?: Map<number, MessageMention>;
   cardShownSeparately?: boolean;
+  /** See {@link RichContent}'s `tokens`. */
+  tokens?: boolean;
 }) {
   if (!hasVisibleContent(props.nodes)) return null;
   return (
@@ -99,9 +106,41 @@ export function RichNodes(props: {
         renderNode(node, i, {
           mentions: props.mentions,
           cardShownSeparately: props.cardShownSeparately,
+          tokens: props.tokens,
         }),
       )}
     </div>
+  );
+}
+
+/**
+ * A text run as one span per word, so a body that is still growing animates the words
+ * that are new and leaves the rest alone.
+ *
+ * The spans are keyed by position, which is the whole trick: while an answer streams,
+ * every word but the last few is at the same position it was in the previous frame, so
+ * React keeps those spans mounted and only the new ones mount — and a mount is what
+ * runs the `agent-token` animation (app.css). No timers, no per-word state, and the
+ * cost of a frame is the words the frame added.
+ *
+ * Whitespace is emitted verbatim between the spans rather than being folded into them:
+ * the body renders under `whitespace-pre-wrap`, so a swallowed newline would reflow the
+ * paragraph.
+ */
+function renderTokens(text: string, key: number): ReactNode {
+  const pieces = text.split(/(\s+)/);
+  return (
+    <Fragment key={key}>
+      {pieces.map((piece, i) =>
+        piece === "" || /^\s+$/.test(piece) ? (
+          piece
+        ) : (
+          <span key={i} className="agent-token">
+            {piece}
+          </span>
+        ),
+      )}
+    </Fragment>
   );
 }
 
@@ -196,22 +235,32 @@ function LinkFavicon({ href }: { href?: string }) {
  * a nested `code` must not paint a second one on top of it.
  * @property cardShownSeparately The message carries a decoded card attachment, so
  * the body's empty app-card placeholder is dropped (see `RichContent`).
+ * @property tokens Wrap each word in its own span, for a body still being written
+ * (see {@link renderTokens}).
  */
 type RenderContext = {
   mentions?: Map<number, MessageMention>;
   verbatim?: boolean;
   inPre?: boolean;
   cardShownSeparately?: boolean;
+  tokens?: boolean;
 };
 
 function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode {
-  if (node.type === "text") return ctx.verbatim ? node.text : renderWordEffects(node.text, key);
+  if (node.type === "text") {
+    if (ctx.verbatim) return node.text;
+    // A body being written animates its new words; a finished one gets the easter-egg
+    // decoration. Never both: a word that arrives one frame at a time has nothing to
+    // gain from a six-colour ramp, and the two would fight over the same span.
+    return ctx.tokens ? renderTokens(node.text, key) : renderWordEffects(node.text, key);
+  }
 
   const childCtx: RenderContext = {
     mentions: ctx.mentions,
     verbatim: ctx.verbatim || node.tag === "code" || node.tag === "pre",
     inPre: ctx.inPre || node.tag === "pre",
     cardShownSeparately: ctx.cardShownSeparately,
+    tokens: ctx.tokens,
   };
   const children = node.children.map((child, i) => renderNode(child, i, childCtx));
 
