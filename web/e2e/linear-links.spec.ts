@@ -49,6 +49,13 @@ test.describe("Linear rich link previews", () => {
     await expect(document).toHaveAttribute("data-kind", "document");
     await expect(document).toContainText("Link previews — system design");
 
+    // Linear's own logomark opens every card's source line, so a reader sees which
+    // tracker a card came from — GitLab's card shares this frame on purpose. It is
+    // named for a screen reader, and it renders even on a document, whose source
+    // line carries nothing else.
+    await expect(cards.locator('[data-testid="linear-logo"]')).toHaveCount(4);
+    await expect(document.getByRole("img", { name: "Linear" })).toHaveCount(1);
+
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 
@@ -132,6 +139,12 @@ test.describe.serial("Linear settings", () => {
     await gotoApp(page);
     await page.locator('[data-testid="open-settings"]').click();
     await expect(page.locator('[data-testid="settings-pane"]')).toBeVisible();
+
+    // The section is headed by Linear's own mark, so it is recognised before it is
+    // read. It is decorative here: the heading beside it already says "Linear".
+    const sectionLogo = page.locator('[data-testid="settings-pane"] [data-testid="linear-logo"]');
+    await expect(sectionLogo).toHaveCount(1);
+    await expect(sectionLogo).toHaveAttribute("aria-hidden", "true");
 
     // The mock starts with a key configured (Linear has no anonymous read, so the
     // seeded previews need one), which the pane reports without revealing it.

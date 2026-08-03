@@ -40,6 +40,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
 //   bun run web/scripts/preview.ts --out /tmp/preview --scrolled # history scrolled up (jump button)
 //   bun run web/scripts/preview.ts --out /tmp/ghost --ghost     # read state + Ghost mode
+//   bun run web/scripts/preview.ts --out /tmp/set --settings    # the Settings pane
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -475,9 +476,19 @@ export async function openReactionPicker(page: Page): Promise<void> {
  * here — hence the sentinel — and against the mock it changes nothing but the mock's
  * own settings row.
  */
-export async function setGhostMode(page: Page, on: boolean): Promise<void> {
+/**
+ * Open the Settings pane, which takes the place of a conversation in the right
+ * pane. Every setting — the integration tokens, Ghost mode, appearance — is behind
+ * this one click.
+ */
+export async function openSettings(page: Page): Promise<void> {
   await assertMockBackend(page);
   await page.locator('[data-testid="open-settings"]').click();
+  await page.waitForSelector('[data-testid="settings-pane"]');
+}
+
+export async function setGhostMode(page: Page, on: boolean): Promise<void> {
+  await openSettings(page);
   const toggle = page.locator('[data-testid="ghost-mode-toggle"]');
   await toggle.waitFor({ state: "visible" });
   if ((await toggle.getAttribute("aria-checked")) !== String(on)) await toggle.click();
@@ -656,7 +667,8 @@ if (import.meta.main) {
   const incoming = flag("--incoming");
   const react = args.includes("--react");
   const named = flag("--conversation");
-  /** Crop every capture of the default branch to one element, for detail review. */
+  /** Crop every capture of the default branch — or of `--settings` — to one
+   *  element, for detail review. */
   const element = flag("--element");
   const dpr = Number(flag("--dpr") ?? 1);
   if (!Number.isFinite(dpr) || dpr < 1 || dpr > 8) {
@@ -866,6 +878,23 @@ if (import.meta.main) {
           `${out}-ghost-dark.png`,
       );
     });
+    process.exit(0);
+  }
+
+  // The Settings surface: the integration sections at the top of the pane, in both
+  // themes. Two of them are headed by a third party's own logo, which ships one file
+  // per theme, so a capture of one theme proves only half of it.
+  if (args.includes("--settings")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        await openSettings(page);
+        await shot(`${out}-light.png`, element);
+        await setTheme("dark");
+        await shot(`${out}-dark.png`, element);
+        console.log(`[preview] wrote ${out}-light.png and ${out}-dark.png`);
+      },
+      { deviceScaleFactor: dpr },
+    );
     process.exit(0);
   }
 

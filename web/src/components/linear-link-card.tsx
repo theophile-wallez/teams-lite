@@ -23,6 +23,7 @@ import {
 } from "~/lib/linear";
 import type { LinearLinkKind, LinearLinkMetadata } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
+import { LinearLogo } from "./linear-logo";
 
 /** The icon each state category is drawn with, following Linear's own set: an
  *  empty circle before work starts, a dashed one in the backlog, a half-filled one
@@ -163,25 +164,29 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
             )}
           </div>
 
-          {context.length > 0 && (
-            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-text-faint">
-              {context.map((part, index) => (
-                <span key={`${part}-${index}`} className="flex items-center gap-1.5">
-                  {index > 0 && <span aria-hidden>·</span>}
-                  <span
-                    className={cn(
-                      "truncate",
-                      // The identifier is the handle people speak in ("ENG-123"),
-                      // so it reads a step stronger than the rest of the line.
-                      part === meta.identifier && "font-medium text-text-dim",
-                    )}
-                  >
-                    {part}
-                  </span>
+          {/* The source line. Linear's own mark opens it, because a card that says
+              "ENG-1 · Engineering" says nothing about which tracker it came from —
+              and this card shares its frame with GitLab's on purpose. The mark
+              carries the name for a screen reader, so the row always renders, even
+              for a document that has no identifier, team, project or owner. */}
+          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-text-faint">
+            <LinearLogo title="Linear" className="size-3 shrink-0" />
+            {context.map((part, index) => (
+              <span key={`${part}-${index}`} className="flex items-center gap-1.5">
+                {index > 0 && <span aria-hidden>·</span>}
+                <span
+                  className={cn(
+                    "truncate",
+                    // The identifier is the handle people speak in ("ENG-123"),
+                    // so it reads a step stronger than the rest of the line.
+                    part === meta.identifier && "font-medium text-text-dim",
+                  )}
+                >
+                  {part}
                 </span>
-              ))}
-            </div>
-          )}
+              </span>
+            ))}
+          </div>
 
           {meta.parent && (
             <div className="flex items-center gap-1 text-[11px] text-text-faint">

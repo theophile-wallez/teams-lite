@@ -640,6 +640,21 @@ html[data-virtual-keyboard-open] .composer-shell {
   color: var(--linear-state-label);
 }
 
+/* Linear's logomark, in Linear's own two fills. Their brand assets ship the mark
+   twice — `logo-dark.svg` filled #222326 (Nordic Gray) for a light background,
+   `logo-light.svg` filled white for a dark one — with identical geometry. So the
+   two files become these two rules, and LinearLogo draws the path once with
+   `currentColor`.
+   These are the only literal hexes outside theme.css, and deliberately: they are a
+   third party's brand colour, not a token of ours to theme. Linear asks that the
+   mark not be recoloured, so it must NOT follow --foreground. */
+.linear-logo {
+  color: #222326;
+}
+[data-theme="dark"] .linear-logo {
+  color: #ffffff;
+}
+
 /* Calendar: the diagonal hatch every calendar uses for a TENTATIVE event, so
    "maybe" is legible without a colour of its own (colour is reserved for which
    calendar an event belongs to). Drawn over the block's own tint at low contrast,

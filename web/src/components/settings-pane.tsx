@@ -3,7 +3,6 @@ import {
   Bell,
   Check,
   ChevronLeft,
-  CircleDotDashed,
   ExternalLink,
   Ghost,
   GitPullRequestArrow,
@@ -21,6 +20,7 @@ import type { SettingsPatch } from "~/lib/protocol";
 import { pushBlockerMessage } from "~/lib/push";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
+import { LinearLogo } from "./linear-logo";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
@@ -259,8 +259,12 @@ function LinearSettings() {
   return (
     <section className="flex flex-col gap-4">
       <div className="flex items-start gap-3">
-        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
-          <CircleDotDashed className="size-5" strokeWidth={1.5} />
+        {/* Linear's own mark, so the section is recognised before it is read. It
+            sits on the neutral surface rather than the accent tint the sections
+            above use: the mark is monochrome brand colour, and Linear asks that it
+            not be laid over a field that competes with it. */}
+        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-element shadow-chip">
+          <LinearLogo className="size-[18px]" />
         </div>
         <div className="flex flex-col">
           <h3 className="text-[15px] font-medium text-foreground">Linear</h3>
