@@ -35,6 +35,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/preview --incoming "hello there"
 //   bun run web/scripts/preview.ts --out /tmp/mail --mail        # the Mail surface
 //   bun run web/scripts/preview.ts --out /tmp/cal --calendar     # the Calendar surface
+//   bun run web/scripts/preview.ts --out /tmp/chan --channels    # the team → channel tree
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
 //   bun run web/scripts/preview.ts --out /tmp/preview --scrolled # history scrolled up (jump button)
 //
@@ -236,6 +237,29 @@ async function openRow(page: Page, row: ReturnType<Page["locator"]>): Promise<st
   // can legitimately consist of nothing but membership/call notices.
   await page.waitForSelector('[data-testid="message"], [data-testid="system-event"]');
   return id;
+}
+
+/**
+ * Switch the sidebar to the Channels tab and wait for the team → channel tree.
+ *
+ * Reading the tree is a pure read, so — like the mail and calendar helpers — this
+ * one has no keystroke gate of its own. It still only ever runs inside
+ * `withPreview`, which proved the backend was the mock before handing over the page.
+ */
+export async function openChannelsTab(page: Page): Promise<void> {
+  await page.locator('[data-testid="tab-channels"]').click();
+  await page.waitForSelector('[data-testid="channel-row"]', { timeout: APP_READY_TIMEOUT_MS });
+}
+
+/** Collapse (or expand) the team section at `index`, by its header — the same
+ *  toggle a person clicks. */
+export async function toggleTeamSection(page: Page, index: number): Promise<void> {
+  await page
+    .locator('[data-testid="team-group"]')
+    .nth(index)
+    .locator('[data-testid="team-header"]')
+    .click();
+  await page.waitForTimeout(250); // the chevron rotates; capture it settled
 }
 
 /**
@@ -603,6 +627,28 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-list-light.png, ${out}-light.png, ` +
           `${out}-attachments-light.png and ${out}-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // The channel surface: the team → channel tree, an open channel, and a folded team.
+  if (args.includes("--channels")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openChannelsTab(page);
+      await shot(`${out}-tree-light.png`);
+      await page.locator('[data-testid="channel-row"]').first().click();
+      await page.waitForSelector('[data-testid="message"], [data-testid="system-event"]');
+      await shot(`${out}-open-light.png`);
+      // A folded team: the header keeps the name and reports what it hides.
+      await toggleTeamSection(page, 0);
+      await shot(`${out}-collapsed-light.png`);
+      await toggleTeamSection(page, 0);
+      await setTheme("dark");
+      await shot(`${out}-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-tree-light.png, ${out}-open-light.png, ` +
+          `${out}-collapsed-light.png and ${out}-dark.png`,
       );
     });
     process.exit(0);

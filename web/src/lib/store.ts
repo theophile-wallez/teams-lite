@@ -105,6 +105,36 @@ function mailAttachmentKey(messageId: string, attachmentId: string): string {
   return `mail-attachment:${messageId}:${attachmentId}`;
 }
 
+/** Read an id → boolean map out of localStorage, or null when there is nothing
+ *  usable there. Best-effort and SSR-safe on purpose: these maps hold sidebar
+ *  preferences (favorited channels, collapsed sections), so a missing store, a
+ *  malformed value or a non-boolean entry must degrade to the default rather than
+ *  fail a render. */
+function readFlagMap(key: string): Record<string, boolean> | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    const flags: Record<string, boolean> = {};
+    for (const [id, flag] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof flag === "boolean") flags[id] = flag;
+    }
+    return flags;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist an id → boolean map. A failure just means it doesn't survive a reload. */
+function writeFlagMap(key: string, flags: Record<string, boolean>): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(flags));
+  } catch {
+    /* ignore — the preference stays in memory for this session */
+  }
+}
+
 export type AppState = {
   conversations: Conversation[];
   /** The team/channel tree (flat, pre-sorted; grouped for display by
@@ -118,6 +148,10 @@ export type AppState = {
    *  absent here falls back to that value. Drives the sidebar's pinned Favorites
    *  section (see `channelIsFavorite`/`organizeChannels`). */
   channelFavorites: Record<string, boolean>;
+  /** Which sidebar sections the user has collapsed, keyed by team id (and
+   *  `"favorites"` for the pinned section), persisted to localStorage. A section
+   *  absent here is expanded, so a fresh install shows the whole tree. */
+  collapsedTeams: Record<string, boolean>;
   openId: string | null;
   messages: ChatMessage[];
   loadingMessages: boolean;
@@ -264,6 +298,9 @@ const CALL_RING_TIMEOUT_MS = 45_000;
 const PRESENCE_TTL_MS = 30_000;
 // Where local channel-favorite overrides are persisted (client-only).
 const CHANNEL_FAVORITES_KEY = "teams-lite:channel-favorites";
+// And which sidebar team sections the user has collapsed (client-only too — Teams
+// keeps this per install, not per account).
+const COLLAPSED_TEAMS_KEY = "teams-lite:collapsed-teams";
 // How many conversations keep a cached message page at all. Re-opening one of
 // these is instant; beyond that the least-recently-opened page is dropped, so a
 // long session spent hopping between dozens of chats doesn't accumulate their
@@ -317,6 +354,7 @@ function initialState(): AppState {
     channels: [],
     sidebarTab: "chats",
     channelFavorites: {},
+    collapsedTeams: {},
     openId: null,
     messages: [],
     loadingMessages: false,
@@ -505,6 +543,7 @@ export class TeamsController {
     this.applyPersistedAppearance();
     this.applyPersistedSounds();
     this.applyPersistedFavorites();
+    this.applyPersistedCollapsedTeams();
     this.applyPersistedVisibleCalendars();
     this.applyPersistedCalendarSettings();
     this.wireEvents();
@@ -1238,28 +1277,15 @@ export class TeamsController {
    *  and SSR-safe: any failure (no localStorage, malformed JSON) leaves the empty
    *  default, so the backend's Teams-sourced `is_favorite` stands alone. */
   private applyPersistedFavorites(): void {
-    try {
-      const raw = localStorage.getItem(CHANNEL_FAVORITES_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as unknown;
-      if (parsed && typeof parsed === "object") {
-        const overrides: Record<string, boolean> = {};
-        for (const [id, fav] of Object.entries(parsed as Record<string, unknown>)) {
-          if (typeof fav === "boolean") overrides[id] = fav;
-        }
-        this.set({ channelFavorites: overrides });
-      }
-    } catch {
-      /* ignore — favorites are non-critical */
-    }
+    const overrides = readFlagMap(CHANNEL_FAVORITES_KEY);
+    if (overrides) this.set({ channelFavorites: overrides });
   }
 
-  private persistFavorites(overrides: Record<string, boolean>): void {
-    try {
-      localStorage.setItem(CHANNEL_FAVORITES_KEY, JSON.stringify(overrides));
-    } catch {
-      /* ignore — a failed persist just doesn't survive reload */
-    }
+  /** Load the persisted collapsed sidebar sections. Same best-effort contract as
+   *  the favorites: on any failure every section stays expanded. */
+  private applyPersistedCollapsedTeams(): void {
+    const collapsed = readFlagMap(COLLAPSED_TEAMS_KEY);
+    if (collapsed) this.set({ collapsedTeams: collapsed });
   }
 
   /** Toggle a channel's favorite state, pinning it into (or out of) the sidebar's
@@ -1271,7 +1297,17 @@ export class TeamsController {
     const current = overrides[id] ?? base;
     const next = { ...overrides, [id]: !current };
     this.set({ channelFavorites: next });
-    this.persistFavorites(next);
+    writeFlagMap(CHANNEL_FAVORITES_KEY, next);
+  }
+
+  /** Collapse or expand one sidebar section — a team by its id, or the pinned
+   *  Favorites section by `"favorites"`. Persisted, so a user who works out of two
+   *  of their fifteen teams keeps the other thirteen folded away across reloads. */
+  toggleTeamCollapsed(id: string): void {
+    const collapsed = this.get().collapsedTeams;
+    const next = { ...collapsed, [id]: !collapsed[id] };
+    this.set({ collapsedTeams: next });
+    writeFlagMap(COLLAPSED_TEAMS_KEY, next);
   }
 
   // ---- calendar (read-only Teams/Outlook surface) --------------------------

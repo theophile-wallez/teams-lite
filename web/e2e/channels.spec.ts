@@ -180,6 +180,37 @@ test.describe("channels", () => {
     );
   });
 
+  test("collapses a team section and remembers it across a reload", async ({ page }) => {
+    await gotoApp(page);
+    await openChannelsTab(page);
+
+    // Every team starts expanded, the way Microsoft Teams opens on a full tree.
+    const group = page.locator('[data-testid="team-group"]').first();
+    const header = group.locator('[data-testid="team-header"]');
+    await expect(header).toHaveAttribute("aria-expanded", "true");
+    const shown = await group.locator('[data-testid="channel-row"]').count();
+    expect(shown).toBeGreaterThan(0);
+
+    // The whole header is the toggle: one click folds the team's channels away.
+    await header.click();
+    await expect(header).toHaveAttribute("aria-expanded", "false");
+    await expect(group.locator('[data-testid="channel-row"]')).toHaveCount(0);
+
+    // The collapsed state is persisted client-side, so it survives a reload.
+    await page.reload();
+    await openChannelsTab(page);
+    const reopened = page.locator('[data-testid="team-group"]').first();
+    await expect(reopened.locator('[data-testid="team-header"]')).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    await expect(reopened.locator('[data-testid="channel-row"]')).toHaveCount(0);
+
+    // Expanding it brings every channel back.
+    await reopened.locator('[data-testid="team-header"]').click();
+    await expect(reopened.locator('[data-testid="channel-row"]')).toHaveCount(shown);
+  });
+
   test("runs clean with no console errors", async ({ page, consoleErrors }) => {
     await gotoApp(page);
     await openChannelsTab(page);

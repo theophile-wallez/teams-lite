@@ -120,7 +120,9 @@ user. Two independent mechanisms enforce that split:
   from it. For the mail surface: `bun run preview -- --out /tmp/mail --mail`, or
   `openMailTab` / `openFirstMail` / `openMailAt` from the same file. For the calendar:
   `bun run preview -- --out /tmp/cal --calendar`, or `openCalendarTab` /
-  `openCalendarView` / `openFirstEvent`.
+  `openCalendarView` / `openFirstEvent`. For the team → channel tree:
+  `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
+  `toggleTeamSection` from the same file.
   `web/scripts/scroll-probe.ts` is what a diagnostic built on top of it looks like
   (it measures history scroll smoothness frame by frame): a tracked script that
   drives the app *through* `withPreview`, never around it.

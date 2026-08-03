@@ -1,7 +1,7 @@
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Hash, MoonStar, Search, Settings as SettingsIcon, Star, Sun } from "lucide-react";
+import { ChevronRight, MoonStar, Search, Settings as SettingsIcon, Star, Sun } from "lucide-react";
 import {
   channelIsFavorite,
   channelLabel,
@@ -15,7 +15,7 @@ import {
 } from "~/lib/protocol";
 import type { SidebarTab } from "~/lib/store";
 import { cn } from "~/lib/utils";
-import { Avatar, tintFor } from "./avatar";
+import { Avatar } from "./avatar";
 import { BrokerBanner } from "./broker-banner";
 import { CalendarSidebar } from "./calendar-sidebar";
 import { useAppState, useController } from "./controller-context";
@@ -274,7 +274,12 @@ function ChatList(props: { selectedIndex: number; onSelect: (index: number) => v
  *  the team → channel tree. Teams and channels render in the user's own Microsoft
  *  Teams order — the backend preserves the CSA array order and `organizeChannels`
  *  keeps it, with General first within each team. Favorited channels are lifted
- *  out of their team into the Favorites section. */
+ *  out of their team into the Favorites section.
+ *
+ *  The tree follows Microsoft Teams' own shape: each team is a collapsible section
+ *  whose header carries the team's picture and its name at full size, and the
+ *  channels below it are plain indented names — no per-channel glyph, because Teams
+ *  has none and the indent alone already says "inside this team". */
 function ChannelTree() {
   const channels = useAppState((s) => s.channels);
   const openId = useAppState((s) => s.openId);
@@ -316,29 +321,109 @@ function ChannelTree() {
       className="flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2"
     >
       {pinned.length > 0 && (
-        <section data-testid="favorites-group">
-          <h3 className="flex items-center gap-1.5 truncate px-2.5 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
-            <Star className="size-3 fill-amber-400 text-amber-400" strokeWidth={1.6} />
-            Favorites
-          </h3>
-          {pinned.map(renderRow)}
-        </section>
+        <ChannelSection
+          sectionId="favorites"
+          testId="favorites-group"
+          label="Favorites"
+          glyph={
+            <Star
+              className="size-4 shrink-0 fill-amber-400 text-amber-400"
+              strokeWidth={1.6}
+              aria-hidden
+            />
+          }
+          channels={pinned}
+          openId={openId}
+          renderRow={renderRow}
+        />
       )}
       {teams.map((team) => (
-        <section key={team.team_id} data-testid="team-group" data-team-id={team.team_id}>
-          <h3 className="flex items-center gap-2 px-2.5 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
+        <ChannelSection
+          key={team.team_id}
+          sectionId={team.team_id}
+          testId="team-group"
+          teamId={team.team_id}
+          label={team.team_name || "Team"}
+          glyph={
             <Avatar
               seed={team.team_id}
               label={team.team_name || "Team"}
               photo={team.group_id ? { kind: "team", id: team.group_id } : undefined}
               className="size-5 rounded-md text-[9px]"
             />
-            <span className="truncate">{team.team_name || "Team"}</span>
-          </h3>
-          {team.channels.map(renderRow)}
-        </section>
+          }
+          channels={team.channels}
+          openId={openId}
+          renderRow={renderRow}
+        />
       ))}
     </div>
+  );
+}
+
+/**
+ * One collapsible section of the channel tree — a team, or the pinned Favorites.
+ * The whole header is the toggle, as in Microsoft Teams, where clicking a team
+ * folds it away; the state is persisted per section, so a user who works out of
+ * two of their fifteen teams keeps the rest folded across reloads.
+ *
+ * A collapsed section still reports what it hides: the team name turns bold when
+ * one of its channels is unread, and a dot marks the section holding the open
+ * channel. Otherwise folding a team would look like losing it.
+ */
+function ChannelSection(props: {
+  sectionId: string;
+  testId: string;
+  teamId?: string;
+  label: string;
+  glyph: ReactNode;
+  channels: Channel[];
+  openId: string | null;
+  renderRow: (c: Channel) => ReactNode;
+}) {
+  const controller = useController();
+  const collapsed = useAppState((s) => s.collapsedTeams[props.sectionId] === true);
+  const hidesUnread = collapsed && props.channels.some((c) => !c.is_read);
+  const hidesOpen = collapsed && props.channels.some((c) => c.id === props.openId);
+
+  return (
+    <section
+      data-testid={props.testId}
+      data-team-id={props.teamId}
+      data-collapsed={collapsed ? "true" : undefined}
+    >
+      <h3 className="pt-2">
+        <button
+          type="button"
+          data-testid="team-header"
+          data-cuelume-press=""
+          aria-expanded={!collapsed}
+          onClick={() => controller.toggleTeamCollapsed(props.sectionId)}
+          className="flex w-full items-center gap-1.5 rounded-lg py-1 pl-1 pr-2 text-left transition-colors hover:bg-row-hovered"
+        >
+          <ChevronRight
+            className={cn(
+              "size-3.5 shrink-0 text-text-faint transition-transform duration-150",
+              !collapsed && "rotate-90",
+            )}
+            strokeWidth={2}
+            aria-hidden
+          />
+          {props.glyph}
+          <span
+            data-testid="team-name"
+            className={cn(
+              "min-w-0 flex-1 truncate text-[13px] text-foreground",
+              hidesUnread ? "font-semibold" : "font-medium",
+            )}
+          >
+            {props.label}
+          </span>
+          {hidesOpen && <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden />}
+        </button>
+      </h3>
+      {!collapsed && props.channels.map(props.renderRow)}
+    </section>
   );
 }
 
@@ -440,10 +525,12 @@ function ConversationRow(props: {
   );
 }
 
-/** One channel row: a colour-tinted `#` glyph (Teams' channel avatar), the channel
- *  name, and a date — a single, vertically-centered line, no subtitle. Unread is
- *  conveyed by a bolder name (Teams-style). A star toggles the channel's favorite
- *  state: revealed on hover, and shown filled at all times once favorited. */
+/** One channel row: the channel name and a date on a single line, indented under
+ *  its team header — the Microsoft Teams shape, which gives a channel no glyph of
+ *  its own and states membership through the indent. Unread is a bold name
+ *  (Teams-style) and the open channel carries a coloured rail on its leading edge.
+ *  A star toggles the channel's favorite state: revealed on hover, and shown filled
+ *  at all times once favorited. */
 function ChannelRow(props: {
   channel: Channel;
   open: boolean;
@@ -455,10 +542,9 @@ function ChannelRow(props: {
   const unread = !c.is_read;
   const label = channelLabel(c);
   const time = useMemo(() => formatTime(c.last_message_time), [c.last_message_time]);
-  const emphasize = props.open || unread;
 
   return (
-    <div className="group/chan relative my-0.5">
+    <div className="group/chan relative">
       <button
         type="button"
         onClick={props.onClick}
@@ -470,22 +556,28 @@ function ChannelRow(props: {
         data-favorite={props.favorite ? "true" : undefined}
         aria-current={props.open ? "true" : undefined}
         className={cn(
-          "flex h-10 w-full items-center gap-2.5 rounded-lg px-2.5 text-left transition-colors",
+          // The leading padding lands the name just past the header's team picture,
+          // so every channel reads as one indent level under its team.
+          "flex h-9 w-full items-center gap-2 rounded-lg pl-11 pr-2.5 text-left transition-colors",
           props.open ? "bg-row-open shadow-card" : "hover:bg-row-hovered",
         )}
       >
-        <span
-          className={cn("grid size-6 shrink-0 place-items-center rounded-md", tintFor(c.id))}
-          aria-hidden
-        >
-          <Hash className="size-3.5" strokeWidth={2} />
-        </span>
+        {props.open && (
+          <span
+            className="absolute left-1 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-primary"
+            aria-hidden
+          />
+        )}
 
         <span
           data-testid="channel-name"
           className={cn(
             "min-w-0 flex-1 truncate text-[13px]",
-            emphasize ? "font-medium text-foreground" : "text-text-dim",
+            unread
+              ? "font-semibold text-foreground"
+              : props.open
+                ? "text-foreground"
+                : "text-text-dim",
           )}
         >
           {label}
