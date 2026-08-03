@@ -85,7 +85,7 @@ export function Composer(props: { focusToken: unknown }) {
   // Restore the mode preference on the client (kept out of SSR to avoid a
   // hydration mismatch — the server always renders the plain textarea, then we
   // flip to rich here). Rich text is the default: only an explicit opt-out ("0")
-  // drops to the plain textarea, so formatting shortcuts (Ctrl+B/I/U, Ctrl+K) and
+  // drops to the plain textarea, so formatting shortcuts (Cmd/Ctrl+B/I/U, Cmd/Ctrl+K) and
   // the select-to-format menu are available unless the user turned rich off.
   useEffect(() => {
     try {

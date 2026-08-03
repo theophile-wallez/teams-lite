@@ -1,6 +1,6 @@
 import { test, expect, gotoApp } from "./helpers";
 
-test.describe("command palette (Ctrl+K)", () => {
+test.describe("command palette (Ctrl+K / ⌘K)", () => {
   test("opens, filters, and jumps to a conversation", async ({ page }) => {
     await gotoApp(page);
     // Grab a known conversation name from the sidebar to search for.
@@ -20,6 +20,14 @@ test.describe("command palette (Ctrl+K)", () => {
     await input.press("Enter");
     await expect(page.locator("[cmdk-input]")).toHaveCount(0);
     await expect(page.locator('[data-testid="conversation-title"]')).toContainText(name ?? "");
+  });
+
+  // The Mac chord, which is the one a Mac user types. Playwright sends the same
+  // Meta modifier a mac keyboard does, so this holds on any host OS.
+  test("opens on Meta+K too", async ({ page }) => {
+    await gotoApp(page);
+    await page.keyboard.press("Meta+k");
+    await expect(page.locator("[cmdk-input]")).toBeVisible();
   });
 
   test("closes on Escape", async ({ page }) => {

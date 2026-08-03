@@ -12,6 +12,7 @@ import { IncomingCallBanner } from "./incoming-call-banner";
 import { Splash } from "./splash";
 import { TooltipProvider } from "./ui/tooltip";
 import { Button } from "./ui/button";
+import { hasModifier } from "~/lib/platform";
 import { cn } from "~/lib/utils";
 import { installVirtualKeyboardState } from "~/lib/virtual-keyboard";
 
@@ -138,12 +139,13 @@ function AppInner() {
       // Dialogs own their own keys while open.
       if (paletteOpen || settingsOpen) return;
 
-      if (e.ctrlKey && (e.key === "k" || e.key === "K")) {
+      // Every shortcut takes Ctrl or Cmd, so the Mac keystroke works as typed.
+      if (hasModifier(e) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
         setPaletteOpen(true);
         return;
       }
-      if (e.ctrlKey && (e.key === "p" || e.key === "P")) {
+      if (hasModifier(e) && (e.key === "p" || e.key === "P")) {
         e.preventDefault();
         setSettingsOpen(true);
         return;
@@ -167,6 +169,9 @@ function AppInner() {
       if (sidebarTab === "channels" || sidebarTab === "calendar") return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+      // A held modifier means a shortcut, not list navigation: Cmd+K must never also
+      // move the selection up.
+      if (hasModifier(e) || e.altKey) return;
 
       if (e.key === "ArrowDown" || e.key === "j") {
         e.preventDefault();

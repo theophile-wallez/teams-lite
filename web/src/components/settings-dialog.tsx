@@ -23,7 +23,7 @@ const HINTS: Record<Appearance, string> = {
 };
 
 /**
- * Ctrl+P appearance picker: choose Light, Dark, or System (follow the OS). The
+ * Cmd/Ctrl+P appearance picker: choose Light, Dark, or System (follow the OS). The
  * hovered/focused option previews live; clicking commits and persists it, and
  * dismissing without choosing reverts to the committed appearance.
  */

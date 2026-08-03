@@ -154,7 +154,7 @@ export function RichEditor(props: {
 
   return (
     <div className="w-full">
-      {/* No permanent toolbar — formatting is keyboard-driven (Ctrl+B/I/U, Ctrl+K)
+      {/* No permanent toolbar — formatting is keyboard-driven (Cmd/Ctrl+B/I/U, Cmd/Ctrl+K)
           plus this select-to-format menu, so the field stays as lean as the plain
           textarea. */}
       <BubbleMenu

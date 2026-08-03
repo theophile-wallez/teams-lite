@@ -4,7 +4,6 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   BellOff,
   ChevronRight,
-  Command,
   Ghost,
   MoonStar,
   Search,
@@ -24,6 +23,7 @@ import {
   type Channel,
   type Conversation,
 } from "~/lib/protocol";
+import { formatShortcut, useModifierLabel } from "~/lib/platform";
 import type { SidebarTab } from "~/lib/store";
 import { cn } from "~/lib/utils";
 import { Avatar, conversationPhoto } from "./avatar";
@@ -32,6 +32,7 @@ import { CalendarSidebar } from "./calendar-sidebar";
 import { useAppState, useController } from "./controller-context";
 import { MailList } from "./mail-list";
 import { NotificationsBell } from "./notifications-bell";
+import { ShortcutChord } from "./shortcut";
 import { StatusBar } from "./status-bar";
 import { Tabs, TabsList, TabsPanel, TabsTrigger } from "./ui/tabs";
 
@@ -76,6 +77,7 @@ export function ConversationList(props: {
   const controller = useController();
   const sidebarTab = useAppState((s) => s.sidebarTab);
   const resolvedTheme = useAppState((s) => s.resolvedTheme);
+  const modifier = useModifierLabel();
 
   return (
     <aside
@@ -101,7 +103,7 @@ export function ConversationList(props: {
         <button
           type="button"
           aria-label="Appearance"
-          title="Appearance (Ctrl+P)"
+          title={`Appearance (${formatShortcut("P", modifier)})`}
           data-cuelume-press=""
           onClick={props.onOpenSettings}
           className="grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground"
@@ -131,7 +133,7 @@ export function ConversationList(props: {
         </button>
       </div>
 
-      {/* Search field with a ⌘K hint — opens the command palette. */}
+      {/* Search field with a ⌘K / Ctrl+K hint — opens the command palette. */}
       <div className="px-3 pb-2">
         <button
           type="button"
@@ -141,20 +143,11 @@ export function ConversationList(props: {
         >
           <Search className="size-4 shrink-0" strokeWidth={1.4} />
           <span className="flex-1 text-[13px]">Search conversations</span>
-          {/* U+2318 is in none of Inter's subsets, so a fallback font draws the ⌘
-           * character — shorter and lighter than the K beside it, and different on
-           * every platform. Lucide's Command icon is the same mark under our own
-           * control. It is baseline-aligned like a letter, and its size, offset and
-           * stroke are calibrated against the K's cap box and stem: measured at 8x
-           * device scale, both marks are 53 device pixels tall with a 9 pixel
-           * stroke. Every value is in `em`, so the pair stays matched at any font
-           * size. */}
           <kbd
             data-testid="search-shortcut"
             className="inline-flex items-baseline gap-px rounded bg-element px-1.5 py-0.5 text-[10px] font-medium text-text-faint"
           >
-            <Command aria-hidden className="size-[0.745em] translate-y-[0.11em]" strokeWidth={3.4} />
-            <span className="sr-only">Command </span>K
+            <ShortcutChord keyName="K" modifier={modifier} />
           </kbd>
         </button>
       </div>

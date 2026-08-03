@@ -1,9 +1,9 @@
 import { test, expect, gotoApp } from "./helpers";
 
-// The Ctrl+P appearance picker offers System / Light / Dark. The OS scheme is
+// The Cmd/Ctrl+P appearance picker offers System / Light / Dark. The OS scheme is
 // pinned to light in playwright.config.ts, so the default "System" resolves to
 // the light theme.
-test.describe("appearance picker (Ctrl+P)", () => {
+test.describe("appearance picker (Ctrl+P / ⌘P)", () => {
   test("selects Dark, applies it, and persists across reload", async ({ page }) => {
     await gotoApp(page);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
@@ -21,6 +21,15 @@ test.describe("appearance picker (Ctrl+P)", () => {
     // …and survives a reload (the pre-hydration bootstrap applies it, no flash).
     await page.reload();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  });
+
+  // Meta is the modifier a mac keyboard sends, and it must open the same picker.
+  test("opens on Meta+P too", async ({ page }) => {
+    await gotoApp(page);
+    await page.keyboard.press("Meta+p");
+    await expect(
+      page.locator('[data-testid="appearance-option"][data-value="dark"]'),
+    ).toBeVisible();
   });
 
   test("System follows the (light) OS scheme", async ({ page }) => {

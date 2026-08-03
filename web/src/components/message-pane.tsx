@@ -15,7 +15,9 @@ import { Avatar, conversationPhoto, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
 import { SystemEventLine } from "./system-event-line";
 import { ReadReceipts } from "./read-receipts";
+import { ModifierKey } from "./shortcut";
 import { PersonHoverCard } from "./person-card";
+import { useModifierLabel } from "~/lib/platform";
 import { groupThreads, type Thread } from "~/lib/threads";
 import { Composer } from "./composer";
 import { JumpToLatest } from "./jump-to-latest";
@@ -84,6 +86,7 @@ export function MessagePane(props: { onBack?: () => void }) {
   const pendingScroll = useAppState((s) => s.pendingScroll);
   const scrollToBottomNonce = useAppState((s) => s.scrollToBottomNonce);
   const readReceipts = useAppState((s) => s.readReceipts);
+  const modifier = useModifierLabel();
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [focusToken, setFocusToken] = useState(0);
@@ -429,8 +432,8 @@ export function MessagePane(props: { onBack?: () => void }) {
           <p className="text-sm font-medium text-foreground">No conversation open</p>
           <p className="text-[13px] text-text-faint">
             Pick a chat on the left, or press{" "}
-            <kbd className="rounded bg-element px-1.5 py-0.5 text-[11px] font-medium text-text-dim">
-              Ctrl
+            <kbd className="inline-flex items-baseline rounded bg-element px-1.5 py-0.5 text-[11px] font-medium text-text-dim">
+              <ModifierKey modifier={modifier} />
             </kbd>{" "}
             <kbd className="rounded bg-element px-1.5 py-0.5 text-[11px] font-medium text-text-dim">
               K

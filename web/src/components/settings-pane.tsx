@@ -568,7 +568,7 @@ function NotificationSettings() {
   );
 }
 
-/** Appearance preference (Light / Dark / System) — the same choice as the Ctrl+P
+/** Appearance preference (Light / Dark / System) — the same choice as the Cmd/Ctrl+P
  *  picker, surfaced here so Settings is a single home. */
 function AppearanceSettings() {
   const controller = useController();
