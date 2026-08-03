@@ -3,8 +3,12 @@ import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   BellOff,
+  CalendarDays,
   ChevronRight,
   Ghost,
+  Hash,
+  Mail as MailIcon,
+  MessagesSquare,
   MoonStar,
   Search,
   Settings as SettingsIcon,
@@ -38,6 +42,11 @@ import { Tabs, TabsList, TabsPanel, TabsTrigger } from "./ui/tabs";
 
 const ROW_HEIGHT = 64;
 
+/** One icon-only tab in the sidebar strip: a taller target than a text tab needs,
+ *  the glyph centred in it, and the active section tinted the accent colour. */
+const TAB_ICON =
+  "grid place-items-center py-2 text-text-dim data-[state=active]:text-primary";
+
 /** Compact relative time for the sidebar (compose_time is epoch milliseconds). */
 function formatTime(ms: number): string {
   if (!ms) return "";
@@ -62,9 +71,11 @@ function formatTime(ms: number): string {
  * under the Channels tab and never appear in the chat list, matching the Microsoft
  * Teams separation.
  *
- * The four labels are abbreviated in the tab strip (a 320px column will not carry
- * "Channels" and "Calendar" in full) with the full name on the accessible label, so
- * the strip stays legible without lying about what the sections are.
+ * The four sections show as icons in the tab strip, not as words: a 320px column
+ * will not carry "Channels" and "Calendar" in full, and an abbreviation ("Chans",
+ * "Cal") reads worse than the symbol it stands for. Each trigger therefore carries
+ * the full name on `aria-label` and on the tooltip, so nothing is lost to a screen
+ * reader or to a person who does not know the icon yet.
  */
 export function ConversationList(props: {
   selectedIndex: number;
@@ -159,22 +170,42 @@ export function ConversationList(props: {
       >
         <div className="px-3 pb-1.5">
           <TabsList aria-label="Sidebar sections" className="w-full">
-            <TabsTrigger value="chats" data-testid="tab-chats" className="px-2">
-              Chats
+            <TabsTrigger
+              value="chats"
+              data-testid="tab-chats"
+              aria-label="Chats"
+              title="Chats"
+              className={TAB_ICON}
+            >
+              <MessagesSquare className="size-[19px]" strokeWidth={1.6} />
             </TabsTrigger>
-            <TabsTrigger value="channels" data-testid="tab-channels" className="px-2">
-              <span aria-hidden>Chans</span>
-              <span className="sr-only">Channels</span>
+            <TabsTrigger
+              value="channels"
+              data-testid="tab-channels"
+              aria-label="Channels"
+              title="Channels"
+              className={TAB_ICON}
+            >
+              <Hash className="size-[19px]" strokeWidth={1.8} />
             </TabsTrigger>
-            <TabsTrigger value="mail" data-testid="tab-mail" className="px-2">
-              <span className="flex items-center justify-center gap-1.5">
-                Mail
-                <MailUnreadBadge />
-              </span>
+            <TabsTrigger
+              value="mail"
+              data-testid="tab-mail"
+              aria-label="Mail"
+              title="Mail"
+              className={cn(TAB_ICON, "relative")}
+            >
+              <MailIcon className="size-[19px]" strokeWidth={1.6} />
+              <MailUnreadBadge />
             </TabsTrigger>
-            <TabsTrigger value="calendar" data-testid="tab-calendar" className="px-2">
-              <span aria-hidden>Cal</span>
-              <span className="sr-only">Calendar</span>
+            <TabsTrigger
+              value="calendar"
+              data-testid="tab-calendar"
+              aria-label="Calendar"
+              title="Calendar"
+              className={TAB_ICON}
+            >
+              <CalendarDays className="size-[19px]" strokeWidth={1.6} />
             </TabsTrigger>
           </TabsList>
         </div>
@@ -205,7 +236,10 @@ export function ConversationList(props: {
 /** Unread count on the Mail tab. Counts the INBOX only: it is the folder whose
  *  unread state a person acts on, whereas Junk and Deleted are noise (this mailbox
  *  carries 1558 unread messages in Deleted alone). Renders nothing at zero, and
- *  nothing at all until Mail has been opened once — mail loads lazily. */
+ *  nothing at all until Mail has been opened once — mail loads lazily.
+ *
+ *  The tab holds an icon, so the count sits in the tab's top-right corner. It is
+ *  clear of the glyph, which keeps both readable without a cut-out ring. */
 function MailUnreadBadge() {
   const folders = useAppState((s) => s.mailFolders);
   const unread = mailUnreadBadge(folders);
@@ -213,7 +247,7 @@ function MailUnreadBadge() {
   return (
     <span
       data-testid="mail-unread-badge"
-      className="rounded-full bg-primary/12 px-1.5 text-[10px] font-semibold tabular-nums text-primary"
+      className="absolute right-1 top-0.5 rounded-full bg-primary px-1 text-[9px] font-semibold leading-[14px] tabular-nums text-primary-foreground"
     >
       {unread > 99 ? "99+" : unread}
     </span>

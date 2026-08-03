@@ -99,6 +99,10 @@ export function TabsTrigger(props: {
   value: string;
   className?: string;
   children: React.ReactNode;
+  /** Accessible name — required when the trigger holds an icon and no text. */
+  "aria-label"?: string;
+  /** Hover tooltip, so an icon-only trigger can still say what it opens. */
+  title?: string;
   "data-testid"?: string;
 }) {
   const ctx = useTabs("TabsTrigger");
@@ -109,6 +113,8 @@ export function TabsTrigger(props: {
       role="tab"
       id={`${ctx.baseId}-tab-${props.value}`}
       aria-selected={selected}
+      aria-label={props["aria-label"]}
+      title={props.title}
       aria-controls={`${ctx.baseId}-panel-${props.value}`}
       tabIndex={selected ? 0 : -1}
       data-testid={props["data-testid"]}
