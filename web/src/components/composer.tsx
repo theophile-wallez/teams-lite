@@ -248,191 +248,197 @@ export function Composer(props: { focusToken: unknown }) {
         className="composer-fade pointer-events-none absolute inset-x-0 bottom-full h-14"
       />
 
-      {replyingTo && (
+      {/* The reading column. The bar is capped a touch wider than the history
+          (`max-w-composer` vs `max-w-chat`), so it reads as a frame under the
+          messages rather than a box that ends exactly where they do. The fade
+          above stays full-width, because it belongs to the whole history. */}
+      <div className="mx-auto w-full max-w-composer">
+        {replyingTo && (
+          <div
+            data-testid="reply-banner"
+            className="mb-2 flex items-start gap-2 rounded-xl border-l-2 border-primary bg-card px-3 py-2 shadow-chip animate-in fade-in slide-in-from-bottom-1 duration-150 ease-out"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-semibold text-primary">
+                Replying to {replyingTo.message.sender}
+              </div>
+              <div className="truncate text-xs text-text-faint">
+                {copyableMessageText(replyingTo.message)}
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="Cancel reply"
+              data-testid="reply-cancel"
+              data-cuelume-press=""
+              onClick={() => controller.cancelReply()}
+              className="grid size-6 shrink-0 place-items-center rounded-md text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <X className="size-4" strokeWidth={1.6} />
+            </button>
+          </div>
+        )}
         <div
-          data-testid="reply-banner"
-          className="mb-2 flex items-start gap-2 rounded-xl border-l-2 border-primary bg-card px-3 py-2 shadow-chip animate-in fade-in slide-in-from-bottom-1 duration-150 ease-out"
+          className="flex cursor-text flex-col gap-2 rounded-2xl bg-card px-3 py-2.5 shadow-chip transition-shadow focus-within:shadow-card"
+          onMouseDown={(event) => {
+            // Clicking anywhere in the box focuses the field, except the action
+            // buttons (send / rich-text toggle / image) and the field itself, which
+            // handle their own clicks.
+            const element = event.target as HTMLElement;
+            if (element.closest("button") || element.closest("textarea, [contenteditable]")) return;
+            event.preventDefault();
+            focusField();
+          }}
         >
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-semibold text-primary">
-              Replying to {replyingTo.message.sender}
+          {/* The pending image, above the field like Teams: a thumbnail with its pixel
+              size and a remove button. It is a local preview (a data URL), so nothing
+              is uploaded until the message is actually sent. */}
+          {image && (
+            <div data-testid="composer-image-preview" className="relative w-fit max-w-full">
+              <img
+                src={image.previewUrl}
+                alt={image.name}
+                className="max-h-40 max-w-full rounded-xl border border-border-subtle object-contain"
+              />
+              <button
+                type="button"
+                aria-label="Remove image"
+                title="Remove image"
+                data-testid="composer-image-remove"
+                onClick={removeImage}
+                className="absolute -right-2 -top-2 grid size-7 place-items-center rounded-full bg-popover text-foreground shadow-pop hover:bg-accent"
+              >
+                <X className="size-4" strokeWidth={1.8} />
+              </button>
+              <div className="mt-1 text-xs text-text-faint">
+                {image.width} × {image.height}
+              </div>
             </div>
-            <div className="truncate text-xs text-text-faint">
-              {copyableMessageText(replyingTo.message)}
+          )}
+          {imageError && (
+            <div role="alert" data-testid="composer-image-error" className="text-xs text-destructive">
+              {imageError}
             </div>
-          </div>
-          <button
-            type="button"
-            aria-label="Cancel reply"
-            data-testid="reply-cancel"
-            data-cuelume-press=""
-            onClick={() => controller.cancelReply()}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-text-dim transition-colors hover:bg-accent hover:text-foreground"
-          >
-            <X className="size-4" strokeWidth={1.6} />
-          </button>
-        </div>
-      )}
-      <div
-        className="flex cursor-text flex-col gap-2 rounded-2xl bg-card px-3 py-2.5 shadow-chip transition-shadow focus-within:shadow-card"
-        onMouseDown={(event) => {
-          // Clicking anywhere in the box focuses the field, except the action
-          // buttons (send / rich-text toggle / image) and the field itself, which
-          // handle their own clicks.
-          const element = event.target as HTMLElement;
-          if (element.closest("button") || element.closest("textarea, [contenteditable]")) return;
-          event.preventDefault();
-          focusField();
-        }}
-      >
-        {/* The pending image, above the field like Teams: a thumbnail with its pixel
-            size and a remove button. It is a local preview (a data URL), so nothing
-            is uploaded until the message is actually sent. */}
-        {image && (
-          <div data-testid="composer-image-preview" className="relative w-fit max-w-full">
-            <img
-              src={image.previewUrl}
-              alt={image.name}
-              className="max-h-40 max-w-full rounded-xl border border-border-subtle object-contain"
-            />
-            <button
-              type="button"
-              aria-label="Remove image"
-              title="Remove image"
-              data-testid="composer-image-remove"
-              onClick={removeImage}
-              className="absolute -right-2 -top-2 grid size-7 place-items-center rounded-full bg-popover text-foreground shadow-pop hover:bg-accent"
-            >
-              <X className="size-4" strokeWidth={1.8} />
-            </button>
-            <div className="mt-1 text-xs text-text-faint">
-              {image.width} × {image.height}
-            </div>
-          </div>
-        )}
-        {imageError && (
-          <div role="alert" data-testid="composer-image-error" className="text-xs text-destructive">
-            {imageError}
-          </div>
-        )}
+          )}
 
-        {/* Input field. Rich mode is a bare-looking editor that formats via
-            keyboard shortcuts and a select-to-format menu; plain mode is a bare
-            auto-growing textarea. Both read as the same lean box, and both hand a
-            pasted image to `handlePaste` instead of inserting it as content. */}
-        {rich ? (
-          <Suspense
-            fallback={
-              <div className="min-h-[1.75rem] w-full text-sm text-text-faint" aria-hidden />
-            }
-          >
-            <RichEditor
-              key={openId ?? "none"}
-              initialContent={draftToHtml(draft)}
-              focusToken={props.focusToken}
-              submitRef={richSubmitRef}
-              focusRef={richFocusRef}
-              onEmptyChange={setRichEmpty}
-              // Mirror the editor's text into the plain draft so drafts still
-              // persist per-conversation and toggling back to plain keeps the text.
-              onChangeText={(text) => controller.setDraftText(text)}
-              onPaste={handlePaste}
-              onSubmit={(html) => send("", html)}
-            />
-          </Suspense>
-        ) : (
-          <textarea
-            ref={textareaRef}
-            value={draft}
-            rows={1}
-            data-testid="composer"
-            placeholder="Write a message…"
-            className={cn(
-              // `text-base` (16px) on mobile prevents iOS Safari from auto-zooming
-              // when the field is focused; `md:text-sm` restores 14px on desktop.
-              "max-h-64 w-full resize-none bg-transparent px-1 py-1 text-base outline-none md:text-sm placeholder:text-text-faint",
-            )}
-            onChange={(event) => controller.setDraftText(event.target.value)}
-            onPaste={handlePaste}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                submitPlain();
+          {/* Input field. Rich mode is a bare-looking editor that formats via
+              keyboard shortcuts and a select-to-format menu; plain mode is a bare
+              auto-growing textarea. Both read as the same lean box, and both hand a
+              pasted image to `handlePaste` instead of inserting it as content. */}
+          {rich ? (
+            <Suspense
+              fallback={
+                <div className="min-h-[1.75rem] w-full text-sm text-text-faint" aria-hidden />
               }
-            }}
-          />
-        )}
-
-        {/* Bottom control bar: rich-text toggle and image picker on the left, send
-            on the right. */}
-        <div className="flex items-center justify-between gap-1.5">
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              aria-label="Toggle rich text formatting"
-              aria-pressed={rich}
-              title="Rich text formatting"
-              data-testid="composer-format-toggle"
-              data-cuelume-toggle=""
-              onClick={toggleRich}
-              className={cn(
-                "grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground",
-                rich && "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
-              )}
             >
-              <Type className="size-4" strokeWidth={1.6} />
-            </button>
-            {/* The picker itself: hidden, opened by the button beside it. Its value is
-                cleared on every change so re-picking the same file still fires. */}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept={composerImageAccept()}
-              data-testid="composer-image-input"
-              className="sr-only"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                event.target.value = "";
-                if (file) void selectImage(file);
+              <RichEditor
+                key={openId ?? "none"}
+                initialContent={draftToHtml(draft)}
+                focusToken={props.focusToken}
+                submitRef={richSubmitRef}
+                focusRef={richFocusRef}
+                onEmptyChange={setRichEmpty}
+                // Mirror the editor's text into the plain draft so drafts still
+                // persist per-conversation and toggling back to plain keeps the text.
+                onChangeText={(text) => controller.setDraftText(text)}
+                onPaste={handlePaste}
+                onSubmit={(html) => send("", html)}
+              />
+            </Suspense>
+          ) : (
+            <textarea
+              ref={textareaRef}
+              value={draft}
+              rows={1}
+              data-testid="composer"
+              placeholder="Write a message…"
+              className={cn(
+                // `text-base` (16px) on mobile prevents iOS Safari from auto-zooming
+                // when the field is focused; `md:text-sm` restores 14px on desktop.
+                "max-h-64 w-full resize-none bg-transparent px-1 py-1 text-base outline-none md:text-sm placeholder:text-text-faint",
+              )}
+              onChange={(event) => controller.setDraftText(event.target.value)}
+              onPaste={handlePaste}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  submitPlain();
+                }
               }}
             />
+          )}
+
+          {/* Bottom control bar: rich-text toggle and image picker on the left, send
+              on the right. */}
+          <div className="flex items-center justify-between gap-1.5">
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                aria-label="Toggle rich text formatting"
+                aria-pressed={rich}
+                title="Rich text formatting"
+                data-testid="composer-format-toggle"
+                data-cuelume-toggle=""
+                onClick={toggleRich}
+                className={cn(
+                  "grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground",
+                  rich && "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
+                )}
+              >
+                <Type className="size-4" strokeWidth={1.6} />
+              </button>
+              {/* The picker itself: hidden, opened by the button beside it. Its value is
+                  cleared on every change so re-picking the same file still fires. */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={composerImageAccept()}
+                data-testid="composer-image-input"
+                className="sr-only"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (file) void selectImage(file);
+                }}
+              />
+              <button
+                type="button"
+                aria-label={image ? "Replace image" : "Add image"}
+                title={image ? "Replace image" : "Add image"}
+                data-testid="composer-image-button"
+                disabled={imageLoading || sending}
+                onClick={() => fileInputRef.current?.click()}
+                className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-50"
+              >
+                {imageLoading ? (
+                  <LoaderCircle className="size-4 animate-spin" strokeWidth={1.6} />
+                ) : (
+                  <ImagePlus className="size-4" strokeWidth={1.6} />
+                )}
+              </button>
+            </div>
+
             <button
               type="button"
-              aria-label={image ? "Replace image" : "Add image"}
-              title={image ? "Replace image" : "Add image"}
-              data-testid="composer-image-button"
-              disabled={imageLoading || sending}
-              onClick={() => fileInputRef.current?.click()}
-              className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-50"
+              aria-label={sending ? "Sending message" : "Send message"}
+              title="Send (Enter)"
+              data-testid="composer-send"
+              disabled={!canSend}
+              onClick={submit}
+              className={cn(
+                "grid size-8 shrink-0 cursor-pointer place-items-center rounded-full transition-all disabled:cursor-default",
+                canSend
+                  ? "bg-primary text-primary-foreground shadow-chip hover:brightness-110 active:brightness-95"
+                  : "bg-element text-text-faint",
+              )}
             >
-              {imageLoading ? (
-                <LoaderCircle className="size-4 animate-spin" strokeWidth={1.6} />
+              {sending ? (
+                <LoaderCircle className="size-4 animate-spin" strokeWidth={1.8} />
               ) : (
-                <ImagePlus className="size-4" strokeWidth={1.6} />
+                <ArrowUp className="size-4" strokeWidth={2} />
               )}
             </button>
           </div>
-
-          <button
-            type="button"
-            aria-label={sending ? "Sending message" : "Send message"}
-            title="Send (Enter)"
-            data-testid="composer-send"
-            disabled={!canSend}
-            onClick={submit}
-            className={cn(
-              "grid size-8 shrink-0 cursor-pointer place-items-center rounded-full transition-all disabled:cursor-default",
-              canSend
-                ? "bg-primary text-primary-foreground shadow-chip hover:brightness-110 active:brightness-95"
-                : "bg-element text-text-faint",
-            )}
-          >
-            {sending ? (
-              <LoaderCircle className="size-4 animate-spin" strokeWidth={1.8} />
-            ) : (
-              <ArrowUp className="size-4" strokeWidth={2} />
-            )}
-          </button>
         </div>
       </div>
     </div>

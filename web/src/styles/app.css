@@ -75,6 +75,13 @@
   --color-calendar-weekend: var(--calendar-weekend);
   --color-calendar-line: var(--calendar-line);
 
+  /* The reading column of a conversation. The history is capped at
+   * `max-w-chat`; the composer at `max-w-composer`, which is 10px wider on each
+   * side, so the bar frames the messages instead of ending flush with them. Both
+   * live here so the two stay in step from one place. */
+  --container-chat: 60rem;
+  --container-composer: calc(60rem + 20px);
+
   /* Elevation — shadow-as-border utilities (shadow-chip / -card / -pop). */
   --shadow-chip: var(--elev-chip);
   --shadow-card: var(--elev-card);

@@ -524,7 +524,7 @@ export function MessagePane(props: { onBack?: () => void }) {
               // re-anchor; `containerRef` then keeps it in sync when a measurement
               // changes the total without a re-render.
               ref={virtualizer.containerRef}
-              className="relative mx-auto w-full max-w-3xl"
+              className="relative mx-auto w-full max-w-chat"
               style={{ height: `${virtualizer.getTotalSize()}px` }}
             >
               {hasMoreOlder && (
