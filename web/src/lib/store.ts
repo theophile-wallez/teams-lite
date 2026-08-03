@@ -2031,11 +2031,22 @@ export class TeamsController {
   /** Persist app settings (partial) and reflect the fresh non-secret view in
    *  state. Clears the link cache so previews re-evaluate against the new host /
    *  tokens — including the links that resolved to nothing before a token was
-   *  stored. Rejects on failure so the caller (the settings form) can surface it. */
+   *  stored. Rejects on failure so the caller (the settings form) can surface it.
+   *
+   *  Sounds its outcome: saving a token is a deliberate action whose result the user
+   *  waits for, so the cue rides the answer — never the hover or the click, which say
+   *  only that the pointer moved. */
   async saveSettings(patch: SettingsPatch): Promise<AppSettings> {
-    const settings = await this.backend.setSettings(patch);
+    let settings: AppSettings;
+    try {
+      settings = await this.backend.setSettings(patch);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
     this.set({ settings });
     this.linkCache.clear();
+    playCue("success");
     return settings;
   }
 
@@ -2063,8 +2074,15 @@ export class TeamsController {
    * Rejects on failure, so the control that called it can say why.
    */
   async setAgentMode(conversationId: string, mode: AgentMode): Promise<AgentStatus> {
-    const status = await this.backend.agentSetMode(conversationId, mode);
+    let status: AgentStatus;
+    try {
+      status = await this.backend.agentSetMode(conversationId, mode);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
     this.set({ agent: status });
+    playCue("success");
     return status;
   }
 
@@ -2142,6 +2160,7 @@ export class TeamsController {
           blocker: null,
         },
       });
+      playCue("success");
     } catch (e) {
       const message = errText(e);
       this.set({
@@ -2152,6 +2171,7 @@ export class TeamsController {
           environment: readPushEnvironment(),
         },
       });
+      playCue("error");
       throw e;
     }
   }
@@ -2173,8 +2193,10 @@ export class TeamsController {
           devices: status?.devices ?? this.get().push.devices,
         },
       });
+      playCue("success");
     } catch (e) {
       this.set({ push: { ...this.get().push, busy: false, error: errText(e) } });
+      playCue("error");
       throw e;
     }
   }
@@ -2194,9 +2216,13 @@ export class TeamsController {
           error: report.failed > 0 ? (report.errors[0] ?? "delivery failed") : null,
         },
       });
+      // A test that reached no device is a failure, even though the request itself
+      // answered — so the cue follows the delivery, not the round trip.
+      playCue(report.delivered > 0 && report.failed === 0 ? "success" : "error");
       return report;
     } catch (e) {
       this.set({ push: { ...this.get().push, busy: false, error: errText(e) } });
+      playCue("error");
       throw e;
     }
   }
@@ -2215,6 +2241,10 @@ export class TeamsController {
       await this.backend.repairBroker();
     } catch (e) {
       if (before) this.set({ brokerStatus: { ...before, repairing: false } });
+      // A refused repair sounds; an accepted one does not. The repair only STARTS
+      // here — the socket drops a moment later and the reconnect is the real answer,
+      // so a success cue now would applaud a result nobody has yet.
+      playCue("error");
       throw e;
     }
   }
@@ -2314,7 +2344,10 @@ export class TeamsController {
       return false;
     }
 
-    playCue("success");
+    // No cue on a sent message. The composer clearing and the message appearing in
+    // the thread already say it left, and a chime on every send is noise in the one
+    // action the user repeats all day. A FAILED send still sounds, above: that one
+    // the user must notice.
     if (this.draftCache.get(id) === submittedDraft) {
       const pending = this.draftSaveTimers.get(id);
       if (pending) {

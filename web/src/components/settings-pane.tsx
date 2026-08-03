@@ -625,8 +625,8 @@ function AppearanceSettings() {
 }
 
 /** Interaction sounds on/off (cuelume). A per-device preference, persisted client
- *  side; the switch flips the engine's global flag so both message cues and the
- *  `data-cuelume-*` button feedback go quiet together. */
+ *  side; the switch flips the engine's global flag so the message cues, the outcome
+ *  cues and the `data-cuelume-*` button feedback go quiet together. */
 function SoundsSettings() {
   const controller = useController();
   const enabled = useAppState((s) => s.soundsEnabled);
@@ -636,8 +636,8 @@ function SoundsSettings() {
       <div className="flex flex-col">
         <h3 className="text-[15px] font-medium text-foreground">Sounds</h3>
         <p className="text-[13px] text-text-faint">
-          Play subtle interaction sounds — sending and receiving messages, and
-          button feedback.
+          Play subtle interaction sounds — an incoming message, a button press, and
+          whether an action succeeded or failed.
         </p>
       </div>
 

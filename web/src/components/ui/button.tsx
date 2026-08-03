@@ -36,8 +36,12 @@ export interface ButtonProps
   /** Interaction sound cue, played via cuelume's `data-cuelume-*` delegation
    *  (see lib/sounds.ts `bindCues`). Defaults to a subtle "press" tick on
    *  pointer-down; pass "toggle" for on/off controls, or null to stay silent
-   *  (e.g. a button that already plays a semantic cue). The primary variant also
-   *  gets a soft hover accent. */
+   *  (e.g. a button that already plays a semantic cue).
+   *
+   *  A button never plays a cue on hover: moving the pointer across a toolbar is
+   *  not an action, so a hover chime says something happened when nothing did.
+   *  What an action's outcome sounds like belongs to the action itself — the
+   *  controller plays `success` or `error` when the request answers (lib/store.ts). */
   cue?: "press" | "toggle" | null;
 }
 
@@ -52,14 +56,11 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         : cue === "press"
           ? { "data-cuelume-press": "" }
           : undefined;
-    const prominent = variant === undefined || variant === "default";
-    const hoverProps = cue !== null && prominent ? { "data-cuelume-hover": "" } : undefined;
     return (
       <Comp
         className={cn(buttonVariants({ variant, size, className }))}
         ref={ref}
         {...cueProps}
-        {...hoverProps}
         {...props}
       />
     );
