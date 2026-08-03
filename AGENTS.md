@@ -467,12 +467,13 @@ colleague reads.
   - There was a terminal UI (OpenTUI + Solid, in `ui/`) until 2026-08-03. It is gone,
     and the web app is the only client: do not re-add a second front-end, and read a
     comment that names one as history rather than as a place to keep in sync.
-- The `teams` command (`cli/`): TypeScript + Bun, no dependencies. It spawns or attaches
-  to the backend (`cli/src/backend.ts`), serves the web app and opens the browser
-  (`cli/src/launch.ts`), so one command starts everything — the opencode model.
-  `cli/build.ts` compiles it into ONE binary that embeds the Bun runtime, the release
-  backend and the built web app; that binary is what `install.sh` downloads and what
-  `.github/workflows/build.yml` publishes as the rolling `latest` release.
+- The `teams` command (`launcher/`): TypeScript + Bun, no dependencies. It spawns or
+  attaches to the backend (`launcher/src/backend.ts`), serves the web app and opens
+  the browser (`launcher/src/launch.ts`), so one command starts everything — the
+  opencode model. `launcher/build.ts` compiles it into ONE binary that embeds the Bun
+  runtime, the release backend and the built web app; that binary is what `install.sh`
+  downloads and what `.github/workflows/build.yml` publishes as the rolling `latest`
+  release. It is the launcher, not a second interface: it renders nothing itself.
 
 ## Ports
 
@@ -486,7 +487,7 @@ can never lose a race to it.
 | **19420** | Backend, send-capable — the always-on service      | `src/bin/server.rs` `DEFAULT_PORT` |
 | **19421** | Backend, send-capable — the user's hands-on dev one | `bin/teams-dev-server.sh` |
 | **19430** | Backend, read-only (`TEAMS_LITE_READ_ONLY=1`)      | `src/bin/server.rs` `READ_ONLY_PORT` |
-| **19440** | Web app, production — the always-on service, and `teams` | `web/server.ts`, `cli/src/launch.ts` |
+| **19440** | Web app, production — the always-on service, and `teams` | `web/server.ts`, `launcher/src/launch.ts` |
 | **19441** | Web UI, `vite dev`                                 | `web/vite.config.ts` `DEV_PORT` |
 | 19455 / 19445 | `bun run dev:mock` — mock backend / app        | `web/package.json` |
 | 19456 / 19446 | `bun run preview` — mock backend / app         | `web/scripts/preview.ts` |
@@ -576,7 +577,7 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   - Backend (`src/`, Rust): `cargo test`.
   - Web app (`web/`): `bun run test` (unit) plus `bun run typecheck`; add
     `bun run test:e2e` when behavior or flows change.
-  - The `teams` command (`cli/`): `bun test` plus `bun run typecheck` (run in `cli/`).
+  - The `teams` command: `bun test` plus `bun run typecheck` (run in `launcher/`).
   - The automation guard (`.claude/hooks/`): `python3
     .claude/hooks/guard-live-automation.test.py` whenever you touch the hook, a
     launcher name, or a port. It pins both halves — what must block, and the ordinary

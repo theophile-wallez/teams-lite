@@ -34,7 +34,7 @@ jobs:
           bun-version: latest
 
       - name: Install launcher dependencies
-        working-directory: cli
+        working-directory: launcher
         run: bun install --frozen-lockfile
 
       - name: Install web dependencies
@@ -46,7 +46,7 @@ jobs:
         run: cargo test
 
       - name: Launcher tests
-        working-directory: cli
+        working-directory: launcher
         run: bun test
 
       # The web client's tests are fully deterministic (pure logic + a fake
@@ -70,13 +70,13 @@ jobs:
       - name: Compile single `teams` binary
         # build.ts also builds the web app and embeds it, so the published binary
         # needs nothing else to serve it (web deps were installed above).
-        working-directory: cli
+        working-directory: launcher
         run: bun run build.ts
 
       - name: Stage release asset
         run: |
           mkdir -p out
-          cp cli/dist/teams out/teams-linux-x64
+          cp launcher/dist/teams out/teams-linux-x64
 
       - name: Publish rolling "latest" release
         env:

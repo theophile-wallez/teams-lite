@@ -6,7 +6,7 @@
 // embedded and extracted (see backend.ts). Under `bun run` (dev) this module is
 // never imported; the launcher uses the repo's web/ dir.
 //
-// The embedded asset (web.tar.gz) is produced by cli/build.ts. Extraction uses the
+// The embedded asset (web.tar.gz) is produced by launcher/build.ts. Extraction uses the
 // system `tar` (always present on Linux, teams-lite's only target) fed the archive
 // on stdin, so we need no bundled tar parser.
 

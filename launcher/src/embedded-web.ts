@@ -3,7 +3,7 @@
 // import and bakes the bytes into the executable's virtual filesystem (bunfs);
 // at runtime `webEmbedPath` is a `/$bunfs/root/...` path we can read.
 //
-// The file `web.tar.gz` is produced by cli/build.ts (a gzipped tar of the web
+// The file `web.tar.gz` is produced by launcher/build.ts (a gzipped tar of the web
 // app's runtime files) right before the compile, and is gitignored. It does NOT
 // need to exist for `bun run` (dev): this module is only imported when running as
 // a compiled binary (see web-bundle.ts), so the dev entrypoint never touches it —

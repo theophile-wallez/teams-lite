@@ -2,7 +2,7 @@
 //
 // WHY THIS FILE EXISTS. Two things ship that set, and they used to each keep their
 // own idea of it:
-//   • cli/build.ts tars it into the `teams` binary (which extracts it to
+//   • launcher/build.ts tars it into the `teams` binary (which extracts it to
 //     ~/.cache/teams-lite/web and runs server.ts from there);
 //   • bin/teams-lite-service.sh stages it for the always-on systemd service.
 // The tar list said `server.ts dist` and nothing else, so when server.ts gained

@@ -21,11 +21,11 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Absolute path to the compiled `teams` binary this launcher wraps.
-TEAMS_BIN="${TEAMS_LITE_BIN:-$REPO_ROOT/cli/dist/teams}"
+TEAMS_BIN="${TEAMS_LITE_BIN:-$REPO_ROOT/launcher/dist/teams}"
 
 if [ ! -x "$TEAMS_BIN" ]; then
   echo "teams-lite: binary not found at $TEAMS_BIN" >&2
-  echo "  build it with: (cd cli && bun run build)  or set TEAMS_LITE_BIN" >&2
+  echo "  build it with: (cd launcher && bun run build)  or set TEAMS_LITE_BIN" >&2
   exit 1
 fi
 

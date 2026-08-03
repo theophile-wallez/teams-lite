@@ -1,24 +1,24 @@
 // Build the standalone `teams` binary (opencode-style single command).
 //
 // This produces ONE self-contained executable that embeds:
-//   • the Bun runtime + the compiled launcher (cli/src),
+//   • the Bun runtime + the compiled launcher (launcher/src),
 //   • the web app (built SSR bundle + assets, as a tarball), and
 //   • the Rust backend binary (target/release/server), embedded here and
 //     extracted to ~/.cache/teams-lite/server on first launch.
 //
 // Usage:
 //   cargo build --release --bin server   # produce ../target/release/server
-//   cd cli && bun run build               # produce cli/dist/teams
+//   cd launcher && bun run build          # produce launcher/dist/teams
 //
 // One gotcha learned the hard way: `bun build --compile` writes a ZERO-FILLED
 // (corrupt) binary when the outfile lives on a different filesystem than the build
 // (e.g. /tmp tmpfs vs the on-disk repo). We therefore always emit inside the repo
-// (cli/dist).
+// (launcher/dist).
 import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-const cliDir = import.meta.dir;
-const repoRoot = join(cliDir, "..");
+const launcherDir = import.meta.dir;
+const repoRoot = join(launcherDir, "..");
 
 // 1. Locate the release backend binary.
 const backendBin = join(repoRoot, "target", "release", "server");
@@ -30,12 +30,12 @@ if (!existsSync(backendBin)) {
 }
 
 // 2. Stage it as a local, non-escaping asset for the embed import
-//    (cli/src/embedded-backend.ts imports "../server.embed").
-const embedPath = join(cliDir, "server.embed");
+//    (launcher/src/embedded-backend.ts imports "../server.embed").
+const embedPath = join(launcherDir, "server.embed");
 copyFileSync(backendBin, embedPath);
 
 // 3. Build the web app and stage it as an embedded tarball (see
-//    cli/src/embedded-web.ts / web-bundle.ts). web/server.ts resolves its dist/
+//    launcher/src/embedded-web.ts / web-bundle.ts). web/server.ts resolves its dist/
 //    relative to itself, so the archive keeps that layout: the runtime files +
 //    dist/ at the archive root -> extracted to ~/.cache/teams-lite/web on first
 //    launch.
@@ -46,7 +46,7 @@ copyFileSync(backendBin, embedPath);
 //    and the day server.ts imported ./write-token the archive silently lost a
 //    module — every launch from a fresh binary then died on startup.
 const webDir = join(repoRoot, "web");
-const webTar = join(cliDir, "web.tar.gz");
+const webTar = join(launcherDir, "web.tar.gz");
 if (!existsSync(join(webDir, "node_modules"))) {
   console.error("error: web deps missing. Run `cd web && bun install` first.");
   process.exit(1);
@@ -78,7 +78,7 @@ if (!tar.success) {
 
 // 4. Compile the single binary. Emit inside the repo (same filesystem) to avoid
 //    the cross-filesystem zero-fill bug, then the caller/CI moves it if needed.
-const outDir = join(cliDir, "dist");
+const outDir = join(launcherDir, "dist");
 mkdirSync(outDir, { recursive: true });
 const outfile = join(outDir, "teams");
 
@@ -90,7 +90,7 @@ const target = process.env.TEAMS_BUILD_TARGET as Bun.Build.CompileTarget | undef
 
 try {
   const result = await Bun.build({
-    entrypoints: [join(cliDir, "src", "index.ts")],
+    entrypoints: [join(launcherDir, "src", "index.ts")],
     target: "bun",
     compile: target ? { target, outfile } : { outfile },
   });

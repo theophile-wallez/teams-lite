@@ -42,7 +42,7 @@ export function isCompiledBinary(): boolean {
   return Array.isArray(embedded) && embedded.length > 0;
 }
 
-/// The repo root, for a source checkout: cli/src -> two levels up.
+/// The repo root, for a source checkout: launcher/src -> two levels up.
 export function repoRoot(): string {
   return join(import.meta.dir, "..", "..");
 }

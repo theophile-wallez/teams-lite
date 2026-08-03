@@ -302,11 +302,11 @@ cd teams-lite
 
 # 2. Install dependencies (the app + the `teams` command)
 cd web && bun install && cd ..
-cd cli && bun install && cd ..
+cd launcher && bun install && cd ..
 
 # 3a. Run straight from source (spawns the debug/release backend it finds)
 cargo build --release --bin server
-cd cli && bun run start           # the whole thing, as `teams` would
+cd launcher && bun run start      # the whole thing, as `teams` would
 #   …or the app alone in dev (Vite + HMR), against a mock backend:
 cd web && bun run dev:mock        # mock on 19455, app on 19445
 #
@@ -323,8 +323,8 @@ bun run dev                       # terminal 2  (Vite HMR on 19441, against :194
 
 # 3b. …or produce the single `teams` binary (backend + app embedded)
 cargo build --release --bin server
-cd cli && bun run build           # -> cli/dist/teams   (also builds & embeds web/)
-./cli/dist/teams                  # run it
+cd launcher && bun run build      # -> launcher/dist/teams (also builds & embeds web/)
+./launcher/dist/teams             # run it
 ```
 
 `bun run build` builds the web app and bundles it in automatically, so the binary
@@ -340,7 +340,7 @@ cargo test                       # Rust backend
 cd web && bun run test           # app unit tests (Vitest)
 cd web && bun run typecheck      # app types
 cd web && bun run test:e2e       # app end-to-end (Playwright, headless Chromium)
-cd cli && bun test               # the `teams` command line
+cd launcher && bun test          # the `teams` command line
 ```
 
 The web E2E suite boots the backend **mock** (`web/mock/server.ts`) and the SSR

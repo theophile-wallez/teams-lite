@@ -25,7 +25,7 @@ jobs:
       - name: Backend tests
         run: cargo test
 
-  cli:
+  launcher:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,13 +33,13 @@ jobs:
         with:
           bun-version: latest
       - name: Install launcher dependencies
-        working-directory: cli
+        working-directory: launcher
         run: bun install --frozen-lockfile
       - name: Launcher tests
-        working-directory: cli
+        working-directory: launcher
         run: bun test
       - name: Launcher typecheck
-        working-directory: cli
+        working-directory: launcher
         run: bun run typecheck
 
   web:

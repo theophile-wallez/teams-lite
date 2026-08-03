@@ -159,7 +159,7 @@ searching_text() {
 }
 
 # Is this command asking a launcher to PRINT ITS USAGE? `teams --help` parses argv,
-# writes the flags and exits (see cli/src/index.ts), so it starts no backend and serves
+# writes the flags and exits (see launcher/src/index.ts), so it starts no backend and serves
 # no app — and reading a command's own help is how anyone checks what it takes.
 #
 # Narrow like `probing_processes`: the flag must be there as a word, and the command
@@ -772,16 +772,19 @@ fi
 # and an agent that needs the UI drives the mock. So this one blocks unconditionally.
 #
 # Every spelling that RUNS it: the compiled binary wherever it was installed
-# (cli/dist/teams, ~/.teams-lite/bin/teams, a `teams` on the PATH), the repo wrapper
-# that resolves the broker bus for it, and the source entrypoint. Anchored to a
-# command position like rules 3 and 3a, so prose, `git add cli/dist/teams` and
+# (launcher/dist/teams, ~/.teams-lite/bin/teams, a `teams` on the PATH), the repo
+# wrapper that resolves the broker bus for it, and the source entrypoint. Anchored to a
+# command position like rules 3 and 3a, so prose, `git add launcher/dist/teams` and
 # `chmod +x` still run nothing. `teams-lite-service.sh` and friends do not match:
 # the name must be followed by a space or the end of the segment. The entrypoint is
 # matched only behind the interpreter that would RUN it — the same shape rule 2a uses
-# for web/server.ts — because `git add cli/src/index.ts` starts nothing.
+# for web/server.ts — because `git add launcher/src/index.ts` starts nothing. `bun` is
+# anchored there for the same reason it is in rule 2a: unanchored, those three letters
+# matched inside `stage-bundle.ts`, so a `sed` over a list of files that happened to
+# name both was read as a launch.
 runs_the_teams_command="${at_backend_command_start}teams([[:space:]]|\$)"
 runs_the_teams_launcher="${at_backend_command_start}teams-launcher\.sh([[:space:]]|\$)"
-runs_the_teams_entrypoint='bun[^;&|]*(cli/)?src/index\.ts'
+runs_the_teams_entrypoint="${at_command_start}bun[^;&|]*(launcher/)?src/index\.ts"
 if ! stopping_a_process && ! inspecting_a_file && ! searching_text && ! printing_usage &&
   printf '%s' "$command_line" |
   grep -qE "$runs_the_teams_command|$runs_the_teams_launcher|$runs_the_teams_entrypoint"; then

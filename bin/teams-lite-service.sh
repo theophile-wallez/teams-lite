@@ -129,7 +129,7 @@ stage_artifacts() {
   install -m 0644 "$BIN_DIR/broker-env.sh" "$SERVICE_DIR/broker-env.sh"
 
   # The web runtime file set is owned by web/scripts/stage-bundle.ts, so this script
-  # and cli/build.ts cannot drift apart on what the server needs.
+  # and launcher/build.ts cannot drift apart on what the server needs.
   (cd "$REPO/web" && "$BUN" run scripts/stage-bundle.ts "$SERVICE_DIR/web")
 
   local commit

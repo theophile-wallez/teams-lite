@@ -296,13 +296,13 @@ def cases(tmp: Path):
         # word — every spelling that runs it, and no read-only escape from it.
         ("BLOCK", PROJECT, "teams"),
         ("BLOCK", PROJECT, "teams --no-open"),
-        ("BLOCK", PROJECT, "cli/dist/teams --port 19450"),
-        ("BLOCK", PROJECT, "./cli/dist/teams"),
+        ("BLOCK", PROJECT, "launcher/dist/teams --port 19450"),
+        ("BLOCK", PROJECT, "./launcher/dist/teams"),
         ("BLOCK", PROJECT, "$HOME/.teams-lite/bin/teams --dev"),
         ("BLOCK", PROJECT, "bin/teams-launcher.sh"),
         ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 teams"),
-        ("BLOCK", PROJECT, "cd cli && bun run src/index.ts"),
-        ("BLOCK", PROJECT, "bun run cli/src/index.ts --no-open"),
+        ("BLOCK", PROJECT, "cd launcher && bun run src/index.ts"),
+        ("BLOCK", PROJECT, "bun run launcher/src/index.ts --no-open"),
         # The production web server relays to the LIVE backend by default.
         ("BLOCK", WEB, "bun run start"),
         # The repair unit restarts the Intune container: same rule, by unit name.
@@ -324,7 +324,7 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/horizon-reader.ts"),
         # Reading the code that implements the write is ordinary work, like any search.
         ("ALLOW", PROJECT, 'grep -rn "name=consumptionhorizon" src'),
-        ("ALLOW", PROJECT, "grep -rn set_consumption_horizon src cli web"),
+        ("ALLOW", PROJECT, "grep -rn set_consumption_horizon src launcher web"),
         # Reading presence is what the person card is built on, in every shape.
         ("ALLOW", PROJECT, f"bun run {tmp}/presence-reader.ts"),
         ("ALLOW", PROJECT, "cargo run --example guard-test-presence-read"),
@@ -381,9 +381,12 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, "bash -n bin/teams-dev-server.sh"),
         ("ALLOW", PROJECT, "shellcheck bin/teams-lite-backend.sh"),
         # Ordinary file work on a launcher runs nothing — the `teams` command included.
-        ("ALLOW", PROJECT, "ls -la cli/dist/teams"),
-        ("ALLOW", PROJECT, "git add cli/src/index.ts cli/build.ts"),
-        ("ALLOW", PROJECT, "grep -n backendPort cli/src/backend.ts"),
+        ("ALLOW", PROJECT, "ls -la launcher/dist/teams"),
+        ("ALLOW", PROJECT, "git add launcher/src/index.ts launcher/build.ts"),
+        ("ALLOW", PROJECT, "grep -n backendPort launcher/src/backend.ts"),
+        # A `sed` over a list of files that names both `stage-bundle.ts` and the
+        # launcher's entrypoint edits text: `bun` inside a word is not an interpreter.
+        ("ALLOW", PROJECT, "sed -i 's|a|b|g' web/scripts/stage-bundle.ts launcher/src/index.ts"),
         # Searching the repo runs nothing, and a regex alternation is not a pipeline:
         # the bare `|` in a pattern used to read as a command separator, which blocked
         # a search of this very repo for the launcher it documents.
@@ -394,13 +397,13 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "grep -rn teams README.md; teams --no-open"),
         ("BLOCK", PROJECT, "grep -rn server src && target/release/server"),
         ("ALLOW", PROJECT, "chmod +x bin/teams-launcher.sh"),
-        ("ALLOW", PROJECT, "git commit -m 'feat(cli): teams now opens the web app'"),
+        ("ALLOW", PROJECT, "git commit -m 'feat(launcher): teams now opens the web app'"),
         # Asking a launcher what its flags are prints text and exits.
-        ("ALLOW", PROJECT, "cli/dist/teams --help"),
+        ("ALLOW", PROJECT, "launcher/dist/teams --help"),
         ("ALLOW", PROJECT, "teams -h"),
         # …but a usage line is not a licence for what follows it.
-        ("BLOCK", PROJECT, "cli/dist/teams --help && cli/dist/teams"),
-        ("ALLOW", PROJECT, "cd cli && bun test"),
+        ("BLOCK", PROJECT, "launcher/dist/teams --help && launcher/dist/teams"),
+        ("ALLOW", PROJECT, "cd launcher && bun test"),
         ("ALLOW", PROJECT, "chmod +x bin/teams-lite-backend.sh"),
         ("ALLOW", PROJECT, "git add bin/teams-lite-backend.sh bin/teams-dev-server.sh"),
         ("ALLOW", PROJECT, "grep -n broker bin/teams-dev-server.sh"),
