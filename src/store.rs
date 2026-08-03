@@ -3202,6 +3202,29 @@ impl Store {
         Ok(name)
     }
 
+    /// Everybody who has written in a conversation, most recent contributor first:
+    /// their MRI and the display name their newest message carries (empty when we
+    /// never captured one). Local and network-free.
+    ///
+    /// This is what an @mention list is built from in a CHANNEL, whose roster Teams
+    /// does not expose on the thread (see src/teams_members.rs), and what completes a
+    /// chat's roster with the names it already knows. `MAX(seq)` makes `sender` a
+    /// well-defined bare column in SQLite — the value from the row that holds the
+    /// maximum — so each person is named by their latest message, not an arbitrary one.
+    pub fn thread_senders(&self, conversation_id: &str, limit: i64) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT sender_mri, sender, MAX(seq) AS last_seq FROM messages
+             WHERE conversation_id = ?1 AND sender_mri <> ''
+             GROUP BY sender_mri
+             ORDER BY last_seq DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![conversation_id, limit], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The newest `limit` messages of a conversation, ordered oldest -> newest (for display).
     pub fn newest_messages(&self, conversation_id: &str, limit: i64) -> Result<Vec<Message>> {
         let sql = format!(

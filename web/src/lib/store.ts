@@ -14,6 +14,7 @@
 import { Store } from "@tanstack/store";
 import { Backend, defaultWsUrl } from "./ws-client";
 import type { SendImage } from "./composer-image";
+import { dedupeCandidates, type MentionCandidate, type OutboundMention } from "./mentions";
 import {
   appendLiveMessage,
   copyableMessageText,
@@ -222,6 +223,11 @@ export type AppState = {
    *  Refreshed on open and kept live by the `read_receipt` event. Empty for the
    *  no-open / channel / receipts-disabled cases. */
   readReceipts: ReadReceipt[];
+  /** The people the OPEN conversation's composer can @mention, most relevant first.
+   *  Empty until the user types the first "@" there: the list costs a roster read and a
+   *  directory lookup, so it is fetched on demand and then cached per conversation (see
+   *  `ensureMentionCandidates`). */
+  mentionCandidates: MentionCandidate[];
   /** User appearance preference (System follows the OS). */
   appearance: Appearance;
   /** Concrete theme currently applied to <html> (what CSS keys off). */
@@ -406,6 +412,7 @@ function initialState(): AppState {
     typingByConversation: {},
     incomingCalls: [],
     readReceipts: [],
+    mentionCandidates: [],
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
     soundsEnabled: DEFAULT_SOUNDS_ENABLED,
@@ -486,6 +493,13 @@ export class TeamsController {
   // conversation whenever this changes. Seeded by the `read_receipts` fetch on
   // open and updated in place by live `read_receipt` events.
   private receiptsByConv = new Map<string, Map<string, ReadReceipt>>();
+
+  // Mention candidates per conversation: convId -> the people it can @mention.
+  // Non-reactive; the reactive `mentionCandidates` slice is the open conversation's.
+  // A conversation is fetched once per session (`mentionLoads` holds the in-flight
+  // request, so a burst of keystrokes cannot fan out into several roster reads).
+  private mentionsByConv = new Map<string, MentionCandidate[]>();
+  private mentionLoads = new Map<string, Promise<void>>();
 
   // Media proxy cache: hosted-content URL -> a promise of a blob object URL.
   // Deduplicates concurrent loads of the same image and makes re-mounts/re-opens
@@ -1177,6 +1191,44 @@ export class TeamsController {
     this.set({ readReceipts: byMri ? [...byMri.values()] : [] });
   }
 
+  // ---- @mention candidates -------------------------------------------------
+
+  /**
+   * Make sure the open conversation's mention candidates are loaded, then publish
+   * them. Called when the composer sees its first "@", not when a thread opens: the
+   * list costs the backend a roster read and a directory lookup, and most messages
+   * mention nobody.
+   *
+   * Cached per conversation for the session and single-flighted, so holding "@" down
+   * cannot fan out into a stream of requests. Best-effort: a failure leaves the list
+   * empty, and a composer with no suggestions still sends messages.
+   */
+  async ensureMentionCandidates(): Promise<void> {
+    const id = this.get().openId;
+    if (!id) return;
+    const cached = this.mentionsByConv.get(id);
+    if (cached) {
+      if (this.get().openId === id) this.set({ mentionCandidates: cached });
+      return;
+    }
+    const pending = this.mentionLoads.get(id);
+    if (pending) return pending;
+    const load = (async () => {
+      try {
+        const res = await this.backend.members(id);
+        const people = dedupeCandidates(res.members ?? []);
+        this.mentionsByConv.set(id, people);
+        if (this.get().openId === id) this.set({ mentionCandidates: people });
+      } catch {
+        // Best-effort: no suggestions rather than an error in the composer.
+      } finally {
+        this.mentionLoads.delete(id);
+      }
+    })();
+    this.mentionLoads.set(id, load);
+    return load;
+  }
+
   // ---- conversations -------------------------------------------------------
 
   private async loadConversations(): Promise<void> {
@@ -1706,6 +1758,9 @@ export class TeamsController {
       // Show any cached "seen by" positions instantly on re-open; the fetch below
       // (and live `read_receipt` events) then reconcile them.
       readReceipts: cachedReceipts ? [...cachedReceipts.values()] : [],
+      // Whoever this thread can mention, when we already know. Never another
+      // thread's people: this slice belongs to the open conversation alone.
+      mentionCandidates: this.mentionsByConv.get(id) ?? [],
     });
 
     // Fetch the current read positions best-effort — never blocks the open, and a
@@ -1842,8 +1897,9 @@ export class TeamsController {
       this.flushDraft(id);
       this.trimCachedHistory(id);
     }
-    // The read-receipts slice is single-conversation — drop it when nothing is open.
-    this.set({ openId: null, replyingTo: null, readReceipts: [] });
+    // The read-receipts and mention slices are single-conversation — drop them when
+    // nothing is open.
+    this.set({ openId: null, replyingTo: null, readReceipts: [], mentionCandidates: [] });
   }
 
   async loadOlderMessages(): Promise<void> {
@@ -2512,8 +2568,16 @@ export class TeamsController {
    * Send one snapshot of the composer. The snapshot stays visible while the
    * request is pending and after a failure. A successful request clears only the
    * exact submitted text, so text entered during the request is never erased.
+   *
+   * `mentions` says who the body's mention spans name (the spans themselves carry only
+   * an index), which is what makes Teams notify those people.
    */
-  async sendDraft(text: string, html?: string, image?: SendImage): Promise<boolean> {
+  async sendDraft(
+    text: string,
+    html?: string,
+    image?: SendImage,
+    mentions?: OutboundMention[],
+  ): Promise<boolean> {
     const id = this.get().openId;
     if (!id) return false;
     const clean = text.trim();
@@ -2527,7 +2591,7 @@ export class TeamsController {
       : undefined;
 
     try {
-      await this.backend.send(id, clean, replyTo, richHtml, image);
+      await this.backend.send(id, clean, replyTo, richHtml, image, mentions);
     } catch (e) {
       this.set({ status: `send failed: ${errText(e)}` });
       playCue("error");

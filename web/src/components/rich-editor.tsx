@@ -1,5 +1,7 @@
 import {
   useEffect,
+  useRef,
+  useState,
   type ClipboardEvent as ReactClipboardEvent,
   type MutableRefObject,
   type ReactNode,
@@ -20,8 +22,16 @@ import {
   TextUnderlineIcon,
 } from "@hugeicons/core-free-icons";
 import { COMPOSER_FIELD_CLASS } from "~/lib/composer-field";
-import { serializeTeamsHtml } from "~/lib/rich-text";
+import {
+  matchMentionCandidates,
+  mentionQueryBefore,
+  type MentionCandidate,
+  type OutboundMention,
+} from "~/lib/mentions";
+import { serializeTeamsMessage } from "~/lib/rich-text";
 import { cn } from "~/lib/utils";
+import { MentionNode } from "./mention-extension";
+import { MentionSuggestions } from "./mention-suggestions";
 
 // The editor is deliberately restricted to the formatting Microsoft Teams
 // accepts in RichText/Html: bold, italic, underline, strikethrough, inline code,
@@ -44,7 +54,28 @@ const EXTENSIONS = [
   Placeholder.configure({
     placeholder: "Write a message…",
   }),
+  // @mentions: an atomic inline node that carries who is mentioned, shrinks by one
+  // word per Backspace, and serializes to the markup Teams notifies people from.
+  MentionNode,
 ];
+
+/** An "@…" being typed: what was typed, and the document range it occupies (so
+ *  picking somebody replaces exactly that text). */
+type MentionQueryState = { query: string; from: number; to: number };
+
+/** The `@…` the caret sits in, in document coordinates, or null when it sits in
+ *  ordinary text. The text is read from the caret's own block, so a mention can only
+ *  start at the beginning of a line or after a space (see `mentionQueryBefore`). */
+function mentionQueryInEditor(editor: Editor): MentionQueryState | null {
+  const { $from, empty } = editor.state.selection;
+  if (!empty || !$from.parent.isTextblock) return null;
+  // An atom (an existing mention, an image) counts as one non-space character, so the
+  // offsets below line up with document positions.
+  const before = $from.parent.textBetween(0, $from.parentOffset, undefined, "\ufffc");
+  const found = mentionQueryBefore(before);
+  if (!found) return null;
+  return { query: found.query, from: $from.start() + found.at, to: $from.pos };
+}
 
 /** Prompt for a URL and apply it as a link to the current selection. */
 function promptForLink(editor: Editor) {
@@ -67,12 +98,18 @@ function promptForLink(editor: Editor) {
  * Formatting is therefore reachable two ways, and never both at once: the composer's
  * own {@link FormatToolbar} when the user opened it, and a floating BubbleMenu over
  * the selection when they did not. On submit the HTML is normalized to the
- * Teams-safe subset by {@link serializeTeamsHtml}.
+ * Teams-safe subset by {@link serializeTeamsMessage}, which also hands back who the
+ * body's @mentions name.
+ *
+ * Typing "@" opens the mention list (see `mentionQueryInEditor` and
+ * `MentionSuggestions`): arrows move, Enter or Tab picks, Escape closes it and leaves
+ * the "@" as text. A picked person becomes one atomic node whose name shrinks by a word
+ * per Backspace, exactly as in Teams (see components/mention-extension.ts).
  */
 export function RichEditor(props: {
   initialContent: string;
   focusToken: unknown;
-  onSubmit: (html: string) => Promise<boolean>;
+  onSubmit: (html: string, mentions: OutboundMention[]) => Promise<boolean>;
   /** Whether the composer already shows a format bar — then the selection menu stays
    *  away, so the same buttons are never offered twice. */
   toolbarVisible?: boolean;
@@ -88,7 +125,52 @@ export function RichEditor(props: {
   onChangeText?: (text: string) => void;
   /** Hands the live editor out, so the composer can drive it from its format bar. */
   onEditorChange?: (editor: Editor | null) => void;
+  /** The people this conversation can mention. */
+  mentionCandidates?: readonly MentionCandidate[];
+  /** Called the moment an "@…" starts, so the candidates can be fetched on demand. */
+  onMentionQuery?: () => void;
 }) {
+  // The mention list, mirrored into a ref because `handleKeyDown` is created once with
+  // the editor and would otherwise read the state of the first render forever.
+  const [mention, setMention] = useState<MentionQueryState | null>(null);
+  const mentionRef = useRef<MentionQueryState | null>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const activeIndexRef = useRef(0);
+  const rankedRef = useRef<MentionCandidate[]>([]);
+  // The exact query the user dismissed with Escape. Typing on reopens the list; the
+  // same query does not, so Escape means "not this one" rather than "not ever".
+  const dismissedRef = useRef<string | null>(null);
+
+  const setMentionState = (next: MentionQueryState | null) => {
+    mentionRef.current = next;
+    setMention(next);
+  };
+  const setActive = (index: number) => {
+    activeIndexRef.current = index;
+    setActiveIndex(index);
+  };
+  const closeMentions = () => {
+    setMentionState(null);
+    setActive(0);
+  };
+
+  /** Re-read the "@…" under the caret after anything that can move or change it. */
+  const syncMentions = (editor: Editor) => {
+    const found = mentionQueryInEditor(editor);
+    if (!found) {
+      dismissedRef.current = null;
+      if (mentionRef.current) closeMentions();
+      return;
+    }
+    if (dismissedRef.current === found.query) return;
+    dismissedRef.current = null;
+    const previous = mentionRef.current;
+    setMentionState(found);
+    // A different query is a different list: start at its best match.
+    if (!previous || previous.query !== found.query) setActive(0);
+    props.onMentionQuery?.();
+  };
+
   const editor = useEditor({
     // TanStack Start renders on the server; ProseMirror needs the DOM, so defer
     // creation to the client to avoid a hydration mismatch.
@@ -99,7 +181,10 @@ export function RichEditor(props: {
     onUpdate: ({ editor }) => {
       props.onEmptyChange?.(editor.isEmpty);
       props.onChangeText?.(editor.getText());
+      syncMentions(editor);
     },
+    onSelectionUpdate: ({ editor }) => syncMentions(editor),
+    onBlur: () => closeMentions(),
     editorProps: {
       attributes: {
         // The field metrics come from the shared constant, so the placeholder the
@@ -107,6 +192,33 @@ export function RichEditor(props: {
         class: cn(COMPOSER_FIELD_CLASS, "tiptap-message overflow-y-auto outline-none"),
       },
       handleKeyDown: (_view, event) => {
+        // The mention list owns the keyboard while it is open and has somebody to
+        // offer, so Enter picks a person instead of sending a half-typed name.
+        const open = mentionRef.current !== null && rankedRef.current.length > 0;
+        if (open) {
+          const count = rankedRef.current.length;
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            const step = event.key === "ArrowDown" ? 1 : -1;
+            setActive((activeIndexRef.current + step + count) % count);
+            return true;
+          }
+          if (event.key === "Enter" || event.key === "Tab") {
+            event.preventDefault();
+            const candidate = rankedRef.current[activeIndexRef.current];
+            if (candidate) pickMention(candidate);
+            return true;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            // The list, and only the list. Escape is also the app's "leave this
+            // thread"/"cancel the reply" key, and closing a menu must not do either.
+            event.stopPropagation();
+            dismissedRef.current = mentionRef.current?.query ?? null;
+            closeMentions();
+            return true;
+          }
+        }
         if (event.key === "Enter" && !event.shiftKey) {
           event.preventDefault();
           submit();
@@ -123,12 +235,36 @@ export function RichEditor(props: {
     },
   });
 
+  // The ranked list this render shows. Kept in a ref as well, for `handleKeyDown`.
+  const ranked = mention
+    ? matchMentionCandidates(props.mentionCandidates ?? [], mention.query)
+    : [];
+  rankedRef.current = ranked;
+
+  /** Replace the typed "@…" with a real mention of `candidate`. */
+  const pickMention = (candidate: MentionCandidate) => {
+    const state = mentionRef.current;
+    if (!editor || !state) return;
+    closeMentions();
+    editor
+      .chain()
+      .insertMention({
+        mri: candidate.mri,
+        label: candidate.name,
+        from: state.from,
+        to: state.to,
+      })
+      .run();
+  };
+
   const submit = () => {
     if (!editor) return;
-    const html = serializeTeamsHtml(editor.getHTML());
+    closeMentions();
+    const { html, mentions } = serializeTeamsMessage(editor.getHTML());
     const submittedHtml = html;
-    void props.onSubmit(html).then((sent) => {
-      if (!sent || !editor || serializeTeamsHtml(editor.getHTML()) !== submittedHtml) return;
+    void props.onSubmit(html, mentions).then((sent) => {
+      if (!sent || !editor || serializeTeamsMessage(editor.getHTML()).html !== submittedHtml)
+        return;
       editor.commands.clearContent();
     });
   };
@@ -172,7 +308,17 @@ export function RichEditor(props: {
   }
 
   return (
-    <div className="w-full">
+    <div className="relative w-full">
+      {/* The mention list, anchored to the field's own box (see MentionSuggestions).
+          It is rendered only while an "@…" is being typed AND somebody matches it. */}
+      {mention && (
+        <MentionSuggestions
+          candidates={ranked}
+          activeIndex={activeIndex}
+          onPick={pickMention}
+          onActivate={setActive}
+        />
+      )}
       {/* The select-to-format menu, for when the composer's format bar is closed.
           It is not the only way to format: the keyboard (Cmd/Ctrl+B/I/U, Cmd/Ctrl+K)
           always works, bar or no bar. */}

@@ -74,6 +74,19 @@
   --sender-name: #3849dc; /* indigo-600 for legibility on white */
   --sender-name-mine: rgba(255, 255, 255, 0.92);
 
+  /* An @mention — in a message and in the composer alike: blue text on a light blue
+   * wash, the way Microsoft Teams marks one. It is a chip rather than coloured words,
+   * because a mention is a thing (one Backspace shortens it, another removes it) and
+   * not emphasis.
+   *
+   * `-mine` is the same chip inside our OWN bubble, which is a solid indigo fill: blue
+   * on blue reads as nothing there, so it becomes a translucent white wash with
+   * near-white text — exactly what `--sender-name-mine` does for the quote header. */
+  --mention: #1d4ed8; /* blue-700 */
+  --mention-surface: #dbeafe; /* blue-100 */
+  --mention-mine: rgba(255, 255, 255, 0.96);
+  --mention-surface-mine: rgba(255, 255, 255, 0.22);
+
   /* Reaction pills straddle the bubble's bottom edge, and their fill is
    * translucent so that edge shows faintly through the chip. The chip pairs it
    * with a backdrop blur, which keeps the emoji legible over whatever is behind.
@@ -186,6 +199,13 @@
   --quote-text-incoming: #a1a1a1;
   --sender-name: #97a2fc; /* indigo-300 */
   --sender-name-mine: rgba(255, 255, 255, 0.92);
+
+  /* The mention chip on dark: the same pairing, lightened for a dark surface (a
+   * blue-100 wash would glare). See the light block for what each one is for. */
+  --mention: #bfdbfe; /* blue-200 */
+  --mention-surface: rgba(59, 130, 246, 0.24);
+  --mention-mine: rgba(255, 255, 255, 0.96);
+  --mention-surface-mine: rgba(255, 255, 255, 0.22);
 
   --reaction-chip: rgba(46, 46, 46, 0.7);
   --reaction-chip-mine: rgba(58, 65, 128, 0.76);

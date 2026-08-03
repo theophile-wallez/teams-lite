@@ -80,8 +80,8 @@ use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
     agent, agent_policy, auth, calendar, mail, push, push_policy, retry, teams, teams_activity,
-    teams_avatars, teams_media, teams_presence, teams_profiles, teams_read, teams_readstate,
-    teams_send, trouter, trouter_events,
+    teams_avatars, teams_media, teams_members, teams_presence, teams_profiles, teams_read,
+    teams_readstate, teams_send, trouter, trouter_events,
 };
 use teams_lite::{gitlab, link_preview};
 
@@ -1765,6 +1765,14 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             let image = params.get("image").map(teams_send::parse_image).transpose()?;
+            // Who the message @mentions. The body carries an index per mention and this
+            // list says who each index names, so Teams notifies them (see
+            // `teams_send::Mention`). Validated before anything leaves this machine.
+            let mentions = params
+                .get("mentions")
+                .map(teams_send::parse_mentions)
+                .transpose()?
+                .unwrap_or_default();
             let http = ctx.http.clone();
             let tokens = ctx.tokens.clone();
             let send_conv = conv.clone();
@@ -1777,6 +1785,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let reply_to = reply_to.clone();
                     let content_html = content_html.clone();
                     let image = image.clone();
+                    let mentions = mentions.clone();
                     async move {
                         let ic3 = tokens.get(IC3_SCOPE).await?;
                         teams_send::send_message(
@@ -1788,6 +1797,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             reply_to.as_ref(),
                             content_html.as_deref(),
                             image.as_ref(),
+                            &mentions,
                         )
                         .await
                     }
@@ -2084,6 +2094,62 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .unwrap_or_default();
             let store = ctx.store()?;
             Ok(read_receipts_json(&store, &conv, &horizons, &self_name, &self_mri))
+        }
+
+        // The people a message in this conversation can @mention, most relevant first.
+        // A pure READ: the roster GET (src/teams_members.rs) and the short-profile
+        // lookup that names it, both of which this app already does elsewhere.
+        //
+        // Two sources, because neither covers both thread kinds: the thread's roster
+        // (complete for a chat, just us for a channel) and everybody who has written
+        // in the conversation (the only source a channel has, and the one that carries
+        // the names we already hold). Whoever is still nameless — a chat member who
+        // never wrote — is resolved in one batch against the directory.
+        //
+        // Best-effort by contract: a roster Teams refuses, or a directory that answers
+        // nothing, leaves a shorter list rather than an error, because a composer with
+        // no suggestions still sends messages.
+        "members" => {
+            let conv = param_str(params, "conversation")?;
+            let self_mri = ctx.session().await?.self_mri.to_string();
+            let http = ctx.http.clone();
+            let roster_conv = conv.clone();
+            let roster = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let conv = roster_conv.clone();
+                    async move { teams_members::fetch_thread_members(&http, &session, &conv).await }
+                })
+                .await
+                .unwrap_or_default();
+
+            let (mut people, unnamed) = {
+                let store = ctx.store()?;
+                let senders = store.thread_senders(&conv, MAX_MENTION_MEMBERS as i64)?;
+                mention_candidates(&roster, &senders, &self_mri)
+            };
+            if !unnamed.is_empty() {
+                let session = ctx.session().await?;
+                if let Ok(profile) = ctx.profile().await {
+                    if let Ok(names) =
+                        teams_profiles::fetch_names(&ctx.http, &session, &profile, &unnamed).await
+                    {
+                        for person in people.iter_mut() {
+                            if let Some(name) = names.get(&person.mri) {
+                                person.display_name = name.clone();
+                            }
+                        }
+                    }
+                }
+            }
+            // Somebody we cannot name is somebody the user cannot pick out of a list,
+            // so they are left out rather than offered as an MRI.
+            let members: Vec<Value> = people
+                .into_iter()
+                .filter(|person| !person.display_name.is_empty())
+                .map(|person| json!({ "mri": person.mri, "name": person.display_name }))
+                .collect();
+            Ok(json!({ "members": members }))
         }
 
         // Read the non-secret view of the app settings: the configured GitLab host,
@@ -3405,6 +3471,60 @@ fn read_receipts_json(
     json!({ "receipts": receipts })
 }
 
+/// How many people the `members` method offers. A mention list is a menu, not a
+/// directory: past this many the user types a name rather than reads the list, and one
+/// directory batch ([`teams_profiles::MAX_BATCH`]) then names everybody who needs it.
+const MAX_MENTION_MEMBERS: usize = 100;
+
+/// Merge a thread's roster with the people who have written in it into one mention
+/// list, and say who still needs a name.
+///
+/// Order is usefulness: the recent contributors first, in the order the store gave
+/// them (newest message first), then the rest of the roster. We are never in the list
+/// — a mention of oneself notifies nobody.
+///
+/// Returns the candidates and the MRIs among them that carry no name yet, capped to
+/// one directory batch. Pure, so the merge is unit-tested without a tenant.
+fn mention_candidates(
+    roster: &[teams_members::ThreadMember],
+    senders: &[(String, String)],
+    self_mri: &str,
+) -> (Vec<teams_members::ThreadMember>, Vec<String>) {
+    let mut people: Vec<teams_members::ThreadMember> = Vec::new();
+    let mut push = |mri: &str, name: &str| {
+        if people.len() >= MAX_MENTION_MEMBERS
+            || !teams_profiles::is_person_mri(mri)
+            || teams_lite::store::same_user(mri, self_mri)
+        {
+            return;
+        }
+        match people.iter_mut().find(|p| teams_lite::store::same_user(&p.mri, mri)) {
+            // A name from either source wins over no name at all.
+            Some(known) if known.display_name.is_empty() => {
+                known.display_name = name.trim().to_string();
+            }
+            Some(_) => {}
+            None => people.push(teams_members::ThreadMember {
+                mri: mri.to_string(),
+                display_name: name.trim().to_string(),
+            }),
+        }
+    };
+    for (mri, name) in senders {
+        push(mri, name);
+    }
+    for member in roster {
+        push(&member.mri, &member.display_name);
+    }
+    let unnamed: Vec<String> = people
+        .iter()
+        .filter(|person| person.display_name.is_empty())
+        .map(|person| person.mri.clone())
+        .take(teams_profiles::MAX_BATCH)
+        .collect();
+    (people, unnamed)
+}
+
 /// Serialize one message for the wire.
 ///
 /// `message_type` is the Teams `messagetype` verbatim (`Text`, `RichText/Html`,
@@ -4318,6 +4438,9 @@ async fn agent_send(
                 Some(&reply_to),
                 Some(&html),
                 None,
+                // An agent's answer mentions nobody: it is a reply, and a machine must
+                // not be able to notify a colleague.
+                &[],
             )
             .await
         }

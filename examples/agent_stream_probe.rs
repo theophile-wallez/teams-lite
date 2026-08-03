@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
         None,
         Some(&agent_policy::thinking_html(backend)),
         None,
+        &[],
     )
     .await
     .context("post the placeholder")?;

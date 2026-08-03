@@ -56,6 +56,102 @@ struct AmsImage {
     height: Option<u32>,
 }
 
+/// One @mention carried by an outbound message.
+///
+/// A Teams mention lives in two places at once, and both are needed: the body holds an
+/// otherwise inert span that carries ONLY an index —
+/// `<span itemscope itemtype="http://schema.skype.com/Mention" itemid="0">John</span>`
+/// — while WHO it names lives in `properties.mentions`, keyed by that same `itemid`.
+/// The read path decodes exactly this pair (`parse_mentions` in src/teams_read.rs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mention {
+    /// The index the body's span carries. Assigned by the composer in document order.
+    pub itemid: u32,
+    /// The mentioned person's MRI — what makes Teams notify them.
+    pub mri: String,
+    /// The text the span shows. Teams lets the author shorten it ("John De Doe" ->
+    /// "John"), so it is not necessarily the person's full directory name.
+    pub display_name: String,
+}
+
+/// How many people one message may mention. Far above any real message, and it bounds
+/// what a client can make this app put in one request.
+pub const MAX_MENTIONS: usize = 64;
+
+/// How long a mention's display text may get. A mention shows a name, not a paragraph.
+const MAX_MENTION_NAME_BYTES: usize = 256;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MentionParams {
+    itemid: u32,
+    mri: String,
+    display_name: String,
+}
+
+/// Parse and validate the optional `mentions` list carried by the send RPC.
+///
+/// Every mention must name a person (never a thread or an app), carry visible text, and
+/// be addressed by an `itemid` no other mention in the same message uses — otherwise
+/// two spans in the body would resolve to one person and one of them would point at
+/// nobody.
+pub fn parse_mentions(value: &Value) -> Result<Vec<Mention>> {
+    let list = value.as_array().context("mentions must be a list")?;
+    anyhow::ensure!(list.len() <= MAX_MENTIONS, "too many mentions in one message");
+    let mut out: Vec<Mention> = Vec::with_capacity(list.len());
+    for entry in list {
+        let params: MentionParams =
+            serde_json::from_value(entry.clone()).context("invalid mention")?;
+        anyhow::ensure!(
+            crate::teams_profiles::is_person_mri(&params.mri),
+            "a mention must name a person"
+        );
+        let display_name = params.display_name.trim().to_string();
+        anyhow::ensure!(!display_name.is_empty(), "a mention must show a name");
+        anyhow::ensure!(
+            display_name.len() <= MAX_MENTION_NAME_BYTES,
+            "a mention's name is too long"
+        );
+        anyhow::ensure!(
+            !display_name.chars().any(char::is_control),
+            "a mention's name contains a control character"
+        );
+        anyhow::ensure!(
+            out.iter().all(|m| m.itemid != params.itemid),
+            "two mentions share one itemid"
+        );
+        out.push(Mention { itemid: params.itemid, mri: params.mri, display_name });
+    }
+    Ok(out)
+}
+
+/// The `itemid`s the mention spans in a message body actually carry.
+///
+/// Used to refuse a message that would notify somebody it does not visibly name: a
+/// mention in `properties` with no span in the body is an invisible ping.
+pub fn mention_span_itemids(html: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    for span in html.split("<span").skip(1) {
+        let head = match span.find('>') {
+            Some(end) => &span[..end],
+            None => span,
+        };
+        if !head.contains("schema.skype.com/Mention") {
+            continue;
+        }
+        let Some(at) = head.find("itemid=") else { continue };
+        let value: String = head[at + "itemid=".len()..]
+            .trim_start_matches(['"', '\''])
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(itemid) = value.parse::<u32>() {
+            out.push(itemid);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyTo {
     pub compose_time: i64,
@@ -215,6 +311,7 @@ pub async fn send_message(
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
     image: Option<&ImageUpload>,
+    mentions: &[Mention],
 ) -> Result<Sent> {
     let chat = session
         .endpoint("chatService")
@@ -236,7 +333,8 @@ pub async fn send_message(
         reply_to,
         content_html,
         ams_image.as_ref(),
-    );
+        mentions,
+    )?;
 
     let resp = http
         .post(&url)
@@ -640,6 +738,13 @@ fn message_url(session: &Session, conversation_id: &str, message_id: &str) -> Re
 }
 
 /// Build the request body (pure, unit-tested).
+///
+/// A mention is refused when the body carries no span for it: `properties.mentions` is
+/// what notifies the person, so a mention with nothing to show would ping somebody the
+/// message never names. The `properties.mentions` value is a JSON-encoded STRING, which
+/// is the shape the read path receives back from Teams (`parse_mentions` in
+/// src/teams_read.rs) and the shape a self-mention was verified with against the tenant
+/// (examples/mention_send_probe.rs).
 fn build_body(
     client_message_id: &str,
     text: &str,
@@ -647,10 +752,12 @@ fn build_body(
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
     image: Option<&AmsImage>,
-) -> serde_json::Value {
+    mentions: &[Mention],
+) -> Result<serde_json::Value> {
+    let content = message_content(text, reply_to, content_html, image);
     let mut body = json!({
         "clientmessageid": client_message_id,
-        "content": message_content(text, reply_to, content_html, image),
+        "content": content,
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "imdisplayname": self_name,
@@ -658,7 +765,29 @@ fn build_body(
     if let Some(image) = image {
         body["amsreferences"] = json!([image.id]);
     }
-    body
+    if !mentions.is_empty() {
+        let in_body = mention_span_itemids(&content);
+        for mention in mentions {
+            anyhow::ensure!(
+                in_body.contains(&mention.itemid),
+                "a mention has no span in the message body"
+            );
+        }
+        let list: Vec<Value> = mentions
+            .iter()
+            .map(|mention| {
+                json!({
+                    "@type": "http://schema.skype.com/Mention",
+                    "itemid": mention.itemid,
+                    "mri": mention.mri,
+                    "mentionType": "person",
+                    "displayName": mention.display_name,
+                })
+            })
+            .collect();
+        body["properties"] = json!({ "mentions": Value::Array(list).to_string() });
+    }
+    Ok(body)
 }
 
 /// Build the edit request body (pure, unit-tested). There is no reply markup and —
@@ -869,7 +998,9 @@ mod tests {
             None,
             Some("<p><strong>Rich</strong> text</p>"),
             Some(&image),
-        );
+            &[],
+        )
+        .unwrap();
         assert_eq!(body["amsreferences"], json!(["0-weu-d1-image"]));
         assert_eq!(body["messagetype"], "RichText/Html");
         assert_eq!(
@@ -970,7 +1101,7 @@ mod tests {
 
     #[test]
     fn body_has_required_fields() {
-        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None, None);
+        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None, None, &[]).unwrap();
         assert_eq!(b["clientmessageid"], "12345");
         assert_eq!(b["content"], "hi &lt;there&gt;");
         assert_eq!(b["messagetype"], "RichText/Html");
@@ -981,13 +1112,13 @@ mod tests {
     #[test]
     fn rich_content_html_is_forwarded_as_content() {
         let html = "<p>hi <strong>bold</strong> <a href=\"https://x\">link</a></p>";
-        let b = build_body("9", "", "Me", None, Some(html), None);
+        let b = build_body("9", "", "Me", None, Some(html), None, &[]).unwrap();
         assert_eq!(b["content"], html);
     }
 
     #[test]
     fn empty_rich_content_html_falls_back_to_plain() {
-        let b = build_body("9", "plain", "Me", None, Some(""), None);
+        let b = build_body("9", "plain", "Me", None, Some(""), None, &[]).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
@@ -1017,7 +1148,7 @@ mod tests {
             after: "new <reply>".into(),
         };
 
-        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None, None);
+        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None, None, &[]).unwrap();
 
         assert_eq!(
             b["content"],
@@ -1071,10 +1202,10 @@ mod tests {
 
     #[test]
     fn plain_text_is_trimmed_before_it_goes_out() {
-        let b = build_body("1", "  hi there\n\n", "Me", None, None, None);
+        let b = build_body("1", "  hi there\n\n", "Me", None, None, None, &[]).unwrap();
         assert_eq!(b["content"], "hi there");
         // A body of whitespace only becomes empty rather than a blank message.
-        let b = build_body("1", " \n\t ", "Me", None, None, None);
+        let b = build_body("1", " \n\t ", "Me", None, None, None, &[]).unwrap();
         assert_eq!(b["content"], "");
         // An edit trims the same way.
         let b = build_edit_body("\n updated \n", None, "Me");
@@ -1102,13 +1233,13 @@ mod tests {
 
     #[test]
     fn html_body_is_trimmed_on_send_and_on_edit() {
-        let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), None);
+        let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), None, &[]).unwrap();
         assert_eq!(b["content"], "<p>hi</p>");
         let b = build_edit_body("", Some(" <p>answer</p><p></p>"), "Me");
         assert_eq!(b["content"], "<p>answer</p>");
         // An html body of spacers only falls back to the plain text, as an empty
         // one already did.
-        let b = build_body("9", "plain", "Me", None, Some("<p><br></p>"), None);
+        let b = build_body("9", "plain", "Me", None, Some("<p><br></p>"), None, &[]).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
@@ -1125,6 +1256,118 @@ mod tests {
         let content = message_content("", Some(&reply), None, None);
         assert!(content.starts_with("<p>before</p><blockquote"));
         assert!(content.ends_with("</blockquote><p>after</p>"));
+    }
+
+    // ---- @mentions ---------------------------------------------------------
+
+    fn mention_html(itemid: u32, name: &str) -> String {
+        format!(
+            "<p><span itemscope=\"\" itemtype=\"http://schema.skype.com/Mention\" \
+             itemid=\"{itemid}\">{name}</span> hello</p>"
+        )
+    }
+
+    #[test]
+    fn a_mention_travels_as_a_span_index_and_a_properties_entry() {
+        let mentions = vec![Mention {
+            itemid: 0,
+            mri: "8:orgid:abc-123".into(),
+            display_name: "John".into(),
+        }];
+        let html = mention_html(0, "John");
+        let body = build_body("9", "", "Me", None, Some(&html), None, &mentions).unwrap();
+        assert_eq!(body["content"], html, "the span stays in the body verbatim");
+        // `properties.mentions` is a JSON-encoded STRING — the shape the read path
+        // decodes and the shape the tenant accepted.
+        let raw = body["properties"]["mentions"].as_str().expect("a JSON string");
+        let parsed: Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed,
+            json!([{
+                "@type": "http://schema.skype.com/Mention",
+                "itemid": 0,
+                "mri": "8:orgid:abc-123",
+                "mentionType": "person",
+                "displayName": "John",
+            }])
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_mention_carries_no_properties() {
+        let body = build_body("9", "hi", "Me", None, None, None, &[]).unwrap();
+        assert!(body.get("properties").is_none());
+    }
+
+    #[test]
+    fn a_mention_the_body_never_shows_is_refused() {
+        // An invisible ping: `properties` would notify the person, but the reader sees
+        // no mention at all.
+        let mentions = vec![Mention {
+            itemid: 1,
+            mri: "8:orgid:abc".into(),
+            display_name: "John".into(),
+        }];
+        let html = mention_html(0, "John");
+        assert!(build_body("9", "", "Me", None, Some(&html), None, &mentions).is_err());
+        assert!(build_body("9", "plain text", "Me", None, None, None, &mentions).is_err());
+    }
+
+    #[test]
+    fn reads_the_itemids_of_the_mention_spans_in_a_body() {
+        let html = format!("{}{}", mention_html(0, "John"), mention_html(3, "Ada"));
+        assert_eq!(mention_span_itemids(&html), vec![0, 3]);
+        // A span that is not a mention, and a mention without an index, name nobody.
+        assert!(mention_span_itemids("<p><span class=\"x\" itemid=\"2\">t</span></p>").is_empty());
+        assert!(
+            mention_span_itemids(
+                "<span itemtype=\"http://schema.skype.com/Mention\">John</span>"
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn parses_a_mention_list_from_the_wire() {
+        let value = json!([
+            { "itemid": 0, "mri": "8:orgid:abc", "display_name": "  John  " },
+            { "itemid": 1, "mri": "8:orgid:def", "display_name": "Ada Lovelace" }
+        ]);
+        let mentions = parse_mentions(&value).unwrap();
+        assert_eq!(mentions.len(), 2);
+        assert_eq!(mentions[0].display_name, "John", "the name is trimmed");
+        assert_eq!(mentions[1].mri, "8:orgid:def");
+    }
+
+    #[test]
+    fn refuses_a_mention_that_names_nobody_or_repeats_an_itemid() {
+        let cases = [
+            // A thread, an app: neither is a person a mention may notify.
+            json!([{ "itemid": 0, "mri": "19:abc@thread.v2", "display_name": "General" }]),
+            json!([{ "itemid": 0, "mri": "28:app-guid", "display_name": "A bot" }]),
+            // Nothing to show.
+            json!([{ "itemid": 0, "mri": "8:orgid:abc", "display_name": "   " }]),
+            // A name that is a paragraph, and one carrying a control character.
+            json!([{ "itemid": 0, "mri": "8:orgid:abc", "display_name": "x".repeat(MAX_MENTION_NAME_BYTES + 1) }]),
+            json!([{ "itemid": 0, "mri": "8:orgid:abc", "display_name": "Jo\u{0}hn" }]),
+            // Two spans resolving to one person, so one of them points at nobody.
+            json!([
+                { "itemid": 0, "mri": "8:orgid:abc", "display_name": "John" },
+                { "itemid": 0, "mri": "8:orgid:def", "display_name": "Ada" }
+            ]),
+            // Shapes that are not a mention list at all.
+            json!({ "itemid": 0 }),
+            json!([{ "itemid": 0, "mri": "8:orgid:abc", "display_name": "John", "extra": 1 }]),
+            json!([{ "mri": "8:orgid:abc", "display_name": "John" }]),
+        ];
+        for value in cases {
+            assert!(parse_mentions(&value).is_err(), "accepted {value}");
+        }
+        // The cap bounds one message.
+        let many: Vec<Value> = (0..=MAX_MENTIONS as u32)
+            .map(|i| json!({ "itemid": i, "mri": "8:orgid:abc", "display_name": "John" }))
+            .collect();
+        assert!(parse_mentions(&Value::Array(many)).is_err());
     }
 
     #[test]

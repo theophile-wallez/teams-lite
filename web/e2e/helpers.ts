@@ -105,6 +105,9 @@ export type CapturedSend = {
   conversation: string;
   text: string;
   content_html?: string;
+  /** Who the body's mention spans name, by the itemid each span carries. Present only
+   *  when the message @mentions somebody. */
+  mentions?: { itemid: number; mri: string; display_name: string }[];
   image?: {
     name: string;
     content_type: string;

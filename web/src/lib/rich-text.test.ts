@@ -15,6 +15,7 @@ import {
   parsePlainText,
   parseRelayedEmail,
   serializeTeamsHtml,
+  serializeTeamsMessage,
   type RichNode,
 } from "./rich-text";
 
@@ -911,5 +912,80 @@ describe("serializeTeamsHtml", () => {
     expect(serializeTeamsHtml("<p></p><pre><code> x </code></pre><p><br></p>")).toBe(
       "<pre><code> x </code></pre>",
     );
+  });
+});
+
+describe("serializeTeamsMessage — @mentions", () => {
+  /** What the composer's mention node renders (see components/mention-extension.ts). */
+  const composed = (mri: string, label: string) =>
+    `<span itemscope="" itemtype="http://schema.skype.com/Mention" class="composer-mention" ` +
+    `contenteditable="false" data-mri="${mri}">${label}</span>`;
+
+  it("turns a composed mention into an indexed span plus who it names", () => {
+    const { html, mentions } = serializeTeamsMessage(
+      `<p>${composed("8:orgid:john", "John De Doe")} can you look?</p>`,
+    );
+    // The body carries ONLY the index: that is the shape Teams reads back.
+    expect(html).toBe(
+      '<p><span itemscope="" itemtype="http://schema.skype.com/Mention" itemid="0">' +
+        "John De Doe</span> can you look?</p>",
+    );
+    expect(mentions).toEqual([
+      { itemid: 0, mri: "8:orgid:john", display_name: "John De Doe" },
+    ]);
+  });
+
+  it("numbers several mentions in reading order", () => {
+    const { html, mentions } = serializeTeamsMessage(
+      `<p>${composed("8:orgid:ada", "Ada")} and ${composed("8:orgid:bob", "Bob")}</p>`,
+    );
+    expect(mentions.map((m) => [m.itemid, m.mri])).toEqual([
+      [0, "8:orgid:ada"],
+      [1, "8:orgid:bob"],
+    ]);
+    expect(html).toContain('itemid="0"');
+    expect(html).toContain('itemid="1"');
+  });
+
+  it("keeps a shortened name exactly as the author left it", () => {
+    // Backspace shrinks the label ("John De Doe" -> "John"); the mention still names
+    // John, and the message shows what the author chose to show.
+    const { html, mentions } = serializeTeamsMessage(`<p>${composed("8:orgid:john", "John")}</p>`);
+    expect(html).toContain(">John</span>");
+    expect(mentions[0]?.display_name).toBe("John");
+  });
+
+  it("sends an inbound mention as plain text, because it names nobody we can prove", () => {
+    // A mention pasted back in from a received message carries an index into THAT
+    // message's list and no identity. Sending it as a mention would be blue text that
+    // pings nobody, so it goes out as words.
+    const inbound = '<span itemscope itemtype="http://schema.skype.com/Mention" itemid="7">Ada</span>';
+    const { html, mentions } = serializeTeamsMessage(`<p>${inbound} hi</p>`);
+    expect(html).toBe("<p>Ada hi</p>");
+    expect(mentions).toEqual([]);
+  });
+
+  it("refuses an mri that is not a person", () => {
+    // A channel/team/tag mention's mri is a thread, and only a person may be mentioned
+    // as a person (the backend refuses the rest anyway).
+    const { html, mentions } = serializeTeamsMessage(
+      `<p>${composed("19:general@thread.tacv2", "General")}</p>`,
+    );
+    expect(html).toBe("<p>General</p>");
+    expect(mentions).toEqual([]);
+  });
+
+  it("drops a mention the author emptied", () => {
+    const { html, mentions } = serializeTeamsMessage(`<p>${composed("8:orgid:john", "")} hi</p>`);
+    expect(html).toBe("<p>hi</p>");
+    expect(mentions).toEqual([]);
+  });
+
+  it("carries no mentions for an ordinary message", () => {
+    expect(serializeTeamsMessage("<p>just words</p>")).toEqual({
+      html: "<p>just words</p>",
+      mentions: [],
+    });
+    expect(serializeTeamsMessage("<p></p>")).toEqual({ html: "", mentions: [] });
   });
 });

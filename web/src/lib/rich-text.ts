@@ -57,6 +57,12 @@ export type RichAttrs = {
    *  their display text) — kept so the renderer can look them up and offer their
    *  person card. For a card it is the card's own id. */
   itemid?: string;
+  /** Mentions only, and only OUTBOUND ones: the MRI of the person the mention names.
+   *  An inbound Teams mention never carries it (its span holds an index and nothing
+   *  else — see `itemid`); the composer's own markup does, because a message being
+   *  written has no `mentions` list beside it yet. It is what
+   *  {@link serializeTeamsMessage} turns back into that list on send. */
+  mri?: string;
   /** Table cells only: how many columns/rows the cell spans, when it spans more
    *  than one. Bounded (see {@link cellSpan}) so a hostile value can't ask the
    *  browser for a million columns. */
@@ -197,6 +203,16 @@ function parseAttributes(source: string): RawAttrs {
 function isMention(attrs: RawAttrs): boolean {
   const itemtype = attrs["itemtype"] ?? "";
   return /schema\.skype\.com\/Mention/i.test(itemtype);
+}
+
+/** The person an outbound mention names, when the markup says so and the value is a
+ *  person MRI. Only the composer's own markup carries it, and only `8:…` identities are
+ *  people — a `19:` thread or a `28:` app is not somebody a person-mention may name, and
+ *  the backend refuses one anyway. */
+function mentionMri(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const mri = decodeEntities(raw).trim();
+  return /^8:[A-Za-z0-9:._@-]{1,120}$/.test(mri) ? mri : undefined;
 }
 
 /** An app link-unfurl card: a span carrying the Skype InputExtension itemtype. */
@@ -354,9 +370,13 @@ export function parseRichHtml(html: string): RichNode[] {
       if (!isSelfClosing) spans.push(frameTag ? "frame" : "plain");
       if (frameTag) {
         const itemid = attrs["itemid"];
+        const mri = frameTag === "mention" ? mentionMri(attrs["data-mri"]) : undefined;
         const frame: OpenFrame & { attrs: RichAttrs } = {
           tag: frameTag,
-          attrs: itemid ? { itemid: decodeEntities(itemid).trim() } : {},
+          attrs: {
+            ...(itemid ? { itemid: decodeEntities(itemid).trim() } : {}),
+            ...(mri ? { mri } : {}),
+          },
           children: [],
         };
         if (!isSelfClosing) stack.push(frame);
@@ -950,7 +970,18 @@ const SIMPLE_TAGS: Partial<Record<RichTag, string>> = {
   li: "li",
 };
 
-function serializeNodes(nodes: RichNode[]): string {
+/** The outbound form of one @mention: the Teams span the body carries, and the entry
+ *  that says who its index names. See {@link serializeTeamsMessage}. */
+export type SerializedMention = {
+  itemid: number;
+  mri: string;
+  display_name: string;
+};
+
+/** Collects the mentions found while serializing, and hands out their indices. */
+type MentionSink = { mentions: SerializedMention[] };
+
+function serializeNodes(nodes: RichNode[], sink?: MentionSink): string {
   let out = "";
   for (const node of nodes) {
     if (node.type === "text") {
@@ -969,14 +1000,36 @@ function serializeNodes(nodes: RichNode[]): string {
       continue;
     }
     if (node.tag === "a") {
-      const inner = serializeNodes(node.children);
+      const inner = serializeNodes(node.children, sink);
       out += node.attrs.href
         ? `<a href="${escapeAttr(node.attrs.href)}">${inner}</a>`
         : inner;
       continue;
     }
     if (node.tag === "mention") {
-      out += serializeNodes(node.children); // send mentions as plain text
+      const label = serializeNodes(node.children, sink);
+      const mri = node.attrs.mri;
+      // A mention we know the person behind goes out as a real Teams mention: an
+      // indexed span here, and an entry in the `mentions` list the send carries
+      // (which is what notifies them). One without an MRI — inbound markup that was
+      // pasted back in, say — is just its text, exactly as before: a message must
+      // never carry blue text that pings nobody.
+      if (!mri || !sink) {
+        out += label;
+        continue;
+      }
+      const displayName = nodeText(node.children).trim();
+      // Nothing left to show: the author deleted every word of the name. A span with no
+      // text pings a person the message does not name, so this one goes out as text.
+      if (!displayName) {
+        out += label;
+        continue;
+      }
+      const itemid = sink.mentions.length;
+      sink.mentions.push({ itemid, mri, display_name: displayName });
+      out +=
+        `<span itemscope="" itemtype="http://schema.skype.com/Mention" ` +
+        `itemid="${itemid}">${label}</span>`;
       continue;
     }
     const tag = SIMPLE_TAGS[node.tag];
@@ -984,8 +1037,8 @@ function serializeNodes(nodes: RichNode[]): string {
     // an app card) is unwrapped rather than dropped: what we send loses the
     // structure Teams' composer can't express, never the words.
     out += tag
-      ? `<${tag}>${serializeNodes(node.children)}</${tag}>`
-      : serializeNodes(node.children);
+      ? `<${tag}>${serializeNodes(node.children, sink)}</${tag}>`
+      : serializeNodes(node.children, sink);
   }
   return out;
 }
@@ -1046,8 +1099,29 @@ function trimEdgeNode(node: RichNode, edge: Edge): RichNode | null {
  * as long as the message exists.
  */
 export function serializeTeamsHtml(html: string): string {
+  return serializeTeamsMessage(html).html;
+}
+
+/**
+ * The whole outbound message: the Teams-safe HTML body (see {@link serializeTeamsHtml})
+ * plus who its @mentions name.
+ *
+ * A Teams mention is a pair, and this is where the pair is made: the body gets a span
+ * carrying only an index, and `mentions` says which person each index is. Indices are
+ * assigned in document order, so the list matches the reading order of the message.
+ * Verified end-to-end against the tenant — see examples/mention_send_probe.rs.
+ */
+export function serializeTeamsMessage(html: string): {
+  html: string;
+  mentions: SerializedMention[];
+} {
   const nodes = parseRichHtml(html);
-  if (!hasVisibleContent(nodes)) return "";
-  return serializeNodes(trimEdge(trimEdge(nodes, "start"), "end"));
+  if (!hasVisibleContent(nodes)) return { html: "", mentions: [] };
+  const sink: MentionSink = { mentions: [] };
+  const body = serializeNodes(trimEdge(trimEdge(nodes, "start"), "end"), sink);
+  // A mention whose text was emptied (the author deleted every word of the name) shows
+  // nothing, so it names nobody: the backend refuses a mention with no visible span,
+  // and it is right to.
+  return { html: body, mentions: sink.mentions };
 }
 

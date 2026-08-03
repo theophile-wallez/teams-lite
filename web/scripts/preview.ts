@@ -44,6 +44,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/set --settings    # the Settings pane
 //   bun run web/scripts/preview.ts --out /tmp/agent --agent     # the local-agent menu
 //   bun run web/scripts/preview.ts --out /tmp/reply --agent-reply  # the agent answering
+//   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -853,6 +854,43 @@ if (import.meta.main) {
       // Leave the shared mock healthy again.
       await emit({ kind: "broker", ok: true });
       console.log(`[preview] wrote ${out}-light.png, ${out}-dark.png and ${out}-refused-dark.png`);
+    });
+    process.exit(0);
+  }
+
+  // @mentions: the suggestion list a typed "@" opens, the chip a picked person leaves
+  // in the composer, what Backspace does to it (one word per keystroke, Teams-style),
+  // and the mention as it reads once the message is sent.
+  if (args.includes("--mentions")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openConversation(page, "Mention Demo");
+      // The list, opened by the "@" alone: everybody this thread can mention.
+      await typeInComposer(page, "@");
+      await page.waitForSelector('[data-testid="mention-suggestions"]');
+      await page.waitForTimeout(250);
+      await shot(`${out}-list-light.png`);
+      // Narrowed by what is typed, then picked with Enter.
+      await typeInComposer(page, "li");
+      await page.waitForTimeout(200);
+      await shot(`${out}-filtered-light.png`);
+      await page.keyboard.press("Enter");
+      await typeInComposer(page, "could you review this?");
+      await page.waitForSelector(".tiptap-message .composer-mention");
+      await shot(`${out}-composed-light.png`, '[data-testid="composer-shell"]');
+      await setTheme("dark");
+      await shot(`${out}-composed-dark.png`, '[data-testid="composer-shell"]');
+      await setTheme("light");
+      // The mention as it reads in the thread, ours and somebody else's — the chip
+      // changes colour inside our own bubble, where blue on blue would vanish.
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(800);
+      await shot(`${out}-sent-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-sent-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-list-light.png, ${out}-filtered-light.png, ` +
+          `${out}-composed-{light,dark}.png and ${out}-sent-{light,dark}.png`,
+      );
     });
     process.exit(0);
   }

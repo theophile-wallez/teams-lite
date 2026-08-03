@@ -534,6 +534,43 @@ colleague reads.
   network, not only at the dispatch gate — the heartbeat never passes through that
   gate, and a screenshot backend must not tell the user's colleagues they are around.
 
+## @mentions (a mention notifies a person — treat it as part of the send)
+
+The composer can @mention somebody the way Teams does: "@" opens a list of the people
+this thread can mention, the picked person becomes one chip, and Backspace shortens
+their name a word at a time ("John De Doe" → "John De" → "John") before removing the
+mention whole. The chip is blue on a light blue wash in the composer and in the message.
+
+- **A mention is a PAIR, and both halves are needed.** The body carries an inert span
+  that holds only an index (`<span itemscope itemtype="http://schema.skype.com/Mention"
+  itemid="0">John</span>`), and `properties.mentions` — a JSON-encoded **string** —
+  says who each index names. Get one half wrong and nothing fails: the message simply
+  arrives with blue text that notifies nobody. Verified end to end against the tenant,
+  by a self-mention in the sandbox chat (`examples/mention_send_probe.rs`).
+- **A mention is part of the send, so it needs no gate of its own** — and it gets no
+  relaxation either. `send` is already an `OUTWARD_METHODS` entry; the mentions ride in
+  its params (`teams_send::parse_mentions`), and every entry must name a person
+  (`8:…`, never a `19:` thread or a `28:` app), carry visible text, and have a span in
+  the body. **A mention with no span is refused**, because `properties` is what
+  notifies the person: a mention the reader cannot see is an invisible ping.
+- **The local agent never mentions anybody.** `agent_reply` passes an empty list, and
+  it must stay empty: a machine posting under the user's name must not be able to
+  notify a colleague.
+- **The candidate list is READ-ONLY, and two sources feed it** (the `members` RPC,
+  over `src/teams_members.rs`). `GET {chatService}/v1/threads/{id}?view=msnp24Equivalent`
+  gives a chat's roster — verified; a **channel** answers with one member, us, so a
+  channel's list comes from the people who have written in it
+  (`store::thread_senders`). Names never come from the roster (`friendlyName` is empty
+  on every live member): they come from the store, then from one directory batch.
+  Membership writes are outward and irreversible from here, so that module issues GET
+  requests only and a test in it scans for any other verb — do not weaken it.
+- **We are never in the list**, and neither is anybody the backend could not name: a
+  mention of oneself notifies nobody, and a row showing an MRI is a row nobody can pick.
+- **An inbound mention pasted back into the composer goes out as plain text.** Its span
+  indexes the list of the message it came from, so it names nobody we can prove — see
+  `serializeTeamsMessage` in `web/src/lib/rich-text.ts`, which is where the outbound
+  pair is made.
+
 ## Language policy (MANDATORY)
 
 - **All artifacts are in English.** This includes: UI strings, labels, button text,
@@ -554,7 +591,8 @@ colleague reads.
   READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`), the
   READ-ONLY Teams/Outlook calendar (`src/calendar.rs`), presence — reading everybody's
   and, only when the user asks for it, publishing their own (`src/teams_presence.rs`,
-  see § The user's own status), the READ-ONLY rich link
+  see § The user's own status), the READ-ONLY conversation roster an @mention list is
+  built from (`src/teams_members.rs`, see § @mentions), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
   `src/gitlab.rs` and `src/linear.rs`) and the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see

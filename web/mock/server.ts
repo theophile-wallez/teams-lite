@@ -228,6 +228,16 @@ type CapturedSend = {
   reply_to?: ReplyTo;
   content_html?: string;
   image?: SendImage;
+  /** Who the body's mention spans name, by the itemid each span carries. What a spec
+   *  asserts on to prove a mention actually left the composer. */
+  mentions?: OutboundMention[];
+};
+
+/** One @mention as the composer sends it (mirrors the Rust `teams_send::Mention`). */
+type OutboundMention = {
+  itemid: number;
+  mri: string;
+  display_name: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -1483,6 +1493,18 @@ function seedMentionSamples(): void {
       ],
     },
     60_000,
+  );
+  // A mention in OUR OWN message: the chip sits on the accent-filled bubble, where a
+  // light blue wash would disappear, so it must render in its `-mine` colours.
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content: `<p>${mentionSpan(0, ava.name)} shipped it, thanks!</p>`,
+      is_self: true,
+      mentions: [{ itemid: 0, mri: ava.mri, kind: "person", display_name: ava.name }],
+    },
+    90_000,
   );
   // A reply: the quoted author's name carries their MRI, so it is hoverable too.
   push(
@@ -2810,6 +2832,30 @@ function parseSendImage(value: unknown): SendImage | undefined {
   };
 }
 
+/** Parse the optional `mentions` list the way the real backend does: a person MRI, a
+ *  name to show, and an itemid no other mention repeats. A bad entry is an error here
+ *  too — a mention that names nobody would be a message pinging nobody. */
+function parseSendMentions(value: unknown): OutboundMention[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error("invalid mentions param");
+  const out: OutboundMention[] = [];
+  for (const entry of value) {
+    const o = asObject(entry);
+    if (typeof o.itemid !== "number" || !Number.isInteger(o.itemid) || o.itemid < 0) {
+      throw new Error("invalid mention param: itemid");
+    }
+    if (typeof o.mri !== "string" || !o.mri.startsWith("8:")) {
+      throw new Error("invalid mention param: mri");
+    }
+    if (typeof o.display_name !== "string" || o.display_name.trim().length === 0) {
+      throw new Error("invalid mention param: display_name");
+    }
+    if (out.some((m) => m.itemid === o.itemid)) throw new Error("duplicate mention itemid");
+    out.push({ itemid: o.itemid, mri: o.mri, display_name: o.display_name });
+  }
+  return out;
+}
+
 /** Build the AMS inline-image HTML Teams returns after a successful upload. */
 function sentImageContent(image: SendImage): string {
   nextSentImage += 1;
@@ -3624,6 +3670,15 @@ function dispatch(method: string, params: unknown): unknown {
       return { receipts: byMri ? [...byMri.values()] : [] };
     }
 
+    case "members": {
+      // The people this thread can @mention. Never us — a mention of oneself notifies
+      // nobody — which is exactly what the real backend leaves out.
+      const id = requireString(params, "conversation");
+      const t = threadFor(id);
+      const members = (t?.participants ?? []).map((p) => ({ mri: p.mri, name: p.name }));
+      return { members };
+    }
+
     case "open": {
       const id = requireString(params, "conversation");
       const t = threadFor(id);
@@ -3655,6 +3710,7 @@ function dispatch(method: string, params: unknown): unknown {
       const rawHtml = input.content_html;
       const contentHtml = typeof rawHtml === "string" && rawHtml.length > 0 ? rawHtml : undefined;
       const image = parseSendImage(input.image);
+      const mentions = parseSendMentions(input.mentions);
       if (TEST_HOOKS) {
         capturedSends.push({
           conversation: id,
@@ -3662,18 +3718,19 @@ function dispatch(method: string, params: unknown): unknown {
           ...(replyTo ? { reply_to: replyTo } : {}),
           ...(contentHtml ? { content_html: contentHtml } : {}),
           ...(image ? { image } : {}),
+          ...(mentions.length > 0 ? { mentions } : {}),
         });
         if (testSendError) throw new Error(testSendError);
         if (testSendDelayMs > 0) {
           return new Promise((resolve) => {
             setTimeout(() => {
-              scheduleSendEcho(id, text, replyTo, contentHtml, image);
+              scheduleSendEcho(id, text, replyTo, contentHtml, image, mentions);
               resolve({ sent: true });
             }, testSendDelayMs);
           });
         }
       }
-      scheduleSendEcho(id, text, replyTo, contentHtml, image);
+      scheduleSendEcho(id, text, replyTo, contentHtml, image, mentions);
       return { sent: true };
     }
 
@@ -4023,6 +4080,7 @@ function scheduleSendEcho(
   replyTo: ReplyTo | undefined,
   contentHtml?: string,
   image?: SendImage,
+  mentions?: OutboundMention[],
 ): void {
   setTimeout(() => {
     const t = threadFor(convId);
@@ -4039,6 +4097,18 @@ function scheduleSendEcho(
       sender_mri: SELF_MRI,
       content: body + imageHtml,
       is_self: true,
+      // The body's mention spans carry only an index; this is what says whom each one
+      // names, so a sent mention comes back rendered as a mention (like the real echo).
+      ...(mentions && mentions.length > 0
+        ? {
+            mentions: mentions.map((m) => ({
+              itemid: m.itemid,
+              mri: m.mri,
+              kind: "person" as const,
+              display_name: m.display_name,
+            })),
+          }
+        : {}),
     };
     t.messages.push(msg);
     t.recompute();

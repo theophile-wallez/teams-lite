@@ -446,6 +446,12 @@ export type ReadReceipt = {
 /** Result of the `read_receipts` method: every OTHER member's read position. */
 export type ReadReceiptsResult = { receipts: ReadReceipt[] };
 
+/** Result of the `members` method: the people a message in this conversation can
+ *  @mention, most relevant first (whoever wrote most recently, then the rest of the
+ *  thread's roster). We are never in it — a mention of oneself notifies nobody — and
+ *  neither is anybody the backend could not name. */
+export type MembersResult = { members: { mri: string; name: string }[] };
+
 /** One @mention in a message body (mirrors the Rust `parse_mentions` in
  *  src/teams_read.rs). A mention span in `content` carries only its `itemid`, so
  *  this list is what maps the rendered "@James" back to WHO was mentioned.

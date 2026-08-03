@@ -498,10 +498,15 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
     case "mention": {
       // The span carries only an index; who it names lives in the message's
       // mention list. A person we can identify gets their card on hover; a
-      // channel/team/tag mention (or an unmapped one) stays plain accent text.
+      // channel/team/tag mention (or an unmapped one) still reads as a mention.
+      //
+      // The chip's colours come from CSS rather than from a prop, because whether it
+      // sits in our own bubble is the BUBBLE's business: `[data-mine]` on the message
+      // switches it (see styles/app.css), so the renderer needs no flag threaded
+      // through every node.
       const itemid = Number(node.attrs.itemid);
       const mention = Number.isInteger(itemid) ? ctx.mentions?.get(itemid) : undefined;
-      const text = <span className="font-semibold text-sender-name">{children}</span>;
+      const text = <span className="mention-chip">{children}</span>;
       if (!mention) return <span key={key}>{text}</span>;
       return (
         <PersonHoverCard key={key} mri={mention.mri} name={mention.display_name}>

@@ -15,6 +15,7 @@ import {
   sendImage,
   type ComposerImage,
 } from "~/lib/composer-image";
+import type { OutboundMention } from "~/lib/mentions";
 import { copyableMessageText } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
@@ -62,6 +63,9 @@ function clipboardImage(event: ClipboardEvent): File | null {
  * never swaps the field, so the text keeps its place and its padding — the box grows
  * upwards from its fixed bottom edge and the words do not move.
  *
+ * Typing "@" opens the mention list, and a picked person travels with the message as
+ * a real Teams mention — see `RichEditor`.
+ *
  * One image can ride along with the message — picked with the image button or
  * pasted from the clipboard, previewed above the field, and uploaded to Teams by
  * the backend as part of the same `send` (see src/teams_send.rs). The submitted
@@ -73,6 +77,9 @@ export function Composer(props: { focusToken: unknown }) {
   const draft = useAppState((s) => s.draft);
   const replyingTo = useAppState((s) => s.replyingTo);
   const openId = useAppState((s) => s.openId);
+  // Who this thread can @mention. Loaded on the first "@" (see
+  // `ensureMentionCandidates`), so a conversation nobody mentions in costs nothing.
+  const mentionCandidates = useAppState((s) => s.mentionCandidates);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [toolbarOpen, setToolbarOpen] = useState(false);
   // The editor owns its content, so it registers a submit callback here, reports
@@ -179,7 +186,11 @@ export function Composer(props: { focusToken: unknown }) {
    * leaves the whole snapshot on screen to retry, and a picture picked while the
    * request was in flight is never thrown away.
    */
-  const send = async (text: string, html?: string): Promise<boolean> => {
+  const send = async (
+    text: string,
+    html?: string,
+    mentions?: OutboundMention[],
+  ): Promise<boolean> => {
     if (sendingRef.current || imageLoading) return false;
     const clean = text.trim();
     const richHtml = html?.trim() || undefined;
@@ -193,6 +204,7 @@ export function Composer(props: { focusToken: unknown }) {
       text,
       richHtml,
       submittedImage ? sendImage(submittedImage) : undefined,
+      mentions,
     );
     if (sendVersion.current !== version) return sent;
     sendingRef.current = false;
@@ -344,7 +356,9 @@ export function Composer(props: { focusToken: unknown }) {
               // survives a walk through other conversations.
               onChangeText={(text) => controller.setDraftText(text)}
               onPaste={handlePaste}
-              onSubmit={(html) => send("", html)}
+              onSubmit={(html, mentions) => send("", html, mentions)}
+              mentionCandidates={mentionCandidates}
+              onMentionQuery={() => void controller.ensureMentionCandidates()}
             />
           </Suspense>
 

@@ -76,6 +76,10 @@
   --color-quote-text-incoming: var(--quote-text-incoming);
   --color-sender-name: var(--sender-name);
   --color-sender-name-mine: var(--sender-name-mine);
+  --color-mention: var(--mention);
+  --color-mention-surface: var(--mention-surface);
+  --color-mention-mine: var(--mention-mine);
+  --color-mention-surface-mine: var(--mention-surface-mine);
   --color-reaction-chip: var(--reaction-chip);
   --color-reaction-chip-mine: var(--reaction-chip-mine);
   --color-reaction-chip-border: var(--reaction-chip-border);
@@ -310,6 +314,32 @@ html[data-virtual-keyboard-open] .composer-shell {
   padding: 0.05rem 0.25rem;
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.85em;
+}
+/* An @mention inside a message. Blue on a light blue wash, like Microsoft Teams —
+   and, inside our own bubble (a solid indigo fill), a translucent white wash instead,
+   since blue on blue would disappear. */
+.mention-chip {
+  border-radius: 0.25rem;
+  background-color: var(--mention-surface);
+  color: var(--mention);
+  padding: 0.05rem 0.25rem;
+  font-weight: 600;
+}
+[data-mine="true"] .mention-chip {
+  background-color: var(--mention-surface-mine);
+  color: var(--mention-mine);
+}
+
+/* An @mention in the composer. Same chip as in a message (see `.mention-chip`), and
+   it is not editable text: the caret cannot enter it, so the whole mention answers one
+   keystroke — Backspace drops the last word of the name (see mention-extension.ts). */
+.tiptap-message .composer-mention {
+  border-radius: 0.25rem;
+  background-color: var(--mention-surface);
+  color: var(--mention);
+  padding: 0.05rem 0.25rem;
+  font-weight: 600;
+  white-space: nowrap;
 }
 /* Placeholder shown while the editor is empty (from extension-placeholder). */
 .tiptap-message p.is-editor-empty:first-child::before {

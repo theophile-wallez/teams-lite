@@ -10,6 +10,7 @@
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { SendImage } from "./composer-image";
+import type { OutboundMention } from "./mentions";
 import type {
   AppSettings,
   CalendarInfo,
@@ -20,6 +21,7 @@ import type {
   MailBody as MailBodyResult,
   MailFolder,
   MailPage,
+  MembersResult,
   MessagePage,
   NotificationFeeds,
   PersonProfile,
@@ -392,12 +394,16 @@ export class Backend {
     replyTo?: ReplyTo,
     contentHtml?: string,
     image?: SendImage,
+    mentions?: OutboundMention[],
   ): Promise<{ sent: boolean }> {
     return this.writeRequest<{ sent: boolean }>("send", {
       conversation,
       text,
       reply_to: replyTo,
       content_html: contentHtml,
+      // Who the message @mentions. The body's mention spans carry only an index; this
+      // list is what tells Teams whom each index names, so they are notified.
+      mentions: mentions && mentions.length > 0 ? mentions : undefined,
       image: image
         ? {
             name: image.name,
@@ -545,6 +551,12 @@ export class Backend {
    *  then refresh live via the `read_receipt` event. */
   readReceipts(conversation: string): Promise<ReadReceiptsResult> {
     return this.request<ReadReceiptsResult>("read_receipts", { conversation });
+  }
+  /** The people a message in this conversation can @mention, most relevant first.
+   *  Best-effort on the backend — a roster it cannot read leaves a shorter list (in a
+   *  channel, the people who have written there), never an error. */
+  members(conversation: string): Promise<MembersResult> {
+    return this.request<MembersResult>("members", { conversation });
   }
   /** Fetch one hosted-content media object (inline image or shared file) through
    *  the backend, which attaches the session credentials the browser lacks. The
