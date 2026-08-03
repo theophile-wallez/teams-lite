@@ -1,5 +1,5 @@
 import { devices } from "@playwright/test";
-import { test, expect, gotoApp, openConversationAt } from "./helpers";
+import { test, expect, composerField, gotoApp, openConversationAt } from "./helpers";
 
 // Chromium cannot emulate iOS WebKit. Use its stable mobile profile and replace
 // VisualViewport below with the geometry that iOS reports for its keyboard.
@@ -10,8 +10,6 @@ test.describe("iOS keyboard spacing", () => {
     // The browser runner cannot open a software keyboard. Replace only the Visual
     // Viewport API so the app receives the same resize event and geometry as iOS.
     await page.addInitScript(() => {
-      localStorage.removeItem("teams-composer-rich");
-
       const viewport = new EventTarget() as EventTarget & {
         height: number;
         width: number;
@@ -43,7 +41,7 @@ test.describe("iOS keyboard spacing", () => {
     await openConversationAt(page, 0);
 
     const shell = page.locator('[data-testid="composer-shell"]');
-    const editor = page.locator('[data-testid="composer-rich"] .tiptap-message');
+    const editor = composerField(page);
     await expect(editor).toBeVisible();
     await editor.click();
 

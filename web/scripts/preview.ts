@@ -209,11 +209,11 @@ export async function typeInComposer(
   opts: { send?: boolean } = {},
 ): Promise<void> {
   await assertMockBackend(page);
-  const composer = page
-    .locator('[data-testid="composer"], [data-testid="composer-rich"], .tiptap-message')
-    .first();
+  // The composer has one field and it is the rich editor, so type in the editable
+  // itself: its wrapper takes no keystrokes.
+  const composer = page.locator('[data-testid="composer-rich"] .tiptap-message').first();
   await composer.click();
-  await composer.type(text, { delay: 5 });
+  await composer.pressSequentially(text, { delay: 5 });
   if (opts.send) {
     await assertMockBackend(page); // last check, right before the message leaves
     await page.keyboard.press("Enter");

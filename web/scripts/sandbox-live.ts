@@ -170,11 +170,11 @@ async function typeInSandbox(
   opts: { send?: boolean },
 ): Promise<void> {
   await assertSandboxThread(page, url);
-  const composer = page
-    .locator('[data-testid="composer"], [data-testid="composer-rich"], .tiptap-message')
-    .first();
+  // The composer has one field and it is the rich editor, so type in the editable
+  // itself: its wrapper takes no keystrokes.
+  const composer = page.locator('[data-testid="composer-rich"] .tiptap-message').first();
   await composer.click();
-  await composer.type(text, { delay: 5 });
+  await composer.pressSequentially(text, { delay: 5 });
   if (!opts.send) return;
   await assertSandboxThread(page, url); // last check, right before the message leaves
   console.log(`  sending: ${oneLine(text)}`);

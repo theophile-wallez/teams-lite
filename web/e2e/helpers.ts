@@ -5,7 +5,6 @@ import { test as base, expect, type Page } from "@playwright/test";
 // filtered out as noise.
 type Fixtures = {
   consoleErrors: string[];
-  plainComposer: void;
   mockBackendOnly: void;
 };
 
@@ -47,29 +46,30 @@ export const test = base.extend<Fixtures>({
     },
     { auto: true },
   ],
-
-  // The app now defaults the composer to the rich-text editor. These specs drive
-  // the plain `[data-testid="composer"]` textarea (fill / toHaveValue), so opt
-  // every test out to the deterministic plain field before it navigates. Specs
-  // that exercise the rich default clear this key themselves (see
-  // rich-composer.spec.ts). Registered as an auto fixture so it also covers the
-  // one spec that calls `page.goto` directly.
-  plainComposer: [
-    async ({ page }, use) => {
-      await page.addInitScript(() => {
-        try {
-          localStorage.setItem("teams-composer-rich", "0");
-        } catch {
-          /* ignore */
-        }
-      });
-      await use();
-    },
-    { auto: true },
-  ],
 });
 
 export { expect };
+
+/** The composer's editable field. The composer has ONE field and it is always the
+ *  rich editor, so every spec drives this — there is no plain textarea to fall back
+ *  to. The format bar only shows or hides buttons above it. */
+export function composerField(page: Page) {
+  return page.locator('[data-testid="composer-rich"] .tiptap-message');
+}
+
+/** Replace whatever the composer holds with `text`. `fill` works on a contenteditable,
+ *  so this stays as terse as the old textarea call it replaces. */
+export async function fillComposer(page: Page, text: string): Promise<void> {
+  const field = composerField(page);
+  await field.click();
+  await field.fill(text);
+}
+
+/** Write `text` in the composer and send it with Enter. */
+export async function sendFromComposer(page: Page, text: string): Promise<void> {
+  await fillComposer(page, text);
+  await composerField(page).press("Enter");
+}
 
 /** Navigate to the app and wait until it has connected and loaded conversations. */
 export async function gotoApp(page: Page): Promise<void> {

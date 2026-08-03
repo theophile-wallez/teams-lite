@@ -234,7 +234,7 @@ test.describe("mail", () => {
       await expect(pane.getByRole("button", { name: label })).toHaveCount(0);
     }
     // No composer either: that belongs to chat, which has consent rules of its own.
-    await expect(pane.locator('[data-testid="composer"]')).toHaveCount(0);
+    await expect(pane.locator('[data-testid="composer-shell"]')).toHaveCount(0);
   });
 
   test("leaves the chat surfaces untouched", async ({ page }) => {

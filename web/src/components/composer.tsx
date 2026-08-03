@@ -1,5 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ClipboardEvent } from "react";
+import type { Editor } from "@tiptap/react";
 import { ArrowUp, ImagePlus, LoaderCircle, Type, X } from "lucide-react";
+import { COMPOSER_FIELD_CLASS } from "~/lib/composer-field";
 import {
   composerImageAccept,
   loadComposerImage,
@@ -10,17 +12,16 @@ import { copyableMessageText } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
 
-// TipTap (ProseMirror) is heavy and only needed when rich mode is on, so load it
-// lazily on demand. This keeps the default plain-text composer path off the
-// critical bundle.
-const RichEditor = lazy(() =>
-  import("./rich-editor").then((m) => ({ default: m.RichEditor })),
+// TipTap (ProseMirror) is heavy, so it stays off the critical bundle and arrives as
+// its own chunk. Both imports name the same module, so the format bar costs nothing
+// beyond the editor that is loading anyway.
+const RichEditor = lazy(() => import("./rich-editor").then((m) => ({ default: m.RichEditor })));
+const FormatToolbar = lazy(() =>
+  import("./rich-editor").then((m) => ({ default: m.FormatToolbar })),
 );
 
-const MAX_ROWS = 12;
-const LINE_HEIGHT = 20;
-const BASE_PADDING = 16;
-const RICH_MODE_KEY = "teams-composer-rich";
+/** Whether the user keeps the format bar open. The editor is rich either way. */
+const TOOLBAR_KEY = "teams-composer-toolbar";
 
 /** Escape plain draft text so it seeds the rich editor as literal text. */
 function draftToHtml(text: string): string {
@@ -44,13 +45,17 @@ function clipboardImage(event: ClipboardEvent): File | null {
 }
 
 /**
- * Message composer with two input modes, toggled like Teams: a rich-text editor
- * (default — bold/italic/underline/strike/code/link/lists via keyboard shortcuts
- * and a select-to-format menu, no permanent toolbar) and a plain auto-growing
- * textarea. Enter sends, Shift+Enter inserts a newline; a reply banner shows the
- * quoted message. The rich editor can be turned off with the format toggle.
+ * Message composer. There is one field and it is always the rich-text editor, so
+ * bold/italic/underline/strike/code/link/lists are on the keyboard
+ * (Cmd/Ctrl+B/I/U, Cmd/Ctrl+K) in every state of the box. Enter sends, Shift+Enter
+ * inserts a newline; a reply banner shows the quoted message.
  *
- * One image can ride along with either mode — picked with the image button or
+ * The `Type` button decides only whether the format buttons are *visible*: on, they
+ * sit in the box's own top section; off, they appear over a selection instead. It
+ * never swaps the field, so the text keeps its place and its padding — the box grows
+ * upwards from its fixed bottom edge and the words do not move.
+ *
+ * One image can ride along with the message — picked with the image button or
  * pasted from the clipboard, previewed above the field, and uploaded to Teams by
  * the backend as part of the same `send` (see src/teams_send.rs). The submitted
  * snapshot stays on screen while the request is in flight and after a failure, so
@@ -61,14 +66,15 @@ export function Composer(props: { focusToken: unknown }) {
   const draft = useAppState((s) => s.draft);
   const replyingTo = useAppState((s) => s.replyingTo);
   const openId = useAppState((s) => s.openId);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [rich, setRich] = useState(false);
-  // The rich editor owns its content, so it registers a submit callback here and
-  // reports emptiness for the send button's enabled state.
+  const [toolbarOpen, setToolbarOpen] = useState(false);
+  // The editor owns its content, so it registers a submit callback here, reports
+  // emptiness for the send button's enabled state, and hands its instance out for
+  // the format bar to drive.
   const richSubmitRef = useRef<(() => void) | null>(null);
   const [richEmpty, setRichEmpty] = useState(true);
   const richFocusRef = useRef<(() => void) | null>(null);
+  const [editor, setEditor] = useState<Editor | null>(null);
   const [image, setImage] = useState<ComposerImage | null>(null);
   const imageRef = useRef<ComposerImage | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
@@ -82,16 +88,13 @@ export function Composer(props: { focusToken: unknown }) {
   const selectionVersion = useRef(0);
   const sendVersion = useRef(0);
 
-  // Restore the mode preference on the client (kept out of SSR to avoid a
-  // hydration mismatch — the server always renders the plain textarea, then we
-  // flip to rich here). Rich text is the default: only an explicit opt-out ("0")
-  // drops to the plain textarea, so formatting shortcuts (Cmd/Ctrl+B/I/U, Cmd/Ctrl+K) and
-  // the select-to-format menu are available unless the user turned rich off.
+  // Restore the format bar preference on the client (kept out of SSR to avoid a
+  // hydration mismatch — the server renders the bar closed, which is the default).
   useEffect(() => {
     try {
-      setRich(localStorage.getItem(RICH_MODE_KEY) !== "0");
+      setToolbarOpen(localStorage.getItem(TOOLBAR_KEY) === "1");
     } catch {
-      setRich(true);
+      /* ignore */
     }
   }, []);
 
@@ -110,31 +113,19 @@ export function Composer(props: { focusToken: unknown }) {
     setSending(false);
   }, [openId]);
 
-  const toggleRich = () => {
-    setRich((prev) => {
+  /** Show or hide the format buttons. The field itself is untouched, so the caret,
+   *  the selection and the text stay exactly as they were. */
+  const toggleToolbar = () => {
+    setToolbarOpen((prev) => {
       const next = !prev;
       try {
-        localStorage.setItem(RICH_MODE_KEY, next ? "1" : "0");
+        localStorage.setItem(TOOLBAR_KEY, next ? "1" : "0");
       } catch {
         /* ignore */
       }
       return next;
     });
   };
-
-  // Keep the textarea sized to its content, capped at MAX_ROWS.
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el || rich) return;
-    el.style.height = "auto";
-    const maxHeight = MAX_ROWS * LINE_HEIGHT + BASE_PADDING;
-    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
-  }, [draft, rich]);
-
-  // Focus the plain composer when the open conversation changes.
-  useEffect(() => {
-    if (openId && !rich) textareaRef.current?.focus();
-  }, [openId, rich, props.focusToken]);
 
   /** Read, validate and preview one picked or pasted image. Decoding is async, so a
    *  newer selection (or a removal) makes this result stale and it is dropped. */
@@ -206,26 +197,17 @@ export function Composer(props: { focusToken: unknown }) {
     return sent;
   };
 
-  const submitPlain = () => {
-    const text = textareaRef.current?.value ?? draft;
-    void send(text);
-  };
-
-  const canSend =
-    !sending &&
-    !imageLoading &&
-    (image !== null || (rich ? !richEmpty : draft.trim().length > 0));
+  const canSend = !sending && !imageLoading && (image !== null || !richEmpty);
 
   const submit = () => {
     if (!canSend) return;
-    if (rich && !richEmpty) richSubmitRef.current?.();
-    else void send(draft);
+    // An empty field with a picked image is a valid send: the image travels with an
+    // empty body, so the editor has nothing to serialize.
+    if (richEmpty) void send("");
+    else richSubmitRef.current?.();
   };
 
-  const focusField = () => {
-    if (rich) richFocusRef.current?.();
-    else textareaRef.current?.focus();
-  };
+  const focusField = () => richFocusRef.current?.();
 
   return (
     <div
@@ -282,14 +264,30 @@ export function Composer(props: { focusToken: unknown }) {
           className="flex cursor-text flex-col gap-2 rounded-2xl bg-card px-3 py-2.5 shadow-chip transition-shadow focus-within:shadow-card"
           onMouseDown={(event) => {
             // Clicking anywhere in the box focuses the field, except the action
-            // buttons (send / rich-text toggle / image) and the field itself, which
-            // handle their own clicks.
+            // buttons (send / format bar / image) and the field itself, which handle
+            // their own clicks.
             const element = event.target as HTMLElement;
-            if (element.closest("button") || element.closest("textarea, [contenteditable]")) return;
+            if (element.closest("button") || element.closest("[contenteditable]")) return;
             event.preventDefault();
             focusField();
           }}
         >
+          {/* The format bar, in the box's own top section. It is the SAME editor either
+              way — the button only shows or hides these buttons — so the field keeps its
+              content, its caret and its padding when the bar opens. The row keeps its
+              height while the editor chunk loads, so the bar does not grow under the
+              pointer that opened it. */}
+          {toolbarOpen && (
+            <div
+              role="toolbar"
+              aria-label="Formatting"
+              data-testid="composer-toolbar"
+              className="flex min-h-7 items-center gap-0.5 border-b border-border-subtle pb-2 animate-in fade-in slide-in-from-bottom-1 duration-150 ease-out"
+            >
+              <Suspense fallback={null}>{editor && <FormatToolbar editor={editor} />}</Suspense>
+            </div>
+          )}
+
           {/* The pending image, above the field like Teams: a thumbnail with its pixel
               size and a remove button. It is a local preview (a data URL), so nothing
               is uploaded until the message is actually sent. */}
@@ -321,68 +319,44 @@ export function Composer(props: { focusToken: unknown }) {
             </div>
           )}
 
-          {/* Input field. Rich mode is a bare-looking editor that formats via
-              keyboard shortcuts and a select-to-format menu; plain mode is a bare
-              auto-growing textarea. Both read as the same lean box, and both hand a
-              pasted image to `handlePaste` instead of inserting it as content. */}
-          {rich ? (
-            <Suspense
-              fallback={
-                <div className="min-h-[1.75rem] w-full text-sm text-text-faint" aria-hidden />
-              }
-            >
-              <RichEditor
-                key={openId ?? "none"}
-                initialContent={draftToHtml(draft)}
-                focusToken={props.focusToken}
-                submitRef={richSubmitRef}
-                focusRef={richFocusRef}
-                onEmptyChange={setRichEmpty}
-                // Mirror the editor's text into the plain draft so drafts still
-                // persist per-conversation and toggling back to plain keeps the text.
-                onChangeText={(text) => controller.setDraftText(text)}
-                onPaste={handlePaste}
-                onSubmit={(html) => send("", html)}
-              />
-            </Suspense>
-          ) : (
-            <textarea
-              ref={textareaRef}
-              value={draft}
-              rows={1}
-              data-testid="composer"
-              placeholder="Write a message…"
-              className={cn(
-                // `text-base` (16px) on mobile prevents iOS Safari from auto-zooming
-                // when the field is focused; `md:text-sm` restores 14px on desktop.
-                "max-h-64 w-full resize-none bg-transparent px-1 py-1 text-base outline-none md:text-sm placeholder:text-text-faint",
-              )}
-              onChange={(event) => controller.setDraftText(event.target.value)}
+          {/* The one input field: a bare-looking rich editor that hands a pasted image
+              to `handlePaste` instead of inserting it as content. The placeholder under
+              `Suspense` carries the field's own metrics, so the box does not resize when
+              the editor arrives. */}
+          <Suspense fallback={<div className={COMPOSER_FIELD_CLASS} aria-hidden />}>
+            <RichEditor
+              key={openId ?? "none"}
+              initialContent={draftToHtml(draft)}
+              focusToken={props.focusToken}
+              toolbarVisible={toolbarOpen}
+              submitRef={richSubmitRef}
+              focusRef={richFocusRef}
+              onEmptyChange={setRichEmpty}
+              onEditorChange={setEditor}
+              // Mirror the editor's text into the draft, so a half-written message
+              // survives a walk through other conversations.
+              onChangeText={(text) => controller.setDraftText(text)}
               onPaste={handlePaste}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  submitPlain();
-                }
-              }}
+              onSubmit={(html) => send("", html)}
             />
-          )}
+          </Suspense>
 
-          {/* Bottom control bar: rich-text toggle and image picker on the left, send
+          {/* Bottom control bar: format bar toggle and image picker on the left, send
               on the right. */}
           <div className="flex items-center justify-between gap-1.5">
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
-                aria-label="Toggle rich text formatting"
-                aria-pressed={rich}
-                title="Rich text formatting"
+                aria-label={toolbarOpen ? "Hide formatting options" : "Show formatting options"}
+                aria-pressed={toolbarOpen}
+                title={toolbarOpen ? "Hide formatting options" : "Show formatting options"}
                 data-testid="composer-format-toggle"
                 data-cuelume-toggle=""
-                onClick={toggleRich}
+                onClick={toggleToolbar}
                 className={cn(
                   "grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground",
-                  rich && "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
+                  toolbarOpen &&
+                    "bg-primary/12 text-primary hover:bg-primary/15 hover:text-primary",
                 )}
               >
                 <Type className="size-4" strokeWidth={1.6} />

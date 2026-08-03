@@ -1,5 +1,5 @@
 import { devices, type Locator, type Page } from "@playwright/test";
-import { test, expect, gotoApp, openConversationAt } from "./helpers";
+import { test, expect, composerField, gotoApp, openConversationAt } from "./helpers";
 
 // The mobile, single-pane layout. Emulate an Android Chrome phone (narrow
 // viewport + touch, so the `md` breakpoint resolves to the mobile layout and
@@ -108,7 +108,7 @@ test.describe("mobile single-pane layout", () => {
     await gotoApp(page);
     await openConversationAt(page, 0);
 
-    const composer = page.locator('[data-testid="composer"]');
+    const composer = composerField(page);
     await expect(composer).toBeVisible();
     const box = await composer.boundingBox();
     const height = page.viewportSize()!.height;

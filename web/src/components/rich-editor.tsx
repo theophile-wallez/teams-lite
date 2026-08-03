@@ -4,7 +4,7 @@ import {
   type MutableRefObject,
   type ReactNode,
 } from "react";
-import { EditorContent, useEditor, type Editor } from "@tiptap/react";
+import { EditorContent, useEditor, useEditorState, type Editor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -18,6 +18,7 @@ import {
   Strikethrough,
   Underline,
 } from "lucide-react";
+import { COMPOSER_FIELD_CLASS } from "~/lib/composer-field";
 import { serializeTeamsHtml } from "~/lib/rich-text";
 import { cn } from "~/lib/utils";
 
@@ -57,17 +58,23 @@ function promptForLink(editor: Editor) {
 }
 
 /**
- * A Teams-compatible rich-text message editor built on TipTap. Enter sends,
- * Shift+Enter inserts a line break, Cmd/Ctrl+B/I/U format the selection, and
- * Cmd/Ctrl+K adds a link. Formatting has no permanent toolbar: a floating
- * BubbleMenu appears over the selection, so the field reads as a plain box until
- * you select text. On submit the HTML is normalized to the Teams-safe subset by
- * {@link serializeTeamsHtml}.
+ * A Teams-compatible rich-text message editor built on TipTap. It is the only
+ * message field the composer has: Enter sends, Shift+Enter inserts a line break,
+ * Cmd/Ctrl+B/I/U format the selection, and Cmd/Ctrl+K adds a link — always, whether
+ * or not the composer shows the format bar.
+ *
+ * Formatting is therefore reachable two ways, and never both at once: the composer's
+ * own {@link FormatToolbar} when the user opened it, and a floating BubbleMenu over
+ * the selection when they did not. On submit the HTML is normalized to the
+ * Teams-safe subset by {@link serializeTeamsHtml}.
  */
 export function RichEditor(props: {
   initialContent: string;
   focusToken: unknown;
   onSubmit: (html: string) => Promise<boolean>;
+  /** Whether the composer already shows a format bar — then the selection menu stays
+   *  away, so the same buttons are never offered twice. */
+  toolbarVisible?: boolean;
   /** Handles image clipboard items before ProseMirror inserts them as content. */
   onPaste?: (event: ReactClipboardEvent) => void;
   /** Registers the editor's submit fn so an outside control (send button) can call it. */
@@ -78,6 +85,8 @@ export function RichEditor(props: {
   onEmptyChange?: (empty: boolean) => void;
   /** Mirrors the editor's plain text out, so the composer can persist it as the draft. */
   onChangeText?: (text: string) => void;
+  /** Hands the live editor out, so the composer can drive it from its format bar. */
+  onEditorChange?: (editor: Editor | null) => void;
 }) {
   const editor = useEditor({
     // TanStack Start renders on the server; ProseMirror needs the DOM, so defer
@@ -92,7 +101,9 @@ export function RichEditor(props: {
     },
     editorProps: {
       attributes: {
-        class: "tiptap-message max-h-64 min-h-[1.5rem] w-full overflow-y-auto outline-none",
+        // The field metrics come from the shared constant, so the placeholder the
+        // composer shows until this editor mounts is exactly as tall as the editor.
+        class: cn(COMPOSER_FIELD_CLASS, "tiptap-message overflow-y-auto outline-none"),
       },
       handleKeyDown: (_view, event) => {
         if (event.key === "Enter" && !event.shiftKey) {
@@ -145,93 +156,91 @@ export function RichEditor(props: {
     };
   });
 
+  // Hand the editor to the composer, which renders the format bar in its own top
+  // section. The composer keys this component per conversation, so the null on
+  // unmount is what stops the bar driving a dead editor.
+  const onEditorChange = props.onEditorChange;
+  useEffect(() => {
+    onEditorChange?.(editor ?? null);
+    return () => onEditorChange?.(null);
+  }, [editor, onEditorChange]);
+
   if (!editor) {
     // Reserve the field height so the composer doesn't jump on hydration.
-    return (
-      <div className="min-h-[1.5rem] w-full py-1 text-base text-text-faint md:text-sm" aria-hidden />
-    );
+    return <div className={COMPOSER_FIELD_CLASS} aria-hidden />;
   }
 
   return (
     <div className="w-full">
-      {/* No permanent toolbar — formatting is keyboard-driven (Cmd/Ctrl+B/I/U, Cmd/Ctrl+K)
-          plus this select-to-format menu, so the field stays as lean as the plain
-          textarea. */}
-      <BubbleMenu
-        editor={editor}
-        className="flex items-center gap-0.5 rounded-xl bg-popover p-1 shadow-pop"
-      >
-        <ToolbarButtons editor={editor} onLink={() => promptForLink(editor)} />
-      </BubbleMenu>
-      {/* `text-base` (16px) on mobile stops iOS Safari auto-zooming on focus;
-          `md:text-sm` keeps 14px on desktop. */}
-      <EditorContent
-        editor={editor}
-        data-testid="composer-rich"
-        className="text-base md:text-sm"
-        onPaste={props.onPaste}
-      />
+      {/* The select-to-format menu, for when the composer's format bar is closed.
+          It is not the only way to format: the keyboard (Cmd/Ctrl+B/I/U, Cmd/Ctrl+K)
+          always works, bar or no bar. */}
+      {!props.toolbarVisible && (
+        <BubbleMenu
+          editor={editor}
+          className="flex items-center gap-0.5 rounded-xl bg-popover p-1 shadow-pop"
+        >
+          <FormatToolbar editor={editor} />
+        </BubbleMenu>
+      )}
+      <EditorContent editor={editor} data-testid="composer-rich" onPaste={props.onPaste} />
     </div>
   );
 }
 
-function ToolbarButtons(props: { editor: Editor; onLink: () => void }) {
+/** The marks and lists the bar offers, in the order it shows them. `null` draws the
+ *  separator between the character formats and the two list formats. */
+const FORMATS = [
+  { name: "bold", label: "Bold", icon: Bold, toggle: "toggleBold" },
+  { name: "italic", label: "Italic", icon: Italic, toggle: "toggleItalic" },
+  { name: "underline", label: "Underline", icon: Underline, toggle: "toggleUnderline" },
+  { name: "strike", label: "Strikethrough", icon: Strikethrough, toggle: "toggleStrike" },
+  { name: "code", label: "Inline code", icon: Code, toggle: "toggleCode" },
+  { name: "link", label: "Link", icon: Link2, toggle: null },
+  null,
+  { name: "bulletList", label: "Bulleted list", icon: List, toggle: "toggleBulletList" },
+  { name: "orderedList", label: "Numbered list", icon: ListOrdered, toggle: "toggleOrderedList" },
+] as const;
+
+/**
+ * One row of format buttons over the editor's current selection.
+ *
+ * The composer shows it in its own top section when the user asks for it (the `Type`
+ * button); the BubbleMenu above shows the same row over the selection when they did
+ * not. Both drive the same editor, so formatting reads the same either way.
+ *
+ * The active flags come through `useEditorState`, so the row follows the CARET as
+ * well as the typing: the composer that renders the bar does not re-render on a
+ * transaction of its own, and a highlight that only tracked edits would lie every
+ * time the user clicked into a bold word.
+ */
+export function FormatToolbar(props: { editor: Editor }) {
   const { editor } = props;
+  const active = useEditorState({
+    editor,
+    selector: ({ editor }) =>
+      FORMATS.map((format) => (format ? editor.isActive(format.name) : false)),
+  });
   return (
     <>
-      <FmtButton
-        label="Bold"
-        active={editor.isActive("bold")}
-        onClick={() => editor.chain().focus().toggleBold().run()}
-      >
-        <Bold className="size-4" strokeWidth={1.8} />
-      </FmtButton>
-      <FmtButton
-        label="Italic"
-        active={editor.isActive("italic")}
-        onClick={() => editor.chain().focus().toggleItalic().run()}
-      >
-        <Italic className="size-4" strokeWidth={1.8} />
-      </FmtButton>
-      <FmtButton
-        label="Underline"
-        active={editor.isActive("underline")}
-        onClick={() => editor.chain().focus().toggleUnderline().run()}
-      >
-        <Underline className="size-4" strokeWidth={1.8} />
-      </FmtButton>
-      <FmtButton
-        label="Strikethrough"
-        active={editor.isActive("strike")}
-        onClick={() => editor.chain().focus().toggleStrike().run()}
-      >
-        <Strikethrough className="size-4" strokeWidth={1.8} />
-      </FmtButton>
-      <FmtButton
-        label="Inline code"
-        active={editor.isActive("code")}
-        onClick={() => editor.chain().focus().toggleCode().run()}
-      >
-        <Code className="size-4" strokeWidth={1.8} />
-      </FmtButton>
-      <FmtButton label="Link" active={editor.isActive("link")} onClick={props.onLink}>
-        <Link2 className="size-4" strokeWidth={1.8} />
-      </FmtButton>
-      <span className="mx-0.5 h-4 w-px bg-border-subtle" aria-hidden />
-      <FmtButton
-        label="Bulleted list"
-        active={editor.isActive("bulletList")}
-        onClick={() => editor.chain().focus().toggleBulletList().run()}
-      >
-        <List className="size-4" strokeWidth={1.8} />
-      </FmtButton>
-      <FmtButton
-        label="Numbered list"
-        active={editor.isActive("orderedList")}
-        onClick={() => editor.chain().focus().toggleOrderedList().run()}
-      >
-        <ListOrdered className="size-4" strokeWidth={1.8} />
-      </FmtButton>
+      {FORMATS.map((format, index) =>
+        format === null ? (
+          <span key="sep" className="mx-0.5 h-4 w-px bg-border-subtle" aria-hidden />
+        ) : (
+          <FmtButton
+            key={format.name}
+            label={format.label}
+            active={active[index] ?? false}
+            onClick={() =>
+              format.toggle === null
+                ? promptForLink(editor)
+                : editor.chain().focus()[format.toggle]().run()
+            }
+          >
+            <format.icon className="size-4" strokeWidth={1.8} />
+          </FmtButton>
+        ),
+      )}
     </>
   );
 }

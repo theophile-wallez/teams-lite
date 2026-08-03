@@ -1,4 +1,11 @@
-import { test, expect, gotoApp, openConversationAt, emitReaction } from "./helpers";
+import {
+  test,
+  expect,
+  gotoApp,
+  openConversationAt,
+  emitReaction,
+  sendFromComposer,
+} from "./helpers";
 
 test.describe("message reactions", () => {
   test("adds from the menu, highlights the active reaction, and toggles it off there", async ({
@@ -9,10 +16,7 @@ test.describe("message reactions", () => {
 
     // Send a fresh message of our own so we have a deterministic target.
     const original = `react-me-${Date.now()}`;
-    const composer = page.locator('[data-testid="composer"]');
-    await composer.click();
-    await composer.fill(original);
-    await composer.press("Enter");
+    await sendFromComposer(page, original);
 
     const bubble = page.locator('[data-testid="message"]', { hasText: original });
     await expect(bubble).toBeVisible();
@@ -54,10 +58,7 @@ test.describe("message reactions", () => {
     await openConversationAt(page, 0);
 
     const original = `chip-react-${Date.now()}`;
-    const composer = page.locator('[data-testid="composer"]');
-    await composer.click();
-    await composer.fill(original);
-    await composer.press("Enter");
+    await sendFromComposer(page, original);
 
     const bubble = page.locator('[data-testid="message"]', { hasText: original });
     await expect(bubble).toBeVisible();
@@ -84,10 +85,7 @@ test.describe("message reactions", () => {
     await openConversationAt(page, 0);
 
     const original = `emoji-picker-${Date.now()}`;
-    const composer = page.locator('[data-testid="composer"]');
-    await composer.click();
-    await composer.fill(original);
-    await composer.press("Enter");
+    await sendFromComposer(page, original);
 
     const bubble = page.locator('[data-testid="message"]', { hasText: original });
     await expect(bubble).toBeVisible();

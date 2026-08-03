@@ -1,10 +1,12 @@
 import {
   test,
   expect,
+  composerField,
   gotoApp,
   openChannelsTab,
   fetchTestChannels,
   realErrors,
+  sendFromComposer,
 } from "./helpers";
 
 // Channels are a Microsoft Teams-style, first-class surface: a separate sidebar
@@ -110,16 +112,13 @@ test.describe("channels", () => {
       .toBeGreaterThan(0);
 
     const marker = `chan-${Date.now()}`;
-    const composer = page.locator('[data-testid="composer"]');
-    await composer.click();
-    await composer.fill(marker);
-    await composer.press("Enter");
+    await sendFromComposer(page, marker);
 
     // The mock echoes the sent message back as one of ours (same path as chats).
     const echoed = page.locator('[data-testid="message"]', { hasText: marker });
     await expect(echoed.first()).toBeVisible();
     await expect(echoed.first()).toHaveAttribute("data-mine", "true");
-    await expect(composer).toHaveValue("");
+    await expect(composerField(page)).toHaveText("");
   });
 
   test("pinning a channel lifts it into the Pinned section and back", async ({ page }) => {

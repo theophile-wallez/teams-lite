@@ -1,4 +1,13 @@
-import { test, expect, fetchCapturedSends, gotoApp, openConversationAt, setSendControl } from "./helpers";
+import {
+  test,
+  expect,
+  composerField,
+  fetchCapturedSends,
+  fillComposer,
+  gotoApp,
+  openConversationAt,
+  setSendControl,
+} from "./helpers";
 
 const PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nAAAAABJRU5ErkJggg==";
@@ -34,7 +43,7 @@ test.describe("composer images", () => {
 
   test("accepts an image pasted from the clipboard", async ({ page }) => {
     await openComposer(page);
-    await page.locator('[data-testid="composer"]').evaluate((element, base64) => {
+    await composerField(page).evaluate((element, base64) => {
       const bytes = Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
       const file = new File([bytes], "pasted.png", { type: "image/png" });
       const clipboard = new DataTransfer();
@@ -74,23 +83,24 @@ test.describe("composer images", () => {
   test("sends a caption with the image", async ({ page }) => {
     await openComposer(page);
     await selectImage(page, "captioned.png");
-    await page.locator('[data-testid="composer"]').fill("A small caption");
+    await fillComposer(page, "A small caption");
     await page.locator('[data-testid="composer-send"]').click();
 
     const message = page.locator('[data-testid="message"]', { hasText: "A small caption" }).last();
     await expect(message).toBeVisible();
     await expect(message.locator('[data-testid="message-image"]')).toBeVisible();
+    // The field is the rich editor, so the caption travels as HTML beside the image.
     const sends = await fetchCapturedSends(page);
-    expect(sends[0]?.text).toBe("A small caption");
+    expect(sends[0]?.content_html).toContain("A small caption");
     expect(sends[0]?.image?.name).toBe("captioned.png");
   });
 
-  test("supports an image in rich mode", async ({ page }) => {
+  test("sends a caption with the format bar open", async ({ page }) => {
     await openComposer(page);
     await page.locator('[data-testid="composer-format-toggle"]').click();
-    await expect(page.locator('[data-testid="composer-rich"]')).toBeVisible();
+    await expect(page.locator('[data-testid="composer-toolbar"]')).toBeVisible();
     await selectImage(page, "rich.png");
-    await page.locator('[data-testid="composer-rich"] .tiptap-message').fill("Rich caption");
+    await fillComposer(page, "Rich caption");
     await page.locator('[data-testid="composer-send"]').click();
 
     await expect(
@@ -137,13 +147,12 @@ test.describe("composer images", () => {
     await openComposer(page);
     await setSendControl(page, { error: "mock image send failed", clear: true });
     await selectImage(page, "retry.png");
-    const composer = page.locator('[data-testid="composer"]');
-    await composer.fill("Keep this caption");
+    await fillComposer(page, "Keep this caption");
     await page.locator('[data-testid="composer-send"]').click();
 
     await expect(page.locator('[data-testid="status-bar"]')).toContainText("mock image send failed");
     await expect(page.locator(IMAGE_PREVIEW)).toBeVisible();
-    await expect(composer).toHaveValue("Keep this caption");
+    await expect(composerField(page)).toHaveText("Keep this caption");
     expect(await fetchCapturedSends(page)).toHaveLength(1);
   });
 });
