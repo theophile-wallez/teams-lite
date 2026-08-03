@@ -193,6 +193,27 @@ pub fn command_for(
     })
 }
 
+/// The backend a message asked for, applying every rule EXCEPT the conversation's
+/// mode — for one purpose: saying so in the journal.
+///
+/// [`command_for`] refuses on [`Mode::Off`] before it ever looks at the text, which is
+/// the right order (almost no message is a trigger). That order leaves one question
+/// unanswered, and it is the question a user asks when the thread stays quiet: was
+/// that silence a message about nothing, or my own request dropped in a conversation
+/// nobody opted in? A feature that looks broken with no line naming the cause is the
+/// failure this exists to prevent.
+///
+/// It decides nothing and authorizes nothing: it returns a name to print, never a
+/// [`Command`] to run. Every gate — `from_me` included — still applies, so a
+/// colleague's `@claude` is not even worth a log line.
+pub fn ignored_trigger(
+    message: &Message,
+    from_me: bool,
+    now_ms: i64,
+) -> Option<&'static Backend> {
+    command_for(message, from_me, Mode::Reply, now_ms).map(|command| command.backend)
+}
+
 /// Split `@claude do the thing` into its backend and its prompt.
 ///
 /// The prefix must open the message: a `@claude` in the middle of a sentence is
@@ -442,6 +463,25 @@ mod tests {
     #[test]
     fn a_conversation_that_is_off_never_triggers() {
         assert!(command_for(&message("@claude hello"), true, Mode::Off, 1_000_000).is_none());
+    }
+
+    #[test]
+    fn a_trigger_dropped_by_the_mode_is_still_nameable_for_the_journal() {
+        // The user wrote a real request and got silence: that deserves a line.
+        let named = ignored_trigger(&message("@claude hello"), true, 1_000_000)
+            .expect("the dropped trigger names its backend");
+        assert_eq!(named.name, "claude");
+    }
+
+    #[test]
+    fn nothing_else_is_nameable_for_the_journal() {
+        // A colleague's prefix, and an ordinary message, stay as silent in the log as
+        // they are in the thread — the first one is not the user's request to drop.
+        assert!(ignored_trigger(&message("@claude rm -rf ~"), false, 1_000_000).is_none());
+        assert!(ignored_trigger(&message("<p>hello</p>"), true, 1_000_000).is_none());
+        let mut old = message("@claude hello");
+        old.compose_time = 1_000_000 - MAX_AGE_MS - 1;
+        assert!(ignored_trigger(&old, true, 1_000_000).is_none());
     }
 
     #[test]

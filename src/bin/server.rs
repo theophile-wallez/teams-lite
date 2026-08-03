@@ -3626,6 +3626,18 @@ fn agent_live_message(ctx: &Ctx, store: &Store, message: &Message, from_me: bool
     let modes = store.get_setting(agent_policy::SETTING_MODES).unwrap_or_default();
     let mode = agent_policy::mode_for(&message.conversation_id, modes.as_deref());
     let Some(command) = agent_policy::command_for(message, from_me, mode, now_ms()) else {
+        // Say when the user's own request was dropped because nobody opted this
+        // conversation in. Silence here reads as a broken feature, and the cause —
+        // `off` is the default everywhere — is invisible from the thread.
+        if mode == agent_policy::Mode::Off {
+            if let Some(backend) = agent_policy::ignored_trigger(message, from_me, now_ms()) {
+                eprintln!(
+                    "[agent] {} is `off` in {} — ignoring the trigger. Turn it on from that \
+                     conversation's own header.",
+                    backend.name, message.conversation_id
+                );
+            }
+        }
         return;
     };
     if !agent::is_available(command.backend) {
