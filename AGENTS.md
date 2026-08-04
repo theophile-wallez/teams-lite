@@ -694,6 +694,18 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
   where a still touch on the row opens the menu (`useLongPress`, the plain half of the
   message gestures). The app is used from a phone, so a menu behind hover alone would be
   a feature that does not exist there — `web/e2e/mobile.spec.ts` pins both halves.
+- **The chat with ONESELF is absent because Teams never reports it**, not because
+  anything here drops it. The official client draws that "(You)" row itself and creates
+  the thread on the first message sent into it, so an account that never used it has no
+  thread at all: CSA lists 957 chats — 98 one-to-one, `hasMoreChats` false — and not one
+  names the user's own oid twice, the chat service's own list names none either, and
+  `19:<oid>_<oid>@unq.gbl.spaces` answers 404 `LocationLookupFailed` when asked for by
+  name (`examples/self_chat_recon.rs` measures all three). Two things follow. A CSA
+  chat's `members` array is NOT the roster — it lists only us on 281 of those 957 — so
+  "the members are only me" finds hundreds of ordinary colleagues' chats and must never
+  be read as a self chat; the id is the signal. And offering the row would mean CREATING
+  the thread, which is a send: it needs the consent gate of § Sending messages, never a
+  quiet addition to the sidebar.
 
 ## The user's own status (outward, and gated like one)
 
