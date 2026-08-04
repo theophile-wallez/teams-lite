@@ -1019,9 +1019,30 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-chip-dark.png`, '.tiptap-message [data-testid="agent-tag"]');
       await setTheme("light");
+      // The tag as it reads once sent: the same chip, in our own bubble, where the wash
+      // now sits on the solid accent fill. The message carries only the plain prefix, so
+      // this is also where the reader sees that reading it back really works.
+      await page.keyboard.press("Enter");
+      await page.waitForSelector(
+        '[data-testid="message"][data-mine="true"] [data-testid="agent-tag"]',
+      );
+      await page.waitForTimeout(400);
+      await shot(`${out}-sent-light.png`);
+      await shot(
+        `${out}-sent-chip-light.png`,
+        '[data-testid="message"][data-mine="true"] [data-testid="agent-tag"]',
+      );
+      await setTheme("dark");
+      await shot(`${out}-sent-dark.png`);
+      await shot(
+        `${out}-sent-chip-dark.png`,
+        '[data-testid="message"][data-mine="true"] [data-testid="agent-tag"]',
+      );
+      await setTheme("light");
       console.log(
-        `[preview] wrote ${out}-list-{light,dark}.png, ${out}-composed-{light,dark}.png ` +
-          `and ${out}-chip-{light,dark}.png`,
+        `[preview] wrote ${out}-list-{light,dark}.png, ${out}-composed-{light,dark}.png, ` +
+          `${out}-chip-{light,dark}.png, ${out}-sent-{light,dark}.png and ` +
+          `${out}-sent-chip-{light,dark}.png`,
       );
       // Each CLI wears its own colour, so the second one is worth its own capture — but
       // only this machine says which CLIs it holds, and the mock holds one. Skipping is

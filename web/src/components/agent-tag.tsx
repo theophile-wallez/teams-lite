@@ -11,6 +11,11 @@ import { AgentLogo } from "./agent-logo";
  * somebody; this is a promise to start a program on the machine the backend runs on, and
  * the two must not read as one thing. The mark carries which program, which is the part
  * that matters and the part a name alone would blur.
+ *
+ * The composer draws it while the message is written ({@link AgentTagView}) and the thread
+ * draws the same one once it is sent, from the prefix read back out of the body
+ * (lib/agent-tag.ts, rendered by components/rich-content.tsx). One component, because
+ * tagging an agent and reading the message back are one thing, not two that look alike.
  */
 export function AgentTagChip(props: { backend: string; className?: string }) {
   return (

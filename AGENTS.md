@@ -722,11 +722,23 @@ notifies a colleague, a tag starts a program on this machine.
 - **One Backspace removes the whole tag.** A person's name shrinks by a word because
   that is how people address each other in a thread; half a prefix summons nothing, so
   there is nothing to shrink.
+- **The bubble wears the same chip, read back out of the words.** The body holds the bare
+  prefix and no markup, so there is nothing to restore — `markAgentTag`
+  (`web/src/lib/agent-tag.ts`) recognises it the way the backend does and hands
+  `rich-content.tsx` an `agent` node, drawn by the composer's own `AgentTagChip`. It is the
+  choice `agent-message.ts` makes for a reply's signature, and for the same reason: a
+  message read back covers the tags typed from a phone too. The rules above still decide —
+  `agentTagInText` is a port of `agent_policy::split_prefix` plus its prompt rules, and
+  `agentTagsInMessage` re-applies every gate the composer applies (`from_me` first, then
+  `agentCandidatesFor`'s own list) — so a colleague's prefix, a prefix mid-sentence and ours
+  in a thread nobody opted in all stay plain words.
+  A quote keeps its words too: the backend strips quoted blocks before it reads a trigger,
+  so a prefix inside one started nothing.
 - `web/mock/server.ts` seeds the sandbox thread as a conversation of its own
   (`seedAgentSandbox`), so the tag is exercised in the state a fresh backend is really in:
   one thread opted in, every other off. `cd web && bun run preview -- --out /tmp/tag
-  --agent-tag` captures the list and both chips, and `web/e2e/agent-tag.spec.ts` pins
-  every rule above.
+  --agent-tag` captures the list, both chips and the sent bubble, and
+  `web/e2e/agent-tag.spec.ts` pins every rule above.
 
 ## Language policy (MANDATORY)
 

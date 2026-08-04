@@ -166,6 +166,41 @@ describe("RichContent — relayed HTML emails", () => {
   });
 });
 
+// An agent tag in a body: the message carries the plain `@claude` prefix and nothing else
+// (that is the whole design — see lib/agent-tag.ts), so the chip is recognised from the
+// words and drawn with the composer's own component.
+describe("RichContent — agent tags", () => {
+  const CLAUDE = { backend: "claude", name: "Claude", prefix: "@claude" };
+  const withAgents = (html: string, agents = [CLAUDE]) =>
+    renderToStaticMarkup(createElement(RichContent, { html, agentTags: agents }));
+
+  it("draws the opening prefix as the vendor's chip, and keeps the prompt", () => {
+    const out = withAgents("<p>@claude which port does the backend listen on?</p>");
+    expect(out).toContain('data-testid="agent-tag"');
+    expect(out).toContain('data-agent="claude"');
+    // The chip says the CLI's name in the vendor's own casing, and wears its mark.
+    expect(out).toContain("Claude");
+    expect(out).toContain('data-testid="claude-logo"');
+    expect(out).toContain("which port does the backend listen on?");
+    // The prefix itself is replaced by the chip — never both.
+    expect(out).not.toContain("@claude");
+  });
+
+  it("leaves the prefix as words when no agent is offered", () => {
+    // What the caller passes IS the gate: a colleague's message, or a thread nobody opted
+    // in, offers none — see the memo in message-bubble.tsx.
+    const out = withAgents("<p>@claude which port?</p>", []);
+    expect(out).toContain("@claude which port?");
+    expect(out).not.toContain('data-testid="agent-tag"');
+  });
+
+  it("leaves a prefix that summons nothing as words", () => {
+    const out = withAgents("<p>as we said @claude is quick</p>");
+    expect(out).toContain("@claude");
+    expect(out).not.toContain('data-testid="agent-tag"');
+  });
+});
+
 describe("RichContent — markup validity", () => {
   it("never nests a block inside a paragraph", () => {
     // `<div>` maps to a paragraph, so message HTML routinely puts a list or a

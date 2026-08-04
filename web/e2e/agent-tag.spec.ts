@@ -126,4 +126,44 @@ test.describe("agent tags", () => {
       .first();
     await expect(answering).toBeVisible({ timeout: 30_000 });
   });
+
+  test("the sent message wears the same chip in its own bubble", async ({ page }) => {
+    await openSandbox(page);
+    await page.keyboard.type("@cl");
+    await page.locator(agentOptions).click();
+    const marker = `bubble-${Date.now()}`;
+    await page.keyboard.type(`${marker} which port?`);
+    await page.keyboard.press("Enter");
+
+    // The body carries the plain prefix and no markup at all (the test above pins that),
+    // so the chip in the thread is read back from the words — see lib/agent-tag.ts. One
+    // artwork for the composer and for the thread, because it is one promise.
+    const bubble = page
+      .locator('[data-testid="message"][data-mine="true"]', { hasText: marker })
+      .last();
+    const sent = bubble.locator('[data-testid="agent-tag"]');
+    await expect(sent).toHaveAttribute("data-agent", "claude");
+    await expect(sent).toContainText("Claude");
+    await expect(sent.locator('[data-testid="claude-logo"]')).toHaveCount(1);
+    // The chip replaced the prefix, so the bubble says it once.
+    await expect(bubble).not.toContainText("@claude");
+    await expect(bubble).toContainText("which port?");
+    // Still not a mention: nothing in that bubble notifies anybody.
+    await expect(bubble.locator(".mention-chip")).toHaveCount(0);
+  });
+
+  test("a prefix that summons nothing stays plain words", async ({ page }) => {
+    await openSandbox(page);
+    // Typed by hand, mid-sentence: the backend reads the prefix a message OPENS with, so
+    // this one started no program and must not look as if it had.
+    const marker = `plain-${Date.now()}`;
+    await page.keyboard.type(`${marker} as we said @claude is quick`);
+    await page.keyboard.press("Enter");
+
+    const bubble = page
+      .locator('[data-testid="message"][data-mine="true"]', { hasText: marker })
+      .last();
+    await expect(bubble).toContainText("@claude is quick");
+    await expect(bubble.locator('[data-testid="agent-tag"]')).toHaveCount(0);
+  });
 });

@@ -363,7 +363,13 @@ html[data-virtual-keyboard-open] .composer-shell {
    (see `--agent-tag-*` in theme.css). Deliberately not the mention's blue — a mention
    notifies a colleague, a tag starts a program on this machine, and the two must not read
    as one thing. A CLI this app does not know yet keeps the neutral base pair, exactly as
-   its mark falls back to a generic glyph. */
+   its mark falls back to a generic glyph.
+
+   One chip for two surfaces: the composer (the node view) and the sent message, where the
+   prefix is read back out of the words (lib/agent-tag.ts). It needs no `[data-mine]`
+   variant the way `.mention-chip` does — the wash is pale in light and translucent in
+   dark, so the vendor's colour survives on the solid accent fill our own bubble carries,
+   which is the only bubble a tag can ever be in. */
 .agent-tag {
   display: inline-flex;
   align-items: center;

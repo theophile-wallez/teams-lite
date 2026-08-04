@@ -38,6 +38,7 @@ import {
 } from "~/lib/rich-text";
 import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
+import { agentTagsInMessage } from "~/lib/agent-tag";
 import { CardAttachment } from "~/components/card-attachment";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
@@ -231,6 +232,16 @@ function MessageBubbleImpl(props: {
   // their card on hover (the span itself only carries an index — see
   // `mentionsByItemId`).
   const mentions = useMemo(() => mentionsByItemId(props.message), [props.message]);
+  // The agents this message could really have summoned, which is what decides whether the
+  // `@claude` it opens with is drawn as the chip the composer drew (see `agentTagsInMessage`
+  // and `markAgentTag`). A colleague's prefix stays words, and so does ours in a thread
+  // nobody opted in: the chip says a program was started, and a sent message cannot take
+  // that back.
+  const agentStatus = useAppState((s) => s.agent);
+  const agentTags = useMemo(
+    () => agentTagsInMessage(props.message, agentStatus),
+    [props.message, agentStatus],
+  );
   // Candidate integration links in the authored body (not the quoted reply): the
   // configured GitLab host, and Linear's fixed one. Filtering by host keeps
   // enrichment to links an integration could plausibly claim, so an ordinary link
@@ -494,6 +505,7 @@ function MessageBubbleImpl(props: {
           hiddenHrefs={hiddenHrefs}
           mentions={mentions}
           cardShownSeparately={cardAttachments.length > 0}
+          agentTags={agentTags}
         />
       ) : null}
 
@@ -506,6 +518,10 @@ function MessageBubbleImpl(props: {
           hiddenHrefs={hiddenHrefs}
           mentions={mentions}
           cardShownSeparately={cardAttachments.length > 0}
+          // A trigger's prefix opens the message, and the backend reads the body with
+          // every quoted block removed — so this part opens it only when nothing of the
+          // author's words came before the quote.
+          agentTags={parsed.beforeHtml ? undefined : agentTags}
         />
       ) : null}
 

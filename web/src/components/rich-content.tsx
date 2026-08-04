@@ -12,8 +12,11 @@ import {
   type RichNode,
   type RichTag,
 } from "~/lib/rich-text";
+import { markAgentTag } from "~/lib/agent-tag";
+import type { AgentCandidate } from "~/lib/mentions";
 import type { BodyFormat, MessageMention } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
+import { AgentTagChip } from "./agent-tag";
 import { EmailSummaryCard } from "./email-summary";
 import { MediaImage } from "./media-image";
 import { PersonHoverCard } from "./person-card";
@@ -50,6 +53,11 @@ import { renderWordEffects } from "./word-effect";
  * `"html"`; pass `"text"` for a Teams `messagetype: Text` body, which is plain text
  * and is then shown verbatim — escaped by React, with bare URLs still linked — so
  * `Vec<String>` survives instead of being parsed away as a tag.
+ *
+ * `agentTags` names the agents whose prefix, when the body OPENS with it, is drawn as
+ * that vendor's chip instead of as the plain `@claude` on the wire (see `markAgentTag`).
+ * Pass it only where the tag would really have summoned one; empty or absent leaves the
+ * prefix the words it is.
  */
 export function RichContent(props: {
   html: string;
@@ -58,20 +66,23 @@ export function RichContent(props: {
   mentions?: Map<number, MessageMention>;
   format?: BodyFormat;
   cardShownSeparately?: boolean;
+  agentTags?: readonly AgentCandidate[];
   /** Render each word in its own span, so a body that is still being written animates
    *  its new words in. Only the streamed agent reply passes this — see
    *  {@link renderTokens}. */
   tokens?: boolean;
 }) {
-  const { html, hiddenHrefs } = props;
+  const { html, hiddenHrefs, agentTags } = props;
   const format = props.format ?? "html";
   // A plain-text body is text, not markup: it is never an email either, and its
   // angle brackets are the author's own (see `parseMessageBody`).
   const email = useMemo(() => (format === "text" ? null : parseRelayedEmail(html)), [html, format]);
   const nodes = useMemo(() => {
     const parsed = parseMessageBody(html, format);
-    return hiddenHrefs && hiddenHrefs.size > 0 ? dropLinks(parsed, hiddenHrefs) : parsed;
-  }, [html, format, hiddenHrefs]);
+    const pruned = hiddenHrefs && hiddenHrefs.size > 0 ? dropLinks(parsed, hiddenHrefs) : parsed;
+    // Last, on the tree as it will be read: the prefix has to open what the reader sees.
+    return agentTags ? markAgentTag(pruned, agentTags) : pruned;
+  }, [html, format, hiddenHrefs, agentTags]);
   if (email) return <EmailSummaryCard email={email} className={props.className} />;
   return (
     <RichNodes
@@ -555,6 +566,13 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
         </PersonHoverCard>
       );
     }
+    case "agent":
+      // The very chip the composer drew (components/agent-tag.tsx), so tagging an agent
+      // and reading the message back are one thing rather than two that look alike. The
+      // node's own text — the `@claude` on the wire — is what the chip replaces: the mark
+      // and the name say it in the vendor's own voice, which is what was on screen when
+      // the message was written.
+      return <AgentTagChip key={key} backend={node.attrs.backend ?? ""} />;
     default:
       return <span key={key}>{children}</span>;
   }

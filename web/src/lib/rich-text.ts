@@ -45,7 +45,14 @@ export type RichTag =
   | "img"
   | "mention"
   /** An app link-unfurl card (`span itemtype=".../InputExtension"`). */
-  | "card";
+  | "card"
+  /** An agent tag: the `@claude` prefix a message of ours OPENS with, which summons a
+   *  CLI on the backend's machine. The parser never produces one — a tag carries no
+   *  markup at all, by design — so it only ever comes from {@link markAgentTag}, which
+   *  recognises the prefix in the words the way the backend does. Its children are that
+   *  prefix, verbatim, so anything that does not know the tag (the outbound serializer
+   *  below, a renderer without the case) still sees exactly the text the user typed. */
+  | "agent";
 
 export type RichAttrs = {
   href?: string;
@@ -63,6 +70,9 @@ export type RichAttrs = {
    *  written has no `mentions` list beside it yet. It is what
    *  {@link serializeTeamsMessage} turns back into that list on send. */
   mri?: string;
+  /** Agent tags only: the CLI the prefix summons (`claude`, `opencode`), which is the
+   *  mark and the colour the chip wears. */
+  backend?: string;
   /** Table cells only: how many columns/rows the cell spans, when it spans more
    *  than one. Bounded (see {@link cellSpan}) so a hostile value can't ask the
    *  browser for a million columns. */

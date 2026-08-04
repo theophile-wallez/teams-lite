@@ -11,7 +11,9 @@
 //   - **It serializes to that prefix, as plain text.** `renderHTML` emits the bare
 //     `@claude` inside a span our own parser unwraps, so the body that reaches Teams is
 //     exactly what the user would have typed by hand — no markup that would render as
-//     coloured text in every other client while summoning nothing.
+//     coloured text in every other client while summoning nothing. The chip the thread
+//     then shows is that prefix read back out of the words (lib/agent-tag.ts), the way
+//     the backend's own trigger reads it.
 //   - **One Backspace removes it whole.** There is no name to shorten: "Claude" is one
 //     word, and half a prefix summons nothing.
 //
