@@ -274,6 +274,14 @@ export function MessagePane(props: { onBack?: () => void }) {
     // bottom on a live message only when we were already at the bottom.
     anchorTo: "end",
     followOnAppend: true,
+    // What counts as "at the bottom" for that follow, and it has to be the pane's
+    // own number. The default is 1px, which is a state a reader is almost never
+    // in: a row measured after the pane landed on the newest message leaves a few
+    // px of slack, and a wheel stops wherever the wheel stops — so the follow
+    // never fired and a live message wrote itself in below the lower edge. Sharing
+    // `AT_BOTTOM_PX` with the jump-to-latest button also keeps the two halves of
+    // one promise together: while the button is hidden, the pane follows.
+    scrollEndThreshold: AT_BOTTOM_PX,
     paddingStart: hasMoreOlder ? HISTORY_LOADER_PX : 0,
     // Why the rows are positioned by the virtualizer instead of by React (see
     // `containerRef` and the absence of a `transform` style below): a row's real

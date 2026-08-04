@@ -1,4 +1,4 @@
-import { test, expect, gotoApp, openConversationAt } from "./helpers";
+import { test, expect, emitLive, gotoApp, openConversationAt } from "./helpers";
 
 /** How much history the pane has loaded. The message list is virtualized, so the
  *  number of rendered bubbles tracks the viewport, not the backlog — the pane
@@ -269,5 +269,75 @@ test.describe("history (infinite scroll)", () => {
     await expect.poll(() => loadedCount(page), { timeout: 8_000 }).toBeGreaterThan(before);
     const reachedTop = await scroller.evaluate((el) => el.scrollTop <= 1);
     expect(reachedTop).toBeFalsy();
+  });
+
+  test("follows an incoming message when the reader is already at the bottom", async ({ page }) => {
+    await gotoApp(page);
+    const openId = await openConversationAt(page, 0);
+    await settled(page);
+
+    const scroller = page.locator('[data-testid="message-scroll"]');
+    // A row measured after the pane landed on the newest message leaves a few px
+    // of slack, and a reader who wheels down stops wherever the wheel stops. Both
+    // read as "at the bottom", so the test parks in that band rather than exactly
+    // on the last pixel — which is the case the follow used to miss.
+    await scroller.evaluate((el) => (el.scrollTop = el.scrollHeight - el.clientHeight - 40));
+    const marker = `follow-bottom-${await loadedCount(page)}`;
+    await emitLive(page, { conversation: openId, content: marker, is_self: false });
+
+    const bubble = page.locator('[data-testid="message"]', { hasText: marker });
+    await expect(bubble).toBeVisible();
+
+    // The new message is what the reader is looking at: it sits inside the
+    // viewport rather than below its lower edge.
+    await expect
+      .poll(
+        () =>
+          bubble.evaluate((node) => {
+            const box = node.getBoundingClientRect();
+            const view = document
+              .querySelector('[data-testid="message-scroll"]')!
+              .getBoundingClientRect();
+            return box.bottom - view.bottom;
+          }),
+        { timeout: 4_000 },
+      )
+      .toBeLessThanOrEqual(0);
+    // Following is not a jump-to-latest either: the button never appears.
+    await expect(page.locator('[data-testid="jump-to-latest"]')).toHaveAttribute(
+      "data-visible",
+      "false",
+    );
+  });
+
+  test("leaves the reading position alone when a message arrives while scrolled up", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    const openId = await openConversationAt(page, 0);
+    await settled(page);
+
+    const scroller = page.locator('[data-testid="message-scroll"]');
+    // Read a screen up: the reader is deliberately away from the bottom, so a live
+    // message must not pull them off what they are reading.
+    await scroller.evaluate((el) => {
+      el.scrollTop = Math.max(0, el.scrollTop - el.clientHeight);
+    });
+    const before = await scroller.evaluate((el) => el.scrollTop);
+    expect(before).toBeGreaterThan(200);
+
+    const marker = `stay-put-${await loadedCount(page)}`;
+    await emitLive(page, { conversation: openId, content: marker, is_self: false });
+    // Give the append a few frames to do the wrong thing, if it were going to.
+    await page.waitForTimeout(600);
+
+    // The viewport did not move, and the way back to the newest message is the
+    // button — which the arrival is what puts there.
+    const after = await scroller.evaluate((el) => el.scrollTop);
+    expect(Math.abs(after - before)).toBeLessThanOrEqual(4);
+    await expect(page.locator('[data-testid="jump-to-latest"]')).toHaveAttribute(
+      "data-visible",
+      "true",
+    );
   });
 });
