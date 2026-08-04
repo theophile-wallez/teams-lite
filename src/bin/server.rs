@@ -13,6 +13,7 @@
 //          | fetch_media | fetch_avatar | profile | presence | get_settings
 //          | set_settings | set_always_available | enrich_link
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
+//          | mail_mark_read
 //          | calendars | calendar_view
 //          | agent_status | agent_set_mode | agent_set_tools | agent_set_provider
 //          | agent_set_unrestricted
@@ -24,8 +25,11 @@
 //
 // The `mail_*` methods are the READ-ONLY Outlook surface (see `mail`): the same
 // broker identity carries the mailbox, and the app lists folders, reads messages and
-// renders bodies. It cannot send, reply, delete, move or mark as read — no such path
-// exists in the crate, and `mail::tests` enforce that on the source. Mail bodies are
+// renders bodies. It cannot send, reply, delete or move a mail, nor mark one read IN
+// THE MAILBOX — no such path exists in the crate, and `mail::tests` enforce that on
+// the source. `mail_mark_read` is the one mail method that writes, and it writes one
+// column of our own mirror: the marker clears in this app, and Outlook is never told
+// (see `Store::mark_mail_read_locally`). Mail bodies are
 // sanitized server-side and stripped of every remote reference, so displaying one
 // makes no network request of its own.
 //
@@ -2290,11 +2294,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
 
         // ---- mail (READ-ONLY Outlook surface, see `mail`) --------------------
         //
-        // Every method below only reads. None of them is in `OUTWARD_METHODS`
-        // because none can act on the mailbox: there is no send/reply/delete/move/
-        // mark-as-read anywhere in the crate (`mail::tests` enforce it). What the
-        // write lock protects is Teams; what protects the mailbox is that the
-        // capability does not exist.
+        // Every method below reads the mailbox, and only `mail_mark_read` writes
+        // anything at all — one column of our OWN mirror, never the mailbox. None of
+        // them is in `OUTWARD_METHODS`, because none can act on the mailbox: there is
+        // no send/reply/delete/move/mark-as-read anywhere in the crate (`mail::tests`
+        // enforce it). What the write lock protects is Teams; what protects the
+        // mailbox is that the capability does not exist.
 
         // The mail folder list — LOCAL-FIRST like `conversations`: answer instantly
         // from SQLite, then sync from Graph in the background and emit
@@ -2469,6 +2474,39 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     "header": Value::Null,
                 })),
             }
+        }
+
+        // Clear one mail's unread marker — HERE, and nowhere else.
+        //
+        // What a client calls when the user opens an unread mail, so the marker
+        // actually clears instead of standing over a mail they have read. The write
+        // lands on our own `local_read` column (see `Store::mark_mail_read_locally`)
+        // and goes no further: Graph is never told, so Outlook keeps the mail unread
+        // on the user's phone and its sender is shown nothing. That is the whole
+        // point — the mailbox stays read-only, and the app still behaves like a mail
+        // client.
+        //
+        // NOT an `OUTWARD_METHODS` entry, deliberately: that list means "other people
+        // see it", and nobody but the user sees this. If marking a mail read in the
+        // MAILBOX is ever wanted, it is a deliberate feature — its own consent gate,
+        // its own entry in that list — never a widening of this one.
+        //
+        // A read-only backend refuses it, for the same reason `deliver_push` and
+        // `publish_presence` refuse before the network: a screenshot script or an
+        // automated driver opening mail must not clear the user's own unread markers.
+        "mail_mark_read" => {
+            let id = param_str(params, "id")?;
+            if read_only() {
+                return Ok(json!({ "read": false, "moved": false }));
+            }
+            // Only a real change emits, so re-opening a mail that is already read does
+            // not spin the UI's refresh loop.
+            if let Some(folder) = ctx.store()?.mark_mail_read_locally(&id)? {
+                emit_mail_list(ctx, &folder);
+                ctx.emit("mail_folders_changed", json!({}));
+                return Ok(json!({ "read": true, "moved": true }));
+            }
+            Ok(json!({ "read": true, "moved": false }))
         }
 
         // One attachment's bytes, base64 over the same WebSocket as every other
@@ -2782,7 +2820,10 @@ fn mail_header_json(mail: &teams_lite::store::MailMessageRow) -> Value {
         "to": addresses(&mail.to_addresses),
         "cc": addresses(&mail.cc_addresses),
         "received": mail.received,
-        "is_read": mail.is_read,
+        // The effective state: read in the mailbox, or read here (see
+        // `MailMessageRow::is_read` and `mail_mark_read`). One field, because a client
+        // has one marker to draw and no decision to make about it.
+        "is_read": mail.is_read(),
         "has_attachments": mail.has_attachments,
         "importance": mail.importance,
         "preview": mail.preview,
@@ -6125,16 +6166,48 @@ mod lifecycle_tests {
                  deliberate feature needing its own consent gate."
             );
         }
-        // And every mail method reads, so none of them needs the token.
+        // No mail method needs the token: every one of them reads the mailbox, and
+        // `mail_mark_read` — the only one that writes anything — writes one column of
+        // our own mirror, which nobody but the user ever sees.
         for method in [
             "mail_folders",
             "mail_list",
             "mail_backfill",
             "mail_body",
             "mail_attachment",
+            "mail_mark_read",
         ] {
             assert!(check_write_allowed(method, &json!({}), Some("tok")).is_ok(), "{method}");
             assert!(check_write_allowed(method, &json!({}), None).is_ok(), "{method}");
+            assert!(!MACHINE_METHODS.contains(&method), "{method}");
+        }
+    }
+
+    /// The local read mark must stay local. Graph exposes marking a message read as a
+    /// PATCH of `isRead` on the message, and the token this app holds carries
+    /// `Mail.ReadWrite` — so the only thing between `mail_mark_read` and the user's
+    /// phone clearing its own marker is that no code names that write. Read receipts
+    /// on a mail are somebody else's business: publishing one is a deliberate
+    /// feature, with its own consent gate.
+    #[test]
+    fn marking_a_mail_read_never_names_a_graph_write() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code
+            .split("\"mail_mark_read\" =>")
+            .nth(1)
+            .expect("the mail_mark_read handler")
+            .split("\"mail_attachment\" =>")
+            .next()
+            .expect("the handler ends at the next arm");
+        assert!(handler.contains("mark_mail_read_locally"), "scanned the wrong text");
+        for named in ["retry_graph", "isRead", "graph.microsoft.com", "http"] {
+            assert!(
+                !handler.contains(named),
+                "the mail_mark_read handler names `{named}`. It must write our own mirror and \
+                 nothing else: the mailbox is read-only, and telling Graph a mail was read \
+                 clears the marker on every device the user owns."
+            );
         }
     }
 

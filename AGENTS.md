@@ -242,6 +242,21 @@ must never write to it.
   channel, mail has *no* standing exception at all. A mail leaves the user's personal
   address, reaches people who never agreed to be part of a test, and cannot be
   recalled.
+- **The unread marker is the one thing this app moves, and it moves it HERE ONLY.**
+  Opening an unread mail clears its marker, because a mail client that leaves a read
+  mail bold is broken — but the read is recorded in our own mirror
+  (`mail_messages.local_read`, written by `Store::mark_mail_read_locally` behind the
+  `mail_mark_read` RPC) and Graph is never told. So Outlook keeps the mail unread on
+  the user's phone, and the sender is shown nothing. Three rails hold that apart from
+  a real mark-as-read, and each is pinned by a test: the server's own flag lives in
+  its own column (`is_read`) so a poll and a local read can never clobber each other,
+  the effective state is the OR of the two in ONE place
+  (`MailMessageRow::is_read`), and the `mail_mark_read` handler names no HTTP client,
+  no Graph host and no `isRead` — `marking_a_mail_read_never_names_a_graph_write`
+  scans it. A read-only backend refuses the call outright, so a screenshot script
+  cannot clear the user's markers. Publishing a read to the MAILBOX stays forbidden:
+  it clears the marker on every device the user owns, and it is a deliberate feature
+  with its own consent gate, never a widening of this one.
 - The broker token this app already holds carries **`Mail.ReadWrite` and
   `Mail.Send`** (verified — see `examples/graph_mail_scopes.rs`). So nothing at the
   API level stops a send. What stops it is that **no code names the endpoint**:
@@ -251,7 +266,8 @@ must never write to it.
 - Reading, searching, and rendering mail are fine and are what the feature is for.
   If mail *sending* is ever wanted, it is a deliberate feature: its own consent gate,
   its own entry in `OUTWARD_METHODS`, its own write-lock coverage — never a quiet
-  addition to the read path.
+  addition to the read path. The same applies to publishing a read state, a flag, a
+  category or a folder move: each one is a write to the user's mailbox.
 - Mail bodies are sanitized server-side and stripped of every remote reference, so
   **displaying a mail makes no network request**. That is a privacy guarantee (a
   remote image is a read receipt for its sender), not an optimization: never add a

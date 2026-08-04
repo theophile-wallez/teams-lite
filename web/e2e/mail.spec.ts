@@ -72,6 +72,63 @@ test.describe("mail", () => {
     );
   });
 
+  test("clears an unread mail's marker when it is opened", async ({ page }) => {
+    // What a person expects of opening a mail — and it happens HERE ONLY: the
+    // backend records the read in its own mirror and never tells Graph, so Outlook
+    // keeps the message unread (see `mail_mark_read` in src/bin/server.rs).
+    await gotoApp(page);
+    await openMailTab(page);
+
+    const { folders } = await fetchTestMail(page);
+    const before = folders.find((f) => f.well_known === "Inbox")!.unread_count;
+    expect(before).toBeGreaterThan(0);
+
+    // The first fixture is unread, so its row carries the marker.
+    const row = page.locator('[data-testid="mail-row"]').first();
+    await expect(row).toHaveAttribute("data-unread", "true");
+
+    const id = await openMailAt(page, 0);
+
+    // The row it came from loses the marker, and the tab's count follows it down.
+    await expect(page.locator(`[data-mail-id="${id}"]`)).not.toHaveAttribute(
+      "data-unread",
+      "true",
+    );
+    await expect(page.locator('[data-testid="mail-unread-badge"]')).toHaveText(
+      String(before - 1),
+    );
+
+    // And it stays clear across a reload: the read was recorded, not painted.
+    await page.reload();
+    await openMailTab(page);
+    await expect(page.locator(`[data-mail-id="${id}"]`)).not.toHaveAttribute(
+      "data-unread",
+      "true",
+    );
+  });
+
+  test("records the read on a deep link, where no list held the mail", async ({ page }) => {
+    // The one path where the mail's read state is unknown until its body lands: a
+    // fresh tab on `/m/<id>` has no list to take a header from.
+    await gotoApp(page);
+    const { inbox } = await fetchTestMail(page);
+    const unread = inbox.find((m) => !m.is_read);
+    expect(unread).toBeTruthy();
+
+    await page.goto(`/m/${encodeURIComponent(unread!.id)}`);
+    await expect(page.locator('[data-testid="mail-heading"]')).toBeVisible();
+
+    // Asserted against the backend's own state, not the row: the read has to be
+    // recorded, and a repainted list would prove nothing about that.
+    await expect
+      .poll(
+        async () =>
+          (await fetchTestMail(page)).inbox.find((m) => m.id === unread!.id)?.is_read,
+        { timeout: 10_000 },
+      )
+      .toBe(true);
+  });
+
   test("opens a mail into the reading pane", async ({ page }) => {
     await gotoApp(page);
     await openMailTab(page);

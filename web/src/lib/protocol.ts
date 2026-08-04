@@ -1543,6 +1543,10 @@ export type MailHeader = {
   cc: MailAddress[];
   /** ISO 8601 UTC, whole seconds. The ordering and paging key. */
   received: string;
+  /** Read in the mailbox, OR read here (the backend sends one effective flag —
+   *  see `MailMessageRow::is_read` in src/store.rs). Opening a mail clears the
+   *  marker in this app only: the mailbox is read-only, so Outlook keeps the mail
+   *  unread and its sender is told nothing. */
   is_read: boolean;
   has_attachments: boolean;
   importance: string;

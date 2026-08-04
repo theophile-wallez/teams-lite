@@ -249,6 +249,30 @@ describe("Backend request/response", () => {
     backend.close();
   });
 
+  // Reading a mail is the mirror image: it clears the marker in this app and tells
+  // Graph nothing, so it carries NO write token — and the mailbox stays untouched
+  // whatever token the page happens to hold.
+  it("frames mail_mark_read as a plain read, carrying no write token", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("tok");
+
+    const promise = backend.mailMarkRead("AAMk-1");
+
+    const frame = JSON.parse(socket.sent[0]!) as {
+      id: number;
+      method: string;
+      params?: Record<string, unknown>;
+    };
+    expect(frame.method).toBe("mail_mark_read");
+    expect(frame.params).toEqual({ id: "AAMk-1" });
+
+    socket.simulateMessage(
+      JSON.stringify({ id: frame.id, result: { read: true, moved: true } }),
+    );
+    await expect(promise).resolves.toEqual({ read: true, moved: true });
+    backend.close();
+  });
+
   // "Always available" publishes the user's own status to Teams, where every
   // colleague reads it, so it travels as a WRITE in both directions — turning it off
   // is the same outward call as turning it on.

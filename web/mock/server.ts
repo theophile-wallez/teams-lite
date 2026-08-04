@@ -18,6 +18,7 @@
 //          | get_settings | set_settings | set_always_available | enrich_link
 //          | push_status | push_subscribe | push_unsubscribe | push_test
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
+//          | mail_mark_read
 // Events:  status | realtime_status | message | conversations_changed
 //          | channels_changed | typing | call | read_receipt
 //          | mail_folders_changed | mail_list_updated
@@ -3215,7 +3216,9 @@ function toFeed(items: MockNotification[]): MockFeed {
 //      the web renderer is exercised against realistic input.
 //   2. There is no way to send. No `mail_send`/`mail_reply`/`mail_delete` case
 //      exists here, mirroring a backend where the capability is absent rather than
-//      merely ungated.
+//      merely ungated. `mail_mark_read` is the one mail case that changes anything,
+//      and it changes only what this mock holds — as the real backend changes only
+//      its own mirror, never the mailbox.
 // ---------------------------------------------------------------------------
 
 type MailAddress = { name: string; address: string };
@@ -3991,6 +3994,24 @@ function dispatch(method: string, params: unknown): unknown {
       // in one Graph request) — so a deep link renders subject and sender with no
       // list to take them from.
       return { ...body, header: mailHeaderById(id) };
+    }
+
+    // Clear one mail's unread marker. The real backend records this in its OWN
+    // mirror and never tells Graph (see `mail_mark_read` in src/bin/server.rs), so
+    // the mailbox keeps calling the mail unread; this mock holds one read state, so
+    // it simply flips it and re-broadcasts the folder like the backend does.
+    case "mail_mark_read": {
+      const id = requireString(params, "id");
+      const mail = mailHeaderById(id);
+      if (!mail || mail.is_read) return { read: true, moved: false };
+      mail.is_read = true;
+      recomputeMailCounts();
+      broadcast("mail_list_updated", {
+        folder: mail.folder_id,
+        ...mailPage(mail.folder_id, null, PAGE_SIZE),
+      });
+      broadcast("mail_folders_changed", {});
+      return { read: true, moved: true };
     }
 
     case "mail_attachment": {

@@ -152,7 +152,16 @@ CREATE TABLE IF NOT EXISTS mail_messages (
     -- ISO 8601 UTC, whole seconds. Fixed-width, so ordering and keyset paging run
     -- on the text directly (see graph_time::normalize_timestamp).
     received               TEXT NOT NULL DEFAULT '',
+    -- The SERVER's own read flag, from Graph's `isRead`. Never written by a read
+    -- made here: the mailbox is read-only (src/mail.rs).
     is_read                INTEGER NOT NULL DEFAULT 1,
+    -- Our own read mark, set when the user opens the mail in THIS app (see
+    -- `Store::mark_mail_read_locally`). Kept apart from `is_read` so the poll can
+    -- keep writing the server's flag verbatim and neither one can clobber the
+    -- other; the effective state the UI shows is the OR of the two
+    -- (`MailMessageRow::is_read`). Only ever set while the server says unread, and
+    -- cleared as soon as the server itself reports the mail read.
+    local_read             INTEGER NOT NULL DEFAULT 0,
     has_attachments        INTEGER NOT NULL DEFAULT 0,
     importance             TEXT NOT NULL DEFAULT 'normal',
     preview                TEXT NOT NULL DEFAULT '',
@@ -315,6 +324,12 @@ CREATE INDEX IF NOT EXISTS idx_conv_sidebar_order ON conversations(is_pinned DES
 -- first page nor a scroll-up ever scans the folder. `body_html` is deliberately not
 -- covered: a list read never touches it (bodies are up to ~135 KB each).
 CREATE INDEX IF NOT EXISTS idx_mail_folder_received ON mail_messages(folder_id, received DESC, id ASC);
+-- The mail a folder's unread count has to discount: read HERE while the server still
+-- calls it unread (see `Store::mail_folders`). PARTIAL, so it holds only the handful
+-- of rows the user has opened in this app since the mailbox last caught up — the
+-- count then costs an index lookup per folder instead of a scan of the mirror.
+CREATE INDEX IF NOT EXISTS idx_mail_local_read ON mail_messages(folder_id)
+    WHERE local_read = 1 AND is_read = 0;
 -- Every calendar read is a range scan over `start_utc` (a view's window, and the
 -- window a sync reconciles), so without this each one scans the whole calendar.
 -- The trailing columns are the rest of the read's shape: `end_utc` completes the
@@ -369,7 +384,11 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// first that an OLDER binary cannot read: a backend still running the previous
 /// build queries `is_favorite` and gets nothing. Restart every backend that shares
 /// the store — the always-on service does it on re-stage.
-const SCHEMA_VERSION: i64 = 10;
+///
+/// v11 adds `mail_messages.local_read` and its partial index, our own read mark on a
+/// mail (the mailbox itself stays read-only — see [`Store::mark_mail_read_locally`]).
+/// Additive, so an older binary keeps working on a v11 store.
+const SCHEMA_VERSION: i64 = 11;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -740,6 +759,8 @@ pub struct MailFolderRow {
     /// Stable English label for a well-known folder ("Inbox", …), else empty.
     pub well_known: String,
     pub total_count: i64,
+    /// What the badge shows: the mailbox's own unread count, less the mail read HERE
+    /// that the mailbox still calls unread (see [`Store::mail_folders`]).
     pub unread_count: i64,
     pub position: i64,
     /// Oldest message held locally (ISO 8601 UTC), or empty when the folder has
@@ -780,7 +801,14 @@ pub struct MailMessageRow {
     pub cc_addresses: String,
     /// ISO 8601 UTC, whole seconds — the ordering and paging key.
     pub received: String,
-    pub is_read: bool,
+    /// The MAILBOX's own read flag (Graph's `isRead`). Not what the UI shows on its
+    /// own — see [`MailMessageRow::is_read`].
+    pub is_read_on_server: bool,
+    /// True when the user opened this mail HERE while the mailbox still called it
+    /// unread. Local for good: nothing publishes it, so Outlook keeps the mail
+    /// unread and its sender learns nothing (see
+    /// [`Store::mark_mail_read_locally`]).
+    pub is_read_locally: bool,
     pub has_attachments: bool,
     pub importance: String,
     pub preview: String,
@@ -790,6 +818,15 @@ pub struct MailMessageRow {
     pub body_truncated: bool,
     /// JSON array of `{id, name, content_type, size, is_inline}`.
     pub attachments: String,
+}
+
+impl MailMessageRow {
+    /// The read state to show: read in the mailbox, OR read here. The single place
+    /// that rule lives, so a list row, a reading pane and a folder's unread count
+    /// can never disagree — the mail analogue of [`read_state`] for a thread.
+    pub fn is_read(&self) -> bool {
+        self.is_read_on_server || self.is_read_locally
+    }
 }
 
 /// One mail's list fields from a network fetch, fed to
@@ -983,7 +1020,7 @@ fn row_to_mail(row: &Row) -> rusqlite::Result<MailMessageRow> {
         to_addresses: row.get(6)?,
         cc_addresses: row.get(7)?,
         received: row.get(8)?,
-        is_read: row.get::<_, i64>(9)? != 0,
+        is_read_on_server: row.get::<_, i64>(9)? != 0,
         has_attachments: row.get::<_, i64>(10)? != 0,
         importance: row.get(11)?,
         preview: row.get(12)?,
@@ -992,10 +1029,11 @@ fn row_to_mail(row: &Row) -> rusqlite::Result<MailMessageRow> {
         blocked_remote_images: row.get(15)?,
         body_truncated: row.get::<_, i64>(16)? != 0,
         attachments: row.get(17)?,
+        is_read_locally: row.get::<_, i64>(18)? != 0,
     })
 }
 
-const MAIL_SELECT_COLS: &str = "id, folder_id, conversation_id, subject, from_name, from_address, to_addresses, cc_addresses, received, is_read, has_attachments, importance, preview, body_html, body_loaded, blocked_remote_images, body_truncated, attachments";
+const MAIL_SELECT_COLS: &str = "id, folder_id, conversation_id, subject, from_name, from_address, to_addresses, cc_addresses, received, is_read, has_attachments, importance, preview, body_html, body_loaded, blocked_remote_images, body_truncated, attachments, local_read";
 
 fn row_to_event(row: &Row) -> rusqlite::Result<CalendarEventRow> {
     Ok(CalendarEventRow {
@@ -1264,6 +1302,13 @@ fn migrate(conn: &Connection) -> Result<()> {
             "ALTER TABLE {table} ADD COLUMN local_read_ghost INTEGER NOT NULL DEFAULT 0"
         ))?;
     }
+
+    // mail_messages.local_read: our own read mark on a mail, held locally (see the
+    // DDL above). Legacy rows get 0 — "never read here" — so every mail keeps the
+    // read state the mailbox itself reports until the user next opens one. Like the
+    // thread columns above, 0 can only ever leave an unread marker standing, never
+    // hide one.
+    add_column("ALTER TABLE mail_messages ADD COLUMN local_read INTEGER NOT NULL DEFAULT 0")?;
     Ok(())
 }
 
@@ -2107,12 +2152,23 @@ impl Store {
     /// Every known mail folder, in sidebar order: well-known folders first (Inbox,
     /// Archive, Sent, …) then the user's own, with the name as a deterministic
     /// tie-breaker.
+    ///
+    /// `unread_count` is the mailbox's own count MINUS the mail read here that the
+    /// mailbox still calls unread, floored at zero: a folder whose every unread mail
+    /// the user has opened in this app has to badge nothing, or the count contradicts
+    /// the rows under it. The subtraction can only ever be an estimate — the mailbox
+    /// counts the whole folder while we hold a window of it — so it is deliberately
+    /// one-directional: it lowers a count, never raises one, and a row re-fetched
+    /// from Graph re-synchronizes both halves.
     pub fn mail_folders(&self) -> Result<Vec<MailFolderRow>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, display_name, well_known, total_count, unread_count, position,
-                    oldest_received, has_more_older
-             FROM mail_folders
-             ORDER BY position ASC, display_name ASC, id ASC",
+            "SELECT f.id, f.display_name, f.well_known, f.total_count,
+                    MAX(0, f.unread_count - (
+                        SELECT COUNT(*) FROM mail_messages m
+                         WHERE m.folder_id = f.id AND m.local_read = 1 AND m.is_read = 0)),
+                    f.position, f.oldest_received, f.has_more_older
+             FROM mail_folders f
+             ORDER BY f.position ASC, f.display_name ASC, f.id ASC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(MailFolderRow {
@@ -2187,6 +2243,11 @@ impl Store {
     ///
     /// The cached body is preserved: this statement never writes `body_html`,
     /// `body_loaded`, `blocked_remote_images`, `body_truncated` or `attachments`.
+    ///
+    /// Our own read mark is preserved too, with one exception: a sync that reports the
+    /// mail READ clears it, because the mailbox's own flag then says everything and a
+    /// stale mark would keep a later "mark as unread" in Outlook from coming through
+    /// (see [`Store::mark_mail_read_locally`]).
     pub fn upsert_mail_message(&self, u: &MailMessageUpdate) -> Result<bool> {
         let changed = self.exec(
             "INSERT INTO mail_messages (
@@ -2204,6 +2265,8 @@ impl Store {
                 cc_addresses    = excluded.cc_addresses,
                 received        = excluded.received,
                 is_read         = excluded.is_read,
+                local_read      = CASE WHEN excluded.is_read THEN 0
+                                       ELSE mail_messages.local_read END,
                 has_attachments = excluded.has_attachments,
                 importance      = excluded.importance,
                 preview         = excluded.preview
@@ -2257,6 +2320,39 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Mark one mail read HERE — and only here.
+    ///
+    /// The mailbox is read-only (see `crate::mail`), so this writes our own
+    /// `local_read` column and nothing else: Outlook keeps the mail unread on every
+    /// other client, and its sender is told nothing. What it moves is the marker in
+    /// this app, which is what a person means when they say they read a mail.
+    ///
+    /// Only ever set while the mailbox itself says UNREAD, so `local_read = 1` names
+    /// exactly the set a folder's unread count has to discount (see
+    /// [`Store::mail_folders`]) and a mail already read needs no mark at all.
+    ///
+    /// Returns the mail's folder when the mark actually moved — the caller emits that
+    /// folder's list and its counts — and `None` when there was nothing to move (no
+    /// such mail, already read here, or already read in the mailbox), so re-opening a
+    /// read mail spins no refresh.
+    pub fn mark_mail_read_locally(&self, id: &str) -> Result<Option<String>> {
+        let moved = self.exec(
+            "UPDATE mail_messages SET local_read = 1
+              WHERE id = ?1 AND local_read = 0 AND is_read = 0",
+            params![id],
+        )?;
+        if moved == 0 {
+            return Ok(None);
+        }
+        Ok(self
+            .query_one(
+                "SELECT folder_id FROM mail_messages WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
     }
 
     /// One mail by id, body included when it has been fetched.
@@ -3718,7 +3814,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (10, 0x5b08_a2be_8c18_60b9);
+        const PINNED: (i64, u64) = (11, 0x58d1_7bbe_4053_1b93);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -5703,11 +5799,89 @@ mod tests {
         assert!(s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", true)).unwrap());
 
         let row = s.mail_message("m1").unwrap().expect("still there");
-        assert!(row.is_read, "the list field updated");
+        assert!(row.is_read_on_server, "the list field updated");
         assert_eq!(row.body_html, "<p>body</p>", "the cached body survived");
         assert!(row.body_loaded);
         assert_eq!(row.blocked_remote_images, 4);
         assert_eq!(row.attachments, r#"[{"id":"a1"}]"#);
+    }
+
+    #[test]
+    fn reading_a_mail_here_clears_its_marker_without_touching_the_server_flag() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
+        s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", false)).unwrap();
+
+        assert_eq!(s.mark_mail_read_locally("m1").unwrap().as_deref(), Some("f"));
+
+        let row = s.mail_message("m1").unwrap().unwrap();
+        assert!(row.is_read(), "the marker is clear here");
+        assert!(row.is_read_locally);
+        assert!(!row.is_read_on_server, "the mailbox was never told");
+
+        // Re-opening the same mail moves nothing, so no client is asked to refresh.
+        assert_eq!(s.mark_mail_read_locally("m1").unwrap(), None);
+        // Neither does a mail we do not hold.
+        assert_eq!(s.mark_mail_read_locally("nope").unwrap(), None);
+    }
+
+    #[test]
+    fn a_mail_the_mailbox_calls_read_needs_no_local_mark() {
+        // `local_read = 1` must name exactly "read here while the mailbox says
+        // unread" — the set the folder count discounts below.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", true)).unwrap();
+        assert_eq!(s.mark_mail_read_locally("m1").unwrap(), None);
+        assert!(!s.mail_message("m1").unwrap().unwrap().is_read_locally);
+    }
+
+    #[test]
+    fn a_sync_that_reports_a_mail_read_drops_our_own_mark() {
+        // Once the mailbox itself says read, its flag says everything — and a stale
+        // mark would swallow a later "mark as unread" made in Outlook.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", false)).unwrap();
+        s.mark_mail_read_locally("m1").unwrap();
+
+        s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", true)).unwrap();
+        assert!(!s.mail_message("m1").unwrap().unwrap().is_read_locally);
+
+        // The mail is then marked unread again in Outlook: that comes through.
+        s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", false)).unwrap();
+        assert!(!s.mail_message("m1").unwrap().unwrap().is_read());
+    }
+
+    #[test]
+    fn a_folder_count_discounts_the_mail_read_here() {
+        let s = Store::open_in_memory().unwrap();
+        let mut f = folder("f", "Inbox", "Inbox", 0);
+        f.unread_count = 2;
+        s.upsert_mail_folder(&f).unwrap();
+        s.upsert_mail_message(&mail("m1", "f", "2026-07-01T09:00:00Z", false)).unwrap();
+        s.upsert_mail_message(&mail("m2", "f", "2026-07-02T09:00:00Z", false)).unwrap();
+
+        s.mark_mail_read_locally("m1").unwrap();
+        assert_eq!(s.mail_folders().unwrap()[0].unread_count, 1);
+
+        // A count can only ever be lowered, never taken below zero: the mailbox counts
+        // the whole folder while we hold a window of it, so the two can disagree.
+        s.mark_mail_read_locally("m2").unwrap();
+        s.upsert_mail_message(&mail("m3", "f", "2026-07-03T09:00:00Z", false)).unwrap();
+        s.mark_mail_read_locally("m3").unwrap();
+        assert_eq!(s.mail_folders().unwrap()[0].unread_count, 0);
+    }
+
+    #[test]
+    fn the_folder_count_reads_its_local_reads_from_an_index() {
+        // `mail_folders` runs on every open of the Mail tab and on every
+        // `mail_folders_changed`, so its subtraction must not scan the mirror.
+        let s = Store::open_in_memory().unwrap();
+        let plan = query_plan(
+            &s,
+            "SELECT COUNT(*) FROM mail_messages WHERE folder_id = 'f' AND local_read = 1 AND is_read = 0",
+        );
+        assert!(plan.contains("idx_mail_local_read"), "plan was:\n{plan}");
+        assert!(!plan.contains("SCAN mail_messages"), "plan was:\n{plan}");
     }
 
     #[test]

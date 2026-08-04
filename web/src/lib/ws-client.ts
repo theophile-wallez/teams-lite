@@ -598,10 +598,12 @@ export class Backend {
 
   // ---- mail (read-only) ---------------------------------------------------
   //
-  // Every method here is a READ, so none uses `writeRequest`: the write token
-  // exists to gate acts that other people see, and the mail surface has none. The
-  // backend cannot send, reply to, delete or move a mail — the capability is absent
-  // from the crate, not merely ungranted (see src/mail.rs).
+  // Nothing here reaches the mailbox, so none of these uses `writeRequest`: the
+  // write token exists to gate acts that other people see, and the mail surface has
+  // none. The backend cannot send, reply to, delete or move a mail — the capability
+  // is absent from the crate, not merely ungranted (see src/mail.rs). The one method
+  // that writes at all is {@link mailMarkRead}, and it writes the backend's own
+  // mirror.
 
   /** The mailbox's folders, in sidebar order. Local-first on the backend: answers
    *  from its cache, then a background sync may push `mail_folders_changed`. */
@@ -633,6 +635,18 @@ export class Backend {
    *  iframe (see `MailBody`). */
   mailBody(id: string): Promise<MailBodyResult> {
     return this.request<MailBodyResult>("mail_body", { id });
+  }
+
+  /** Clear one mail's unread marker, HERE ONLY. The backend writes its own mirror
+   *  and tells Graph nothing, so Outlook keeps the mail unread on every other client
+   *  and its sender is shown nothing — which is why this is a plain request and not
+   *  a `writeRequest`: nobody but the user sees it.
+   *
+   *  `read` is false when the backend refused to record it (a read-only backend
+   *  never touches the user's markers), so a caller must not paint the marker clear
+   *  before it comes back true. */
+  mailMarkRead(id: string): Promise<{ read: boolean; moved: boolean }> {
+    return this.request<{ read: boolean; moved: boolean }>("mail_mark_read", { id });
   }
 
   /** One attachment's bytes, base64 over this same socket (the browser holds no

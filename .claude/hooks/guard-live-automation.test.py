@@ -50,6 +50,20 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'mark_read' }));\n"
     ),
+    # Clearing a MAIL's unread marker reaches nobody but the user — and nothing in
+    # this app can put the marker back, so a script walking a live inbox erases what
+    # the user had not read yet.
+    "mail-mark-read-writer.ts": (
+        "// Marks real mail read through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'mail_mark_read', params: { id: 'AAMk-1' } }));\n"
+    ),
+    # Reading the mailbox is what the feature is for: ordinary recon.
+    "mail-reader.ts": (
+        "// Lists real mail through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'mail_list', params: { folder: 'f' } }));\n"
+    ),
     # The same write, straight to Teams — bypassing the backend's gate entirely.
     "horizon-writer.ts": (
         "// PUTs our own consumption horizon to Teams.\n"
@@ -278,6 +292,8 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "cargo run --example guard-test-loose-delete"),
         # Marking a thread read tells the sender the user read their message.
         ("BLOCK", PROJECT, f"bun run {tmp}/mark-read-writer.ts"),
+        # Marking MAIL read tells nobody — but nothing here can raise the marker again.
+        ("BLOCK", PROJECT, f"bun run {tmp}/mail-mark-read-writer.ts"),
         # …and going straight to Teams bypasses every gate the RPC has.
         ("BLOCK", PROJECT, f"bun run {tmp}/horizon-writer.ts"),
         (
@@ -352,6 +368,8 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/dev-backend-reader.ts"),
         # Reading the read positions is how "seen by" works — plural GET, allowed.
         ("ALLOW", PROJECT, f"bun run {tmp}/horizon-reader.ts"),
+        # Reading the real mailbox is what the mail feature is for.
+        ("ALLOW", PROJECT, f"bun run {tmp}/mail-reader.ts"),
         # Reading the code that implements the write is ordinary work, like any search.
         ("ALLOW", PROJECT, 'grep -rn "name=consumptionhorizon" src'),
         ("ALLOW", PROJECT, "grep -rn set_consumption_horizon src launcher web"),

@@ -208,7 +208,8 @@ function MailEmptyState() {
         <p className="text-sm text-text-dim">Pick a message to read it.</p>
         <p className="text-[12px] text-text-faint">
           Mail is read-only here: remote images are never loaded, so opening a message
-          tells its sender nothing.
+          tells its sender nothing. Reading one clears its marker in this app alone —
+          Outlook still shows it unread.
         </p>
       </div>
     </section>

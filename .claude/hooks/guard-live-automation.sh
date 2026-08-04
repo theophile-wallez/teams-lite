@@ -403,8 +403,14 @@ if ! sanctioned_automation; then
     # `set_always_available` publishes the user's own status: it posts no message, but
     # the green dot it turns on is what every colleague reads (OUTWARD_METHODS in
     # src/bin/server.rs).
+    #
+    # `mail_mark_read` is the odd one out: it posts nothing and tells Graph nothing —
+    # it clears an unread marker in the app's own mirror. It is still in this list
+    # because nothing in this app can put such a marker BACK (there is no mark-unread,
+    # and Outlook still calls the mail unread, so the local mark stands), so a script
+    # walking a live inbox would quietly erase what the user had not read yet.
     if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|delete|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)"|'\''(send|edit|delete|react|mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that
@@ -426,7 +432,9 @@ Reading the live backend is fine — inspect all the real data you need. Writing
 not: send/edit/delete/react post to real people as the user — a delete removes a
 message from the thread for everybody and nothing brings it back — mark_read tells them the user
 read their message, and the push_* methods decide which of the user's devices this
-machine notifies. The backend refuses writes without the capability token it
+machine notifies. mail_mark_read reaches nobody but the user, and is here because
+nothing in this app can raise an unread marker it clears. The backend refuses the
+outward writes without the capability token it
 publishes for the user's own frontends (see the write lock in src/bin/server.rs),
 and this hook refuses to run the attempt at all.
 

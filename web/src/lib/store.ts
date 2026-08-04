@@ -1380,6 +1380,9 @@ export class TeamsController {
       mailBodyLoading: !cachedBody,
       mailBodyError: null,
     });
+    // Reading a mail clears its unread marker, which is what a person expects of
+    // opening one. A no-op unless the header we hold says it is unread.
+    void this.markMailRead(id);
     if (cachedBody) return;
 
     try {
@@ -1390,11 +1393,62 @@ export class TeamsController {
         // reload) show the subject and sender: there is no list to read them from.
         this.set({ mailBody: body, openMail: this.get().openMail ?? body.header ?? null });
       }
+      // A DEEP LINK had no header until now — the list it would have come from was
+      // never loaded — so this is the first moment its read state is known.
+      void this.markMailRead(id);
     } catch (e) {
       if (this.get().openMailId === id) this.set({ mailBodyError: errText(e) });
     } finally {
       if (this.get().openMailId === id) this.set({ mailBodyLoading: false });
     }
+  }
+
+  /** Clear one mail's unread marker — in THIS APP only.
+   *
+   *  The mailbox is read-only (src/mail.rs): the backend records the read in its own
+   *  mirror and tells Graph nothing, so Outlook keeps the mail unread on the user's
+   *  phone and its sender is shown nothing. What clears is the marker here, which is
+   *  what a person means when they say they read a mail.
+   *
+   *  The row is repainted only once the backend confirms it recorded the read — a
+   *  read-only backend refuses, and a marker that clears on a refusal would be this
+   *  app claiming a state nothing holds. The backend also broadcasts the folder's
+   *  list and counts, so a second client (the phone) follows without asking. */
+  private async markMailRead(id: string): Promise<void> {
+    const state = this.get();
+    const header =
+      state.mailMessages.find((m) => m.id === id) ??
+      (state.openMail?.id === id ? state.openMail : null);
+    if (!header || header.is_read) return;
+
+    try {
+      const { read } = await this.backend.mailMarkRead(id);
+      if (read) this.applyMailRead(id);
+    } catch {
+      // Best-effort, and self-healing: the marker stays until the next open, which
+      // is the honest direction to fail in — nothing recorded, nothing claimed.
+    }
+  }
+
+  /** Show one mail as read: the open row, the folder page on screen, and the cached
+   *  page it came from (a mail deep in the backlog is in no broadcast page, so its
+   *  row would otherwise stay bold until the folder is re-opened). */
+  private applyMailRead(id: string): void {
+    const markRead = (mail: MailHeader): MailHeader =>
+      mail.id === id ? { ...mail, is_read: true } : mail;
+
+    for (const [folderId, page] of this.mailPageCache) {
+      if (!page.messages.some((m) => m.id === id && !m.is_read)) continue;
+      this.mailPageCache.set(folderId, { ...page, messages: page.messages.map(markRead) });
+    }
+
+    const state = this.get();
+    this.set({
+      mailMessages: state.mailMessages.some((m) => m.id === id && !m.is_read)
+        ? state.mailMessages.map(markRead)
+        : state.mailMessages,
+      openMail: state.openMail?.id === id ? markRead(state.openMail) : state.openMail,
+    });
   }
 
   /** Store a rendered body, dropping the least-recently-opened one past the budget. */
