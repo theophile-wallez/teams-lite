@@ -47,6 +47,7 @@ import { MailList } from "./mail-list";
 import { NotificationsBell } from "./notifications-bell";
 import { ShortcutChord } from "./shortcut";
 import { StatusBar } from "./status-bar";
+import { UpdateButton } from "./update-button";
 import { Tabs, TabsList, TabsPanel, TabsTrigger } from "./ui/tabs";
 import { chatSectionKey, useChatSections } from "./use-chat-sections";
 import { useLongPress } from "./use-long-press";
@@ -242,10 +243,12 @@ export function ConversationList(props: {
         </TabsPanel>
       </Tabs>
 
-      {/* Above the status bar and below every list, so it shows on all four tabs and
-          is impossible to miss — unlike the status line, which truncates at eleven
-          pixels and which a pending-update notice replaces outright. */}
+      {/* Above the status bar and below every list, so both show on all four tabs and
+          neither is missable — unlike the status line, which truncates at eleven pixels.
+          The update sits between them: it is an invitation, so it stays under an outage
+          that is telling the user why the app is empty. */}
       <BrokerBanner />
+      <UpdateButton />
       <StatusBar />
     </aside>
   );

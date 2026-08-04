@@ -495,7 +495,9 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/ask --answer-with`. For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
   file. For Settings › AI providers and its model picker, open and closed in both
-  themes: `bun run preview -- --out /tmp/prov --ai-providers`. To review a detail too
+  themes: `bun run preview -- --out /tmp/prov --ai-providers`. For the update button, its
+  progress mid-download and the link the other install shape keeps:
+  `bun run preview -- --out /tmp/upd --update`. To review a detail too
   small to read in a
   1200px page — a 16px icon, a chip, a badge — crop to it and raise the pixel
   density: `bun run preview -- --out /tmp/chip --element
@@ -964,9 +966,10 @@ else wrote, three screens up, that the user wants an answer to.
   see § The user's own status), the READ-ONLY conversation roster an @mention list is
   built from (`src/teams_members.rs`, see § @mentions), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
-  `src/gitlab.rs` and `src/linear.rs`) and the local agent that answers an `@claude`
+  `src/gitlab.rs` and `src/linear.rs`), the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
-  § The local agent).
+  § The local agent) and the app's own update — the check, the download and the swap
+  (`src/update.rs`, see § Updating the app from inside it).
   Exposed over a local WebSocket (`ws://127.0.0.1:19420`).
 - One front-end, talking to the backend only through that WebSocket. Local-first is
   enforced server-side; the front-end touches neither the network nor SQLite directly.
@@ -1026,6 +1029,72 @@ holds 19420 for weeks, and `bin/teams-dev-server.sh` plus `bun run dev` step asi
 `E2E_MOCK_PORT` / `E2E_WEB_PORT` the suite's. Change a default in code and this table
 in the same commit — and check `.claude/hooks/guard-live-automation.sh`, which matches
 19420, 19421, 19440 and 19441 by number.
+
+## Updating the app from inside it (two clicks, and one install shape)
+
+There is no version number: teams-lite ships as a ROLLING `latest` GitHub release, so a
+build IS the commit it was compiled from (`TEAMS_BUILD_REV`, baked by build.rs). The
+backend checks once at startup whether `latest` names a different commit and, if it does,
+the sidebar offers the update as a blue button above the status line
+(`web/src/components/update-button.tsx`, over the pure `web/src/lib/update.ts`).
+
+**It is two clicks, and each one is the user's.** `update_download` streams the release
+asset into `~/.cache/teams-lite/updates` and reports progress as a fill inside the button;
+`update_apply` puts it in place and restarts onto it. Nothing happens on its own: the
+download is ~130 MB (measured on the published release) and this machine may be on a
+metered link, which is why the first
+button says what it costs before it is pressed.
+
+- **Both RPCs are `MACHINE_METHODS`** — the write token, refused read-only, and the
+  automation hook blocks a script that names either against a live port. `update_apply`
+  replaces the binary the user's whole Teams account runs through and then restarts it,
+  which would also cut a live `@claude` reply in half: the same failure
+  `teams-lite-service.sh update --now` is blocked for.
+- **The swap is a RENAME, never a write into the running file.** Every running process
+  keeps the inode it started from — overwriting the bytes of a running executable is how a
+  process gets a `SIGBUS` — and the next start gets the new build
+  (`update::install_binary`, pinned by an inode assertion).
+- **What is downloaded is checked before it can be installed**: the byte count must match
+  the size the release published, and the first four bytes must be an ELF header. Neither
+  alone is enough — a captive portal's login page is the wrong shape, and a cut-off
+  transfer of the real asset is the right one — and a file that fails is deleted rather
+  than kept, because the next click would install it.
+- **The RESTART is the launcher's, and only the launcher's** (`launcher/src/update.ts`).
+  The web server runs inside that process and the backend is its child, so it is the one
+  process that can free both ports and bring both back: the backend asks with an
+  `update_restart` event on the keepalive socket it already holds, and the launcher stops the
+  web server, kills the backend, spawns the new build detached with `--no-open`, and exits.
+  The order is the feature — a listener still up when the new process starts makes it die
+  on `EADDRINUSE`, which would leave the user with no app rather than an updated one — and
+  the backend's exit is AWAITED (`BackendHandle.waitForExit`), because a signalled process
+  still holds its port for a moment and the new build's first act is to ask whether
+  something is listening on it: a yes makes it attach to the backend we just killed.
+- **`Restarting…` is the one state that outlives the socket.** Applying takes the backend
+  and the web server down together, so the page is disconnected for a few seconds; every
+  other phase hides itself when the socket is down (a stale "update available" is a claim
+  we cannot make), and this one must not, or the user's click would be followed by the
+  control vanishing. `installed` is the honest end when nothing restarted the app.
+- **ONE install shape can do this: the `teams` command from install.sh.** That binary IS
+  the release asset, byte for byte, so replacing it is the whole update — and the backend
+  knows the path only because the launcher named it (`TEAMS_LITE_LAUNCHER_BIN`, set for a
+  compiled binary only). A **staged always-on service cannot**: it runs a separate backend
+  binary, a web bundle, wrapper scripts and unit files built from a checkout, and the
+  release asset holds none of that shape. So `can_install` is false there and the notice
+  stays the LINK it always was — a button that reported success while the service kept
+  running what it had would be worse than no button, exactly like the chat pin Teams
+  accepts and never reads back. That install is updated by `bin/teams-lite-service.sh
+  update` (see § The always-on service), and widening the in-app update to cover it is a
+  deliberate feature — the release would have to carry the scripts and units too — never a
+  quiet swap of a staged file.
+- The notice used to be an eleven-pixel link that REPLACED the status line, where it hid
+  the truncated `error:` a sign-in outage puts there (see `broker-banner.tsx`). It has its
+  own row now, and `web/e2e/update.spec.ts` pins that it never covers that line again.
+
+`web/mock/server.ts` reproduces the whole flow with no GitHub and no binary (armed with
+the `{kind: "update"}` test hook, which a spec MUST clear afterwards — one mock process
+serves the whole run, and a left-behind update moves every later sidebar). `cd web && bun
+run preview -- --out /tmp/upd --update` captures the button, the download mid-transfer, the
+restart it offers next, and the link the other install shape keeps.
 
 ## The always-on service
 

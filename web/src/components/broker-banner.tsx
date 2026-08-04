@@ -4,8 +4,9 @@
 // every eighteen hours. The identity broker then answers no token call at all, and
 // nothing else changes: the socket stays up, the backend stays `active (running)`, the
 // live dot stays green — and the app shows an empty sidebar with a truncated eleven-
-// pixel `error:` line that a pending-update notice can hide entirely. That happened
-// twice, and both times the app's own answer to "why is it empty" was nothing.
+// pixel `error:` line, which a pending-update notice used to replace outright. That
+// happened twice, and both times the app's own answer to "why is it empty" was nothing.
+// (The update has its own row now — see update-button.tsx — so it hides nothing.)
 //
 // It sits in the sidebar above the status bar, in flow, so it appears on every tab
 // (Chats, Channels, Mail, Calendar) and pushes no content off screen. Deliberately NOT

@@ -9,6 +9,7 @@ import { spawn } from "bun";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { backendUrl, ensureBackend, isCompiledBinary, repoRoot } from "./backend";
+import { handleBackendEvent, spawnDetached } from "./update";
 
 export type LaunchOptions = {
   port: number;
@@ -104,12 +105,17 @@ async function resolveWebRoot(): Promise<{ dir: string; entry: string }> {
 /// lifetime, reconnecting on drop. This guarantees the backend always has >=1
 /// client while `teams` runs, so it never self-expires between browser reloads or
 /// while no tab is open. Cleaned up implicitly on process exit.
-function startKeepalive(url: string): void {
+///
+/// It is also the one channel the backend can reach US on, which is what an in-app
+/// update needs: only this process can restart the app onto a new build, so `onEvent`
+/// carries the backend's `update_restart` to `handleBackendEvent` (see src/update.ts).
+function startKeepalive(url: string, onEvent?: (raw: unknown) => void): void {
   let stopped = false;
   const connect = () => {
     if (stopped) return;
     try {
       const ws = new WebSocket(url);
+      if (onEvent) ws.onmessage = (event: MessageEvent) => onEvent(event.data);
       ws.onclose = () => {
         if (!stopped) setTimeout(connect, 1000);
       };
@@ -178,12 +184,14 @@ export async function launch(options: LaunchOptions): Promise<void> {
   // 1. Bring up (or attach to) the Rust backend, and keep it alive. In dev,
   //    spawn it with idle-exit disabled so closing/reloading the browser doesn't
   //    take the backend down between hot reloads.
-  await ensureBackend({ keepAlive: options.dev });
-  startKeepalive(backendUrl());
+  const backend = await ensureBackend({ keepAlive: options.dev });
 
   // 2. Dev mode: hand off to Vite (HMR) instead of the built SSR server. Never
   //    returns — it runs until the Vite process exits.
-  if (options.dev) await runViteDev(options);
+  if (options.dev) {
+    startKeepalive(backendUrl());
+    await runViteDev(options);
+  }
 
   // 3. Locate/build the web app and start its SSR server in-process. The server
   //    module reads PORT/HOST from the environment and self-starts Bun.serve.
@@ -196,7 +204,29 @@ export async function launch(options: LaunchOptions): Promise<void> {
   process.env.TEAMS_LITE_WS_URL ??= backendUrl();
   // Dynamic import with a runtime-computed path so the compiler never tries to
   // bundle the separate web app into the `teams` binary.
-  await import(/* @vite-ignore */ entry);
+  //
+  // The module exports the listener it started, which an in-app update needs: the new
+  // build cannot bind this port while ours still holds it (see src/update.ts).
+  const web = (await import(/* @vite-ignore */ entry)) as {
+    server?: { stop: (closeActiveConnections?: boolean) => void };
+  };
+
+  // 3b. Now that both halves are ours to stop, listen for the backend asking us to
+  //     restart onto a build it just installed.
+  startKeepalive(backendUrl(), (raw) =>
+    handleBackendEvent(raw, {
+      stopWeb: () => web.server?.stop(true),
+      stopBackend: async () => {
+        backend.stop();
+        await backend.waitForExit();
+      },
+      execPath: process.execPath,
+      args: process.argv.slice(2),
+      start: spawnDetached,
+      exit: () => process.exit(0),
+      log: (message) => console.error(message),
+    }),
+  );
 
   const url = `http://${options.host}:${options.port}`;
   console.error(`\n  teams-lite ready at ${url}\n`);

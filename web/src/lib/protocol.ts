@@ -331,10 +331,46 @@ export type MessagePage = {
   has_more: boolean;
 };
 
+/** A newer build exists (the backend's `update_available` event, from src/update.rs).
+ *
+ *  `current`/`latest` are short commit SHAs — teams-lite has no version number, a build
+ *  IS its commit. `size` is the download in bytes, so the progress bar has a total
+ *  before the first byte; it is 0 when the release published no binary for this machine.
+ *
+ *  `can_install` is the one field the button turns on: it is true only when this app can
+ *  really replace itself, which means it was started by the `teams` command from
+ *  install.sh. A staged always-on service cannot (it runs artifacts built from a
+ *  checkout, which the release asset is not), and there the notice stays a link to the
+ *  release — a button that reported success while the service kept running what it had
+ *  would be worse than no button. */
 export type UpdateInfo = {
   current: string;
   latest: string;
   url: string;
+  size?: number;
+  can_install?: boolean;
+};
+
+/** Where the update has got to. One value, and the six the backend can send
+ *  (`UpdatePhase` in src/bin/server.rs — keep the two in step). */
+export type UpdatePhase =
+  | "idle"
+  | "downloading"
+  | "ready"
+  | "restarting"
+  | "installed"
+  | "failed";
+
+/** The backend's `update_progress` event: the phase, and the numbers behind it.
+ *
+ *  It arrives on every whole percent of a download, and again on each phase change — and
+ *  it is replayed on every fresh connection, so a page that opens (or a phone that
+ *  reconnects) mid-download draws the bar it is already in rather than an idle button. */
+export type UpdateProgress = {
+  phase: UpdatePhase;
+  received: number;
+  total: number;
+  error: string;
 };
 
 export type LiveStatus = "connecting" | "connected" | "disconnected";

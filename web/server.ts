@@ -89,7 +89,12 @@ function staticFileFor(pathname: string): string | null {
   return existsSync(full) ? full : null;
 }
 
-const server = Bun.serve<Relay>({
+// Exported, and that export is load-bearing for exactly one caller: the `teams`
+// launcher imports this module to start the app in-process, and an in-app update has to
+// free this port before the new build binds it (see launcher/src/update.ts). Nothing
+// else stops it — a service run is stopped by systemd, and a stop() nobody calls costs
+// nothing.
+export const server = Bun.serve<Relay>({
   port,
   hostname,
   idleTimeout: 60,

@@ -1,16 +1,19 @@
 import { useAppState } from "./controller-context";
 
 /**
- * A compact status line pinned to the bottom of the sidebar (not full width). It
- * shows the realtime connection dot plus the single most important message: a
- * pending-update notice when the connection is healthy and a newer build exists,
- * otherwise the current status text (conversation count, transient feedback such
- * as "Copied", or connection/error messages).
+ * A compact status line pinned to the bottom of the sidebar (not full width). It shows
+ * the realtime connection dot plus the current status text — the conversation count,
+ * transient feedback such as "Copied", or a connection/error message.
+ *
+ * A pending update used to REPLACE that text with a link to the GitHub release. It does
+ * not any more: it is a button of its own above this line (see update-button.tsx), which
+ * both gives it room to show a download's progress and stops it hiding an error the user
+ * needs — the truncated `error:` this line carries during a sign-in outage was invisible
+ * behind it (see broker-banner.tsx).
  */
 export function StatusBar() {
   const live = useAppState((s) => s.live);
   const status = useAppState((s) => s.status);
-  const update = useAppState((s) => s.update);
 
   return (
     <footer
@@ -32,18 +35,7 @@ export function StatusBar() {
         aria-hidden
       />
       <span className="sr-only">{live}</span>
-      {update && live === "connected" ? (
-        <a
-          href={update.url}
-          target="_blank"
-          rel="noreferrer"
-          className="truncate text-warning underline-offset-2 hover:underline"
-        >
-          ↑ update available ({update.latest})
-        </a>
-      ) : (
-        <span className="truncate">{status}</span>
-      )}
+      <span className="truncate">{status}</span>
     </footer>
   );
 }

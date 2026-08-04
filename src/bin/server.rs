@@ -18,8 +18,10 @@
 //          | agent_status | agent_set_mode | agent_set_tools | agent_set_provider
 //          | agent_set_unrestricted
 //          | person_override | person_overrides | set_person_name | set_person_avatar
+//          | update_download | update_apply
 // Events:  status | message | conversations_changed | notifications_changed | typing
-//          | read_receipt | call | call_signal | update_available
+//          | read_receipt | call | call_signal | update_available | update_progress
+//          | update_restart
 //          | mail_folders_changed | mail_list_updated | mail_list_error
 //          | calendars_changed | calendar_view_updated | calendar_view_error
 //          | agent_stream | person_override_changed
@@ -259,8 +261,10 @@ const OUTWARD_METHODS: [&str; 7] = [
 /// misstates (see the local agent's signature line in AGENTS.md), so relabelling it is
 /// the user's own act and nothing that merely found this socket gets to perform it.
 /// Reading the overrides back stays open: it returns what the user themselves chose.
-const MACHINE_METHODS: [&str; 11] = [
+const MACHINE_METHODS: [&str; 13] = [
     "repair_broker",
+    "update_download",
+    "update_apply",
     "push_subscribe",
     "push_unsubscribe",
     "push_test",
@@ -280,6 +284,11 @@ const MACHINE_METHODS: [&str; 11] = [
 fn machine_effect(method: &str) -> &'static str {
     match method {
         "repair_broker" => "restarts the Intune container on this machine",
+        "update_download" => "downloads a new build of this app onto this machine",
+        "update_apply" => {
+            "replaces this app's own binary on this machine, and restarts everything the \
+             user's Teams account runs through"
+        }
         "push_subscribe" | "push_unsubscribe" | "push_test" => {
             "changes which devices this machine sends push notifications to"
         }
@@ -341,6 +350,12 @@ const BROKER_REPAIR_UNIT: &str = "teams-lite-broker-repair.service";
 /// The floor between two repairs this process asks for. Shorter than the unit's own
 /// limit (three an hour) so the backend refuses first and the journal names it.
 const REPAIR_MIN_INTERVAL: Duration = Duration::from_secs(20 * 60);
+
+/// How long an applied update waits for the launcher to restart the app before this
+/// backend concludes that nothing will (see `Ctx::apply_update`). Several seconds
+/// rather than one: the launcher stops the web server and kills this process, and a
+/// loaded machine can take a moment over it.
+const RESTART_GRACE: Duration = Duration::from_secs(10);
 
 /// Read-only mode (`TEAMS_LITE_READ_ONLY=1`): refuse every {@link OUTWARD_METHODS}
 /// call before it can reach the network.
@@ -700,6 +715,84 @@ async fn wait_for_idle_shutdown(clients: ClientTracker, disabled: bool) {
     }
 }
 
+/// How far the user has taken the update, and the one thing each phase needs.
+///
+/// One value, not a set of booleans, because the phases exclude each other and the UI
+/// draws exactly one thing per phase (see web/src/components/update-button.tsx). The
+/// tag is what travels on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum UpdatePhase {
+    /// A newer release exists and nothing has been downloaded. Nothing happens on its
+    /// own from here: the download is 130 MB, so the user asks for it.
+    #[default]
+    Idle,
+    /// Fetching the release asset. `received` moves; the total is in the availability
+    /// payload, so a client that connects mid-download can draw the bar at once.
+    Downloading,
+    /// Downloaded and verified, waiting for the user's second click.
+    Ready,
+    /// Installed, and the launcher is putting the app back up on the new build. The
+    /// socket drops right after this — which is why the phase is published BEFORE the
+    /// restart is asked for, or nobody would ever see it.
+    Restarting,
+    /// Installed, but nothing restarted the app (no launcher is listening). The new
+    /// build is on disk and starts next time; saying so is the honest end state.
+    Installed,
+    /// The download or the install failed. `error` says how, and the button offers to
+    /// try again — a failure that clears itself would hide a broken release.
+    Failed,
+}
+
+impl UpdatePhase {
+    /// The wire name. Kept identical to the union in web/src/lib/protocol.ts.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Downloading => "downloading",
+            Self::Ready => "ready",
+            Self::Restarting => "restarting",
+            Self::Installed => "installed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Everything known about a newer release, in one lock.
+///
+/// The availability half (`available`) is what the check found; the rest is the state
+/// of installing it. They live together because a client learns both on one greeting,
+/// and because two backends of the same build must not disagree about which phase the
+/// user's own app is showing.
+#[derive(Debug, Default)]
+struct UpdateSlot {
+    /// The `update_available` payload, once the check has found a newer release.
+    available: Option<Value>,
+    /// The release binary to fetch. Kept HERE and never sent to a client: the download
+    /// is this backend's to make (the UI touches no network), and a URL a client could
+    /// supply is a URL a client could substitute.
+    asset: Option<teams_lite::update::Asset>,
+    /// The commit the release was built from, which names the downloaded file.
+    latest: String,
+    /// The downloaded build, once complete and verified.
+    file: Option<std::path::PathBuf>,
+    phase: UpdatePhase,
+    received: u64,
+    /// Why the last attempt failed, for the button to show. Empty unless `Failed`.
+    error: String,
+}
+
+impl UpdateSlot {
+    /// The `update_progress` payload: the phase, and the numbers that go with it.
+    fn progress_json(&self) -> Value {
+        json!({
+            "phase": self.phase.tag(),
+            "received": self.received,
+            "total": self.asset.as_ref().map(|a| a.size).unwrap_or(0),
+            "error": self.error,
+        })
+    }
+}
+
 /// Shared backend context; cloned into each connection + the trouter task.
 #[derive(Clone)]
 struct Ctx {
@@ -711,10 +804,11 @@ struct Ctx {
     db_path: Arc<String>,
     /// broadcast of server->client events (fan-out to every connected UI)
     events: broadcast::Sender<Value>,
-    /// `update_available` event payload once the startup check has found a newer
-    /// release, else `None`. Cached so a UI that connects AFTER the one-shot
-    /// broadcast fired still learns about the update on its greeting.
-    update: Arc<std::sync::Mutex<Option<Value>>>,
+    /// Everything known about a newer release: whether there is one, and how far the
+    /// user has taken installing it. Cached rather than only broadcast, because a UI
+    /// connects at any moment — after the one-shot check fired, or in the middle of a
+    /// download it has to draw a progress bar for. See {@link UpdateSlot}.
+    update: Arc<std::sync::Mutex<UpdateSlot>>,
     /// Mail folders the live poll watches (see `spawn_mail_sync`). Seeded with the
     /// inbox and extended whenever a UI opens a folder, so the poll costs one
     /// request per folder the user actually looks at rather than one per folder the
@@ -860,6 +954,203 @@ impl Ctx {
         self.emit("broker_status", broker_status_payload(true));
         Ok(json!({ "started": true }))
     }
+
+    // ---- the update, in the two steps the user takes -------------------------
+    // See `update` for what an update IS and which installs can take one. Both steps
+    // are MACHINE methods: they spend the user's bandwidth and then replace the binary
+    // their whole Teams account runs through, so neither is something a client that
+    // merely found this socket gets to start.
+
+    /// Read the update state under the lock and hand back what the closure took from it.
+    fn with_update<T>(&self, f: impl FnOnce(&mut UpdateSlot) -> T) -> Result<T> {
+        let mut slot = self
+            .update
+            .lock()
+            .map_err(|_| anyhow::anyhow!("update state lock poisoned"))?;
+        Ok(f(&mut slot))
+    }
+
+    /// Publish the current phase to every connected UI.
+    fn emit_update_progress(&self) {
+        if let Ok(payload) = self.with_update(|slot| slot.progress_json()) {
+            self.emit("update_progress", payload);
+        }
+    }
+
+    /// Start downloading the release asset, and answer with the phase the caller is now
+    /// in.
+    ///
+    /// Idempotent on purpose: the button is on a page that may be open twice, and a
+    /// second click (or a second phone) must join the download in flight rather than
+    /// start a second one over the same file. A previous FAILURE is the one state a
+    /// click retries from.
+    async fn start_update_download(&self) -> Result<Value> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never downloads a new \
+             build of the user's app"
+        );
+
+        enum Decision {
+            Start(teams_lite::update::Asset, String),
+            Join(Value),
+            Nothing,
+        }
+        let decision = self.with_update(|slot| match slot.phase {
+            UpdatePhase::Downloading | UpdatePhase::Ready | UpdatePhase::Restarting => {
+                Decision::Join(slot.progress_json())
+            }
+            UpdatePhase::Idle | UpdatePhase::Failed | UpdatePhase::Installed => {
+                match (slot.asset.clone(), slot.latest.clone()) {
+                    (Some(asset), latest) if !latest.is_empty() => {
+                        slot.phase = UpdatePhase::Downloading;
+                        slot.received = 0;
+                        slot.error.clear();
+                        slot.file = None;
+                        Decision::Start(asset, latest)
+                    }
+                    _ => Decision::Nothing,
+                }
+            }
+        })?;
+
+        let (asset, latest) = match decision {
+            Decision::Join(progress) => return Ok(progress),
+            Decision::Nothing => anyhow::bail!(
+                "there is no new build to download — this one is current, or the release \
+                 published no binary for this machine"
+            ),
+            Decision::Start(asset, latest) => (asset, latest),
+        };
+
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let dest = teams_lite::update::download_path(&latest)?;
+                // Throttled to whole percent: the download is answered chunk by chunk,
+                // and a frame per chunk would put thousands of events on a socket that
+                // also carries the user's messages.
+                let mut last_percent = u64::MAX;
+                let ctx_progress = ctx.clone();
+                teams_lite::update::download(&ctx.http, &asset, &dest, move |received, total| {
+                    let percent = if total > 0 { received * 100 / total } else { 0 };
+                    if percent == last_percent {
+                        return;
+                    }
+                    last_percent = percent;
+                    let published = ctx_progress
+                        .with_update(|slot| {
+                            if slot.phase != UpdatePhase::Downloading {
+                                return None;
+                            }
+                            slot.received = received;
+                            Some(slot.progress_json())
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some(payload) = published {
+                        ctx_progress.emit("update_progress", payload);
+                    }
+                })
+                .await?;
+                anyhow::Ok(dest)
+            }
+            .await;
+
+            match result {
+                Ok(dest) => {
+                    let _ = ctx.with_update(|slot| {
+                        slot.phase = UpdatePhase::Ready;
+                        slot.received = slot.asset.as_ref().map(|a| a.size).unwrap_or(0);
+                        slot.file = Some(dest.clone());
+                    });
+                    eprintln!("[update] downloaded {} — waiting for the user", dest.display());
+                }
+                Err(e) => {
+                    eprintln!("[update] download failed: {e:#}");
+                    let _ = ctx.with_update(|slot| {
+                        slot.phase = UpdatePhase::Failed;
+                        slot.error = format!("{e:#}");
+                    });
+                }
+            }
+            ctx.emit_update_progress();
+        });
+
+        self.with_update(|slot| slot.progress_json())
+    }
+
+    /// Install the downloaded build and ask the launcher to restart onto it.
+    ///
+    /// The order matters. The swap comes first, because it is the part that must not be
+    /// lost: once it is done the new build starts next time whatever else happens. The
+    /// phase is published SECOND, before the restart is asked for, because the restart
+    /// takes this socket down with it — a client told afterwards would never be told.
+    async fn apply_update(&self) -> Result<Value> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never replaces the \
+             user's own app"
+        );
+        let target = teams_lite::update::self_install().context(
+            "this build cannot replace itself: it was not started by the `teams` command, so \
+             there is no single binary to swap. Update it the way it was installed — a staged \
+             always-on service with `bin/teams-lite-service.sh update`.",
+        )?;
+        let downloaded = self
+            .with_update(|slot| match slot.phase {
+                UpdatePhase::Ready => slot.file.clone(),
+                _ => None,
+            })?
+            .context("nothing is downloaded yet — download the update before applying it")?;
+
+        teams_lite::update::install_binary(&downloaded, &target).with_context(|| {
+            format!("install the new build over {}", target.display())
+        })?;
+        eprintln!("[update] installed over {} — restarting", target.display());
+
+        // The launcher listens for this on the keepalive socket it already holds
+        // (launcher/src/update.ts). Nothing else can put the app back up: it owns the web
+        // server and the backend child. Named for what it asks rather than for the RPC
+        // that emits it, because the launcher is being told to restart — and if it is
+        // gone, the swap still stands and the next start is the new build, which
+        // `Installed` says out loud.
+        let restarting = self.with_update(|slot| {
+            slot.phase = UpdatePhase::Restarting;
+            slot.error.clear();
+            slot.progress_json()
+        })?;
+        self.emit("update_progress", restarting.clone());
+        self.emit("update_restart", json!({ "binary": target.to_string_lossy() }));
+
+        // A restart kills this process, so still being here after a few seconds means
+        // the launcher never acted — it crashed, or the app is being served by
+        // something that is not it. Say so rather than leaving a bubble spinning for
+        // ever: the build IS installed, and it starts next time.
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RESTART_GRACE).await;
+            let stalled = ctx
+                .with_update(|slot| {
+                    if slot.phase != UpdatePhase::Restarting {
+                        return None;
+                    }
+                    slot.phase = UpdatePhase::Installed;
+                    Some(slot.progress_json())
+                })
+                .ok()
+                .flatten();
+            if let Some(payload) = stalled {
+                eprintln!(
+                    "[update] the new build is installed but nothing restarted the app — it \
+                     will run on the next start"
+                );
+                ctx.emit("update_progress", payload);
+            }
+        });
+        Ok(restarting)
+    }
+
     /// A valid CSA-audience token (auto-refreshed).
     async fn csa(&self) -> Result<String> {
         self.tokens.get(teams_read::CSA_SCOPE).await
@@ -1181,7 +1472,7 @@ async fn main() -> Result<()> {
         })),
         db_path: Arc::new(db_path.clone()),
         events: events_tx,
-        update: Arc::new(std::sync::Mutex::new(None)),
+        update: Arc::new(std::sync::Mutex::new(UpdateSlot::default())),
         mail_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         calendar_watch: Arc::new(Mutex::new(None)),
         last_repair: Arc::new(Mutex::new(None)),
@@ -1315,13 +1606,26 @@ async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTrac
     let hello = json!({ "event": "status", "data": "connected" });
     write.send(WsMessage::Text(hello.to_string().into())).await?;
 
-    // If the startup update check already found a newer release, tell this UI
-    // right away — it may have connected after the one-shot broadcast fired, so
-    // it would otherwise never hear about it.
-    let pending_update = ctx.update.lock().ok().and_then(|slot| slot.clone());
-    if let Some(data) = pending_update {
-        let ev = json!({ "event": "update_available", "data": data });
-        write.send(WsMessage::Text(ev.to_string().into())).await?;
+    // If the startup update check already found a newer release, tell this UI right
+    // away — it may have connected after the one-shot broadcast fired, so it would
+    // otherwise never hear about it. The phase goes with it whenever it is not the
+    // untouched one: a page that opens (or a phone that reconnects) in the middle of a
+    // download has to draw the progress bar it is already in, and one that opens after
+    // an apply has to say the app is coming back.
+    let pending_update = ctx
+        .update
+        .lock()
+        .ok()
+        .map(|slot| (slot.available.clone(), slot.phase, slot.progress_json()));
+    if let Some((available, phase, progress)) = pending_update {
+        if let Some(data) = available {
+            let ev = json!({ "event": "update_available", "data": data });
+            write.send(WsMessage::Text(ev.to_string().into())).await?;
+        }
+        if phase != UpdatePhase::Idle {
+            let ev = json!({ "event": "update_progress", "data": progress });
+            write.send(WsMessage::Text(ev.to_string().into())).await?;
+        }
     }
 
     // Say how sign-in is doing, on every fresh connection. The state event is
@@ -1392,6 +1696,14 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // network: token-gated as a MACHINE method, refused read-only, and refused
         // again inside the primitive so the automatic caller inherits both.
         "repair_broker" => ctx.start_broker_repair(false).await,
+
+        // The update, in the two steps the user takes: fetch the release binary, then
+        // put it in place and restart onto it (see `Ctx::start_update_download` /
+        // `Ctx::apply_update`, and `update` for what an update is). MACHINE methods
+        // both: the first spends the user's bandwidth, the second replaces the program
+        // their account runs through.
+        "update_download" => ctx.start_update_download().await,
+        "update_apply" => ctx.apply_update().await,
 
         // ---- push notifications (see src/push.rs) ------------------------------
         // What an installed web app needs to receive a notification while it is
@@ -4190,22 +4502,40 @@ fn spawn_update_check(ctx: Ctx) {
     tokio::spawn(async move {
         match teams_lite::update::check(&ctx.http, current).await {
             Ok(Some(info)) => {
+                // What the button needs beyond the two commits: how big the download
+                // is (so the bar has a total from the first frame), and whether THIS
+                // install can replace itself at all — a staged service cannot, and it
+                // keeps the release link instead (see `update`).
+                let installable =
+                    info.asset.is_some() && !read_only() && teams_lite::update::self_install().is_some();
                 let data = json!({
                     "current": info.current,
                     "latest": info.latest,
                     "url": info.url,
+                    "size": info.asset.as_ref().map(|a| a.size).unwrap_or(0),
+                    "can_install": installable,
                 });
                 if let Ok(mut slot) = ctx.update.lock() {
-                    *slot = Some(data.clone());
+                    slot.available = Some(data.clone());
+                    slot.asset = info.asset.clone();
+                    slot.latest = info.latest.clone();
                 }
                 ctx.emit("update_available", data);
                 eprintln!(
-                    "[update] a newer build is available ({} -> {})",
-                    info.current, info.latest
+                    "[update] a newer build is available ({} -> {}){}",
+                    info.current,
+                    info.latest,
+                    if installable {
+                        " — installable from the app"
+                    } else {
+                        " — update it the way it was installed"
+                    }
                 );
             }
-            // Up to date, or the remote commit couldn't be identified: say nothing.
-            Ok(None) => {}
+            // Up to date, or the remote commit couldn't be identified: say nothing — and
+            // drop any build left in the cache, since being current is exactly what makes
+            // a downloaded one worthless (a successful update ends here).
+            Ok(None) => teams_lite::update::discard_downloads(),
             // Reached-but-failed or offline: log once, never surface to the user.
             Err(e) => eprintln!("[update] check skipped: {e}"),
         }
@@ -6157,6 +6487,66 @@ mod tests {
         for method in MACHINE_METHODS {
             assert_ne!(machine_effect(method), "changes this machine", "{method} has no phrase");
         }
+    }
+
+    /// Downloading and installing a new build are the user's, and only the user's.
+    ///
+    /// `update_apply` replaces the binary every one of their chats, mails and sends goes
+    /// through, and then restarts it. A client that merely found this socket — an
+    /// ad-hoc script, an automated driver — may read everything here and must not be
+    /// able to do that; a read-only backend must not either, whatever token it is shown.
+    #[test]
+    fn updating_this_app_needs_the_write_token_and_is_refused_read_only() {
+        for method in ["update_download", "update_apply"] {
+            let err = check_write_allowed(method, &json!({}), Some("tok")).unwrap_err().to_string();
+            assert!(err.contains("write token"), "{method}: {err}");
+            assert!(
+                check_write_allowed(method, &json!({ "write_token": "tok" }), Some("tok")).is_ok()
+            );
+            assert!(check_write_allowed(method, &json!({ "write_token": "tok" }), None).is_err());
+        }
+    }
+
+    /// The phase tags are a contract with the page: `updatePhase` in
+    /// web/src/lib/protocol.ts reads exactly these six, and an unknown one leaves the
+    /// button drawing nothing. So they are pinned here, spelled out, rather than derived.
+    #[test]
+    fn the_update_phases_are_the_six_the_page_knows() {
+        let tags: Vec<&str> = [
+            UpdatePhase::Idle,
+            UpdatePhase::Downloading,
+            UpdatePhase::Ready,
+            UpdatePhase::Restarting,
+            UpdatePhase::Installed,
+            UpdatePhase::Failed,
+        ]
+        .iter()
+        .map(|p| p.tag())
+        .collect();
+        assert_eq!(
+            tags,
+            ["idle", "downloading", "ready", "restarting", "installed", "failed"]
+        );
+    }
+
+    /// A progress frame carries a total even before the first byte, so the bar is a bar
+    /// from the start rather than a spinner that becomes one.
+    #[test]
+    fn a_progress_frame_states_the_whole_download() {
+        let slot = UpdateSlot {
+            asset: Some(teams_lite::update::Asset {
+                url: "https://example/teams".into(),
+                size: 1000,
+            }),
+            phase: UpdatePhase::Downloading,
+            received: 250,
+            ..UpdateSlot::default()
+        };
+        let payload = slot.progress_json();
+        assert_eq!(payload["phase"], "downloading");
+        assert_eq!(payload["received"], 250);
+        assert_eq!(payload["total"], 1000);
+        assert_eq!(payload["error"], "");
     }
 
     #[test]

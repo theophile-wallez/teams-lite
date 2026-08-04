@@ -65,6 +65,7 @@ import {
   type TypingName,
   type TypingSignal,
   type UpdateInfo,
+  type UpdateProgress,
 } from "./protocol";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import {
@@ -235,6 +236,12 @@ export type AppState = {
   splashMessage: string;
   fatal: string | null;
   update: UpdateInfo | null;
+  /** How far the update has got (the backend's `update_progress` event), or null while
+   *  nothing has been asked of it. Held apart from `update` because they answer two
+   *  different questions and arrive at two different times — and because the backend
+   *  replays this one on every connection, so it is what a page opened mid-download
+   *  draws its bar from. See {@link updateView}. */
+  updateProgress: UpdateProgress | null;
   draft: string;
   replyingTo: PendingReply | null;
   /** The notifications panel's three activity streams (newest-first each), one
@@ -470,6 +477,7 @@ function initialState(): AppState {
     splashMessage: "connecting",
     fatal: null,
     update: null,
+    updateProgress: null,
     draft: "",
     replyingTo: null,
     notifications: { activity: [], mentions: [], following: [] },
@@ -1017,7 +1025,17 @@ export class TeamsController {
         void this.handleLiveRecovery();
       }
     });
-    on("update_available", (u) => this.set({ update: u as UpdateInfo }));
+    // A newer build exists. The payload can be null in one place only — the mock
+    // clearing an armed update between specs — and that clears the phase with it, so no
+    // progress can outlive the release it belonged to.
+    on("update_available", (u) => {
+      const next = (u ?? null) as UpdateInfo | null;
+      this.set(next ? { update: next } : { update: null, updateProgress: null });
+    });
+    // How far installing it has got. Sent on every whole percent of a download and on
+    // each phase change, and replayed on connect — so this handler is also what a page
+    // that opened in the middle of one learns from.
+    on("update_progress", (p) => this.set({ updateProgress: p as UpdateProgress }));
     // How sign-in is doing. The backend sends this on a change of state and in the
     // greeting, so an outage that started before this tab opened still reaches it.
     on("broker_status", (raw) => {
@@ -1044,6 +1062,13 @@ export class TeamsController {
       // send is refused until someone reloads the page. On a phone left open for
       // days that is the normal outcome of a restart, so recovery has to be here.
       void this.loadWriteToken();
+      // Forget what we knew about an update, and let the backend that just answered say
+      // it again. The socket coming back is precisely how a RESTART onto a new build ends
+      // (see lib/update.ts): that backend is current, so it announces no update at all —
+      // and without this the page would keep drawing "Restarting…" for ever over a build
+      // that already restarted. A download in flight is re-stated in the same greeting,
+      // because the backend replays the phase on every connection.
+      this.set({ update: null, updateProgress: null });
       if (this.connectionDropped) {
         this.connectionDropped = false;
         void this.handleLiveRecovery();
@@ -2890,6 +2915,54 @@ export class TeamsController {
       // so a success cue now would applaud a result nobody has yet.
       playCue("error");
       throw e;
+    }
+  }
+
+  /** Start downloading the new build (the update control's first click).
+   *
+   *  Moves to `downloading` here rather than waiting for the backend's first frame, so
+   *  the button reacts to the press at once; the real progress replaces it a moment
+   *  later, and a refusal puts the failure — with the backend's own words, which is the
+   *  useful part — where the button can show it. */
+  async downloadUpdate(): Promise<void> {
+    const total = this.get().update?.size ?? 0;
+    this.set({ updateProgress: { phase: "downloading", received: 0, total, error: "" } });
+    try {
+      this.set({ updateProgress: await this.backend.updateDownload() });
+    } catch (e) {
+      playCue("error");
+      this.set({
+        updateProgress: {
+          phase: "failed",
+          received: 0,
+          total,
+          error: e instanceof Error ? e.message : String(e),
+        },
+      });
+    }
+  }
+
+  /** Install what was downloaded and restart the app onto it (the second click).
+   *
+   *  The socket drops seconds later — that IS the restart — so this deliberately does
+   *  not wait for anything more: `restarting` is a state the control keeps drawing while
+   *  disconnected, and the page's own reconnect is what ends it. */
+  async applyUpdate(): Promise<void> {
+    const previous = this.get().updateProgress;
+    const total = this.get().update?.size ?? 0;
+    this.set({ updateProgress: { phase: "restarting", received: total, total, error: "" } });
+    try {
+      await this.backend.updateApply();
+    } catch (e) {
+      playCue("error");
+      this.set({
+        updateProgress: {
+          phase: "failed",
+          received: previous?.received ?? total,
+          total,
+          error: e instanceof Error ? e.message : String(e),
+        },
+      });
     }
   }
 

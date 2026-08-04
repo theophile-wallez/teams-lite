@@ -218,6 +218,35 @@ export async function emitCall(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Arm (or clear) a pending update in the mock, through its gated test hook; the mock
+ *  then broadcasts `update_available`, mirroring the Rust backend's own event.
+ *
+ *  `can_install: false` is the install this app cannot replace itself (a staged
+ *  always-on service, in practice), which keeps a link instead of a button.
+ *
+ *  ALWAYS clear it with `{ available: false }` before the spec ends. The mock is a
+ *  shared process and `reuseExistingServer` adopts it across runs, so an update left
+ *  armed would add a row to every later sidebar. */
+export async function emitUpdate(
+  page: Page,
+  body: {
+    available?: boolean;
+    current?: string;
+    latest?: string;
+    url?: string;
+    size?: number;
+    can_install?: boolean;
+    /** Simulate the restart an apply ends in: the backend drops every socket, and the
+     *  one that answers next is the new build, with no update to announce. */
+    restarted?: boolean;
+  } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "update", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Set the broker health the mock reports, through its gated test hook; the mock then
  *  broadcasts `broker_status`, mirroring the Rust backend's own event.
  *

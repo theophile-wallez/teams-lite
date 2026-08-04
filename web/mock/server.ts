@@ -3417,6 +3417,57 @@ let mockBrokerStatus: {
   repairing: boolean;
 } | null = null;
 
+// ---- a pending update (see src/update.rs, and update-button.tsx) ---------------
+// The whole two-click flow with no GitHub and no binary: a release that exists, a
+// download that takes a couple of seconds, and an install that cannot restart anything
+// because there is nothing here to restart. That last part is not a shortcut — it is the
+// `installed` phase the real backend reports when nothing put the app back up, so the
+// mock exercises a real state rather than pretending a restart happened.
+
+/** The download a mock release claims, in bytes. The size of the real asset, measured on
+ *  the published release (133,429,376 B), so the button's "Downloads 133 MB." line reads
+ *  like the one a user sees. */
+const MOCK_UPDATE_SIZE = 133 * 1024 * 1024;
+/** How long a mock download takes, and how often it reports. Two seconds is long enough
+ *  to screenshot the bar mid-transfer and short enough that a spec waits on nothing. */
+const MOCK_DOWNLOAD_MS = 2000;
+const MOCK_DOWNLOAD_TICK_MS = 100;
+
+/** The update the mock reports, or null for "this build is current" — the default, so
+ *  every existing spec keeps seeing a sidebar with no update row. Armed through the test
+ *  hook (`{kind: "update"}`), exactly like the broker status, and HELD rather than only
+ *  broadcast so a reconnect replays it the way the Rust backend replays its own. */
+let mockUpdate: {
+  current: string;
+  latest: string;
+  url: string;
+  size: number;
+  can_install: boolean;
+} | null = null;
+
+/** How far the mock update has got. Mirrors `UpdateSlot` in src/bin/server.rs, including
+ *  that the phase is replayed on connect whenever it is not `idle`. */
+let mockUpdateProgress = {
+  phase: "idle" as "idle" | "downloading" | "ready" | "restarting" | "installed" | "failed",
+  received: 0,
+  total: 0,
+  error: "",
+};
+let mockDownloadTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Put the update back to "nothing has been asked of it", timers included. One mock
+ *  process serves a whole E2E run, so a download left in flight would report progress
+ *  into the next spec. */
+function resetMockUpdate(): void {
+  if (mockDownloadTimer) clearInterval(mockDownloadTimer);
+  mockDownloadTimer = null;
+  mockUpdateProgress = { phase: "idle", received: 0, total: mockUpdate?.size ?? 0, error: "" };
+}
+
+function broadcastUpdateProgress(): void {
+  broadcast("update_progress", { ...mockUpdateProgress });
+}
+
 /** Upsert one member's read position for a conversation (newest write wins),
  *  returning the stored receipt so the caller can broadcast it. */
 function setReceipt(conversationId: string, receipt: ReadReceipt): ReadReceipt {
@@ -4290,6 +4341,59 @@ function dispatch(method: string, params: unknown): unknown {
         }, 500);
       }
       return { started: true };
+    }
+
+    // The update's first click: fetch the new build. Reports progress on a timer the way
+    // the real one reports it per whole percent, and joins a download already in flight
+    // rather than starting a second one — the button may be open in two pages.
+    case "update_download": {
+      if (!mockUpdate) throw new Error("there is no new build to download");
+      if (mockUpdateProgress.phase === "downloading") return { ...mockUpdateProgress };
+      resetMockUpdate();
+      mockUpdateProgress = {
+        phase: "downloading",
+        received: 0,
+        total: mockUpdate.size,
+        error: "",
+      };
+      broadcastUpdateProgress();
+      const step = mockUpdate.size / (MOCK_DOWNLOAD_MS / MOCK_DOWNLOAD_TICK_MS);
+      mockDownloadTimer = setInterval(() => {
+        if (mockUpdateProgress.phase !== "downloading") return;
+        mockUpdateProgress.received = Math.min(
+          mockUpdateProgress.total,
+          mockUpdateProgress.received + step,
+        );
+        if (mockUpdateProgress.received >= mockUpdateProgress.total) {
+          if (mockDownloadTimer) clearInterval(mockDownloadTimer);
+          mockDownloadTimer = null;
+          mockUpdateProgress.phase = "ready";
+        }
+        broadcastUpdateProgress();
+      }, MOCK_DOWNLOAD_TICK_MS);
+      return { ...mockUpdateProgress };
+    }
+
+    // The second click: install it and restart onto it. There is no binary here and no
+    // launcher, so this walks the two phases the real backend walks when nothing restarts
+    // the app — `restarting`, then `installed`, which is the honest end for a mock.
+    case "update_apply": {
+      if (mockUpdateProgress.phase !== "ready") {
+        throw new Error("nothing is downloaded yet — download the update before applying it");
+      }
+      mockUpdateProgress = {
+        phase: "restarting",
+        received: mockUpdateProgress.total,
+        total: mockUpdateProgress.total,
+        error: "",
+      };
+      broadcastUpdateProgress();
+      setTimeout(() => {
+        if (mockUpdateProgress.phase !== "restarting") return;
+        mockUpdateProgress.phase = "installed";
+        broadcastUpdateProgress();
+      }, 1200);
+      return { ...mockUpdateProgress };
     }
 
     case "fetch_media": {
@@ -5185,6 +5289,41 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       broadcast("broker_status", mockBrokerStatus);
       return Response.json({ ok: true, broker: mockBrokerStatus }, { status: 200 });
     }
+    // Arm (or clear) a pending update, and say whether this pretend install can replace
+    // itself — the difference between the button and the plain link (`can_install` in
+    // src/update.rs). A spec MUST clear it afterwards: one mock process serves the whole
+    // run, and a left-behind update row moves every later sidebar screenshot.
+    if (body.kind === "update") {
+      // What a real restart looks like from the page: this backend goes away mid-phase,
+      // and the one that answers next is the NEW build — current, so it announces no
+      // update at all. Dropping the sockets is the whole of it; the page's own reconnect
+      // is what has to end up with an empty update row rather than a stuck "Restarting…".
+      if (body.restarted === true) {
+        mockUpdate = null;
+        resetMockUpdate();
+        for (const ws of sockets) ws.close();
+        return Response.json({ ok: true, restarted: true }, { status: 200 });
+      }
+      if (body.available === false) {
+        mockUpdate = null;
+        resetMockUpdate();
+        broadcast("update_available", null);
+        return Response.json({ ok: true, update: null }, { status: 200 });
+      }
+      mockUpdate = {
+        current: typeof body.current === "string" ? body.current : "abc1234",
+        latest: typeof body.latest === "string" ? body.latest : "def5678",
+        url:
+          typeof body.url === "string"
+            ? body.url
+            : "https://github.com/theophile-wallez/teams-lite/releases/tag/latest",
+        size: typeof body.size === "number" ? body.size : MOCK_UPDATE_SIZE,
+        can_install: body.can_install !== false,
+      };
+      resetMockUpdate();
+      broadcast("update_available", { ...mockUpdate });
+      return Response.json({ ok: true, update: mockUpdate }, { status: 200 });
+    }
     // Move a member's read position ("seen by") and broadcast it, exactly like
     // the Rust backend's `read_receipt` event, so the E2E suite can drive the
     // avatar row deterministically. Defaults anchor the reader to the newest
@@ -5723,6 +5862,15 @@ const server = Bun.serve({
       // Only when something is wrong, like the real backend: a mock that announced a
       // healthy broker would make the banner's "null means silence" rule untestable.
       if (mockBrokerStatus) sendJson(ws, { event: "broker_status", data: mockBrokerStatus });
+      // A pending update, and how far it has got — replayed on connect exactly like the
+      // Rust backend replays it, so a page that opens mid-download draws the bar it is
+      // already in rather than an untouched button.
+      if (mockUpdate) {
+        sendJson(ws, { event: "update_available", data: { ...mockUpdate } });
+        if (mockUpdateProgress.phase !== "idle") {
+          sendJson(ws, { event: "update_progress", data: { ...mockUpdateProgress } });
+        }
+      }
     },
     message(ws, message) {
       const raw = typeof message === "string" ? message : new TextDecoder().decode(message);

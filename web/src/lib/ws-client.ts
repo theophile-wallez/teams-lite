@@ -31,6 +31,7 @@ import type {
   ReadReceiptsResult,
   ReplyTo,
   SettingsPatch,
+  UpdateProgress,
 } from "./protocol";
 import type { PushStatus, SubscriptionPayload } from "./push";
 
@@ -482,6 +483,23 @@ export class Backend {
    *  and drops this socket on the way; recovery is the page's own reconnect. */
   repairBroker(): Promise<{ started: boolean; reason?: string }> {
     return this.writeRequest<{ started: boolean; reason?: string }>("repair_broker", {});
+  }
+
+  /** Start downloading the new build. Answers with the phase this leaves us in, and
+   *  the progress then arrives as `update_progress` events (see {@link UpdateProgress}).
+   *
+   *  A WRITE request: it spends the user's bandwidth on their machine. Idempotent — a
+   *  second page, or a second click, joins the download in flight. */
+  updateDownload(): Promise<UpdateProgress> {
+    return this.writeRequest<UpdateProgress>("update_download", {});
+  }
+  /** Install what was downloaded and restart the app onto it.
+   *
+   *  A WRITE request, and the heaviest one here: it replaces the binary the user's whole
+   *  Teams account runs through. It answers `restarting`, and this socket goes down a
+   *  moment later — the page's own reconnect is what shows the app coming back. */
+  updateApply(): Promise<UpdateProgress> {
+    return this.writeRequest<UpdateProgress>("update_apply", {});
   }
 
   /** What the backend can do about push notifications, and which devices it already

@@ -946,6 +946,49 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // The update: the blue button, its progress mid-download, the restart it offers next,
+  // and the plain link an install that cannot replace itself keeps instead. Driven
+  // through the mock's own control plane — the real thing needs a published release
+  // newer than this build, which is not a state a capture can arrange.
+  if (args.includes("--update")) {
+    await withPreview(async ({ page, shot, setTheme, emit }) => {
+      const control = page.locator('[data-testid="update-control"]');
+      await emit({ kind: "update" });
+      await control.waitFor({ state: "visible" });
+      await shot(`${out}-offered-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-offered-dark.png`);
+
+      // Mid-download: the progress is a fill behind the button's own label, so this
+      // capture is the only way to review it.
+      await page.locator('[data-testid="update-button"]').click();
+      await page.waitForFunction(
+        `(() => { const el = document.querySelector('[data-testid="update-button"]');
+                  const pct = Number(el?.getAttribute("data-percent") ?? 0);
+                  return pct > 20 && pct < 80; })()`,
+      );
+      await shot(`${out}-downloading-dark.png`);
+
+      // Downloaded: the second click, which is a restart.
+      await page.locator('[data-testid="update-control"][data-phase="ready"]').waitFor();
+      await shot(`${out}-ready-dark.png`);
+
+      // The other install shape: a staged service is updated where it was installed
+      // from, so it keeps a link and never a button that would lie.
+      await emit({ kind: "update", can_install: false });
+      await page.locator('[data-testid="update-link"]').waitFor({ state: "visible" });
+      await shot(`${out}-link-dark.png`);
+
+      // Leave the shared mock without an update, or every later capture grows this row.
+      await emit({ kind: "update", available: false });
+      console.log(
+        `[preview] wrote ${out}-offered-light.png, ${out}-offered-dark.png, ` +
+          `${out}-downloading-dark.png, ${out}-ready-dark.png and ${out}-link-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
   // @mentions: the suggestion list a typed "@" opens, the chip a picked person leaves
   // in the composer, what Backspace does to it (one word per keystroke, Teams-style),
   // and the mention as it reads once the message is sent.

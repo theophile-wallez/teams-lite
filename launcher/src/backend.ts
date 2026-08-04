@@ -105,7 +105,41 @@ async function portOpen(): Promise<boolean> {
   }
 }
 
-export type BackendHandle = { stop: () => void };
+/// Environment variable the backend reads to learn which binary IT can replace with a
+/// new release (`LAUNCHER_BIN_ENV` in src/update.rs). Kept in step with the Rust side by
+/// name; the value is ours to state, because we are the only process that knows it.
+export const LAUNCHER_BIN_ENV = "TEAMS_LITE_LAUNCHER_BIN";
+
+/// What we add to the backend's environment, and why each entry is there.
+///
+/// `TEAMS_LITE_LAUNCHER_BIN` is what makes an in-app update possible at all: this
+/// binary IS the release asset, so the backend can download a newer one and rename it
+/// over this path. It is set only for a COMPILED binary — under `bun run` the path is
+/// bun itself, and swapping that is not an update of teams-lite — which is also what
+/// makes the variable the backend's proof that a launcher is there to restart the app
+/// afterwards (see launcher/src/update.ts).
+///
+/// `TEAMS_NO_IDLE_EXIT` (dev only) keeps a spawned backend up across the frontend
+/// reloads a hot-reloading session produces.
+export function backendEnv(keepAlive: boolean): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (isCompiledBinary()) env[LAUNCHER_BIN_ENV] = process.execPath;
+  if (keepAlive) env.TEAMS_NO_IDLE_EXIT = "1";
+  return env;
+}
+
+export type BackendHandle = {
+  stop: () => void;
+  /// Resolves once the backend we spawned is really gone — not merely signalled.
+  ///
+  /// An in-app update needs that difference. `kill()` returns before the kernel has
+  /// reaped the process and released port 19420, and the new build's first act is to ask
+  /// whether something is already listening there: a yes makes it ATTACH to the backend
+  /// we just killed, and the app comes back on the new UI with a dead backend behind it.
+  /// Resolves immediately when we only attached to somebody else's backend, which is not
+  /// ours to stop or to wait for.
+  waitForExit: () => Promise<void>;
+};
 
 /// Ensure the backend is running. If a server is already up, attach to it and
 /// don't manage its lifecycle. Otherwise spawn one and return a stop() handle.
@@ -116,7 +150,8 @@ export type BackendHandle = { stop: () => void };
 /// we merely attach to a backend someone else already started.
 export async function ensureBackend(opts: { keepAlive?: boolean } = {}): Promise<BackendHandle> {
   if (await portOpen()) {
-    return { stop: () => {} }; // someone else owns it
+    // Someone else owns it: neither ours to stop, nor ours to wait for.
+    return { stop: () => {}, waitForExit: () => Promise.resolve() };
   }
 
   const bin = await backendBinary();
@@ -124,7 +159,7 @@ export async function ensureBackend(opts: { keepAlive?: boolean } = {}): Promise
     stdout: Bun.file("/tmp/teams-lite-server.log"),
     stderr: Bun.file("/tmp/teams-lite-server.log"),
     stdin: "ignore",
-    ...(opts.keepAlive ? { env: { ...process.env, TEAMS_NO_IDLE_EXIT: "1" } } : {}),
+    env: { ...process.env, ...backendEnv(opts.keepAlive === true) },
   });
 
   // wait for it to bind (auth broker handshake can take a few seconds)
@@ -142,7 +177,14 @@ export async function ensureBackend(opts: { keepAlive?: boolean } = {}): Promise
         } catch {}
       };
       killChildOnExit(stop);
-      return { stop };
+      return {
+        stop,
+        // `proc.exited` resolves when the kernel has reaped it, which is also when its
+        // port is free — the one thing a relaunch has to wait for.
+        waitForExit: async () => {
+          await proc.exited;
+        },
+      };
     }
     await Bun.sleep(300);
   }

@@ -217,6 +217,14 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19441');\n"
         "ws.send(JSON.stringify({ method: 'set_person_avatar' }));\n"
     ),
+    # The in-app update: which build the user runs is theirs to choose, and applying one
+    # replaces the binary their whole account runs through and restarts it — which would
+    # also cut a live `@claude` reply in half (MACHINE_METHODS in src/bin/server.rs).
+    "self-updater.ts": (
+        "// Replaces the user's own teams binary and restarts their app.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'update_apply' }));\n"
+    ),
     "person-override-reader.ts": (
         "// Reads back what the user themselves chose, which is allowed.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
@@ -341,6 +349,7 @@ def cases(tmp: Path):
         # writes is who this app says a message is from.
         ("BLOCK", PROJECT, f"bun run {tmp}/person-renamer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/person-refacer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/self-updater.ts"),
         # A cargo example reaches Teams with a broker token, past every port rule.
         ("BLOCK", PROJECT, "cargo run --example guard-test-loose-send"),
         ("BLOCK", PROJECT, "cargo run --example guard-test-real-send"),
