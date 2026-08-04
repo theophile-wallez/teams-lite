@@ -10,7 +10,7 @@
 //   event    (server -> client):  { "event": "<name>", "data": {...} }   (no id)
 //
 // Methods: conversations | open | backfill | set_draft | send | edit | react | notifications
-//          | fetch_media | fetch_avatar | profile | people_by_address | presence
+//          | fetch_media | fetch_avatar | sender_icon | profile | people_by_address | presence
 //          | get_settings | set_settings | set_always_available | enrich_link
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | mail_mark_read
@@ -84,7 +84,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_policy, auth, calendar, mail, push, push_policy, retry, store, teams,
+    agent, agent_policy, auth, calendar, mail, push, push_policy, retry, sender_icon, store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
@@ -136,6 +136,16 @@ const SETTING_GHOST_MODE: &str = "ghost_mode";
 /// green dot is what every colleague reads to decide whether to write. Off by default
 /// because a status the user did not ask for is a claim about them they never made.
 const SETTING_ALWAYS_AVAILABLE: &str = "always_available";
+/// Sender icons (`"0"` = off, anything else = on, and ON is the default): show the mark
+/// of the organisation a mail came from, fetched from that organisation's own domain
+/// (see [`sender_icon`]).
+///
+/// It is a setting because it is the only place this app requests something from a
+/// stranger's server, and it defaults ON because the user asked for the mark — the five
+/// rails in `sender_icon` are what make that defensible, not this flag. Turning it off
+/// stops every such request at the dispatch point, and a read-only backend never makes
+/// one whatever the setting says.
+const SETTING_SENDER_ICONS: &str = "sender_icons";
 /// The id of the presence endpoint this store's backends register, generated on first
 /// use and then kept. Stable ON PURPOSE, twice over: re-registering the same id is the
 /// same endpoint refreshed rather than a second one, so neither the heartbeat nor the
@@ -1822,6 +1832,39 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }
         }
 
+        // The mark of an ORGANISATION that mails the user, for a sender the Teams
+        // directory cannot name (see `sender_icon`, which holds the rails, and
+        // `people_by_address`, which is what names a colleague instead).
+        //
+        // This is the only method that requests something from a server nobody here
+        // configured, so four things happen before the network:
+        //   - the domain is reduced to its registrable form, so a per-recipient
+        //     subdomain cannot carry a reader's identity out to the sender;
+        //   - the store answers if this domain was ever asked — including a remembered
+        //     "it has none", so a server is asked once per organisation, not per mail;
+        //   - a read-only backend refuses: an automation must not touch a stranger's
+        //     server on the user's behalf;
+        //   - the user's own switch is honoured (`SETTING_SENDER_ICONS`).
+        // A domain with no usable icon answers `found: false`, and the UI keeps the
+        // tinted initials it already draws from the same domain.
+        "sender_icon" => {
+            let domain = sender_icon::registrable_domain(&param_str(params, "domain")?);
+            anyhow::ensure!(sender_icon::is_fetchable_domain(&domain), "not a sender domain");
+            let store = ctx.store()?;
+
+            if let Some(cached) = store.sender_icon(&domain)? {
+                return Ok(sender_icon_json(cached.as_ref()));
+            }
+            if read_only() {
+                return Ok(sender_icon_json(None));
+            }
+            anyhow::ensure!(sender_icons_enabled(&store)?, "sender icons are turned off");
+
+            let icon = sender_icon::fetch_icon(&ctx.http, &domain).await.unwrap_or(None);
+            store.put_sender_icon(&domain, icon.as_ref(), now_ms())?;
+            Ok(sender_icon_json(icon.as_ref()))
+        }
+
         "set_draft" => {
             let conv = param_str(params, "conversation")?;
             let text = param_str(params, "text")?;
@@ -2419,6 +2462,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // string-to-string map (see `ghost_mode`, which only trusts "1").
             if let Some(ghost) = params.get("ghost_mode").and_then(Value::as_bool) {
                 store.set_setting(SETTING_GHOST_MODE, if ghost { "1" } else { "0" })?;
+            }
+            // Sender icons: the switch that decides whether this app ever requests
+            // anything from a domain that mails the user (see `sender_icon`). Stored the
+            // same way, and read by `sender_icons_enabled`, which trusts anything but
+            // "0" — the feature is on unless it was turned off.
+            if let Some(icons) = params.get("sender_icons").and_then(Value::as_bool) {
+                store.set_setting(SETTING_SENDER_ICONS, if icons { "1" } else { "0" })?;
             }
             settings_json(&store)
         }
@@ -3463,6 +3513,7 @@ fn settings_json(store: &Store) -> Result<Value> {
         "linear_token_set": settings.linear_token.is_some(),
         "ghost_mode": ghost_mode(store)?,
         "always_available": always_available(store)?,
+        "sender_icons": sender_icons_enabled(store)?,
     }))
 }
 
@@ -3482,6 +3533,29 @@ fn presence_endpoint_id(store: &Store) -> Result<String> {
     let id = uuid::Uuid::new_v4().to_string();
     store.set_setting(SETTING_PRESENCE_ENDPOINT_ID, &id)?;
     Ok(id)
+}
+
+/// Wire shape of a sender icon: the same `{ found, content_type, data_base64 }` as
+/// `fetch_avatar`, so the UI's avatar path needs no new case. `None` — no icon, or the
+/// feature held back — answers `found: false`, which is the tinted initials the mail
+/// list already draws from the same domain.
+fn sender_icon_json(icon: Option<&teams_media::Media>) -> Value {
+    match icon {
+        Some(icon) => json!({
+            "found": true,
+            "content_type": icon.content_type,
+            "data_base64": base64::engine::general_purpose::STANDARD.encode(&icon.bytes),
+        }),
+        None => json!({ "found": false }),
+    }
+}
+
+/// Are sender icons on? On unless the stored value is exactly `"0"`. The opposite
+/// default from every other switch here, and deliberately: the user asked for the mark,
+/// and what makes the request defensible is the set of rails in [`sender_icon`] rather
+/// than a flag they would have to find first.
+fn sender_icons_enabled(store: &Store) -> Result<bool> {
+    Ok(store.get_setting(SETTING_SENDER_ICONS)?.as_deref() != Some("0"))
 }
 
 /// Is Ghost mode on? Off unless the stored value is exactly `"1"`, so a missing,
@@ -6661,6 +6735,81 @@ mod lifecycle_tests {
                  clears the marker on every device the user owns."
             );
         }
+    }
+
+    // The one method that requests something from a server nobody here configured. Its
+    // handler must reach the store BEFORE the network, must reduce the domain first, and
+    // must never carry anything about the mail — so the scan looks for both the rails
+    // that have to be there and the things that must not.
+    #[test]
+    fn the_sender_icon_handler_checks_every_rail_before_the_network() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code
+            .split("\"sender_icon\" =>")
+            .nth(1)
+            .expect("the sender_icon handler")
+            .split("\"set_draft\" =>")
+            .next()
+            .expect("the handler ends at the next arm");
+        assert!(handler.contains("fetch_icon"), "scanned the wrong text");
+        for rail in [
+            "registrable_domain",  // a per-recipient subdomain never reaches the wire
+            "is_fetchable_domain", // nor does anything that is not a public domain
+            "store.sender_icon",   // asked once per organisation, ever
+            "read_only()",         // an automation touches no stranger's server
+            "sender_icons_enabled", // and the user can turn it off
+        ] {
+            assert!(
+                handler.contains(rail),
+                "the sender_icon handler no longer names `{rail}`. Every one of those is a \
+                 rail between a hostile mail and a request made on the user's behalf — see \
+                 the header of src/sender_icon.rs."
+            );
+        }
+        // The fetch is of a DOMAIN. Anything about the mail or the reader in it would
+        // turn a favicon into the tracking pixel `mail_html` strips out of the body.
+        for named in ["message_id", "\"address\"", "mail_body", "recipient"] {
+            assert!(
+                !handler.contains(named),
+                "the sender_icon handler names `{named}`. The request must carry the \
+                 organisation's domain and nothing else."
+            );
+        }
+    }
+
+    // A domain is asked once, and "there is none" is an answer worth keeping: it is the
+    // answer for 7 senders in 18, and re-asking would hit that server on every render.
+    #[test]
+    fn a_sender_with_no_icon_is_remembered_as_having_none() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.sender_icon("getsentry.com").unwrap().is_none(), "never asked");
+
+        store.put_sender_icon("getsentry.com", None, 1).unwrap();
+        let cached = store.sender_icon("getsentry.com").unwrap();
+        assert!(cached.is_some(), "the domain was asked");
+        assert!(cached.unwrap().is_none(), "and it serves no icon");
+
+        let icon = teams_media::Media {
+            content_type: "image/png".into(),
+            bytes: vec![0x89, b'P', b'N', b'G'],
+        };
+        store.put_sender_icon("getsentry.com", Some(&icon), 2).unwrap();
+        let held = store.sender_icon("getsentry.com").unwrap().unwrap().unwrap();
+        assert_eq!(held.content_type, "image/png");
+        assert_eq!(held.bytes, icon.bytes);
+    }
+
+    // On unless it was turned off — the opposite of every other switch here, because the
+    // user asked for the mark and the rails are what make the request defensible.
+    #[test]
+    fn sender_icons_are_on_until_they_are_turned_off() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(sender_icons_enabled(&store).unwrap(), "unset reads as on");
+        store.set_setting(SETTING_SENDER_ICONS, "0").unwrap();
+        assert!(!sender_icons_enabled(&store).unwrap());
+        store.set_setting(SETTING_SENDER_ICONS, "1").unwrap();
+        assert!(sender_icons_enabled(&store).unwrap());
     }
 
     #[test]

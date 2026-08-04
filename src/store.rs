@@ -338,6 +338,20 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     heartbeat_ms    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (conversation_id, message_id)
 );
+-- The icon of an organisation that mails the user, fetched from its own domain (see
+-- `sender_icon`). Durable, and that is the point rather than a convenience: this is
+-- the one place the app requests something from a stranger's server, so the row is
+-- what makes it happen ONCE per organisation instead of once per mail — and a row
+-- with no `bytes` is the cached answer "this domain serves none", which is the
+-- answer for 7 senders in 18 and must not be asked again either.
+CREATE TABLE IF NOT EXISTS sender_icons (
+    -- The REGISTRABLE domain, lowercased — never a subdomain, because a per-recipient
+    -- host is exactly what must never be requested.
+    domain       TEXT PRIMARY KEY,
+    content_type TEXT NOT NULL DEFAULT '',
+    bytes        BLOB,
+    fetched_ms   INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 /// Indexes, applied AFTER [`migrate`] because several of them cover columns that a
@@ -429,7 +443,11 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// `last_message_sender_mri` on `conversations` and `channels`, so the sidebar's
 /// preview attribution can follow a nickname. Additive on both counts: an older
 /// binary names neither, and a store with no overrides reads exactly as before.
-const SCHEMA_VERSION: i64 = 12;
+///
+/// v13 adds `sender_icons`, the icon of an organisation that mails the user (see
+/// [`Store::sender_icon`]). A whole new table rather than columns, and additive: an
+/// older binary never names it.
+const SCHEMA_VERSION: i64 = 13;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -3164,6 +3182,59 @@ impl Store {
             .optional()?)
     }
 
+    /// What is cached for one organisation's icon: `Some(Some(media))` when we hold an
+    /// icon, `Some(None)` when the domain was asked and serves none we can use, and
+    /// `None` when it was never asked at all. The middle case is why this is not an
+    /// `Option<Media>`: "there is none" is an answer worth remembering, because
+    /// otherwise every list render would ask that server again (see `sender_icon`).
+    pub fn sender_icon(&self, domain: &str) -> Result<Option<Option<crate::teams_media::Media>>> {
+        let row = self
+            .query_one(
+                "SELECT content_type, bytes FROM sender_icons WHERE domain = ?1",
+                params![domain],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.map(|(content_type, bytes)| match bytes {
+            Some(bytes) if !bytes.is_empty() => Some(crate::teams_media::Media {
+                content_type,
+                bytes,
+            }),
+            // A row with no bytes is the remembered "this domain serves none".
+            _ => None,
+        }))
+    }
+
+    /// Remember one organisation's icon, or the fact that it has none (`None`). Written
+    /// once per domain; a later fetch overwrites the row rather than adding one.
+    pub fn put_sender_icon(
+        &self,
+        domain: &str,
+        icon: Option<&crate::teams_media::Media>,
+        fetched_ms: i64,
+    ) -> Result<()> {
+        self.exec(
+            "INSERT INTO sender_icons (domain, content_type, bytes, fetched_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(domain) DO UPDATE SET
+                content_type = excluded.content_type,
+                bytes        = excluded.bytes,
+                fetched_ms   = excluded.fetched_ms",
+            params![
+                domain,
+                icon.map(|i| i.content_type.as_str()).unwrap_or_default(),
+                icon.map(|i| i.bytes.as_slice()),
+                fetched_ms
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Read one application setting by key. Returns `None` when the key was never
     /// set. This is a simple key/value side table (see `SCHEMA`), used for
     /// durable app configuration such as the GitLab host and access token — data
@@ -4150,7 +4221,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (12, 0x9372_926b_8b32_d7d5);
+        const PINNED: (i64, u64) = (13, 0x1381_4ce2_589a_1a10);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(

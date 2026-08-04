@@ -1,7 +1,16 @@
 import { useEffect, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { UserMultiple02Icon, ZoomIcon } from "@hugeicons/core-free-icons";
-import { isMeetingChat, type Conversation, type MailAddress } from "~/lib/protocol";
+import {
+  isMeetingChat,
+  mailAddressSpellsAPerson,
+  mailDomain,
+  mailDomainName,
+  registrableMailDomain,
+  type AvatarPicture,
+  type Conversation,
+  type MailAddress,
+} from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
 import { PersonCoin } from "./person-coin";
@@ -55,36 +64,6 @@ export function mailAddressPhoto(address: string): AvatarPhoto | undefined {
   return address ? { kind: "address", address } : undefined;
 }
 
-/** Everything after the "@", lowercased — the organisation a mail address belongs
- *  to. Empty when the string is not an address. */
-function mailDomain(address: string): string {
-  const at = address.lastIndexOf("@");
-  return at > 0 ? address.slice(at + 1).trim().toLowerCase() : "";
-}
-
-/** The second-level labels that are part of a public suffix rather than a name, so
- *  "example.co.uk" is read as "example" and not as "co". A short list on purpose: a
- *  real public-suffix list is a megabyte of data to pick two letters with. */
-const SUFFIX_LABELS = new Set(["co", "com", "net", "org", "gov", "edu", "ac"]);
-
-/** The registrable part of a domain — its name plus the public suffix:
- *  "md.getsentry.com" → "getsentry.com", "sns.amazonaws.com" → "amazonaws.com",
- *  "shop.example.co.uk" → "example.co.uk". What sits in front of it is routing
- *  ("mail.", "updates.", "notifications."), so this is the part that names the
- *  organisation and the part two subdomains of one sender share. */
-function registrableDomain(domain: string): string {
-  const labels = domain.split(".").filter(Boolean);
-  if (labels.length <= 2) return labels.join(".");
-  let index = labels.length - 2;
-  if (SUFFIX_LABELS.has(labels[index]!)) index -= 1;
-  return labels.slice(index).join(".");
-}
-
-/** The label inside a domain a reader recognises: "md.getsentry.com" → "getsentry",
- *  "linear.app" → "linear". */
-function domainName(domain: string): string {
-  return registrableDomain(domain).split(".")[0] ?? "";
-}
 
 /** The tint seed for a face on a mail: the sender's registrable DOMAIN, so every
  *  address at one organisation carries one colour — `notifications@linear.app` and
@@ -99,16 +78,7 @@ function domainName(domain: string): string {
  *  `fallback` is used when the mail carries no address at all (the mail's own id, so
  *  two nameless senders still differ). */
 export function mailAvatarSeed(address: MailAddress, fallback: string): string {
-  return registrableDomain(mailDomain(address.address)) || address.address || fallback;
-}
-
-/** True when a local part spells a PERSON's name: exactly two dot-separated words of
- *  letters, which is what a corporate mailbox looks like ("reva.singh"). Everything
- *  else — "no-reply", "security", "notifications", "adq_lab_eng" — names a function or
- *  a machine, and then the organisation is what a reader recognises. */
-function spellsAPersonName(local: string): boolean {
-  const words = local.split(".");
-  return words.length === 2 && words.every((word) => word.length >= 2 && /^[a-z]+$/i.test(word));
+  return registrableMailDomain(mailDomain(address.address)) || address.address || fallback;
 }
 
 /** The initials a face on a mail shows. The display name when the mail carries one.
@@ -118,10 +88,11 @@ function spellsAPersonName(local: string): boolean {
 export function mailAvatarInitials(address: MailAddress): string {
   const name = address.name.trim();
   if (name) return avatarInitials(name);
-  const at = address.address.lastIndexOf("@");
-  const local = at > 0 ? address.address.slice(0, at) : "";
-  if (spellsAPersonName(local)) return avatarInitials(local.replace(".", " "));
-  const label = domainName(mailDomain(address.address));
+  if (mailAddressSpellsAPerson(address.address)) {
+    const local = address.address.slice(0, address.address.lastIndexOf("@"));
+    return avatarInitials(local.replace(".", " "));
+  }
+  const label = mailDomainName(mailDomain(address.address));
   return avatarInitials(label || address.address);
 }
 
@@ -178,9 +149,9 @@ function photoKey(photo?: AvatarPhoto): string {
  * `undefined` (no fetch). Loads client-side only via an effect, so SSR always
  * renders the initials and hydration is stable.
  */
-function useAvatarPhoto(photo?: AvatarPhoto): string | null {
+function useAvatarPhoto(photo?: AvatarPhoto): AvatarPicture | null {
   const controller = useController();
-  const [src, setSrc] = useState<string | null>(null);
+  const [src, setSrc] = useState<AvatarPicture | null>(null);
   const key = photoKey(photo);
 
   useEffect(() => {
@@ -190,12 +161,15 @@ function useAvatarPhoto(photo?: AvatarPhoto): string | null {
     }
     let active = true;
     setSrc(null);
-    const loading =
-      photo.kind === "chat"
-        ? controller.loadAvatarPicture(photo.url)
-        : photo.kind === "address"
-          ? controller.loadAvatarForAddress(photo.address)
-          : controller.loadAvatar(photo.kind, photo.id);
+    // Only the address path can answer with something that is not a face: an address
+    // resolves either to a colleague's photo or to their organisation's mark.
+    const loading: Promise<AvatarPicture | null> =
+      photo.kind === "address"
+        ? controller.loadAvatarForAddress(photo.address)
+        : (photo.kind === "chat"
+            ? controller.loadAvatarPicture(photo.url)
+            : controller.loadAvatar(photo.kind, photo.id)
+          ).then((url) => (url ? { url, fit: "cover" } : null));
     loading
       .then((url) => {
         if (active) setSrc(url);
@@ -253,7 +227,12 @@ export function Avatar(props: {
   overrideSrc?: string;
 }) {
   const resolved = useAvatarPhoto(props.overrideSrc ? undefined : props.photo);
-  const photoUrl = props.overrideSrc ?? resolved;
+  // A face the user just picked is drawn like every other face — it fills the frame.
+  // Only a resolved address can answer with something that is not one (an
+  // organisation's mark), so only that path carries a fit of its own.
+  const picture: AvatarPicture | null = props.overrideSrc
+    ? { url: props.overrideSrc, fit: "cover" }
+    : resolved;
   const person = props.fallback === "person";
   const glyph =
     props.fallback === "meeting" || props.fallback === "group"
@@ -263,10 +242,17 @@ export function Avatar(props: {
   // A named person shows tinted initials (like Teams); the faceless coin is only
   // for a human we can't name (a bare MRI / phone number → avatarInitials → "?").
   const coin = person && initials === "?";
+  // An ORGANISATION's mark, rather than a face. It takes a rounded square: a favicon is
+  // a square logo, and a circle either clips its corners or shrinks it to the square
+  // that fits inside — and the shape then says "an organisation wrote this, not a
+  // person", which is exactly what the sender is. The radius transitions, so a row that
+  // starts on initials morphs instead of jumping when the mark lands.
+  const orgMark = picture?.fit === "contain";
   return (
     <span
       className={cn(
         "relative grid size-9 shrink-0 place-items-center overflow-hidden text-[13px] font-semibold",
+        "transition-[border-radius] duration-200",
         person ? "rounded-full" : "rounded-xl",
         // Initials sit on a tinted disc; a person coin brings its own gradient
         // background, so the tint is skipped only when a coin is what shows.
@@ -275,9 +261,13 @@ export function Avatar(props: {
         // Re-assert round after the caller's className so dense monogram stacks
         // (which pass rounded-md/lg) still get circular avatars.
         person && "rounded-full",
+        // …and re-assert the square last of all, because it wins over the shape the
+        // caller asked for: what is drawn is no longer a face.
+        orgMark && "rounded-[28%]",
       )}
       data-testid={glyph ? "avatar-glyph" : props.testId}
       data-fallback={glyph ? props.fallback : undefined}
+      data-org-mark={orgMark ? "true" : undefined}
       aria-hidden
     >
       {coin ? (
@@ -290,13 +280,21 @@ export function Avatar(props: {
       ) : (
         initials
       )}
-      {photoUrl && (
+      {picture && (
         <img
-          src={photoUrl}
+          src={picture.url}
           alt=""
           loading="lazy"
           decoding="async"
-          className="absolute inset-0 size-full rounded-[inherit] object-cover animate-in fade-in duration-200"
+          data-fit={picture.fit}
+          className={cn(
+            "absolute inset-0 size-full rounded-[inherit] animate-in fade-in duration-200",
+            orgMark
+              ? // Whole, with a hair of margin, on the light tile a favicon is drawn
+                // for — a transparent dark mark would vanish on the dark theme.
+                "bg-white object-contain p-[9%]"
+              : "object-cover",
+          )}
           // If the blob fails to decode, drop it so the initials show through.
           onError={(e) => {
             e.currentTarget.style.display = "none";

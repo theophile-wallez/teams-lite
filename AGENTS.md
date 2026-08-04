@@ -285,19 +285,48 @@ must never write to it.
   attributed to an address that asked for it (matched on `email`, then
   `userPrincipalName`), because the wrong face on a name is worse than no face. The
   lookups are batched, so a screenful of mail costs one request.
-- **A sender the directory cannot name is drawn from its DOMAIN, and never fetched
-  from it.** No favicon, from the sender or through an icon service: the domain comes
-  from the mail, so a per-recipient subdomain (`mail.a1b2c3.example.com`) would turn
-  that fetch into the tracking pixel the sanitizer just removed, and a third-party icon
-  service would be told every domain that writes to the user. What the face says
-  instead is local and deterministic (`mailAvatarSeed` / `mailAvatarInitials` in
-  `web/src/components/avatar.tsx`): the tint is seeded by the REGISTRABLE domain, so
-  `notifications@linear.app` and `security@updates.linear.app` are one colour and one
-  sender, and the letters come from the display name, then from an address that spells
-  a person (`reva.singh` → RS), then from the organisation (`no-reply@sns.amazonaws.com`
-  → AM) — never from a local part every alert mailbox shares. It costs a colleague
-  nothing: measured on this tenant, every internal address the directory resolves has a
-  photo, and a photo covers the tint.
+- **A sender the directory cannot name is drawn from its DOMAIN.** Locally first
+  (`mailAvatarSeed` / `mailAvatarInitials` in `web/src/components/avatar.tsx`): the tint
+  is seeded by the REGISTRABLE domain, so `notifications@linear.app` and
+  `security@updates.linear.app` are one colour and one sender, and the letters come from
+  the display name, then from an address that spells a person (`reva.singh` → RS), then
+  from the organisation (`no-reply@sns.amazonaws.com` → AM) — never from a local part
+  every alert mailbox shares. It costs a colleague nothing: measured on this tenant,
+  every internal address the directory resolves has a photo, and a photo covers the tint.
+- **And its real mark is fetched from its own domain — the ONE request this app makes to
+  a stranger's server.** `sender_icon` (`src/sender_icon.rs`) GETs
+  `https://{domain}/favicon.ico`, then `/apple-touch-icon.png`; 11 of the 18 domains that
+  write to this mailbox answer, and the rest keep the tinted initials
+  (`examples/sender_icon_probe.rs` measures both halves, and reading a home page's
+  `<link rel="icon">` was measured too and rejected — without a real parser it mistook a
+  stylesheet for an icon). A favicon request is a request to the SENDER, so five rails
+  hold it apart from the tracking pixel `mail_html` strips out of the body, and
+  `the_sender_icon_handler_checks_every_rail_before_the_network` scans the handler for
+  every one of them:
+  - **Only the registrable domain is ever requested.** A per-recipient host
+    (`mail.a1b2c3.example.com`) is reduced to `example.com` before anything is fetched,
+    so the token that would identify this reader never reaches the wire. Verified live.
+  - **Once per organisation, ever.** The answer — including "there is none" — lives in
+    `sender_icons`, so the number of requests is the number of organisations that write
+    to the user, not the number of mails they send.
+  - **The reader's behaviour is not in it.** The icon is asked for when a mail LIST
+    renders, never when a body is opened, so the request cannot say a mail was read.
+  - **Nothing about the mail travels**: no cookie, no referrer, no query, no mail id, no
+    address. And nothing is fetched for a HUMAN — an address that spells a person keeps
+    their initials (`mailAddressSpellsAPerson`), because an employer's logo on somebody's
+    message misattributes it.
+  - **It is a setting** (Settings › Sender icons, on by default), and a read-only backend
+    never fetches whatever the setting says: an automation must not touch a stranger's
+    server on the user's behalf.
+  Two more rails guard this machine rather than the user's privacy: the host must resolve
+  to a PUBLIC address (a hostile domain pointing at `169.254.169.254` would make this an
+  SSRF into the cloud metadata endpoint), and the bytes must sniff as a raster image
+  under a size cap — never SVG, and never on the strength of the content type the server
+  claimed. **A third-party icon service is not an alternative**: Google's or
+  DuckDuckGo's would be told the domain of every person who mails the user.
+  In the UI a mark is drawn on a rounded SQUARE while a face stays a circle, so the shape
+  says whether a person or a machine wrote — `web/mock/server.ts` synthesizes one per
+  domain, so the whole surface is reviewable with nothing leaving the machine.
 
 ## The calendar is READ-ONLY (MANDATORY — no exception, not even a sandbox)
 

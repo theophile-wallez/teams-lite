@@ -14,7 +14,7 @@
 // Methods: ping | conversations | channels | open | backfill | set_draft | send
 //          | edit | react | mark_read | notifications | read_receipts | fetch_media
 //          | fetch_avatar
-//          | profile | people_by_address | presence
+//          | profile | people_by_address | presence | sender_icon
 //          | get_settings | set_settings | set_always_available | enrich_link
 //          | push_status | push_subscribe | push_unsubscribe | push_test
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
@@ -2610,6 +2610,52 @@ function mockProfile(mri: string): MockProfile | { found: false } {
   };
 }
 
+/** The second-level labels that belong to a public suffix (mirrors
+ *  `sender_icon::registrable_domain` in the backend and `registrableMailDomain` in the
+ *  app — three copies of one notion, and the backend's is the one that decides what is
+ *  actually fetched). */
+const MOCK_SUFFIX_LABELS = new Set(["co", "com", "net", "org", "gov", "edu", "ac"]);
+
+/** The registrable part of a domain: "updates.tracker.dev" → "tracker.dev". */
+function registrableDomain(domain: string): string {
+  const labels = domain.split(".").filter(Boolean);
+  if (labels.length <= 2) return labels.join(".");
+  let index = labels.length - 2;
+  if (MOCK_SUFFIX_LABELS.has(labels[index]!)) index -= 1;
+  return labels.slice(index).join(".");
+}
+
+/** The icon of one organisation that mails the user — the mock half of `sender_icon`,
+ *  and it reaches no domain: it draws a square mark with the organisation's own letters
+ *  on a per-domain colour, which is what a favicon looks like once it is in the avatar.
+ *
+ *  A quarter of domains deterministically serve NONE (`found: false`), because that is
+ *  the real shape: measured over the domains that write to this mailbox, 7 in 18 answer
+ *  nothing usable, and the tinted initials have to stand there. `tracker.dev` is pinned
+ *  to serving one, so the two Tracker fixtures exercise the icon rather than the dice. */
+function mockSenderIcon(
+  domain: string,
+): { found: true; content_type: string; data_base64: string } | { found: false } {
+  if (domain !== "tracker.dev" && hashString(`icon:${domain}`) % 4 === 0) {
+    return { found: false };
+  }
+  const hue = hashString(domain) % 360;
+  const letters = (domain.split(".")[0] ?? domain).slice(0, 2).toUpperCase();
+  // Flat, edge-to-edge and square: a favicon has its own background, which is exactly
+  // why the avatar contains it instead of cropping it (see `AvatarPicture`).
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">` +
+    `<rect width="128" height="128" fill="hsl(${hue} 72% 46%)"/>` +
+    `<text x="64" y="82" text-anchor="middle" font-family="Arial, sans-serif" ` +
+    `font-size="58" font-weight="bold" fill="#ffffff">${letters}</text>` +
+    `</svg>`;
+  return {
+    found: true,
+    content_type: "image/svg+xml",
+    data_base64: Buffer.from(svg, "utf8").toString("base64"),
+  };
+}
+
 /** The person behind one MAIL ADDRESS, or `null` when the directory knows nobody by
  *  it — the mock half of `people_by_address`. A colleague's address resolves (which
  *  is what puts a real face on a mail), while a shared mailbox like
@@ -2678,6 +2724,10 @@ const mockSettings = {
   // Off, like the real backend's default. Here it is only a flag: the mock publishes
   // no presence at all, which is the whole point of driving the UI against it.
   always_available: false,
+  // ON, like the real backend's default (see `sender_icons_enabled` in
+  // src/bin/server.rs). Here it reaches no domain either: `mockSenderIcon` draws the
+  // mark, so the whole surface is exercised with nothing leaving the machine.
+  sender_icons: true,
 };
 
 /** Devices that "subscribed" to push notifications, keyed by endpoint (the real
@@ -2839,6 +2889,7 @@ function settingsView(): {
   linear_token_set: boolean;
   ghost_mode: boolean;
   always_available: boolean;
+  sender_icons: boolean;
 } {
   const host = mockSettings.gitlab_host.trim() || "gitlab.com";
   return {
@@ -2847,6 +2898,7 @@ function settingsView(): {
     linear_token_set: mockSettings.linear_token.length > 0,
     ghost_mode: mockSettings.ghost_mode,
     always_available: mockSettings.always_available,
+    sender_icons: mockSettings.sender_icons,
   };
 }
 
@@ -4188,6 +4240,14 @@ function dispatch(method: string, params: unknown): unknown {
       return mockProfile(mri);
     }
 
+    case "sender_icon": {
+      // The real backend reduces the domain to its registrable form before anything
+      // else, so the mock does too — a spec must see the same key the app will get.
+      const domain = requireString(params, "domain").trim().toLowerCase();
+      if (!mockSettings.sender_icons) return { found: false };
+      return mockSenderIcon(registrableDomain(domain));
+    }
+
     case "people_by_address": {
       const o = asObject(params);
       const addresses = Array.isArray(o.addresses)
@@ -4336,6 +4396,7 @@ function dispatch(method: string, params: unknown): unknown {
       if (typeof o.gitlab_token === "string") mockSettings.gitlab_token = o.gitlab_token.trim();
       if (typeof o.linear_token === "string") mockSettings.linear_token = o.linear_token.trim();
       if (typeof o.ghost_mode === "boolean") mockSettings.ghost_mode = o.ghost_mode;
+      if (typeof o.sender_icons === "boolean") mockSettings.sender_icons = o.sender_icons;
       return settingsView();
     }
 

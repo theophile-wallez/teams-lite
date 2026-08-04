@@ -48,6 +48,10 @@ import {
   formatCallDuration,
   mailFolderLabel,
   mailAddressLabel,
+  mailAddressSpellsAPerson,
+  mailDomain,
+  mailDomainName,
+  registrableMailDomain,
   mailSenderLabel,
   mailSubjectLabel,
   mailReceivedMs,
@@ -1604,6 +1608,38 @@ describe("mail display helpers", () => {
     expect(mailAddressLabel(address("Ada Lovelace", "ada@example.com"))).toBe("Ada Lovelace");
     expect(mailAddressLabel(address("", "ops@example.com"))).toBe("ops@example.com");
     expect(mailAddressLabel(address("", ""))).toBe("");
+  });
+
+  it("reduces a sender's host to the organisation behind it", () => {
+    // What the tint groups by, and what the backend is asked about — a subdomain is
+    // routing, so two of them are one sender (see `sender_icon::registrable_domain`).
+    expect(registrableMailDomain("updates.tracker.dev")).toBe("tracker.dev");
+    expect(registrableMailDomain("md.getsentry.com")).toBe("getsentry.com");
+    expect(registrableMailDomain("linear.app")).toBe("linear.app");
+    expect(registrableMailDomain("shop.example.co.uk")).toBe("example.co.uk");
+    // `mailDomain` takes the host as written; reducing it is the other helper's job.
+    expect(mailDomain("no-reply@sns.amazonaws.com")).toBe("sns.amazonaws.com");
+    expect(registrableMailDomain(mailDomain("no-reply@sns.amazonaws.com"))).toBe(
+      "amazonaws.com",
+    );
+    expect(mailDomainName("md.getsentry.com")).toBe("getsentry");
+    // Not an address: nothing to reduce, and nothing to ask.
+    expect(mailDomain("not-an-address")).toBe("");
+  });
+
+  it("tells an address that spells a person from one that names a machine", () => {
+    // One predicate decides both the initials of a nameless address and whether an
+    // organisation's mark may stand in for it — a company logo on a human's message
+    // would misattribute it.
+    expect(mailAddressSpellsAPerson("reva.singh@partner.example.org")).toBe(true);
+    expect(mailAddressSpellsAPerson("Alexandre.Agaud@example.com")).toBe(true);
+    expect(mailAddressSpellsAPerson("no-reply@sns.amazonaws.com")).toBe(false);
+    expect(mailAddressSpellsAPerson("security@updates.tracker.dev")).toBe(false);
+    expect(mailAddressSpellsAPerson("notifications@linear.app")).toBe(false);
+    expect(mailAddressSpellsAPerson("adq_lab_eng@example.com")).toBe(false);
+    expect(mailAddressSpellsAPerson("do.not.reply@example.com")).toBe(false);
+    expect(mailAddressSpellsAPerson("plat.114@example.com")).toBe(false);
+    expect(mailAddressSpellsAPerson("")).toBe(false);
   });
 
   it("names a sender by display name, then address, then a placeholder", () => {

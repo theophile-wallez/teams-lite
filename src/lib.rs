@@ -12,6 +12,7 @@ pub mod mail_html;
 pub mod push;
 pub mod push_policy;
 pub mod retry;
+pub mod sender_icon;
 pub mod teams;
 pub mod teams_activity;
 pub mod teams_avatars;

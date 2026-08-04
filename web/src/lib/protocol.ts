@@ -629,6 +629,12 @@ export type AppSettings = {
    *  it on, the backend registers this machine as an endpoint reporting Available and
    *  refreshes it, so every colleague sees the green dot until it is turned off. */
   always_available: boolean;
+  /** Sender icons: show the mark of the organisation a mail came from, fetched from
+   *  that organisation's own domain. ON by default, and the only setting here that is:
+   *  it is the one place the app requests something from a server nobody configured, so
+   *  it is a switch — the rails that make the request defensible live in
+   *  `src/sender_icon.rs`. Off means no such request is ever made. */
+  sender_icons: boolean;
 };
 
 /** A partial settings update. An omitted field is left unchanged, so one
@@ -640,6 +646,8 @@ export type SettingsPatch = {
   linearToken?: string;
   /** Turn Ghost mode on or off (see {@link AppSettings.ghost_mode}). */
   ghostMode?: boolean;
+  /** Turn sender icons on or off (see {@link AppSettings.sender_icons}). */
+  senderIcons?: boolean;
 };
 
 /** Kind discriminant for an enriched GitLab link (mirrors the Rust `LinkMetadata`
@@ -1800,6 +1808,67 @@ export function mailFolderLabel(folder: MailFolder): string {
  *  bare address, else nothing (an empty entry names nobody). */
 export function mailAddressLabel(address: MailAddress): string {
   return address.name || address.address || "";
+}
+
+/** A picture an avatar has loaded, and how it must be drawn. What the controller
+ *  answers for a mail address, since the two answers are drawn differently:
+ *   - "cover"   — a FACE, which fills the frame: a profile photo is a portrait, and
+ *     cropping it to the circle is what makes a column of them read as people;
+ *   - "contain" — an ORGANISATION's mark, which must not be cropped: a favicon is a
+ *     logo on its own background, often a wide one, so cover would cut its corners
+ *     off. It sits on a light tile with a margin, because a favicon is drawn for a
+ *     white page and a transparent dark mark would vanish on this app's dark theme. */
+export type AvatarPicture = { url: string; fit: "cover" | "contain" };
+
+/** Everything after the "@", lowercased — the organisation an address belongs to.
+ *  Empty when the string is not an address. */
+export function mailDomain(address: string): string {
+  const at = address.lastIndexOf("@");
+  return at > 0 ? address.slice(at + 1).trim().toLowerCase() : "";
+}
+
+/** The second-level labels that belong to a public suffix rather than to a name, so
+ *  "example.co.uk" keeps both. A short list on purpose: a real public-suffix list is a
+ *  megabyte of data to pick a colour and two letters with. */
+const SUFFIX_LABELS = new Set(["co", "com", "net", "org", "gov", "edu", "ac"]);
+
+/** The registrable part of a mail domain — its name plus the public suffix:
+ *  "md.getsentry.com" → "getsentry.com", "updates.tracker.dev" → "tracker.dev". What
+ *  sits in front of it is routing ("mail.", "notifications."), so this is what names the
+ *  organisation and what two subdomains of one sender share.
+ *
+ *  Mirrors `sender_icon::registrable_domain` in the backend, which re-derives it before
+ *  any request: this copy decides what the UI groups by, that one decides what is
+ *  actually fetched, and the backend's answer is the authoritative one. */
+export function registrableMailDomain(domain: string): string {
+  const labels = domain.split(".").filter(Boolean);
+  if (labels.length <= 2) return labels.join(".");
+  let index = labels.length - 2;
+  if (SUFFIX_LABELS.has(labels[index]!)) index -= 1;
+  return labels.slice(index).join(".");
+}
+
+/** The label inside a mail domain a reader recognises: "md.getsentry.com" →
+ *  "getsentry", "linear.app" → "linear". */
+export function mailDomainName(domain: string): string {
+  return registrableMailDomain(domain).split(".")[0] ?? "";
+}
+
+/** True when an address spells a PERSON's name: its local part is exactly two
+ *  dot-separated words of letters, which is what a corporate mailbox looks like
+ *  ("reva.singh@partner.example.org"). Everything else — "no-reply", "security",
+ *  "notifications", "adq_lab_eng" — names a function or a machine.
+ *
+ *  ONE predicate for two decisions, and that is the point: it picks the initials a
+ *  nameless address shows (the person, not their organisation), and it decides whether
+ *  an organisation's mark may be drawn at all. A company logo on a human's message
+ *  misattributes it, and asking that company's server about a person we are not going to
+ *  draw would be a request for nothing. */
+export function mailAddressSpellsAPerson(address: string): boolean {
+  const at = address.lastIndexOf("@");
+  const local = at > 0 ? address.slice(0, at) : "";
+  const words = local.split(".");
+  return words.length === 2 && words.every((word) => word.length >= 2 && /^[a-z]+$/i.test(word));
 }
 
 /** Who a mail is from, for the list and the reading pane: the display name when

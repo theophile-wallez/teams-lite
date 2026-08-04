@@ -29,7 +29,11 @@ import {
   shouldNotify,
   trimHistoryPage,
   mergeCalendarWindow,
+  mailAddressSpellsAPerson,
+  mailDomain,
+  registrableMailDomain,
   type AddressPerson,
+  type AvatarPicture,
   type AppSettings,
   type BrokerStatus,
   type CalendarEvent,
@@ -485,6 +489,10 @@ function initialState(): AppState {
       linear_token_set: false,
       ghost_mode: false,
       always_available: false,
+      // On, like the backend's own default (see `sender_icons_enabled`): the switch
+      // must not read "off" for the moment before the settings land, or the user would
+      // be told no icon is fetched while one is.
+      sender_icons: true,
     },
     push: INITIAL_PUSH_STATE,
     agent: null,
@@ -2321,15 +2329,44 @@ export class TeamsController {
     });
   }
 
-  /** Resolve the profile photo of whoever a MAIL ADDRESS belongs to, as a local blob
-   *  object URL. Two steps, each cached on its own: the address resolves to a person
-   *  through the directory, then that person's MRI takes the ordinary photo path — so
-   *  a colleague who writes from two addresses is fetched once, and a sender the
-   *  directory does not know (an external one, a distribution list, a shared mailbox)
-   *  resolves to `null` and keeps their tinted initials. */
-  async loadAvatarForAddress(address: string): Promise<string | null> {
+  /** The picture for one MAIL ADDRESS: a face when the directory knows the person, else
+   *  the mark of the organisation the address belongs to.
+   *
+   *  Three steps, each cached on its own. The address resolves to a person through the
+   *  directory; that person's MRI takes the ordinary photo path, so a colleague who
+   *  writes from two addresses is fetched once. An address the directory cannot name —
+   *  Sentry, Linear, a distribution list — falls through to its domain's own icon
+   *  (see `loadSenderIcon`), which is the mark a reader of that mail already knows.
+   *  When neither answers, the tinted initials the caller already draws stand. */
+  async loadAvatarForAddress(address: string): Promise<AvatarPicture | null> {
     const person = await this.loadAddressPerson(address);
-    return person?.mri ? this.loadAvatar("user", person.mri) : null;
+    if (person?.mri) {
+      const url = await this.loadAvatar("user", person.mri);
+      return url ? { url, fit: "cover" } : null;
+    }
+    // A HUMAN the directory could not name — an external colleague, someone who left —
+    // keeps their initials. Their employer's logo would misattribute a message they
+    // wrote, and asking that employer's server about them would be a request made for
+    // a picture we were never going to draw.
+    if (mailAddressSpellsAPerson(address)) return null;
+    const url = await this.loadSenderIcon(registrableMailDomain(mailDomain(address)));
+    return url ? { url, fit: "contain" } : null;
+  }
+
+  /** Resolve one organisation's icon to a local blob object URL, through the backend —
+   *  which is where every rail on that request lives (`src/sender_icon.rs`): the domain
+   *  is reduced to its registrable form, the answer is remembered per domain so a
+   *  server is asked once rather than once per mail, a read-only backend never asks,
+   *  and the user can turn the whole thing off.
+   *
+   *  Asked for by a mail LIST rather than by opening a body, which is deliberate: the
+   *  request must not be able to say that a mail was read. */
+  loadSenderIcon(domain: string): Promise<string | null> {
+    if (!domain || !domain.includes(".")) return Promise.resolve(null);
+    return this.cacheAvatar(`icon:${domain}`, async () => {
+      const res = await this.backend.senderIcon(domain);
+      return res.found && res.data_base64 ? res : null;
+    });
   }
 
   /** Resolve one mail address to the person the directory knows behind it, or `null`

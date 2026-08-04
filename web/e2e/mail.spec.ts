@@ -312,6 +312,53 @@ test.describe("mail", () => {
     await expect(tracker).toHaveText("TR");
   });
 
+  test("wears an organisation's own mark for a sender the directory cannot name", async ({
+    page,
+  }) => {
+    // The mark is fetched from that organisation's domain, once per organisation, and
+    // the backend holds every rail on that request (src/sender_icon.rs). What this pins
+    // is the surface: an organisation shows its mark on a SQUARE — a favicon is a square
+    // logo, and the shape says a machine wrote this — while a person stays a circle.
+    await gotoApp(page);
+    await openMailTab(page);
+
+    const rowFor = (subject: string) =>
+      page.locator('[data-testid="mail-row"]', { hasText: subject }).first();
+    const markOf = (subject: string) =>
+      rowFor(subject).locator('[data-testid="mail-avatar"][data-org-mark="true"]');
+
+    // Both Tracker mails carry the mark of tracker.dev, though they were sent from two
+    // different subdomains: the domain is reduced before it is ever asked about.
+    for (const subject of ["3 issues moved to In Review", "rotate your PAT", "Weekly digest"]) {
+      await expect(markOf(subject)).toBeVisible({ timeout: 10_000 });
+      await expect(markOf(subject).locator("img")).toHaveAttribute("data-fit", "contain");
+    }
+
+    // A person is never given their organisation's mark: a colleague has a face, and
+    // one shared logo down a column of colleagues would say nothing at all.
+    const person = rowFor("Re: mail rendering").locator('[data-testid="mail-avatar"]');
+    await expect(person).toBeVisible();
+    await expect(person).not.toHaveAttribute("data-org-mark", "true");
+  });
+
+  test("asks no sender's domain anything once the setting is off", async ({ page }) => {
+    // The switch is the user's, and what it turns off is the only request this app makes
+    // to a server nobody configured. With it off no mark may appear at all.
+    await gotoApp(page);
+    await page.locator('[data-testid="open-settings"]').click();
+    await expect(page.locator('[data-testid="settings-pane"]')).toBeVisible();
+    const toggle = page.locator('[data-testid="sender-icon-toggle"]');
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+
+    await openMailTab(page);
+    await expect(page.locator('[data-testid="mail-row"]').first()).toBeVisible();
+    // Give the list the time it would have needed to draw one.
+    await page.waitForTimeout(1_000);
+    await expect(page.locator('[data-org-mark="true"]')).toHaveCount(0);
+  });
+
   test("shows a new mail as it arrives", async ({ page }) => {
     await gotoApp(page);
     await openMailTab(page);

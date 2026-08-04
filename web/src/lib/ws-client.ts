@@ -594,6 +594,19 @@ export class Backend {
     );
   }
 
+  /** Fetch the icon of an ORGANISATION that mails the user, for a sender the Teams
+   *  directory cannot name. The backend holds every rail on that request (it is the
+   *  only one aimed at a server nobody here configured — see `src/sender_icon.rs`) and
+   *  answers `found: false` for a domain that serves none, which is most of the tail. */
+  senderIcon(
+    domain: string,
+  ): Promise<{ found: boolean; content_type?: string; data_base64?: string }> {
+    return this.request<{ found: boolean; content_type?: string; data_base64?: string }>(
+      "sender_icon",
+      { domain },
+    );
+  }
+
   /** Fetch one person's directory card — name, job title, department, email, work
    *  location — for the card shown on hovering their name. `found` is false when
    *  the directory knows nobody by this MRI, so the caller keeps the name it has.
@@ -772,6 +785,7 @@ export class Backend {
     if (patch.gitlabToken !== undefined) params.gitlab_token = patch.gitlabToken;
     if (patch.linearToken !== undefined) params.linear_token = patch.linearToken;
     if (patch.ghostMode !== undefined) params.ghost_mode = patch.ghostMode;
+    if (patch.senderIcons !== undefined) params.sender_icons = patch.senderIcons;
     return this.writeRequest<AppSettings>("set_settings", params);
   }
   /** Turn "Always available" on or off, which publishes the user's OWN presence:

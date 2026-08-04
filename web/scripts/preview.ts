@@ -1071,7 +1071,9 @@ if (import.meta.main) {
   if (args.includes("--mail")) {
     await withPreview(async ({ page, shot, setTheme }) => {
       await openMailTab(page);
-      await shot(`${out}-list-light.png`);
+      // `--element` crops this one too, which is how a 36px sender face is reviewed
+      // (e.g. --element '[data-testid="mail-avatar"]' --dpr 4).
+      await shot(`${out}-list-light.png`, element);
       await openFirstMail(page);
       await shot(`${out}-light.png`);
       // The second fixture is the interesting one to look at: file attachments

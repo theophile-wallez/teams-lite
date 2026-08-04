@@ -10,6 +10,7 @@ import {
   GhostIcon,
   GitPullRequestArrowIcon,
   Loading02Icon,
+  Mail01Icon,
   Moon02Icon,
   Settings02Icon,
   Sun03Icon,
@@ -78,6 +79,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
           <GitLabSettings />
           <LinearSettings />
           <GhostModeSettings />
+          <SenderIconSettings />
           <AlwaysAvailableSettings />
           <RenamedPeopleSettings />
           <NotificationSettings />
@@ -450,6 +452,101 @@ function GhostModeSettings() {
 
       {error && (
         <span data-testid="ghost-mode-error" className="text-xs text-destructive">
+          {error}
+        </span>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Sender icons — the mark of the organisation a mail came from.
+ *
+ * ON by default, and the only switch here that is: a mail from a colleague shows their
+ * real photo, while a mail from Sentry or Linear has no directory entry at all, and its
+ * own favicon is the mark the reader already knows.
+ *
+ * It is a switch because it is the one place this app requests something from a server
+ * nobody here configured. What makes that defensible is not this toggle but the rails in
+ * `src/sender_icon.rs`: only the registrable domain is ever asked for, so a
+ * per-recipient subdomain never reaches the wire; the answer is remembered per
+ * organisation, so a server is asked once rather than once per mail; and the request is
+ * made when a LIST renders, never when a body is opened, so it cannot say a mail was
+ * read. The copy below says exactly that, because a setting whose cost the user cannot
+ * read is a setting they cannot judge.
+ */
+function SenderIconSettings() {
+  const controller = useController();
+  const enabled = useAppState((s) => s.settings.sender_icons);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await controller.saveSettings({ senderIcons: !enabled });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="flex flex-col gap-4" data-testid="sender-icon-settings">
+      <div className="flex items-start gap-3">
+        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
+          <HugeiconsIcon icon={Mail01Icon} className="size-5" strokeWidth={1.5} />
+        </div>
+        <div className="flex flex-col">
+          <h3 className="text-[15px] font-medium text-foreground">Sender icons</h3>
+          <p className="text-[13px] text-text-faint">
+            Show the mark of the organisation a mail came from, for a sender the Teams
+            directory cannot name. It is fetched once per organisation from that
+            organisation's own domain — never per mail, and never when a message is
+            opened, so it cannot tell a sender their mail was read.
+          </p>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4 shadow-chip">
+        <div className="flex min-w-0 flex-col">
+          <span className="text-[13px] font-medium text-foreground">
+            Load a sender's icon
+          </span>
+          <span className="text-[11px] text-text-faint">
+            {enabled
+              ? "On — the mail list asks each new domain once"
+              : "Off — no request ever leaves for a sender's domain"}
+          </span>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label="Sender icons"
+          data-testid="sender-icon-toggle"
+          disabled={busy}
+          onClick={() => void toggle()}
+          className={cn(
+            "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+            busy && "opacity-60",
+            enabled ? "bg-primary" : "bg-element",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
+              enabled ? "translate-x-[22px]" : "translate-x-0.5",
+            )}
+          />
+        </button>
+      </div>
+
+      {error && (
+        <span data-testid="sender-icon-error" className="text-xs text-destructive">
           {error}
         </span>
       )}
