@@ -68,11 +68,17 @@ export function agentRunIsLive(run: AgentRun | null | undefined): boolean {
  *
  * A run ends with a `done`/`error` frame, so this only catches the case where that
  * frame never comes: the backend was killed mid-run, or the socket dropped and came
- * back. Comfortably past `agent::RUN_TIMEOUT` (10 minutes), which is when the backend
- * itself gives up on a wedged CLI — so a legitimately slow run is never dropped from
- * under the user, and a lost one does not leave a bubble writing forever.
+ * back.
+ *
+ * It counts MISSED FRAMES, not run time: a live run repeats its latest frame every
+ * 15 seconds while it is quiet (`AGENT_STREAM_KEEPALIVE` in src/bin/server.rs), so eight
+ * missed beats is a backend that is gone and nothing else. A run itself has no such
+ * budget — a question that needs an hour of tool calls gets it (`agent::RUN_IDLE_TIMEOUT`)
+ * — and this window must never be read as one: it used to sit just past a ten-minute cap
+ * on the whole run, and raising that cap without the keepalive would have made the bubble
+ * give up on runs that were still writing.
  */
-export const AGENT_RUN_STALE_MS = 11 * 60 * 1000;
+export const AGENT_RUN_STALE_MS = 2 * 60 * 1000;
 
 /** Whether a run is too old to be believed (see {@link AGENT_RUN_STALE_MS}). */
 export function agentRunIsStale(run: AgentRun, nowMs: number): boolean {

@@ -204,10 +204,26 @@ pub const SETTING_WORKSPACE: &str = "agent_workspace";
 /// follow-up question continues the same conversation with the model.
 pub const SETTING_SESSION_PREFIX: &str = "agent_session:";
 
-/// How long one run may take before the child is killed. Long enough for a real
-/// question with a few tool calls, short enough that a wedged CLI does not leave a
-/// "working…" message in a channel forever.
-pub const RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// How long the CLI may say NOTHING AT ALL before the child is killed.
+///
+/// This is a liveness check, not a budget: a run that keeps emitting events — a token,
+/// a tool starting, a tool finishing — lives as long as the work takes. A wall-clock cap
+/// cannot tell a wedged CLI from a real piece of work, so it killed the second one to
+/// catch the first: a question that needed forty minutes of tool calls was cut at ten,
+/// mid-answer, and the thread got the failure of a run that was working.
+///
+/// The window is wide because silence is normal: one tool call can be a build or a test
+/// suite, and the CLI reports nothing while it runs. What it must stay narrower than is
+/// the patience of the person watching the message.
+pub const RUN_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// The backstop: how long one run may last however talkative it is.
+///
+/// [`RUN_IDLE_TIMEOUT`] catches a CLI that stopped; this catches one that never stops —
+/// a loop that calls a tool, prints a token and calls it again would otherwise hold a
+/// live run, and its marker, for as long as the machine is up. Hours rather than
+/// minutes, because reaching it is a bug and not a long question.
+pub const RUN_MAX_DURATION: Duration = Duration::from_secs(8 * 3600);
 
 /// How much answer is kept in memory. A runaway CLI that prints megabytes gets
 /// truncated here rather than in the store.
@@ -364,7 +380,8 @@ fn which_program(program: &str) -> Option<PathBuf> {
 
 /// Run the agent, reporting the answer-so-far on `progress`.
 ///
-/// Returns when the child exits, or fails after [`RUN_TIMEOUT`] with the child killed.
+/// Returns when the child exits. It fails with the child killed when the CLI goes
+/// silent for [`RUN_IDLE_TIMEOUT`], or when the whole run passes [`RUN_MAX_DURATION`].
 /// A non-zero exit with no answer at all is an error carrying the tail of stderr,
 /// because "the agent said nothing" is not something to post to a channel.
 ///
@@ -419,15 +436,15 @@ async fn run_once(request: &Request, progress: &watch::Sender<Progress>) -> Resu
     let stderr = child.stderr.take().context("the agent has no stderr")?;
     let stderr_tail = tokio::spawn(read_tail(stderr));
 
-    let harvest = harvest(request.backend, stdout, progress);
-    let outcome = match tokio::time::timeout(RUN_TIMEOUT, harvest).await {
+    let harvest = harvest(request.backend, stdout, RUN_IDLE_TIMEOUT, progress);
+    let outcome = match tokio::time::timeout(RUN_MAX_DURATION, harvest).await {
         Ok(result) => result?,
         Err(_) => {
             child.kill().await.ok();
             anyhow::bail!(
-                "{} ran longer than {} minutes and was stopped",
+                "{} ran for {} hours and was stopped",
                 request.backend.name,
-                RUN_TIMEOUT.as_secs() / 60
+                RUN_MAX_DURATION.as_secs() / 3600
             );
         }
     };
@@ -524,17 +541,29 @@ fn model_of(request: &Request) -> Option<&str> {
 }
 
 /// Read the child's JSON event stream, updating `progress` as the answer grows.
-async fn harvest(
+///
+/// Fails when `idle` passes with no line at all: the wait is per LINE rather than over
+/// the whole run, so the deadline moves forward on every event the CLI emits and only a
+/// CLI that stopped talking hits it (see [`RUN_IDLE_TIMEOUT`]).
+///
+/// Generic over the reader so a test can drive it with a pipe: the idle rule is the one
+/// thing here that decides whether a run lives, and a rule nothing can exercise without
+/// a child process is a rule nobody checks.
+async fn harvest<R>(
     backend: &Backend,
-    stdout: tokio::process::ChildStdout,
+    stdout: R,
+    idle: Duration,
     progress: &watch::Sender<Progress>,
-) -> Result<Outcome> {
+) -> Result<Outcome>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let mut lines = BufReader::new(stdout).lines();
     let mut answer = Answer::default();
     let mut outcome = Outcome::default();
     let mut last_sent = Progress::default();
 
-    while let Some(line) = lines.next_line().await.context("read the agent's output")? {
+    while let Some(line) = next_line_before(&mut lines, idle, backend).await? {
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue; // a log line, a banner: not our business
         };
@@ -561,6 +590,28 @@ async fn harvest(
         outcome.text = answer.text();
     }
     Ok(outcome)
+}
+
+/// The next line of the child's output, or an error when `idle` passes without one.
+///
+/// The message names the silence rather than a budget, because that is what the reader
+/// of the thread has to act on: the CLI stopped, and asking again is the way out.
+async fn next_line_before<R>(
+    lines: &mut tokio::io::Lines<BufReader<R>>,
+    idle: Duration,
+    backend: &Backend,
+) -> Result<Option<String>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    match tokio::time::timeout(idle, lines.next_line()).await {
+        Ok(line) => line.context("read the agent's output"),
+        Err(_) => anyhow::bail!(
+            "{} said nothing for {} minutes and was stopped",
+            backend.name,
+            idle.as_secs() / 60
+        ),
+    }
 }
 
 /// One thing an event tells us.
@@ -1567,6 +1618,53 @@ mod tests {
         let (progress, _rx) = watch::channel(Progress::default());
         let error = run(&request, &progress).await.expect_err("both attempts fail");
         assert!(error.to_string().contains("without saying anything"), "{error}");
+    }
+
+    /// A run is stopped by SILENCE, never by how long the work takes.
+    ///
+    /// This is what [`RUN_IDLE_TIMEOUT`] buys: the stream below takes four times the
+    /// idle window to arrive, one event at a time, and every event pushes the deadline
+    /// back. The cap this code held before was over the whole run, so it cut a question
+    /// that needed forty minutes of tool calls at ten — half way, and in front of
+    /// everybody in the thread.
+    #[tokio::test(start_paused = true)]
+    async fn a_run_that_keeps_talking_is_never_cut_short() {
+        let idle = Duration::from_secs(60);
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let feed = tokio::spawn(async move {
+            for _ in 0..4 {
+                tokio::time::sleep(idle - Duration::from_secs(1)).await;
+                writer.write_all(format!("{CLAUDE_DELTA}\n").as_bytes()).await.unwrap();
+            }
+            // Dropping the pipe is the child exiting.
+        });
+        let (progress, _rx) = watch::channel(Progress::default());
+        let outcome = harvest(CLAUDE, reader, idle, &progress).await.expect("the run finishes");
+        feed.await.unwrap();
+        assert_eq!(outcome.text, "elloelloelloello");
+    }
+
+    /// And a CLI that stopped talking IS stopped, so the thread does not keep a
+    /// "thinking…" message in front of a program that will never answer.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_run_is_stopped_after_the_idle_window() {
+        let idle = Duration::from_secs(120);
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        writer.write_all(format!("{CLAUDE_DELTA}\n").as_bytes()).await.unwrap();
+        // `writer` is held, so the pipe stays open and silent: a wedged CLI, not one
+        // that exited.
+        let (progress, _rx) = watch::channel(Progress::default());
+        let error =
+            harvest(CLAUDE, reader, idle, &progress).await.expect_err("the silence stops it");
+        assert!(error.to_string().contains("said nothing for 2 minutes"), "{error}");
+    }
+
+    #[test]
+    fn the_backstop_is_far_above_the_idle_window() {
+        // Two different jobs: the idle window catches a CLI that stopped, the backstop
+        // catches one that never stops. A backstop near the idle window would take the
+        // first one's job and cut a long, talkative run.
+        assert!(RUN_MAX_DURATION >= RUN_IDLE_TIMEOUT * 8, "{RUN_MAX_DURATION:?}");
     }
 
     #[tokio::test]

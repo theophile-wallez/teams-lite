@@ -224,6 +224,26 @@ Five more things worth knowing before touching it:
 - **The reply signs itself.** The message is posted under the user's name, so the last
   line says a machine wrote it (`— claude, via teams-lite`). That is honesty about
   authorship, not decoration.
+- **A run is bounded by SILENCE, not by a clock.** A question that needs an hour of tool
+  calls gets the hour: the child is killed when the CLI emits nothing at all for
+  `agent::RUN_IDLE_TIMEOUT` (30 min), and the deadline moves forward on every event, so
+  only a CLI that stopped ever hits it. `RUN_MAX_DURATION` (8 h) is the backstop for the
+  opposite failure — a loop that never stops talking — and is never the cap on real work.
+  A wall-clock cap on the whole run was the first design and it was wrong: it cut a
+  40-minute question at 10 minutes, mid-answer, and the thread was told the run failed.
+  Three numbers follow from that and must move together:
+  - **The page counts missed frames, never run time.** A quiet run repeats its latest
+    frame every `AGENT_STREAM_KEEPALIVE` (15 s, `agent_stream_local`), so
+    `AGENT_RUN_STALE_MS` (2 min) is eight missed beats — a backend that is gone. That is
+    what lets a bubble follow an hour-long run without ever giving up on it, and
+    `the_pages_staleness_window_is_several_keepalives_wide` pins the pair across the
+    socket.
+  - **The store heartbeat is the same idea, for the other reader** (see below): a beat
+    every 5 s, abandoned after 60, so a run reading files in silence is never mistaken
+    for a dead one.
+  - **The restart waits longer than a run is likely to take** — 40 minutes
+    (`AGENT_WAIT_SECONDS`), because a wait shorter than a run kills exactly the long
+    answers the wait exists to protect.
 - **A run does not survive its process, so a restart is handled on both sides.** The
   child dies with the backend, the final edit never goes out, and the thread keeps the
   `claude is thinking…` placeholder — for everybody in it, for good. It happened: a

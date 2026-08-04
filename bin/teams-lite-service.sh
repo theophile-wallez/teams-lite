@@ -84,14 +84,16 @@ INTUNE_CONTAINER="${INTUNE_CONTAINER:-$(command -v intune-container || echo "$HO
 AGENT_PATH="${TEAMS_LITE_AGENT_PATH:-$HOME/.local/bin:$HOME/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 
 # Where a live agent run publishes its marker (`agent_run_marker_dir` in
-# src/bin/server.rs), and how long a restart waits for one. Ten minutes is over the
-# longest run seen against the real tenant; past it the restart proceeds, because the
-# staged commit must reach the user's phone and the abandoned reply is closed by the
-# backend that comes up.
+# src/bin/server.rs), and how long a restart waits for one. Forty minutes, because a run
+# is bounded by SILENCE and not by a clock (`agent::RUN_IDLE_TIMEOUT`): a question that
+# needs an hour of tool calls gets it, so a ten-minute wait here would kill the long runs
+# this wait exists to protect. Past it the restart proceeds, because the staged commit
+# must reach the user's phone and the abandoned reply is closed by the backend that comes
+# up.
 # No runtime directory means no markers are published at all (see the Rust side), so the
 # variable stays empty rather than naming a path at the root that can never exist.
 AGENT_RUN_DIR="${TEAMS_LITE_AGENT_RUN_DIR:-${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/teams-lite/agent-runs}}"
-AGENT_WAIT_SECONDS="${TEAMS_LITE_AGENT_WAIT:-600}"
+AGENT_WAIT_SECONDS="${TEAMS_LITE_AGENT_WAIT:-2400}"
 
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }

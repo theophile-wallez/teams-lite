@@ -4453,6 +4453,15 @@ const AGENT_MAX_EDITS: usize = 100;
 /// web/src/components/agent-reply.tsx).
 const AGENT_STREAM_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How often a run repeats its latest frame while nothing changes.
+///
+/// The clock half of [`agent_stream_local`], and the client's counterpart of the store
+/// heartbeat: a run may spend half an hour inside ONE tool call (`agent::RUN_IDLE_TIMEOUT`
+/// is what bounds that), and a page hearing nothing for that long has to assume the
+/// backend died — which is what `AGENT_RUN_STALE_MS` in web/src/lib/agent-run.ts does.
+/// The keepalive is what tells a quiet run from a gone one, so that window can be short.
+const AGENT_STREAM_KEEPALIVE: Duration = Duration::from_secs(15);
+
 /// How often a live run says it is still writing, in the store and in its marker file.
 ///
 /// It has to keep ticking through a silent minute of tool calls, because its ABSENCE is
@@ -5046,13 +5055,23 @@ async fn agent_stream_edits(
 /// Returns when the runner drops its end of the channel. The terminal frame is NOT
 /// sent here: [`agent_run_to_completion`] sends it from the authoritative outcome, which
 /// is the only place that knows whether the run succeeded.
+///
+/// A frame also goes out every [`AGENT_STREAM_KEEPALIVE`] while nothing changes, because
+/// a client cannot tell a run reading files in silence from a backend that died mid-answer
+/// — and it must not drop a live run from under the user (see that constant).
 async fn agent_stream_local(
     ctx: &Ctx,
     command: &agent_policy::Command,
     message_id: &str,
     progress: &mut tokio::sync::watch::Receiver<agent::Progress>,
 ) {
-    while progress.changed().await.is_ok() {
+    loop {
+        let waited = tokio::time::timeout(AGENT_STREAM_KEEPALIVE, progress.changed()).await;
+        // A closed channel is the run ending; a timeout is a run that is merely quiet,
+        // and the frame below then repeats what it said last.
+        if matches!(waited, Ok(Err(_))) {
+            return;
+        }
         let current = progress.borrow_and_update().clone();
         ctx.emit(
             "agent_stream",
@@ -5942,6 +5961,35 @@ mod tests {
             "src/agent.rs must remove {WRITE_TOKEN_ENV} from the child's environment"
         );
         assert!(source.contains("env_remove(WRITE_TOKEN_ENV)"));
+    }
+
+    /// The page's staleness window must be several keepalives wide.
+    ///
+    /// The two numbers sit on opposite sides of the socket and only mean something
+    /// together: this backend repeats a quiet run's frame every
+    /// [`AGENT_STREAM_KEEPALIVE`], and the page drops a run it has not heard from in
+    /// `AGENT_RUN_STALE_MS`. Raise the keepalive past that window and the bubble stops
+    /// believing in runs that are still writing — which is the failure this pair
+    /// replaced, when the window was pinned to a ten-minute cap on the run itself.
+    #[test]
+    fn the_pages_staleness_window_is_several_keepalives_wide() {
+        let source = include_str!("../../web/src/lib/agent-run.ts");
+        let product = source
+            .split_once("export const AGENT_RUN_STALE_MS =")
+            .expect("the client's staleness window")
+            .1
+            .split_once(';')
+            .expect("one statement")
+            .0;
+        // Spelled as a product in the file (`2 * 60 * 1000`), so read it as one.
+        let stale_ms: u128 = product
+            .split('*')
+            .map(|factor| factor.trim().parse::<u128>().expect("a product of integers"))
+            .product();
+        assert!(
+            stale_ms >= 4 * AGENT_STREAM_KEEPALIVE.as_millis(),
+            "{stale_ms} ms is under four keepalives"
+        );
     }
 
     #[test]
