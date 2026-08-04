@@ -8,7 +8,13 @@
 import { spawn } from "bun";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { backendUrl, ensureBackend, isCompiledBinary, repoRoot } from "./backend";
+import {
+  backendUrl,
+  ensureBackend,
+  isCompiledBinary,
+  repoRoot,
+  WRITE_TOKEN_ENV,
+} from "./backend";
 import { handleBackendEvent, spawnDetached } from "./update";
 
 export type LaunchOptions = {
@@ -185,6 +191,12 @@ export async function launch(options: LaunchOptions): Promise<void> {
   //    spawn it with idle-exit disabled so closing/reloading the browser doesn't
   //    take the backend down between hot reloads.
   const backend = await ensureBackend({ keepAlive: options.dev });
+  // Hand our own frontend the token we pinned for that backend. It has to be in the
+  // environment before anything serves the write-token route (web/write-token.ts reads
+  // the environment first, then the file), and it is what lets this instance run beside
+  // the always-on service: neither backend publishes over the other's token. Null means
+  // we attached to a backend that published its own, so the file is the right source.
+  if (backend.writeToken) process.env[WRITE_TOKEN_ENV] = backend.writeToken;
 
   // 2. Dev mode: hand off to Vite (HMR) instead of the built SSR server. Never
   //    returns — it runs until the Vite process exits.

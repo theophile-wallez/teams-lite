@@ -449,6 +449,17 @@ fn bind_addr() -> String {
 /// value to the backend and to the frontend it spawns.
 const WRITE_TOKEN_ENV: &str = "TEAMS_LITE_WRITE_TOKEN";
 
+/// Whether this process's token was PINNED by a parent instead of minted and published
+/// here. Set once, by `write_token`; read by the startup log, which must not name a file
+/// that does not hold this backend's token — and by nothing else, because the policy it
+/// records lives in `write_token`.
+static WRITE_TOKEN_PINNED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Was the token handed to us? False until [`write_token`] has resolved one.
+fn write_token_pinned() -> bool {
+    WRITE_TOKEN_PINNED.get().copied().unwrap_or(false)
+}
+
 /// THE WRITE LOCK.
 ///
 /// Reading this backend is open: any local client may list conversations and read
@@ -480,21 +491,42 @@ fn write_token() -> Option<&'static str> {
             if read_only() {
                 return None;
             }
-            let token = std::env::var(WRITE_TOKEN_ENV)
+            let pinned = std::env::var(WRITE_TOKEN_ENV)
                 .ok()
                 .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(mint_write_token);
-            if let Err(e) = publish_write_token(&token) {
-                // Enforce anyway. A lock that quietly opens itself when it can't
-                // publish is the failure we are fixing; a frontend that cannot
-                // send until this is resolved is loud, and recoverable.
-                eprintln!(
-                    "[write-lock] could not publish the write token ({e}) — writes will be \
-                     refused until a frontend can read it. Set {WRITE_TOKEN_ENV} in both the \
-                     backend and the frontend to work around a read-only runtime directory."
-                );
-            }
+                .filter(|t| !t.is_empty());
+            // A PINNED token is never published, and that absence is what lets two
+            // send-capable backends run side by side.
+            //
+            // The file is ONE path per machine (`write_token_path`), so a second backend
+            // that published would overwrite the first one's token — and the first one's
+            // frontend would then be handed a token its own backend refuses. Reads keep
+            // working, so the app looks healthy while every send comes back refused: the
+            // user's phone, on the always-on service, would stop being able to answer
+            // anybody the moment a second instance started.
+            //
+            // A pinned token needs no file anyway: the parent that pinned it hands the
+            // same value to the frontend it runs (see `launcher/src/backend.ts`), which is
+            // the whole point of the variable.
+            let _ = WRITE_TOKEN_PINNED.set(pinned.is_some());
+            let token = match pinned {
+                Some(token) => token,
+                None => {
+                    let token = mint_write_token();
+                    if let Err(e) = publish_write_token(&token) {
+                        // Enforce anyway. A lock that quietly opens itself when it can't
+                        // publish is the failure we are fixing; a frontend that cannot
+                        // send until this is resolved is loud, and recoverable.
+                        eprintln!(
+                            "[write-lock] could not publish the write token ({e}) — writes \
+                             will be refused until a frontend can read it. Set \
+                             {WRITE_TOKEN_ENV} in both the backend and the frontend to work \
+                             around a read-only runtime directory."
+                        );
+                    }
+                    token
+                }
+            };
             Some(token)
         })
         .as_deref()
@@ -1868,6 +1900,13 @@ async fn main() -> Result<()> {
     // token — never the token itself (it must not land in a log or a scrollback).
     match write_token() {
         None => eprintln!("[write-lock] read-only: {OUTWARD_METHODS:?} are refused"),
+        // A pinned token is in no file, on purpose: the parent that pinned it hands the
+        // same value to its own frontend, and publishing would overwrite the token of
+        // the other backend sharing this machine (see `write_token`).
+        Some(_) if write_token_pinned() => eprintln!(
+            "[write-lock] armed: {OUTWARD_METHODS:?} require the token pinned by our \
+             parent in {WRITE_TOKEN_ENV} — nothing was published"
+        ),
         Some(_) => match write_token_path() {
             Ok(path) => eprintln!(
                 "[write-lock] armed: {OUTWARD_METHODS:?} require the token at {}",
@@ -7878,6 +7917,47 @@ mod tests {
             "src/agent.rs must remove {WRITE_TOKEN_ENV} from the child's environment"
         );
         assert!(source.contains("env_remove(WRITE_TOKEN_ENV)"));
+    }
+
+    /// A PINNED token is never published, which is what lets two send-capable backends
+    /// share a machine.
+    ///
+    /// There is ONE token file per machine, so a second backend that published would
+    /// overwrite the first one's token — and the first one's own frontend would then be
+    /// handed a token its backend refuses. Nothing would look broken: reads keep working,
+    /// and only sends come back refused, which on the always-on service means the user's
+    /// phone silently losing the ability to answer anybody.
+    ///
+    /// The test reads this function's own source, because the failure is the ABSENCE of a
+    /// call on one branch and no unit test can observe a file the process did not write
+    /// without racing the real one at `$XDG_RUNTIME_DIR/teams-lite/write-token`.
+    #[test]
+    fn a_pinned_write_token_is_never_published() {
+        let source = include_str!("server.rs");
+        let body = source
+            .split("fn write_token() -> Option<&'static str> {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("write_token is defined once");
+        let published = body.matches("publish_write_token(").count();
+        assert_eq!(
+            published, 1,
+            "write_token must publish on exactly one branch — the one that MINTED the \
+             token. A pinned one belongs to the parent that handed it over, and \
+             publishing it would overwrite the other backend's token: {body}"
+        );
+        let pinned_arm = body
+            .split("let token = match pinned {")
+            .nth(1)
+            .expect("the pinned/minted split must stay explicit");
+        let pinned_first = pinned_arm
+            .split("None =>")
+            .next()
+            .expect("the Some arm comes first");
+        assert!(
+            !pinned_first.contains("publish_write_token"),
+            "the PINNED arm must publish nothing: {pinned_first}"
+        );
     }
 
     /// The page's staleness window must be several keepalives wide.

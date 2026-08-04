@@ -110,6 +110,25 @@ async function portOpen(): Promise<boolean> {
 /// name; the value is ours to state, because we are the only process that knows it.
 export const LAUNCHER_BIN_ENV = "TEAMS_LITE_LAUNCHER_BIN";
 
+/// Environment variable that PINS the backend's write token, so the parent hands the
+/// same value to the backend and to the frontend it serves (`WRITE_TOKEN_ENV` in
+/// src/bin/server.rs).
+export const WRITE_TOKEN_ENV = "TEAMS_LITE_WRITE_TOKEN";
+
+/// A write token of our own, for the backend we are about to spawn.
+///
+/// Two 128-bit UUIDs, hex, mirroring `mint_write_token` on the Rust side. It is minted
+/// HERE rather than left to the backend for one reason: a backend that mints its own
+/// PUBLISHES it, to one file per machine — so a second instance would overwrite the
+/// token of the first, and the first one's frontend would then be handed a token its own
+/// backend refuses. Reads would keep working while every send came back refused, which
+/// on the always-on service means the user's phone quietly losing the ability to answer
+/// anybody. A pinned token is never published (see `write_token` in src/bin/server.rs),
+/// so an instance started by `teams` costs the service nothing.
+export function mintWriteToken(): string {
+  return `${crypto.randomUUID()}${crypto.randomUUID()}`.replace(/-/g, "");
+}
+
 /// What we add to the backend's environment, and why each entry is there.
 ///
 /// `TEAMS_LITE_LAUNCHER_BIN` is what makes an in-app update possible at all: this
@@ -119,17 +138,26 @@ export const LAUNCHER_BIN_ENV = "TEAMS_LITE_LAUNCHER_BIN";
 /// makes the variable the backend's proof that a launcher is there to restart the app
 /// afterwards (see launcher/src/update.ts).
 ///
+/// `TEAMS_LITE_WRITE_TOKEN` pins the write lock's token (see `mintWriteToken`), and the
+/// caller hands the same value to the web server it runs in-process.
+///
 /// `TEAMS_NO_IDLE_EXIT` (dev only) keeps a spawned backend up across the frontend
 /// reloads a hot-reloading session produces.
-export function backendEnv(keepAlive: boolean): Record<string, string> {
+export function backendEnv(keepAlive: boolean, writeToken?: string): Record<string, string> {
   const env: Record<string, string> = {};
   if (isCompiledBinary()) env[LAUNCHER_BIN_ENV] = process.execPath;
+  if (writeToken) env[WRITE_TOKEN_ENV] = writeToken;
   if (keepAlive) env.TEAMS_NO_IDLE_EXIT = "1";
   return env;
 }
 
 export type BackendHandle = {
   stop: () => void;
+  /// The write token we pinned for the backend we SPAWNED, which the caller must hand to
+  /// its own frontend (see `mintWriteToken`). Null when we merely attached to a backend
+  /// somebody else started: that one published its own token, and the frontend reads it
+  /// from the file the way it always did.
+  writeToken: string | null;
   /// Resolves once the backend we spawned is really gone — not merely signalled.
   ///
   /// An in-app update needs that difference. `kill()` returns before the kernel has
@@ -150,16 +178,18 @@ export type BackendHandle = {
 /// we merely attach to a backend someone else already started.
 export async function ensureBackend(opts: { keepAlive?: boolean } = {}): Promise<BackendHandle> {
   if (await portOpen()) {
-    // Someone else owns it: neither ours to stop, nor ours to wait for.
-    return { stop: () => {}, waitForExit: () => Promise.resolve() };
+    // Someone else owns it: neither ours to stop, nor ours to wait for, and its token is
+    // its own — published to the file our frontend already reads.
+    return { stop: () => {}, waitForExit: () => Promise.resolve(), writeToken: null };
   }
 
   const bin = await backendBinary();
+  const writeToken = mintWriteToken();
   const proc: Subprocess = spawn([bin], {
     stdout: Bun.file("/tmp/teams-lite-server.log"),
     stderr: Bun.file("/tmp/teams-lite-server.log"),
     stdin: "ignore",
-    env: { ...process.env, ...backendEnv(opts.keepAlive === true) },
+    env: { ...process.env, ...backendEnv(opts.keepAlive === true, writeToken) },
   });
 
   // wait for it to bind (auth broker handshake can take a few seconds)
@@ -179,6 +209,7 @@ export async function ensureBackend(opts: { keepAlive?: boolean } = {}): Promise
       killChildOnExit(stop);
       return {
         stop,
+        writeToken,
         // `proc.exited` resolves when the kernel has reaped it, which is also when its
         // port is free — the one thing a relaunch has to wait for.
         waitForExit: async () => {

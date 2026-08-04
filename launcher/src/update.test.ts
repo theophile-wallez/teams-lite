@@ -1,7 +1,13 @@
 // The launcher's half of an in-app update: the restart, and what must never trigger it.
 import { describe, expect, test } from "bun:test";
 import { handleBackendEvent, relaunch, relaunchArgs, type RelaunchDeps } from "./update";
-import { backendEnv, isCompiledBinary, LAUNCHER_BIN_ENV } from "./backend";
+import {
+  backendEnv,
+  isCompiledBinary,
+  LAUNCHER_BIN_ENV,
+  mintWriteToken,
+  WRITE_TOKEN_ENV,
+} from "./backend";
 
 /** A relaunch that records what it was asked to do, in order. */
 function recordingDeps(overrides: Partial<RelaunchDeps> = {}) {
@@ -126,5 +132,21 @@ describe("backendEnv", () => {
   test("keepAlive is the only other thing it adds", () => {
     expect(backendEnv(true).TEAMS_NO_IDLE_EXIT).toBe("1");
     expect(backendEnv(false).TEAMS_NO_IDLE_EXIT).toBeUndefined();
+  });
+
+  // The token is PINNED so the backend we spawn publishes nothing — one file per machine
+  // means a second instance would overwrite the always-on service's token, and the
+  // service's own app would then be refused every send while reads kept working.
+  test("pins the write token when the caller minted one", () => {
+    expect(backendEnv(false, "tok")[WRITE_TOKEN_ENV]).toBe("tok");
+    expect(backendEnv(false)[WRITE_TOKEN_ENV]).toBeUndefined();
+  });
+});
+
+describe("mintWriteToken", () => {
+  test("is 64 hex characters, and a fresh one every time", () => {
+    const first = mintWriteToken();
+    expect(first).toMatch(/^[0-9a-f]{64}$/);
+    expect(mintWriteToken()).not.toBe(first);
   });
 });
