@@ -1160,6 +1160,67 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // Audio calling: the switch that is the consent, the button in a 1:1 header, a call
+  // ringing with a working Answer, and the bar while it is up.
+  //
+  // Nothing here registers anything or opens a microphone. The mock reproduces the
+  // signaling and the page uses `simulatedCallMedia` because the backend announced
+  // itself as a mock — which is what makes this surface reviewable with nothing leaving
+  // the machine (see web/mock/server.ts and src/lib/call-media.ts).
+  if (args.includes("--call")) {
+    await withPreview(async ({ page, shot, setTheme, emit }) => {
+      // 1. Off, which is the state a fresh backend is really in: the button is drawn
+      //    but disabled, and its tooltip says where to turn calling on.
+      await openConversation(page, "Ava Thompson");
+      await shot(`${out}-off-light.png`, '[data-testid="message-pane"] header');
+
+      // 2. The switch. Turning it on is the consent, so it is performed rather than
+      //    assumed — the same reason the agent's mode is switched on in its capture.
+      await openSettings(page);
+      const section = page.locator('[data-testid="calling-settings"]');
+      await section.waitFor();
+      await shot(`${out}-settings-light.png`, '[data-testid="calling-settings"]');
+      await page.locator('[data-testid="calling-toggle"]').click();
+      await page.waitForSelector('[data-testid="calling-state"]:has-text("registered")');
+      await shot(`${out}-settings-on-light.png`, '[data-testid="calling-settings"]');
+      await setTheme("dark");
+      await shot(`${out}-settings-on-dark.png`, '[data-testid="calling-settings"]');
+      await setTheme("light");
+
+      // 3. The header button, now live.
+      const conversationId = await openConversation(page, "Ava Thompson");
+      await shot(`${out}-button-light.png`, '[data-testid="message-pane"] header');
+
+      // 4. Ringing, with an Answer that works.
+      await emit({ kind: "call_invite", conversation: conversationId });
+      await page.waitForSelector('[data-testid="call-bar"][data-phase="ringing"]');
+      await page.waitForTimeout(300);
+      await shot(`${out}-ringing-light.png`);
+      await shot(`${out}-ringing-card-light.png`, '[data-testid="call-bar"]');
+      await setTheme("dark");
+      await shot(`${out}-ringing-card-dark.png`, '[data-testid="call-bar"]');
+      await setTheme("light");
+
+      // 5. Answered: the bar, the duration, mute.
+      await page.locator('[data-testid="call-answer"]').click();
+      await page.waitForSelector('[data-testid="call-bar"][data-phase="connected"]');
+      await page.waitForTimeout(1100);
+      await shot(`${out}-connected-card-light.png`, '[data-testid="call-bar"]');
+      await page.locator('[data-testid="call-mute"]').click();
+      await page.waitForSelector('[data-testid="call-mute"][aria-pressed="true"]');
+      await shot(`${out}-muted-card-light.png`, '[data-testid="call-bar"]');
+      await setTheme("dark");
+      await shot(`${out}-connected-card-dark.png`, '[data-testid="call-bar"]');
+      await page.locator('[data-testid="call-hangup"]').click();
+      console.log(
+        `[preview] wrote ${out}-off-light.png, ${out}-settings-{light,on-light,on-dark}.png, ` +
+          `${out}-button-light.png, ${out}-ringing-{light,card-light,card-dark}.png and ` +
+          `${out}-{connected-card-light,muted-card-light,connected-card-dark}.png`,
+      );
+    });
+    process.exit(0);
+  }
+
   // The Mail surface: the sidebar's Mail tab plus the reading pane, in both themes.
   if (args.includes("--mail")) {
     await withPreview(async ({ page, shot, setTheme }) => {

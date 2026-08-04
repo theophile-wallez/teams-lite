@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
   BellIcon,
+  CallIcon,
   CheckIcon,
   ChevronLeftIcon,
   CircleDotIcon,
@@ -81,6 +82,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
           <GhostModeSettings />
           <SenderIconSettings />
           <AlwaysAvailableSettings />
+          <CallingSettings />
           <RenamedPeopleSettings />
           <NotificationSettings />
           <AppearanceSettings />
@@ -452,6 +454,94 @@ function GhostModeSettings() {
 
       {error && (
         <span data-testid="ghost-mode-error" className="text-xs text-destructive">
+          {error}
+        </span>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Audio calling — whether this machine is a device the user's calls ring on.
+ *
+ * OFF by default, and the switch IS the consent: turning it on registers a calling
+ * endpoint with Teams, and their real incoming calls are then offered here as well as on
+ * their phone and their desktop client. Turning it off unregisters, so they stop being
+ * offered — a registration left behind would swallow calls into a client that is not
+ * listening.
+ *
+ * Two states are shown, not one. "On" is what the user asked for; "registered" is
+ * whether the connection is actually up, and it is the backend that says so. A switch
+ * that only showed the first would claim the user's calls ring here while nothing was
+ * listening.
+ */
+function CallingSettings() {
+  const controller = useController();
+  const status = useAppState((s) => s.callStatus);
+  const error = useAppState((s) => s.callError);
+  const [busy, setBusy] = useState(false);
+
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      await controller.setCallingEnabled(!status.enabled);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="flex flex-col gap-4" data-testid="calling-settings">
+      <div className="flex items-start gap-3">
+        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
+          <HugeiconsIcon icon={CallIcon} className="size-5" strokeWidth={1.5} />
+        </div>
+        <div className="flex flex-col">
+          <h3 className="text-[15px] font-medium text-foreground">Audio calls</h3>
+          <p className="text-[13px] text-text-faint">
+            Take and place one-to-one audio calls here. Turning this on tells Teams this
+            machine is a device you can be reached on, so your calls ring here too.
+          </p>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4 shadow-chip">
+        <div className="flex min-w-0 flex-col">
+          <span className="text-[13px] font-medium text-foreground">Ring on this machine</span>
+          <span data-testid="calling-state" className="text-[11px] text-text-faint">
+            {!status.enabled
+              ? "Off — calls are not offered here, and none can be placed"
+              : status.ready
+                ? "On — registered with Teams and ready"
+                : "On — connecting to the calling service…"}
+          </span>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={status.enabled}
+          aria-label="Audio calls"
+          data-testid="calling-toggle"
+          disabled={busy}
+          onClick={() => void toggle()}
+          className={cn(
+            "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+            busy && "opacity-60",
+            status.enabled ? "bg-primary" : "bg-element",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
+              status.enabled ? "translate-x-[22px]" : "translate-x-0.5",
+            )}
+          />
+        </button>
+      </div>
+
+      {error && (
+        <span data-testid="calling-error" className="text-xs text-destructive">
           {error}
         </span>
       )}

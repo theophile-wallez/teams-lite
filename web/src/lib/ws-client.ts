@@ -9,6 +9,7 @@
 
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import { BACKEND_WS_ROUTE } from "./backend-route";
+import type { CallPreparation, CallStatus } from "./call";
 import type { SendImage } from "./composer-image";
 import type { OutboundMention } from "./mentions";
 import type {
@@ -529,6 +530,63 @@ export class Backend {
       {},
     );
   }
+  // ---- audio calling ------------------------------------------------------
+  // Seven methods, and the split between them is the consent design: reading state
+  // is open, and every step that rings a person, opens the microphone or hands out
+  // the media credentials is a write request. See `./call.ts` and NATIVE-CALLING.md.
+
+  /** Whether this machine can take calls, and what call it is in. A read: it carries
+   *  no SDP and no credentials. */
+  callStatus(): Promise<CallStatus> {
+    return this.request<CallStatus>("call_status", {});
+  }
+  /** Turn calling on or off.
+   *
+   *  A WRITE request, and the consent gate for the whole feature: ON registers this
+   *  machine with Teams as a device the user's calls ring on, OFF unregisters it so they
+   *  stop being offered here (a `MACHINE_METHODS` entry, refused read-only). */
+  setCalling(enabled: boolean): Promise<CallStatus> {
+    return this.writeRequest<CallStatus>("set_calling", { enabled });
+  }
+  /** Reserve the one call this machine holds, and get what one `RTCPeerConnection`
+   *  needs.
+   *
+   *  Two shapes, one per direction: a conversation starts an outgoing call, a call id
+   *  prepares to answer the one that is ringing (and returns its offer). A WRITE
+   *  request because it hands out the relay credentials the backend holds. */
+  callPrepare(target: { conversation: string } | { callId: string }): Promise<CallPreparation> {
+    const params =
+      "conversation" in target
+        ? { conversation: target.conversation }
+        : { call_id: target.callId };
+    return this.writeRequest<CallPreparation>("call_prepare", params);
+  }
+  /** Place the call: one POST carrying our offer. This is what makes a device buzz in
+   *  somebody's pocket, so it is an `OUTWARD_METHODS` entry and carries out one click. */
+  callPlace(callId: string, sdp: string): Promise<{ call_id: string }> {
+    return this.writeRequest<{ call_id: string }>("call_place", { call_id: callId, sdp });
+  }
+  /** Answer the ringing call with our own SDP. Outward: it opens the user's microphone
+   *  to whoever is on the other end. */
+  callAccept(callId: string, sdp: string): Promise<{ call_id: string }> {
+    return this.writeRequest<{ call_id: string }>("call_accept", { call_id: callId, sdp });
+  }
+  /** End the call, or decline it while it is still ringing. Outward either way: the
+   *  other side is told. */
+  callHangup(callId: string): Promise<{ call_id: string; told_service: boolean }> {
+    return this.writeRequest<{ call_id: string; told_service: boolean }>("call_hangup", {
+      call_id: callId,
+    });
+  }
+  /** Publish whether the user can be heard. The page has already stopped sending audio;
+   *  this is the half the other side sees, which is why it is outward. */
+  callMute(callId: string, muted: boolean): Promise<{ call_id: string; muted: boolean }> {
+    return this.writeRequest<{ call_id: string; muted: boolean }>("call_mute", {
+      call_id: callId,
+      muted,
+    });
+  }
+
   /** What the local agent can do on the backend's machine: which CLIs it holds, which
    *  conversations are opted in, what an agent may run and where. A read. */
   agentStatus(): Promise<AgentStatus> {

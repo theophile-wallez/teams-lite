@@ -4,6 +4,7 @@ pub mod agent_models;
 pub mod agent_policy;
 pub mod auth;
 pub mod calendar;
+pub mod calling;
 pub mod gitlab;
 pub mod graph_time;
 pub mod linear;

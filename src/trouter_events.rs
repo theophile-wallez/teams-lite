@@ -168,11 +168,30 @@ fn unwrap_nested(body: Value) -> Result<Value> {
     Ok(body)
 }
 
-/// True for a trouter push delivered to one of the native calling workers
-/// (NextGenCalling → …/NGCallManagerWin, SkypeSpacesWeb → …/SkypeSpacesWeb).
-/// These carry call setup/state/hangup, not chat.
+/// True for a trouter push that carries CALLING traffic rather than chat.
+///
+/// Calling normally has a connection of its own, where every push is a calling
+/// frame and nothing is matched by URL at all (see `trouter::Role::Calling`). This
+/// is the other case: a calling frame that arrives on the MESSAGING socket anyway.
+/// It matches on `callAgent`, which is the path segment every link a call publishes
+/// is built under — the web client's own shape — and keeps the two desktop worker
+/// suffixes, because a Windows registration left behind by an older build of this
+/// app is still routed to.
 fn is_calling_url(url: &str) -> bool {
-    url.ends_with("NGCallManagerWin") || url.contains("SkypeSpacesWeb")
+    url.contains("callAgent")
+        || url.ends_with("NGCallManagerWin")
+        || url.contains("SkypeSpacesWeb")
+}
+
+/// Decode ONE push from the calling connection into a frame.
+///
+/// The calling socket carries nothing else, so — unlike [`realtime_from_request`] —
+/// this never looks at the URL: filtering calling traffic by URL is exactly what
+/// dropped the web client's own frame shape. An empty body yields `None` rather than
+/// an error: the service sends keep-alive pushes with no payload.
+pub fn call_frame_from_request(request: &Value) -> Result<Option<CallFrame>> {
+    let url = request.get("url").and_then(|u| u.as_str()).unwrap_or("");
+    Ok(call_frames_from_request(request, url)?.into_iter().next())
 }
 
 /// Decode a native calling push into a `CallFrame`. The outer envelope carries

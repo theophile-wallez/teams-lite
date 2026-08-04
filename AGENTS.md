@@ -709,6 +709,70 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
   the thread, which is a send: it needs the consent gate of § Sending messages, never a
   quiet addition to the sidebar.
 
+## Audio calls (a call RINGS a person — the sharpest outward action here)
+
+The app takes and places one-to-one **audio** calls, by doing what the real Teams WEB
+client does: `src/calling.rs` is the signaling plane, the browser carries the media
+(`web/src/lib/call-media.ts`), and `NATIVE-CALLING.md` is the protocol map every line of
+both was written from — read it before touching either. Video is deliberately absent.
+
+**The backend signals; the page carries the audio.** That split is not an implementation
+detail: the tokens must never reach a browser, and a microphone is only reachable from
+one. So an SDP crosses the local WebSocket in each direction and nothing else about a
+call does — this side never handles RTP, and the page never learns a Teams URL.
+
+- **Calling is OFF until the user turns it on** (`SETTING_CALLING`, Settings › Audio
+  calls). The switch IS the consent gate for the whole feature, because turning it on
+  REGISTERS a calling endpoint with Teams: their real incoming calls are then offered
+  here as well as on their phone. Turning it off **unregisters** — a registration left
+  behind keeps routing their calls to a client that is not listening, and a call offered
+  to a device that never rings is a call they miss. Never make it the default, and never
+  turn it on for the user.
+- **Four methods reach a person, and they are `OUTWARD_METHODS` entries**: `call_place`
+  starts a device buzzing in somebody's pocket, `call_accept` opens the user's own
+  microphone to whoever is on the other end, `call_hangup` ends the call for both of them
+  (or declines it, which the caller is shown), and `call_mute` publishes whether they can
+  be heard. None can be taken back, and each one carries out one click the user just made
+  — nothing in this feature ever acts on its own.
+- **`set_calling` and `call_prepare` are `MACHINE_METHODS` entries**, with their own
+  refusal words: the first decides whether this machine is a device the user's calls ring
+  on, the second reserves the one call slot and hands the page the relay credentials this
+  backend holds. `call_status` stays open: it returns no SDP, no links and no credentials,
+  only what the UI has to draw.
+- **One call at a time.** A second simultaneous call needs a second microphone and a UI
+  that can hold two. An invite that arrives while a call is up is left for the user's
+  other devices to ring, which is what Teams does with a client that does not answer.
+- **A one-to-one chat and nothing else.** A group call needs a roster, a mixer and more
+  than one audio element, so the button is not drawn outside a 1:1 and the backend
+  refuses a conversation with more than one other person. Widening that is a product
+  decision with its own UI, not a cleanup.
+- **The microphone is released on ONE path.** Every ending — our hangup, theirs, a
+  dropped connection, calling switched off — arrives as the backend's `call_state` frame,
+  and the store's handler is the only place that stops the media. A path that released it
+  somewhere else would eventually miss a case and leave the browser's recording indicator
+  on for a call that does not exist.
+- **The registration mimics the WEB client, not the desktop one.** `SkypeSpacesWeb_2.6`,
+  TTL 3600, path = the bare surl, on a connection of its own to `calling_trouterUrl`
+  (`trouter::Endpoint::calling`). The desktop client's `NGCallManagerWin` /
+  `DesktopNgc_2.3` pair is what an earlier capture branch sent, and it is wrong: Teams
+  routes a call to the endpoints it believes are running, so claiming to be a Windows
+  client sends the user's calls to a client that is not there. A test scans this crate
+  for those spellings — do not bring them back.
+- **The SDP is not rewritten.** `application/sdp-ngc-1.0` is a LABEL the service puts on
+  ordinary WebRTC SDP; what Chrome produced is what goes out. It travels whole, with its
+  candidates, because this protocol has no trickle channel — hence the bounded wait for
+  ICE gathering in `call-media.ts`.
+- **`web/mock/server.ts` reproduces the whole flow with no tenant, no registration and no
+  microphone**, and the page pairs it with `simulatedCallMedia` because that backend
+  announces itself as a mock. That is what makes this surface reviewable with nothing
+  leaving the machine: `cd web && bun run preview -- --out /tmp/call --call` captures the
+  switch, the button, the ring and the bar, and `web/e2e/calling.spec.ts` pins every rule
+  above.
+- **There is no sanctioned live call.** Unlike a send, a call has NO pre-authorized
+  target: the sandbox chat is a group thread, and ringing it would ring real people. A
+  live test is the user's own click, on their own machine, to somebody who agreed to it
+  beforehand — see NATIVE-CALLING.md § 8 for what is still unverified against the tenant.
+
 ## The user's own status (outward, and gated like one)
 
 The app can hold the user's Teams status green — the **Always available** setting, off
@@ -964,7 +1028,9 @@ else wrote, three screens up, that the user wants an answer to.
   READ-ONLY Teams/Outlook calendar (`src/calendar.rs`), presence — reading everybody's
   and, only when the user asks for it, publishing their own (`src/teams_presence.rs`,
   see § The user's own status), the READ-ONLY conversation roster an @mention list is
-  built from (`src/teams_members.rs`, see § @mentions), the READ-ONLY rich link
+  built from (`src/teams_members.rs`, see § @mentions), the one-to-one AUDIO CALLING
+  plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
+  and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
   `src/gitlab.rs` and `src/linear.rs`), the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see

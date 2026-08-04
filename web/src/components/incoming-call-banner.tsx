@@ -2,6 +2,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CallIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
+import { isLive } from "~/lib/call";
 import { incomingCallTitle, type Channel, type Conversation, type IncomingCall } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
 import { CallParticipants } from "./call-event-line";
@@ -9,17 +10,29 @@ import { Button } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 /**
- * The ringing-call banner. teams-lite surfaces an INCOMING call so the user knows
- * it is happening — it deliberately cannot answer or place calls (there is no
- * media stack), so the primary action just opens the chat and "Answer" is a
- * disabled, clearly-labelled affordance that points at real Microsoft Teams.
+ * The call-AWARENESS banner: a note that a call is happening in a conversation,
+ * built from the after-the-fact `Event/Call` chat message rather than from the calling
+ * plane. It knows nothing about media, which is why "Answer" here is disabled and the
+ * primary action opens the chat.
  *
- * Fixed to the top-centre, above everything except the fatal overlay. Renders one
- * card per ringing conversation (usually just one). Each is cleared by its
- * backend `ended`/`missed`, a manual dismiss, or the store's safety timeout.
+ * It is the OTHER banner. When this machine is really being called — calling turned on,
+ * an invite on the calling socket — `components/call-bar.tsx` draws that call with a
+ * working Answer, and the awareness card for the same conversation is dropped: two cards
+ * for one call, one of which says it cannot be answered, would be the app arguing with
+ * itself. The awareness banner still covers every case the calling plane does not: a call
+ * in a group chat, a channel meeting, a call that rang while calling was off, and a call
+ * the user took on their phone.
+ *
+ * Fixed to the top-centre, under the call bar. Renders one card per ringing
+ * conversation. Each is cleared by its backend `ended`/`missed`, a manual dismiss, or the
+ * store's safety timeout.
  */
 export function IncomingCallBanner() {
-  const calls = useAppState((s) => s.incomingCalls);
+  const awareness = useAppState((s) => s.incomingCalls);
+  const liveCall = useAppState((s) => s.callStatus.call);
+  const calls = awareness.filter(
+    (c) => !(liveCall && isLive(liveCall) && liveCall.conversation_id === c.conversationId),
+  );
   // Always render the (empty, pointer-events-none) container so AnimatePresence
   // stays mounted — otherwise dismissing the last call unmounts it before the
   // exit animation can play, and the common single-call case would pop out with

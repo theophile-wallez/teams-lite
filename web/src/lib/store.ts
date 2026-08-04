@@ -76,6 +76,20 @@ import {
   withoutAgentRun,
   type AgentRun,
 } from "./agent-run";
+import {
+  UNKNOWN_CALL_STATUS,
+  callEndLabel,
+  holdsMicrophone,
+  isLive,
+  type CallMediaSignal,
+  type CallStatus,
+} from "./call";
+import {
+  MicrophoneUnavailableError,
+  simulatedCallMedia,
+  startCallMedia,
+  type CallMedia,
+} from "./call-media";
 import { coalesce } from "./singleflight";
 import {
   requestRange,
@@ -271,6 +285,19 @@ export type AppState = {
    *  timeout). AWARENESS only — teams-lite has no media stack, so the banner these
    *  drive can point the user at the chat but never answer or place a call. */
   incomingCalls: IncomingCall[];
+  /** What this machine can do about audio calls, and the one call it is in (see
+   *  lib/call.ts). Both flags are false until the backend answers `call_status`: a
+   *  hopeful `enabled` would tell the user their calls ring here while nothing is
+   *  registered. */
+  callStatus: CallStatus;
+  /** Why the last call attempt failed, in words for the user — a refused microphone,
+   *  a conversation that cannot be called. Cleared when the next one starts. */
+  callError: string | null;
+  /** Why the last call ended, when it is worth saying — a call the user did not end
+   *  themselves. Its own field rather than a read of the ended call, because the call is
+   *  dropped the moment that frame is delivered: the backend hands out ONE frame with the
+   *  ending in it and then frees the slot. Cleared on its own after a few seconds. */
+  callNotice: string | null;
   /** Read receipts ("seen by") for the OPEN conversation: every other member's
    *  read position, used to anchor their avatar to the last message they read.
    *  Refreshed on open and kept live by the `read_receipt` event. Empty for the
@@ -369,6 +396,10 @@ const TYPING_TIMEOUT_MS = 8000;
 // terminal call event, but a missed close (or a client that reconnected mid-call)
 // must not leave a banner ringing forever. Comfortably past Teams' own ring window.
 const CALL_RING_TIMEOUT_MS = 45_000;
+
+/** How long the line about a call that ended stays on screen. Long enough to read a
+ *  sentence, short enough that nobody has to dismiss it. */
+const CALL_NOTICE_MS = 6_000;
 
 /** How long a fetched presence is trusted before the next person card refetches
  *  it. Short enough that a colleague who just joined a meeting reads as busy on
@@ -486,6 +517,9 @@ function initialState(): AppState {
     scrollToBottomNonce: 0,
     typingByConversation: {},
     incomingCalls: [],
+    callStatus: UNKNOWN_CALL_STATUS,
+    callError: null,
+    callNotice: null,
     readReceipts: [],
     mentionCandidates: [],
     appearance: DEFAULT_APPEARANCE,
@@ -732,6 +766,10 @@ export class TeamsController {
       // holds an agent CLI at all. Best-effort: a failure leaves the menu saying the
       // backend has not answered, never a switch that pretends to work.
       void this.loadAgentStatus();
+      // Whether this machine takes calls, and whether it is in one. Best-effort for
+      // the same reason: an unanswered status reads as "off", which is what the
+      // backend defaults to.
+      void this.refreshCallStatus();
       // Where this device stands on push notifications, and a re-registration if it
       // is already subscribed (a browser may have rotated the subscription while the
       // app was closed — see syncPush).
@@ -902,11 +940,16 @@ export class TeamsController {
 
     on("call", (raw) => this.onCall(raw as CallSignal));
 
-    // EXPERIMENTAL native-calling capture. The raw call setup/state frames from
-    // the calling trouter workers arrive here (only when the backend runs with
-    // TEAMS_LITE_CALLING=1). Their schema is still being reverse-engineered, so we
-    // log them to the console verbatim — a live call to a consenting party reveals
-    // the shape — rather than acting on them. No media is placed or answered here.
+    // The real calling plane: the one call this machine is in, and the far side's SDP.
+    // `call_state` is the whole state every time, so a page that reconnects mid-call
+    // learns exactly what a live one knows — and it is the frame that releases the
+    // microphone when the call is over.
+    on("call_state", (raw) => this.onCallState(raw as CallStatus));
+    on("call_media", (raw) => void this.onCallMedia(raw as CallMediaSignal));
+
+    // The RAW calling frames, logged verbatim while the wire schema is still young
+    // (NATIVE-CALLING.md § 8). A capture aid beside `call_state`, which is what the app
+    // actually acts on: nothing here places, answers or ends a call.
     on("call_signal", (raw) => {
       const f = raw as CallSignalFrame;
       console.info("[call_signal]", f.url, f.call_id, f.body);
@@ -1221,6 +1264,194 @@ export class TeamsController {
    *  it silences the banner here and never touches the call in real Teams. */
   dismissIncomingCall(convId: string): void {
     this.clearIncomingCall(convId);
+  }
+
+  // ---- audio calling -------------------------------------------------------
+  //
+  // The backend signals and this page carries the audio, so every action here is the
+  // same three steps in a different order: ask the backend for what a peer connection
+  // needs, negotiate locally, hand the SDP back. Nothing here decides whether a call
+  // may happen — the backend holds the links and the consent (see lib/call.ts).
+
+  /** The live call's media, while there is one. Deliberately NOT reactive state: it
+   *  owns a peer connection and an audio element, and re-rendering must never replace
+   *  it. Its observable half is `callStatus`. */
+  private callMedia: CallMedia | null = null;
+
+  /** Drops the "why the call ended" line after {@link CALL_NOTICE_MS}. */
+  private callNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Fold one `call_state` frame in, and stop the microphone when the call is over.
+   *
+   *  This is the ONE place media is torn down, whichever side ended the call: our own
+   *  hangup, the far side's, a dropped connection, calling being turned off. A path that
+   *  released the microphone somewhere else would eventually miss a case and leave the
+   *  browser's recording indicator on. */
+  private onCallState(status: CallStatus): void {
+    this.set({ callStatus: status });
+    const call = status.call;
+    if (!holdsMicrophone(call)) this.stopCallMedia();
+    if (isLive(call)) {
+      // A new call clears whatever the last one left on screen.
+      this.showCallNotice(null);
+      return;
+    }
+    // The ONE frame that says the call is over. Its reason is kept here because the
+    // slot is freed immediately afterwards — reading it off `callStatus` later would
+    // find nothing. An ending the user caused says nothing back at them.
+    if (call?.phase === "ended") this.showCallNotice(callEndLabel(call) || null);
+  }
+
+  /** Show (or clear) the one line about a call that ended, and drop it on its own.
+   *  A toast that stays is a toast the user has to dismiss. */
+  private showCallNotice(text: string | null): void {
+    if (this.callNoticeTimer) {
+      clearTimeout(this.callNoticeTimer);
+      this.callNoticeTimer = null;
+    }
+    this.set({ callNotice: text });
+    if (!text) return;
+    this.callNoticeTimer = setTimeout(() => {
+      this.callNoticeTimer = null;
+      this.set({ callNotice: null });
+    }, CALL_NOTICE_MS);
+  }
+
+  /** The far side's SDP: the frame that turns a call that is ringing into audio. */
+  private async onCallMedia(signal: CallMediaSignal): Promise<void> {
+    const media = this.callMedia;
+    if (!media || signal.kind !== "answer") return;
+    try {
+      await media.setRemoteAnswer(signal.sdp);
+    } catch (error) {
+      // A rejected answer means this call will never carry audio, so end it rather than
+      // leaving a bar that says "connecting" for good.
+      console.error("[call] the answer could not be applied", error);
+      await this.hangUpCall();
+    }
+  }
+
+  private stopCallMedia(): void {
+    this.callMedia?.stop();
+    this.callMedia = null;
+  }
+
+  /** Open the microphone and negotiate, using the mock's inert stand-in when the
+   *  backend announced itself as the mock.
+   *
+   *  The mock has no media at all, so a page pointed at it would otherwise ask for a
+   *  microphone in order to talk to nothing. Only `web/mock/server.ts` sends that
+   *  sentinel, so this can never pick the stand-in against a real backend. */
+  private async openCallMedia(options: {
+    iceServers: RTCIceServer[];
+    remoteOffer?: string;
+  }): Promise<CallMedia> {
+    if (this.get().backendIsMock) return simulatedCallMedia();
+    return startCallMedia({
+      iceServers: options.iceServers,
+      remoteOffer: options.remoteOffer,
+      onConnectionStateChange: (state) => {
+        if (state === "failed") {
+          console.error("[call] the media transport failed");
+          void this.hangUpCall();
+        }
+      },
+    });
+  }
+
+  /** Ask the backend what this machine can do about calls. Called on connect, and
+   *  after the user flips the setting. */
+  async refreshCallStatus(): Promise<void> {
+    try {
+      this.set({ callStatus: await this.backend.callStatus() });
+    } catch {
+      // An older backend has no `call_status`; the unknown state is the safe reading.
+      this.set({ callStatus: UNKNOWN_CALL_STATUS });
+    }
+  }
+
+  /** Turn calling on or off. The consent gate: ON registers this machine with Teams as
+   *  a device the user's calls ring on. */
+  async setCallingEnabled(enabled: boolean): Promise<void> {
+    this.set({ callError: null });
+    try {
+      this.set({ callStatus: await this.backend.setCalling(enabled) });
+    } catch (error) {
+      this.set({ callError: errText(error) });
+      await this.refreshCallStatus();
+    }
+  }
+
+  /** Place a call in a one-to-one chat: reserve it, open the microphone, send the
+   *  offer. Every step is the user's own click — nothing here starts on its own. */
+  async startCall(conversationId: string): Promise<void> {
+    if (isLive(this.get().callStatus.call)) return;
+    this.set({ callError: null });
+    this.showCallNotice(null);
+    let callId: string | null = null;
+    try {
+      const prepared = await this.backend.callPrepare({ conversation: conversationId });
+      callId = prepared.call_id;
+      this.callMedia = await this.openCallMedia({ iceServers: prepared.ice_servers });
+      await this.backend.callPlace(prepared.call_id, this.callMedia.localSdp);
+    } catch (error) {
+      this.set({ callError: callErrorText(error) });
+      this.stopCallMedia();
+      // The backend reserved the call before the failure, so release it: a machine that
+      // thinks it is dialling refuses the next call.
+      if (callId) await this.hangUpCall();
+      await this.refreshCallStatus();
+    }
+  }
+
+  /** Answer the call that is ringing: take its offer, open the microphone, answer. */
+  async answerCall(): Promise<void> {
+    const call = this.get().callStatus.call;
+    if (!call || !call.can_accept) return;
+    this.set({ callError: null });
+    this.showCallNotice(null);
+    try {
+      const prepared = await this.backend.callPrepare({ callId: call.id });
+      if (!prepared.offer_sdp) throw new Error("that call carried nothing to answer");
+      this.callMedia = await this.openCallMedia({
+        iceServers: prepared.ice_servers,
+        remoteOffer: prepared.offer_sdp,
+      });
+      await this.backend.callAccept(call.id, this.callMedia.localSdp);
+    } catch (error) {
+      this.set({ callError: callErrorText(error) });
+      this.stopCallMedia();
+      await this.hangUpCall();
+    }
+  }
+
+  /** End the call, or decline it while it is still ringing. The microphone is released
+   *  here as well as on the backend's own frame, because the user asked for it now. */
+  async hangUpCall(): Promise<void> {
+    const call = this.get().callStatus.call;
+    this.stopCallMedia();
+    if (!call) return;
+    try {
+      await this.backend.callHangup(call.id);
+    } catch (error) {
+      console.error("[call] the hangup failed", error);
+    }
+    await this.refreshCallStatus();
+  }
+
+  /** Mute or unmute. The microphone stops first and the service is told second, so the
+   *  user is never live for the round trip. */
+  async setCallMuted(muted: boolean): Promise<void> {
+    const call = this.get().callStatus.call;
+    if (!call) return;
+    this.callMedia?.setMuted(muted);
+    // Reflect it now: the button must follow the microphone, not the network.
+    this.set({ callStatus: { ...this.get().callStatus, call: { ...call, muted } } });
+    try {
+      await this.backend.callMute(call.id, muted);
+    } catch (error) {
+      console.error("[call] the mute did not reach the service", error);
+    }
   }
 
   // ---- the local agent's live run ------------------------------------------
@@ -3222,6 +3453,19 @@ export class TeamsController {
     setCuesEnabled(enabled);
     if (enabled) playCue("ready");
   }
+}
+
+/** Why a call attempt failed, in words the user can act on.
+ *
+ *  A refused microphone is the one failure that is not a bug, and it is the common one:
+ *  the browser asks once, the user says no, and every later call fails the same way
+ *  until they change it in the site settings. So it gets its own sentence rather than a
+ *  `NotAllowedError` the page would show verbatim. */
+function callErrorText(e: unknown): string {
+  if (e instanceof MicrophoneUnavailableError) {
+    return "teams-lite could not open the microphone. Allow it for this site, then try again.";
+  }
+  return errText(e);
 }
 
 function errText(e: unknown): string {

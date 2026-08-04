@@ -11,9 +11,14 @@
 //   2. GET  {socketio}socket.io/1/?v=v4&{connectparams}&...   -> sessionId
 //   3. WS   wss://{socketio}socket.io/1/websocket/{sessionId}?...  (+X-Skypetoken)
 //   4. on "1::" -> user.authenticate (Bearer ic3) + user.activity + registrar POST
-//        (+ opt-in calling registrations when TEAMS_LITE_CALLING=1)
-//   5. messages arrive as "3:::{...}"; ack every request, decode /messaging pushes
-//        (and, when enabled, native calling pushes on the calling worker URLs)
+//   5. messages arrive as "3:::{...}"; ack every request, then decode
+//
+// TWO connections, not one, because that is what the real web client runs: the
+// messaging worker (chat, typing, read receipts) and — only when the user turned
+// calling on — the CALLING worker, which is a connection of its own to its own
+// regional host, registered under its own template (see [`Endpoint::calling`] and
+// NATIVE-CALLING.md § 2.1). A `Role` says which of the two a connection is, so the
+// handshake, the acking and the reconnect backoff are written once.
 //
 // No raw tokens are ever logged (Status carries only human-readable state).
 
@@ -29,10 +34,192 @@ use crate::store::Message;
 use crate::teams::Session;
 
 const TROUTER_BEGIN: &str = "https://go.trouter.teams.microsoft.com/v4/a";
-const REGISTRAR: &str = "https://teams.microsoft.com/registrar/prod/V2/registrations";
+/// The registrar every endpoint registers with. Public because the calling plane
+/// falls back to it when the directory does not name `calling_registrarUrl`.
+pub const REGISTRAR: &str = "https://teams.microsoft.com/registrar/prod/V2/registrations";
 const TCCV: &str = "2024.23.01.2";
 const CLIENT_VERSION: &str = "1415/26061118216";
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) teams-lite/0.1";
+
+/// The messaging worker's registration — the one this app has always used.
+const MESSAGING_APP_ID: &str = "TeamsCDLWebWorker";
+const MESSAGING_TEMPLATE: &str = "TeamsCDLWebWorker_2.1";
+/// A day: a messaging endpoint is long-lived and re-registered on every reconnect.
+const MESSAGING_TTL: u64 = 86400;
+
+/// The CALLING worker's registration, taken from the real web client's own
+/// configuration rather than from the desktop client's: `pnhTemplate` is
+/// `SkypeSpacesWeb_2.6` and `webRegistrarTtlInSeconds` is 3600
+/// (config-prod-<hash>.js — see NATIVE-CALLING.md § 2.1).
+///
+/// The desktop client's `NGCallManagerWin` / `DesktopNgc_2.3` pair is deliberately
+/// NOT used: its path suffix belongs to a Windows endpoint, and Teams routes a call
+/// to the endpoints it believes are running.
+const CALLING_APP_ID: &str = "SkypeSpacesWeb";
+const CALLING_TEMPLATE: &str = "SkypeSpacesWeb_2.6";
+const CALLING_TTL: u64 = 3600;
+
+/// Which trouter this connection talks to, and how it registers there.
+///
+/// Two instances exist: [`Endpoint::messaging`], hard-coded to the global allocate
+/// host this app has always used, and [`Endpoint::calling`], built from the calling
+/// URLs in the authz directory so the connection lands on the user's own region.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    /// The allocate URL (`…/v4/a`), which the connection POSTs to first.
+    pub allocate: String,
+    /// The registrar the registration is POSTed to.
+    pub registrar: String,
+    pub app_id: &'static str,
+    pub template_key: &'static str,
+    pub ttl_secs: u64,
+}
+
+impl Endpoint {
+    /// The messaging worker: chat, typing and read receipts.
+    pub fn messaging() -> Self {
+        Self {
+            allocate: TROUTER_BEGIN.to_string(),
+            registrar: REGISTRAR.to_string(),
+            app_id: MESSAGING_APP_ID,
+            template_key: MESSAGING_TEMPLATE,
+            ttl_secs: MESSAGING_TTL,
+        }
+    }
+
+    /// The calling worker, addressed from the directory's own `calling_trouterUrl`
+    /// and `calling_registrarUrl`.
+    pub fn calling(trouter_url: &str, registrar: &str) -> Self {
+        Self {
+            allocate: allocate_url_for(trouter_url),
+            registrar: registrar.to_string(),
+            app_id: CALLING_APP_ID,
+            template_key: CALLING_TEMPLATE,
+            ttl_secs: CALLING_TTL,
+        }
+    }
+}
+
+/// Map a trouter URL from the directory onto the allocate endpoint this client
+/// speaks.
+///
+/// The directory states the CONNECT form (`https://go-eu.trouter.teams.microsoft.com/v3/c`)
+/// while this client speaks the allocate-then-socket.io flow (`…/v4/a`) that the
+/// messaging connection has used all along. The real client converts between the
+/// two forms the same way — it rewrites `/v4/c` to `/v4/a` and back — so only the
+/// host matters, and keeping the directory's host is what puts the connection in the
+/// user's own region. A URL that already names an allocate path is left alone.
+pub fn allocate_url_for(trouter_url: &str) -> String {
+    let trimmed = trouter_url.trim_end_matches('/');
+    if trimmed.ends_with("/v4/a") {
+        return trimmed.to_string();
+    }
+    // Keep scheme + host, drop whatever version path the directory stated.
+    let without_scheme = trimmed.strip_prefix("https://").or_else(|| trimmed.strip_prefix("wss://"));
+    match without_scheme {
+        Some(rest) => {
+            let host = rest.split('/').next().unwrap_or(rest);
+            format!("https://{host}/v4/a")
+        }
+        // Not a URL we recognise: fall back to the host that is known to work rather
+        // than to something malformed.
+        None => TROUTER_BEGIN.to_string(),
+    }
+}
+
+/// The live calling connection's own address, published upward the moment it is
+/// registered.
+///
+/// The signaling layer needs it: every callback link a call publishes is built on
+/// this surl (`{surl}callAgent/{sessionId}/{causeId}{path}`), so a call cannot be
+/// placed or answered before this arrives — and a reconnect that changes the surl
+/// invalidates the links of any call still up, which is why it is a channel rather
+/// than a one-shot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallingChannel {
+    /// The trouter surl this connection was allocated.
+    pub surl: String,
+    /// The registration id (endpoint id) it registered under.
+    pub endpoint_id: String,
+}
+
+/// What a connection does with the pushes it receives.
+///
+/// One enum rather than two `run` functions with different parameter lists: the
+/// handshake, the ack and the backoff are identical, and the only real difference is
+/// where a decoded push goes.
+pub enum Role {
+    /// The messaging worker. `calls` still exists here to catch a calling push that
+    /// arrives on this socket anyway (the service has routed one before), so a frame
+    /// is never silently dropped.
+    Messaging {
+        events: mpsc::UnboundedSender<Vec<Message>>,
+        typing: mpsc::UnboundedSender<crate::trouter_events::TypingEvent>,
+        receipts: mpsc::UnboundedSender<crate::trouter_events::ReadReceiptEvent>,
+        calls: mpsc::UnboundedSender<crate::trouter_events::CallFrame>,
+    },
+    /// The calling worker. Every push here is calling traffic — the invite, the
+    /// media answer, the roster, the ending — so nothing is filtered by URL.
+    Calling {
+        frames: mpsc::UnboundedSender<crate::trouter_events::CallFrame>,
+        channel: mpsc::UnboundedSender<CallingChannel>,
+    },
+}
+
+impl Role {
+    /// Decode one push and fan it out. Returns false when the consumer is gone, so
+    /// the connection can stop instead of decoding for nobody.
+    fn deliver(&self, request: &Value) -> bool {
+        match self {
+            Role::Messaging { events, typing, receipts, calls } => {
+                let Ok(rt) = crate::trouter_events::realtime_from_request(request) else {
+                    return true; // a frame we cannot decode is not a reason to hang up
+                };
+                if !rt.messages.is_empty() && events.send(rt.messages).is_err() {
+                    return false; // consumer gone
+                }
+                // Typing, receipts and calls are best-effort: a dropped receiver must
+                // never take down the chat stream.
+                rt.typing.into_iter().for_each(|t| {
+                    let _ = typing.send(t);
+                });
+                rt.read_receipts.into_iter().for_each(|r| {
+                    let _ = receipts.send(r);
+                });
+                rt.calls.into_iter().for_each(|c| {
+                    let _ = calls.send(c);
+                });
+                true
+            }
+            Role::Calling { frames, .. } => {
+                match crate::trouter_events::call_frame_from_request(request) {
+                    Ok(Some(frame)) => frames.send(frame).is_ok(),
+                    // An empty or undecodable body is nothing to act on; the ack has
+                    // already gone out, which is what keeps the socket alive.
+                    _ => true,
+                }
+            }
+        }
+    }
+
+    /// Whether the consumer of this role has gone away.
+    fn is_closed(&self) -> bool {
+        match self {
+            Role::Messaging { events, .. } => events.is_closed(),
+            Role::Calling { frames, .. } => frames.is_closed(),
+        }
+    }
+
+    /// Announce the connection's own address, for the roles that need it.
+    fn on_registered(&self, surl: &str, endpoint_id: &str) {
+        if let Role::Calling { channel, .. } = self {
+            let _ = channel.send(CallingChannel {
+                surl: surl.to_string(),
+                endpoint_id: endpoint_id.to_string(),
+            });
+        }
+    }
+}
 
 /// Lifecycle signals from the real-time client (for a status line / catch-up hook).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,27 +255,25 @@ pub trait CredentialProvider: Send + Sync {
         -> impl std::future::Future<Output = Result<Credentials>> + Send;
 }
 
-/// Run the real-time client forever, reconnecting with capped exponential backoff.
+/// Run one real-time connection forever, reconnecting with capped exponential
+/// backoff.
 ///
 /// - `creds` supplies fresh credentials before every connection attempt (so a
 ///   reconnection past the ~1h token lifetime re-mints the skypetoken + ic3).
-/// - `events` receives batches of parsed chat messages as they arrive.
-/// - `typing` receives ephemeral typing/presence signals.
-/// - `receipts` receives ephemeral read-receipt (consumption-horizon) updates.
-/// - `calls` receives raw native-calling frames (experimental; only populated when
-///   calling is enabled via `TEAMS_LITE_CALLING=1`).
+/// - `endpoint` says which trouter this is and how to register there
+///   ([`Endpoint::messaging`] or [`Endpoint::calling`]).
+/// - `role` receives whatever the pushes decode into.
 /// - `status` receives lifecycle transitions (Connecting/Connected/Disconnected).
 /// - `epid` is the stable endpoint id; persist it across runs so the server keeps
-///   routing to the same registration.
+///   routing to the same registration. The two connections use DIFFERENT ids: one
+///   registration per worker, or the second would replace the first.
 ///
 /// Returns only if the channels close (i.e. the UI is gone).
 pub async fn run(
     creds: impl CredentialProvider,
     epid: String,
-    events: mpsc::UnboundedSender<Vec<Message>>,
-    typing: mpsc::UnboundedSender<crate::trouter_events::TypingEvent>,
-    receipts: mpsc::UnboundedSender<crate::trouter_events::ReadReceiptEvent>,
-    calls: mpsc::UnboundedSender<crate::trouter_events::CallFrame>,
+    endpoint: Endpoint,
+    role: Role,
     status: mpsc::UnboundedSender<Status>,
 ) {
     let http = match reqwest::Client::builder().user_agent(UA).http1_only().build() {
@@ -109,14 +294,15 @@ pub async fn run(
         // journal, so the one line that names the cause has to be in it.
         match creds.credentials().await {
             Ok(Credentials { session, ic3 }) => {
-                let _ = connect_once(&http, &session, &ic3, &epid, &events, &typing, &receipts, &calls, &status).await;
+                let _ =
+                    connect_once(&http, &session, &ic3, &epid, &endpoint, &role, &status).await;
             }
             Err(e) => eprintln!(
                 "[realtime] no credentials, retrying in {backoff}s — is the identity broker up? ({e:#})"
             ),
         }
         // If the consumer is gone, stop.
-        if events.is_closed() || status.is_closed() {
+        if role.is_closed() || status.is_closed() {
             return;
         }
         let _ = status.send(Status::Disconnected { retry_in_secs: backoff });
@@ -126,23 +312,17 @@ pub async fn run(
 }
 
 /// One full connect → listen cycle. Returns when the socket closes or errors.
-// The credentials/ids plus the four fan-out sinks (messages, typing, receipts,
-// calls) and the status channel are genuinely distinct inputs threaded from `run`;
-// bundling them would only obscure the flow, so allow the wider signature.
-#[allow(clippy::too_many_arguments)]
 async fn connect_once(
     http: &reqwest::Client,
     sess: &Session,
     ic3: &str,
     epid: &str,
-    events: &mpsc::UnboundedSender<Vec<Message>>,
-    typing: &mpsc::UnboundedSender<crate::trouter_events::TypingEvent>,
-    receipts: &mpsc::UnboundedSender<crate::trouter_events::ReadReceiptEvent>,
-    calls: &mpsc::UnboundedSender<crate::trouter_events::CallFrame>,
+    endpoint: &Endpoint,
+    role: &Role,
     status: &mpsc::UnboundedSender<Status>,
 ) -> Result<()> {
     // 1. trouter connect
-    let begin_url = format!("{TROUTER_BEGIN}?epid={}", urlencoding::encode(epid));
+    let begin_url = format!("{}?epid={}", endpoint.allocate, urlencoding::encode(epid));
     let r = http
         .post(&begin_url)
         .header("x-skypetoken", &sess.skypetoken)
@@ -218,7 +398,10 @@ async fn connect_once(
                         write.send(WsMessage::Text(format!("5:{count}+::{act}"))).await?;
                         count += 1;
 
-                        register(http, &sess.skypetoken, ic3, &surl, epid).await?;
+                        register(http, &sess.skypetoken, ic3, &surl, epid, endpoint).await?;
+                        // The surl is only ours once the registration took, so this
+                        // is where a call may start building links on it.
+                        role.on_registered(&surl, epid);
                         let _ = status.send(Status::Connected);
                     }
                     b'3' => {
@@ -229,28 +412,8 @@ async fn connect_once(
                                 let ack = json!({"id": id, "status": 200, "body": ""});
                                 write.send(WsMessage::Text(format!("3:::{ack}"))).await?;
 
-                                // decode once, fan out chat messages + typing signals
-                                // + calling frames (non-message pushes decode to
-                                // empty and cost nothing).
-                                if let Ok(rt) = crate::trouter_events::realtime_from_request(&reqv) {
-                                    if !rt.messages.is_empty() && events.send(rt.messages).is_err() {
-                                        return Ok(()); // consumer gone
-                                    }
-                                    for t in rt.typing {
-                                        // A dropped typing receiver is non-fatal: presence is
-                                        // best-effort, so keep the chat stream alive.
-                                        let _ = typing.send(t);
-                                    }
-                                    for r in rt.read_receipts {
-                                        // Read receipts are best-effort too: a dropped
-                                        // receiver must never take down the chat stream.
-                                        let _ = receipts.send(r);
-                                    }
-                                    for c in rt.calls {
-                                        // Best-effort like typing: a dropped calls
-                                        // receiver must not kill the chat stream.
-                                        let _ = calls.send(c);
-                                    }
+                                if !role.deliver(&reqv) {
+                                    return Ok(()); // consumer gone
                                 }
                             }
                     }
@@ -300,70 +463,74 @@ fn after_third_colon(s: &str) -> Option<&str> {
     None
 }
 
-async fn register(http: &reqwest::Client, skypetoken: &str, ic3: &str, surl: &str, epid: &str) -> Result<()> {
-    let body = json!({
-        "clientDescription": {
-            "appId": "TeamsCDLWebWorker",
-            "aesKey": "",
-            "languageId": "en-US",
-            "platform": "edge",
-            "templateKey": "TeamsCDLWebWorker_2.1",
-            "platformUIVersion": CLIENT_VERSION
-        },
-        "registrationId": epid,
-        "nodeId": "",
-        "transports": { "TROUTER": [{ "context": "", "path": surl, "ttl": 86400 }] }
-    });
-    http.post(REGISTRAR)
+async fn register(
+    http: &reqwest::Client,
+    skypetoken: &str,
+    ic3: &str,
+    surl: &str,
+    epid: &str,
+    endpoint: &Endpoint,
+) -> Result<()> {
+    let body = registration_body(surl, epid, endpoint);
+    http.post(&endpoint.registrar)
         .header("content-type", "application/json")
         .header("X-Skypetoken", skypetoken)
         .header("authorization", format!("Bearer {ic3}"))
         .body(body.to_string())
         .send()
         .await?;
+    Ok(())
+}
 
-    // Native calling (experimental, opt-in via TEAMS_LITE_CALLING=1). Registering
-    // the calling worker templates is what makes the calling service route incoming
-    // call notifications to this endpoint's trouter socket. Off by default because
-    // it changes how Teams routes the user's real calls across their endpoints.
-    if std::env::var("TEAMS_LITE_CALLING").as_deref() == Ok("1") {
-        register_calling(http, skypetoken, ic3, surl).await?;
+/// Remove a registration: `DELETE {registrar}/{registrationId}`, the same call the
+/// web client makes when it stops.
+///
+/// It matters most for the CALLING worker. A registration Teams still believes in
+/// keeps routing the user's calls to a client that is no longer listening, and a call
+/// offered to a device that never rings is a call they miss.
+pub async fn unregister(
+    http: &reqwest::Client,
+    skypetoken: &str,
+    ic3: &str,
+    registrar: &str,
+    registration_id: &str,
+) -> Result<()> {
+    let url = format!(
+        "{}/{}",
+        registrar.trim_end_matches('/'),
+        urlencoding::encode(registration_id)
+    );
+    let response = http
+        .delete(&url)
+        .header("X-Skypetoken", skypetoken)
+        .header("authorization", format!("Bearer {ic3}"))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(anyhow!("unregister -> {}", response.status()));
     }
     Ok(())
 }
 
-/// Register the two native calling worker templates (NextGenCalling +
-/// SkypeSpacesWeb) so the calling service delivers call setup/state pushes to this
-/// endpoint. Each registration points at the same live trouter socket with a
-/// worker-specific path suffix (…/NGCallManagerWin, …/SkypeSpacesWeb) and its own
-/// registration id. Modeled on EionRobb/purple-teams teams_trouter.c.
-async fn register_calling(http: &reqwest::Client, skypetoken: &str, ic3: &str, surl: &str) -> Result<()> {
-    for (app_id, template_key, suffix) in [
-        ("NextGenCalling", "DesktopNgc_2.3:SkypeNgc", "NGCallManagerWin"),
-        ("SkypeSpacesWeb", "SkypeSpacesWeb_2.3", "SkypeSpacesWeb"),
-    ] {
-        let body = json!({
-            "clientDescription": {
-                "appId": app_id,
-                "aesKey": "",
-                "languageId": "en-US",
-                "platform": "edge",
-                "templateKey": template_key,
-                "platformUIVersion": CLIENT_VERSION
-            },
-            "registrationId": uuid::Uuid::new_v4().to_string(),
-            "nodeId": "",
-            "transports": { "TROUTER": [{ "context": "", "path": format!("{surl}{suffix}"), "ttl": 86400 }] }
-        });
-        http.post(REGISTRAR)
-            .header("content-type", "application/json")
-            .header("X-Skypetoken", skypetoken)
-            .header("authorization", format!("Bearer {ic3}"))
-            .body(body.to_string())
-            .send()
-            .await?;
-    }
-    Ok(())
+/// The registration body, pure so both workers' shapes can be pinned by a test.
+///
+/// `path` is the BARE surl for either worker: the real web client appends no suffix
+/// to it (`transports:{TROUTER:[{context, path: allocateResult.surl, ttl}]}`), and a
+/// suffix here is what made this app look like a Windows endpoint.
+fn registration_body(surl: &str, epid: &str, endpoint: &Endpoint) -> Value {
+    json!({
+        "clientDescription": {
+            "appId": endpoint.app_id,
+            "aesKey": "",
+            "languageId": "en-US",
+            "platform": "edge",
+            "templateKey": endpoint.template_key,
+            "platformUIVersion": CLIENT_VERSION
+        },
+        "registrationId": epid,
+        "nodeId": "",
+        "transports": { "TROUTER": [{ "context": "", "path": surl, "ttl": endpoint.ttl_secs }] }
+    })
 }
 
 /// Load a persisted endpoint id from `path`, or generate + save a fresh one.
@@ -407,6 +574,118 @@ mod tests {
         assert!(q.contains("auth=true"));
     }
 
+    /// The registration is what tells Teams which client is running, and the
+    /// calling one decides whether a call is routed here at all. Both shapes are
+    /// pinned: the bare surl as the path, the web client's own template, and its
+    /// own TTL.
+    #[test]
+    fn each_worker_registers_the_way_the_web_client_registers_it() {
+        let messaging = registration_body("https://tr/v4/f/abc/", "epid-1", &Endpoint::messaging());
+        assert_eq!(messaging["clientDescription"]["appId"], "TeamsCDLWebWorker");
+        assert_eq!(messaging["clientDescription"]["templateKey"], "TeamsCDLWebWorker_2.1");
+        assert_eq!(messaging["registrationId"], "epid-1");
+        assert_eq!(messaging["transports"]["TROUTER"][0]["path"], "https://tr/v4/f/abc/");
+        assert_eq!(messaging["transports"]["TROUTER"][0]["ttl"], 86400);
+
+        let calling = Endpoint::calling("https://go-eu.trouter.teams.microsoft.com/v3/c", REGISTRAR);
+        let body = registration_body("https://tr/v4/f/xyz/", "epid-2", &calling);
+        assert_eq!(body["clientDescription"]["appId"], "SkypeSpacesWeb");
+        assert_eq!(body["clientDescription"]["templateKey"], "SkypeSpacesWeb_2.6");
+        assert_eq!(body["transports"]["TROUTER"][0]["ttl"], 3600);
+        // The BARE surl: the desktop client's worker suffix is what made a call
+        // routed to a Windows endpoint that does not exist here.
+        let path = body["transports"]["TROUTER"][0]["path"].as_str().unwrap();
+        assert_eq!(path, "https://tr/v4/f/xyz/");
+        assert!(!path.contains("NGCallManager"), "the web client appends no worker suffix");
+    }
+
+    /// The desktop client's templates must not come back: Teams routes a call to
+    /// the endpoints it believes are running, and claiming to be a Windows client
+    /// sends the user's calls to a client that is not there.
+    #[test]
+    fn no_worker_ever_claims_to_be_the_desktop_client() {
+        // Built rather than written, because this test's own source is part of what
+        // it scans: a literal here would make the assertion find itself.
+        let desktop = [
+            format!("NGCallManager{}", "Win"),
+            format!("NGCallManager{}", "Osx"),
+            format!("Desktop{}", "Ngc"),
+        ];
+        let source = include_str!("trouter.rs");
+        for spelling in desktop {
+            assert!(
+                !source.contains(&format!("\"{spelling}\"")),
+                "{spelling} must never be a value this app sends"
+            );
+        }
+        // And the values that ARE sent are the web client's own.
+        assert_eq!(Endpoint::calling("https://t/v3/c", REGISTRAR).app_id, "SkypeSpacesWeb");
+        assert_eq!(
+            Endpoint::calling("https://t/v3/c", REGISTRAR).template_key,
+            "SkypeSpacesWeb_2.6"
+        );
+    }
+
+    #[test]
+    fn a_directory_trouter_url_becomes_this_clients_allocate_url() {
+        // The directory states the connect form; we speak allocate, same host.
+        assert_eq!(
+            allocate_url_for("https://go-eu.trouter.teams.microsoft.com/v3/c"),
+            "https://go-eu.trouter.teams.microsoft.com/v4/a"
+        );
+        assert_eq!(
+            allocate_url_for("wss://go-eu.trouter.teams.microsoft.com/v4/c"),
+            "https://go-eu.trouter.teams.microsoft.com/v4/a"
+        );
+        // Already an allocate URL: left alone (trailing slash trimmed).
+        assert_eq!(
+            allocate_url_for("https://go.trouter.teams.microsoft.com/v4/a/"),
+            "https://go.trouter.teams.microsoft.com/v4/a"
+        );
+        // Nonsense falls back to the host that is known to work rather than to a
+        // malformed URL: a calling connection that cannot allocate is a feature
+        // that silently does nothing.
+        assert_eq!(allocate_url_for("not a url"), TROUTER_BEGIN);
+    }
+
+    /// A call cannot publish a link before it knows its own surl, so the calling
+    /// role must announce it — and the messaging role must not (it has no links).
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_calling_role_publishes_its_surl_once_registered() {
+        let (frames_tx, _frames_rx) = mpsc::unbounded_channel();
+        let (chan_tx, mut chan_rx) = mpsc::unbounded_channel();
+        let calling = Role::Calling { frames: frames_tx, channel: chan_tx };
+        calling.on_registered("https://tr/v4/f/abc/", "epid-2");
+        let published = chan_rx.recv().await.expect("the surl");
+        assert_eq!(published.surl, "https://tr/v4/f/abc/");
+        assert_eq!(published.endpoint_id, "epid-2");
+
+        let (ev_tx, _ev_rx) = mpsc::unbounded_channel();
+        let (ty_tx, _ty_rx) = mpsc::unbounded_channel();
+        let (rr_tx, _rr_rx) = mpsc::unbounded_channel();
+        let (call_tx, _call_rx) = mpsc::unbounded_channel();
+        Role::Messaging { events: ev_tx, typing: ty_tx, receipts: rr_tx, calls: call_tx }
+            .on_registered("https://tr/v4/f/abc/", "epid-1");
+        // Nothing to assert but the absence of a panic: the messaging role has no
+        // channel to publish on.
+    }
+
+    /// Everything on the calling socket is calling traffic, whatever URL it names —
+    /// filtering it by URL is what dropped the web client's own frame shape.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_calling_role_forwards_every_push_it_gets() {
+        let (frames_tx, mut frames_rx) = mpsc::unbounded_channel();
+        let (chan_tx, _chan_rx) = mpsc::unbounded_channel();
+        let role = Role::Calling { frames: frames_tx, channel: chan_tx };
+        let request = json!({
+            "url": "https://tr/v4/f/abc/callAgent/s/c/call/mediaAnswer/",
+            "body": "{\"mediaAnswer\":{}}"
+        });
+        assert!(role.deliver(&request));
+        let frame = frames_rx.recv().await.expect("a frame");
+        assert!(frame.url.contains("callAgent"));
+    }
+
     #[test]
     fn epid_persists_across_calls() {
         let dir = std::env::temp_dir();
@@ -447,9 +726,15 @@ mod tests {
         let (rr_tx, _rr_rx) = mpsc::unbounded_channel::<crate::trouter_events::ReadReceiptEvent>();
         let (call_tx, _call_rx) = mpsc::unbounded_channel::<crate::trouter_events::CallFrame>();
         let (st_tx, mut st_rx) = mpsc::unbounded_channel::<Status>();
+        let role = Role::Messaging {
+            events: ev_tx,
+            typing: ty_tx,
+            receipts: rr_tx,
+            calls: call_tx,
+        };
 
         let handle = tokio::spawn(async move {
-            run(provider, "epid-test".to_string(), ev_tx, ty_tx, rr_tx, call_tx, st_tx).await;
+            run(provider, "epid-test".to_string(), Endpoint::messaging(), role, st_tx).await;
         });
 
         // Wait until the provider has been asked at least twice (proves it was

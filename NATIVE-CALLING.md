@@ -1,12 +1,16 @@
 # Native calling — audio only, the way the Teams web client does it
 
-Status: **investigation, nothing implemented.** This file is the protocol map that a
-first implementation is written from. It records what the real Teams web client does,
-what this tenant answers, what teams-lite already holds, and what is still unknown.
+Status: **implemented, and not yet exercised against the tenant.** One-to-one audio
+calling is built end to end — `src/calling.rs` signals, `web/src/lib/call-media.ts`
+carries the audio, and the whole flow is driven by the mock in `web/e2e/calling.spec.ts`.
+What has NOT happened is a real call: § 8 lists exactly what only a live ring can answer,
+and § 7 says why nothing here places one on its own.
 
-Nothing in here rings anybody. Every fact below came from two READ-ONLY sources: the
-web client's own public JavaScript, and one authz call this app already makes on every
-start.
+This file stays the protocol map. It records what the real Teams web client does, what
+this tenant answers, what the implementation does with it, and what is still unknown.
+
+Every fact below came from two READ-ONLY sources: the web client's own public JavaScript,
+and one authz call this app already makes on every start.
 
 ## 1. The short answer
 
@@ -175,36 +179,39 @@ traffic. It does not: the web client reads it from
 `serviceUrls.calling_conversationServiceUrl`, and the directory this app already parses
 carries it. `calling_registrarUrl` is the registrar teams-lite already posts to.
 
-## 4. What teams-lite already holds
+## 4. What teams-lite holds now
 
-- The two tokens the plane needs: the `ic3.teams.office.com` bearer and the skypetoken
+The plane this app already had, and still uses:
+
+- The two tokens: the `ic3.teams.office.com` bearer and the skypetoken
   (`src/auth.rs`, `src/teams.rs`).
 - The directory, including every key in § 3 (`Session::endpoint`).
-- A live trouter connection with a stable `epid`, and the registrar call
-  (`src/trouter.rs`).
-- The push decoder for the calling envelope, including nested `cp` / `gp`
-  (`src/trouter_events.rs`, `CallFrame`).
-- A `calls` channel through the backend and a `call_signal` event to the web app
-  (`src/bin/server.rs`), plus an incoming-call banner.
+- The messaging trouter connection, and the registrar call (`src/trouter.rs`).
+- The push decoder for the calling envelope, `cp` / `gp` included
+  (`src/trouter_events.rs`).
 
-Three corrections to make before a live capture is worth running:
+What was added, and the three corrections it carries:
 
-1. **`register_calling` copies the Windows desktop client, not the web one.** It
-   registers `NextGenCalling` / `DesktopNgc_2.3:SkypeNgc` at `{surl}NGCallManagerWin`
-   and `SkypeSpacesWeb` / `SkypeSpacesWeb_2.3` at `{surl}SkypeSpacesWeb`, both on the
-   MESSAGING socket. The web client registers **one** endpoint, template
-   `SkypeSpacesWeb_2.6`, TTL 3600, path = the bare surl, on a **calling** trouter
-   connection of its own (`calling_trouterUrl`).
-2. **`is_calling_url` matches those suffixes**, so a push shaped like the web client's
-   would be read as a chat frame and dropped. It should key on the calling connection
-   the frame arrived on, and on `callAgent` in the path.
-3. **The calling connection is addressed as `/v3/c`** while this app's messaging client
-   uses the `/v4/a` allocate plus socket.io flow. The client's own code converts a
-   `/v4/c` websocket URL to the `/v4/a` allocate URL and back, so the two are forms of
-   one service — but `/v3/c` against `/v4/a` is **not yet verified** and is the first
-   thing a spike must answer.
+1. **`src/calling.rs`** — the signaling plane: the endpoints, the callback-link builder,
+   the payloads of § 2.3 and § 2.4, the frame readers (invite, acceptance, media answer,
+   ending), and the relay credentials of § 2.6. It holds no state and starts nothing.
+2. **A calling trouter connection of its own** (`trouter::Endpoint::calling` +
+   `trouter::Role::Calling`), registered the way the WEB client registers:
+   `SkypeSpacesWeb_2.6`, TTL 3600, path = the bare surl. The desktop client's
+   `NGCallManagerWin` / `DesktopNgc_2.3` pair that an earlier capture branch sent is gone,
+   and a test scans the module so it cannot come back.
+3. **`is_calling_url` matches `callAgent`** — the path segment every link a call publishes
+   is built under — as well as the two old worker suffixes, so a calling frame that lands
+   on the MESSAGING socket is still read as one. On the calling connection nothing is
+   filtered by URL at all: everything there is calling traffic.
+4. **The `/v3/c` question is answered by `allocate_url_for`**, which keeps the directory's
+   regional host and speaks the `/v4/a` allocate flow this client already had. That
+   mapping is the one piece of § 2.1 a live call still has to confirm (§ 8).
 
-## 5. How it should be built here
+The backend owns the live call (`CallSession` in `src/bin/server.rs`), which is what keeps
+"who may place a call" one decision in one place, and it is the only holder of the links.
+
+## 5. How it is built here
 
 **The backend signals; the browser carries the audio.** Nothing else fits this app:
 
@@ -216,34 +223,48 @@ Three corrections to make before a live capture is worth running:
   every other RPC. The browser never learns a Teams URL, and the backend never handles
   RTP.
 
-That splits cleanly into `src/calling.rs` (the signaling client: the POSTs, the links,
-the relay credentials), the calling half of `src/trouter.rs`, new RPCs, and a browser
-media controller under `web/src/lib/`.
+That is exactly how it is split: `src/calling.rs` (the POSTs, the links, the relay
+credentials), the calling half of `src/trouter.rs`, seven RPCs (§ 6), and one browser
+media controller (`web/src/lib/call-media.ts`) that is the only place in the app touching
+WebRTC or the microphone.
 
-## 6. Audio-only plan, in the order it should be done
+## 6. The surface, and what each part is for
 
-1. **Spike the second trouter connection.** Connect and register as the web client
-   (`SkypeSpacesWeb_2.6`, bare surl, `calling_trouterUrl`, `calling_registrarUrl`).
-   Prove a real incoming call arrives on it, and dump the frame. This answers § 4.3 and
-   fixes the schema guesses with one real ring.
-2. **Model the notification.** Turn the captured `callNotification` into a typed
-   Rust struct and drive the existing banner from it, links included. No answer yet.
-3. **Relay credentials.** Read `relayConfig` out of whatever the service sends, GET
-   `Service.tokenUrl`, and hand the browser only what an `RTCPeerConnection` needs:
-   `[{urls, username, credential}]`. The token itself never leaves the backend.
-4. **Answer a call.** Browser: `getUserMedia({audio:true})` →
-   `setRemoteDescription(offer)` → `createAnswer`. Backend: POST `accept`, then
-   `mediaAnswer` with the blob, then `mediaAcknowledgement`. This is the first point
-   where two people hear each other.
-5. **Hang up, and survive.** `hangup` / `end`, `keepAlive` on the interval the service
-   asks for, and the roster / `conversationEnd` pushes. A call that cannot be ended is
-   worse than no call.
-6. **Place a call.** The § 2.3 POST, audio modality only, with the `groupChat.threadId`
-   of the conversation the user is in, so the call belongs to that thread.
-7. **Mute, and the in-call surface.** `mute` / `unmute` are links like any other.
+Seven RPCs, and the split between them IS the consent design (see § 7):
 
-Video is deliberately out. It changes nothing structural — one more modality and one
-more m-line — so it stays out until audio is solid.
+| Method | Gate | What it does |
+| --- | --- | --- |
+| `call_status` | open | The state the UI draws. No SDP, no links, no credentials. |
+| `set_calling` | `MACHINE_METHODS` | Registers (or unregisters) this machine as a device the user's calls ring on. |
+| `call_prepare` | `MACHINE_METHODS` | Reserves the one call, and returns the ICE servers (plus the offer, when answering). |
+| `call_place` | `OUTWARD_METHODS` | The § 2.3 POST, carrying our offer. Rings a person. |
+| `call_accept` | `OUTWARD_METHODS` | Answers with our SDP. Opens the microphone to them. |
+| `call_hangup` | `OUTWARD_METHODS` | Ends the call, or declines it while it is still ringing. |
+| `call_mute` | `OUTWARD_METHODS` | Publishes whether the user can be heard. |
+
+Two events carry the rest: `call_state` (the whole state, every time — so a page that
+reconnects mid-call learns what a live one knows, and so ONE frame releases the
+microphone) and `call_media` (the far side's SDP, the only frame whose body a client is
+given). `call_signal` still forwards every raw calling frame for capture.
+
+Two things the backend does on its own, and neither is a decision about a call:
+
+- **A keep-alive every 20 s** while a call is connected, on the `keepAlive` link the
+  service gave us (`CALL_KEEPALIVE`). The interval the service asks for
+  (`callKeepAliveInterval`) has not been seen on this tenant, so this is shorter than any
+  plausible server timeout: too often costs one request, too late drops the call.
+- **`ready` needs the registration AND a live socket.** They are tracked apart because a
+  reconnect has to tell a surl that came back UNCHANGED from one that MOVED — a moved surl
+  invalidates a live call's links, and only that ends the call.
+
+The browser half is two files: `web/src/lib/call.ts` (pure state model) and
+`call-media.ts` (the microphone, one `RTCPeerConnection`, the remote audio element). The
+UI is `call-bar.tsx` (ringing and in-call, one component), `call-button.tsx` (a 1:1
+header) and the Settings switch.
+
+What is deliberately NOT built: video, a group call, transfer, hold, DTMF, and a call the
+app places without a click. Each is a product decision with its own surface, and audio has
+to be solid first.
 
 ## 7. Consent — a call is at least as outward as a send
 
@@ -263,17 +284,30 @@ that hold `send` hold here, and one is stricter:
   from their own click and nothing else — but it publishes their microphone, so it is
   never automatic either.
 
-## 8. Still unknown
+## 8. Still unknown — what only a live ring can answer
 
-- `/v3/c` against the `/v4/a` allocate flow (§ 4.3). First spike.
-- The exact path an incoming call is pushed to on the calling connection, and the
-  fields the notification really carries on this tenant. Only a live ring answers.
-- Whether a 1:1 audio call to a colleague connects peer to peer or through a Microsoft
-  media server. It changes latency, not the code: ICE decides.
-- `applicationType`, `clientType` and `endpointCapabilities` values the service accepts
-  from a client that is not the real one.
-- What the service returns from the create-call POST (the conversation `Location` and
-  the first link set) — read from the response of the first real placed call.
+Everything below is written, and none of it has met the tenant. A live call is the user's
+own click (§ 7), so these are the questions that first call answers:
+
+- **`/v3/c` against the `/v4/a` allocate flow.** `trouter::allocate_url_for` keeps the
+  directory's regional host and speaks the allocate protocol this client already had. If
+  the calling trouter refuses it, the journal says so in one line
+  (`[calling] disconnected`), and the fix is that function alone.
+- **The path the initial invite is pushed to**, and the field names the notification
+  really carries on this tenant. `calling::incoming_call_from_frame` reads several
+  spellings and every `links` object at any depth for exactly this reason, and
+  `call_signal` still forwards the raw frame so one real ring corrects the shape.
+- **Which token the conversation service wants.** Both travel on every request, and its
+  `www-authenticate` answer is what a 401 would tell us.
+- **`applicationType` / `endpointCapabilities`** — the values the service accepts from a
+  client that is not the real one. Nothing sends them yet; a rejection would name them.
+- **Whether a 1:1 call connects peer to peer or through a media server.** It changes
+  latency, not the code: ICE decides, and the STUN server from `calling_udpTransportUrl`
+  is what lets the browser offer a reachable candidate at all. A relayed path additionally
+  needs the TURN credentials, and those only arrive if the service sends a `relayConfig`
+  (`calling::relay_config_in_frame`) — if it never does, that is the next thing to find.
+- **What the create-call POST returns.** `PlacedCall` keeps the whole response, and the
+  links are collected from it wherever they sit.
 
 ## 9. Reproducing this recon
 
@@ -291,3 +325,10 @@ The client half needs no account at all — the bundles are public:
 
 Hashes move with every Teams release, so read the shell for the current ones rather
 than pinning the names in this file.
+
+And the surface itself, with no tenant, no registration and no microphone:
+
+    cd web && bun run preview -- --out /tmp/call --call     # the switch, the ring, the bar
+    cd web && bun run test                                  # the state model
+    cd web && bun run test:e2e -- calling.spec.ts           # the whole flow, through the mock
+    cargo test                                              # the payloads, the frames, the gates

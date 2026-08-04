@@ -204,6 +204,34 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'agent_status' }));\n"
     ),
+    # Audio calling: a call rings a person, opens the user's own microphone, or
+    # registers this machine as a device their calls ring on (OUTWARD_METHODS and
+    # MACHINE_METHODS in src/bin/server.rs).
+    "call-placer.ts": (
+        "// Rings a real colleague from a script.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'call_place', params: { sdp: 'v=0' } }));\n"
+    ),
+    "call-answerer.ts": (
+        "// Opens the user's microphone to whoever is calling, through the app's relay.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19441');\n"
+        "ws.send(JSON.stringify({ method: 'call_accept', params: { sdp: 'v=0' } }));\n"
+    ),
+    "call-registrar.ts": (
+        "// Registers this machine with Teams as a device the user's calls ring on.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19421');\n"
+        "ws.send(JSON.stringify({ method: 'set_calling', params: { enabled: true } }));\n"
+    ),
+    "call-preparer.ts": (
+        "// Reserves the one call slot and asks for the relay credentials.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'call_prepare' }));\n"
+    ),
+    "call-status-reader.ts": (
+        "// Reads whether this machine takes calls, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'call_status' }));\n"
+    ),
     # Person overrides: writing one decides the name and the face this app puts on a
     # colleague's messages — a script that could set them could make one person's post
     # appear to come from another (MACHINE_METHODS in src/bin/server.rs).
@@ -350,6 +378,11 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/person-renamer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/person-refacer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/self-updater.ts"),
+        # A call rings a real person; registering decides whether their calls ring here.
+        ("BLOCK", PROJECT, f"bun run {tmp}/call-placer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/call-answerer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/call-registrar.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/call-preparer.ts"),
         # A cargo example reaches Teams with a broker token, past every port rule.
         ("BLOCK", PROJECT, "cargo run --example guard-test-loose-send"),
         ("BLOCK", PROJECT, "cargo run --example guard-test-real-send"),
@@ -476,6 +509,8 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/agent-status-reader.ts"),
         # …and so is reading back the names and faces the user chose themselves.
         ("ALLOW", PROJECT, f"bun run {tmp}/person-override-reader.ts"),
+        # Reading the call state names no write and reaches nobody.
+        ("ALLOW", PROJECT, f"bun run {tmp}/call-status-reader.ts"),
         # An example pinned to the pre-authorized channel is the sanctioned shape,
         # and one that only reads needs no target at all.
         ("ALLOW", PROJECT, "cargo run --example guard-test-sandbox-send"),

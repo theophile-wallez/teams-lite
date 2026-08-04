@@ -218,6 +218,33 @@ export async function emitCall(
   expect(res.ok()).toBeTruthy();
 }
 
+/**
+ * Ring THIS machine, the way an invite on the calling socket does (the mock's
+ * `call_invite` hook, mirroring `calling::incoming_call_from_frame`).
+ *
+ * Different from {@link emitCall}: that one is the awareness signal built from an
+ * after-the-fact chat event and can only raise a banner, while this is a call the app can
+ * really answer. Ringing implies calling is ON, because a real invite could not arrive
+ * otherwise.
+ *
+ * ALWAYS finish with `resetCall`. One mock process serves the whole run, so a call left
+ * ringing would ring inside every later spec.
+ */
+export async function emitCallInvite(page: Page, conversation: string): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_invite", conversation },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** End any mock call and turn calling back off — the state a fresh backend is in. */
+export async function resetCall(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_invite", reset: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Arm (or clear) a pending update in the mock, through its gated test hook; the mock
  *  then broadcasts `update_available`, mirroring the Rust backend's own event.
  *

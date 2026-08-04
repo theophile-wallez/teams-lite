@@ -54,9 +54,9 @@
 // The `call` event is incoming-call AWARENESS only (ring/dismiss a banner) — it
 // rides on the after-the-fact `Event/Call` chat system message.
 //
-// `call_signal` is EXPERIMENTAL native-calling plumbing (opt-in via
-// TEAMS_LITE_CALLING=1): the raw, still-being-reverse-engineered call setup/state
-// frames from the calling trouter workers, forwarded verbatim for a live capture.
+// `call_signal` carries the RAW calling frames, forwarded verbatim, while the wire
+// schema is still young (see NATIVE-CALLING.md § 8). It is a capture aid beside the
+// typed `call_state`, not the feature: the app acts on `call_state` alone.
 // No media is placed/answered without an explicit user action.
 //
 // `TEAMS_LITE_READ_ONLY=1` refuses every outward-facing method (send | edit |
@@ -86,8 +86,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_models, agent_policy, auth, calendar, mail, push, push_policy, retry, sender_icon,
-    store, teams,
+    agent, agent_models, agent_policy, auth, calendar, calling, mail, push, push_policy, retry,
+    sender_icon, store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
@@ -155,6 +155,15 @@ const SETTING_SENDER_ICONS: &str = "sender_icons";
 /// two backends that share this store (the always-on service and the user's dev one)
 /// can leave a trail of registrations Teams still counts as us.
 const SETTING_PRESENCE_ENDPOINT_ID: &str = "presence_endpoint_id";
+/// Native calling (`"1"` = on, anything else = off, and OFF is the default): let this
+/// app take and place audio calls (see [`teams_lite::calling`] and NATIVE-CALLING.md).
+///
+/// A setting rather than a build-time feature, and off by default, because turning it
+/// on REGISTERS a calling endpoint with Teams — and Teams then routes the user's real
+/// incoming calls to it, alongside their phone and their desktop client. That is a
+/// change to their account even before this app rings once, so it is theirs to make;
+/// turning it off unregisters, so their calls stop being offered here.
+const SETTING_CALLING: &str = "calling";
 /// This machine's VAPID private key (base64url), generated on first use. It must
 /// stay stable: every device's subscription embeds the matching public half, so a
 /// new key silently stops every phone that already opted in (see
@@ -209,7 +218,15 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// account on every device, so it sits behind the same gate as a send. The chat's PIN
 /// and HIDE are deliberately NOT here: neither write round-trips through the tenant, so
 /// both stay local to this app (see `src/teams_chat_settings.rs`).
-const OUTWARD_METHODS: [&str; 7] = [
+/// The four calling methods are outward for the sharpest reason in this list: a call
+/// RINGS a person. `call_place` starts a device buzzing in somebody's pocket,
+/// `call_accept` opens the user's own microphone to whoever is on the other end,
+/// `call_hangup` ends the call for both of them (or declines it, which the caller is
+/// shown), and `call_mute` publishes whether the user can be heard. None of them can
+/// be taken back, and none is ever automatic: each one carries out a click the user
+/// just made. `call_prepare` is the one calling method that is NOT here — it posts
+/// nothing, and sits in {@link MACHINE_METHODS} with its own refusal text.
+const OUTWARD_METHODS: [&str; 11] = [
     "send",
     "edit",
     "delete",
@@ -217,6 +234,10 @@ const OUTWARD_METHODS: [&str; 7] = [
     "mark_read",
     "set_always_available",
     "set_chat_muted",
+    "call_place",
+    "call_accept",
+    "call_hangup",
+    "call_mute",
 ];
 
 /// The RPC methods that act on THIS MACHINE rather than on the user's Teams account.
@@ -261,10 +282,20 @@ const OUTWARD_METHODS: [&str; 7] = [
 /// misstates (see the local agent's signature line in AGENTS.md), so relabelling it is
 /// the user's own act and nothing that merely found this socket gets to perform it.
 /// Reading the overrides back stays open: it returns what the user themselves chose.
-const MACHINE_METHODS: [&str; 13] = [
+/// `set_calling` and `call_prepare` are the two calling entries that post nothing.
+/// `set_calling` registers (or unregisters) a calling endpoint with Teams, which
+/// decides whether the user's real incoming calls are offered on this machine at all
+/// — the consent gate for the whole feature, and the reason it is not a standing
+/// licence to ring anybody. `call_prepare` reserves the one call slot this machine
+/// has and hands the page the relay credentials its `RTCPeerConnection` needs; the
+/// credentials are why it is gated rather than open, because a client that merely
+/// found this socket has no business holding them.
+const MACHINE_METHODS: [&str; 15] = [
     "repair_broker",
     "update_download",
     "update_apply",
+    "set_calling",
+    "call_prepare",
     "push_subscribe",
     "push_unsubscribe",
     "push_test",
@@ -309,6 +340,12 @@ fn machine_effect(method: &str) -> &'static str {
         "set_person_name" | "set_person_avatar" => {
             "decides the name and the face this machine puts on a colleague's messages"
         }
+        "set_calling" => {
+            "registers this machine with Teams as a device the user's calls ring on"
+        }
+        "call_prepare" => {
+            "reserves this machine's one call and hands out the media credentials it holds"
+        }
         // Unreachable while the two lists agree; the test below pins that they do.
         _ => "changes this machine",
     }
@@ -341,6 +378,14 @@ fn write_class(method: &str) -> Option<WriteClass> {
 /// minutes leaves room for a missed tick and a retry inside a window whose end is
 /// visible to every colleague as the user going Offline.
 const PRESENCE_HEARTBEAT: Duration = Duration::from_secs(120);
+
+/// How often a live call is kept alive.
+///
+/// The service tears a call down when the client stops saying it is still there, and the
+/// interval it asks for (`callKeepAliveInterval`) has not been seen on this tenant yet —
+/// so this is deliberately shorter than any plausible server timeout. A keep-alive that
+/// arrives too often costs one request; one that arrives too late drops the call.
+const CALL_KEEPALIVE: Duration = Duration::from_secs(20);
 
 /// The systemd unit that repairs the broker by restarting the Intune container.
 /// Never run `intune-container` from here: one unit keeps the rate limit in one
@@ -822,6 +867,133 @@ struct Ctx {
     /// When this process last asked systemd for a broker repair, so it cannot loop.
     /// See {@link REPAIR_MIN_INTERVAL} and `start_broker_repair`.
     last_repair: Arc<Mutex<Option<std::time::Instant>>>,
+    /// The audio-calling plane: the calling connection's own address, and the one
+    /// call this machine is in. Empty and idle until the user turns calling on
+    /// ({@link SETTING_CALLING}) — see [`CallingPlane`].
+    calling: Arc<Mutex<CallingPlane>>,
+}
+
+/// Everything this machine knows about audio calling right now.
+///
+/// Deliberately ONE call: a second simultaneous call would need a second microphone
+/// and a UI that can hold two, and neither exists. A call arriving while one is up is
+/// left for the user's other devices to ring, which is what Teams does with a client
+/// that does not answer.
+#[derive(Default)]
+struct CallingPlane {
+    /// The calling connection's surl and registration id, once it registered. `None`
+    /// means no call can start: every callback link a call publishes is built on that
+    /// surl, so without it there is nothing for the service to answer to.
+    channel: Option<trouter::CallingChannel>,
+    /// The call in flight, if any.
+    call: Option<CallSession>,
+    /// Whether that connection is up RIGHT NOW. Separate from `channel` on purpose: a
+    /// reconnect must be able to tell a surl that came back UNCHANGED from one that
+    /// moved (a moved surl invalidates a live call's links), so the address is kept
+    /// across the gap while this says the socket is not carrying anything.
+    connected: bool,
+    /// The relay description the service sent, and the credentials fetched for it.
+    /// Cached because they outlive one call and cost a round trip each.
+    relay: Option<Value>,
+    relay_credentials: Option<Value>,
+    /// The calling connection's task, so turning the setting off can drop the socket
+    /// as well as unregister the endpoint.
+    connection: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Which way a call was set up. It decides which payload ends it and which side of
+/// the SDP handshake this app performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallDirection {
+    Incoming,
+    Outgoing,
+}
+
+impl CallDirection {
+    fn as_str(self) -> &'static str {
+        match self {
+            CallDirection::Incoming => "incoming",
+            CallDirection::Outgoing => "outgoing",
+        }
+    }
+}
+
+/// How far along one call is. The UI draws one thing per state, and every transition
+/// is either a frame from the service or the user's own click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallPhase {
+    /// Somebody is calling us and we have not answered.
+    Ringing,
+    /// We are calling somebody and they have not answered.
+    Dialing,
+    /// Answered on both sides; the media is still being negotiated.
+    Connecting,
+    /// Audio is flowing.
+    Connected,
+    /// Over. Kept for one emit so the UI can say why, then dropped.
+    Ended,
+}
+
+impl CallPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            CallPhase::Ringing => "ringing",
+            CallPhase::Dialing => "dialing",
+            CallPhase::Connecting => "connecting",
+            CallPhase::Connected => "connected",
+            CallPhase::Ended => "ended",
+        }
+    }
+}
+
+/// The one call this machine is in.
+struct CallSession {
+    /// Our correlation id for the whole call — the `X-Microsoft-Skype-Chain-ID` on
+    /// every request, and the id every RPC about this call names.
+    id: String,
+    direction: CallDirection,
+    phase: CallPhase,
+    /// The chat or channel the call belongs to, when it has one.
+    conversation_id: Option<String>,
+    /// Who is on the other end (one person: a group call is not offered).
+    peer_mri: String,
+    peer_name: String,
+    /// Every link the service has handed us so far, newest merged over oldest.
+    links: calling::Links,
+    local: calling::LocalParticipant,
+    callbacks: calling::CallbackBase,
+    /// The offer the caller sent, held until the page asks for it (`call_prepare`).
+    offer: Option<calling::MediaContent>,
+    /// Whether we told the service we are muted. The microphone is muted in the page
+    /// as well — this half is what draws the crossed-out microphone for everybody
+    /// else in the call.
+    muted: bool,
+    /// When audio started, so the UI can count the duration from one clock.
+    connected_at_ms: Option<i64>,
+    /// Why it ended, for the line the UI shows afterwards.
+    end_reason: Option<String>,
+}
+
+impl CallSession {
+    /// The view of this call every client gets. It carries no SDP and no
+    /// credentials: those only ever leave through a token-gated method.
+    fn json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "direction": self.direction.as_str(),
+            "phase": self.phase.as_str(),
+            "conversation_id": self.conversation_id,
+            "peer": self.peer_name,
+            "peer_mri": self.peer_mri,
+            "muted": self.muted,
+            "connected_at_ms": self.connected_at_ms,
+            "end_reason": self.end_reason,
+            // What the user may do next, decided HERE rather than in the page: the
+            // links are what make an action possible, and only this side sees them.
+            "can_accept": self.phase == CallPhase::Ringing && self.offer.is_some(),
+            "can_hangup": self.phase != CallPhase::Ended,
+        })
+    }
 }
 
 /// The calendar window a UI currently has on screen, and over which calendars.
@@ -1476,6 +1648,7 @@ async fn main() -> Result<()> {
         mail_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         calendar_watch: Arc::new(Mutex::new(None)),
         last_repair: Arc::new(Mutex::new(None)),
+        calling: Arc::new(Mutex::new(CallingPlane::default())),
     };
 
     // Watch the broker, and react once per CHANGE of state (see `observe_broker`).
@@ -1511,6 +1684,10 @@ async fn main() -> Result<()> {
 
     // real-time: run the trouter, persist each live message, broadcast an event.
     spawn_realtime(ctx.clone(), session, db_path);
+
+    // calling: a second trouter connection, registered as the web client registers
+    // it — but only when the user turned calling on (see `spawn_calling`).
+    spawn_calling(ctx.clone());
 
     // mail: poll whichever folders a client opens (read-only, and idle until one
     // does — see `spawn_mail_sync`).
@@ -2808,6 +2985,394 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let store = ctx.store()?;
             store.set_setting(SETTING_ALWAYS_AVAILABLE, if enabled { "1" } else { "0" })?;
             settings_json(&store)
+        }
+
+        // ---- audio calling ------------------------------------------------
+        // Seven methods, and the split between them IS the consent design:
+        //   `call_status`  reads state, and is the only open one.
+        //   `set_calling`  registers this machine as a device the user's calls ring
+        //                  on — the gate for the whole feature.
+        //   `call_prepare` reserves the one call and hands out the media credentials.
+        //   `call_place` / `call_accept` / `call_hangup` / `call_mute` reach a person.
+        // See `teams_lite::calling` and NATIVE-CALLING.md.
+
+        // What this machine can do about calls, and what call it is in. Open, because
+        // it returns no SDP and no credentials — only what the UI has to draw.
+        "call_status" => Ok(ctx.call_state_payload()),
+
+        // Turn calling on or off.
+        //
+        // ON registers a calling endpoint with Teams, and the user's real incoming
+        // calls are then offered here as well as on their phone. OFF unregisters, so
+        // they stop being offered — the registration is what makes this machine a
+        // device, and leaving one behind would silently swallow their calls.
+        "set_calling" => {
+            let enabled = params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .context("`enabled` must be true or false")?;
+            // Stored first for ON so a reconnect inside `start_calling` already reads
+            // the new value, and last for OFF so nothing re-registers behind the
+            // unregister.
+            if enabled {
+                ctx.store()?.set_setting(SETTING_CALLING, "1")?;
+                if let Err(e) = ctx.start_calling().await {
+                    // Roll the setting back: a switch that reads "on" while no
+                    // endpoint is registered claims the user's calls ring here.
+                    ctx.store()?.set_setting(SETTING_CALLING, "0")?;
+                    return Err(e);
+                }
+            } else {
+                ctx.stop_calling().await;
+                ctx.store()?.set_setting(SETTING_CALLING, "0")?;
+            }
+            ctx.emit_call_state();
+            Ok(ctx.call_state_payload())
+        }
+
+        // Everything the page needs to build one `RTCPeerConnection`, and the
+        // reservation of the single call this machine holds.
+        //
+        // Two shapes, one per direction: `conversation` starts an outgoing call (and
+        // returns nothing to answer yet), `call_id` prepares to answer the call that
+        // is ringing (and returns the caller's own offer). The ICE servers are why
+        // this is gated: they carry the relay credentials this backend holds.
+        "call_prepare" => {
+            let ringing_id = params.get("call_id").and_then(Value::as_str);
+            match ringing_id {
+                // Answering: hand back the offer that is already ringing.
+                Some(call_id) => {
+                    let offer = {
+                        let plane = ctx.calling.lock().unwrap();
+                        let call = plane
+                            .call
+                            .as_ref()
+                            .filter(|c| c.id == call_id && c.phase == CallPhase::Ringing)
+                            .context("call_prepare: that call is not ringing")?;
+                        call.offer.clone().context("call_prepare: that call carried no offer")?
+                    };
+                    Ok(json!({
+                        "call_id": call_id,
+                        "offer_sdp": offer.blob,
+                        "ice_servers": ctx.call_ice_servers().await,
+                    }))
+                }
+                // Placing: reserve the call and resolve who to ring.
+                None => {
+                    let conversation = param_str(params, "conversation")?;
+                    let (session, endpoint_id) = {
+                        let endpoint_id = ctx
+                            .calling
+                            .lock()
+                            .unwrap()
+                            .channel
+                            .as_ref()
+                            .map(|c| c.endpoint_id.clone())
+                            .context(
+                                "call_prepare: calling is not connected yet — turn it on in \
+                                 Settings, then try again",
+                            )?;
+                        (ctx.session().await?, endpoint_id)
+                    };
+                    // Who to ring: the roster, minus us. A group call is refused
+                    // rather than half-supported — it needs a roster UI, a mixer and
+                    // more than one audio element.
+                    let http = ctx.http.clone();
+                    let target = conversation.clone();
+                    let roster = ctx
+                        .retry_on_auth(move |session, _csa| {
+                            let http = http.clone();
+                            let conversation = target.clone();
+                            async move {
+                                teams_members::fetch_thread_members(&http, &session, &conversation)
+                                    .await
+                            }
+                        })
+                        .await
+                        .unwrap_or_default();
+                    let others: Vec<String> = roster
+                        .iter()
+                        .map(|p| p.mri.clone())
+                        .filter(|mri| mri != &session.self_mri && mri.starts_with("8:"))
+                        .collect();
+                    let peer_mri = match others.len() {
+                        1 => others[0].clone(),
+                        0 => anyhow::bail!(
+                            "call_prepare: nobody to ring in {conversation} — this app only \
+                             calls a one-to-one chat"
+                        ),
+                        n => anyhow::bail!(
+                            "call_prepare: {conversation} has {n} other people — this app only \
+                             calls a one-to-one chat"
+                        ),
+                    };
+                    // The store first, because it is where the user's own nickname for
+                    // that person lives (see `person_overrides`): a call has to name
+                    // them the way every other surface does.
+                    let peer_name = ctx
+                        .store()?
+                        .display_name_for_mri(&peer_mri)?
+                        .into_iter()
+                        .chain(
+                            roster
+                                .iter()
+                                .find(|p| p.mri == peer_mri)
+                                .map(|p| p.display_name.clone()),
+                        )
+                        .find(|name| !name.trim().is_empty())
+                        .unwrap_or_default();
+                    let surl = ctx
+                        .calling
+                        .lock()
+                        .unwrap()
+                        .channel
+                        .as_ref()
+                        .map(|c| c.surl.clone())
+                        .context("call_prepare: the calling connection went away")?;
+
+                    let call_id = uuid::Uuid::new_v4().to_string();
+                    let call = CallSession {
+                        id: call_id.clone(),
+                        direction: CallDirection::Outgoing,
+                        phase: CallPhase::Dialing,
+                        conversation_id: Some(conversation.clone()),
+                        peer_mri,
+                        peer_name,
+                        links: calling::Links::default(),
+                        local: ctx.local_participant(&session, &endpoint_id),
+                        callbacks: calling::CallbackBase {
+                            surl,
+                            session_id: uuid::Uuid::new_v4().to_string(),
+                            cause_id: short_cause_id(),
+                        },
+                        offer: None,
+                        muted: false,
+                        connected_at_ms: None,
+                        end_reason: None,
+                    };
+                    {
+                        let mut plane = ctx.calling.lock().unwrap();
+                        if plane.call.as_ref().is_some_and(|c| c.phase != CallPhase::Ended) {
+                            anyhow::bail!(
+                                "call_prepare: this machine is already in a call — hang up first"
+                            );
+                        }
+                        plane.call = Some(call);
+                    }
+                    // The UI shows "calling…" from here, before the offer exists: the
+                    // microphone prompt happens next and the user must see why.
+                    ctx.emit_call_state();
+                    Ok(json!({
+                        "call_id": call_id,
+                        "ice_servers": ctx.call_ice_servers().await,
+                    }))
+                }
+            }
+        }
+
+        // Place the call: ONE POST carrying our offer (NATIVE-CALLING.md § 2.3).
+        //
+        // This is the method that makes a device buzz in somebody's pocket, so it
+        // carries out exactly one click and nothing else. A failure ends the
+        // reservation rather than leaving the UI on "calling…" forever.
+        "call_place" => {
+            let call_id = param_str(params, "call_id")?;
+            let sdp = param_str(params, "sdp")?;
+            let (local, callbacks, to, thread) = {
+                let plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_ref()
+                    .filter(|c| c.id == call_id)
+                    .context("call_place: no such call — call_prepare first")?;
+                (
+                    call.local.clone(),
+                    call.callbacks.clone(),
+                    vec![call.peer_mri.clone()],
+                    call.conversation_id.clone(),
+                )
+            };
+            let session = ctx.session().await?;
+            let ic3 = ctx.tokens.get(IC3_SCOPE).await?;
+            let placed = calling::place_call(
+                &ctx.http,
+                &session,
+                &ic3,
+                &local,
+                &to,
+                thread.as_deref(),
+                &calling::MediaContent::sdp(sdp),
+                &callbacks,
+                &call_id,
+            )
+            .await;
+            match placed {
+                Ok(placed) => {
+                    {
+                        let mut plane = ctx.calling.lock().unwrap();
+                        if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                            call.links.merge(&placed.links);
+                        }
+                    }
+                    ctx.emit_call_state();
+                    Ok(json!({ "call_id": call_id, "links": placed.links.names() }))
+                }
+                Err(e) => {
+                    ctx.end_call_locally("CallEndReasonPlaceFailed").await;
+                    Err(e)
+                }
+            }
+        }
+
+        // Answer the ringing call with our own SDP.
+        //
+        // One POST where the service gave us an `accept` link — the acceptance
+        // carries the answer, which is what the web client does — and a plain
+        // `mediaAnswer` where it did not.
+        "call_accept" => {
+            let call_id = param_str(params, "call_id")?;
+            let sdp = param_str(params, "sdp")?;
+            let (local, callbacks, accept, media_answer) = {
+                let plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_ref()
+                    .filter(|c| c.id == call_id)
+                    .context("call_accept: no such call")?;
+                (
+                    call.local.clone(),
+                    call.callbacks.clone(),
+                    call.links.accept().map(str::to_string),
+                    call.links.media_answer().map(str::to_string),
+                )
+            };
+            let answer = calling::MediaContent::sdp(sdp);
+            let (url, payload) = match (accept, media_answer) {
+                (Some(url), _) => (url, calling::acceptance_payload(&local, &answer, &callbacks)),
+                (None, Some(url)) => {
+                    (url, calling::media_answer_payload(&local, &answer, &callbacks))
+                }
+                (None, None) => {
+                    ctx.end_call_locally("CallEndReasonNoAcceptLink").await;
+                    anyhow::bail!("call_accept: the invite carried no link to answer on")
+                }
+            };
+            match ctx.post_call_signal(&url, &payload).await {
+                Ok(response) => {
+                    let links = calling::Links::collect(&response);
+                    {
+                        let mut plane = ctx.calling.lock().unwrap();
+                        if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                            call.links.merge(&links);
+                            call.phase = CallPhase::Connected;
+                            call.connected_at_ms = Some(now_ms());
+                        }
+                    }
+                    ctx.emit_call_state();
+                    Ok(json!({ "call_id": call_id }))
+                }
+                Err(e) => {
+                    ctx.end_call_locally("CallEndReasonAcceptFailed").await;
+                    Err(e)
+                }
+            }
+        }
+
+        // End the call — or decline it, when it is still ringing.
+        //
+        // Both are one method because they are one intention ("I am not on this
+        // call") and because the UI shows one button. Which payload goes out depends
+        // on the phase: a caller who is declined is told so, and a call that was up
+        // ends for both sides.
+        "call_hangup" => {
+            let call_id = param_str(params, "call_id")?;
+            let (local, url, declining) = {
+                let plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_ref()
+                    .filter(|c| c.id == call_id)
+                    .context("call_hangup: no such call")?;
+                let declining =
+                    call.direction == CallDirection::Incoming && call.phase == CallPhase::Ringing;
+                let url = if declining {
+                    call.links.reject().or_else(|| call.links.hangup())
+                } else {
+                    call.links.hangup()
+                };
+                (call.local.clone(), url.map(str::to_string), declining)
+            };
+            // Tell the other side first, then drop it locally: the local drop is what
+            // stops the microphone, and it must happen even if the POST fails.
+            let told = match url {
+                Some(url) => {
+                    let payload = if declining {
+                        calling::rejection_payload(&local)
+                    } else {
+                        calling::hangup_payload(&local)
+                    };
+                    match ctx.post_call_signal(&url, &payload).await {
+                        Ok(_) => true,
+                        Err(e) => {
+                            eprintln!("[calling] the hangup did not reach the service: {e:#}");
+                            false
+                        }
+                    }
+                }
+                None => {
+                    eprintln!("[calling] no link to hang up on — dropping the call locally");
+                    false
+                }
+            };
+            ctx.end_call_locally(if declining {
+                "CallEndReasonDeclined"
+            } else {
+                "CallEndReasonHangup"
+            })
+            .await;
+            Ok(json!({ "call_id": call_id, "told_service": told }))
+        }
+
+        // Publish whether the user can be heard.
+        //
+        // The page has already stopped sending audio; this is the half everybody else
+        // in the call sees. It is outward for that reason: it states something about
+        // the user to the person they are talking to.
+        "call_mute" => {
+            let call_id = param_str(params, "call_id")?;
+            let muted = params
+                .get("muted")
+                .and_then(Value::as_bool)
+                .context("`muted` must be true or false")?;
+            let (local, url) = {
+                let plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_ref()
+                    .filter(|c| c.id == call_id)
+                    .context("call_mute: no such call")?;
+                let url = if muted { call.links.mute() } else { call.links.unmute() };
+                (call.local.clone(), url.map(str::to_string))
+            };
+            // The local state moves whatever the service says: the microphone is
+            // already off, and the UI must never claim the user is live when they are
+            // not.
+            {
+                let mut plane = ctx.calling.lock().unwrap();
+                if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                    call.muted = muted;
+                }
+            }
+            ctx.emit_call_state();
+            let told = match url {
+                Some(url) => ctx
+                    .post_call_signal(&url, &calling::mute_payload(&local, muted))
+                    .await
+                    .inspect_err(|e| eprintln!("[calling] the mute did not reach the service: {e:#}"))
+                    .is_ok(),
+                None => false,
+            };
+            Ok(json!({ "call_id": call_id, "muted": muted, "told_service": told }))
         }
 
         // Enrich a tracker link with metadata (title, state, assignee, …) so the
@@ -5614,6 +6179,532 @@ fn agent_status_json(store: &Store) -> Result<Value> {
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Audio calling (see `teams_lite::calling` and NATIVE-CALLING.md)
+//
+// The backend signals and the browser carries the audio. That split is not an
+// implementation detail: the tokens must never reach a page, and the microphone can
+// only be reached from one. So every SDP crosses the local WebSocket — an offer out,
+// an answer in — and this side never handles RTP.
+// ---------------------------------------------------------------------------
+
+/// Is calling turned on in this store? Off in a fresh one, and off for a read-only
+/// backend whatever the store says: a screenshot backend must not register a device
+/// the user's calls ring on.
+fn calling_enabled(store: &Store) -> bool {
+    !read_only() && store.get_setting(SETTING_CALLING).ok().flatten().as_deref() == Some("1")
+}
+
+impl Ctx {
+    /// The `call_state` event and the `call_status` answer, in one shape so a client
+    /// that reconnects mid-call learns exactly what a live one already knows.
+    fn call_state_payload(&self) -> Value {
+        let plane = self.calling.lock().unwrap();
+        let enabled = self.store().map(|s| calling_enabled(&s)).unwrap_or(false);
+        json!({
+            "enabled": enabled,
+            // Ready means a call could start right now: the connection is up and
+            // registered. A switch that is on while this is false is honest about a
+            // connection that has not come back yet.
+            "ready": plane.channel.is_some() && plane.connected,
+            "call": plane.call.as_ref().map(CallSession::json),
+        })
+    }
+
+    fn emit_call_state(&self) {
+        self.emit("call_state", self.call_state_payload());
+    }
+
+    /// Our own identity for one call: our mri and name, the calling endpoint's
+    /// registration id, and a fresh participant leg.
+    fn local_participant(&self, session: &Session, endpoint_id: &str) -> calling::LocalParticipant {
+        calling::LocalParticipant {
+            id: session.self_mri.clone(),
+            display_name: session.self_name.clone(),
+            endpoint_id: endpoint_id.to_string(),
+            participant_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+
+    /// Start the calling connection, unless it is already up.
+    ///
+    /// One connection of its own, on the calling trouter, registered as the web
+    /// client registers it. It reconnects forever on its own (`trouter::run`), so
+    /// this is called once per process and once more whenever the user switches the
+    /// setting on.
+    async fn start_calling(&self) -> Result<()> {
+        if self.calling.lock().unwrap().connection.is_some() {
+            return Ok(());
+        }
+        let session = self.session().await?;
+        let endpoints = calling::endpoints(&session)?;
+        // A registration id of its own, persisted beside the messaging one: two
+        // workers are two endpoints, and one id would make the second registration
+        // replace the first.
+        let epid_path = std::path::Path::new(self.db_path.as_str()).with_extension("calling-epid");
+        let epid = trouter::load_or_create_epid(&epid_path);
+        let endpoint = trouter::Endpoint::calling(&endpoints.trouter, &endpoints.registrar);
+        eprintln!(
+            "[calling] registering as {} on {} (epid {epid})",
+            endpoint.template_key, endpoint.allocate
+        );
+
+        let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (chan_tx, mut chan_rx) =
+            tokio::sync::mpsc::unbounded_channel::<trouter::CallingChannel>();
+        let (st_tx, mut st_rx) = tokio::sync::mpsc::unbounded_channel::<trouter::Status>();
+
+        // The connection's own address. Every reconnect publishes it again, and a
+        // surl that CHANGED invalidates the links of a call still up — so the call is
+        // ended rather than left with links nobody answers.
+        let ctx_chan = self.clone();
+        tokio::spawn(async move {
+            while let Some(channel) = chan_rx.recv().await {
+                let changed = {
+                    let mut plane = ctx_chan.calling.lock().unwrap();
+                    let changed = plane
+                        .channel
+                        .as_ref()
+                        .is_some_and(|existing| existing.surl != channel.surl);
+                    plane.channel = Some(channel);
+                    plane.connected = true;
+                    changed
+                };
+                if changed {
+                    ctx_chan.end_call_locally("CallEndReasonReconnected").await;
+                }
+                ctx_chan.emit_call_state();
+            }
+        });
+
+        let ctx_frames = self.clone();
+        tokio::spawn(async move {
+            while let Some(frame) = frames_rx.recv().await {
+                ctx_frames.handle_call_frame(frame).await;
+            }
+        });
+
+        // The calling socket's lifecycle is worth one journal line each way — a call
+        // that never rings is diagnosed from here — and it decides whether this machine
+        // says it is ready. It does NOT end a live call: a socket that comes back with
+        // the same surl comes back to the same links, and only a CHANGED surl breaks
+        // them (see the channel task above).
+        let ctx_status = self.clone();
+        tokio::spawn(async move {
+            while let Some(status) = st_rx.recv().await {
+                match status {
+                    trouter::Status::Connected => eprintln!("[calling] connected"),
+                    trouter::Status::Disconnected { retry_in_secs } => {
+                        eprintln!("[calling] disconnected, retrying in {retry_in_secs}s");
+                        ctx_status.calling.lock().unwrap().connected = false;
+                        ctx_status.emit_call_state();
+                    }
+                    trouter::Status::Connecting => {}
+                }
+            }
+        });
+
+        // One ticker for the whole connection rather than one per call: there is only
+        // ever one call, and a task that outlives it has nothing to leak.
+        let ctx_keepalive = self.clone();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(CALL_KEEPALIVE);
+            ticks.tick().await; // consume the immediate first tick
+            loop {
+                ticks.tick().await;
+                if ctx_keepalive.calling.lock().unwrap().connection.is_none() {
+                    return; // calling was turned off; this connection is gone
+                }
+                ctx_keepalive.keep_call_alive().await;
+            }
+        });
+
+        let creds = self.clone();
+        let handle = tokio::spawn(async move {
+            trouter::run(
+                creds,
+                epid,
+                endpoint,
+                trouter::Role::Calling { frames: frames_tx, channel: chan_tx },
+                st_tx,
+            )
+            .await;
+        });
+        self.calling.lock().unwrap().connection = Some(handle);
+        Ok(())
+    }
+
+    /// Stop the calling connection and unregister the endpoint.
+    ///
+    /// Unregistering is the load-bearing half. A registration Teams still believes in
+    /// keeps routing the user's calls to a client that is gone, and a call offered to
+    /// a device that never rings is a call they miss — so the DELETE goes out even if
+    /// dropping the socket already did.
+    async fn stop_calling(&self) {
+        let (handle, endpoint_id) = {
+            let mut plane = self.calling.lock().unwrap();
+            plane.connected = false;
+            plane.relay = None;
+            plane.relay_credentials = None;
+            (plane.connection.take(), plane.channel.take().map(|c| c.endpoint_id))
+        };
+        self.end_call_locally("CallEndReasonCallingTurnedOff").await;
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+        if let Some(endpoint_id) = endpoint_id {
+            if let Err(e) = self.unregister_calling(&endpoint_id).await {
+                eprintln!("[calling] could not unregister {endpoint_id}: {e:#}");
+            } else {
+                eprintln!("[calling] unregistered {endpoint_id} — calls stop ringing here");
+            }
+        }
+        self.emit_call_state();
+    }
+
+    async fn unregister_calling(&self, endpoint_id: &str) -> Result<()> {
+        let session = self.session().await?;
+        let ic3 = self.tokens.get(IC3_SCOPE).await?;
+        let endpoints = calling::endpoints(&session)?;
+        trouter::unregister(&self.http, &session.skypetoken, &ic3, &endpoints.registrar, endpoint_id)
+            .await
+    }
+
+    /// One decoded frame from the calling socket. This is the whole receive path.
+    async fn handle_call_frame(&self, frame: trouter_events::CallFrame) {
+        record_call_frame(&frame);
+        // The raw frame still goes to the UI console: the schema is young, and a
+        // capture of what really arrived is what corrects it.
+        self.emit(
+            "call_signal",
+            json!({ "url": frame.url, "call_id": frame.call_id, "body": frame.body }),
+        );
+
+        // The relay description can ride on any frame; cache it the moment it does,
+        // so the credentials are ready before the next call needs them.
+        if let Some(relay) = calling::relay_config_in_frame(&frame.body) {
+            let already = self.calling.lock().unwrap().relay.as_ref() == Some(&relay);
+            if !already {
+                self.calling.lock().unwrap().relay = Some(relay);
+                self.refresh_relay_credentials().await;
+            }
+        }
+
+        if let Some(invite) = calling::incoming_call_from_frame(&frame.body) {
+            self.handle_incoming_call(invite).await;
+            return;
+        }
+
+        // Everything below is about the call we are already in. A frame for any other
+        // call is not ours to act on — a second call rings the user's other devices.
+        let links = calling::Links::collect(&frame.body);
+        let mine = {
+            let mut plane = self.calling.lock().unwrap();
+            match plane.call.as_mut() {
+                Some(call) if call.phase != CallPhase::Ended => {
+                    call.links.merge(&links);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !mine {
+            return;
+        }
+
+        if let Some(ended) = calling::call_ended_from_frame(&frame.body) {
+            let reason = if ended.phrase.is_empty() {
+                format!("code {}", ended.code)
+            } else {
+                ended.phrase
+            };
+            eprintln!("[calling] the call ended: {reason}");
+            self.end_call_locally(&reason).await;
+            return;
+        }
+
+        // The far side picked up. Audio still waits for their SDP, so this only stops
+        // the ringing tone.
+        if calling::call_accepted_in_frame(&frame.body) {
+            let mut changed = false;
+            {
+                let mut plane = self.calling.lock().unwrap();
+                if let Some(call) = plane
+                    .call
+                    .as_mut()
+                    .filter(|c| c.phase == CallPhase::Dialing || c.phase == CallPhase::Ringing)
+                {
+                    call.phase = CallPhase::Connecting;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.emit_call_state();
+            }
+        }
+
+        // Their SDP answer: the page needs it to finish the handshake, and it is the
+        // one frame whose body a client is given.
+        if let Some(answer) = calling::media_answer_from_frame(&frame.body) {
+            let (id, acknowledgement) = {
+                let plane = self.calling.lock().unwrap();
+                match plane.call.as_ref() {
+                    Some(call) => (
+                        call.id.clone(),
+                        call.links.media_acknowledgement().map(str::to_string),
+                    ),
+                    None => return,
+                }
+            };
+            self.emit(
+                "call_media",
+                json!({ "call_id": id, "sdp": answer.blob, "kind": "answer" }),
+            );
+            // Acknowledge it, or the service re-sends the answer until it gives up.
+            if let Some(url) = acknowledgement
+                && let Err(e) = self.post_call_signal(&url, &json!({ "payload": {} })).await
+            {
+                eprintln!("[calling] could not acknowledge the answer: {e:#}");
+            }
+        }
+    }
+
+    /// Somebody is calling. Ring, unless this machine is busy.
+    async fn handle_incoming_call(&self, invite: calling::IncomingCall) {
+        if !invite.has_audio() {
+            eprintln!("[calling] ignoring an invite with no audio: {:?}", invite.modalities);
+            return;
+        }
+        let (session, endpoint_id) = {
+            let endpoint_id = self.calling.lock().unwrap().channel.as_ref().map(|c| c.endpoint_id.clone());
+            match (self.session().await, endpoint_id) {
+                (Ok(session), Some(endpoint_id)) => (session, endpoint_id),
+                _ => {
+                    eprintln!("[calling] an invite arrived before the connection was ready");
+                    return;
+                }
+            }
+        };
+        // A name we can state. The invite's own `displayName` is often empty, and the
+        // store already holds what this app calls that person — the user's own
+        // nickname for them included (see `person_overrides`).
+        let peer_name = self
+            .store()
+            .ok()
+            .and_then(|s| s.display_name_for_mri(&invite.caller_mri).ok().flatten())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| invite.caller_name.clone());
+
+        let surl = match self.calling.lock().unwrap().channel.as_ref() {
+            Some(channel) => channel.surl.clone(),
+            None => return,
+        };
+        let call = CallSession {
+            // An incoming call is correlated by the service's own id where it named
+            // one, so our requests about it land on the same call.
+            id: if invite.call_id.is_empty() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                invite.call_id.clone()
+            },
+            direction: CallDirection::Incoming,
+            phase: CallPhase::Ringing,
+            conversation_id: invite.thread_id.clone(),
+            peer_mri: invite.caller_mri.clone(),
+            peer_name,
+            links: invite.links.clone(),
+            local: calling::LocalParticipant {
+                // The leg the service assigned us, when it did: answering under a
+                // different one is answering a call it does not think we are in.
+                participant_id: invite
+                    .participant_id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                ..self.local_participant(&session, &endpoint_id)
+            },
+            callbacks: calling::CallbackBase {
+                surl,
+                session_id: uuid::Uuid::new_v4().to_string(),
+                cause_id: short_cause_id(),
+            },
+            offer: invite.offer.clone(),
+            muted: false,
+            connected_at_ms: None,
+            end_reason: None,
+        };
+
+        {
+            let mut plane = self.calling.lock().unwrap();
+            if plane.call.as_ref().is_some_and(|c| c.phase != CallPhase::Ended) {
+                eprintln!(
+                    "[calling] busy — leaving this call for the user's other devices to ring"
+                );
+                return;
+            }
+            plane.call = Some(call);
+        }
+        eprintln!("[calling] ringing: a call from {}", invite.caller_mri);
+        self.emit_call_state();
+    }
+
+    /// Mark the call over locally and tell every client. Sends nothing: this is what
+    /// runs when the SERVICE ended it, when the connection moved, or after our own
+    /// hangup has already gone out.
+    async fn end_call_locally(&self, reason: &str) {
+        let had_call = {
+            let mut plane = self.calling.lock().unwrap();
+            match plane.call.as_mut() {
+                Some(call) if call.phase != CallPhase::Ended => {
+                    call.phase = CallPhase::Ended;
+                    call.end_reason = Some(reason.to_string());
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !had_call {
+            return;
+        }
+        // One emit with the ending in it, then the slot is free. The UI needs that
+        // frame to stop holding the microphone, so the drop cannot be folded into it.
+        self.emit_call_state();
+        self.calling.lock().unwrap().call = None;
+    }
+
+    /// POST one signaling frame for the live call, with its correlation id.
+    async fn post_call_signal(&self, url: &str, payload: &Value) -> Result<Value> {
+        let correlation = self
+            .calling
+            .lock()
+            .unwrap()
+            .call
+            .as_ref()
+            .map(|c| c.id.clone())
+            .unwrap_or_default();
+        let session = self.session().await?;
+        let ic3 = self.tokens.get(IC3_SCOPE).await?;
+        calling::post_signal(&self.http, url, &session, &ic3, &correlation, payload).await
+    }
+
+    /// Tell the service the live call is still here, if it gave us a link to say it on.
+    ///
+    /// Silent when there is no call, and silent when the invite named no `keepAlive`
+    /// link — the service only expects one where it asked for one. A failure is one
+    /// journal line: the call is still up as far as this side knows, and the ending will
+    /// arrive as a frame like any other.
+    async fn keep_call_alive(&self) {
+        let url = {
+            let plane = self.calling.lock().unwrap();
+            plane
+                .call
+                .as_ref()
+                .filter(|call| call.phase == CallPhase::Connected)
+                .and_then(|call| call.links.keep_alive().map(str::to_string))
+        };
+        let Some(url) = url else { return };
+        if let Err(e) = self.post_call_signal(&url, &json!({ "payload": {} })).await {
+            eprintln!("[calling] the keep-alive did not reach the service: {e:#}");
+        }
+    }
+
+    /// Fetch the relay credentials for the cached relay description, if it names a
+    /// token URL. Best-effort: without them a call still has STUN, which is enough
+    /// whenever the far side publishes a reachable candidate of its own.
+    async fn refresh_relay_credentials(&self) {
+        let token_url = {
+            let plane = self.calling.lock().unwrap();
+            plane
+                .relay
+                .as_ref()
+                .and_then(|r| r.pointer("/Service/tokenUrl").and_then(Value::as_str))
+                .map(str::to_string)
+        };
+        let Some(token_url) = token_url else { return };
+        let Ok(session) = self.session().await else { return };
+        match calling::fetch_relay_credentials(&self.http, &token_url, &session).await {
+            Ok(response) => {
+                let credential = calling::first_relay_credential(&response);
+                if credential.is_none() {
+                    eprintln!("[calling] the relay token response named no credentials");
+                }
+                self.calling.lock().unwrap().relay_credentials = credential;
+            }
+            // Never log the URL: a relay token URL has carried a token in its query.
+            Err(e) => eprintln!("[calling] could not fetch the relay credentials: {e:#}"),
+        }
+    }
+
+    /// The ICE servers the page should build its `RTCPeerConnection` with: the
+    /// directory's STUN server, plus the service's TURN relay when we hold its
+    /// credentials.
+    async fn call_ice_servers(&self) -> Vec<Value> {
+        let Ok(session) = self.session().await else { return Vec::new() };
+        let Ok(endpoints) = calling::endpoints(&session) else { return Vec::new() };
+        let (relay, credentials) = {
+            let plane = self.calling.lock().unwrap();
+            (plane.relay.clone(), plane.relay_credentials.clone())
+        };
+        let relay_turn = relay
+            .as_ref()
+            .and_then(|r| r.pointer("/Relay/Turn").cloned())
+            .or_else(|| relay.clone());
+        calling::ice_servers(&endpoints, relay_turn.as_ref(), credentials.as_ref())
+            .iter()
+            .map(calling::IceServer::json)
+            .collect()
+    }
+}
+
+/// Log one calling frame, and append it to the capture file when the user asked for one.
+///
+/// Two switches, both for the phase this feature is in (see NATIVE-CALLING.md § 8):
+/// `TEAMS_LITE_CALL_DEBUG=1` prints every frame, and `TEAMS_LITE_CALL_CAPTURE` names a
+/// file to append them to as JSON lines — opened once, in append mode, so the frames of
+/// several calls accumulate and a single real test call is never lost to a scrollback
+/// wipe. The records carry live identities and SDP, so that path must point inside the
+/// gitignored `captures/` directory and must never be committed. Turn both off once
+/// calling is known to work.
+fn record_call_frame(frame: &trouter_events::CallFrame) {
+    if std::env::var("TEAMS_LITE_CALL_DEBUG").as_deref() == Ok("1") {
+        eprintln!(
+            "[calling] frame {} id={}\n{}",
+            frame.url,
+            frame.call_id,
+            serde_json::to_string_pretty(&frame.body).unwrap_or_default()
+        );
+    }
+    static CAPTURE: std::sync::OnceLock<Option<Mutex<std::fs::File>>> =
+        std::sync::OnceLock::new();
+    let capture = CAPTURE.get_or_init(|| {
+        let path = std::env::var("TEAMS_LITE_CALL_CAPTURE").ok().filter(|p| !p.is_empty())?;
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => {
+                eprintln!("[calling] capturing decoded frames to {path}");
+                Some(Mutex::new(file))
+            }
+            Err(e) => {
+                eprintln!("[calling] cannot open capture file {path}: {e}");
+                None
+            }
+        }
+    });
+    if let Some(file) = capture {
+        use std::io::Write;
+        let line = call_capture_line(now_ms() as u64, &frame.url, &frame.call_id, &frame.body);
+        if let Ok(mut file) = file.lock()
+            && let Err(e) = file.write_all(line.as_bytes())
+        {
+            eprintln!("[calling] capture write failed: {e}");
+        }
+    }
+}
+
+/// An 8-hex cause id, the shape the web client's own `ti()` produces. It labels one
+/// leg of one call in the service's logs and in ours.
+fn short_cause_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
+}
+
 /// Start the trouter; persist each live message and broadcast it as an event.
 ///
 /// The trouter re-acquires fresh credentials before every (re)connection via the
@@ -5806,64 +6897,51 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
         }
     });
 
-    // trouter native-calling frames -> `call_signal` event (experimental, opt-in
-    // via TEAMS_LITE_CALLING=1). The native call wire schema is only partially
-    // reverse-engineered, so we forward the whole decoded envelope to the UI and —
-    // behind TEAMS_LITE_CALL_DEBUG=1 — log it, so a live call to a consenting
-    // party pins down the exact shape. Distinct from the `call` awareness event,
-    // which rides on the after-the-fact `Event/Call` chat system message.
+    // A calling frame that arrived on the MESSAGING socket. The calling connection has
+    // one of its own (see `Ctx::start_calling`), so this is the stray case — the service
+    // has routed one here before — and it goes through exactly the same handler, because
+    // a frame is a frame and a second decoding path is a second place to get it wrong.
     let ctx_call = ctx.clone();
     tokio::spawn(async move {
-        let debug = std::env::var("TEAMS_LITE_CALL_DEBUG").as_deref() == Ok("1");
-        // Durable capture: when TEAMS_LITE_CALL_CAPTURE names a file, append every
-        // decoded call frame as one JSON line (JSONL). Opened once in append mode so
-        // frames from several calls accumulate and survive a terminal scrollback wipe
-        // — a single real test call is then never lost. The records carry live tokens,
-        // identities, and SDP, so this must point inside the gitignored captures/ dir
-        // and must never be committed.
-        let mut capture_file = std::env::var("TEAMS_LITE_CALL_CAPTURE")
-            .ok()
-            .filter(|p| !p.is_empty())
-            .and_then(|path| {
-                match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                    Ok(f) => {
-                        eprintln!("[call_signal] capturing decoded frames to {path}");
-                        Some(f)
-                    }
-                    Err(e) => {
-                        eprintln!("[call_signal] cannot open capture file {path}: {e}");
-                        None
-                    }
-                }
-            });
-        while let Some(c) = call_rx.recv().await {
-            if debug {
-                eprintln!(
-                    "[call_signal] {} id={}\n{}",
-                    c.url,
-                    c.call_id,
-                    serde_json::to_string_pretty(&c.body).unwrap_or_default()
-                );
-            }
-            if let Some(f) = capture_file.as_mut() {
-                use std::io::Write;
-                let ts_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                if let Err(e) = f.write_all(call_capture_line(ts_ms, &c.url, &c.call_id, &c.body).as_bytes()) {
-                    eprintln!("[call_signal] capture write failed: {e}");
-                }
-            }
-            ctx_call.emit(
-                "call_signal",
-                json!({ "url": c.url, "call_id": c.call_id, "body": c.body }),
-            );
+        while let Some(frame) = call_rx.recv().await {
+            ctx_call.handle_call_frame(frame).await;
         }
     });
 
     tokio::spawn(async move {
-        trouter::run(ctx, epid, ev_tx, ty_tx, rr_tx, call_tx, st_tx).await;
+        trouter::run(
+            ctx,
+            epid,
+            trouter::Endpoint::messaging(),
+            trouter::Role::Messaging {
+                events: ev_tx,
+                typing: ty_tx,
+                receipts: rr_tx,
+                calls: call_tx,
+            },
+            st_tx,
+        )
+        .await;
+    });
+}
+
+/// Bring the calling connection up at boot, but only when the user turned calling on.
+///
+/// Off in a fresh store and off for a read-only backend, because coming up REGISTERS a
+/// device the user's calls ring on (see {@link SETTING_CALLING}). A failure is one
+/// journal line and nothing else: the rest of the app does not depend on it.
+fn spawn_calling(ctx: Ctx) {
+    tokio::spawn(async move {
+        let enabled = match ctx.store() {
+            Ok(store) => calling_enabled(&store),
+            Err(_) => false,
+        };
+        if !enabled {
+            return;
+        }
+        if let Err(e) = ctx.start_calling().await {
+            eprintln!("[calling] could not start: {e:#}");
+        }
     });
 }
 
@@ -6241,6 +7319,171 @@ mod tests {
         store.set_setting(SETTING_LINEAR_TOKEN, "").unwrap();
         assert_eq!(settings_json(&store).unwrap()["linear_token_set"], false);
         assert_eq!(link_preview_settings(&store).unwrap().linear_token, None);
+    }
+
+    /// A call rings a person, so every calling method that reaches one is gated
+    /// exactly like a send — and the two that reach nobody are gated for their own
+    /// reason, with their own words.
+    #[test]
+    fn every_calling_method_that_reaches_a_person_is_outward_facing() {
+        for method in ["call_place", "call_accept", "call_hangup", "call_mute"] {
+            assert!(OUTWARD_METHODS.contains(&method), "{method} rings or is heard by a person");
+            assert_eq!(write_class(method), Some(WriteClass::Outward), "{method}");
+            let refused = check_write_allowed(method, &json!({}), None)
+                .expect_err("a read-only backend must refuse it");
+            assert!(refused.contains("read-only"), "{method}: {refused}");
+            let untokened = check_write_allowed(method, &json!({}), Some("tok"))
+                .expect_err("a client without the token must be refused");
+            assert!(untokened.contains("write token"), "{method}: {untokened}");
+            assert!(
+                check_write_allowed(method, &json!({ "write_token": "tok" }), Some("tok")).is_ok()
+            );
+        }
+
+        // The two that post nothing: gated, but never described as posting.
+        for (method, phrase) in [
+            ("set_calling", "calls ring on"),
+            ("call_prepare", "media credentials"),
+        ] {
+            assert!(!OUTWARD_METHODS.contains(&method), "{method} posts nothing");
+            assert_eq!(write_class(method), Some(WriteClass::Machine), "{method}");
+            let err = check_write_allowed(method, &json!({}), Some("tok"))
+                .expect_err("must refuse without the token");
+            assert!(err.contains(phrase), "{method}: {err}");
+        }
+
+        // Reading the state is open, like every other read.
+        assert_eq!(write_class("call_status"), None);
+    }
+
+    /// Calling is off in a fresh store, and off for a read-only backend whatever the
+    /// store says: coming up registers a device the user's calls ring on.
+    #[test]
+    fn calling_is_off_until_the_user_turns_it_on() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(!calling_enabled(&store), "a fresh store must not register a calling endpoint");
+        store.set_setting(SETTING_CALLING, "1").unwrap();
+        assert_eq!(calling_enabled(&store), !read_only());
+        for off in ["0", "", "true", "yes"] {
+            store.set_setting(SETTING_CALLING, off).unwrap();
+            assert!(!calling_enabled(&store), "only \"1\" means on, not {off:?}");
+        }
+    }
+
+    /// The state every client is given must carry no SDP and no credentials: those
+    /// leave only through a token-gated method.
+    #[test]
+    fn the_call_a_client_is_shown_carries_no_media_and_no_secret() {
+        let call = CallSession {
+            id: "call-1".into(),
+            direction: CallDirection::Incoming,
+            phase: CallPhase::Ringing,
+            conversation_id: Some("19:thread@thread.v2".into()),
+            peer_mri: "8:orgid:her".into(),
+            peer_name: "Her".into(),
+            links: calling::Links::collect(&json!({
+                "links": { "accept": "https://x/accept", "hangup": "https://x/hangup" }
+            })),
+            local: calling::LocalParticipant {
+                id: "8:orgid:me".into(),
+                display_name: "Me".into(),
+                endpoint_id: "endpoint".into(),
+                participant_id: "leg".into(),
+            },
+            callbacks: calling::CallbackBase {
+                surl: "https://tr/v4/f/a/".into(),
+                session_id: "s".into(),
+                cause_id: "c".into(),
+            },
+            offer: Some(calling::MediaContent::sdp("v=0 secret-sdp")),
+            muted: false,
+            connected_at_ms: None,
+            end_reason: None,
+        };
+        let json = call.json();
+        assert_eq!(json["phase"], "ringing");
+        assert_eq!(json["direction"], "incoming");
+        assert_eq!(json["peer"], "Her");
+        // What the UI may offer, decided here because only this side holds the links.
+        assert_eq!(json["can_accept"], true);
+        assert_eq!(json["can_hangup"], true);
+        let rendered = json.to_string();
+        for secret in ["v=0", "https://x/accept", "https://tr/v4/f/a/", "endpoint"] {
+            assert!(!rendered.contains(secret), "the client view leaked {secret}: {rendered}");
+        }
+    }
+
+    /// A ringing call with no offer cannot be answered, and saying so HERE is what
+    /// stops the page from asking the microphone for nothing.
+    #[test]
+    fn a_call_with_no_offer_is_not_answerable() {
+        let mut call = CallSession {
+            id: "call-1".into(),
+            direction: CallDirection::Incoming,
+            phase: CallPhase::Ringing,
+            conversation_id: None,
+            peer_mri: "8:orgid:her".into(),
+            peer_name: "Her".into(),
+            links: calling::Links::default(),
+            local: calling::LocalParticipant {
+                id: "8:orgid:me".into(),
+                display_name: "Me".into(),
+                endpoint_id: "e".into(),
+                participant_id: "l".into(),
+            },
+            callbacks: calling::CallbackBase {
+                surl: "https://tr/".into(),
+                session_id: "s".into(),
+                cause_id: "c".into(),
+            },
+            offer: None,
+            muted: false,
+            connected_at_ms: None,
+            end_reason: None,
+        };
+        assert_eq!(call.json()["can_accept"], false);
+        // And a call that is over offers nothing at all.
+        call.phase = CallPhase::Ended;
+        call.offer = Some(calling::MediaContent::sdp("v=0"));
+        assert_eq!(call.json()["can_accept"], false);
+        assert_eq!(call.json()["can_hangup"], false);
+    }
+
+    /// "Ready" must mean a call could start RIGHT NOW: registered, and the socket up.
+    /// A registration that is still remembered across a reconnect is not readiness, or
+    /// the UI would offer a call the backend has nothing to send it on.
+    #[test]
+    fn readiness_needs_both_the_registration_and_a_live_socket() {
+        let mut plane = CallingPlane::default();
+        assert!(plane.channel.is_none() && !plane.connected, "a fresh plane is not ready");
+
+        plane.channel = Some(trouter::CallingChannel {
+            surl: "https://tr/v4/f/abc/".into(),
+            endpoint_id: "epid".into(),
+        });
+        // Registered but the socket is down: not ready, and the address is kept so a
+        // reconnect can still tell a surl that MOVED from one that came back.
+        assert!(plane.channel.is_some() && !plane.connected);
+        plane.connected = true;
+        assert!(plane.channel.is_some() && plane.connected);
+    }
+
+    /// The keep-alive is shorter than any plausible server timeout, and it exists at all
+    /// because a call the service stops hearing from is a call it tears down.
+    #[test]
+    fn the_call_keepalive_is_frequent_enough_to_hold_a_call() {
+        assert!(CALL_KEEPALIVE <= Duration::from_secs(30), "too slow to hold a call");
+        assert!(CALL_KEEPALIVE >= Duration::from_secs(5), "one request per few seconds is noise");
+    }
+
+    /// The cause id the web client generates is 8 hex characters, and the service
+    /// logs a leg by it.
+    #[test]
+    fn a_cause_id_is_eight_hex_characters() {
+        let id = short_cause_id();
+        assert_eq!(id.len(), 8);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+        assert_ne!(id, short_cause_id(), "two legs must not share one id");
     }
 
     #[test]

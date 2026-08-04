@@ -8,6 +8,7 @@ import { MessagePane } from "./message-pane";
 import { SettingsPane } from "./settings-pane";
 import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
+import { CallBar } from "./call-bar";
 import { IncomingCallBanner } from "./incoming-call-banner";
 import { Splash } from "./splash";
 import { useChatSections } from "./use-chat-sections";
@@ -260,6 +261,9 @@ function AppInner() {
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
 
+      {/* The real call, over the awareness banner: one is a call this machine can
+          answer, the other is a note that a call happened somewhere. */}
+      <CallBar />
       <IncomingCallBanner />
 
       {/* A repair restarts the backend on purpose, so the socket drops and the

@@ -441,6 +441,17 @@ if ! sanctioned_automation; then
     # tooling would also cut a live `@claude` reply in half — the same failure
     # `teams-lite-service.sh update --now` is blocked for.
     #
+    # The `call_*` methods and `set_calling` are the sharpest entries in this list: a
+    # call RINGS a person. `call_place` starts a device buzzing in somebody's pocket,
+    # `call_accept` opens the user's own microphone to whoever is on the other end,
+    # `call_hangup` ends the call for both of them, and `call_mute` states whether they
+    # can be heard. `set_calling` registers this machine with Teams as a device their
+    # calls ring on — so a script naming it could route the user's real calls to a
+    # client nobody is watching — and `call_prepare` reserves the one call slot and
+    # hands out the relay credentials the backend holds (OUTWARD_METHODS and
+    # MACHINE_METHODS in src/bin/server.rs). Reading `call_status` is not a write and is
+    # not listed.
+    #
     # `set_person_name` and `set_person_avatar` write only to the local store too, and
     # are in the list because of WHAT they write: the name and the face this app puts on
     # a colleague's messages, everywhere from the sidebar to the push on the user's
@@ -448,7 +459,7 @@ if ! sanctioned_automation; then
     # from another (MACHINE_METHODS in src/bin/server.rs). Reading them back is not a
     # write and is not listed.
     if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_accept|call_hangup|call_mute)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_accept|call_hangup|call_mute)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that
@@ -470,7 +481,9 @@ Reading the live backend is fine — inspect all the real data you need. Writing
 not: send/edit/delete/react post to real people as the user — a delete removes a
 message from the thread for everybody and nothing brings it back — mark_read tells them the user
 read their message, and the push_* methods decide which of the user's devices this
-machine notifies. mail_mark_read reaches nobody but the user, and is here because
+machine notifies, and the call_* methods ring a real person, open the user's own
+microphone or register this machine as a device their calls ring on. mail_mark_read
+reaches nobody but the user, and is here because
 nothing in this app can raise an unread marker it clears. The backend refuses the
 outward writes without the capability token it
 publishes for the user's own frontends (see the write lock in src/bin/server.rs),

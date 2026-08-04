@@ -705,6 +705,52 @@ mod tests {
         }
     }
 
+    /// True when `code` names `endpoint` as a whole path segment.
+    ///
+    /// A Graph action is the LAST segment of a URL (`…/events/{id}/accept`), so the
+    /// name is always followed by a quote, a brace or the end of the string — never
+    /// by another letter. Requiring that is what keeps the scan precise instead of
+    /// merely long: `/accept` must still fire on the real call, and must not fire on
+    /// the native-calling callback path `/call/acceptance/`, which reaches the Teams
+    /// calling service and no calendar (see `src/calling.rs`). Same reasoning as the
+    /// leading slash above — `tentativelyAccepted` is a value we read, and
+    /// `/tentativelyAccept` could only be a call.
+    fn names_endpoint(code: &str, endpoint: &str) -> bool {
+        code.match_indices(endpoint).any(|(at, _)| {
+            let after = code[at + endpoint.len()..].chars().next();
+            !after.is_some_and(|c| c.is_ascii_alphanumeric())
+        })
+    }
+
+    /// The scan above is only worth having if it still fires on the real spelling,
+    /// so pin both halves: every Graph action as it would really be written, and the
+    /// one native-calling path that shares a prefix with `/accept`.
+    #[test]
+    fn the_endpoint_scan_catches_a_real_graph_action_and_not_a_calling_path() {
+        for real in [
+            "let url = format!(\"{GRAPH}/me/events/{id}/accept\");",
+            "post(&format!(\"{base}/decline\"))",
+            "\"/tentativelyAccept\"",
+            "get(GRAPH.to_string() + \"/me/events/1/cancel\")",
+        ] {
+            assert!(
+                ["/accept", "/decline", "/tentativelyAccept", "/cancel"]
+                    .iter()
+                    .any(|e| names_endpoint(real, e)),
+                "the scan must still catch: {real}"
+            );
+        }
+        // The calling plane's own callback paths are not calendar writes.
+        for calling in ["\"/call/acceptance/\"", "\"/call/acknowledgement/\""] {
+            for endpoint in ["/accept", "/decline", "/cancel", "/forward"] {
+                assert!(
+                    !names_endpoint(calling, endpoint),
+                    "{calling} is a Teams calling callback, not a calendar write"
+                );
+            }
+        }
+    }
+
     /// Graph's calendar-write endpoints must not exist anywhere in the crate.
     ///
     /// The token this app already holds carries the consent to use them, so — as
@@ -747,7 +793,7 @@ mod tests {
                 "/dismissReminder",
             ] {
                 assert!(
-                    !code.contains(endpoint),
+                    !names_endpoint(&code, endpoint),
                     "{} names the Graph calendar endpoint `{endpoint}`. Acting on an event is \
                      forbidden here: it mails the organizer or every attendee as the user, and \
                      cannot be recalled.",

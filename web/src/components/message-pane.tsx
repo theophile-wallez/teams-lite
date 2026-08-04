@@ -24,6 +24,7 @@ import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
 import { agentCandidatesFor, type AgentCandidate } from "~/lib/mentions";
 import { useAppState, useController } from "./controller-context";
 import { AgentMenu } from "./agent-menu";
+import { CallButton } from "./call-button";
 import { AgentPendingBubble } from "./agent-reply";
 import { Avatar, conversationFallback, conversationPhoto, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
@@ -664,9 +665,16 @@ export function MessagePane(props: { onBack?: () => void }) {
             </p>
           ) : null}
         </div>
-        {/* Whether this thread answers an `@claude` message. Per conversation on
-            purpose — see components/agent-menu.tsx. */}
-        {openId && <AgentMenu conversationId={openId} />}
+        {/* The header's own controls, as one group on the right: call this person
+            (only in a one-to-one chat, and only where a call would really work — see
+            components/call-button.tsx), and whether this thread answers an `@claude`
+            message (per conversation on purpose — see components/agent-menu.tsx). */}
+        {openId && (
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <CallButton conversationId={openId} />
+            <AgentMenu conversationId={openId} />
+          </div>
+        )}
       </header>
 
       {/* The history and the control that floats over it. The wrapper is what the

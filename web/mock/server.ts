@@ -266,6 +266,11 @@ const SEED = 0x7ea115;
 const LIVE_INTERVAL_MS = Number(process.env.MOCK_LIVE_MS ?? 7_000);
 /** Delay before echoing a sent message, simulating the real-time round trip. */
 const SEND_ECHO_DELAY_MS = 150;
+/** How long a mock outgoing call rings before the far side picks up, and before its
+ *  audio is reported as flowing. Short enough for a spec to wait through, long enough
+ *  that the "Calling…" state is really drawn. */
+const MOCK_CALL_ANSWER_MS = 400;
+const MOCK_CALL_CONNECT_MS = 700;
 
 /** When "1", expose an HTTP control plane (POST /__test/emit, GET
  *  /__test/conversations) so E2E tests can drive live events deterministically.
@@ -2940,6 +2945,109 @@ function agentStatusView(): {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Audio calling (see src/calling.rs and NATIVE-CALLING.md).
+//
+// The mock registers nothing with Teams, opens no microphone and carries no audio: it
+// reproduces the SIGNALING — the ring, the answer, the mute, the ending — so the whole
+// surface is reviewable with nothing leaving the machine. The page pairs it with
+// `simulatedCallMedia`, which it picks because this mock announces itself as one.
+// ---------------------------------------------------------------------------
+
+/** The one call the mock is in, in the shape `call_status` answers with. */
+type MockCall = {
+  id: string;
+  direction: "incoming" | "outgoing";
+  phase: "ringing" | "dialing" | "connecting" | "connected" | "ended";
+  conversation_id: string | null;
+  peer: string;
+  peer_mri: string;
+  muted: boolean;
+  connected_at_ms: number | null;
+  end_reason: string | null;
+  can_accept: boolean;
+  can_hangup: boolean;
+};
+
+/** Off, exactly like a fresh Rust store: turning it on is the consent, so a spec has to
+ *  perform that step rather than find it already done. */
+let mockCallingEnabled = false;
+let mockCall: MockCall | null = null;
+/** Timers of a simulated call, cleared on every ending so a reused mock cannot let an
+ *  old call finish connecting inside a later spec. */
+let mockCallTimers: ReturnType<typeof setTimeout>[] = [];
+
+function mockCallStatus(): { enabled: boolean; ready: boolean; call: MockCall | null } {
+  return {
+    enabled: mockCallingEnabled,
+    // Ready the moment it is on: the mock has no connection to wait for, and a switch
+    // stuck on "connecting…" would be a state the real backend leaves in seconds.
+    ready: mockCallingEnabled,
+    call: mockCall,
+  };
+}
+
+function broadcastMockCall(): void {
+  broadcast("call_state", mockCallStatus());
+}
+
+function clearMockCallTimers(): void {
+  for (const timer of mockCallTimers) clearTimeout(timer);
+  mockCallTimers = [];
+}
+
+/** End the mock call and hand out one last frame carrying the reason — the same shape
+ *  the Rust backend emits, so the page releases its (simulated) microphone. */
+function endMockCall(reason: string): void {
+  clearMockCallTimers();
+  if (!mockCall) return;
+  mockCall = { ...mockCall, phase: "ended", end_reason: reason, can_accept: false, can_hangup: false };
+  broadcastMockCall();
+  mockCall = null;
+}
+
+/** An inert answer SDP. The page's simulated media ignores it; it exists so the
+ *  `call_media` frame the real backend sends is exercised too. */
+const MOCK_ANSWER_SDP = [
+  "v=0",
+  "o=- 0 0 IN IP4 127.0.0.1",
+  "s=teams-lite-mock-answer",
+  "t=0 0",
+  "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+  "c=IN IP4 0.0.0.0",
+  "a=rtpmap:111 opus/48000/2",
+  "a=sendrecv",
+  "",
+].join("\r\n");
+
+/** Ring this machine, the way an invite on the calling socket does. Used by the gated
+ *  test hook and by the preview script. */
+function injectMockCallInvite(conversation: string): MockCall | null {
+  const thread = threadFor(conversation);
+  if (!thread) return null;
+  const person = thread.participants[0];
+  clearMockCallTimers();
+  mockCall = {
+    id: `mock-call-${Date.now()}`,
+    direction: "incoming",
+    phase: "ringing",
+    conversation_id: conversation,
+    peer: person?.name ?? "Someone",
+    peer_mri: person?.mri ?? "8:orgid:someone",
+    muted: false,
+    connected_at_ms: null,
+    end_reason: null,
+    can_accept: true,
+    can_hangup: true,
+  };
+  // Calling has to be on for a real invite to reach this machine at all, so an invite
+  // implies it: a spec that rings without flipping the switch is testing a state the
+  // backend cannot be in.
+  mockCallingEnabled = true;
+  broadcastMockCall();
+  return mockCall;
+}
+
 /** The model shape the Rust RPC accepts (`agent_policy::is_valid_model`). The mock
  *  enforces it too, so a spec can prove the refusal without a real backend. */
 function isValidMockModel(model: string): boolean {
@@ -4560,6 +4668,121 @@ function dispatch(method: string, params: unknown): unknown {
       return agentStatusView();
     }
 
+    // ---- audio calling ------------------------------------------------------
+    // Nothing is registered, nobody is rung, and no audio exists. The phases move on
+    // timers so the page's own flow — prepare, negotiate, answer, mute, hang up — runs
+    // end to end (see the calling block above).
+
+    case "call_status":
+      return mockCallStatus();
+
+    case "set_calling": {
+      const o = asObject(params);
+      if (typeof o.enabled !== "boolean") throw new Error("`enabled` must be true or false");
+      mockCallingEnabled = o.enabled;
+      if (!o.enabled) endMockCall("CallEndReasonCallingTurnedOff");
+      broadcastMockCall();
+      return mockCallStatus();
+    }
+
+    case "call_prepare": {
+      const o = asObject(params);
+      if (!mockCallingEnabled) throw new Error("call_prepare: calling is not connected yet");
+      // Answering: hand back the offer that is ringing, exactly like the Rust one.
+      if (typeof o.call_id === "string") {
+        if (!mockCall || mockCall.id !== o.call_id || mockCall.phase !== "ringing") {
+          throw new Error("call_prepare: that call is not ringing");
+        }
+        return {
+          call_id: mockCall.id,
+          offer_sdp: MOCK_ANSWER_SDP,
+          ice_servers: [{ urls: ["stun:mock.invalid:3478"] }],
+        };
+      }
+      const conversation = requireString(params, "conversation");
+      const thread = threadFor(conversation);
+      if (!thread) throw new Error(`call_prepare: no such conversation: ${conversation}`);
+      if (mockCall && mockCall.phase !== "ended") {
+        throw new Error("call_prepare: this machine is already in a call — hang up first");
+      }
+      const person = thread.participants[0];
+      clearMockCallTimers();
+      mockCall = {
+        id: `mock-call-${Date.now()}`,
+        direction: "outgoing",
+        phase: "dialing",
+        conversation_id: conversation,
+        peer: person?.name ?? "Someone",
+        peer_mri: person?.mri ?? "8:orgid:someone",
+        muted: false,
+        connected_at_ms: null,
+        end_reason: null,
+        can_accept: false,
+        can_hangup: true,
+      };
+      broadcastMockCall();
+      return {
+        call_id: mockCall.id,
+        ice_servers: [{ urls: ["stun:mock.invalid:3478"] }],
+      };
+    }
+
+    case "call_place": {
+      const callId = requireString(params, "call_id");
+      requireString(params, "sdp");
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_place: no such call");
+      // The far side picks up, then their SDP arrives — the two frames the real
+      // service sends, in the real order.
+      mockCallTimers.push(
+        setTimeout(() => {
+          if (!mockCall || mockCall.id !== callId) return;
+          mockCall = { ...mockCall, phase: "connecting" };
+          broadcastMockCall();
+          broadcast("call_media", { call_id: callId, sdp: MOCK_ANSWER_SDP, kind: "answer" });
+        }, MOCK_CALL_ANSWER_MS),
+      );
+      mockCallTimers.push(
+        setTimeout(() => {
+          if (!mockCall || mockCall.id !== callId) return;
+          mockCall = { ...mockCall, phase: "connected", connected_at_ms: Date.now() };
+          broadcastMockCall();
+        }, MOCK_CALL_CONNECT_MS),
+      );
+      return { call_id: callId };
+    }
+
+    case "call_accept": {
+      const callId = requireString(params, "call_id");
+      requireString(params, "sdp");
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_accept: no such call");
+      mockCall = {
+        ...mockCall,
+        phase: "connected",
+        connected_at_ms: Date.now(),
+        can_accept: false,
+      };
+      broadcastMockCall();
+      return { call_id: callId };
+    }
+
+    case "call_hangup": {
+      const callId = requireString(params, "call_id");
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_hangup: no such call");
+      const declining = mockCall.direction === "incoming" && mockCall.phase === "ringing";
+      endMockCall(declining ? "CallEndReasonDeclined" : "CallEndReasonHangup");
+      return { call_id: callId, told_service: true };
+    }
+
+    case "call_mute": {
+      const callId = requireString(params, "call_id");
+      const o = asObject(params);
+      if (typeof o.muted !== "boolean") throw new Error("`muted` must be true or false");
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_mute: no such call");
+      mockCall = { ...mockCall, muted: o.muted };
+      broadcastMockCall();
+      return { call_id: callId, muted: o.muted, told_service: true };
+    }
+
     case "get_settings":
       return settingsView();
 
@@ -5192,6 +5415,27 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // reconciliation (a meeting rescheduled or removed in real Outlook) without
     // waiting for a poll. READ-ONLY still holds: this is the test control plane
     // pretending the SERVER changed, not a client writing.
+    // Ring this machine, the way an invite on the calling socket does — and reset,
+    // because one mock process serves a whole run and a call left ringing would ring
+    // inside every later spec.
+    //
+    // `call_invite`, not `call`: that kind is the AWARENESS signal below (the
+    // after-the-fact chat event), and the two are different things — one is a call this
+    // machine can answer, the other is a note that a call happened.
+    if (body.kind === "call_invite") {
+      if (body.reset === true) {
+        endMockCall("CallEndReasonHangup");
+        mockCallingEnabled = false;
+        broadcastMockCall();
+        return Response.json({ ok: true, reset: true }, { status: 200 });
+      }
+      const conversation = typeof body.conversation === "string" ? body.conversation : (order[0] ?? "");
+      const call = injectMockCallInvite(conversation);
+      if (!call) {
+        return Response.json({ ok: false, error: `unknown conversation: ${conversation}` }, { status: 404 });
+      }
+      return Response.json({ ok: true, call_id: call.id }, { status: 200 });
+    }
     if (body.kind === "calendar") {
       // Re-seed the calendar, so a serial suite can undo the reschedules and
       // removals below and stay deterministic across runs against a reused mock.

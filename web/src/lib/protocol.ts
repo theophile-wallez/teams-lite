@@ -425,8 +425,10 @@ export type TypingSignal = {
 export type TypingName = { mri: string; name: string };
 
 /** Wire shape of the backend `call` event (see src/bin/server.rs). Incoming-call
- *  AWARENESS only: teams-lite has no media stack, so this can raise or dismiss a
- *  banner but never carries, answers, or places a call. `started` rings;
+ *  AWARENESS, built from the after-the-fact `Event/Call` chat message: it can raise or
+ *  dismiss a banner and nothing else. The call this app can really answer arrives on
+ *  `call_state` instead (see lib/call.ts) — a group chat, a channel meeting and a call
+ *  that rang while calling was off are what this still covers. `started` rings;
  *  `ended`/`missed` dismiss the banner. `caller` is the display name the backend
  *  resolved for whoever started/ended the call. */
 export type CallSignal = {
@@ -453,12 +455,13 @@ export type IncomingCall = {
   participantCount: number;
 };
 
-/** Wire shape of the EXPERIMENTAL `call_signal` event (see src/bin/server.rs).
- *  A raw, still-being-reverse-engineered native-calling frame from the calling
- *  trouter workers, forwarded verbatim. Only emitted when the backend has calling
- *  enabled (TEAMS_LITE_CALLING=1). `body` is the fully-decoded envelope (with any
- *  nested payload expanded under `_decoded`); its schema is not yet pinned down,
- *  so this is surfaced for capture, not acted upon — no media is placed/answered. */
+/** Wire shape of the `call_signal` event (see src/bin/server.rs): one raw calling frame
+ *  from the calling connection, forwarded verbatim. `body` is the fully-decoded envelope
+ *  (with any nested payload expanded under `_decoded`).
+ *
+ *  A capture aid, not the feature: the app acts on `call_state` (see lib/call.ts), and
+ *  this exists because parts of the wire schema are still unverified against the tenant
+ *  (NATIVE-CALLING.md § 8). */
 export type CallSignalFrame = {
   /** The calling worker URL the frame arrived on (…/NGCallManagerWin, …/SkypeSpacesWeb). */
   url: string;
