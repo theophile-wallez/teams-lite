@@ -18,8 +18,10 @@ import {
   type ChatMessage,
   type Conversation,
 } from "~/lib/protocol";
+import type { AgentAnswer } from "~/lib/agent-answer";
 import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
+import { agentCandidatesFor, type AgentCandidate } from "~/lib/mentions";
 import { useAppState, useController } from "./controller-context";
 import { AgentMenu } from "./agent-menu";
 import { AgentPendingBubble } from "./agent-reply";
@@ -115,8 +117,28 @@ export function MessagePane(props: { onBack?: () => void }) {
   );
   const modifier = useModifierLabel();
 
+  // The agents a message's ⋯ menu may offer to answer with — the backend's own state and
+  // this thread's own mode, so a thread nobody opted in offers none. Computed once here
+  // rather than per bubble: the pane keeps every bubble prop reference-stable so a live
+  // message re-renders one row and not the whole history.
+  const agentStatus = useAppState((s) => s.agent);
+  const answerAgents = useMemo(
+    () => agentCandidatesFor(agentStatus, openId),
+    [agentStatus, openId],
+  );
+
   const [editingId, setEditingId] = useState<string | null>(null);
   const [focusToken, setFocusToken] = useState(0);
+  // The last "Answer with <agent>" the reader picked, handed to the composer, which
+  // writes the request and waits for their Enter (see lib/agent-answer.ts).
+  const [agentAnswer, setAgentAnswer] = useState<AgentAnswer | null>(null);
+  // A request is spent when the thread changes: the composer keys its editor per
+  // conversation, so a request left in state would be written again the next time the user
+  // came back to this thread — into a draft they had already sent or cleared. The
+  // composer's own conversation filter covers the frame before this runs.
+  useEffect(() => {
+    setAgentAnswer(null);
+  }, [openId]);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   // Whether the history is parked at its newest message. It drives the
   // jump-to-latest button only, so it starts true: a pane that just opened is at
@@ -450,6 +472,25 @@ export function MessagePane(props: { onBack?: () => void }) {
     setFocusToken((t) => t + 1);
   }, [controller]);
 
+  // "Answer with <agent>": reply to that message, with that agent's tag already leading
+  // the draft. Nothing is sent — the reply banner shows which message the answer is
+  // about, and the user presses Enter (or says more first). The two halves are why it
+  // works at all: the tag is the trigger the backend reads, and the quote is how it knows
+  // which message "answer this" names (`agent_policy::answering`).
+  const doAnswerWith = useCallback(
+    (m: ChatMessage, agent: AgentCandidate) => {
+      if (!openId) return;
+      controller.startReply(m);
+      setAgentAnswer((prev) => ({
+        token: (prev?.token ?? 0) + 1,
+        conversation: openId,
+        backend: agent.backend,
+        prefix: agent.prefix,
+      }));
+    },
+    [controller, openId],
+  );
+
   const doCopy = useCallback(async (m: ChatMessage) => {
     const text = copyableMessageText(m);
     try {
@@ -519,6 +560,8 @@ export function MessagePane(props: { onBack?: () => void }) {
             onAgentSettled={doAgentSettled}
             onReply={doReply}
             onCopy={doCopy}
+            answerAgents={answerAgents}
+            onAnswerWith={doAnswerWith}
             onReact={doReact}
             onStartEdit={doStartEdit}
             onSaveEdit={doSaveEdit}
@@ -726,7 +769,7 @@ export function MessagePane(props: { onBack?: () => void }) {
       )}
 
       <TypingIndicator />
-      <Composer focusToken={focusToken} />
+      <Composer focusToken={focusToken} agentAnswer={agentAnswer} />
     </section>
   );
 }

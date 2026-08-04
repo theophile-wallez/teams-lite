@@ -101,6 +101,29 @@ export async function openConversationAt(page: Page, index = 0): Promise<string>
   return id;
 }
 
+/**
+ * Open a conversation BY NAME, through the command palette, and wait for its messages.
+ *
+ * A test whose subject is a conversation's own state — its agent mode, its draft, its
+ * history — must name it rather than index it. The sidebar's order is shared state: one
+ * mock process serves the whole run, and any earlier spec that sent a message moved the
+ * rows under everybody else. That is not a theory: an index landed on the agent sandbox,
+ * a test toggled "the switch of the thread at index 1" and turned the one thread that is
+ * opted in out of the box OFF — which broke two other files, in a way that reproduced
+ * only in a full run.
+ */
+export async function openConversationNamed(page: Page, name: string): Promise<void> {
+  await page.keyboard.press("Control+k");
+  const input = page.locator("[cmdk-input]");
+  await expect(input).toBeVisible();
+  await input.fill(name);
+  await input.press("Enter");
+  await expect(page.locator('[data-testid="conversation-title"]')).toContainText(name);
+  await expect
+    .poll(() => page.locator('[data-testid="message"]').count(), { timeout: 10_000 })
+    .toBeGreaterThan(0);
+}
+
 export type CapturedSend = {
   conversation: string;
   text: string;

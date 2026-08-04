@@ -195,7 +195,11 @@ Five more things worth knowing before touching it:
 - **The thread transcript travels with the prompt, and it is DATA.** The appended
   system prompt says so explicitly, because the people in a thread never agreed to be
   able to steer an agent on the user's machine. Keep that instruction, keep the
-  transcript bounded, and never move it out of its `<thread>` delimiter.
+  transcript bounded, and never move it out of its `<thread>` delimiter. A trigger written
+  as a REPLY carries one more block, `<answering>` — the message it replies to, read back
+  out of the quote by `agent_policy::answering` — under the same three rules, because
+  without it a request that says "answer this message" names nothing (see "Answer with
+  <agent>" under § Tagging an agent).
 - **The reply signs itself.** The message is posted under the user's name, so the last
   line says a machine wrote it (`— claude, via teams-lite`). That is honesty about
   authorship, not decoration.
@@ -446,7 +450,8 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
   `toggleTeamSection` from the same file. For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
-  `toggleChatSection` from the same file. For the settings pane:
+  `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
+  `bun run preview -- --out /tmp/ask --answer-with`. For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
   file. To review a detail too small to read in a
   1200px page — a 16px icon, a chip, a badge — crop to it and raise the pixel
@@ -839,6 +844,37 @@ had. Do not drop either one for the other.
 since one mock process serves the whole run and a rename left behind renames that person
 for every later spec. `bun run preview -- --out /tmp/person --person` captures the card,
 the dialog and the list; `web/e2e/person-override.spec.ts` pins them.
+
+### "Answer with <agent>" — the same tag, from the message
+
+A message's own "…" menu offers **Answer with Claude** / **Answer with opencode**, each
+wearing that vendor's mark (`web/src/lib/agent-answer.ts`, drawn by the actions menu in
+`web/src/components/message-bubble.tsx`). It is the tag above reached from the other end —
+the message rather than the keyboard — for the case the "@" is bad at: a message somebody
+else wrote, three screens up, that the user wants an answer to.
+
+- **It DRAFTS; it never sends.** Picking it starts a reply to that message, leads the
+  composer with the tag and seeds the request — then stops. The send is the user's own
+  Enter, because § Sending messages needs consent for that exact message, and one menu row
+  is not consent to post under their name.
+- **The request comes seeded (`ANSWER_REQUEST`), and that is load-bearing.** A bare prefix
+  summons nothing — `agent_policy::split_prefix` refuses an empty prompt — so a draft
+  holding only the chip would post a message that starts no program. A half-written draft
+  is kept instead and becomes the request: the user's own sentence beats ours.
+- **The rows are the composer's own list** (`agentCandidatesFor`), so a thread nobody opted
+  in offers none. The consent gate stays in the thread's own menu; this reflects it and
+  never widens it. A request also carries the conversation it was asked in, so walking to
+  another chat drops it rather than leaving a tag in a draft nobody asked for.
+- **The reply is how the agent knows WHICH message.** The prompt is the body with the
+  quote stripped (`teams_read::plain_text_from_html`), so "answer this message" would
+  otherwise name nothing. `agent_policy::answering` reads the quote back out of the trigger
+  — `teams_read::quoted_message_from_html`, the exact opposite half of
+  `strip_quoted_blocks` — and it travels in its own `<answering>` block, bounded and
+  introduced as context like the transcript, because it is a colleague's words.
+- `cd web && bun run preview -- --out /tmp/ask --answer-with` captures the row and the
+  draft; `web/e2e/answer-with-agent.spec.ts` pins every rule above, and the mock strips the
+  quote the way the backend does (`withoutQuotedBlocks`) so a reply-shaped trigger really
+  answers there.
 
 ## Language policy (MANDATORY)
 

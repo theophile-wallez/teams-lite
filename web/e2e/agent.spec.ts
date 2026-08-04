@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { test, fetchAgentModes, fillComposer, gotoApp, openConversationAt } from "./helpers";
+import { test, fetchAgentModes, fillComposer, gotoApp, openConversationNamed } from "./helpers";
 
 // The per-conversation switch that lets the local agent answer an `@claude` message
 // (see web/src/components/agent-menu.tsx, src/agent_policy.rs), and how the answer is
@@ -21,7 +21,9 @@ test.describe("The local agent switch", () => {
     page,
   }) => {
     await gotoApp(page);
-    await openConversationAt(page, 0);
+    // Named, not indexed: the subject of this test is a conversation's own mode, and the
+    // sidebar's order belongs to whatever the rest of the run has already sent.
+    await openConversationNamed(page, "Plain Text");
 
     const trigger = page.locator('[data-testid="agent-menu"]');
     await expect(trigger).toBeVisible();
@@ -42,9 +44,15 @@ test.describe("The local agent switch", () => {
     page,
   }) => {
     await gotoApp(page);
-    // A different conversation from the test above: one mock process serves the whole
-    // run, so each test owns its own thread and neither depends on the other's order.
-    const conversationId = await openConversationAt(page, 1);
+    // Named for a stronger reason than the test above: this one FLIPS the switch, so an
+    // index that landed on the sandbox would take the one consent that is granted out of
+    // the box away from every spec after it. It ends OFF, which is the state the two other
+    // tests that read this thread expect.
+    await openConversationNamed(page, "Plain Text");
+    const conversationId =
+      (await page
+        .locator('[data-testid="composer-shell"]')
+        .getAttribute("data-conversation-id")) ?? "";
 
     await page.locator('[data-testid="agent-menu"]').click();
     const toggle = page.locator('[data-testid="agent-mode-toggle"]');
@@ -78,7 +86,10 @@ test.describe("The local agent switch", () => {
   // user could switch.
   test("grants one read-only group of tools, and takes it back", async ({ page }) => {
     await gotoApp(page);
-    await openConversationAt(page, 2);
+    // The allowlist is per MACHINE, not per conversation, so any thread would do — but it
+    // is still named: a row the rest of the run keeps re-ordering can move out from under
+    // the click, and the header menu detaches with it.
+    await openConversationNamed(page, "Thread Activity");
 
     await page.locator('[data-testid="agent-menu"]').click();
     const files = page.locator('[data-testid="agent-tool-grant-files"]');
@@ -115,7 +126,8 @@ test.describe("The local agent switch", () => {
     page,
   }) => {
     await gotoApp(page);
-    await openConversationAt(page, 3);
+    // Per machine too, and named for the same reason.
+    await openConversationNamed(page, "Thread Activity");
 
     await page.locator('[data-testid="agent-menu"]').click();
     const own = page.locator('[data-testid="agent-unrestricted-toggle"]');
@@ -142,23 +154,34 @@ test.describe("The local agent switch", () => {
 });
 
 test.describe("The local agent's answer", () => {
-  /** Opt the open thread in through its own header — the only place the app offers it. */
+  /** Opt the open thread in through its own header — the only place the app offers it.
+   *
+   *  It switches on and never off: the thread comes from the sidebar's order, which the
+   *  rest of the run owns, so a blind click could land on a thread that is already opted
+   *  in and take that consent away from every spec after this one. */
   async function optIn(page: import("@playwright/test").Page): Promise<void> {
-    await page.locator('[data-testid="agent-menu"]').click();
-    await page.locator('[data-testid="agent-mode-toggle"]').click();
-    await expect(page.locator('[data-testid="agent-menu"]')).toHaveAttribute(
-      "data-agent-mode",
-      "reply",
-    );
+    const menu = page.locator('[data-testid="agent-menu"]');
+    await menu.click();
+    const toggle = page.locator('[data-testid="agent-mode-toggle"]');
+    if ((await toggle.getAttribute("aria-checked")) !== "true") await toggle.click();
+    await expect(menu).toHaveAttribute("data-agent-mode", "reply");
     // Closed with a click, not Escape: the app reads Escape as "close the conversation".
-    await page.locator('[data-testid="agent-menu"]').click();
+    await menu.click();
   }
 
   test("is written into the thread, on the side of what arrives", async ({ page }) => {
     await gotoApp(page);
-    await openConversationAt(page, 2);
+    // Its own thread, named: this test reads THE one agent reply of the history, so a
+    // thread another spec has already been answered in — the sandbox, which the sidebar's
+    // order can put at any index — would match two bubbles and fail on the wrong thing.
+    await openConversationNamed(page, "Forwarded Messages");
     await optIn(page);
 
+    // A plain message first, so the history holds a same-author RUN for the spacing
+    // assertion below to compare against. The fixtures alternate authors, and a thread
+    // that shows one spacing cannot prove which of the two the reply takes.
+    await fillComposer(page, "one moment");
+    await page.keyboard.press("Enter");
     await fillComposer(page, "@claude which port is it?");
     await page.keyboard.press("Enter");
 
@@ -233,7 +256,9 @@ test.describe("The local agent's answer", () => {
 
   test("answers nothing in a conversation nobody opted in", async ({ page }) => {
     await gotoApp(page);
-    await openConversationAt(page, 3);
+    // Named: the whole test is that THIS thread is off, so it cannot be a row whose
+    // position another spec decides.
+    await openConversationNamed(page, "Plain Text");
 
     await fillComposer(page, "@claude are you there?");
     await page.keyboard.press("Enter");

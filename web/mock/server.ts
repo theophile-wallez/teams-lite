@@ -4668,6 +4668,19 @@ const MOCK_AGENT_TOOLS: { tool: string; target: string }[] = [
   { tool: "Read", target: "src/bin/server.rs" },
 ];
 
+/** A reply/forward body with its QUOTE removed — `teams_read::strip_quoted_blocks`.
+ *
+ *  The trigger reads the body the same way the backend does, and the backend reads it
+ *  with the quote gone. It matters for one shape in particular: "Answer with <agent>"
+ *  writes a REPLY whose body opens with the prefix, so a mock that kept the quote would
+ *  see the quoted author first and answer nothing at all. */
+function withoutQuotedBlocks(html: string): string {
+  return html.replace(
+    /<blockquote[^>]*schema\.skype\.com\/(?:reply|forward)[^>]*>[\s\S]*?(?:<\/blockquote>|$)/gi,
+    "",
+  );
+}
+
 /** The backend a message asks for, or null — `agent_policy::split_prefix`, and the same
  *  rule: the prefix must OPEN the message. */
 function mockAgentBackend(text: string): string | null {
@@ -4691,7 +4704,7 @@ function mockAgentBackend(text: string): string | null {
  *  which matters: the rich composer puts the whole message in `content_html` and sends an
  *  empty `text`, so a mock that trusted that field would answer nothing at all. */
 function maybeRunMockAgent(convId: string, trigger: ChatMessage): void {
-  const backend = mockAgentBackend(plain(trigger.content));
+  const backend = mockAgentBackend(plain(withoutQuotedBlocks(trigger.content)));
   if (!backend) return;
   // The consent gate, not a convenience: off is the default everywhere but the sandbox,
   // and a mock that answered regardless would make the switch untestable.

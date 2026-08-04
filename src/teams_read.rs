@@ -2102,7 +2102,16 @@ const BLOCK_TAGS: [&str; 22] = [
 /// result to one capped line for a sidebar row, and [`crate::agent_policy`] keeps it
 /// whole, because a prompt typed over three lines is three lines.
 pub fn plain_text_from_html(html: &str) -> String {
-    let html = strip_quoted_blocks(html);
+    html_to_text(&strip_quoted_blocks(html))
+}
+
+/// Strip the tags of a body that has already been narrowed to the part worth reading,
+/// keeping the line structure ([`BLOCK_TAGS`]) and decoding the entities Teams emits.
+///
+/// Its own function because two callers want opposite halves of the same body:
+/// [`plain_text_from_html`] drops what is quoted, [`quoted_message_from_html`] keeps
+/// only that.
+fn html_to_text(html: &str) -> String {
     let mut text = String::with_capacity(html.len());
     let mut in_tag = false;
     let mut tag = String::new();
@@ -2162,6 +2171,11 @@ fn is_block_tag(tag: &str) -> bool {
     BLOCK_TAGS.iter().any(|block| name.eq_ignore_ascii_case(block))
 }
 
+/// What marks a blockquote as a QUOTE of another message rather than something the
+/// sender wrote themselves. Lowercase, because the markers are matched on a folded copy
+/// of the body.
+const QUOTE_MARKERS: [&str; 2] = ["schema.skype.com/reply", "schema.skype.com/forward"];
+
 /// Remove the QUOTED part of a reply/forward body, i.e. every
 /// `<blockquote itemtype="http://schema.skype.com/Reply|Forward">…</blockquote>`.
 ///
@@ -2175,7 +2189,6 @@ fn is_block_tag(tag: &str) -> bool {
 /// the outer quote early, and an unterminated quote drops the rest of the body
 /// (which is what it visually is).
 fn strip_quoted_blocks(html: &str) -> std::borrow::Cow<'_, str> {
-    const QUOTE_MARKERS: [&str; 2] = ["schema.skype.com/reply", "schema.skype.com/forward"];
     let lower = html.to_ascii_lowercase();
     if !QUOTE_MARKERS.iter().any(|marker| lower.contains(marker)) {
         return std::borrow::Cow::Borrowed(html);
@@ -2220,6 +2233,65 @@ fn strip_quoted_blocks(html: &str) -> std::borrow::Cow<'_, str> {
     }
     out.push_str(&html[rest.min(html.len())..]);
     std::borrow::Cow::Owned(out)
+}
+
+/// The message a reply body quotes: who wrote it, and what it said.
+///
+/// Both fields are one collapsed line. A quote is shown to a reader, or handed to an
+/// agent as the message a request is about, and neither wants the sender's line breaks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotedMessage {
+    /// The quoted author. Empty on a forward, which Teams sends with no author at all.
+    pub sender: String,
+    /// The quoted body, as Teams previewed it inside the quote.
+    pub text: String,
+}
+
+/// The message a reply (or a forward) quotes, or `None` when the body quotes nothing.
+///
+/// The exact opposite half of [`strip_quoted_blocks`], and it exists for one caller:
+/// the local agent. A reply's target travels inside the body, so an `@claude answer
+/// this` written as a reply would otherwise reach the CLI with the quote stripped and
+/// nothing saying WHICH message "this" is (see [`crate::agent_policy`]).
+///
+/// Only the FIRST quote is read: a body carries one, the one it replies to.
+pub fn quoted_message_from_html(html: &str) -> Option<QuotedMessage> {
+    let lower = html.to_ascii_lowercase();
+    if !QUOTE_MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return None;
+    }
+    let mut rest = 0usize;
+    loop {
+        let open = rest + lower[rest..].find("<blockquote")?;
+        let tag_end = open + lower[open..].find('>')? + 1;
+        if !QUOTE_MARKERS.iter().any(|marker| lower[open..tag_end].contains(marker)) {
+            rest = tag_end;
+            continue;
+        }
+        // The quote's own close, or the end of the body: an unterminated quote is
+        // everything that follows it, which is what it visually is.
+        let close = lower[tag_end..].find("</blockquote").map_or(html.len(), |at| tag_end + at);
+        return Some(quoted_message_of(&html[tag_end..close]));
+    }
+}
+
+/// Split the inside of a reply quote into its author and its text.
+///
+/// Teams opens the quote with `<strong itemprop="mri">Author</strong>`, so that close
+/// tag is the boundary: everything before it names the person, everything after it is
+/// what they wrote. A quote with no author (a forward) is all text.
+fn quoted_message_of(inner: &str) -> QuotedMessage {
+    const AUTHOR_END: &str = "</strong>";
+    let (head, body) = match inner.to_ascii_lowercase().find(AUTHOR_END) {
+        Some(at) => (&inner[..at], &inner[at + AUTHOR_END.len()..]),
+        None => ("", inner),
+    };
+    QuotedMessage { sender: one_line(head), text: one_line(body) }
+}
+
+/// A body's text on one line: tags gone, every run of whitespace a single space.
+fn one_line(html: &str) -> String {
+    html_to_text(html).split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// A short, typed LABEL for a message whose body previews as nothing — an
@@ -2895,6 +2967,29 @@ mod tests {
         let nested = "<blockquote itemtype=\"http://schema.skype.com/Reply\">\
                       <blockquote><p>inner</p></blockquote><p>quoted</p></blockquote><p>said</p>";
         assert_eq!(preview_from_html(nested), "said");
+    }
+
+    #[test]
+    fn the_quoted_message_of_a_reply_reads_back_whole() {
+        // The exact opposite half of the test above: what the local agent needs when the
+        // request that summoned it was written as a reply.
+        let reply = "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" itemid=\"1784\">\
+                     <strong itemprop=\"mri\" itemid=\"8:orgid:abc\">Matthieu GAUCHER</strong>\
+                     <span itemprop=\"time\" itemid=\"1784\"></span>\
+                     <p itemprop=\"preview\">Si je vais le faire intervenir</p></blockquote>\
+                     <p>@claude Answer this message.</p>";
+        let quoted = quoted_message_from_html(reply).expect("the reply quotes a message");
+        assert_eq!(quoted.sender, "Matthieu GAUCHER");
+        assert_eq!(quoted.text, "Si je vais le faire intervenir");
+        // A forward carries no author at all, and Teams sends none.
+        let forward = "<blockquote itemtype=\"http://schema.skype.com/Forward\">\
+                       <p>original message</p></blockquote><p>FYI</p>";
+        let quoted = quoted_message_from_html(forward).expect("a forward quotes a message");
+        assert_eq!(quoted.sender, "");
+        assert_eq!(quoted.text, "original message");
+        // A body that quotes nothing, and a quote the sender typed by hand, are not one.
+        assert!(quoted_message_from_html("<p>just a message</p>").is_none());
+        assert!(quoted_message_from_html("<blockquote><p>by hand</p></blockquote>").is_none());
     }
 
     #[test]

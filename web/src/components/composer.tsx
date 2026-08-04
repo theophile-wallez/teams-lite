@@ -8,6 +8,7 @@ import {
   Loading02Icon,
   TextFontIcon,
 } from "@hugeicons/core-free-icons";
+import type { AgentAnswer } from "~/lib/agent-answer";
 import { COMPOSER_FIELD_CLASS } from "~/lib/composer-field";
 import {
   composerImageAccept,
@@ -65,7 +66,9 @@ function clipboardImage(event: ClipboardEvent): File | null {
  *
  * Typing "@" opens the mention list, and a picked person travels with the message as
  * a real Teams mention — see `RichEditor`. An "@" that opens the message also offers the
- * agents this machine can run, which travel as the plain prefix that summons them.
+ * agents this machine can run, which travel as the plain prefix that summons them. The
+ * same tag arrives from the other end when the reader picks "Answer with <agent>" on a
+ * message: the draft is written for them, and the send stays their own Enter.
  *
  * One image can ride along with the message — picked with the image button or
  * pasted from the clipboard, previewed above the field, and uploaded to Teams by
@@ -73,7 +76,12 @@ function clipboardImage(event: ClipboardEvent): File | null {
  * snapshot stays on screen while the request is in flight and after a failure, so
  * a rejected send never loses the image or the caption.
  */
-export function Composer(props: { focusToken: unknown }) {
+export function Composer(props: {
+  focusToken: unknown;
+  /** An "Answer with <agent>" the reader picked on a message, drafted here rather than
+   *  sent (see lib/agent-answer.ts). */
+  agentAnswer?: AgentAnswer | null;
+}) {
   const controller = useController();
   const draft = useAppState((s) => s.draft);
   const replyingTo = useAppState((s) => s.replyingTo);
@@ -368,6 +376,13 @@ export function Composer(props: { focusToken: unknown }) {
               onSubmit={(html, mentions) => send("", html, mentions)}
               mentionCandidates={mentionCandidates}
               agentCandidates={agentCandidates}
+              // A request asked in another thread is dropped rather than applied here.
+              // The editor is keyed per conversation, so a fresh one would otherwise
+              // apply the last pick again — in a thread nobody asked, and possibly one
+              // where the tag would summon nothing.
+              agentAnswer={
+                props.agentAnswer?.conversation === openId ? props.agentAnswer : null
+              }
               onMentionQuery={() => void controller.ensureMentionCandidates()}
             />
           </Suspense>

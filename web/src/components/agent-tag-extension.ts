@@ -44,6 +44,18 @@ declare module "@tiptap/core" {
         from: number;
         to: number;
       }) => ReturnType;
+      /** Put a tag summoning `backend` at the START of the message — the one place the
+       *  backend reads a prefix from — keeping whatever the composer already held after
+       *  it, and leave the caret at the end. `request` seeds the words after the tag for
+       *  a composer that had none (see `answerRequest` in lib/agent-answer.ts).
+       *
+       *  A tag already leading the message is REPLACED: picking a second agent changes
+       *  which one answers, it does not queue both. */
+      leadAgentTag: (options: {
+        backend: string;
+        prefix: string;
+        request: string;
+      }) => ReturnType;
     };
   }
 }
@@ -108,6 +120,36 @@ export const AgentTagNode = Node.create({
               { type: "text", text: " " },
             ])
             .run(),
+
+      leadAgentTag:
+        ({ backend, prefix, request }) =>
+        ({ chain, state }) => {
+          const tag = { type: this.name, attrs: { backend, prefix } };
+          // The tag is followed by a space either way: a prefix glued to the next word
+          // summons nothing.
+          const words = { type: "text", text: request ? ` ${request}` : " " };
+          const first = state.doc.firstChild;
+          // The message does not OPEN with a paragraph (an empty doc always does; a
+          // draft that starts with a list does not). A leading paragraph of its own then
+          // carries the tag, so the prefix opens the message whatever follows it.
+          if (!first || first.type.name !== "paragraph") {
+            return chain()
+              .insertContentAt(0, { type: "paragraph", content: [tag, words] })
+              .focus("end")
+              .run();
+          }
+          // Replace a tag that already leads the message, and the single space it left
+          // behind with it, so switching agents cannot leave a double space.
+          const leading = first.firstChild;
+          const tagged = leading !== null && leading.type.name === this.name;
+          const after = tagged && first.childCount > 1 ? first.child(1) : null;
+          const spaced = after !== null && after.isText && after.text?.startsWith(" ") === true;
+          const to = 1 + (tagged ? leading.nodeSize : 0) + (spaced ? 1 : 0);
+          return chain()
+            .insertContentAt({ from: 1, to }, [tag, words])
+            .focus("end")
+            .run();
+        },
     };
   },
 

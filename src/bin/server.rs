@@ -4688,7 +4688,11 @@ fn agent_request(
         .unwrap_or_else(agent::default_workspace);
     Ok(agent::Request {
         backend: command.backend,
-        prompt: agent_policy::prompt_with_context(&command.prompt, &transcript),
+        prompt: agent_policy::prompt_with_context(
+            &command.prompt,
+            &transcript,
+            command.answering.as_deref(),
+        ),
         system_prompt: agent_policy::system_prompt(command.backend, &title),
         resume_session: store
             .get_setting(&agent_session_key(&command.conversation_id, command.backend.name))?
@@ -6911,6 +6915,7 @@ mod lifecycle_tests {
             conversation_id: "19:c@thread.v2".into(),
             message_id: "1000".into(),
             prompt: "hi".into(),
+            answering: None,
             sender: "Ada".into(),
             sender_mri: "8:orgid:ada".into(),
             compose_time: 1,

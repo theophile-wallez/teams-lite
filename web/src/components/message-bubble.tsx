@@ -39,9 +39,11 @@ import {
 import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
 import { agentTagsInMessage } from "~/lib/agent-tag";
+import type { AgentCandidate } from "~/lib/mentions";
 import { CardAttachment } from "~/components/card-attachment";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
+import { AgentLogo } from "./agent-logo";
 import { AgentSignature, AgentStoredStatus, AgentStream } from "./agent-reply";
 import {
   DropdownMenu,
@@ -203,6 +205,13 @@ function MessageBubbleImpl(props: {
    *  otherwise bring its own panel — an app card — renders flush inside it
    *  instead of as a card within a card. */
   onPanel?: boolean;
+  /** The agents that could really answer in this thread, in the backend's own order
+   *  (`agentCandidatesFor`). Empty — which is every thread nobody opted in — draws no
+   *  "Answer with …" row at all. */
+  answerAgents?: readonly AgentCandidate[];
+  /** Ask one of them about THIS message. It drafts the request; the send stays the
+   *  user's (see lib/agent-answer.ts). */
+  onAnswerWith?: (message: ChatMessage, agent: AgentCandidate) => void;
   onReply: (message: ChatMessage) => void;
   onCopy: (message: ChatMessage) => void;
   onReact: (message: ChatMessage, key: string) => void;
@@ -419,16 +428,25 @@ function MessageBubbleImpl(props: {
     onReply: () => props.onReply(props.message),
   });
 
-  // Set while the ⋯ menu closes because it handed off to the full picker, so the
-  // menu can skip its focus restore that once (see `onCloseAutoFocus` below).
-  const handingOffToPicker = useRef(false);
+  // Set while the ⋯ menu closes because the action it ran put focus somewhere else — the
+  // full picker, or the composer for Reply and "Answer with …" — so the menu can skip its
+  // focus restore that once (see `onCloseAutoFocus` below).
+  const handingOffFocus = useRef(false);
 
   // Hand off from the ⋯ menu's quick row to the full picker: the menu steps aside,
   // since both are the same one-reaction decision.
   const openEmojiPicker = () => {
-    handingOffToPicker.current = true;
+    handingOffFocus.current = true;
     setMenuOpen(false);
     setEmojiPickerOpen(true);
+  };
+
+  /** Run an action that continues in the composer, and keep the caret there. The menu
+   *  would otherwise take focus back to its own ⋯ trigger as it closes, leaving the user
+   *  with a written draft and nowhere to type. */
+  const inComposer = (act: () => void) => {
+    handingOffFocus.current = true;
+    act();
   };
 
   // Apply a reaction from any surface (the menu bar, the emoji picker, or a chip),
@@ -763,18 +781,23 @@ function MessageBubbleImpl(props: {
                   // not: the full picker is a popover that dismisses when focus
                   // lands outside it, so the restore would close the picker the
                   // moment it opened — and emoji-mart's search field is where
-                  // focus belongs anyway.
-                  if (!handingOffToPicker.current) return;
-                  handingOffToPicker.current = false;
+                  // focus belongs anyway. Reply and "Answer with …" hand off the same
+                  // way, to the composer they just wrote into.
+                  if (!handingOffFocus.current) return;
+                  handingOffFocus.current = false;
                   event.preventDefault();
                 }}
                 activeReactionKey={myReactionKey}
                 onReact={react}
                 onMore={openEmojiPicker}
                 onEdit={() => props.onStartEdit(props.message)}
-                onReply={() => props.onReply(props.message)}
+                onReply={() => inComposer(() => props.onReply(props.message))}
                 onCopy={() => props.onCopy(props.message)}
                 onDelete={() => props.onDelete(props.message)}
+                answerAgents={props.answerAgents ?? []}
+                onAnswerWith={(agent) =>
+                  inComposer(() => props.onAnswerWith?.(props.message, agent))
+                }
               />
             )}
           </>
@@ -787,10 +810,16 @@ function MessageBubbleImpl(props: {
 /**
  * The ⋯ actions surface of a bubble, and the only way in to a reaction: a
  * hover-revealed trigger on the author's outer side, opening a menu that leads
- * with the reaction bar and then Edit (mine only), Reply, Copy and Delete (mine
- * only). On a coarse pointer a long press on the bubble opens the same menu.
- * Rendered only for a message there is something to do with — see `inert` in the
- * bubble.
+ * with the reaction bar and then Edit (mine only), Reply, Copy, "Answer with
+ * <agent>" (only where one would answer) and Delete (mine only). On a coarse pointer a
+ * long press on the bubble opens the same menu. Rendered only for a message there is
+ * something to do with — see `inert` in the bubble.
+ *
+ * "Answer with <agent>" is the one row that is not about this message alone: it points
+ * one of the machine's agent CLIs at it. It wears that vendor's own mark rather than a
+ * glyph of ours, exactly as the composer's tag does, because the two are one feature
+ * reached from two ends — and like the tag it only DRAFTS the request (see
+ * lib/agent-answer.ts): a message posted under the user's name is theirs to send.
  *
  * Delete asks twice. Every other action here is recoverable — an edit can be edited
  * again, a reaction toggled off — while a deletion removes the message from the
@@ -825,6 +854,9 @@ function MessageActionsMenu(props: {
   onReply: () => void;
   onCopy: () => void;
   onDelete: () => void;
+  /** The agents this thread could summon; empty draws no row. */
+  answerAgents: readonly AgentCandidate[];
+  onAnswerWith: (agent: AgentCandidate) => void;
 }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   // A closed menu is disarmed: the next open starts at "Delete", never at the
@@ -881,6 +913,24 @@ function MessageActionsMenu(props: {
           <HugeiconsIcon icon={CopyIcon} className="size-4" strokeWidth={1.6} />
           Copy
         </DropdownMenuItem>
+        {props.answerAgents.length > 0 && (
+          <>
+            {/* Its own group: the rows above act on the message, these start a program
+                on the machine the backend runs on. */}
+            <DropdownMenuSeparator />
+            {props.answerAgents.map((agent) => (
+              <DropdownMenuItem
+                key={agent.backend}
+                data-testid="action-answer-with"
+                data-agent={agent.backend}
+                onSelect={() => props.onAnswerWith(agent)}
+              >
+                <AgentLogo backend={agent.backend} className="size-4 shrink-0" />
+                Answer with {agent.name}
+              </DropdownMenuItem>
+            ))}
+          </>
+        )}
         {props.mine && (
           <>
             <DropdownMenuSeparator />

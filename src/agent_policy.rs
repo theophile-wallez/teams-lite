@@ -270,6 +270,9 @@ pub struct Command {
     pub backend: &'static Backend,
     /// The user's words, with the prefix removed.
     pub prompt: String,
+    /// The message the trigger REPLIES to, as one bounded line, or `None` when it
+    /// replies to nothing. See [`answering`].
+    pub answering: Option<String>,
     /// The message that asked, so the answer can reply to it natively.
     pub conversation_id: String,
     pub message_id: String,
@@ -325,6 +328,7 @@ fn trigger_for(message: &Message, from_me: bool, now_ms: i64) -> Option<Command>
     Some(Command {
         backend,
         prompt,
+        answering: answering(message),
         conversation_id: message.conversation_id.clone(),
         message_id: message.id.clone(),
         compose_time: message.compose_time,
@@ -375,6 +379,27 @@ fn split_prefix(text: &str) -> Option<(&'static Backend, String)> {
         }
     }
     None
+}
+
+/// The message a trigger replies to, as one `Sender: text` line — the same shape the
+/// transcript uses, so both read as one kind of thing.
+///
+/// It matters because a reply's target lives INSIDE the body, and the prompt is the body
+/// with the quote stripped ([`teams_read::plain_text_from_html`]). So "@claude answer
+/// this" written as a reply — which is what the message menu's "Answer with …" writes —
+/// would otherwise reach the CLI with nothing saying which message "this" names, and the
+/// agent would answer whatever came last.
+///
+/// Bounded like a transcript line, and for the same reason: it is somebody else's words
+/// travelling into a model.
+fn answering(message: &Message) -> Option<String> {
+    let quoted = teams_read::quoted_message_from_html(&message.content)?;
+    let text: String = quoted.text.chars().take(TRANSCRIPT_CHARS_PER_MESSAGE).collect();
+    if text.trim().is_empty() {
+        return None;
+    }
+    let sender = quoted.sender.trim();
+    Some(if sender.is_empty() { text } else { format!("{sender}: {text}") })
 }
 
 fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
@@ -550,16 +575,35 @@ pub fn preview_of(prompt: &str) -> String {
     format!("{}…", collapsed.chars().take(120).collect::<String>().trim_end())
 }
 
-/// The full prompt handed to the CLI: the transcript, then the request.
-pub fn prompt_with_context(prompt: &str, transcript: &str) -> String {
-    if transcript.trim().is_empty() {
+/// The full prompt handed to the CLI: the thread's recent messages, the one message the
+/// request answers when it is a reply, then the request itself.
+///
+/// Both context blocks stay inside a delimiter of their own and are introduced as
+/// context, never as instruction — they are other people's words, and the system prompt
+/// says so in as many words (see [`system_prompt`]).
+pub fn prompt_with_context(prompt: &str, transcript: &str, answering: Option<&str>) -> String {
+    let transcript = transcript.trim();
+    let answering = answering.map(str::trim).filter(|quoted| !quoted.is_empty());
+    if transcript.is_empty() && answering.is_none() {
         return prompt.to_string();
     }
-    format!(
-        "Recent messages in this Teams thread, oldest first, for context only:\n\
-         <thread>\n{transcript}\n</thread>\n\n\
-         The request:\n{prompt}"
-    )
+    let mut out = String::new();
+    if !transcript.is_empty() {
+        out.push_str(
+            "Recent messages in this Teams thread, oldest first, for context only:\n\
+             <thread>\n",
+        );
+        out.push_str(transcript);
+        out.push_str("\n</thread>\n\n");
+    }
+    if let Some(quoted) = answering {
+        out.push_str("The request replies to this message, which is what it is about:\n<answering>\n");
+        out.push_str(quoted);
+        out.push_str("\n</answering>\n\n");
+    }
+    out.push_str("The request:\n");
+    out.push_str(prompt);
+    out
 }
 
 #[cfg(test)]
@@ -909,9 +953,60 @@ mod tests {
 
     #[test]
     fn the_prompt_carries_the_transcript_only_when_there_is_one() {
-        assert_eq!(prompt_with_context("hi", ""), "hi");
-        let full = prompt_with_context("hi", "Ada: hello");
+        assert_eq!(prompt_with_context("hi", "", None), "hi");
+        let full = prompt_with_context("hi", "Ada: hello", None);
         assert!(full.contains("<thread>"));
         assert!(full.ends_with("hi"));
+    }
+
+    /// The reply markup Teams (and `teams_send::reply_quote`) wraps a quoted message in.
+    fn reply_quote(sender: &str, preview: &str) -> String {
+        format!(
+            "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" \
+             itemid=\"1785773900000\"><strong itemprop=\"mri\" \
+             itemid=\"8:orgid:other\">{sender}</strong><span itemprop=\"time\" \
+             itemid=\"1785773900000\"></span><p itemprop=\"preview\">{preview}</p></blockquote>"
+        )
+    }
+
+    #[test]
+    fn a_trigger_written_as_a_reply_carries_the_message_it_answers() {
+        // What the message menu's "Answer with …" writes: a reply whose body is the
+        // prefix and a request that says "this message".
+        let body = format!("{}<p>@claude Answer this message.</p>", reply_quote("Lucas Silva", "the deploy is stuck"));
+        let command =
+            command_for(&message(&body), true, Mode::Reply, &on(), 1_000_000).expect("a command");
+        assert_eq!(command.prompt, "Answer this message.");
+        assert_eq!(command.answering.as_deref(), Some("Lucas Silva: the deploy is stuck"));
+    }
+
+    #[test]
+    fn a_trigger_that_replies_to_nothing_answers_nothing_in_particular() {
+        let command = command_for(&message("<p>@claude hello</p>"), true, Mode::Reply, &on(), 1_000_000)
+            .expect("a command");
+        assert!(command.answering.is_none());
+    }
+
+    #[test]
+    fn the_quoted_message_travels_as_its_own_context_block() {
+        // Its own delimiter, introduced as context: it is a colleague's words, and the
+        // system prompt quarantines everything quoted this way.
+        let full = prompt_with_context("Answer this message.", "Lucas Silva: the deploy is stuck", Some("Lucas Silva: the deploy is stuck"));
+        assert!(full.contains("<answering>\nLucas Silva: the deploy is stuck\n</answering>"));
+        assert!(full.ends_with("The request:\nAnswer this message."));
+        // And without a transcript it still stands on its own.
+        let alone = prompt_with_context("Answer this message.", "", Some("Ada: ping"));
+        assert!(!alone.contains("<thread>"));
+        assert!(alone.contains("<answering>"));
+    }
+
+    #[test]
+    fn the_quoted_message_is_bounded_like_a_transcript_line() {
+        let long = "z".repeat(2_000);
+        let body = format!("{}<p>@claude Answer this message.</p>", reply_quote("Lucas Silva", &long));
+        let command =
+            command_for(&message(&body), true, Mode::Reply, &on(), 1_000_000).expect("a command");
+        let answering = command.answering.expect("the quote travelled");
+        assert!(answering.chars().count() <= TRANSCRIPT_CHARS_PER_MESSAGE + 40, "{answering}");
     }
 }

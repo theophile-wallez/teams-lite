@@ -48,6 +48,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/reply --agent-reply  # the agent answering
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
 //   bun run web/scripts/preview.ts --out /tmp/tag --agent-tag   # tagging an agent
+//   bun run web/scripts/preview.ts --out /tmp/ask --answer-with # "Answer with <agent>" on a message
 //   bun run web/scripts/preview.ts --out /tmp/chat --chat-menu  # chat sections + the row's "…" menu
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
@@ -1063,6 +1064,41 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-opencode-dark.png`, '.tiptap-message [data-testid="agent-tag"]');
       console.log(`[preview] wrote ${out}-opencode-{light,dark}.png`);
+    });
+    process.exit(0);
+  }
+
+  // "Answer with <agent>": the same tag reached from a message's own ⋯ menu. Two things
+  // to look at — the row (the vendor's mark beside the words, in a menu whose other rows
+  // wear our own glyphs) and the draft it writes (a reply, tag first, request seeded).
+  if (args.includes("--answer-with")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openConversation(page, "Agent Sandbox");
+      await clearComposer(page);
+      const bubble = page.locator('[data-testid="message"]').first();
+      await bubble.hover();
+      await bubble.locator('[data-testid="message-actions"]').click();
+      const row = page.locator('[data-testid="action-answer-with"]');
+      await row.waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-menu-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-menu-dark.png`);
+      await setTheme("light");
+      // The row up close: a 16px mark next to two words is where this is right or wrong.
+      await shot(`${out}-row-light.png`, '[data-testid="action-answer-with"]');
+      // Picked: the composer holds the reply banner, the chip and the seeded request, and
+      // nothing has been sent — the Enter is the user's.
+      await row.click();
+      await page.waitForSelector('.tiptap-message [data-testid="agent-tag"]');
+      await page.waitForTimeout(200);
+      await shot(`${out}-draft-light.png`, '[data-testid="composer-shell"]');
+      await setTheme("dark");
+      await shot(`${out}-draft-dark.png`, '[data-testid="composer-shell"]');
+      console.log(
+        `[preview] wrote ${out}-menu-{light,dark}.png, ${out}-row-light.png and ` +
+          `${out}-draft-{light,dark}.png`,
+      );
     });
     process.exit(0);
   }
