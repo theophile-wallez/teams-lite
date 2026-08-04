@@ -36,7 +36,11 @@ pub const THREADS_THREAD: &str = "48:threads";
 /// The one real chat in the `48:` id space: notes-to-self. It flows through the
 /// normal message pipeline, so it is the sole exception to the "`48:` is a
 /// system feed" rule.
-const NOTES_THREAD: &str = "48:notes";
+///
+/// Public because the CSA parser has to FIND it: the chat arrives in `privateFeeds`
+/// rather than in `chats` (see `teams_read::parse_notes_conversation`), and one
+/// spelling of the id is what keeps the two halves agreeing.
+pub const NOTES_THREAD: &str = "48:notes";
 
 /// Default number of feed entries to fetch.
 pub const DEFAULT_NOTIFICATIONS_LIMIT: u32 = 30;

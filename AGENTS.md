@@ -696,18 +696,28 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
   where a still touch on the row opens the menu (`useLongPress`, the plain half of the
   message gestures). The app is used from a phone, so a menu behind hover alone would be
   a feature that does not exist there — `web/e2e/mobile.spec.ts` pins both halves.
-- **The chat with ONESELF is absent because Teams never reports it**, not because
-  anything here drops it. The official client draws that "(You)" row itself and creates
-  the thread on the first message sent into it, so an account that never used it has no
-  thread at all: CSA lists 957 chats — 98 one-to-one, `hasMoreChats` false — and not one
-  names the user's own oid twice, the chat service's own list names none either, and
-  `19:<oid>_<oid>@unq.gbl.spaces` answers 404 `LocationLookupFailed` when asked for by
-  name (`examples/self_chat_recon.rs` measures all three). Two things follow. A CSA
-  chat's `members` array is NOT the roster — it lists only us on 281 of those 957 — so
-  "the members are only me" finds hundreds of ordinary colleagues' chats and must never
-  be read as a self chat; the id is the signal. And offering the row would mean CREATING
-  the thread, which is a send: it needs the consent gate of § Sending messages, never a
-  quiet addition to the sidebar.
+- **The chat with ONESELF is `48:notes`, and it is NOT in `chats`.** Teams delivers it in
+  the CSA payload's `privateFeeds`, beside the activity streams — so the parser reads it
+  from there (`teams_read::parse_notes_conversation`), and a list built from `chats` alone
+  showed every conversation the user has except that one. It is not a `19:` thread at all:
+  of 957 CSA chats and 1049 chat-service conversations none is the self chat, and
+  `19:<oid>_<oid>@unq.gbl.spaces` — the id it would carry if it were an ordinary
+  one-to-one — answers 404 `LocationLookupFailed`. `examples/self_chat_lookup.rs` measures
+  every one of those, and reads the thread's own history back through this crate's parser.
+  Four things follow:
+  - **`48:notes` is the sole `48:` id that is a chat.** `teams_activity::is_system_feed_thread`
+    and `Conversation::kind` (→ `ConversationKind::Notes`) already said so before anything
+    parsed it, which is why the fix was one function and no new plumbing.
+  - **The feed carries none of the sidebar booleans** — no `isRead`, `isSticky`, `hidden`,
+    `isMuted`, `isLastMessageFromMe` — so those take their defaults, and only
+    "we wrote the last message" is derived, from the frame's own `from`. Every note is
+    ours: there is nothing to be unread of, and no colleague to attribute a preview to.
+  - **No title is invented in the backend.** The feed has none, and the client already
+    names the row ("Notes", `convLabel`) and draws initials rather than a face
+    (`conversationFallback`). A name minted server-side would be a second spelling.
+  - **A CSA chat's `members` array is NOT the roster** — it lists only us on 281 of those
+    957 chats — so "the members are only me" finds hundreds of ordinary colleagues' chats.
+    It cost one wrong diagnosis: the id is the signal.
 
 ## Audio calls (a call RINGS a person — the sharpest outward action here)
 

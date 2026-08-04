@@ -794,7 +794,70 @@ fn parse_conversations_with_self(v: &Value, self_mri: &str) -> Vec<Conversation>
             picture_url: parse_thread_picture(chat),
         });
     }
+    out.extend(parse_notes_conversation(v, self_mri));
     out
+}
+
+/// The user's own notes-to-self chat — the row Teams labels "(You)" — out of the CSA
+/// payload's `privateFeeds`.
+///
+/// **It is not in `chats`.** `48:notes` arrives beside the activity streams
+/// (`48:notifications`, `48:mentions`, …) in `privateFeeds`, which is why a list built
+/// from `chats` alone shows every other conversation and not that one — the bug this
+/// function exists to fix. Measured against the tenant by
+/// `examples/self_chat_lookup.rs`: of 957 CSA chats and 1049 chat-service
+/// conversations, NONE is the self chat, and the id it would have if it were an
+/// ordinary one-to-one thread (`19:<oid>_<oid>@unq.gbl.spaces`) does not exist at all.
+///
+/// It is a real chat all the same — our own messages, through the ordinary message
+/// pipeline — which is exactly what [`crate::teams_activity::is_system_feed_thread`]
+/// already exempts it from, and what [`Conversation::kind`] already classifies as
+/// [`crate::store::ConversationKind::Notes`].
+///
+/// Its object carries none of the sidebar booleans (`isRead`, `isSticky`, `hidden`,
+/// `isLastMessageFromMe`), so three take their defaults — every note is ours, so there
+/// is nothing to be unread of, and a pin or a hide made here stays local like any
+/// other — and the fourth is derived from the frame's own `from`, so the sidebar can
+/// say "You:" the way it does everywhere else.
+///
+/// Returns `None` when the payload holds no notes feed, and a conversation flagged
+/// `is_empty` when the user has never written a note — the caller skips it, so an
+/// unused feed never becomes a row.
+fn parse_notes_conversation(v: &Value, self_mri: &str) -> Option<Conversation> {
+    let feed = v
+        .get("privateFeeds")
+        .and_then(|f| f.as_array())?
+        .iter()
+        .find(|f| f.get("id").and_then(|x| x.as_str()) == Some(crate::teams_activity::NOTES_THREAD))?;
+    let lm = parse_last_message(feed);
+    let is_empty = feed.get("isEmptyConversation").and_then(|x| x.as_bool()).unwrap_or(false)
+        || !lm.has_message;
+    Some(Conversation {
+        id: crate::teams_activity::NOTES_THREAD.to_string(),
+        // Deliberately empty: the feed carries no title, and the client already names
+        // this chat ("Notes") rather than inventing a name here.
+        title: String::new(),
+        // `threadType` is "streamofnotes"; there is no `chatType`. `kind()` reads the
+        // id, so the classification does not depend on either.
+        chat_type: String::new(),
+        is_one_on_one: false,
+        last_message_time: lm.time,
+        is_empty,
+        // A 1:1's "other party" is who we resolve a name and a face from. There is no
+        // other party here, so it stays empty and nothing tries to resolve one.
+        other_member_mri: String::new(),
+        last_message_preview: lm.preview,
+        last_message_sender: lm.sender,
+        last_message_from_me: !lm.sender_mri.is_empty()
+            && crate::store::same_user(&lm.sender_mri, self_mri),
+        last_message_sender_mri: lm.sender_mri,
+        is_read: true,
+        is_muted: false,
+        is_pinned: false,
+        is_hidden: false,
+        thread_type: feed.get("threadType").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        picture_url: String::new(),
+    })
 }
 
 #[cfg(test)]
@@ -2507,6 +2570,92 @@ mod tests {
         assert!(!convs[0].is_empty);
         assert!(convs[1].is_empty); // flagged empty
         assert_eq!(convs[1].last_message_time, 0);
+    }
+
+    /// The shape the tenant really sends for the notes chat: NOT in `chats`, but in
+    /// `privateFeeds` beside the activity streams, with `threadType: "streamofnotes"`
+    /// and none of the sidebar booleans (captured through
+    /// `examples/self_chat_lookup.rs`).
+    fn payload_with_a_notes_feed(content: &str, empty: bool) -> Value {
+        json!({
+            "chats": [{
+                "id": "19:abc@thread.v2",
+                "title": "Team Chat",
+                "chatType": "meeting",
+                "isEmptyConversation": false,
+                "lastMessage": { "id": "123", "composeTime": "2026-07-16T16:05:26.767Z" }
+            }],
+            "privateFeeds": [
+                {
+                    "id": "48:notifications",
+                    "isEmptyConversation": false,
+                    "threadType": "streamofthreads",
+                    "lastMessage": { "id": "9", "composeTime": "2026-08-04T14:45:36.893Z" }
+                },
+                {
+                    "id": "48:notes",
+                    "isEmptyConversation": empty,
+                    "threadType": "streamofnotes",
+                    "members": [{ "mri": "8:orgid:me", "role": "Admin" }],
+                    "lastMessage": {
+                        "id": if empty { Value::Null } else { json!("1784245471163") },
+                        "composeTime": if empty { Value::Null } else { json!("2026-07-16T23:44:31.163Z") },
+                        "messageType": "RichText/Html",
+                        "content": content,
+                        "from": "8:orgid:me",
+                        "imDisplayName": "Théophile WALLEZ",
+                    }
+                },
+            ]
+        })
+    }
+
+    #[test]
+    fn the_notes_chat_comes_from_private_feeds_not_from_chats() {
+        // The whole bug: a list built from `chats` alone has no self chat, because
+        // Teams delivers `48:notes` in `privateFeeds`.
+        let v = payload_with_a_notes_feed("<p>test 3</p>", false);
+        let convs = parse_conversations_with_self(&v, "8:orgid:me");
+        let notes = convs
+            .iter()
+            .find(|c| c.id == "48:notes")
+            .expect("the notes chat belongs in the conversation list");
+        assert_eq!(notes.kind(), ConversationKind::Notes);
+        assert_eq!(notes.last_message_preview, "test 3");
+        assert_eq!(notes.last_message_time, 1784245471163);
+        assert_eq!(notes.thread_type, "streamofnotes");
+        assert!(!notes.is_empty);
+        // Every note is ours, so the sidebar attributes the preview to "You:".
+        assert!(notes.last_message_from_me);
+        assert_eq!(notes.last_message_sender_mri, "8:orgid:me");
+        // No title is invented here: the client names this chat.
+        assert!(notes.title.is_empty());
+        // And no other party to resolve a name or a face from.
+        assert!(notes.other_member_mri.is_empty());
+    }
+
+    #[test]
+    fn a_notes_chat_nobody_ever_wrote_in_stays_out_of_the_list() {
+        // `is_empty` is what `upsert_conversations` skips on, so an untouched feed
+        // never becomes a row — the same rule an empty meeting room follows.
+        let v = payload_with_a_notes_feed("", true);
+        let convs = parse_conversations_with_self(&v, "8:orgid:me");
+        let notes = convs.iter().find(|c| c.id == "48:notes").expect("parsed all the same");
+        assert!(notes.is_empty);
+        assert_eq!(notes.last_message_time, 0);
+    }
+
+    #[test]
+    fn the_activity_streams_are_never_read_as_the_notes_chat() {
+        // `48:notifications` sits in the same array and is a feed, not a chat.
+        let v = payload_with_a_notes_feed("<p>hi</p>", false);
+        let convs = parse_conversations_with_self(&v, "8:orgid:me");
+        assert!(convs.iter().all(|c| !c.id.starts_with("48:") || c.id == "48:notes"));
+        // A payload with no notes feed at all yields no extra row.
+        let without = json!({ "chats": [], "privateFeeds": [{ "id": "48:mentions" }] });
+        assert!(parse_conversations_with_self(&without, "8:orgid:me").is_empty());
+        // And so does one with no `privateFeeds` key, which is every older capture.
+        assert!(parse_conversations_with_self(&json!({ "chats": [] }), "8:orgid:me").is_empty());
     }
 
     #[test]
