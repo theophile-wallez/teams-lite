@@ -15,7 +15,9 @@
 //   cargo run --example mail_rpc_check
 //
 // READS ONLY — the five methods it calls are the entire mail surface, and all five
-// are reads. It prints field names and sizes, never mail content.
+// are reads. `people_by_address`, which the mail avatars rest on, is checked here too:
+// it is a Teams directory read, and it is what the mail surface asks about the people
+// a message names. It prints field names and sizes, never mail content.
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -239,6 +241,55 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    // The lookup the mail avatars rest on: a mail names its people by address, and a
+    // photo is addressed by mri, so this is what ties one to the other.
+    println!("== people_by_address ==");
+    let mut addresses: Vec<String> = Vec::new();
+    for mail in messages.iter().take(10) {
+        for list in ["from", "to", "cc"] {
+            let entries = match &mail[list] {
+                Value::Array(items) => items.clone(),
+                other => vec![other.clone()],
+            };
+            for entry in entries {
+                let address = entry["address"].as_str().unwrap_or_default().trim().to_string();
+                if !address.is_empty() && !addresses.iter().any(|held| held == &address) {
+                    addresses.push(address);
+                }
+            }
+        }
+    }
+    anyhow::ensure!(!addresses.is_empty(), "no addresses on this page to resolve");
+    let resolved = client
+        .call("people_by_address", json!({ "addresses": addresses }))
+        .await?;
+    let people = resolved["people"].as_array().context("people must be an array")?;
+    println!("  {}/{} addresses resolved to a person", people.len(), addresses.len());
+    if let Some(person) = people.first() {
+        // `address` is what the UI keys its cache on, so its absence would silently
+        // leave every face on initials.
+        require_keys("person", person, &["found", "address", "mri", "display_name"])?;
+        for person in people {
+            let address = person["address"].as_str().unwrap_or_default();
+            anyhow::ensure!(
+                addresses.iter().any(|asked| asked == address),
+                "the answer names an address nobody asked for: {address}"
+            );
+            anyhow::ensure!(
+                person["mri"].as_str().unwrap_or_default().starts_with("8:"),
+                "a resolved person carries no person mri"
+            );
+        }
+    } else {
+        println!("  (nobody on this page is in the directory — the UI keeps initials)");
+    }
+    // A malformed entry must be refused before the request, not passed upstream.
+    let refused = client
+        .call("people_by_address", json!({ "addresses": ["Ada <ada@example.com>"] }))
+        .await;
+    anyhow::ensure!(refused.is_err(), "a mail header was accepted as an address");
+    println!("  a name-plus-address entry is refused, as it must be");
 
     println!("OK — every field web/src/lib/protocol.ts reads is present on the wire");
     Ok(())

@@ -26,6 +26,7 @@ import {
   shouldNotify,
   trimHistoryPage,
   mergeCalendarWindow,
+  type AddressPerson,
   type AppSettings,
   type BrokerStatus,
   type CalendarEvent,
@@ -322,6 +323,16 @@ const CALL_RING_TIMEOUT_MS = 45_000;
  *  the next hover, long enough that re-hovering the same name (or several
  *  mentions of the same person in one thread) costs a single round-trip. */
 const PRESENCE_TTL_MS = 30_000;
+
+/** How long an address lookup waits for company before it goes out. One frame: long
+ *  enough for a whole mail row, header card or virtualized page to join the same
+ *  request, short enough that no face waits visibly for its batch. */
+const ADDRESS_BATCH_MS = 16;
+
+/** How many addresses one lookup may carry — the backend's own batch limit
+ *  (`teams_profiles::MAX_BATCH`). The surplus goes out in the next batch. */
+const ADDRESS_BATCH_MAX = 100;
+
 // Where local channel-pin overrides are persisted (client-only). The key is new: the
 // map it replaces held the misread `is_favorite` flag (Teams' Show/Hide switch, see
 // `channelIsShown`), so an old entry would pin channels the user never pinned.
@@ -539,6 +550,17 @@ export class TeamsController {
   private profileCache = new Map<string, Promise<PersonProfile | null>>();
   private presenceCache = new Map<string, { at: number; value: Promise<PersonPresence | null> }>();
 
+  // Mail-address -> person cache, keyed by the LOWERCASED address, and the batch
+  // that fills it. A mail names its people by address while a photo is addressed by
+  // MRI, so this is the lookup between the two (see `loadAddressPerson`). One screen
+  // of mail asks for dozens of addresses at once, so a request is never sent per
+  // address: askers queue for a few milliseconds and leave with one batched answer.
+  // A "nobody" is cached like a found person — the directory will answer the same
+  // next time — while a failed batch is evicted so a later render retries.
+  private addressPeopleCache = new Map<string, Promise<AddressPerson | null>>();
+  private addressQueue = new Map<string, (person: AddressPerson | null) => void>();
+  private addressBatchTimer: ReturnType<typeof setTimeout> | null = null;
+
   // Live OS dark-mode query, watched only while appearance === "system".
   private darkQuery: MediaQueryList | null = null;
   private darkListener: ((e: MediaQueryListEvent) => void) | null = null;
@@ -696,6 +718,11 @@ export class TeamsController {
     this.linkCache.clear();
     this.profileCache.clear();
     this.presenceCache.clear();
+    if (this.addressBatchTimer) clearTimeout(this.addressBatchTimer);
+    this.addressBatchTimer = null;
+    for (const resolve of this.addressQueue.values()) resolve(null);
+    this.addressQueue.clear();
+    this.addressPeopleCache.clear();
     this.mailPageCache.clear();
     this.mailBodyCache.clear();
     this.backend.close();
@@ -2125,6 +2152,67 @@ export class TeamsController {
       const res = await this.backend.fetchAvatar(kind, id);
       return res.found && res.data_base64 ? res : null;
     });
+  }
+
+  /** Resolve the profile photo of whoever a MAIL ADDRESS belongs to, as a local blob
+   *  object URL. Two steps, each cached on its own: the address resolves to a person
+   *  through the directory, then that person's MRI takes the ordinary photo path — so
+   *  a colleague who writes from two addresses is fetched once, and a sender the
+   *  directory does not know (an external one, a distribution list, a shared mailbox)
+   *  resolves to `null` and keeps their tinted initials. */
+  async loadAvatarForAddress(address: string): Promise<string | null> {
+    const person = await this.loadAddressPerson(address);
+    return person?.mri ? this.loadAvatar("user", person.mri) : null;
+  }
+
+  /** Resolve one mail address to the person the directory knows behind it, or `null`
+   *  when it knows nobody. Batched: every address asked for within
+   *  ADDRESS_BATCH_MS leaves in one request, because a page of mail names dozens of
+   *  people at once and one request per row would be a request storm. Cached per
+   *  address for the session, a "nobody" included. */
+  loadAddressPerson(address: string): Promise<AddressPerson | null> {
+    const key = address.trim().toLowerCase();
+    // Only a plain address can be looked up; the backend refuses anything else, so
+    // a display name or an empty field never becomes a request.
+    if (!key || !key.includes("@")) return Promise.resolve(null);
+    const cached = this.addressPeopleCache.get(key);
+    if (cached) return cached;
+
+    const pending = new Promise<AddressPerson | null>((resolve) => {
+      this.addressQueue.set(key, resolve);
+      if (!this.addressBatchTimer) {
+        this.addressBatchTimer = setTimeout(() => void this.flushAddressQueue(), ADDRESS_BATCH_MS);
+      }
+    });
+    this.addressPeopleCache.set(key, pending);
+    return pending;
+  }
+
+  /** Ask the directory about every queued address in one request and hand each
+   *  waiter its own answer. A batch is capped (ADDRESS_BATCH_MAX, the backend's own
+   *  limit), and the surplus goes out in the next one. On failure every waiter gets
+   *  `null` and its cache entry is dropped, so a later render retries. */
+  private async flushAddressQueue(): Promise<void> {
+    this.addressBatchTimer = null;
+    const waiting = [...this.addressQueue.entries()].slice(0, ADDRESS_BATCH_MAX);
+    for (const [address] of waiting) this.addressQueue.delete(address);
+    if (this.addressQueue.size > 0) {
+      this.addressBatchTimer = setTimeout(() => void this.flushAddressQueue(), ADDRESS_BATCH_MS);
+    }
+    if (waiting.length === 0) return;
+
+    try {
+      const res = await this.backend.peopleByAddress(waiting.map(([address]) => address));
+      // The backend echoes each address as we spelled it, and we send the lowercased
+      // key, so an answer maps back to its waiter without a second guess.
+      const found = new Map(res.people.map((person) => [person.address.toLowerCase(), person]));
+      for (const [address, resolve] of waiting) resolve(found.get(address) ?? null);
+    } catch {
+      for (const [address, resolve] of waiting) {
+        this.addressPeopleCache.delete(address);
+        resolve(null);
+      }
+    }
   }
 
   /** Resolve a group chat's own picture to a local blob object URL, fetching the

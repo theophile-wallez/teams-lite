@@ -979,11 +979,23 @@ if (import.meta.main) {
       // plus an inline image the backend embedded.
       await openMailAt(page, 1);
       await shot(`${out}-attachments-light.png`);
+      // The fifth fixture is addressed to a whole room: a face for the sender and
+      // for every person it names, and a "+N" chip for the rest.
+      await openMailAt(page, 4);
+      // `--element` crops the two recipient shots, which is how a 20px face and its
+      // chip are reviewed at all (see `--dpr`).
+      await shot(`${out}-recipients-light.png`, element);
+      // And with the rest revealed, which is where the wrap and the initials of an
+      // address the directory cannot name are seen.
+      await page.locator('[data-testid="mail-recipients-more"]').click();
+      await shot(`${out}-recipients-all-light.png`, element);
       await setTheme("dark");
+      await shot(`${out}-recipients-dark.png`, element);
       await shot(`${out}-dark.png`);
       console.log(
         `[preview] wrote ${out}-list-light.png, ${out}-light.png, ` +
-          `${out}-attachments-light.png and ${out}-dark.png`,
+          `${out}-attachments-light.png, ${out}-recipients-{light,all-light,dark}.png ` +
+          `and ${out}-dark.png`,
       );
     });
     process.exit(0);

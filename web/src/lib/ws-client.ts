@@ -12,6 +12,7 @@ import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { SendImage } from "./composer-image";
 import type { OutboundMention } from "./mentions";
 import type {
+  AddressPeopleResult,
   AppSettings,
   CalendarInfo,
   CalendarViewResult,
@@ -586,6 +587,14 @@ export class Backend {
    *  Only person MRIs are accepted; the backend refuses a channel/team MRI. */
   profile(mri: string): Promise<PersonProfile> {
     return this.request<PersonProfile>("profile", { mri });
+  }
+
+  /** Resolve a batch of MAIL ADDRESSES to the people behind them, so a message can
+   *  show a real face for a sender or a recipient it names only by address. An
+   *  address the directory does not know — an external sender, a distribution list,
+   *  a shared mailbox — is simply absent from `people`. */
+  peopleByAddress(addresses: string[]): Promise<AddressPeopleResult> {
+    return this.request<AddressPeopleResult>("people_by_address", { addresses });
   }
 
   /** Read live presence ("Available", "In a meeting", "Offline", …) for one or

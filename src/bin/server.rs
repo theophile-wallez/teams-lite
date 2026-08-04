@@ -10,8 +10,8 @@
 //   event    (server -> client):  { "event": "<name>", "data": {...} }   (no id)
 //
 // Methods: conversations | open | backfill | set_draft | send | edit | react | notifications
-//          | fetch_media | fetch_avatar | profile | presence | get_settings
-//          | set_settings | set_always_available | enrich_link
+//          | fetch_media | fetch_avatar | profile | people_by_address | presence
+//          | get_settings | set_settings | set_always_available | enrich_link
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | mail_mark_read
 //          | calendars | calendar_view
@@ -2267,6 +2267,43 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             })
         }
 
+        // The people behind a batch of MAIL ADDRESSES — the same directory card as
+        // `profile`, asked with an address instead of an mri. This is what puts a real
+        // face on a mail: a message names its sender and its recipients by address,
+        // and a photo is addressed by mri. An address the directory does not know (an
+        // external sender, a distribution list, a shared mailbox) is simply absent
+        // from the answer, so the UI keeps its tinted initials rather than guessing.
+        // READ-ONLY, like every other mail-facing method.
+        "people_by_address" => {
+            let addresses = address_batch(params)?;
+            let http = ctx.http.clone();
+            let tokens = ctx.tokens.clone();
+            let people = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let tokens = tokens.clone();
+                    let addresses = addresses.clone();
+                    async move {
+                        let profile = tokens.get(teams_profiles::PROFILE_SCOPE).await?;
+                        teams_profiles::fetch_profiles_by_address(
+                            &http, &session, &profile, &addresses,
+                        )
+                        .await
+                    }
+                })
+                .await?;
+            Ok(json!({
+                "people": people
+                    .iter()
+                    .map(|(address, p)| {
+                        let mut entry = profile_json(p);
+                        entry["address"] = json!(address);
+                        entry
+                    })
+                    .collect::<Vec<Value>>(),
+            }))
+        }
+
         // Live presence ("Available", "Busy", "In a meeting", "Offline", …) for one
         // or more people, read the same way the Teams client reads it. Volatile by
         // nature, so it is never cached server-side: every call hits the presence
@@ -3104,6 +3141,28 @@ fn presence_mris(params: &Value) -> Result<Vec<String>> {
         "not a person mri"
     );
     Ok(mris)
+}
+
+/// The mail addresses of a `people_by_address` request. Every entry must be a
+/// plain, single address: the batch is bounded, and anything that is not one is
+/// refused here rather than sent upstream.
+fn address_batch(params: &Value) -> Result<Vec<String>> {
+    let addresses: Vec<String> = match params.get("addresses") {
+        Some(Value::Array(items)) => {
+            items.iter().filter_map(Value::as_str).map(str::to_string).collect()
+        }
+        _ => vec![param_str(params, "address")?],
+    };
+    anyhow::ensure!(!addresses.is_empty(), "missing param: address");
+    anyhow::ensure!(
+        addresses.len() <= teams_profiles::MAX_BATCH,
+        "too many addresses in one request"
+    );
+    anyhow::ensure!(
+        addresses.iter().all(|a| teams_profiles::is_mail_address(a)),
+        "not a mail address"
+    );
+    Ok(addresses)
 }
 
 /// Wire shape of a person's directory card (see the `profile` method).

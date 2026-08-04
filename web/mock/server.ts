@@ -14,7 +14,7 @@
 // Methods: ping | conversations | channels | open | backfill | set_draft | send
 //          | edit | react | mark_read | notifications | read_receipts | fetch_media
 //          | fetch_avatar
-//          | profile | presence
+//          | profile | people_by_address | presence
 //          | get_settings | set_settings | set_always_available | enrich_link
 //          | push_status | push_subscribe | push_unsubscribe | push_test
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
@@ -2373,6 +2373,23 @@ function mockProfile(mri: string): MockProfile | { found: false } {
   };
 }
 
+/** The person behind one MAIL ADDRESS, or `null` when the directory knows nobody by
+ *  it — the mock half of `people_by_address`. A colleague's address resolves (which
+ *  is what puts a real face on a mail), while `digest@example.com`, `ci@example.com`
+ *  and anything off the tenant's domain resolve to nothing, exactly as an external
+ *  sender, a distribution list and a shared mailbox do on a real tenant. The mail
+ *  surface therefore shows both states side by side in the mock. */
+function mockAddressPerson(address: string): (MockProfile & { address: string }) | null {
+  const [local = "", domain = ""] = address.toLowerCase().split("@");
+  if (!local || domain !== "example.com") return null;
+  // `personAddress` builds "first.last@example.com" from a name whose MRI is
+  // "8:orgid:first-last", so the two are one substitution apart.
+  const mri = local === "you" ? SELF_MRI : `8:orgid:${local.replace(/\./g, "-")}`;
+  const profile = mockProfile(mri);
+  if (!profile.found) return null;
+  return { ...profile, address };
+}
+
 /** The presence states the mock cycles through, one per MRI, so every badge tone
  *  and label is reachable in dev: reachable, in a meeting, away, offline (with a
  *  "last seen"), out of office (with an auto-reply note), and unknown. */
@@ -3519,8 +3536,35 @@ function seedMail(): void {
     },
   );
 
+  // A mail addressed to a whole room: more recipients than the header card shows at
+  // once, so the "+N" chip and its expansion have a fixture — and so has a face for
+  // every person a message names, which is the point of the recipient lines.
+  add(
+    4,
+    {
+      subject: "Invitation: architecture guild, Thursday 14:00",
+      from: personAddress("Olivia Martins"),
+      to: [
+        SELF_ADDRESS,
+        ...["Ava Thompson", "Liam Nguyen", "Noah Kim", "Emma Rossi", "Lucas Silva", "Mia Chen"].map(
+          personAddress,
+        ),
+        // Nobody the directory knows: an alias and an off-tenant guest, so the
+        // initials fallback stands next to the real photos.
+        { name: "Architecture guild", address: "guild@example.com" },
+        { name: "", address: "reva.singh@partner.example.org" },
+      ],
+      cc: [personAddress("Ethan Brown"), personAddress("Sofia Garcia")],
+      preview: MAIL_PREVIEWS[4]!,
+    },
+    simpleMailBody("Olivia Martins", [
+      MAIL_PREVIEWS[4]!,
+      "The room takes twelve, so reply if you cannot make it and I will free the seat.",
+    ]),
+  );
+
   // The rest of the backlog: ordinary mail, so the list pages and virtualizes.
-  for (let index = 4; index < MAIL_BACKLOG; index++) {
+  for (let index = 5; index < MAIL_BACKLOG; index++) {
     const person = PEOPLE[index % PEOPLE.length]!;
     const subject = MAIL_SUBJECTS[index % MAIL_SUBJECTS.length]!;
     const preview = MAIL_PREVIEWS[index % MAIL_PREVIEWS.length]!;
@@ -3848,6 +3892,14 @@ function dispatch(method: string, params: unknown): unknown {
     case "profile": {
       const mri = requireString(params, "mri");
       return mockProfile(mri);
+    }
+
+    case "people_by_address": {
+      const o = asObject(params);
+      const addresses = Array.isArray(o.addresses)
+        ? o.addresses.filter((a): a is string => typeof a === "string")
+        : [requireString(params, "address")];
+      return { people: addresses.map(mockAddressPerson).filter((p) => p !== null) };
     }
 
     case "presence": {

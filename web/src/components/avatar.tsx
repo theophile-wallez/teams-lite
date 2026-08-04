@@ -34,16 +34,26 @@ export function avatarInitials(label: string): string {
   return (words[0]![0]! + words[words.length - 1]![0]!).toUpperCase();
 }
 
-/** A real picture to load for an avatar. Two kinds of subject, addressed the way
+/** A real picture to load for an avatar. Three kinds of subject, addressed the way
  *  Teams addresses each one:
  *   - a person (`kind: "user"`, `id` = their MRI) or a Teams "team" group
  *     (`kind: "team"`, `id` = its AAD group id) — an identity, so an id;
  *   - a group chat's own uploaded picture (`kind: "chat"`) — hosted content, so
- *     the `url` the backend reported on the conversation (`picture_url`).
+ *     the `url` the backend reported on the conversation (`picture_url`);
+ *   - somebody a MAIL names (`kind: "address"`) — a mail carries an SMTP address
+ *     rather than an identity, so the address is resolved to a person first (see
+ *     `TeamsController.loadAvatarForAddress`).
  *  When the subject has no picture, the avatar keeps its tinted initials. */
 export type AvatarPhoto =
   | { kind: "user" | "team"; id: string }
-  | { kind: "chat"; url: string };
+  | { kind: "chat"; url: string }
+  | { kind: "address"; address: string };
+
+/** The picture to show for one address on a mail, or `undefined` when the mail
+ *  carries no address to resolve (the avatar then keeps its tinted initials). */
+export function mailAddressPhoto(address: string): AvatarPhoto | undefined {
+  return address ? { kind: "address", address } : undefined;
+}
 
 /** The picture an avatar should show for a conversation, or `undefined` when there
  *  is none to load (the avatar then keeps its tinted initials).
@@ -83,10 +93,13 @@ const FALLBACK_ICON = {
   group: UserMultiple02Icon,
 } as const;
 
-/** The cache/effect key of a photo: whichever of `id` / `url` addresses it. */
+/** The cache/effect key of a photo: whichever of `id` / `url` / `address`
+ *  addresses it. */
 function photoKey(photo?: AvatarPhoto): string {
   if (!photo) return "";
-  return photo.kind === "chat" ? photo.url : photo.id;
+  if (photo.kind === "chat") return photo.url;
+  if (photo.kind === "address") return photo.address;
+  return photo.id;
 }
 
 /**
@@ -110,7 +123,9 @@ function useAvatarPhoto(photo?: AvatarPhoto): string | null {
     const loading =
       photo.kind === "chat"
         ? controller.loadAvatarPicture(photo.url)
-        : controller.loadAvatar(photo.kind, photo.id);
+        : photo.kind === "address"
+          ? controller.loadAvatarForAddress(photo.address)
+          : controller.loadAvatar(photo.kind, photo.id);
     loading
       .then((url) => {
         if (active) setSrc(url);

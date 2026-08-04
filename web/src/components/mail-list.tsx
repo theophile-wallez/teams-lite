@@ -12,7 +12,7 @@ import {
   type MailHeader,
 } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
-import { Avatar } from "./avatar";
+import { Avatar, mailAddressPhoto } from "./avatar";
 import { useAppState, useController } from "./controller-context";
 import {
   DropdownMenu,
@@ -290,7 +290,12 @@ function MailRow(props: { mail: MailHeader; open: boolean; onClick: () => void }
         props.open ? "bg-row-open shadow-card" : "hover:bg-row-hovered",
       )}
     >
-      <Avatar seed={mail.from.address || mail.id} label={sender} fallback="person" />
+      <Avatar
+        seed={mail.from.address || mail.id}
+        label={sender}
+        fallback="person"
+        photo={mailAddressPhoto(mail.from.address)}
+      />
 
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex items-baseline gap-2">

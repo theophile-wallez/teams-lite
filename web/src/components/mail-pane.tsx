@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ChevronLeftIcon,
@@ -8,16 +8,18 @@ import {
 } from "@hugeicons/core-free-icons";
 import {
   formatAttachmentSize,
+  mailAddressLabel,
   mailFileAttachments,
   mailReceivedMs,
   mailRecipientsLabel,
   mailSenderLabel,
   mailSubjectLabel,
+  type MailAddress,
   type MailAttachment,
   type MailHeader,
 } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
-import { Avatar } from "./avatar";
+import { Avatar, avatarInitials, mailAddressPhoto } from "./avatar";
 import { useAppState, useController } from "./controller-context";
 import { FileTypeIcon } from "./file-type-icon";
 import { MailBody } from "./mail-body";
@@ -82,7 +84,9 @@ export function MailPane(props: { onBack?: () => void }) {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6">
         <article className="mx-auto flex w-full max-w-3xl flex-col gap-4">
-          {mail && <MailHeaderCard mail={mail} />}
+          {/* Keyed by the mail, so a recipient line the reader opened on one message
+              starts collapsed again on the next. */}
+          {mail && <MailHeaderCard key={mail.id} mail={mail} />}
 
           {bodyError ? (
             <p data-testid="mail-body-error" className="text-[13px] text-destructive">
@@ -114,8 +118,6 @@ function MailHeaderCard(props: { mail: MailHeader }) {
   const mail = props.mail;
   const sender = mailSenderLabel(mail);
   const date = useMemo(() => formatFullDate(mailReceivedMs(mail)), [mail.received]);
-  const to = mailRecipientsLabel(mail.to, 3);
-  const cc = mailRecipientsLabel(mail.cc, 3);
 
   return (
     <div className="flex flex-col gap-3">
@@ -123,8 +125,13 @@ function MailHeaderCard(props: { mail: MailHeader }) {
         {mailSubjectLabel(mail)}
       </h1>
       <div className="flex items-start gap-3">
-        <Avatar seed={mail.from.address || mail.id} label={sender} fallback="person" />
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <Avatar
+          seed={mail.from.address || mail.id}
+          label={sender}
+          fallback="person"
+          photo={mailAddressPhoto(mail.from.address)}
+        />
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex flex-wrap items-baseline gap-x-2">
             <span data-testid="mail-from" className="text-[13px] font-medium text-foreground">
               {sender}
@@ -134,21 +141,84 @@ function MailHeaderCard(props: { mail: MailHeader }) {
             )}
             {date && <time className="ml-auto shrink-0 text-[12px] text-text-faint">{date}</time>}
           </div>
-          {to && (
-            <p className="truncate text-[12px] text-text-dim">
-              <span className="text-text-faint">To: </span>
-              {to}
-            </p>
-          )}
-          {cc && (
-            <p className="truncate text-[12px] text-text-dim">
-              <span className="text-text-faint">Cc: </span>
-              {cc}
-            </p>
-          )}
+          <MailRecipients kind="to" label="To" addresses={mail.to} />
+          <MailRecipients kind="cc" label="Cc" addresses={mail.cc} />
         </div>
       </div>
     </div>
+  );
+}
+
+/** How many recipients a line shows before the rest go behind a "+N" chip. Enough
+ *  that an ordinary mail shows everybody, few enough that a 200-address distribution
+ *  list cannot push the body off the screen. */
+const RECIPIENTS_SHOWN = 6;
+
+/** One recipient line — To or Cc — as a face and a name per person, the way a mail
+ *  client names the people a message reached. A long list is cut at
+ *  RECIPIENTS_SHOWN and opens in place, because the count is what matters first and
+ *  the names second. Nothing renders when nobody is on the line. */
+function MailRecipients(props: { kind: "to" | "cc"; label: string; addresses: MailAddress[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const people = useMemo(
+    () => props.addresses.filter((address) => mailAddressLabel(address).length > 0),
+    [props.addresses],
+  );
+  if (people.length === 0) return null;
+
+  const shown = expanded ? people : people.slice(0, RECIPIENTS_SHOWN);
+  const hidden = people.slice(shown.length);
+
+  return (
+    <div
+      data-testid="mail-recipients"
+      data-kind={props.kind}
+      className="flex flex-wrap items-center gap-x-1.5 gap-y-1"
+    >
+      <span className="text-[12px] text-text-faint">{props.label}</span>
+      {shown.map((address, index) => (
+        <MailPersonChip key={`${address.address}-${index}`} address={address} />
+      ))}
+      {hidden.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          data-testid="mail-recipients-more"
+          title={mailRecipientsLabel(hidden, hidden.length)}
+          className={cn(
+            "rounded-full px-2 py-0.5 text-[12px] tabular-nums text-text-dim",
+            "bg-accent/60 transition-colors hover:bg-accent hover:text-foreground",
+          )}
+        >
+          +{hidden.length}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** One person a mail names: their photo when the directory knows the address, their
+ *  tinted initials otherwise. The address is the title, so a name shared by two
+ *  colleagues is still tellable apart without widening the chip. */
+function MailPersonChip(props: { address: MailAddress }) {
+  const label = mailAddressLabel(props.address);
+  return (
+    <span
+      data-testid="mail-recipient"
+      data-address={props.address.address || undefined}
+      title={props.address.address || label}
+      className="flex max-w-[220px] items-center gap-1.5 rounded-full bg-accent/60 py-0.5 pl-0.5 pr-2"
+    >
+      <Avatar
+        seed={props.address.address || label}
+        label={label}
+        initials={avatarInitials(label).slice(0, 1)}
+        fallback="person"
+        photo={mailAddressPhoto(props.address.address)}
+        className="size-5 text-[9px]"
+      />
+      <span className="min-w-0 truncate text-[12px] text-text-dim">{label}</span>
+    </span>
   );
 }
 

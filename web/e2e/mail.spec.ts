@@ -155,10 +155,17 @@ test.describe("mail", () => {
 
     // Watch for any request the page makes while the mail renders. A tracking pixel
     // would show up here as a request to an external host.
+    //
+    // Three schemes are not one: the app's own origin, a `data:` URI the backend
+    // embedded in the body, and a `blob:` object URL — bytes the page already holds,
+    // which is what an avatar photo is once it has come over the backend socket. None
+    // of them can reach a sender, and no other scheme may appear at all.
     const external: string[] = [];
     page.on("request", (req) => {
       const url = req.url();
-      if (!url.startsWith("http://127.0.0.1") && !url.startsWith("data:")) external.push(url);
+      const local =
+        url.startsWith("http://127.0.0.1") || url.startsWith("data:") || url.startsWith("blob:");
+      if (!local) external.push(url);
     });
 
     await openMailAt(page, 0);
@@ -227,6 +234,50 @@ test.describe("mail", () => {
     await expect(chips.first()).toContainText("platform-review-q3.pdf");
     await expect(chips.first()).toContainText("MB");
     await expect(page.locator('[data-testid="mail-attachments"]')).not.toContainText("logo.svg");
+  });
+
+  test("puts a face on the sender and on everybody the mail names", async ({ page }) => {
+    // A mail names its people by address, while a photo is addressed by identity, so
+    // the app resolves one to the other (`people_by_address`). What must hold is that
+    // both outcomes render: a colleague gets their picture, and an address the
+    // directory knows nobody by keeps tinted initials instead of an empty square.
+    await gotoApp(page);
+    await openMailTab(page);
+    // The fifth fixture is addressed to a whole room — more recipients than the card
+    // shows at once, two of whom the directory cannot name.
+    await openMailAt(page, 4);
+
+    const to = page.locator('[data-testid="mail-recipients"][data-kind="to"]');
+    await expect(to).toBeVisible();
+    const recipients = to.locator('[data-testid="mail-recipient"]');
+    await expect(recipients).toHaveCount(6);
+
+    // The rest are behind a chip that opens them in place.
+    const more = page.locator('[data-testid="mail-recipients-more"]');
+    await expect(more).toHaveText("+3");
+    await more.click();
+    await expect(recipients).toHaveCount(9);
+    await expect(more).toHaveCount(0);
+
+    // Every recipient carries an avatar, and at least one of them a real photo —
+    // resolved from the address alone, since a mail carries no MRI.
+    await expect(recipients.locator("span").first()).toBeVisible();
+    await expect
+      .poll(() => recipients.locator("img").count(), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+    // The off-tenant guest resolves to nobody, so their chip stays on initials.
+    const guest = to.locator('[data-address="reva.singh@partner.example.org"]');
+    await expect(guest).toBeVisible();
+    await expect(guest.locator("img")).toHaveCount(0);
+
+    // Cc is a line of its own, with the same treatment.
+    const cc = page.locator('[data-testid="mail-recipients"][data-kind="cc"]');
+    await expect(cc.locator('[data-testid="mail-recipient"]')).toHaveCount(2);
+
+    // And the sidebar row for the same mail shows the sender's photo too.
+    await expect
+      .poll(() => page.locator('[data-testid="mail-row"] img').count(), { timeout: 10_000 })
+      .toBeGreaterThan(0);
   });
 
   test("shows a new mail as it arrives", async ({ page }) => {

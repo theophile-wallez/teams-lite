@@ -39,6 +39,7 @@ import {
   formatCallEvent,
   formatCallDuration,
   mailFolderLabel,
+  mailAddressLabel,
   mailSenderLabel,
   mailSubjectLabel,
   mailReceivedMs,
@@ -1399,6 +1400,14 @@ describe("mail display helpers", () => {
         position: 9,
       }),
     ).toBe("Projets");
+  });
+
+  it("names one address by display name, then by the address itself", () => {
+    // What a recipient chip is labelled with. Empty means nobody is named, so the
+    // chip is not drawn at all — never a chip with a blank name.
+    expect(mailAddressLabel(address("Ada Lovelace", "ada@example.com"))).toBe("Ada Lovelace");
+    expect(mailAddressLabel(address("", "ops@example.com"))).toBe("ops@example.com");
+    expect(mailAddressLabel(address("", ""))).toBe("");
   });
 
   it("names a sender by display name, then address, then a placeholder", () => {

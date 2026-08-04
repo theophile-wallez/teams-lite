@@ -272,6 +272,19 @@ must never write to it.
   **displaying a mail makes no network request**. That is a privacy guarantee (a
   remote image is a read receipt for its sender), not an optimization: never add a
   "load remote images" action, and never let a body reach a browser unsanitized.
+- **A mail shows a real face, and the lookup behind it is a TEAMS read.** A mail names
+  its people by SMTP address while a photo is addressed by mri, so `people_by_address`
+  resolves one to the other: the short-profile endpoint asked with `isMailAddress=true`,
+  which is the whole difference from the `profile` method
+  (`teams_profiles::fetch_profiles_by_address`, proven against the tenant by
+  `examples/mail_avatar_recon.rs`). Three things hold it in place. It reaches Microsoft's
+  directory and never the sender, so the guarantee above is untouched — a face costs a
+  colleague nothing and tells the sender nothing. A colleague resolves while an external
+  sender, a distribution list and a shared mailbox do not, and an address the directory
+  cannot name keeps its tinted initials rather than a guessed face. And a card is only
+  attributed to an address that asked for it (matched on `email`, then
+  `userPrincipalName`), because the wrong face on a name is worse than no face. The
+  lookups are batched, so a screenful of mail costs one request.
 
 ## The calendar is READ-ONLY (MANDATORY — no exception, not even a sandbox)
 

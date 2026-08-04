@@ -490,6 +490,16 @@ export type PersonProfile = {
   user_type: string;
 };
 
+/** One person the directory knows by a mail address: their card, plus the address
+ *  that asked for it — spelled exactly as the caller sent it, so a caller keyed on
+ *  its own string finds the answer. */
+export type AddressPerson = PersonProfile & { address: string };
+
+/** Result of the `people_by_address` method: one entry per address the directory
+ *  answered for. An address it knows nobody by (an external sender, a distribution
+ *  list, a shared mailbox) is simply absent, and the UI keeps its tinted initials. */
+export type AddressPeopleResult = { people: AddressPerson[] };
+
 /** One person's live presence, as the `presence` method returns it (mirrors the
  *  Rust `Presence` in src/teams_presence.rs).
  *
@@ -1584,10 +1594,16 @@ export function mailFolderLabel(folder: MailFolder): string {
   return folder.well_known || folder.display_name || "(folder)";
 }
 
+/** How one address on a mail reads: the display name when it carries one, else the
+ *  bare address, else nothing (an empty entry names nobody). */
+export function mailAddressLabel(address: MailAddress): string {
+  return address.name || address.address || "";
+}
+
 /** Who a mail is from, for the list and the reading pane: the display name when
  *  the sender has one, else the bare address. */
 export function mailSenderLabel(mail: Pick<MailHeader, "from">): string {
-  return mail.from.name || mail.from.address || "(unknown sender)";
+  return mailAddressLabel(mail.from) || "(unknown sender)";
 }
 
 /** A mail's subject, with the placeholder every mail client shows for an empty one. */
