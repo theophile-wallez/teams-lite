@@ -14,6 +14,30 @@ import { useController } from "./controller-context";
 import { FileTypeIcon } from "./file-type-icon";
 import { ImageLightbox } from "./image-lightbox";
 
+/** A picture's own pixel dimensions — what it takes to reserve its space. */
+type ImageSize = { width: number; height: number };
+
+/** The natural size of every picture this app has already drawn once, keyed by URL.
+ *
+ *  It exists because the history is VIRTUALIZED: a row that scrolls out of view
+ *  unmounts, and on the way back it mounts again from nothing. Without a memory of
+ *  the size, such a row reserves nothing, measures short, and grows again when the
+ *  bytes arrive — once per pass, for every picture, which is the jump a reader
+ *  scrolling through a thread with images actually sees.
+ *
+ *  Teams states the size on most inline images (see `imageDimension` in
+ *  lib/rich-text.ts) and on no attachment at all, so this is what covers the rest.
+ *  It is never invalidated: the bytes behind a hosted-content URL do not change,
+ *  and it holds two numbers per URL. */
+const naturalSizes = new Map<string, ImageSize>();
+
+/** How tall a picture is ever drawn, and how wide. The reserved box and the loaded
+ *  image MUST carry the same pair — that identity is the whole point of the box, so
+ *  they are named once here rather than spelled twice. (Written out as literal
+ *  Tailwind classes because the scanner reads source text: a class assembled from a
+ *  variable is a class Tailwind never generates.) */
+const IMAGE_CAPS = "max-h-80 max-w-full";
+
 /**
  * An image from a chat message. Authenticated Teams hosted content (inline
  * images, image attachments on *.teams.microsoft.com / *.skype.com) is fetched
@@ -21,8 +45,24 @@ import { ImageLightbox } from "./image-lightbox";
  * browser lacks the skypetoken. Public images (giphy, the Teams static-asset
  * CDN) are loaded directly by the browser. Shows a placeholder while a proxied
  * image loads and a graceful fallback if the fetch/render fails.
+ *
+ * **The space a picture will occupy is reserved before it loads**, from the size
+ * the message stated (`width`/`height`) or from the size this app measured the last
+ * time it drew that URL. This is not a nicety: the history is virtualized and
+ * measures each row as it mounts, so a picture that arrives after its row was
+ * measured makes the row grow and shoves every row below it — the reader is reading
+ * one message and is holding another a frame later. A reserved box makes the
+ * before and after the same height, so nothing moves.
  */
-export function MediaImage(props: { src: string; alt?: string; className?: string }) {
+export function MediaImage(props: {
+  src: string;
+  alt?: string;
+  /** The picture's own dimensions, when the message stated them. Both or neither:
+   *  one side alone states no ratio and reserves nothing. */
+  width?: number;
+  height?: number;
+  className?: string;
+}) {
   const controller = useController();
   const proxied = mediaNeedsProxy(props.src);
   // Public images render straight from their URL; proxied ones wait for a blob.
@@ -31,6 +71,23 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
   const [zoomed, setZoomed] = useState(false);
   const thumbRef = useRef<HTMLImageElement>(null);
   const onClosed = useCallback(() => setZoomed(false), []);
+
+  // The box to hold for this picture: what the message stated, else what we
+  // measured last time. Undefined for a picture this app has never drawn and whose
+  // message said nothing — the one case that still settles on load, and the case
+  // `rememberNaturalSize` turns into a reserved box for every later view.
+  const stated =
+    props.width !== undefined && props.height !== undefined
+      ? { width: props.width, height: props.height }
+      : undefined;
+  const reserved = stated ?? naturalSizes.get(props.src);
+
+  // Record what the browser resolved, so the next mount of this URL reserves it.
+  const rememberNaturalSize = useCallback((el: HTMLImageElement) => {
+    if (el.naturalWidth > 0 && el.naturalHeight > 0) {
+      naturalSizes.set(props.src, { width: el.naturalWidth, height: el.naturalHeight });
+    }
+  }, [props.src]);
 
   useEffect(() => {
     if (!proxied) {
@@ -76,18 +133,45 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
 
   if (!objectUrl) {
     return (
-      <div
+      // The picture's own box, held empty. A `span`, not a `div`: this renders
+      // inside a rich-text <p>, where only phrasing content is valid.
+      //
+      // The box is the picture's own WIDTH IN PIXELS plus its ratio, under the same
+      // two caps the loaded image carries (`max-h-80`, `max-w-full`).
+      //
+      // A definite pixel width, never `min(width, 100%)`: every box around a bubble's
+      // content is shrink-to-fit, and a PERCENTAGE contributes nothing to a parent's
+      // intrinsic width. So a percentage-width placeholder let the bubble size itself
+      // to its text and the picture then widened it — the row still grew, by 39px,
+      // which is what the spec measured. A pixel width contributes exactly what the
+      // image will contribute, so the bubble is already the width the picture needs.
+      // `max-w-full` still keeps a picture wider than the column inside it, and the
+      // ratio then takes the height down with the width, exactly as `h-auto` does for
+      // the image.
+      <span
+        data-testid="message-image-placeholder"
         className={cn(
-          "flex h-32 w-40 items-center justify-center rounded-lg bg-element",
+          "flex items-center justify-center rounded-lg bg-element",
+          IMAGE_CAPS,
+          // Nothing known about this one yet, so hold the old fixed thumbnail box.
+          !reserved && "h-32 w-40",
           props.className,
         )}
+        style={
+          reserved
+            ? {
+                aspectRatio: `${reserved.width} / ${reserved.height}`,
+                width: `${reserved.width}px`,
+              }
+            : undefined
+        }
       >
         <HugeiconsIcon
           icon={Loading02Icon}
           className="size-4 animate-spin text-text-faint"
           strokeWidth={1.6}
         />
-      </div>
+      </span>
     );
   }
 
@@ -110,8 +194,20 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
           src={objectUrl}
           alt={alt}
           loading="lazy"
+          // The dimensions the box was reserved from, handed to the browser as the
+          // attributes it sizes a not-yet-decoded image by — so the image holds that
+          // same space from its first frame instead of from its first painted byte.
+          width={reserved?.width}
+          height={reserved?.height}
+          onLoad={(e) => rememberNaturalSize(e.currentTarget)}
           onError={() => setFailed(true)}
-          className="block max-h-80 max-w-full rounded-xl object-contain shadow-card transition-opacity duration-150 ease-out hover:opacity-90"
+          className={cn(
+            "block rounded-xl object-contain shadow-card transition-opacity duration-150 ease-out hover:opacity-90",
+            IMAGE_CAPS,
+            // `width`/`height` state the ratio; the caps decide the drawn size, so
+            // the height must follow the width rather than the attribute.
+            "h-auto",
+          )}
           // The picture is in the lightbox while it is open: leaving it drawn here
           // too would show through the travel and behind the scrim. `visibility`
           // rather than `display`, so the thumbnail keeps the space it holds — the

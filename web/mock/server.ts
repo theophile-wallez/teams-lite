@@ -259,6 +259,33 @@ const HOST = "127.0.0.1";
 const PAGE_SIZE = 40;
 /** Backlog per conversation so infinite scroll + backfill are well exercised. */
 const BACKLOG = Number(process.env.MOCK_BACKLOG ?? 120);
+/** How long this mock takes to answer for media bytes.
+ *
+ *  Zero by default, because the E2E suite must not pay a delay on every picture.
+ *  A diagnostic sets it through the environment (see `scripts/scroll-probe.ts`) and
+ *  a spec arms it for one test through `POST /__test/emit {kind:"media_delay"}`:
+ *  an image that arrives in the same tick as its message hides the one thing worth
+ *  measuring about it — a picture landing in a row the virtualized history has
+ *  already measured, which is what used to make the history jump under a reader
+ *  scrolling through it. A spec that arms it MUST clear it, since one mock process
+ *  serves the whole run. */
+let mediaDelayMs = Number(process.env.MOCK_MEDIA_DELAY_MS ?? 0);
+/** Whether a backlog carries the TALL messages a real thread has (see
+ *  `LONG_MESSAGE_POOL`): `MOCK_TALL_ROWS=1`.
+ *
+ *  Off by default, and that default is a known compromise rather than a preference.
+ *  Measured on this account's own store, a chat's median message is ~30 characters
+ *  and the tail reaches 5000, so ON is the honest fixture — and turning it on makes
+ *  `history.spec.ts` fail two of its assertions, because the virtualized history
+ *  really does jerk when a row measures many times its `ROW_ESTIMATE_PX` guess.
+ *  That is a live defect with its own repro, not a fixture problem:
+ *
+ *      MOCK_TALL_ROWS=1 bunx playwright test e2e/history.spec.ts
+ *
+ *  Turn it on when working on the history's scroll, and leave the default alone
+ *  until the estimate is fixed: a suite that fails by default teaches its readers to
+ *  ignore it. */
+const TALL_ROWS = process.env.MOCK_TALL_ROWS === "1";
 /** Fixed seed for the PRNG → deterministic content/structure across runs. */
 const SEED = 0x7ea115;
 /** How often to inject a live incoming message. Set MOCK_LIVE_MS=0 to disable
@@ -575,6 +602,25 @@ const MESSAGE_POOL = [
   "The retro notes are in the shared doc.",
 ];
 
+/** The tall messages a real thread carries, and the reason they are here.
+ *
+ *  Measured on this account's own store, a chat's median message is ~30 characters
+ *  — one line, a ~60px row — but the tail reaches 5000: a written-out proposal, a
+ *  pasted stack trace, an agent's answer. So a real history is mostly short rows
+ *  with the occasional one twenty times taller.
+ *
+ *  A fixture of uniform one-liners hides every bug the virtualized history can
+ *  have, because `ROW_ESTIMATE_PX` then happens to be right for every row and
+ *  nothing is ever re-measured. These bodies restore that variance, so the scroll
+ *  is reviewable against the shape it meets in production. Keep the spread —
+ *  short, medium and very tall — rather than one representative size. */
+const LONG_MESSAGE_POOL = [
+  "<p>Quick summary of where the caching work stands.</p><p>The read path is done and behind the flag. The write path still invalidates more than it needs to, so I'd rather not turn it on for everyone until that is narrower. I'll have a patch up tomorrow.</p>",
+  "<p>Notes from the review, in the order we went through them:</p><ul><li>The retry wrapper swallows the original error, so a timeout and a 500 read the same in the logs.</li><li>We call the profile endpoint once per row instead of batching, which is what makes the list slow on a cold cache.</li><li>The token refresh has no jitter, so every client refreshes in the same second.</li></ul><p>None of these block the release. I'd take the second one first — it is the one users feel.</p>",
+  "<p>Longer answer, since the short one would be misleading.</p><p>The reason the numbers disagree is that the two dashboards measure different things. Ours counts a request as failed when the client gave up; theirs counts it when the server returned an error. A request that timed out at the gateway is a failure for us and a success for them, and that is most of the gap.</p><p>I would keep both. The server-side number tells us whether the service is healthy, and the client-side one tells us whether people can use it. When they diverge, the divergence itself is the signal — that is how we found the gateway limit last month.</p><p>What I'd change is the naming, because \"error rate\" on two dashboards meaning two things has cost us an afternoon twice now.</p>",
+  "<p>I dug into the flake and it is not the test.</p><p>The fixture builds a store, writes to it, and closes it in an <code>afterEach</code>. Under load the write is still in flight when the close runs, so the next test opens a database with a stale WAL and reads a row that should not exist yet. It passes alone and fails in a full run, which is exactly the pattern we kept blaming on the test itself.</p><p>The fix is to await the write rather than the close, and to give each test its own file so one run can never see another's WAL. I've done both on a branch. It survived two hundred iterations, where it used to fail in about twelve.</p><p>Two things worth saying beyond the fix. First, we have three other suites that share one fixture file, and they will have the same bug the day they get slow enough. Second, the reason it took a week is that the failure named the assertion rather than the cause — the row that appeared was reported as a bad expectation, not as a leak from the previous test. I'd rather spend an hour making that error message name the file it came from than debug this shape again.</p>",
+];
+
 const REPLY_BODIES = [
   "Sounds good.",
   "On it.",
@@ -689,7 +735,14 @@ function generateBacklog(
     }
 
     // Content: mostly a plain line; occasionally a reply that quotes an earlier
-    // message so the UI's reply-blockquote parsing is exercised.
+    // message so the UI's reply-blockquote parsing is exercised, and every ninth
+    // one a TALL body (see `LONG_MESSAGE_POOL`) so the history carries the height
+    // variance a real thread has.
+    //
+    // The tall one is chosen from the index rather than from `rand()` on purpose:
+    // the generator's randomness is one seeded stream, so drawing from it here
+    // would shift every later draw and silently rewrite every fixture in the mock
+    // — including the bodies the specs assert on.
     let content: string;
     if (i >= 3 && rand() < 0.12) {
       const start = Math.max(0, i - 8);
@@ -697,6 +750,12 @@ function generateBacklog(
       content = replyContent(quoted, pick(REPLY_BODIES, rand));
     } else {
       content = escapeHtml(pick(MESSAGE_POOL, rand));
+    }
+    // The tall body REPLACES what the draws above produced, rather than standing
+    // in front of them as its own branch: the draws still happen, in the same
+    // order, so every other message in every fixture keeps the exact body it had.
+    if (TALL_ROWS && i % 9 === 4) {
+      content = LONG_MESSAGE_POOL[Math.floor(i / 9) % LONG_MESSAGE_POOL.length]!;
     }
 
     const id = `${convId}#${seq}`;
@@ -1075,8 +1134,12 @@ function seedMediaSamples(): void {
       sender_mri: other.mri,
       content:
         `<div>Here's the screenshot from the incident:</div>` +
+        // `width`/`height` because Teams sends them on ~3 of every 4 inline images,
+        // and they are what the renderer reserves the picture's space from — a
+        // fixture without them exercises only the minority case.
         `<div><img itemtype="http://schema.skype.com/AMSImage" ` +
-        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-1/views/imgo" alt="incident graph"/></div>`,
+        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-1/views/imgo" ` +
+        `width="320" height="200" alt="incident graph"/></div>`,
       is_self: false,
     },
     60_000,
@@ -1149,7 +1212,8 @@ function seedMediaSamples(): void {
       sender_mri: other.mri,
       content:
         `<p><img itemtype="http://schema.skype.com/AMSImage" ` +
-        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-2/views/imgo" alt="whiteboard"/></p>`,
+        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-2/views/imgo" ` +
+        `width="320" height="200" alt="whiteboard"/></p>`,
       is_self: false,
     },
     300_000,
@@ -4522,7 +4586,9 @@ function dispatch(method: string, params: unknown): unknown {
 
     case "fetch_media": {
       const url = requireString(params, "url");
-      return mockMedia(url);
+      const bytes = mockMedia(url);
+      if (mediaDelayMs <= 0) return bytes;
+      return new Promise((resolve) => setTimeout(() => resolve(bytes), mediaDelayMs));
     }
 
     case "fetch_avatar": {
@@ -5475,6 +5541,13 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       body = (await req.json()) as Record<string, unknown>;
     } catch {
       /* tolerate an empty/invalid body */
+    }
+    // Hold media bytes back for a while, so a spec can watch a picture land in a
+    // row that was already measured (see `mediaDelayMs`). `0` clears it, which the
+    // arming spec owes every later one.
+    if (body.kind === "media_delay") {
+      mediaDelayMs = typeof body.ms === "number" && body.ms > 0 ? body.ms : 0;
+      return Response.json({ ok: true, ms: mediaDelayMs }, { status: 200 });
     }
     // Inject an activity-feed entry (reaction/mention) rather than a chat
     // message, then nudge the client to refresh — exercises the bell + panel.

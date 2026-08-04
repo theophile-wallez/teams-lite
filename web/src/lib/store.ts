@@ -643,6 +643,18 @@ export class TeamsController {
   // evicted so a later render can retry, matching the media cache.
   private linkCache = new Map<string, Promise<LinkMetadata | null>>();
 
+  // The same answers, already resolved, for the readers that cannot await one.
+  //
+  // A promise — even an already-settled one — only hands its value back a microtask
+  // later, which is one React render too late: the message bubble renders once
+  // without the card, the VIRTUALIZED history measures that row at its short
+  // height, and the card then arrives and grows it. Scrolling past a thread of
+  // tracker links did that on every single pass. So a link this session has already
+  // resolved is answered synchronously here, and the row is measured at its real
+  // height the first time. Cleared wherever `linkCache` is: the two are one cache
+  // with two shapes, never two caches.
+  private linkResolved = new Map<string, LinkMetadata | null>();
+
   // Person-card caches, both keyed by MRI. A directory card barely changes, so it
   // is cached for the whole session (a "not found" too — asking again would answer
   // the same). Presence is the opposite: it is only trusted for PRESENCE_TTL_MS,
@@ -835,6 +847,7 @@ export class TeamsController {
     this.avatarObjectUrls = [];
     this.avatarCache.clear();
     this.linkCache.clear();
+    this.linkResolved.clear();
     this.profileCache.clear();
     this.presenceCache.clear();
     if (this.addressBatchTimer) clearTimeout(this.addressBatchTimer);
@@ -2883,6 +2896,7 @@ export class TeamsController {
     }
     this.set({ settings });
     this.linkCache.clear();
+    this.linkResolved.clear();
     playCue("success");
     return settings;
   }
@@ -3230,10 +3244,23 @@ export class TeamsController {
     const cached = this.linkCache.get(url);
     if (cached) return cached;
 
-    const pending = this.backend.enrichLink(url).then((res) => res.metadata ?? null);
+    const pending = this.backend.enrichLink(url).then((res) => {
+      const meta = res.metadata ?? null;
+      this.linkResolved.set(url, meta);
+      return meta;
+    });
     this.linkCache.set(url, pending);
     pending.catch(() => this.linkCache.delete(url));
     return pending;
+  }
+
+  /** What `enrichLink` has already resolved for this URL, without awaiting: the
+   *  metadata, `null` when no integration claims the link, or `undefined` when this
+   *  session has not resolved it yet. A renderer uses it to draw a known card on its
+   *  FIRST render — see `linkResolved` for why that timing decides whether the
+   *  history jumps. */
+  cachedLink(url: string): LinkMetadata | null | undefined {
+    return this.linkResolved.get(url);
   }
 
   /** Re-enrich a link, bypassing the cached value but replacing it, so a later
@@ -3241,7 +3268,11 @@ export class TeamsController {
    *  merge request's pipeline status while its CI is still running. A transient
    *  failure is evicted (not cached) so a subsequent lookup can retry. */
   refreshLink(url: string): Promise<LinkMetadata | null> {
-    const pending = this.backend.enrichLink(url).then((res) => res.metadata ?? null);
+    const pending = this.backend.enrichLink(url).then((res) => {
+      const meta = res.metadata ?? null;
+      this.linkResolved.set(url, meta);
+      return meta;
+    });
     this.linkCache.set(url, pending);
     pending.catch(() => this.linkCache.delete(url));
     return pending;

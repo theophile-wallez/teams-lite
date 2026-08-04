@@ -186,3 +186,37 @@ describe("MessageBubble — card attachments", () => {
     expect(out).not.toContain('data-on-panel="true"');
   });
 });
+
+// The virtualized history measures a row the moment it mounts, so a picture that
+// arrives later grows the row and shoves every row below it — the jump a reader
+// scrolling a thread of screenshots sees. Teams states the picture's size on the
+// tag, so the box is held from the FIRST PAINT, which is what these render.
+describe("MessageBubble — a picture's space is reserved before it loads", () => {
+  /** An inline Teams image, hosted content (so it is proxied and cannot have
+   *  resolved by first paint), with the dimensions Teams states. */
+  const inlineImage = (size = 'width="320" height="200"') =>
+    `<div>look at this</div><div><img itemtype="http://schema.skype.com/AMSImage" ` +
+    `src="https://eu-api.asm.skype.com/v1/objects/x1/views/imgo" ${size} alt="graph"/></div>`;
+
+  it("holds the picture's own box open while the bytes are in flight", () => {
+    const out = render(message({ content: inlineImage() }));
+    expect(out).toContain('data-testid="message-image-placeholder"');
+    // The ratio, so the height follows the width the column allows.
+    expect(out).toContain("aspect-ratio:320 / 200");
+    // A DEFINITE pixel width, never a percentage: every box around a bubble's
+    // content is shrink-to-fit, and a percentage contributes nothing to a parent's
+    // intrinsic width — so a percentage let the bubble size to its text and the
+    // picture then widened it, which is the same row growth in a smaller dose.
+    expect(out).toContain("width:320px");
+    expect(out).not.toContain("min(320px");
+  });
+
+  it("keeps the old fixed thumbnail box when nothing states a size", () => {
+    // Teams omits the pair on about one image in four, and on every attachment.
+    // Nothing is known about this one yet, so there is nothing to reserve.
+    const out = render(message({ content: inlineImage("") }));
+    expect(out).toContain('data-testid="message-image-placeholder"');
+    expect(out).toContain("h-32 w-40");
+    expect(out).not.toContain("aspect-ratio");
+  });
+});

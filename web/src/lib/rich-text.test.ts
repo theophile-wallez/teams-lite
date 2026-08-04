@@ -275,6 +275,36 @@ describe("parseRichHtml — images", () => {
   it("drops images with unsafe sources", () => {
     expect(parseRichHtml('<img src="javascript:alert(1)">')).toEqual([]);
   });
+
+  // The dimensions are what the renderer reserves a picture's space from, so a
+  // picture arriving late cannot grow its row and shove the history under the
+  // reader. Teams states them on ~3 of every 4 inline images — and states them as
+  // decimals.
+  it("keeps the dimensions Teams states, including decimal ones", () => {
+    expect(
+      parseRichHtml('<img src="https://x/y.png" width="140" height="250">')[0],
+    ).toMatchObject({ tag: "img", attrs: { width: 140, height: 250 } });
+    expect(
+      parseRichHtml('<img src="https://x/y.png" width="415.9220146222583" height="250">')[0],
+    ).toMatchObject({ tag: "img", attrs: { width: 415.9220146222583, height: 250 } });
+  });
+
+  it("keeps both sides or neither, since one alone states no ratio", () => {
+    const oneSide = parseRichHtml('<img src="https://x/y.png" width="140">')[0];
+    expect(oneSide).toMatchObject({ tag: "img" });
+    expect(oneSide).not.toHaveProperty("attrs.width");
+    expect(oneSide).not.toHaveProperty("attrs.height");
+  });
+
+  it("reserves nothing from a dimension a body must not be trusted for", () => {
+    // A zero/negative side states no box, and an absurd one must not be able to ask
+    // the browser to reserve a screen of a million pixels.
+    for (const bad of ['width="0" height="0"', 'width="-5" height="10"', 'width="99999" height="10"']) {
+      const node = parseRichHtml(`<img src="https://x/y.png" ${bad}>`)[0];
+      expect(node).toMatchObject({ tag: "img" });
+      expect(node).not.toHaveProperty("attrs.width");
+    }
+  });
 });
 
 describe("parseRichHtml — mentions", () => {

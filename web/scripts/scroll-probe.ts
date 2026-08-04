@@ -30,9 +30,8 @@ type Frame = {
   top: number;
   height: number;
   loaded: number;
-  /** Anchor message nearest the viewport centre, and its screen y. */
-  anchor: string | null;
-  anchorY: number;
+  /** Every mounted message id → its screen y this frame. */
+  rows: Record<string, number>;
   fixes: Fix[];
 };
 
@@ -47,30 +46,24 @@ const INSTRUMENT = `(() => {
     probe.pending.push({ live: Math.round(el.scrollTop), want: Math.round(to ?? 0) });
     return nativeScrollTo(arg);
   };
-  const anchorNode = () => {
-    const box = el.getBoundingClientRect();
-    const middle = box.top + box.height / 2;
-    let best = null;
-    let bestDistance = Infinity;
+  // Every mounted message and where it sits on screen. The WHOLE set is recorded,
+  // not just the one nearest the centre: a teleport moves the content so far that a
+  // different message lands in the middle, and a metric keyed on "the centre message"
+  // discards exactly the frame it was meant to catch.
+  const positions = () => {
+    const seen = {};
     for (const node of el.querySelectorAll("[data-message-id]")) {
-      const rect = node.getBoundingClientRect();
-      const distance = Math.abs(rect.top - middle);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        best = { id: node.dataset.messageId, y: Math.round(rect.top) };
-      }
+      seen[node.dataset.messageId] = Math.round(node.getBoundingClientRect().top);
     }
-    return best;
+    return seen;
   };
   const tick = () => {
-    const anchor = anchorNode();
     probe.frames.push({
       t: Math.round(performance.now()),
       top: Math.round(el.scrollTop),
       height: Math.round(el.scrollHeight),
       loaded: Number(el.dataset.loadedCount ?? 0),
-      anchor: anchor ? anchor.id : null,
-      anchorY: anchor ? anchor.y : 0,
+      rows: positions(),
       fixes: probe.pending.splice(0),
     });
     requestAnimationFrame(tick);
@@ -109,23 +102,32 @@ await withPreview(async ({ page }) => {
   report(frames, notches);
 });
 
+/** How far the content moved between two frames: the MEDIAN shift of every message
+ *  both frames had mounted. The median rather than one chosen row because a single
+ *  row also moves when a row above it is re-measured, while the whole content moving
+ *  is what an eye reads as a jump — and it is defined on every pair of frames that
+ *  share a message, so a jump big enough to change which row is centred is still
+ *  measured instead of skipped. */
+function contentShift(prev: Frame, frame: Frame): number | null {
+  const shifts: number[] = [];
+  for (const [id, y] of Object.entries(frame.rows)) {
+    const was = prev.rows[id];
+    if (was !== undefined) shifts.push(y - was);
+  }
+  if (shifts.length === 0) return null;
+  shifts.sort((a, b) => a - b);
+  return shifts[Math.floor(shifts.length / 2)]!;
+}
+
 function report(frames: Frame[], notches: number[]): void {
-  // Frame-to-frame movement of the *same* message on screen — what an eye
-  // following that message actually sees. Frames that don't share an anchor with
-  // their predecessor can't be compared (the anchor changes as rows pass the
-  // centre, which is expected, not a twitch).
   const driven = (t: number) => notches.some((n) => t >= n - 16 && t <= n + NOTCH_SETTLE_MS);
   const tracked: Array<{ index: number; frame: Frame; moved: number; driven: boolean }> = [];
   for (let i = 1; i < frames.length; i++) {
     const prev = frames[i - 1]!;
     const frame = frames[i]!;
-    if (frame.anchor === null || frame.anchor !== prev.anchor) continue;
-    tracked.push({
-      index: i,
-      frame,
-      moved: frame.anchorY - prev.anchorY,
-      driven: driven(frame.t),
-    });
+    const moved = contentShift(prev, frame);
+    if (moved === null) continue;
+    tracked.push({ index: i, frame, moved, driven: driven(frame.t) });
   }
 
   // Idle frames: the wheel asked for nothing, so the content must not move.
@@ -134,6 +136,11 @@ function report(frames: Frame[], notches: number[]): void {
   const worst = [...twitches].sort((a, b) => Math.abs(b.moved) - Math.abs(a.moved));
   // Driven frames should move by one notch; anything well past that is a lurch.
   const lurches = tracked.filter((f) => f.driven && Math.abs(f.moved) > STEP_PX * 1.5);
+  // A teleport: the content moved further in one frame than a wheel notch could ask
+  // for, whether or not the wheel was turning. This is the number the reader means by
+  // "it jumps" — a whole screen arriving somewhere else between two frames.
+  const teleports = tracked.filter((f) => Math.abs(f.moved) > STEP_PX * 3);
+  const biggest = [...tracked].sort((a, b) => Math.abs(b.moved) - Math.abs(a.moved));
   const fixes = frames.flatMap((f) => f.fixes);
 
   console.log(`\n=== scroll probe ===`);
@@ -147,14 +154,15 @@ function report(frames: Frame[], notches: number[]): void {
   );
   console.log(`worst twitch            : ${worst[0] ? sign(worst[0].moved) : "0px"}`);
   console.log(`lurches (>1.5 notches)  : ${lurches.length}`);
+  console.log(`teleports (>3 notches)  : ${teleports.length}`);
   console.log(`total idle movement     : ${Math.round(idle.reduce((n, f) => n + Math.abs(f.moved), 0))}px`);
   console.log(`programmatic scrolls    : ${fixes.length}`);
 
-  if (worst.length > 0) {
-    console.log(`\nlargest twitches (content moved while the wheel was idle):`);
-    for (const f of worst.slice(0, 15)) {
+  if (biggest.length > 0) {
+    console.log(`\nlargest single-frame content movements:`);
+    for (const f of biggest.slice(0, 15)) {
       console.log(
-        `  #${f.index} t=${f.frame.t} anchor moved ${sign(f.moved)}` +
+        `  #${f.index} t=${f.frame.t} ${f.driven ? "driven" : "  idle"} moved ${sign(f.moved)}` +
           ` | top=${f.frame.top} height=${f.frame.height} loaded=${f.frame.loaded}` +
           ` writes=[${f.frame.fixes.map((x) => `${sign(x.want - x.live)}`).join(" ")}]` +
           ` prevWrites=[${(frames[f.index - 1]?.fixes ?? []).map((x) => sign(x.want - x.live)).join(" ")}]`,

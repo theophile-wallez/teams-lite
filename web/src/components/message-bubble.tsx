@@ -108,6 +108,23 @@ function useEnrichedLinks(urls: string[]): LinkResults {
   // A stable key so the effect only re-runs when the actual set of URLs changes.
   const key = urls.join("\n");
 
+  // What this session ALREADY knows about these links, read synchronously so a card
+  // is part of the very first render. The history is virtualized: a row that scrolls
+  // back into view mounts from nothing, and a card that arrives one microtask after
+  // the row was measured grows the row and shifts every row below it. Answers that
+  // came in while mounted (`results`) are laid over the top, since they are newer.
+  const known = useMemo(() => {
+    const map: LinkResults = new Map();
+    for (const url of urls) {
+      const cached = controller.cachedLink(url);
+      if (cached !== undefined) map.set(url, cached);
+    }
+    for (const [url, meta] of results) map.set(url, meta);
+    return map;
+    // `urls` is captured via its stable string `key`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controller, key, results]);
+
   useEffect(() => {
     let alive = true;
     for (const url of urls) {
@@ -128,9 +145,12 @@ function useEnrichedLinks(urls: string[]): LinkResults {
   // follows the running CI. The interval is armed only when something is active
   // and torn down as soon as everything is terminal; it pauses while the tab is
   // hidden, and a transient refresh failure keeps the last-known status.
-  const anyActive = urls.some((url) => isPollable(results.get(url)));
-  const resultsRef = useRef(results);
-  resultsRef.current = results;
+  // Read from the merged view, not from `results` alone: a link resolved on an
+  // earlier mount arrives through the cache, and a merge request whose CI is still
+  // running must be polled just the same on the way back.
+  const anyActive = urls.some((url) => isPollable(known.get(url)));
+  const resultsRef = useRef(known);
+  resultsRef.current = known;
 
   useEffect(() => {
     if (!anyActive) return;
@@ -155,7 +175,7 @@ function useEnrichedLinks(urls: string[]): LinkResults {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller, key, anyActive]);
 
-  return results;
+  return known;
 }
 
 /**
