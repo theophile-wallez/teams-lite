@@ -1236,6 +1236,43 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   own authenticated HTTPS. `tailscale funnel` would publish the user's Teams account
   to the internet, send included.
 
+## A broken sign-in costs the LIVE feed, never the history
+
+Everything this app shows is local, so the backend serves the store whether or not it
+can sign in. It did not always: three token calls ran before the store was even opened,
+each one `?`-propagated, so an outage the keyring repair above could not fix exited the
+process at boot. systemd restarted it every five minutes, every start died on the same
+token, and the app the user opened said **Backend lost** in front of a store holding
+11 739 of their messages. The boot order is the fix — store, then serve, then sign in —
+and `the_store_opens_before_sign_in_and_a_broken_sign_in_is_not_fatal` pins it.
+
+- **Nothing polls the broker to recover.** `trouter::run` asks for credentials before
+  every connection attempt and backs off to 30 s, so the first attempt that succeeds
+  fills the session in (`Ctx::adopt_session`) and the app catches up with no restart.
+  A `sign_in` retry loop beside it would be a second thing hammering the same bus.
+- **The identity is the ONE thing a local read needed from the session**, which is why
+  an outage broke reads at all: the mri decides whether a stored message is ours, and a
+  1:1 is titled after the other party. It lives in the store now
+  (`Store::remember_self`, written on every successful sign-in) and `Ctx::identity`
+  answers from the live session, then from that copy — **never from the network**. A
+  stale session is deliberately not rebuilt there: a rebuild reaches the broker, and a
+  broker that is down would cost every read its D-Bus timeout.
+- **A store synced before any of this still states whose it is.** `Store::derived_self`
+  reads it back out of the history: a one-to-one thread is `19:<oid>_<oid>@unq.gbl.spaces`
+  and the user is one of its two parties, so the oid in EVERY one of them is theirs.
+  Measured on this tenant — 95 threads intersect to exactly one oid, and `8:orgid:<it>`
+  is the sender of 4716 stored messages, under the name that read then takes. It is
+  strict on purpose (two threads at least, exactly one common oid, else `None`): a wrong
+  answer would draw the user's own messages as a colleague's, and authorship is the one
+  thing this app never misstates. What it derives is written down, so it runs once.
+- **A read-only backend derives but never records it**, like every other write.
+- **Send, mail, calendar and the agent still fail, and the banner says so.** It is not
+  an offline mode with a queue: an unsent message that leaves later, at a moment nobody
+  chose, is exactly the outward action § Sending messages forbids. `broker-banner.tsx`
+  therefore says the history on screen is what this machine stored, and that nothing
+  arrives or leaves until sign-in works — it used to claim the app could read nothing,
+  which was the sentence that made a stale app read as a broken one.
+
 ## Conventions
 
 - Conventional commits. No AI attribution / Co-Authored-By lines.

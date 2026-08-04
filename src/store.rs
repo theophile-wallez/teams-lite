@@ -467,6 +467,24 @@ pub const CLEANUP_REVISION: i64 = 3;
 /// Key under which [`CLEANUP_REVISION`] is recorded once the pass has run.
 const CLEANUP_SETTING: &str = "cleanup_revision";
 
+/// Keys under which the signed-in account's own identity is remembered
+/// ([`Store::remember_self`]).
+const SETTING_SELF_NAME: &str = "self_name";
+const SETTING_SELF_MRI: &str = "self_mri";
+
+/// Who this store belongs to: the account's own display name and mri.
+///
+/// Read back by [`Store::remembered_self`] when the identity broker cannot mint a
+/// token, which is what lets stored history be read during a sign-in outage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfIdentity {
+    /// The account's own display name, as Teams spells it. May be empty: the mri is
+    /// the reliable half, and a blank name only costs the name-based fallbacks.
+    pub name: String,
+    /// The account's own mri (e.g. `8:orgid:<guid>`). Never empty.
+    pub mri: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub id: String,
@@ -1223,6 +1241,21 @@ pub fn canonical_mri(mri: &str) -> String {
 /// can't spuriously claim a reaction).
 pub fn same_user(a: &str, b: &str) -> bool {
     !a.is_empty() && !b.is_empty() && canonical_mri(a) == canonical_mri(b)
+}
+
+/// The two object ids a one-to-one thread id names, or `None` when the id is not one.
+///
+/// The shape is `19:<oid>_<oid>@unq.gbl.spaces`, and it is the only conversation id
+/// that spells its members out — which is what [`Store::derived_self`] reads the
+/// account's own oid out of. Exactly two, both non-empty and different from each
+/// other: a malformed id contributes nothing rather than a wrong party.
+fn one_to_one_parties(id: &str) -> Option<std::collections::BTreeSet<String>> {
+    let core = id.strip_prefix("19:")?.strip_suffix("@unq.gbl.spaces")?;
+    let (a, b) = core.split_once('_')?;
+    if a.is_empty() || b.is_empty() || a == b || b.contains('_') {
+        return None;
+    }
+    Some([a.to_string(), b.to_string()].into_iter().collect())
 }
 
 /// Return the emotion key our own MRI currently reacts with on a message, given
@@ -3261,6 +3294,96 @@ impl Store {
         Ok(())
     }
 
+    /// Remember who this store belongs to, so its history reads without the network.
+    ///
+    /// Every local read needs the account's own name and mri: they decide which
+    /// messages are ours, and a 1:1 is titled after the OTHER person. Both used to
+    /// come from the live Teams session only, so a broker outage turned a store full
+    /// of history into an app that could answer nothing — see `Ctx::identity` in
+    /// src/bin/server.rs. The pair never changes for a given account, so writing it
+    /// on every successful sign-in costs one statement and covers every later outage.
+    pub fn remember_self(&self, name: &str, mri: &str) -> Result<()> {
+        if mri.trim().is_empty() {
+            return Ok(());
+        }
+        self.set_setting(SETTING_SELF_NAME, name)?;
+        self.set_setting(SETTING_SELF_MRI, mri)?;
+        Ok(())
+    }
+
+    /// The account this store belongs to, as of the last successful sign-in. `None`
+    /// on a store that has never recorded one — see [`Store::derived_self`], which
+    /// reads it back out of the history instead.
+    pub fn remembered_self(&self) -> Result<Option<SelfIdentity>> {
+        let Some(mri) = self.get_setting(SETTING_SELF_MRI)? else {
+            return Ok(None);
+        };
+        if mri.trim().is_empty() {
+            return Ok(None);
+        }
+        let name = self.get_setting(SETTING_SELF_NAME)?.unwrap_or_default();
+        Ok(Some(SelfIdentity { name, mri }))
+    }
+
+    /// Read the account's identity back out of the history, for a store synced before
+    /// anything remembered it.
+    ///
+    /// [`Store::remember_self`] only fills in on a successful sign-in, so a store that
+    /// is years old has nothing to answer with during the very outage this exists for.
+    /// The history states it anyway: a one-to-one thread is
+    /// `19:<oid>_<oid>@unq.gbl.spaces` and the user is one of its two parties, so the
+    /// oid present in EVERY one of them is theirs. Measured on this tenant: 95 such
+    /// threads intersect to exactly one oid, and `8:orgid:<that oid>` is the sender of
+    /// 4716 stored messages — under the name this then reads back.
+    ///
+    /// Deliberately strict, because a wrong answer would draw the user's own messages
+    /// as a colleague's and a colleague's as theirs. It needs two threads at least (one
+    /// alone names two people and cannot say which is the reader) and exactly one
+    /// common oid; anything else answers `None` rather than a guess.
+    pub fn derived_self(&self) -> Result<Option<SelfIdentity>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM conversations
+              WHERE id LIKE '19:%@unq.gbl.spaces' AND instr(id, '_') > 0",
+        )?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+
+        let mut common: Option<std::collections::BTreeSet<String>> = None;
+        let mut threads = 0usize;
+        for id in &ids {
+            let Some(parties) = one_to_one_parties(id) else { continue };
+            threads += 1;
+            common = Some(match common {
+                None => parties,
+                Some(seen) => seen.intersection(&parties).cloned().collect(),
+            });
+        }
+        if threads < 2 {
+            return Ok(None);
+        }
+        let mut oids = common.unwrap_or_default().into_iter();
+        let (Some(oid), None) = (oids.next(), oids.next()) else {
+            return Ok(None); // no common party, or more than one: never guess
+        };
+
+        let mri = format!("8:orgid:{oid}");
+        // The name the user's own messages carry. Blank rows exist (an older fallback
+        // for frames with no `imdisplayname`), so take the commonest non-empty one
+        // rather than the newest, and accept none: the mri is the reliable half.
+        let name = self
+            .query_one(
+                "SELECT sender FROM messages
+                  WHERE sender_mri = ?1 AND sender IS NOT NULL AND sender <> ''
+                  GROUP BY sender ORDER BY COUNT(*) DESC LIMIT 1",
+                params![&mri],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        Ok(Some(SelfIdentity { name, mri }))
+    }
+
     /// The name to say a message arrived *in*: a chat's display name, or a
     /// channel's "Team · Channel". `""` when the store knows neither — a chat whose
     /// title is derived per-viewer (a 1:1 is titled after the other person, which
@@ -5040,6 +5163,49 @@ mod tests {
 
         // Idempotent: an upgraded row no longer holds a URIObject.
         assert_eq!(s.convert_legacy_cards().unwrap(), 0);
+    }
+
+    // A store synced before anything recorded an identity still states it: the reader is
+    // the one party every one-to-one thread has in common. Measured on the real tenant —
+    // 95 threads, one common oid, 4716 messages sent by it.
+    #[test]
+    fn the_account_is_read_back_out_of_the_one_to_one_thread_ids() {
+        let s = Store::open_in_memory().unwrap();
+        let me = "2367c029-149d-4ebd-a96c-1fe12bfc24cf";
+        for other in ["06dd3880-8f29-4180-ba04-36ac400604cc", "0ec52592-c6d2-4e70-b53a-e8f16308"] {
+            s.upsert_conversation(&format!("19:{other}_{me}@unq.gbl.spaces"), "", 1).unwrap();
+        }
+        // Group chats and channels name nobody, so they must not disturb the answer.
+        s.upsert_conversation("19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2", "Sandbox", 1).unwrap();
+
+        let mut mine = msg("19:x_y@unq.gbl.spaces", 1);
+        mine.sender = "Théophile WALLEZ".into();
+        mine.sender_mri = format!("8:orgid:{me}");
+        s.insert_message(&mine).unwrap();
+
+        let derived = s.derived_self().unwrap().expect("the common party");
+        assert_eq!(derived.mri, format!("8:orgid:{me}"));
+        assert_eq!(derived.name, "Théophile WALLEZ", "named from their own messages");
+    }
+
+    // The cost of a wrong answer is every message attributed to the wrong person, so
+    // anything short of proof answers nothing at all.
+    #[test]
+    fn an_ambiguous_history_names_no_account_at_all() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.derived_self().unwrap().is_none(), "an empty store names nobody");
+
+        // One thread names two people and cannot say which of them is the reader.
+        s.upsert_conversation("19:aaa_bbb@unq.gbl.spaces", "", 1).unwrap();
+        assert!(s.derived_self().unwrap().is_none(), "one thread proves nothing");
+
+        // Two threads between the same pair have TWO parties in common.
+        s.upsert_conversation("19:bbb_aaa@unq.gbl.spaces", "", 1).unwrap();
+        assert!(s.derived_self().unwrap().is_none(), "two common parties is not an answer");
+
+        // Two threads sharing exactly one party do prove it.
+        s.upsert_conversation("19:aaa_ccc@unq.gbl.spaces", "", 1).unwrap();
+        assert_eq!(s.derived_self().unwrap().unwrap().mri, "8:orgid:aaa");
     }
 
     #[test]

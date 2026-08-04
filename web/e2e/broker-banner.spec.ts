@@ -35,7 +35,12 @@ test.describe("broker banner", () => {
     await expect(banner).toHaveAttribute("data-signature", "disconnected");
     // The words a person can act on, not a raw error string.
     await expect(banner.getByTestId("broker-banner-message")).toContainText("keyring");
-    await expect(banner.getByTestId("broker-banner-message")).toContainText("can't read your chats");
+    // And what still works: the store is local, so the history is on screen behind
+    // this banner. Saying the app can read nothing was wrong — and it was the reason
+    // an outage read as a broken app rather than as a stale one.
+    await expect(banner.getByTestId("broker-banner-message")).toContainText(
+      "history stored on this machine",
+    );
 
     // Pressing it disables the button and says what is happening. The mock reports a
     // healthy broker a beat later, which is what clears the banner — the same way the

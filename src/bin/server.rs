@@ -1009,8 +1009,13 @@ struct CalendarWatch {
 
 /// The session plus when it was minted, so we can rebuild it before the
 /// skypetoken expires (~1 day, but we refresh conservatively).
+///
+/// `session` is `None` when this process has never signed in — a backend that
+/// started while the identity broker was down. It serves the store's own history in
+/// that state (see `Ctx::identity`), and the first successful sign-in fills the cell
+/// in with no restart.
 struct SessionCell {
-    session: Session,
+    session: Option<Session>,
     minted: std::time::Instant,
 }
 
@@ -1331,20 +1336,82 @@ impl Ctx {
     async fn profile(&self) -> Result<String> {
         self.tokens.get(teams_profiles::PROFILE_SCOPE).await
     }
-    /// A fresh clone of the Teams session, rebuilt if the cached one is stale.
+    /// A fresh clone of the Teams session, rebuilt if the cached one is stale — or
+    /// built for the first time, when this process started with the broker down.
     async fn session(&self) -> Result<Session> {
         {
             let cell = self.session.lock().await;
-            if cell.minted.elapsed() < SESSION_TTL {
-                return Ok(cell.session.clone());
+            if let Some(session) = &cell.session {
+                if cell.minted.elapsed() < SESSION_TTL {
+                    return Ok(session.clone());
+                }
             }
         }
-        // stale: rebuild (skypetoken from a fresh skype token via the broker)
+        // stale, or never established: rebuild (skypetoken from a fresh skype token
+        // via the broker)
         let fresh = teams::connect(&self.http).await?;
-        let mut cell = self.session.lock().await;
-        cell.session = fresh.clone();
-        cell.minted = std::time::Instant::now();
+        self.adopt_session(fresh.clone()).await;
         Ok(fresh)
+    }
+
+    /// Hold on to a session this process just established, and remember the account
+    /// it belongs to.
+    ///
+    /// The one place a session is stored, so the store's copy of the identity can
+    /// never fall behind the live one — that copy is what `identity` answers from
+    /// during a sign-in outage.
+    async fn adopt_session(&self, session: Session) {
+        if !read_only() {
+            if let Ok(store) = self.store() {
+                if let Err(e) = store.remember_self(&session.self_name, &session.self_mri) {
+                    eprintln!("[auth] could not remember the account identity: {e}");
+                }
+            }
+        }
+        let mut cell = self.session.lock().await;
+        cell.session = Some(session);
+        cell.minted = std::time::Instant::now();
+    }
+
+    /// Who the user is, WITHOUT touching the network.
+    ///
+    /// Every local-first read needs this pair and nothing else from the session: the
+    /// mri decides which stored messages are ours, and a 1:1 is titled after the
+    /// other person. It used to be read through [`Ctx::session`], which is why a
+    /// broker outage made `conversations`, `open` and `backfill` fail on a store that
+    /// held every message — the app the user opened during an outage said the backend
+    /// was gone rather than showing their history.
+    ///
+    /// So the live session answers when there is one, at any age (an identity does not
+    /// expire — only the skypetoken beside it does), and the store's own copy answers
+    /// otherwise. A stale session is never rebuilt here: a rebuild reaches the broker,
+    /// and a broker that is down would then cost every read its D-Bus timeout.
+    ///
+    /// A store synced before anything remembered an identity is covered too: its own
+    /// one-to-one thread ids name the account (`Store::derived_self`), and what is
+    /// derived is written down, so the derivation runs once rather than per read.
+    async fn identity(&self) -> Result<store::SelfIdentity> {
+        if let Some(session) = self.session.lock().await.session.as_ref() {
+            return Ok(store::SelfIdentity {
+                name: session.self_name.to_string(),
+                mri: session.self_mri.to_string(),
+            });
+        }
+        let store = self.store()?;
+        if let Some(me) = store.remembered_self()? {
+            return Ok(me);
+        }
+        let derived = store.derived_self()?.context(
+            "not signed in, and this store cannot say whose it is — \
+             sign-in has to work at least once before its history can be read",
+        )?;
+        eprintln!("[offline] read the account identity back out of the stored history");
+        if !read_only() {
+            if let Err(e) = store.remember_self(&derived.name, &derived.mri) {
+                eprintln!("[offline] could not record the derived identity: {e}");
+            }
+        }
+        Ok(derived)
     }
 
     /// Force-refresh every credential the read/send paths depend on: the IC3, CSA,
@@ -1357,9 +1424,7 @@ impl Ctx {
         let _ = self.tokens.refresh(teams_profiles::PROFILE_SCOPE).await;
         let _ = self.tokens.refresh(teams_media::GRAPH_SCOPE).await;
         let fresh = teams::connect(&self.http).await?;
-        let mut cell = self.session.lock().await;
-        cell.session = fresh.clone();
-        cell.minted = std::time::Instant::now();
+        self.adopt_session(fresh.clone()).await;
         Ok(fresh)
     }
 
@@ -1593,6 +1658,22 @@ fn run_legacy_cleanups(store: &Store) {
     }
 }
 
+/// Warm the token caches the read and send paths use, then establish the Teams
+/// session and remember the account it belongs to.
+///
+/// Called once at boot and never again: the trouter re-asks for credentials before
+/// every connection attempt (`Ctx::credentials`), which is what rebuilds a session
+/// after this one failed or went stale. A failure here is NOT fatal — see the comment
+/// in `main` on the boot order.
+async fn sign_in(ctx: &Ctx) -> Result<Session> {
+    ctx.tokens.get(IC3_SCOPE).await.context("ic3 token")?;
+    ctx.tokens.get(teams_read::CSA_SCOPE).await.context("csa token")?;
+    ctx.tokens.get(teams_profiles::PROFILE_SCOPE).await.context("profile token")?;
+    let session = teams::connect(&ctx.http).await?;
+    ctx.adopt_session(session.clone()).await;
+    Ok(session)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // CLAIM THE PORT FIRST, before anything with a side effect.
@@ -1617,16 +1698,23 @@ async fn main() -> Result<()> {
         )
     })?;
 
-    eprintln!("teams-lite server — authenticating (broker)…");
     let http = reqwest::Client::builder().user_agent(UA).http1_only().build()?;
     let tokens = auth::TokenCache::new();
-    // warm the caches used at boot (also validates the broker is reachable)
-    tokens.get(IC3_SCOPE).await.context("ic3 token")?;
-    tokens.get(teams_read::CSA_SCOPE).await.context("csa token")?;
-    tokens.get(teams_profiles::PROFILE_SCOPE).await.context("profile token")?;
-    let session = teams::connect(&http).await?;
-    eprintln!("[ok] region={} self={:?}", session.region, session.self_name);
 
+    // THE STORE OPENS BEFORE SIGN-IN, and sign-in may fail without ending the process.
+    //
+    // Everything this app shows is local: the store holds every message, mail and
+    // event it has ever synced, and the read paths answer from it. Authentication used
+    // to come first and to be fatal, so the ~18-hourly broker outage — a re-locked
+    // container keyring, an expired PRT — took the whole backend down at boot. systemd
+    // restarted it every five minutes, each start died on the same token, and the app
+    // the user opened said "Backend lost" in front of a store full of their history.
+    //
+    // So the order is store, then serve, then sign in: an outage now costs the LIVE
+    // feed and every network read, which is what it really costs. The trouter asks for
+    // credentials before every connection attempt and backs off, so nothing here polls
+    // the broker itself — the first successful attempt fills the session in and the app
+    // catches up with no restart.
     let db_path = data_db_path()?;
     eprintln!("[ok] store {db_path}");
     // Creates the schema, applies pending migrations and indexes, refreshes stale
@@ -1639,7 +1727,7 @@ async fn main() -> Result<()> {
         http,
         tokens,
         session: Arc::new(tokio::sync::Mutex::new(SessionCell {
-            session: session.clone(),
+            session: None,
             minted: std::time::Instant::now(),
         })),
         db_path: Arc::new(db_path.clone()),
@@ -1682,8 +1770,30 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Sign in — AFTER the observer, so a failure at boot reaches every client that
+    // connects and asks for a repair when the signature is the repairable one, exactly
+    // as a failure hours later does.
+    eprintln!("teams-lite server — authenticating (broker)…");
+    match sign_in(&ctx).await {
+        Ok(session) => eprintln!("[ok] region={} self={:?}", session.region, session.self_name),
+        Err(e) => match ctx.identity().await {
+            Ok(me) => eprintln!(
+                "[offline] sign-in failed, serving stored history as {:?} — \
+                 the live feed reconnects on its own ({e:#})",
+                me.name
+            ),
+            // Nothing signed in on this machine yet, so the store is empty too. Stay
+            // up regardless: the socket is what carries the reason to the app, and a
+            // process that exits leaves the user with "Backend lost" instead.
+            Err(_) => eprintln!(
+                "[offline] sign-in failed and this machine has never signed in — \
+                 there is nothing stored to show yet ({e:#})"
+            ),
+        },
+    }
+
     // real-time: run the trouter, persist each live message, broadcast an event.
-    spawn_realtime(ctx.clone(), session, db_path);
+    spawn_realtime(ctx.clone(), db_path);
 
     // calling: a second trouter connection, registered as the web client registers
     // it — but only when the user turned calling on (see `spawn_calling`).
@@ -2069,10 +2179,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // cache (0 network round-trips), then sync from the network in the
         // background and emit `conversations_changed` if anything new arrived.
         "conversations" => {
-            let self_name = {
-                let session = ctx.session().await?;
-                session.self_name.to_string()
-            };
+            // The identity, never the session: this must answer from the store while
+            // sign-in is broken (see `Ctx::identity`).
+            let self_name = ctx.identity().await?.name;
             let rows = {
                 let store = ctx.store()?;
                 store.conversations(&self_name)?
@@ -2100,13 +2209,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // background and emit `messages_updated` if anything new arrived.
         "open" => {
             let conv = param_str(params, "conversation")?;
-            // self identity comes from the cached session (a lock + clone, no
-            // network in the common case) so we can tag each cached message with
-            // is_self. The MRI is the reliable signal; the name is the fallback.
-            let (self_name, self_mri) = {
-                let session = ctx.session().await?;
-                (session.self_name.to_string(), session.self_mri.to_string())
-            };
+            // The self identity tags each cached message with is_self. It never
+            // touches the network (see `Ctx::identity`), so the cached page answers
+            // during a sign-in outage as well as it does live. The MRI is the reliable
+            // signal; the name is the fallback.
+            let me = ctx.identity().await?;
+            let (self_name, self_mri) = (me.name, me.mri);
             let (cached, has_more) = {
                 let store = ctx.store()?;
                 newest_history_page(&store, &conv)?
@@ -2171,9 +2279,8 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 cached_history_page(&store, &conv, before_seq)?
             };
 
-            let session = ctx.session().await?;
-            let self_name = session.self_name.to_string();
-            let self_mri = session.self_mri.to_string();
+            let me = ctx.identity().await?;
+            let (self_name, self_mri) = (me.name, me.mri);
             if !cached.is_empty() {
                 return Ok(messages_json(
                     &cached,
@@ -2838,10 +2945,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // live via the `read_receipt` event (see `spawn_realtime`).
         "read_receipts" => {
             let conv = param_str(params, "conversation")?;
-            let (self_name, self_mri) = {
-                let session = ctx.session().await?;
-                (session.self_name.to_string(), session.self_mri.to_string())
-            };
+            // The identity, never the session: the fetch below is already best-effort
+            // (`unwrap_or_default`), so reading it through the session would be the one
+            // thing in this handler that turns a sign-in outage into an error.
+            let me = ctx.identity().await?;
+            let (self_name, self_mri) = (me.name, me.mri);
             let is_channel = {
                 let store = ctx.store()?;
                 teams_read::is_channel_thread_id(&conv) || store.is_channel(&conv).unwrap_or(false)
@@ -6709,7 +6817,7 @@ fn short_cause_id() -> String {
 ///
 /// The trouter re-acquires fresh credentials before every (re)connection via the
 /// `Ctx` credential provider, so the real-time feed survives token expiry.
-fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
+fn spawn_realtime(ctx: Ctx, db_path: String) {
     let epid_path = std::path::Path::new(&db_path).with_extension("epid");
     let epid = trouter::load_or_create_epid(&epid_path);
 
@@ -6722,14 +6830,18 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
         tokio::sync::mpsc::unbounded_channel::<trouter_events::CallFrame>();
     let (st_tx, mut st_rx) = tokio::sync::mpsc::unbounded_channel::<trouter::Status>();
 
-    // consume trouter messages: persist + broadcast. self identity is stable
-    // across token refreshes, so capturing it once at boot is fine.
+    // consume trouter messages: persist + broadcast.
+    //
+    // The identity is resolved per batch, not captured once: this process may have
+    // started before it could sign in (see the boot order in `main`), so there was
+    // nothing to capture. It costs a lock and a clone — never a network call — and a
+    // frame only ever arrives on a connection that already holds a session.
     let ctx_msgs = ctx.clone();
-    let self_name = session.self_name.to_string();
-    let self_mri = session.self_mri.to_string();
     let mut msgs_store = ctx.task_store();
     tokio::spawn(async move {
         while let Some(msgs) = ev_rx.recv().await {
+            let Ok(me) = ctx_msgs.identity().await else { continue };
+            let (self_name, self_mri) = (me.name, me.mri);
             if let Some(store) = msgs_store.get() {
                 let mut activity_changed = false;
                 let mut channels_changed = false;
@@ -6838,11 +6950,11 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     // sender MRI to a display name from what the store already holds (no network),
     // drop our own echo, and never touch the activity-feed thread.
     let ctx_ty = ctx.clone();
-    let self_mri_ty = session.self_mri.to_string();
     let mut typing_store = ctx.task_store();
     tokio::spawn(async move {
         while let Some(t) = ty_rx.recv().await {
-            if t.sender_mri == self_mri_ty {
+            let Ok(me) = ctx_ty.identity().await else { continue };
+            if t.sender_mri == me.mri {
                 continue; // don't show ourselves typing
             }
             if teams_activity::is_system_feed_thread(&t.conversation_id) {
@@ -6870,11 +6982,11 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
     // state), and never touch the activity-feed thread. The UI merges each update
     // into the open conversation's "seen by" avatars.
     let ctx_rr = ctx.clone();
-    let self_mri_rr = session.self_mri.to_string();
     let mut receipts_store = ctx.task_store();
     tokio::spawn(async move {
         while let Some(r) = rr_rx.recv().await {
-            if teams_lite::store::same_user(&r.member_mri, &self_mri_rr) {
+            let Ok(me) = ctx_rr.identity().await else { continue };
+            if teams_lite::store::same_user(&r.member_mri, &me.mri) {
                 continue; // never surface our own read position
             }
             if teams_activity::is_system_feed_thread(&r.conversation_id) {
@@ -8480,6 +8592,118 @@ mod lifecycle_tests {
                 !handler.contains(named),
                 "the sender_icon handler names `{named}`. The request must carry the \
                  organisation's domain and nothing else."
+            );
+        }
+    }
+
+    // Everything this app shows is local, so a backend must SERVE while sign-in is
+    // broken. It used to die at boot instead: three token calls ran before the store was
+    // even opened, each one `?`-propagated, so the ~18-hourly broker outage exited the
+    // process. systemd restarted it every five minutes, every start died on the same
+    // token, and the app said "Backend lost" in front of a store holding every message
+    // the user has. Two halves of the fix, and this pins both.
+    #[test]
+    fn the_store_opens_before_sign_in_and_a_broken_sign_in_is_not_fatal() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let main = code
+            .split("async fn main() -> Result<()> {")
+            .nth(1)
+            .expect("main")
+            .split("\n/// ")
+            .next()
+            .expect("main ends before the next item");
+
+        let store_at = main.find("prepare_store(").expect("main prepares the store");
+        let sign_in_at = main.find("sign_in(&ctx)").expect("main signs in");
+        assert!(
+            store_at < sign_in_at,
+            "main signs in before it opens the store. The store is what the app reads; a \
+             broker outage must cost the live feed, never the history."
+        );
+
+        assert!(
+            !main.contains("sign_in(&ctx).await?"),
+            "main propagates a sign-in failure. That exits the process, and the user is \
+             shown \"Backend lost\" instead of their stored history — the socket is what \
+             carries the reason for an outage to the app."
+        );
+        // The tokens themselves moved into `sign_in` with the same rule.
+        for fatal in ["context(\"ic3 token\")?", "teams::connect(&http).await?"] {
+            assert!(
+                !main.contains(fatal),
+                "main still has `{fatal}`, which is fatal at boot. It belongs in `sign_in`, \
+                 whose failure main handles."
+            );
+        }
+    }
+
+    // The identity is the ONE thing every local read needs from a session, so it is
+    // remembered in the store. Reading it back is what makes a stored conversation
+    // openable during an outage — see `Ctx::identity`.
+    #[test]
+    fn the_account_identity_is_remembered_for_a_signed_out_read() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.remembered_self().unwrap().is_none(), "a fresh store knows nobody");
+
+        store.remember_self("Théophile WALLEZ", "8:orgid:abc").unwrap();
+        let me = store.remembered_self().unwrap().expect("remembered");
+        assert_eq!(me.name, "Théophile WALLEZ");
+        assert_eq!(me.mri, "8:orgid:abc");
+
+        // A session with no mri is not an identity: the mri is what decides whether a
+        // stored message is ours, and remembering a blank one would mis-attribute every
+        // message in the store to somebody else.
+        store.remember_self("", "").unwrap();
+        assert_eq!(store.remembered_self().unwrap().unwrap().mri, "8:orgid:abc");
+    }
+
+    // The local-first reads must not reach the broker for the identity. `identity()`
+    // never rebuilds a session, because a rebuild during an outage costs every read a
+    // D-Bus timeout — and the handlers that answer from the store must ask it, not
+    // `session()`, or the outage turns a cache hit into an error.
+    #[test]
+    fn the_local_first_reads_take_the_identity_and_never_the_session() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+        let identity = code
+            .split("async fn identity(&self)")
+            .nth(1)
+            .expect("Ctx::identity")
+            .split("\n    }")
+            .next()
+            .expect("the body ends");
+        assert!(identity.contains("remembered_self"), "scanned the wrong text");
+        assert!(
+            identity.contains("derived_self"),
+            "Ctx::identity no longer falls back to the derivation. A store synced before \
+             anything recorded an identity is exactly the store an outage finds, so \
+             without it the fix helps nobody until the next successful sign-in."
+        );
+        for reaching in ["teams::connect", "self.session()", "tokens.get"] {
+            assert!(
+                !identity.contains(reaching),
+                "Ctx::identity names `{reaching}`, so reading the identity can reach the \
+                 broker. It must answer from the cached session or from the store."
+            );
+        }
+
+        for (arm, next) in [
+            ("\"conversations\" =>", "\"channels\" =>"),
+            ("\"open\" =>", "\"backfill\" =>"),
+        ] {
+            let handler = code
+                .split(arm)
+                .nth(1)
+                .expect("the handler")
+                .split(next)
+                .next()
+                .expect("the handler ends at the next arm");
+            assert!(
+                handler.contains("ctx.identity()"),
+                "the {arm} handler no longer asks `ctx.identity()`. It answers from the \
+                 store, so it must not depend on a live session."
             );
         }
     }

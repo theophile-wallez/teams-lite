@@ -64,8 +64,8 @@ export function BrokerBanner() {
         <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold text-destructive">Sign-in is broken</p>
           <p data-testid="broker-banner-message" className="mt-0.5 text-[11px] leading-snug text-text-dim">
-            {broker.message} teams-lite can't read your chats, mail or calendar until it works
-            again.
+            {broker.message} You're seeing the history stored on this machine. Nothing new arrives,
+            and nothing can be sent, until it works again.
           </p>
         </div>
       </div>
