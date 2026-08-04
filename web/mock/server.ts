@@ -2516,10 +2516,12 @@ function mockProfile(mri: string): MockProfile | { found: false } {
 
 /** The person behind one MAIL ADDRESS, or `null` when the directory knows nobody by
  *  it — the mock half of `people_by_address`. A colleague's address resolves (which
- *  is what puts a real face on a mail), while `digest@example.com`, `ci@example.com`
- *  and anything off the tenant's domain resolve to nothing, exactly as an external
- *  sender, a distribution list and a shared mailbox do on a real tenant. The mail
- *  surface therefore shows both states side by side in the mock. */
+ *  is what puts a real face on a mail), while a shared mailbox like
+ *  `guild@example.com` and every address off the tenant's domain
+ *  (`digest@platformweekly.io`, `notifications@tracker.dev`) resolve to nothing,
+ *  exactly as an external sender, a distribution list and a shared mailbox do on a
+ *  real tenant. The mail surface therefore shows both states side by side in the
+ *  mock. */
 function mockAddressPerson(address: string): (MockProfile & { address: string }) | null {
   const [local = "", domain = ""] = address.toLowerCase().split("@");
   if (!local || domain !== "example.com") return null;
@@ -3562,7 +3564,9 @@ function seedMail(): void {
     0,
     {
       subject: "Weekly digest: what shipped last week",
-      from: { name: "Platform Digest", address: "digest@example.com" },
+      // An external sender, on its own domain: nobody the directory can name, so this
+      // is the face the domain rule draws (see `mailAvatarSeed`).
+      from: { name: "Platform Digest", address: "digest@platformweekly.io" },
       preview: MAIL_PREVIEWS[3]!,
       is_read: false,
     },
@@ -3643,7 +3647,7 @@ function seedMail(): void {
     2,
     {
       subject: "Your build finished: teams-lite #4821",
-      from: { name: "CI", address: "ci@example.com" },
+      from: { name: "CI", address: "builds@ci.buildbot.dev" },
       preview: MAIL_PREVIEWS[2]!,
     },
     {
@@ -3704,8 +3708,31 @@ function seedMail(): void {
     ]),
   );
 
+  // Two machines at one organisation, on two subdomains, one of them with no display
+  // name at all. They have to read as ONE sender: the same tint, and initials taken
+  // from the domain rather than from "security@", which says nothing about who wrote.
+  add(
+    5,
+    {
+      subject: "Tracker: 3 issues moved to In Review",
+      from: { name: "Tracker", address: "notifications@tracker.dev" },
+      preview: "Ava moved PLAT-114, PLAT-115 and PLAT-118 while you were away.",
+    },
+    simpleMailBody("Tracker", ["Ava moved three issues to In Review."]),
+  );
+  add(
+    6,
+    {
+      subject: "Security advisory: rotate your PAT",
+      from: { name: "", address: "security@updates.tracker.dev" },
+      preview: "A token you created two years ago is older than the policy allows.",
+      is_read: false,
+    },
+    simpleMailBody("Tracker Security", ["Rotate the token before the end of the month."]),
+  );
+
   // The rest of the backlog: ordinary mail, so the list pages and virtualizes.
-  for (let index = 5; index < MAIL_BACKLOG; index++) {
+  for (let index = 7; index < MAIL_BACKLOG; index++) {
     const person = PEOPLE[index % PEOPLE.length]!;
     const subject = MAIL_SUBJECTS[index % MAIL_SUBJECTS.length]!;
     const preview = MAIL_PREVIEWS[index % MAIL_PREVIEWS.length]!;

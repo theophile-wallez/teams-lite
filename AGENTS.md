@@ -285,6 +285,19 @@ must never write to it.
   attributed to an address that asked for it (matched on `email`, then
   `userPrincipalName`), because the wrong face on a name is worse than no face. The
   lookups are batched, so a screenful of mail costs one request.
+- **A sender the directory cannot name is drawn from its DOMAIN, and never fetched
+  from it.** No favicon, from the sender or through an icon service: the domain comes
+  from the mail, so a per-recipient subdomain (`mail.a1b2c3.example.com`) would turn
+  that fetch into the tracking pixel the sanitizer just removed, and a third-party icon
+  service would be told every domain that writes to the user. What the face says
+  instead is local and deterministic (`mailAvatarSeed` / `mailAvatarInitials` in
+  `web/src/components/avatar.tsx`): the tint is seeded by the REGISTRABLE domain, so
+  `notifications@linear.app` and `security@updates.linear.app` are one colour and one
+  sender, and the letters come from the display name, then from an address that spells
+  a person (`reva.singh` → RS), then from the organisation (`no-reply@sns.amazonaws.com`
+  → AM) — never from a local part every alert mailbox shares. It costs a colleague
+  nothing: measured on this tenant, every internal address the directory resolves has a
+  photo, and a photo covers the tint.
 
 ## The calendar is READ-ONLY (MANDATORY — no exception, not even a sandbox)
 

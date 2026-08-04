@@ -19,7 +19,7 @@ import {
   type MailHeader,
 } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
-import { Avatar, avatarInitials, mailAddressPhoto } from "./avatar";
+import { Avatar, mailAddressPhoto, mailAvatarInitials, mailAvatarSeed } from "./avatar";
 import { useAppState, useController } from "./controller-context";
 import { FileTypeIcon } from "./file-type-icon";
 import { MailBody } from "./mail-body";
@@ -126,10 +126,12 @@ function MailHeaderCard(props: { mail: MailHeader }) {
       </h1>
       <div className="flex items-start gap-3">
         <Avatar
-          seed={mail.from.address || mail.id}
+          seed={mailAvatarSeed(mail.from, mail.id)}
           label={sender}
+          initials={mailAvatarInitials(mail.from)}
           fallback="person"
           photo={mailAddressPhoto(mail.from.address)}
+          testId="mail-avatar"
         />
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex flex-wrap items-baseline gap-x-2">
@@ -210,12 +212,15 @@ function MailPersonChip(props: { address: MailAddress }) {
       className="flex max-w-[220px] items-center gap-1.5 rounded-full bg-accent/60 py-0.5 pl-0.5 pr-2"
     >
       <Avatar
-        seed={props.address.address || label}
+        seed={mailAvatarSeed(props.address, label)}
         label={label}
-        initials={avatarInitials(label).slice(0, 1)}
+        // One letter, not two: the chip is 20px, and the overlap of a second letter
+        // is what a dense stack clips first.
+        initials={mailAvatarInitials(props.address).slice(0, 1)}
         fallback="person"
         photo={mailAddressPhoto(props.address.address)}
         className="size-5 text-[9px]"
+        testId="mail-avatar"
       />
       <span className="min-w-0 truncate text-[12px] text-text-dim">{label}</span>
     </span>

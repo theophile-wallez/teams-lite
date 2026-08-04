@@ -265,10 +265,13 @@ test.describe("mail", () => {
     await expect
       .poll(() => recipients.locator("img").count(), { timeout: 10_000 })
       .toBeGreaterThan(0);
-    // The off-tenant guest resolves to nobody, so their chip stays on initials.
+    // The off-tenant guest resolves to nobody, so their chip stays on initials — and
+    // the mail names them by address alone, so the letter comes from the address:
+    // "reva.singh" spells a person, which "R" says and the domain would not.
     const guest = to.locator('[data-address="reva.singh@partner.example.org"]');
     await expect(guest).toBeVisible();
     await expect(guest.locator("img")).toHaveCount(0);
+    await expect(guest.locator('[data-testid="mail-avatar"]')).toHaveText("R");
 
     // Cc is a line of its own, with the same treatment.
     const cc = page.locator('[data-testid="mail-recipients"][data-kind="cc"]');
@@ -278,6 +281,35 @@ test.describe("mail", () => {
     await expect
       .poll(() => page.locator('[data-testid="mail-row"] img').count(), { timeout: 10_000 })
       .toBeGreaterThan(0);
+  });
+
+  test("gives one organisation one colour, whatever mailbox it writes from", async ({ page }) => {
+    // A sender the directory cannot name has no photo, so its tint and its two
+    // letters are everything the reader gets. Both say the ORGANISATION: two
+    // subdomains of one domain are one sender, and "security@" names nobody.
+    await gotoApp(page);
+    await openMailTab(page);
+
+    const rowFor = (subject: string) =>
+      page.locator('[data-testid="mail-row"]', { hasText: subject }).first();
+    const tracker = rowFor("3 issues moved to In Review").locator('[data-testid="mail-avatar"]');
+    const advisory = rowFor("rotate your PAT").locator('[data-testid="mail-avatar"]');
+    const digest = rowFor("Weekly digest").locator('[data-testid="mail-avatar"]');
+    await expect(tracker).toBeVisible();
+    await expect(advisory).toBeVisible();
+
+    const tint = (avatar: typeof tracker) =>
+      avatar.evaluate((el) => getComputedStyle(el).backgroundColor);
+
+    // notifications@tracker.dev and security@updates.tracker.dev: one colour.
+    expect(await tint(advisory)).toBe(await tint(tracker));
+    // And a different organisation is a different colour, or the rule says nothing.
+    expect(await tint(digest)).not.toBe(await tint(tracker));
+
+    // The advisory carries no display name, so its letters come from the domain —
+    // never from "security", which every sender's alert mailbox is called.
+    await expect(advisory).toHaveText("TR");
+    await expect(tracker).toHaveText("TR");
   });
 
   test("shows a new mail as it arrives", async ({ page }) => {

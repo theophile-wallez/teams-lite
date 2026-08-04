@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { UserMultiple02Icon, ZoomIcon } from "@hugeicons/core-free-icons";
-import { isMeetingChat, type Conversation } from "~/lib/protocol";
+import { isMeetingChat, type Conversation, type MailAddress } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
 import { PersonCoin } from "./person-coin";
@@ -53,6 +53,76 @@ export type AvatarPhoto =
  *  carries no address to resolve (the avatar then keeps its tinted initials). */
 export function mailAddressPhoto(address: string): AvatarPhoto | undefined {
   return address ? { kind: "address", address } : undefined;
+}
+
+/** Everything after the "@", lowercased — the organisation a mail address belongs
+ *  to. Empty when the string is not an address. */
+function mailDomain(address: string): string {
+  const at = address.lastIndexOf("@");
+  return at > 0 ? address.slice(at + 1).trim().toLowerCase() : "";
+}
+
+/** The second-level labels that are part of a public suffix rather than a name, so
+ *  "example.co.uk" is read as "example" and not as "co". A short list on purpose: a
+ *  real public-suffix list is a megabyte of data to pick two letters with. */
+const SUFFIX_LABELS = new Set(["co", "com", "net", "org", "gov", "edu", "ac"]);
+
+/** The registrable part of a domain — its name plus the public suffix:
+ *  "md.getsentry.com" → "getsentry.com", "sns.amazonaws.com" → "amazonaws.com",
+ *  "shop.example.co.uk" → "example.co.uk". What sits in front of it is routing
+ *  ("mail.", "updates.", "notifications."), so this is the part that names the
+ *  organisation and the part two subdomains of one sender share. */
+function registrableDomain(domain: string): string {
+  const labels = domain.split(".").filter(Boolean);
+  if (labels.length <= 2) return labels.join(".");
+  let index = labels.length - 2;
+  if (SUFFIX_LABELS.has(labels[index]!)) index -= 1;
+  return labels.slice(index).join(".");
+}
+
+/** The label inside a domain a reader recognises: "md.getsentry.com" → "getsentry",
+ *  "linear.app" → "linear". */
+function domainName(domain: string): string {
+  return registrableDomain(domain).split(".")[0] ?? "";
+}
+
+/** The tint seed for a face on a mail: the sender's registrable DOMAIN, so every
+ *  address at one organisation carries one colour — `notifications@linear.app` and
+ *  `security@updates.linear.app` are the same sender to the reader, and today they
+ *  are the only thing a colour can say about them.
+ *
+ *  It costs a colleague nothing: measured on this tenant, every internal address the
+ *  directory resolves has a photo, which covers the tint entirely. What shares the
+ *  organisation's colour is what the directory could not name — a shared mailbox, a
+ *  distribution list, someone who left — and those ARE the same organisation.
+ *
+ *  `fallback` is used when the mail carries no address at all (the mail's own id, so
+ *  two nameless senders still differ). */
+export function mailAvatarSeed(address: MailAddress, fallback: string): string {
+  return registrableDomain(mailDomain(address.address)) || address.address || fallback;
+}
+
+/** True when a local part spells a PERSON's name: exactly two dot-separated words of
+ *  letters, which is what a corporate mailbox looks like ("reva.singh"). Everything
+ *  else — "no-reply", "security", "notifications", "adq_lab_eng" — names a function or
+ *  a machine, and then the organisation is what a reader recognises. */
+function spellsAPersonName(local: string): boolean {
+  const words = local.split(".");
+  return words.length === 2 && words.every((word) => word.length >= 2 && /^[a-z]+$/i.test(word));
+}
+
+/** The initials a face on a mail shows. The display name when the mail carries one.
+ *  Failing that, the address itself is read: `reva.singh@` spells a person, so "RS",
+ *  while `no-reply@sns.amazonaws.com` spells nobody — every alert mailbox in the
+ *  mailbox is called that — so the organisation answers instead, "AM". */
+export function mailAvatarInitials(address: MailAddress): string {
+  const name = address.name.trim();
+  if (name) return avatarInitials(name);
+  const at = address.address.lastIndexOf("@");
+  const local = at > 0 ? address.address.slice(0, at) : "";
+  if (spellsAPersonName(local)) return avatarInitials(local.replace(".", " "));
+  const label = domainName(mailDomain(address.address));
+  return avatarInitials(label || address.address);
 }
 
 /** The picture an avatar should show for a conversation, or `undefined` when there
@@ -172,6 +242,9 @@ export function Avatar(props: {
   className?: string;
   photo?: AvatarPhoto;
   fallback?: AvatarFallback;
+  /** A test handle on the avatar itself, for a spec that reads the tint or the
+   *  initials it settled on. A glyph avatar keeps its own `avatar-glyph`. */
+  testId?: string;
 }) {
   const photoUrl = useAvatarPhoto(props.photo);
   const person = props.fallback === "person";
@@ -196,7 +269,7 @@ export function Avatar(props: {
         // (which pass rounded-md/lg) still get circular avatars.
         person && "rounded-full",
       )}
-      data-testid={glyph ? "avatar-glyph" : undefined}
+      data-testid={glyph ? "avatar-glyph" : props.testId}
       data-fallback={glyph ? props.fallback : undefined}
       aria-hidden
     >

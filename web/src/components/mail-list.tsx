@@ -12,7 +12,7 @@ import {
   type MailHeader,
 } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
-import { Avatar, mailAddressPhoto } from "./avatar";
+import { Avatar, mailAddressPhoto, mailAvatarInitials, mailAvatarSeed } from "./avatar";
 import { useAppState, useController } from "./controller-context";
 import {
   DropdownMenu,
@@ -291,10 +291,12 @@ function MailRow(props: { mail: MailHeader; open: boolean; onClick: () => void }
       )}
     >
       <Avatar
-        seed={mail.from.address || mail.id}
+        seed={mailAvatarSeed(mail.from, mail.id)}
         label={sender}
+        initials={mailAvatarInitials(mail.from)}
         fallback="person"
         photo={mailAddressPhoto(mail.from.address)}
+        testId="mail-avatar"
       />
 
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
