@@ -78,16 +78,6 @@ export type RichAttrs = {
    *  browser for a million columns. */
   colspan?: number;
   rowspan?: number;
-  /** Images only: the picture's own pixel dimensions, as Teams states them on the
-   *  tag (`width`/`height`). They are kept for ONE reason — the renderer reserves
-   *  the space the picture will take before a byte of it has loaded, so a message
-   *  that scrolls into view does not grow taller under the reader's eyes when the
-   *  bytes arrive (see {@link imageDimension} and `MediaImage`).
-   *
-   *  Teams sends both on ~3 of every 4 inline images, and sends them as decimals
-   *  (`width="415.9220146222583"`), so they are numbers rather than integers. */
-  width?: number;
-  height?: number;
 };
 
 export type RichNode =
@@ -272,21 +262,6 @@ function cellSpan(raw: string | undefined): number | undefined {
   return value;
 }
 
-/** One side of an image's stated size, in pixels, or `undefined` when the tag does
- *  not state a usable one.
- *
- *  Decimal, because Teams really does send `width="415.9220146222583"`. Bounded at
- *  both ends for the same reason {@link cellSpan} is: the value comes from a
- *  message body, so a hostile one must not be able to ask the browser to reserve a
- *  box of a million pixels. A zero or negative side states nothing and is dropped
- *  rather than reserved, since a 0-height box is exactly the reflow to avoid. */
-function imageDimension(raw: string | undefined): number | undefined {
-  if (!raw) return undefined;
-  const value = Number.parseFloat(raw.trim());
-  if (!Number.isFinite(value) || value <= 0 || value > 20_000) return undefined;
-  return value;
-}
-
 type OpenFrame = { tag: RichTag | null; children: RichNode[] };
 
 /** The semantic tags a `<span>` can open, and that its `</span>` closes. */
@@ -439,12 +414,7 @@ export function parseRichHtml(html: string): RichNode[] {
       const src = safeSrc(attrs["src"]);
       if (src) {
         const alt = attrs["alt"] ? decodeEntities(attrs["alt"]) : undefined;
-        // Both sides or neither: an aspect ratio is what the renderer reserves
-        // space from, and one side alone does not state one.
-        const width = imageDimension(attrs["width"]);
-        const height = imageDimension(attrs["height"]);
-        const size = width !== undefined && height !== undefined ? { width, height } : {};
-        pushChild({ type: "element", tag: "img", attrs: { src, alt, ...size }, children: [] });
+        pushChild({ type: "element", tag: "img", attrs: { src, alt }, children: [] });
       }
       continue;
     }

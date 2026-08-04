@@ -259,17 +259,6 @@ const HOST = "127.0.0.1";
 const PAGE_SIZE = 40;
 /** Backlog per conversation so infinite scroll + backfill are well exercised. */
 const BACKLOG = Number(process.env.MOCK_BACKLOG ?? 120);
-/** How long this mock takes to answer for media bytes.
- *
- *  Zero by default, because the E2E suite must not pay a delay on every picture.
- *  A diagnostic sets it through the environment (see `scripts/scroll-probe.ts`) and
- *  a spec arms it for one test through `POST /__test/emit {kind:"media_delay"}`:
- *  an image that arrives in the same tick as its message hides the one thing worth
- *  measuring about it — a picture landing in a row the virtualized history has
- *  already measured, which is what used to make the history jump under a reader
- *  scrolling through it. A spec that arms it MUST clear it, since one mock process
- *  serves the whole run. */
-let mediaDelayMs = Number(process.env.MOCK_MEDIA_DELAY_MS ?? 0);
 /** Whether a backlog carries the TALL messages a real thread has (see
  *  `LONG_MESSAGE_POOL`): `MOCK_TALL_ROWS=1`.
  *
@@ -1134,12 +1123,8 @@ function seedMediaSamples(): void {
       sender_mri: other.mri,
       content:
         `<div>Here's the screenshot from the incident:</div>` +
-        // `width`/`height` because Teams sends them on ~3 of every 4 inline images,
-        // and they are what the renderer reserves the picture's space from — a
-        // fixture without them exercises only the minority case.
         `<div><img itemtype="http://schema.skype.com/AMSImage" ` +
-        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-1/views/imgo" ` +
-        `width="320" height="200" alt="incident graph"/></div>`,
+        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-1/views/imgo" alt="incident graph"/></div>`,
       is_self: false,
     },
     60_000,
@@ -1212,8 +1197,7 @@ function seedMediaSamples(): void {
       sender_mri: other.mri,
       content:
         `<p><img itemtype="http://schema.skype.com/AMSImage" ` +
-        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-2/views/imgo" ` +
-        `width="320" height="200" alt="whiteboard"/></p>`,
+        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-2/views/imgo" alt="whiteboard"/></p>`,
       is_self: false,
     },
     300_000,
@@ -4586,9 +4570,7 @@ function dispatch(method: string, params: unknown): unknown {
 
     case "fetch_media": {
       const url = requireString(params, "url");
-      const bytes = mockMedia(url);
-      if (mediaDelayMs <= 0) return bytes;
-      return new Promise((resolve) => setTimeout(() => resolve(bytes), mediaDelayMs));
+      return mockMedia(url);
     }
 
     case "fetch_avatar": {
@@ -5541,13 +5523,6 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       body = (await req.json()) as Record<string, unknown>;
     } catch {
       /* tolerate an empty/invalid body */
-    }
-    // Hold media bytes back for a while, so a spec can watch a picture land in a
-    // row that was already measured (see `mediaDelayMs`). `0` clears it, which the
-    // arming spec owes every later one.
-    if (body.kind === "media_delay") {
-      mediaDelayMs = typeof body.ms === "number" && body.ms > 0 ? body.ms : 0;
-      return Response.json({ ok: true, ms: mediaDelayMs }, { status: 200 });
     }
     // Inject an activity-feed entry (reaction/mention) rather than a chat
     // message, then nudge the client to refresh — exercises the bell + panel.

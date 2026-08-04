@@ -1,4 +1,4 @@
-import { test, expect, gotoApp, realErrors, setMediaDelay } from "./helpers";
+import { test, expect, gotoApp, realErrors } from "./helpers";
 import type { Locator, Page } from "@playwright/test";
 
 /** Open a conversation by name via the command palette — robust to sidebar
@@ -322,51 +322,6 @@ test.describe("media (images + attachments)", () => {
     expect(opened).toEqual([
       "https://siapartners1-my.sharepoint.com/:v:/g/personal/demo/IQCmMockRecording",
     ]);
-  });
-
-  // Why this is a test and not a detail: the history is VIRTUALIZED, so every row is
-  // measured as it mounts and the rows below it are placed from that measurement. A
-  // picture that arrives after its row was measured therefore grows the row and shoves
-  // everything below — the reader is reading one message and holding another a frame
-  // later. Teams states the picture's size on the tag, so the space is reserved before
-  // a byte of it loads and the two heights are the same height.
-  test("holds a picture's space before it loads, so the row never grows", async ({ page }) => {
-    // Hold the bytes back, which is what makes the "before" state observable at all.
-    await setMediaDelay(page, 4_000);
-    try {
-      await gotoApp(page);
-      await openByPalette(page, "Media Gallery");
-
-      const withText = page
-        .locator('[data-testid="message"]', { hasText: "screenshot from the incident" })
-        .first();
-      await expect(withText).toBeVisible();
-
-      // Before: the picture is still in flight, and its box is already held open.
-      const placeholder = withText.locator('[data-testid="message-image-placeholder"]');
-      await expect(placeholder).toBeVisible();
-      const before = (await withText.boundingBox())!.height;
-
-      // After: the bytes land and the picture replaces the box it was holding.
-      const image = withText.locator('[data-testid="message-image"]');
-      await expect(image).toBeVisible({ timeout: 15_000 });
-      await expect
-        .poll(() => image.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0))
-        .toBe(true);
-      const after = (await withText.boundingBox())!.height;
-
-      // The row is the same height it was, within a pixel of layout rounding.
-      //
-      // Both halves of the fix are needed to hold this, and this fixture measured
-      // each one: with no reservation at all the placeholder was a fixed 128px box
-      // against a 200px picture, and with a reservation written as `min(width, 100%)`
-      // the bubble still grew 39px, because a percentage width contributes nothing to
-      // a shrink-to-fit parent's intrinsic width.
-      expect(Math.abs(after - before)).toBeLessThanOrEqual(1);
-    } finally {
-      // Owed to every later spec — one mock process serves the whole run.
-      await setMediaDelay(page, 0);
-    }
   });
 
   test("keeps the bubble for a message that mixes an image with text", async ({ page }) => {

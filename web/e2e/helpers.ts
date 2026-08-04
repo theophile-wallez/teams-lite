@@ -326,18 +326,6 @@ export async function clearReadReceipts(page: Page): Promise<void> {
   expect(res.ok()).toBeTruthy();
 }
 
-/** Hold the mock's media bytes back for `ms`, so a spec can observe a picture
- *  landing in a row the virtualized history has already measured — the moment a
- *  reserved box has to make invisible. `0` clears it, which the arming spec OWES
- *  every later one: a single mock process serves the whole run, and a delay left
- *  behind slows every picture in it. */
-export async function setMediaDelay(page: Page, ms: number): Promise<void> {
-  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
-    data: { kind: "media_delay", ms },
-  });
-  expect(res.ok()).toBeTruthy();
-}
-
 /** Clear every name and face the user gave somebody, through the mock's gated test
  *  hook. One mock process serves the whole run, so a rename left behind would rename
  *  that person for every later spec. */

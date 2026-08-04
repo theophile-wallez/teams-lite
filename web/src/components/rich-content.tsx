@@ -542,10 +542,6 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
           key={key}
           src={node.attrs.src ?? ""}
           alt={node.attrs.alt ?? ""}
-          // What Teams said the picture measures, so its space is held before the
-          // bytes land and the row never grows mid-scroll.
-          width={node.attrs.width}
-          height={node.attrs.height}
           className="my-1"
         />
       );
