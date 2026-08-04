@@ -169,7 +169,7 @@ function useAvatarPhoto(photo?: AvatarPhoto): AvatarPicture | null {
         : (photo.kind === "chat"
             ? controller.loadAvatarPicture(photo.url)
             : controller.loadAvatar(photo.kind, photo.id)
-          ).then((url) => (url ? { url, fit: "cover" } : null));
+          ).then((url) => (url ? { url, kind: "face" } : null));
     loading
       .then((url) => {
         if (active) setSrc(url);
@@ -227,11 +227,10 @@ export function Avatar(props: {
   overrideSrc?: string;
 }) {
   const resolved = useAvatarPhoto(props.overrideSrc ? undefined : props.photo);
-  // A face the user just picked is drawn like every other face — it fills the frame.
-  // Only a resolved address can answer with something that is not one (an
-  // organisation's mark), so only that path carries a fit of its own.
+  // A face the user just picked is a face like any other. Only a resolved address can
+  // answer with something else (an organisation's mark), so only that path says so.
   const picture: AvatarPicture | null = props.overrideSrc
-    ? { url: props.overrideSrc, fit: "cover" }
+    ? { url: props.overrideSrc, kind: "face" }
     : resolved;
   const person = props.fallback === "person";
   const glyph =
@@ -247,7 +246,7 @@ export function Avatar(props: {
   // that fits inside — and the shape then says "an organisation wrote this, not a
   // person", which is exactly what the sender is. The radius transitions, so a row that
   // starts on initials morphs instead of jumping when the mark lands.
-  const orgMark = picture?.fit === "contain";
+  const orgMark = picture?.kind === "mark";
   return (
     <span
       className={cn(
@@ -286,14 +285,18 @@ export function Avatar(props: {
           alt=""
           loading="lazy"
           decoding="async"
-          data-fit={picture.fit}
+          data-picture={picture.kind}
+          // A mark is drawn edge to edge, exactly like a face: no tile behind it and no
+          // margin around it, so what the row shows IS the sender's icon. A favicon is
+          // square, so filling the square frame neither crops it nor letterboxes it.
+          //
+          // `bg-inherit` is what a TRANSPARENT icon needs — many favicons are a bare
+          // glyph on nothing. It takes the avatar's own tint as its backdrop, so the
+          // monogram underneath cannot read through the mark, and the row keeps the
+          // colour it already had for that organisation.
           className={cn(
-            "absolute inset-0 size-full rounded-[inherit] animate-in fade-in duration-200",
-            orgMark
-              ? // Whole, with a hair of margin, on the light tile a favicon is drawn
-                // for — a transparent dark mark would vanish on the dark theme.
-                "bg-white object-contain p-[9%]"
-              : "object-cover",
+            "absolute inset-0 size-full rounded-[inherit] object-cover",
+            "bg-inherit animate-in fade-in duration-200",
           )}
           // If the blob fails to decode, drop it so the initials show through.
           onError={(e) => {

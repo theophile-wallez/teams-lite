@@ -2641,13 +2641,20 @@ function mockSenderIcon(
   }
   const hue = hashString(domain) % 360;
   const letters = (domain.split(".")[0] ?? domain).slice(0, 2).toUpperCase();
-  // Flat, edge-to-edge and square: a favicon has its own background, which is exactly
-  // why the avatar contains it instead of cropping it (see `AvatarPicture`).
+  // Two real shapes, because the app draws the icon with nothing behind it: most
+  // favicons are a flat square that fills the frame, and plenty are a bare glyph on
+  // TRANSPARENT pixels — which is the case that needs the avatar's own tint as a
+  // backdrop rather than the monogram underneath (see `AvatarPicture`).
+  // `buildbot.dev` is pinned to the transparent shape, exactly as `tracker.dev` is
+  // pinned to serving an icon at all: both shapes then stand in the list on every run
+  // instead of depending on the dice.
+  const transparent = domain === "buildbot.dev" || hashString(`shape:${domain}`) % 3 === 1;
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">` +
-    `<rect width="128" height="128" fill="hsl(${hue} 72% 46%)"/>` +
+    (transparent ? "" : `<rect width="128" height="128" fill="hsl(${hue} 72% 46%)"/>`) +
     `<text x="64" y="82" text-anchor="middle" font-family="Arial, sans-serif" ` +
-    `font-size="58" font-weight="bold" fill="#ffffff">${letters}</text>` +
+    `font-size="58" font-weight="bold" fill="${transparent ? `hsl(${hue} 72% 38%)` : "#ffffff"}">` +
+    `${letters}</text>` +
     `</svg>`;
   return {
     found: true,

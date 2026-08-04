@@ -331,7 +331,7 @@ test.describe("mail", () => {
     // different subdomains: the domain is reduced before it is ever asked about.
     for (const subject of ["3 issues moved to In Review", "rotate your PAT", "Weekly digest"]) {
       await expect(markOf(subject)).toBeVisible({ timeout: 10_000 });
-      await expect(markOf(subject).locator("img")).toHaveAttribute("data-fit", "contain");
+      await expect(markOf(subject).locator("img")).toHaveAttribute("data-picture", "mark");
     }
 
     // A person is never given their organisation's mark: a colleague has a face, and

@@ -1810,15 +1810,14 @@ export function mailAddressLabel(address: MailAddress): string {
   return address.name || address.address || "";
 }
 
-/** A picture an avatar has loaded, and how it must be drawn. What the controller
- *  answers for a mail address, since the two answers are drawn differently:
- *   - "cover"   — a FACE, which fills the frame: a profile photo is a portrait, and
- *     cropping it to the circle is what makes a column of them read as people;
- *   - "contain" — an ORGANISATION's mark, which must not be cropped: a favicon is a
- *     logo on its own background, often a wide one, so cover would cut its corners
- *     off. It sits on a light tile with a margin, because a favicon is drawn for a
- *     white page and a transparent dark mark would vanish on this app's dark theme. */
-export type AvatarPicture = { url: string; fit: "cover" | "contain" };
+/** A picture an avatar has loaded, and WHAT it is — the component decides how to draw
+ *  it. What the controller answers for a mail address, since an address resolves to one
+ *  of two different things:
+ *   - "face" — a person's profile photo, drawn in a circle;
+ *   - "mark" — an ORGANISATION's own icon, drawn edge to edge on a rounded square, so
+ *     the shape says a machine wrote this and the mark is the mark itself: no tile
+ *     behind it, no margin around it. */
+export type AvatarPicture = { url: string; kind: "face" | "mark" };
 
 /** Everything after the "@", lowercased — the organisation an address belongs to.
  *  Empty when the string is not an address. */

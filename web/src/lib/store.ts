@@ -2342,7 +2342,7 @@ export class TeamsController {
     const person = await this.loadAddressPerson(address);
     if (person?.mri) {
       const url = await this.loadAvatar("user", person.mri);
-      return url ? { url, fit: "cover" } : null;
+      return url ? { url, kind: "face" } : null;
     }
     // A HUMAN the directory could not name — an external colleague, someone who left —
     // keeps their initials. Their employer's logo would misattribute a message they
@@ -2350,7 +2350,7 @@ export class TeamsController {
     // a picture we were never going to draw.
     if (mailAddressSpellsAPerson(address)) return null;
     const url = await this.loadSenderIcon(registrableMailDomain(mailDomain(address)));
-    return url ? { url, fit: "contain" } : null;
+    return url ? { url, kind: "mark" } : null;
   }
 
   /** Resolve one organisation's icon to a local blob object URL, through the backend —
