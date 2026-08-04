@@ -56,11 +56,48 @@ pub struct Backend {
     pub prefix: &'static str,
     /// The executable, resolved on `PATH`.
     pub program: &'static str,
-    /// Models worth offering in a picker, in the CLI's own spelling. A suggestion
-    /// list, never a limit: `claude` takes an alias or a full model id, and
-    /// `opencode` takes `provider/model` for whichever providers THIS machine has
-    /// configured — a hard-coded catalogue would be wrong on the next machine.
-    pub models: &'static [&'static str],
+    /// Models this crate names itself, in the CLI's own spelling. A picker's list,
+    /// never a limit: every backend also accepts a model the user types, which is
+    /// what [`is_valid_model`] is for.
+    pub models: &'static [Model],
+    /// Where the rest of this CLI's models come from, beyond [`Backend::models`].
+    pub catalogue: Catalogue,
+}
+
+/// One model a picker may offer, with what a person needs in order to choose it.
+///
+/// `id` is the only half the CLI ever sees. The rest is for the reader, because a
+/// list of bare ids asks somebody holding a phone to remember which of `haiku` and
+/// `opus` is the big one, and what either of them can hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Model {
+    /// What the CLI is given for its model argument.
+    pub id: &'static str,
+    /// The name a person reads: "Opus 5".
+    pub label: &'static str,
+    /// Who made it, as an id — the mark a client draws beside the name.
+    pub vendor: &'static str,
+    /// How that vendor is named to the user.
+    pub vendor_label: &'static str,
+    /// The context window, in tokens.
+    pub context: u32,
+    /// The most tokens one answer may hold.
+    pub output: u32,
+}
+
+/// Where a backend's models come from beyond the static list above.
+///
+/// The distinction is not cosmetic: `claude` takes four aliases this crate can name
+/// once and for all, while an `opencode` model is `provider/model` for whichever
+/// providers THIS machine authenticated. A hard-coded opencode catalogue would be
+/// wrong on the next machine, so that half is read from opencode's own files
+/// (see [`crate::agent_models`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Catalogue {
+    /// The static list is the whole list.
+    None,
+    /// opencode's on-disk catalogue, filtered to the providers it authenticated.
+    Opencode,
 }
 
 /// Every backend, in the order a status reply lists them.
@@ -70,16 +107,53 @@ pub const BACKENDS: [Backend; 2] = [
         prefix: "@claude",
         program: "claude",
         // The aliases Claude Code documents for `--model`; a full id such as
-        // `claude-opus-4-5` is accepted too, which is why the field is a suggestion.
-        models: &["fable", "opus", "sonnet", "haiku"],
+        // `claude-opus-4-5` is accepted too, which is why this is a list and not a
+        // limit. Each alias follows its family, so a label names the model that
+        // family currently resolves to and goes stale the day a new one ships.
+        models: &[
+            Model {
+                id: "fable",
+                label: "Fable 5",
+                vendor: "anthropic",
+                vendor_label: "Anthropic",
+                context: 1_000_000,
+                output: 128_000,
+            },
+            Model {
+                id: "opus",
+                label: "Opus 5",
+                vendor: "anthropic",
+                vendor_label: "Anthropic",
+                context: 1_000_000,
+                output: 128_000,
+            },
+            Model {
+                id: "sonnet",
+                label: "Sonnet 5",
+                vendor: "anthropic",
+                vendor_label: "Anthropic",
+                context: 1_000_000,
+                output: 128_000,
+            },
+            Model {
+                id: "haiku",
+                label: "Haiku 4.5",
+                vendor: "anthropic",
+                vendor_label: "Anthropic",
+                context: 200_000,
+                output: 64_000,
+            },
+        ],
+        catalogue: Catalogue::None,
     },
     Backend {
         name: "opencode",
         prefix: "@opencode",
         program: "opencode",
-        // Deliberately empty: `opencode models` lists only the providers the user
-        // authenticated, so the honest answer is the one they type.
+        // Deliberately empty: opencode's models are the ones THIS machine
+        // authenticated, and it already keeps that answer on disk.
         models: &[],
+        catalogue: Catalogue::Opencode,
     },
 ];
 

@@ -14,6 +14,33 @@
  *   switch that would do nothing.
  */
 
+/**
+ * One model the backend offers for a provider (`agent_models::Choice`).
+ *
+ * Only `id` ever reaches the CLI. The rest is what lets a picker read as a list of
+ * models rather than a list of strings — a phone user should not have to remember
+ * which of `haiku` and `opus` is the big one, or what either of them can hold.
+ *
+ * The list is per machine, not per app: opencode's half is read from the catalogue
+ * opencode itself keeps, filtered to the providers that machine authenticated. It is
+ * a picker, never a limit — a model nobody listed is still typed in and saved.
+ */
+export type AgentModel = {
+  /** What the CLI is given: "opus", "amazon-bedrock/anthropic.claude-opus-5". */
+  id: string;
+  /** The name a person reads: "Opus 5", "Claude Opus 5". */
+  label: string;
+  /** Who made it, as an id: "anthropic", "amazon-bedrock". */
+  vendor: string;
+  /** How that vendor is named to the user: "Anthropic". */
+  vendor_label: string;
+  /** The context window in tokens, or null when this machine holds no catalogue
+   *  entry for the model. */
+  context: number | null;
+  /** The most tokens one answer may hold, on the same terms. */
+  output: number | null;
+};
+
 /** One agent CLI the backend knows how to run — an AI provider, in the Settings pane. */
 export type AgentBackend = {
   /** How it is named to the user: "claude", "opencode". */
@@ -26,8 +53,8 @@ export type AgentBackend = {
   enabled: boolean;
   /** The model the user chose, or null to leave the CLI its own configured default. */
   model: string | null;
-  /** Models worth offering as suggestions — never a limit on what may be typed. */
-  models: string[];
+  /** The models this machine can offer — never a limit on what may be typed. */
+  models: AgentModel[];
 };
 
 /** What one `agent_set_provider` call changes. Both halves are optional, so a switch
@@ -167,6 +194,64 @@ export function agentToolsWithGrant(
   );
   const dropped = new Set(grant.tools.filter((tool) => !keep.has(tool)));
   return status.tools.filter((tool) => !dropped.has(tool));
+}
+
+/**
+ * How a provider is named to a person: "Claude", "OpenCode".
+ *
+ * `AgentBackend.name` is the RPC spelling and the word the reply signs itself with, so
+ * it is lowercase everywhere it matters and must stay that way. A settings pane is the
+ * one place that reads as a product name, so the capitals live here rather than in the
+ * backend. A provider this app has never heard of keeps its own name — a machine may
+ * hold a CLI a newer backend added.
+ */
+export function agentBackendLabel(name: string): string {
+  switch (name) {
+    case "claude":
+      return "Claude";
+    case "opencode":
+      return "OpenCode";
+    default:
+      return name;
+  }
+}
+
+/** A token count as a person reads it: 1000000 → "1M", 200000 → "200K". Exact
+ *  multiples only get the short form, so an odd number is never rounded into a lie. */
+export function formatTokens(count: number): string {
+  if (count % 1_000_000 === 0) return `${count / 1_000_000}M`;
+  if (count % 1_000 === 0) return `${count / 1_000}K`;
+  return `${count}`;
+}
+
+/**
+ * What one model holds: "1M context · 128K output".
+ *
+ * A limit the machine's catalogue does not state is dropped rather than shown as a
+ * zero or a dash, so an empty string is the honest answer for a model this machine
+ * knows by name and nothing else.
+ */
+export function agentModelLimits(model: AgentModel): string {
+  const parts: string[] = [];
+  if (model.context !== null) parts.push(`${formatTokens(model.context)} context`);
+  if (model.output !== null) parts.push(`${formatTokens(model.output)} output`);
+  return parts.join(" · ");
+}
+
+/**
+ * The same, with the vendor in front — for the one place that has no vendor heading
+ * above it to lean on.
+ */
+export function agentModelDetail(model: AgentModel): string {
+  return [model.vendor_label, agentModelLimits(model)].filter((part) => part).join(" · ");
+}
+
+/** The offered model with that id, or null. Null covers both a model the user typed
+ *  and one this machine's catalogue stopped listing — the pane shows the stored id
+ *  either way rather than pretending nothing is set. */
+export function agentModelNamed(backend: AgentBackend, id: string | null): AgentModel | null {
+  if (!id) return null;
+  return backend.models.find((model) => model.id === id) ?? null;
 }
 
 /** One line saying how to summon the agent, or why it cannot be summoned — the text a

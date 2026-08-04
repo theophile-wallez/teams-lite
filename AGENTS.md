@@ -185,11 +185,27 @@ Five more things worth knowing before touching it:
   **provider** the machine holds is on out of the box (`agent_policy::Providers`) — the
   first is consent to post, the second is only which installed CLI answers once that
   consent exists. A disabled provider ignores its own prefix everywhere, and says so in
-  the journal. A model is a free-form name (an alias, a full id, or opencode's
-  `provider/model`) rather than a fixed list, because `opencode models` depends on the
-  providers that machine authenticated — but it is shape-checked
-  (`agent_policy::is_valid_model`) at the RPC and again in `agent::model_of`, so it can
-  never arrive at the CLI as another flag.
+  the journal.
+- **The model is picked from THIS machine's list, and the list is never the limit.**
+  `agent_status` publishes, per provider, the models it can offer with what a reader
+  needs to choose one — the vendor's own name for the model, whose mark to draw, and
+  what it holds (`agent_models::Choice`). Two halves, for two reasons. `claude` takes
+  four documented aliases, so `agent_policy::BACKENDS` names them once and carries their
+  labels and limits with them; each alias follows its family, so a label goes stale the
+  day a new model ships. `opencode` takes `provider/model` for whichever providers THAT
+  machine authenticated, so a hard-coded catalogue would be wrong on the next machine —
+  `agent_models` reads opencode's own files instead (the models.dev catalogue it caches,
+  its `auth.json`, and the user's `opencode.json`). It reads them and nothing else: no
+  `opencode models` subprocess, because a settings pane must not wait seconds on a CLI,
+  and no fetch, because displaying this app makes no network request. The parse is cached
+  against the files' own timestamps, since `agent_status` is answered on every connect
+  and the catalogue is megabytes of JSON. **A model nobody listed is still accepted**:
+  the picker's search field doubles as the free-form entry, and every model — listed or
+  typed — is shape-checked (`agent_policy::is_valid_model`) at the RPC and again in
+  `agent::model_of`, so it can never arrive at the CLI as another flag. The picker offers
+  only what that check would accept, because a control that saves nothing reads as a bug.
+  Picking is the write, so the pane holds no Save button and shows the stored model at
+  all times — a refused write leaves the old one on screen.
 - **The CLI has to be on the backend's own PATH, and a service has almost none.** The
   systemd user manager's PATH holds neither `~/.local/bin` (where `claude` installs
   itself) nor `~/.bun/bin`, so the always-on service found no program, dropped every
@@ -458,7 +474,9 @@ user. Two independent mechanisms enforce that split:
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
   `bun run preview -- --out /tmp/ask --answer-with`. For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
-  file. To review a detail too small to read in a
+  file. For Settings › AI providers and its model picker, open and closed in both
+  themes: `bun run preview -- --out /tmp/prov --ai-providers`. To review a detail too
+  small to read in a
   1200px page — a 16px icon, a chip, a badge — crop to it and raise the pixel
   density: `bun run preview -- --out /tmp/chip --element
   '[data-testid="message-file"]' --dpr 4`.

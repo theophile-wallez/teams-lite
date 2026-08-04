@@ -2853,16 +2853,44 @@ const MOCK_AGENT_TOOL_GRANTS = [
  *  the Rust `DEFAULT_TOOLS` holds, so a spec can tell the default from a grant. */
 let mockAgentTools: string[] = ["Read", "Glob", "Grep"];
 
+/** One model the picker offers, in the shape `agent_models::Choice` publishes. */
+type MockAgentModel = {
+  id: string;
+  label: string;
+  vendor: string;
+  vendor_label: string;
+  context: number | null;
+  output: number | null;
+};
+
+/** The models the mock's `claude` offers, mirroring `agent_policy::BACKENDS`.
+ *
+ *  The real list for `opencode` is read off the machine (`agent_models`), so a mock
+ *  cannot have one — which is the other reason `opencode` is the uninstalled half
+ *  here. */
+const MOCK_CLAUDE_MODELS: MockAgentModel[] = [
+  { id: "fable", label: "Fable 5", vendor: "anthropic", vendor_label: "Anthropic", context: 1_000_000, output: 128_000 },
+  { id: "opus", label: "Opus 5", vendor: "anthropic", vendor_label: "Anthropic", context: 1_000_000, output: 128_000 },
+  { id: "sonnet", label: "Sonnet 5", vendor: "anthropic", vendor_label: "Anthropic", context: 1_000_000, output: 128_000 },
+  { id: "haiku", label: "Haiku 4.5", vendor: "anthropic", vendor_label: "Anthropic", context: 200_000, output: 64_000 },
+];
+
 /** Which AI providers this "machine" holds, and what the user chose for each — the
  *  state the Settings › AI providers pane draws.
  *
  *  `claude` is installed and `opencode` is not, on purpose: both halves of the pane
  *  matter, and the "Not installed" row with its disabled switch is exactly the state a
  *  real machine with one CLI is in. `enabled` starts true for both, as the Rust default
- *  does (`agent_policy::Providers`), and `models` mirrors `Backend::models`. */
+ *  does (`agent_policy::Providers`), and `models` mirrors `agent_models::choices`. */
 const mockAgentProviders = new Map<
   string,
-  { prefix: string; available: boolean; enabled: boolean; model: string | null; models: string[] }
+  {
+    prefix: string;
+    available: boolean;
+    enabled: boolean;
+    model: string | null;
+    models: MockAgentModel[];
+  }
 >([
   [
     "claude",
@@ -2871,7 +2899,7 @@ const mockAgentProviders = new Map<
       available: true,
       enabled: true,
       model: null,
-      models: ["fable", "opus", "sonnet", "haiku"],
+      models: MOCK_CLAUDE_MODELS,
     },
   ],
   ["opencode", { prefix: "@opencode", available: false, enabled: true, model: null, models: [] }],
@@ -2890,7 +2918,7 @@ function agentStatusView(): {
     available: boolean;
     enabled: boolean;
     model: string | null;
-    models: string[];
+    models: MockAgentModel[];
   }[];
   conversations: { conversation: string; mode: string }[];
   tools: string[];

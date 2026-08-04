@@ -1035,7 +1035,7 @@ pub fn permissions_from_settings(tools: Option<&str>, unrestricted: Option<&str>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_policy::BACKENDS;
+    use crate::agent_policy::{BACKENDS, Catalogue};
 
     const CLAUDE: &Backend = &BACKENDS[0];
     const OPENCODE: &Backend = &BACKENDS[1];
@@ -1554,7 +1554,13 @@ mod tests {
         // resume and the fresh retry fail: the fallback must not mask the error, and
         // must not loop.
         static ALWAYS_FAILS: Backend =
-            Backend { name: "opencode", prefix: "@opencode", program: "false", models: &[] };
+            Backend {
+            name: "opencode",
+            prefix: "@opencode",
+            program: "false",
+            models: &[],
+            catalogue: Catalogue::None,
+        };
         let mut request = request(OPENCODE);
         request.backend = &ALWAYS_FAILS;
         request.resume_session = Some("ses_gone".into());
@@ -1570,6 +1576,7 @@ mod tests {
             prefix: "@nope",
             program: "teams-lite-no-such-agent",
             models: &[],
+            catalogue: Catalogue::None,
         };
         let mut request = request(CLAUDE);
         request.backend = &MISSING;

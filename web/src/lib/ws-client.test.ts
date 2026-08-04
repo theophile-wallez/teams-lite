@@ -341,7 +341,16 @@ describe("Backend request/response", () => {
               available: true,
               enabled: false,
               model: "opus",
-              models: ["opus"],
+              models: [
+                {
+                  id: "opus",
+                  label: "Opus 5",
+                  vendor: "anthropic",
+                  vendor_label: "Anthropic",
+                  context: 1_000_000,
+                  output: 128_000,
+                },
+              ],
             },
           ],
           conversations: [],

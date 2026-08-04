@@ -46,6 +46,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/person --person   # rename + custom avatar
 //   bun run web/scripts/preview.ts --out /tmp/agent --agent     # the local-agent menu
 //   bun run web/scripts/preview.ts --out /tmp/reply --agent-reply  # the agent answering
+//   bun run web/scripts/preview.ts --out /tmp/prov --ai-providers # Settings › AI providers
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
 //   bun run web/scripts/preview.ts --out /tmp/tag --agent-tag   # tagging an agent
 //   bun run web/scripts/preview.ts --out /tmp/ask --answer-with # "Answer with <agent>" on a message
@@ -1601,6 +1602,40 @@ if (import.meta.main) {
         await setTheme("dark");
         await shot(`${out}-dark.png`, element);
         console.log(`[preview] wrote ${out}-light.png and ${out}-dark.png`);
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
+  // Settings › AI providers: the two provider rows, then the model picker open over
+  // them. Both halves need a look in both themes — each row wears a vendor's own
+  // artwork, and opencode's mark ships one file per theme, so one capture proves half
+  // of it (web/src/components/ai-providers-settings.tsx and agent-model-select.tsx).
+  if (args.includes("--ai-providers")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        await openSettings(page);
+        const section = '[data-testid="ai-providers-settings"]';
+        await page.locator(section).scrollIntoViewIfNeeded();
+        await shot(`${out}-light.png`, section);
+        await setTheme("dark");
+        await shot(`${out}-dark.png`, section);
+        await setTheme("light");
+
+        // The picker open on the installed provider, which is the one with a list.
+        await page
+          .locator(
+            '[data-testid="ai-provider"][data-provider="claude"] ' +
+              '[data-testid="ai-provider-model-select"]',
+          )
+          .click();
+        await page.waitForSelector('[data-testid="ai-provider-model-option"]');
+        await page.waitForTimeout(300);
+        await shot(`${out}-open-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-open-dark.png`);
+        console.log(`[preview] wrote ${out}-{light,dark,open-light,open-dark}.png`);
       },
       { deviceScaleFactor: dpr },
     );

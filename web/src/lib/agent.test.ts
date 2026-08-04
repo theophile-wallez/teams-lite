@@ -1,20 +1,35 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentBackendLabel,
   agentGrantIsOn,
   agentHint,
   agentIsUnrestricted,
   agentModeFor,
+  agentModelDetail,
+  agentModelNamed,
   agentRunnable,
   agentToolGrants,
   agentToolsWithGrant,
   availableBackends,
+  formatTokens,
   usableBackends,
   type AgentBackend,
+  type AgentModel,
   type AgentStatus,
   type AgentToolGrant,
 } from "./agent";
 
 const SANDBOX = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
+
+const OPUS: AgentModel = {
+  id: "opus",
+  label: "Opus 5",
+  vendor: "anthropic",
+  vendor_label: "Anthropic",
+  context: 1_000_000,
+  output: 128_000,
+};
+const SONNET: AgentModel = { ...OPUS, id: "sonnet", label: "Sonnet 5" };
 
 /** One provider, installed and enabled unless the test says otherwise — the state a
  *  fresh backend reports. */
@@ -25,7 +40,7 @@ function backend(over: Partial<AgentBackend> = {}): AgentBackend {
     available: true,
     enabled: true,
     model: null,
-    models: ["opus", "sonnet"],
+    models: [OPUS, SONNET],
     ...over,
   };
 }
@@ -240,5 +255,49 @@ describe("agentHint", () => {
 
   it("says nothing is known before the backend answers", () => {
     expect(agentHint(null)).toContain("not said yet");
+  });
+});
+
+describe("naming a provider and its models", () => {
+  it("capitalises a provider the way its vendor does", () => {
+    // The RPC spelling stays lowercase — a reply signs itself with it — so the
+    // capitals belong to the pane and nowhere else.
+    expect(agentBackendLabel("claude")).toBe("Claude");
+    expect(agentBackendLabel("opencode")).toBe("OpenCode");
+  });
+
+  it("leaves a provider this app has never heard of under its own name", () => {
+    // A newer backend may hold a CLI this build knows nothing about. Showing its own
+    // name is right; guessing at capitals is not.
+    expect(agentBackendLabel("codex")).toBe("codex");
+  });
+
+  it("shortens a token count only when the short form is exact", () => {
+    expect(formatTokens(1_000_000)).toBe("1M");
+    expect(formatTokens(200_000)).toBe("200K");
+    expect(formatTokens(64_000)).toBe("64K");
+    // 1,050,000 is not "1M": a rounded number in a settings pane reads as a fact.
+    expect(formatTokens(1_050_000)).toBe("1050K");
+    expect(formatTokens(1_234)).toBe("1234");
+  });
+
+  it("says who made a model and what it holds", () => {
+    expect(agentModelDetail(OPUS)).toBe("Anthropic · 1M context · 128K output");
+  });
+
+  it("drops a limit the machine's catalogue does not state", () => {
+    // A model the catalogue names and nothing else: "0 context" would be a lie, and a
+    // dash would be noise.
+    const bare: AgentModel = { ...OPUS, context: null, output: null };
+    expect(agentModelDetail(bare)).toBe("Anthropic");
+  });
+
+  it("finds an offered model by id, and reports a model nobody offers", () => {
+    const claude = backend();
+    expect(agentModelNamed(claude, "sonnet")).toEqual(SONNET);
+    // A model the user typed, or one this machine's catalogue stopped listing. Either
+    // way the pane shows the stored id rather than pretending nothing is set.
+    expect(agentModelNamed(claude, "claude-opus-4-5")).toBeNull();
+    expect(agentModelNamed(claude, null)).toBeNull();
   });
 });

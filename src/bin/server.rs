@@ -84,7 +84,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_policy, auth, calendar, mail, push, push_policy, retry, sender_icon, store, teams,
+    agent, agent_models, agent_policy, auth, calendar, mail, push, push_policy, retry, sender_icon,
+    store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
@@ -5218,8 +5219,9 @@ fn agent_status_json(store: &Store) -> Result<Value> {
                 "available": agent::is_available(backend),
                 "enabled": providers.is_enabled(backend.name),
                 "model": providers.model(backend.name),
-                // Suggestions for a picker, not a limit — see `Backend::models`.
-                "models": backend.models,
+                // What a picker offers, never a limit on what may be saved — see
+                // `agent_models::choices`, which reads this machine's own catalogue.
+                "models": agent_models::choices(backend),
             })
         })
         .collect();
@@ -5992,7 +5994,26 @@ mod tests {
             // `available` is this machine's own PATH, so it is a fact, not a default.
             assert!(backend["available"].is_boolean(), "{backend}");
         }
-        assert_eq!(status["backends"][0]["models"], json!(["fable", "opus", "sonnet", "haiku"]));
+        // Every entry carries what a select needs to draw itself, not just an id: the
+        // name a person reads, whose mark sits beside it, and how much it holds.
+        assert_eq!(
+            status["backends"][0]["models"][1],
+            json!({
+                "id": "opus",
+                "label": "Opus 5",
+                "vendor": "anthropic",
+                "vendor_label": "Anthropic",
+                "context": 1_000_000,
+                "output": 128_000,
+            }),
+        );
+        let ids: Vec<&str> = status["backends"][0]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["fable", "opus", "sonnet", "haiku"]);
     }
 
     #[test]

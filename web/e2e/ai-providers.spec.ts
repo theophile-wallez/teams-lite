@@ -9,6 +9,11 @@ import { test, fetchAgentModes, gotoApp } from "./helpers";
 // decision. The mock reports `claude` as installed and `opencode` as not, which is the
 // state a real machine with one CLI is in — so both halves of the pane are exercised.
 //
+// The model list itself comes from the backend, per machine (`agent_models::choices`
+// reads opencode's own catalogue), so the mock stands in for it with `claude`'s four
+// aliases. What these specs pin is the control, not the catalogue: a chosen model is
+// stored, the default is reachable, and a model nobody listed can still be typed.
+//
 // Nothing here runs an agent. That needs a real CLI and a real tenant, and
 // `examples/agent_stream_probe.rs` is the sanctioned way to try it.
 
@@ -65,47 +70,83 @@ test.describe("AI providers", () => {
     expect(again.providers.find((p) => p.name === "claude")?.enabled).toBe(true);
   });
 
-  test("a suggestion picks the model, and the default can be restored", async ({ page }) => {
+  test("the select offers the machine's own models, and picking one stores it", async ({ page }) => {
     const section = await openProviders(page);
     const claude = section.locator('[data-testid="ai-provider"][data-provider="claude"]');
+    const select = claude.locator('[data-testid="ai-provider-model-select"]');
 
-    // No model chosen: the CLI keeps whatever it is configured for.
-    await expect(claude.locator('[data-testid="ai-provider-model-input"]')).toHaveValue("");
+    // No model chosen: the CLI keeps whatever it is configured for, and the row says
+    // so rather than showing an empty control.
+    await expect(select).toHaveAttribute("data-value", "");
+    await expect(select).toContainText("Default");
 
-    await claude.locator('[data-testid="ai-provider-model-suggestion"][data-value="opus"]').click();
-    await expect(claude.locator('[data-testid="ai-provider-model-input"]')).toHaveValue("opus");
+    await select.click();
+    // Each entry reads as a model: the vendor's name for it, and what it holds.
+    const option = page.locator('[data-testid="ai-provider-model-option"][data-value="opus"]');
+    await expect(option).toContainText("Opus 5");
+    await expect(option).toContainText("1M context");
+    await option.click();
+
+    // The trigger shows the stored choice, and the BACKEND is what proves it.
+    await expect(select).toHaveAttribute("data-value", "opus");
+    await expect(select).toContainText("Opus 5");
     await expect
       .poll(async () => (await fetchAgentModes(page)).providers.find((p) => p.name === "claude")?.model)
       .toBe("opus");
 
-    await claude.locator('[data-testid="ai-provider-model-clear"]').click();
-    await expect(claude.locator('[data-testid="ai-provider-model-input"]')).toHaveValue("");
+    // Back to the CLI's own default, which is an entry of the list rather than an
+    // empty field to clear.
+    await select.click();
+    await page.locator('[data-testid="ai-provider-model-default"]').click();
+    await expect(select).toHaveAttribute("data-value", "");
     await expect
       .poll(async () => (await fetchAgentModes(page)).providers.find((p) => p.name === "claude")?.model)
       .toBe(null);
   });
 
-  test("a typed model is saved, and a name that could pass for a flag is refused", async ({
+  test("a model this machine does not list is still typed in, and a flag is refused", async ({
     page,
   }) => {
     const section = await openProviders(page);
     const claude = section.locator('[data-testid="ai-provider"][data-provider="claude"]');
-    const input = claude.locator('[data-testid="ai-provider-model-input"]');
-    const save = claude.locator('[data-testid="ai-provider-model-save"]');
+    const select = claude.locator('[data-testid="ai-provider-model-select"]');
+    const search = page.locator('[data-testid="ai-provider-model-search"]');
+    const typed = page.locator('[data-testid="ai-provider-model-custom"]');
 
-    // A full model id, not just an alias: the field is free-form on purpose.
-    await input.fill("claude-opus-4-5");
-    await save.click();
+    // A full model id, not one of the aliases the backend lists: the list is a picker
+    // and never the limit, so the search field doubles as the entry.
+    await select.click();
+    await search.fill("claude-opus-4-5");
+    await typed.click();
+    await expect(select).toHaveAttribute("data-value", "claude-opus-4-5");
     await expect
       .poll(async () => (await fetchAgentModes(page)).providers.find((p) => p.name === "claude")?.model)
       .toBe("claude-opus-4-5");
 
     // A model name must never become another flag on the CLI's command line. The
     // backend refuses it, and the row says why rather than pretending it saved.
-    await input.fill("--dangerously-skip-permissions");
-    await save.click();
+    await select.click();
+    await search.fill("--dangerously-skip-permissions");
+    await typed.click();
     await expect(claude.locator('[data-testid="ai-provider-error"]')).toBeVisible();
     const stored = await fetchAgentModes(page);
     expect(stored.providers.find((p) => p.name === "claude")?.model).toBe("claude-opus-4-5");
+    // And the trigger still shows what IS stored, not what was refused.
+    await expect(select).toHaveAttribute("data-value", "claude-opus-4-5");
+  });
+
+  test("a provider reads by its own name and mark", async ({ page }) => {
+    const section = await openProviders(page);
+    // "Claude", not "claude": the RPC spelling stays lowercase, and the pane is the one
+    // place that reads as a product name.
+    await expect(
+      section.locator('[data-testid="ai-provider"][data-provider="claude"]'),
+    ).toContainText("Claude");
+    await expect(
+      section.locator('[data-testid="ai-provider"][data-provider="opencode"]'),
+    ).toContainText("OpenCode");
+    // Each vendor's own artwork, which is what the eye finds before it reads.
+    await expect(section.locator('[data-testid="claude-logo"]').first()).toBeVisible();
+    await expect(section.locator('[data-testid="opencode-logo"]').first()).toBeVisible();
   });
 });

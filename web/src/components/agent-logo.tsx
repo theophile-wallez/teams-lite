@@ -1,5 +1,6 @@
 import { HugeiconsIcon } from "@hugeicons/react";
 import { SparklesIcon } from "@hugeicons/core-free-icons";
+import type { AgentModel } from "~/lib/agent";
 import { cn } from "~/lib/utils";
 
 /**
@@ -95,6 +96,24 @@ export function AgentLogo(props: { backend: string; className?: string; title?: 
         />
       );
   }
+}
+
+/**
+ * Whose mark belongs beside one model's name.
+ *
+ * A model is not the CLI that runs it: opencode drives `provider/model` for whichever
+ * providers the machine authenticated, so its list is mostly other vendors' models —
+ * `amazon-bedrock/eu.anthropic.claude-opus-5` is a Claude model reached through
+ * Bedrock, and reading Anthropic's mark beside it is the point of having one.
+ *
+ * Only marks this app actually holds are named. Anthropic's is one of the two above,
+ * so a model of theirs wears it whichever CLI runs it; every other vendor falls back
+ * to the CLI's own mark rather than to invented artwork. The test is the model's own
+ * words — a model that another vendor named after Claude would be misread, which costs
+ * a wrong logo in a picker and nothing else.
+ */
+export function modelMark(backend: string, model: AgentModel): string {
+  return /anthropic|claude/i.test(`${model.vendor} ${model.id}`) ? "claude" : backend;
 }
 
 /**

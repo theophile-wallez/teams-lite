@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { BotIcon, CheckIcon, Loading02Icon, SparklesIcon } from "@hugeicons/core-free-icons";
-import type { AgentBackend } from "~/lib/agent";
+import { CheckIcon, SparklesIcon } from "@hugeicons/core-free-icons";
+import { agentBackendLabel, type AgentBackend } from "~/lib/agent";
 import { cn } from "~/lib/utils";
+import { AgentLogo } from "./agent-logo";
+import { AgentModelSelect } from "./agent-model-select";
 import { useAppState, useController } from "./controller-context";
-import { Button } from "./ui/button";
-import { Input } from "./ui/input";
 
 /**
  * AI providers — which coding agent may answer an `@claude` message, and on which
@@ -19,10 +19,17 @@ import { Input } from "./ui/input";
  * - **Every installed provider is on out of the box.** Turning one off is the user
  *   narrowing the set, so the switch reflects the backend's own answer and never a
  *   hopeful local guess.
- * - **The model is a free-form name, with suggestions.** `claude` takes an alias or a
- *   full model id; `opencode` takes `provider/model` for whichever providers that
- *   machine has authenticated. A fixed dropdown would be wrong on the next machine, so
- *   the suggestions fill the field rather than replacing it.
+ * - **The model is chosen from the machine's own list.** The backend reads what this
+ *   machine can really run (`agent_models::choices`) and names each model the way its
+ *   vendor does, so the picker offers models rather than ids. It stays a picker and
+ *   never a limit — the search field doubles as the free-form entry the RPC has always
+ *   accepted, because a list that is right on this machine would be wrong on the next.
+ *
+ * The providers are rows of one list, not a card each. A card frames one thing to say
+ * it stands alone; these two are the same kind of thing, read in order, so the eye
+ * should run down the names instead of stopping at every border. Each row wears its
+ * vendor's own mark rather than a generic robot, because the mark is what the reader
+ * recognises before reading a word.
  *
  * Where a conversation is armed stays in that conversation's own header
  * (components/agent-menu.tsx) — that consent belongs where the user can see who reads
@@ -62,9 +69,9 @@ export function AiProvidersSettings() {
           This backend is read-only, so no provider ever answers.
         </p>
       ) : (
-        <div className="flex flex-col gap-3">
-          {backends.map((backend) => (
-            <ProviderRow key={backend.name} backend={backend} />
+        <div className="flex flex-col rounded-xl bg-card shadow-chip">
+          {backends.map((backend, index) => (
+            <ProviderRow key={backend.name} backend={backend} first={index === 0} />
           ))}
         </div>
       )}
@@ -73,28 +80,18 @@ export function AiProvidersSettings() {
 }
 
 /** One provider: whether it is installed, whether it answers, and which model it runs. */
-function ProviderRow(props: { backend: AgentBackend }) {
+function ProviderRow(props: { backend: AgentBackend; first: boolean }) {
   const controller = useController();
   const { backend } = props;
 
-  const [model, setModel] = useState(backend.model ?? "");
   const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // The backend's own answer is the truth: re-sync when it changes (a write landing,
-  // another window changing it, a reconnect).
-  useEffect(() => {
-    setModel(backend.model ?? "");
-  }, [backend.model]);
 
   const save = async (patch: { enabled?: boolean; model?: string }) => {
     setBusy(true);
     setError(null);
-    setSaved(false);
     try {
       await controller.setAgentProvider(backend.name, patch);
-      setSaved(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -102,8 +99,7 @@ function ProviderRow(props: { backend: AgentBackend }) {
     }
   };
 
-  const stored = backend.model ?? "";
-  const dirty = model.trim() !== stored;
+  const label = agentBackendLabel(backend.name);
   const on = backend.available && backend.enabled;
 
   return (
@@ -112,21 +108,21 @@ function ProviderRow(props: { backend: AgentBackend }) {
       data-provider={backend.name}
       data-available={backend.available}
       data-enabled={backend.enabled}
-      className="flex flex-col gap-3 rounded-xl bg-card p-4 shadow-chip"
+      className={cn("flex flex-col gap-3 p-4", !props.first && "border-t border-border-subtle")}
     >
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
-          <div
-            className={cn(
-              "grid size-9 shrink-0 place-items-center rounded-lg shadow-chip",
-              on ? "bg-primary/10 text-primary" : "bg-element text-text-faint",
-            )}
-          >
-            <HugeiconsIcon icon={BotIcon} className="size-5" strokeWidth={1.5} />
-          </div>
+          {/* The vendor's own artwork, bare: it carries its own colour, and a tinted
+              chip behind it would read as this app's badge rather than theirs. A
+              provider that cannot answer wears it greyed, which says "off" without a
+              word. */}
+          <AgentLogo
+            backend={backend.name}
+            className={cn("size-5 shrink-0", !on && "opacity-40 grayscale")}
+          />
           <div className="flex min-w-0 flex-col">
             <span className="flex items-center gap-2 text-[13px] font-medium text-foreground">
-              {backend.name}
+              {label}
               {backend.available ? (
                 <span
                   data-testid="ai-provider-availability"
@@ -157,7 +153,7 @@ function ProviderRow(props: { backend: AgentBackend }) {
           type="button"
           role="switch"
           aria-checked={on}
-          aria-label={`Enable the ${backend.name} provider`}
+          aria-label={`Enable the ${label} provider`}
           data-testid="ai-provider-toggle"
           disabled={busy || !backend.available}
           onClick={() => void save({ enabled: !backend.enabled })}
@@ -178,105 +174,23 @@ function ProviderRow(props: { backend: AgentBackend }) {
         </button>
       </div>
 
-      {/* No CLI, no model to choose: a field that could never change a run is a
+      {/* No CLI, no model to choose: a control that could never change a run is a
           question with no answer. */}
       {backend.available && (
-        <label className="flex flex-col gap-1.5 border-t border-border-subtle pt-3">
-          <span className="text-[13px] font-medium text-foreground">Model</span>
-          <div className="flex items-center gap-2">
-            <Input
-              data-testid="ai-provider-model-input"
-              value={model}
-              placeholder={`Default — whatever ${backend.name} is configured for`}
-              autoCapitalize="off"
-              autoCorrect="off"
-              spellCheck={false}
-              disabled={busy}
-              onChange={(e) => setModel(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && dirty) void save({ model: model.trim() });
-              }}
-            />
-            <Button
-              size="sm"
-              data-testid="ai-provider-model-save"
-              disabled={busy || !dirty}
-              onClick={() => void save({ model: model.trim() })}
-            >
-              {busy ? (
-                <HugeiconsIcon
-                  icon={Loading02Icon}
-                  className="size-4 animate-spin"
-                  strokeWidth={1.8}
-                />
-              ) : (
-                "Save"
-              )}
-            </Button>
-          </div>
-
-          {backend.models.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5 pt-1">
-              {backend.models.map((suggestion) => (
-                <button
-                  key={suggestion}
-                  type="button"
-                  data-testid="ai-provider-model-suggestion"
-                  data-value={suggestion}
-                  disabled={busy}
-                  onClick={() => {
-                    setModel(suggestion);
-                    void save({ model: suggestion });
-                  }}
-                  className={cn(
-                    "rounded-full px-2 py-0.5 font-mono text-[11px] transition-colors",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    stored === suggestion
-                      ? "bg-primary/12 text-primary"
-                      : "bg-element text-text-dim hover:text-foreground",
-                  )}
-                >
-                  {suggestion}
-                </button>
-              ))}
-            </div>
-          )}
-
-          <span className="text-[11px] text-text-faint">
-            {stored
-              ? `Runs ${backend.name} on ${stored}.`
-              : `Leave it empty to run whatever ${backend.name} is configured for.`}
-            {stored && (
-              <button
-                type="button"
-                data-testid="ai-provider-model-clear"
-                disabled={busy}
-                onClick={() => {
-                  setModel("");
-                  void save({ model: "" });
-                }}
-                className="ml-1.5 text-primary underline underline-offset-2 hover:opacity-80"
-              >
-                Use the default
-              </button>
-            )}
-          </span>
-        </label>
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] font-medium text-text-faint">Model</span>
+          <AgentModelSelect
+            backend={backend}
+            busy={busy}
+            onChoose={(model) => void save({ model })}
+          />
+        </div>
       )}
 
-      {error ? (
+      {error && (
         <span data-testid="ai-provider-error" className="text-xs text-destructive">
           {error}
         </span>
-      ) : (
-        saved && (
-          <span
-            data-testid="ai-provider-saved"
-            className="flex items-center gap-1 text-xs text-emerald-600 animate-in fade-in-0 zoom-in-95 duration-200 ease-out dark:text-emerald-400"
-          >
-            <HugeiconsIcon icon={CheckIcon} className="size-3.5" strokeWidth={2} /> Saved
-          </span>
-        )
       )}
     </div>
   );
