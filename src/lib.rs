@@ -16,6 +16,7 @@ pub mod teams;
 pub mod teams_activity;
 pub mod teams_avatars;
 pub mod teams_cards;
+pub mod teams_chat_settings;
 pub mod teams_media;
 pub mod teams_members;
 pub mod teams_presence;

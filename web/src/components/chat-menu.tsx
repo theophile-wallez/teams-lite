@@ -28,17 +28,21 @@ const ITEM_ICON = "size-4 shrink-0 text-text-dim";
  * The "…" menu on a chat row in the sidebar — the settings Microsoft Teams offers
  * there: pin the chat to the top, mute it, put it away, mark it read.
  *
- * Pin, mute and hide are LOCAL overrides. Each mirrors what Teams reported until the
- * user changes it here, and nothing is written back: publishing a setting to their
- * account is an outward action and would need its own consent gate, exactly like a
- * send (see `ChatPrefs` in lib/protocol.ts). The menu states that in one line rather
- * than letting the user assume their phone learned about it — a mute that silenced
- * this app while their phone kept buzzing would otherwise read as a broken switch.
+ * Two of the four items reach the account, and two do not — which is measurement, not
+ * policy, and the menu says which is which because a switch whose reach the user has to
+ * guess is worse than no switch:
  *
- * Mark as read is the one item that DOES leave the machine, so it sits apart: it is
- * the same `mark_read` the app makes on open, which publishes the user's consumption
- * horizon and shows the sender a read receipt. It is here because the user asked for
- * it on this chat, and Ghost mode still decides whether Teams is told at all.
+ * - **Mute is published to Microsoft Teams.** A mute is the conversation's own `alerts`
+ *   property; the write round-trips (see `src/teams_chat_settings.rs`), so it lands on
+ *   every device the user is signed in on and their phone stops notifying them.
+ * - **Mark as read is published too**: the same `mark_read` the app makes on open, which
+ *   moves the user's consumption horizon and shows the sender a read receipt. Ghost mode
+ *   still decides whether Teams is told at all.
+ * - **Pin and hide stay HERE.** Teams keeps neither in a place this app can write: the
+ *   chat service refuses `pinned`/`sticky` outright, and the properties it does accept
+ *   are never read back by the payload the sidebar is built from. A write nothing reads
+ *   would report success while the user's phone disagreed, so both remain local
+ *   overrides (`ChatPrefs` in lib/protocol.ts).
  *
  * The trigger belongs to a pointer, so a phone never sees it: it is revealed by hover
  * on a fine pointer and hidden outright on a coarse one, where the way in is a long
@@ -58,7 +62,7 @@ export function ChatMenu(props: {
   const prefs = useAppState((s) => s.chatPrefs);
   const c = props.conversation;
   const pinned = chatIsPinned(c, prefs);
-  const muted = chatIsMuted(c, prefs);
+  const muted = chatIsMuted(c);
   const hidden = chatIsHidden(c, prefs);
 
   return (
@@ -111,7 +115,7 @@ export function ChatMenu(props: {
         <DropdownMenuItem
           data-testid="chat-menu-mute"
           data-on={muted ? "true" : undefined}
-          onSelect={() => controller.toggleChatMute(c.id)}
+          onSelect={() => void controller.setChatMuted(c.id, !muted)}
         >
           <HugeiconsIcon
             icon={muted ? BellIcon : BellOffIcon}
@@ -148,11 +152,11 @@ export function ChatMenu(props: {
         <DropdownMenuSeparator />
 
         {/* Not a `DropdownMenuLabel`: that one captions the group under it. This is a
-            note about the two settings above, and it is the honest half of offering
-            them at all. */}
+            note about the items above, and it is the honest half of offering them at
+            all — each half of it names the settings it applies to. */}
         <p className="px-2.5 pb-1 pt-0.5 text-[11px] leading-snug text-text-faint">
-          Pinning, muting and hiding stay in teams-lite. Microsoft Teams is not told, so
-          your phone still notifies you.
+          Muting reaches Microsoft Teams, so your phone goes quiet too. Pinning and hiding
+          stay in teams-lite.
         </p>
       </DropdownMenuContent>
     </DropdownMenu>

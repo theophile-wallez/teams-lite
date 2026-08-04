@@ -171,8 +171,22 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// [`SETTING_ALWAYS_AVAILABLE`]). It posts no message, but the green dot it turns on
 /// is read by every colleague as a statement about where the user is — and the same
 /// call is what takes it back, so both directions belong behind one gate.
-const OUTWARD_METHODS: [&str; 6] =
-    ["send", "edit", "delete", "react", "mark_read", "set_always_available"];
+/// `set_chat_muted` publishes one of the user's own chat settings: Teams stores a mute
+/// as the conversation's `alerts` property, and the setting lands in every client they
+/// are signed in on — their phone stops notifying them about that thread. It reaches no
+/// colleague, which is why the refusal text says so plainly, but it changes the user's
+/// account on every device, so it sits behind the same gate as a send. The chat's PIN
+/// and HIDE are deliberately NOT here: neither write round-trips through the tenant, so
+/// both stay local to this app (see `src/teams_chat_settings.rs`).
+const OUTWARD_METHODS: [&str; 7] = [
+    "send",
+    "edit",
+    "delete",
+    "react",
+    "mark_read",
+    "set_always_available",
+    "set_chat_muted",
+];
 
 /// The RPC methods that act on THIS MACHINE, outside the store and the network.
 ///
@@ -2032,6 +2046,40 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
             }
             Ok(json!({ "read": true, "ghost": ghost }))
+        }
+
+        // Mute or unmute one chat IN TEAMS. The one chat setting this app publishes:
+        // Teams keeps a mute as the conversation's `alerts` property, and a write of it
+        // is reported back by the same CSA payload the sidebar is built from (see
+        // src/teams_chat_settings.rs for the measurement, and for why the pin and the
+        // hide stay local). OUTWARD, so it is gated like a send — the setting reaches
+        // every client the user is signed in on.
+        "set_chat_muted" => {
+            let conv = param_str(params, "conversation")?;
+            let muted = params.get("muted").and_then(Value::as_bool).unwrap_or(false);
+            // A channel's notifications are a different setting with a different shape
+            // (store::ChannelAlerts has four states, not two), so this refuses one
+            // rather than writing a chat property to a thread that has none.
+            if ctx.store()?.is_channel(&conv).unwrap_or(false) {
+                anyhow::bail!("set_chat_muted: {conv} is a channel, not a chat");
+            }
+            let http = ctx.http.clone();
+            let target = conv.clone();
+            ctx.retry_on_auth(move |session, _csa| {
+                let http = http.clone();
+                let conv = target.clone();
+                async move {
+                    teams_lite::teams_chat_settings::set_chat_muted(&http, &session, &conv, muted)
+                        .await
+                }
+            })
+            .await?;
+            // Teams took it, so reflect it now instead of waiting for the next sync —
+            // which will overwrite this column with the value we just published.
+            if ctx.store()?.set_conversation_muted(&conv, muted)? {
+                ctx.emit("conversations_changed", json!({}));
+            }
+            Ok(json!({ "muted": muted }))
         }
 
         // Notifications panel — the three Teams activity streams, one per tab:
@@ -5279,6 +5327,50 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    // Muting a chat publishes the user's own `alerts` property: it reaches no
+    // colleague, but it lands on every device they are signed in on and silences a
+    // thread they may be waiting on. So it is outward and token-gated — and the chat's
+    // PIN and HIDE must stay OUT of that list, because neither write round-trips
+    // through the tenant and a gate on a write nobody makes is a false promise.
+    #[test]
+    fn muting_a_chat_is_outward_facing_and_token_gated() {
+        assert!(OUTWARD_METHODS.contains(&"set_chat_muted"));
+        assert_eq!(write_class("set_chat_muted"), Some(WriteClass::Outward));
+        let params = json!({ "conversation": "c1", "muted": true });
+        let err = check_write_allowed("set_chat_muted", &params, Some("tok"))
+            .expect_err("must refuse a tokenless mute");
+        assert!(err.contains("write token"), "{err}");
+        assert!(
+            check_write_allowed(
+                "set_chat_muted",
+                &json!({ "conversation": "c1", "muted": true, "write_token": "tok" }),
+                Some("tok")
+            )
+            .is_ok()
+        );
+        // The two settings this app holds locally have no RPC at all: nothing in the
+        // dispatcher may publish them while nothing reads the write back.
+        for absent in ["set_chat_pinned", "set_chat_hidden"] {
+            assert_eq!(write_class(absent), None, "{absent}");
+        }
+    }
+
+    /// The handler names the ONE property whose write round-trips, and no other. A
+    /// later change that publishes the pin or the hide has to move the measurement
+    /// forward first (see src/teams_chat_settings.rs).
+    #[test]
+    fn the_chat_settings_handler_publishes_only_the_mute() {
+        let source = include_str!("server.rs");
+        let handler = source
+            .split("\"set_chat_muted\" => {")
+            .nth(1)
+            .expect("the set_chat_muted handler");
+        let handler = &handler[..handler.find("\n        }").unwrap_or(handler.len())];
+        for forbidden in ["ispinned", "historyHiddenTime", "favorite"] {
+            assert!(!handler.contains(forbidden), "{forbidden} must not be published");
+        }
     }
 
     // Deleting a message removes it from the thread for everybody, on every device,

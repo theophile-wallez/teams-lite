@@ -43,6 +43,11 @@
 #      `/v1/me/forceavailability/`), which turns the green dot on for every colleague
 #      who can see them. The gated `set_always_available` RPC — the switch in
 #      Settings — is the only way that may happen;
+#   2f. a WRITE of one of the user's own CHAT SETTINGS straight to Teams
+#      (`PUT …/properties?name=alerts|ispinned|historyHiddenTime`), which pins, mutes
+#      or hides that chat in every Teams client they own. The gated
+#      `set_chat_pinned` / `set_chat_muted` / `set_chat_hidden` RPCs — the "…" menu on
+#      a chat row — are the only way that may happen;
 #   5. anything that would send MAIL. The mailbox is read-only here and has no
 #      sandbox equivalent (see AGENTS.md § Mail is READ-ONLY): the broker token
 #      already carries `Mail.Send`, so the only thing standing between this
@@ -310,6 +315,15 @@ publishes_presence() {
   grep -qiE 'me/endpoints|me/forceavailability|register_available_endpoint|remove_endpoint|presence\.teams\.microsoft\.com/\.default' "$1"
 }
 
+# Does this file WRITE one of the user's own chat settings to Teams? The three
+# conversation properties the pin, the mute and the hide live in — measured against the
+# tenant by examples/chat_settings_recon.rs — plus the crate's own functions that write
+# them. Reading those properties is ordinary recon (the same GET the sidebar is built
+# on) and is deliberately not matched: only `name=<key>`, the shape of the PUT, is.
+writes_chat_settings() {
+  grep -qiE 'name=(alerts|ispinned|historyHiddenTime)|set_chat_(pinned|muted|hidden)' "$1"
+}
+
 # Cargo examples that would post to Teams somewhere other than the sandbox channel,
 # and (separately) those that would publish the user's own presence.
 examples_that_send=""
@@ -325,11 +339,14 @@ while IFS= read -r source; do
     examples_publishing_presence="$examples_publishing_presence $source"
   fi
   # Does it act outward at all? Through this crate's send path, by naming the
-  # chatService messages endpoint itself, or by publishing our read position — a
+  # chatService messages endpoint itself, by publishing our read position — a
   # horizon write tells the other party the user read their message, which reaches
-  # them exactly as a post does (see `set_consumption_horizon`).
-  grep -qE 'teams_send::(send_message|edit_message|delete_message|set_reaction)|/v1/users/ME/conversations/[^"]*/messages|set_consumption_horizon|name=consumptionhorizon([^s]|$)' \
-    "$path" || continue
+  # them exactly as a post does (see `set_consumption_horizon`) — or by writing one of
+  # the user's own chat settings, which lands in every Teams client they own.
+  if ! grep -qE 'teams_send::(send_message|edit_message|delete_message|set_reaction)|/v1/users/ME/conversations/[^"]*/messages|set_consumption_horizon|name=consumptionhorizon([^s]|$)' \
+    "$path" && ! writes_chat_settings "$path"; then
+    continue
+  fi
   # Then every conversation it names must be the sandbox one — and it must name one.
   # A send whose target comes from an argument is a send waiting for a typo.
   targets="$(grep -oE '19:[A-Za-z0-9]+@thread\.v2|8:orgid:[0-9a-fA-F-]+' "$path" | sort -u)"
@@ -342,6 +359,7 @@ scripts_driving_a_browser=""
 scripts_writing_to_the_backend=""
 scripts_sending_mail=""
 scripts_writing_the_read_state=""
+scripts_writing_chat_settings=""
 scripts_publishing_presence=""
 scripts_fetching_the_write_token=""
 if ! sanctioned_automation; then
@@ -363,6 +381,12 @@ if ! sanctioned_automation; then
     # read, which is ordinary recon and must stay open.
     if grep -qiE 'name=consumptionhorizon([^s]|$)|set_consumption_horizon' "$script"; then
       scripts_writing_the_read_state="$scripts_writing_the_read_state $script"
+    fi
+    # The chat settings, straight to Teams: pinning, muting or hiding a chat lands in
+    # every Teams client the user owns. Reading the same properties stays open — it is
+    # the GET the sidebar is built on.
+    if writes_chat_settings "$script"; then
+      scripts_writing_chat_settings="$scripts_writing_chat_settings $script"
     fi
     # Our own presence, straight to Teams: registering an endpoint turns the green dot
     # on for every colleague, and the manual status beside it cannot even be undone.
@@ -410,7 +434,7 @@ if ! sanctioned_automation; then
     # and Outlook still calls the mail unread, so the local mark stands), so a script
     # walking a live inbox would quietly erase what the user had not read yet.
     if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that
@@ -543,6 +567,40 @@ READING horizons is fine and is how \"seen by\" works — GET …/consumptionhor
 (plural) is untouched by this rule. To exercise the write, use the mock:
 cd web && bun run preview. Against the real account it needs the user's consent,
 through the app's own gated mark_read RPC."
+fi
+
+# --- 1d2. a chat setting goes to Teams through the gated RPC, or not at all ------
+# `set_chat_pinned` / `set_chat_muted` / `set_chat_hidden` are guarded as backend writes
+# by rule 1, but the property can also be PUT straight to Teams with the skypetoken,
+# which bypasses the backend entirely (the write token, read-only mode, the menu's own
+# confirmation). So the three property names are matched inside ad-hoc scripts and cargo
+# examples, and on the command line behind an HTTP client — the same restriction rule 1d
+# puts on the horizon write, so `grep -rn name=alerts src` still reads the code that
+# implements this.
+#
+# Unlike a send, a chat setting reaches no colleague — but it changes the user's own
+# sidebar on every device they own, and a mute silences a thread they may be waiting on.
+# Pinning the sandbox chat is what makes an example safe, exactly as for a send.
+if printf '%s' "$command_line" |
+  grep -qiE '(curl|wget|xh|httpie|http)[^;&|]*name=(alerts|ispinned|historyHiddenTime)' ||
+  [ -n "$scripts_writing_chat_settings" ]; then
+  [ -n "$scripts_writing_chat_settings" ] &&
+    printf 'note: a chat-settings write was found inside%s\n' "$scripts_writing_chat_settings" >&2
+  block "This command would WRITE one of the user's own chat settings straight to Teams
+(PUT …/properties?name=alerts | ispinned | historyHiddenTime).
+
+Those three carry the mute, the pin and the hide of one chat. A write lands in every
+Teams client the user is signed in on: a pin re-orders their sidebar on their phone, a
+mute silences a thread they may be waiting on, and a hide takes it out of their list.
+
+Going direct also bypasses every gate the feature has: the write token, read-only mode,
+and the app's own menu, which is where the user asks for the change.
+
+READING those properties is fine and is what the sidebar is built on — a GET of
+/v1/users/ME/conversations is untouched by this rule. To exercise the write, use the
+mock: cd web && bun run preview. Against the real account it goes through the app's own
+gated set_chat_pinned / set_chat_muted / set_chat_hidden RPCs, or through a cargo
+example that pins the sandbox chat."
 fi
 
 # --- 1e. our own presence is published by the gated RPC, or not at all ----------

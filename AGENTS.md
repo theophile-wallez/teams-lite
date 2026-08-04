@@ -566,19 +566,30 @@ there plus the one read action: **pin to top**, **mute**, **hide**, **mark as re
 **Pinned**, **Recent**, **Hidden chats** — by `organizeChats` in `web/src/lib/protocol.ts`,
 and `web/e2e/chat-menu.spec.ts` pins the lot.
 
-- **The backend already mirrors all three settings** from CSA: `is_pinned` (from
-  `isSticky`), `is_muted`, `is_hidden`. So a chat pinned, muted or hidden in Teams
-  arrives that way — and 182 of this tenant's 595 chats are hidden ones the list used
-  to show anyway.
-- **A change made here is a LOCAL override, exactly like a channel pin** (`ChatPrefs`,
-  persisted per browser). Nothing is written back: publishing a chat setting to the
-  user's account is an outward action and would need its own consent gate and its own
-  `OUTWARD_METHODS` entry. The menu says so in one line, because a mute that silenced
-  this app while the phone kept buzzing would otherwise read as a broken switch.
+- **The MUTE is published to Teams; the pin and the hide are not.** That split is
+  measured, not chosen — `examples/chat_settings_recon.rs` reads where each setting
+  lives and `examples/chat_settings_probe.rs` writes it against the sandbox chat:
+  - a chat's mute IS its `alerts` property (`"false"` on every muted chat, `"true"` on
+    every unmuted one, no crossover), a `PUT` of it answers 200, and CSA then reports
+    `isMuted` to match. So `set_chat_muted` (`src/teams_chat_settings.rs`) publishes it
+    and the row follows the ACCOUNT — the user's phone goes quiet too. It is an
+    `OUTWARD_METHODS` entry: the write token, refused read-only, and the hook blocks the
+    endpoint on a command line.
+  - the pin is not a conversation property at all: the service answers
+    `400 "sticky: Conversation property is not allowed"`, and the one name it does
+    accept (`ispinned`) is never read back by CSA's `isSticky`. The hide is the same
+    story with `historyHiddenTime`. **A write nothing reads back is worse than no
+    write** — it would report success while the user's phone disagreed — so both stay
+    LOCAL overrides (`ChatPrefs`, persisted per browser), and no RPC exists for them.
+    `muting_a_chat_is_outward_facing_and_token_gated` pins that absence.
+- **`hidden` from CSA is NOT Teams' Hide, and nothing may read it as one.** It is true
+  on all 95 of this tenant's one-to-one chats — the colleagues the user messages daily
+  included — and on 87 of 499 group chats. Bucketing the sidebar on it emptied Recent of
+  every direct message. `chatIsHidden` therefore reads the user's own hide and nothing
+  else; the mock keeps one chat flagged so a spec holds the app to that.
 - **A hide is held by a watermark, not a flag.** `chatIsHidden` keeps the chat away
   while its newest message is no newer than the watermark, so a NEW message brings it
-  back on its own — which is what Teams' Hide does. `0` means "shown here", the one way
-  back for a chat Teams itself hides.
+  back on its own — which is what Teams' Hide does. `0` means "shown here".
 - **Mark as read is the one item that leaves the machine.** It is the same `mark_read`
   the app makes on open — the user's consumption horizon, so the sender is shown a read
   receipt — and Ghost mode still decides whether Teams is told. It is offered because

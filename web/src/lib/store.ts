@@ -385,11 +385,11 @@ const CHANNEL_PINS_KEY = "teams-lite:channel-pins";
 // The key keeps its old name so a fold the user already made survives: it now holds
 // the chat-list groups as well, which is why the state it feeds is `collapsedSections`.
 const COLLAPSED_SECTIONS_KEY = "teams-lite:collapsed-teams";
-// Where the local chat pin / mute / hide overrides are persisted (client-only, like
-// the channel pins). Three maps rather than one blob, so a malformed value can only
-// ever cost the one setting it belongs to.
+// Where the local chat pin and hide are persisted (client-only, like the channel
+// pins). Two maps rather than one blob, so a malformed value can only ever cost the
+// one setting it belongs to. The MUTE has no key here: it is published to Teams and
+// read back from it, so the conversation row is its only home.
 const CHAT_PINS_KEY = "teams-lite:chat-pins";
-const CHAT_MUTES_KEY = "teams-lite:chat-mutes";
 const CHAT_HIDES_KEY = "teams-lite:chat-hides";
 // How many conversations keep a cached message page at all. Re-opening one of
 // these is instant; beyond that the least-recently-opened page is dropped, so a
@@ -448,7 +448,7 @@ function initialState(): AppState {
     channelPins: {},
     // A fresh set of maps per store, not the shared `NO_CHAT_PREFS` constant: two
     // controllers (a test spawns several) must never share one object.
-    chatPrefs: { pins: {}, mutes: {}, hides: {} },
+    chatPrefs: { pins: {}, hides: {} },
     collapsedSections: {},
     openId: null,
     messages: [],
@@ -1582,16 +1582,9 @@ export class TeamsController {
    *  Microsoft Teams reported. */
   private applyPersistedChatPrefs(): void {
     const pins = readFlagMap(CHAT_PINS_KEY);
-    const mutes = readFlagMap(CHAT_MUTES_KEY);
     const hides = readTimeMap(CHAT_HIDES_KEY);
-    if (!pins && !mutes && !hides) return;
-    this.set({
-      chatPrefs: {
-        pins: pins ?? {},
-        mutes: mutes ?? {},
-        hides: hides ?? {},
-      },
-    });
+    if (!pins && !hides) return;
+    this.set({ chatPrefs: { pins: pins ?? {}, hides: hides ?? {} } });
   }
 
   /** Toggle a channel's pin, lifting it into (or out of) the sidebar's top Pinned
@@ -1618,16 +1611,31 @@ export class TeamsController {
     writeFlagMap(CHAT_PINS_KEY, pins);
   }
 
-  /** Toggle a chat's mute: the row dims, it raises no unread marker, and a message in
-   *  it chimes at nobody here. Local like the pin, so the backend's Web Push still
-   *  reaches the user's phone — the menu that offers the switch says so. */
-  toggleChatMute(id: string): void {
-    const conversation = this.get().conversations.find((c) => c.id === id);
-    if (!conversation) return;
-    const prefs = this.get().chatPrefs;
-    const mutes = { ...prefs.mutes, [id]: !chatIsMuted(conversation, prefs) };
-    this.set({ chatPrefs: { ...prefs, mutes } });
-    writeFlagMap(CHAT_MUTES_KEY, mutes);
+  /**
+   * Mute or unmute one chat IN MICROSOFT TEAMS.
+   *
+   * Outward, and the only one of the three settings that is: Teams keeps a mute as the
+   * conversation's own `alerts` property, so the write lands on every device the user is
+   * signed in on and their phone stops notifying them about the thread. The backend
+   * publishes it and answers with the value it wrote; the row then follows the account
+   * rather than this browser, which is why there is no local override to reconcile.
+   *
+   * A failure is reported: the user asked for a change on their account, so a refusal
+   * (a read-only backend, a page without the write token) must not read as success.
+   */
+  async setChatMuted(id: string, muted: boolean): Promise<void> {
+    try {
+      await this.backend.setChatMuted(id, muted);
+      // Reflect it at once instead of waiting for the backend's list refresh, exactly
+      // as a local read does — the next sync brings the same value back from Teams.
+      const conversations = this.get().conversations.map((c) =>
+        c.id === id ? { ...c, is_muted: muted } : c,
+      );
+      this.set({ conversations });
+    } catch (e) {
+      this.set({ status: `${muted ? "mute" : "unmute"} failed: ${errText(e)}` });
+      playCue("error");
+    }
   }
 
   /** Hide a chat away in the list, or bring it back.
@@ -1650,7 +1658,7 @@ export class TeamsController {
    *  notification and cue as well as dimming the row. */
   private threadIsMuted(id: string): boolean {
     const conversation = this.get().conversations.find((c) => c.id === id);
-    if (conversation) return chatIsMuted(conversation, this.get().chatPrefs);
+    if (conversation) return chatIsMuted(conversation);
     const channel = this.get().channels.find((c) => c.id === id);
     return channel ? channelIsMuted(channel) : false;
   }

@@ -762,9 +762,10 @@ function addConversation(input: {
   isRead: boolean;
   isMuted: boolean;
   isPinned: boolean;
-  /** A chat the user hid in Microsoft Teams. It renders under the chat list's own
-   *  "Hidden chats" section, exactly as it does on the tenant (182 of 595 chats
-   *  there). */
+  /** The `hidden` flag CSA reports for a chat. It is deliberately NOT a hide: measured
+   *  against the tenant it is true on all 95 one-to-one chats, the colleagues the user
+   *  messages daily included. One fixture carries it so the app can be held to reading
+   *  it that way — the row stays in Recent (see `chatIsHidden`). */
   isHidden?: boolean;
   /** A custom group picture, as on a real tenant where some groups have one. */
   pictureUrl?: string;
@@ -819,8 +820,8 @@ function seed(): void {
       isRead: rand() >= 0.35,
       isMuted: rand() < 0.08,
       isPinned: idx === 0, // pin one 1:1
-      // Hide exactly one, so the chat list's "Hidden chats" section is exercised
-      // against a known row: Olivia Martins, the third person.
+      // One chat carries Teams' `hidden` flag, so a spec can prove the app does not
+      // read it as a hide: Olivia Martins, the third person.
       isHidden: idx === 2,
     });
   });
@@ -3972,6 +3973,20 @@ function dispatch(method: string, params: unknown): unknown {
       t.markRead(mockSettings.ghost_mode);
       broadcast(t.changedEvent, {});
       return { read: true, ghost: mockSettings.ghost_mode };
+    }
+
+    // The one chat setting the app publishes to Teams. The mock has no tenant, so it
+    // does what the tenant does from the app's point of view: store the new value on the
+    // conversation and announce the list changed — which is what lets a spec (and
+    // `bun run preview`) exercise the round trip with nothing leaving the machine.
+    case "set_chat_muted": {
+      const id = requireString(params, "conversation");
+      const muted = asObject(params).muted === true;
+      const cs = store.get(id);
+      if (!cs) throw new Error(`unknown conversation: ${id}`);
+      cs.conv.is_muted = muted;
+      broadcast("conversations_changed", {});
+      return { muted };
     }
 
     case "repair_broker": {

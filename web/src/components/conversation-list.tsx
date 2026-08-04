@@ -350,7 +350,7 @@ function ChatList(props: { selectedIndex: number; onSelect: (index: number) => v
                   open={openId === row.chat.id}
                   selected={props.selectedIndex === row.index}
                   pinned={chatIsPinned(row.chat, prefs)}
-                  muted={chatIsMuted(row.chat, prefs)}
+                  muted={chatIsMuted(row.chat)}
                   section={row.sectionId}
                   onClick={() => {
                     props.onSelect(row.index);
@@ -377,8 +377,7 @@ function ChatSectionHeader(props: {
   openId: string | null;
 }) {
   const controller = useController();
-  const prefs = useAppState((s) => s.chatPrefs);
-  const hint = chatSectionCollapsedHint(props.section, prefs, props.openId);
+  const hint = chatSectionCollapsedHint(props.section, props.openId);
   return (
     <SectionHeader
       testId="chat-section-header"

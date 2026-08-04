@@ -5,10 +5,11 @@ import type { Page } from "@playwright/test";
 // how loud it is — pinned, muted, hidden — and offers them from a "…" on the row. This
 // covers that menu and the sections it fills.
 //
-// Every one of them is a LOCAL override here: the app mirrors what Teams reported until
-// the user changes it, and writes nothing back (see `ChatPrefs` in lib/protocol.ts). So
-// what a spec can assert is the app's own behaviour — where the row goes, what it looks
-// like, and that the choice survives a reload.
+// The three do NOT reach the same place, and the split is measured rather than chosen
+// (see src/teams_chat_settings.rs): the MUTE is published to Teams and read back from it,
+// while the pin and the hide are local overrides this app holds itself. So the mute is
+// asserted through the backend — the mock stores what the RPC publishes — and the other
+// two through the app's own behaviour, including across a reload.
 
 /** A chat row, by the id the sidebar states on it. */
 function row(page: Page, id: string) {
@@ -58,7 +59,7 @@ async function scrollSidebarToTop(page: Page): Promise<void> {
 }
 
 test.describe("chat sections and the row menu", () => {
-  test("shows the Pinned, Recent and Hidden sections Teams shows", async ({ page }) => {
+  test("shows the Pinned and Recent sections Teams shows", async ({ page }) => {
     await gotoApp(page);
 
     // The mock pins one 1:1 and one group, so both a Pinned and a Recent header are up.
@@ -69,21 +70,16 @@ test.describe("chat sections and the row menu", () => {
     expect(await pinned.count()).toBeGreaterThan(0);
     await expect(pinned.first()).toHaveAttribute("data-pinned", "true");
 
-    // The chat Teams itself hides is not in Recent: it is folded away at the foot,
-    // which is where the user already put it (see `isHidden` in web/mock/server.ts).
-    await expect(
-      page.locator('[data-testid="conversation-row"]', { hasText: "Olivia Martins" }),
-    ).toHaveCount(0);
-    await scrollSidebarToEnd(page);
-    const hidden = sectionHeader(page, "hidden");
-    await expect(hidden).toBeVisible();
-    await expect(hidden).toHaveText("Hidden chats (1)");
-    // It opens folded, so nothing of it renders until it is asked for.
-    await expect(hidden).toHaveAttribute("data-collapsed", "true");
-    await hidden.click();
-    const hiddenRow = page.locator('[data-testid="conversation-row"][data-section="hidden"]');
-    await expect(hiddenRow).toHaveCount(1);
-    await expect(hiddenRow).toContainText("Olivia Martins");
+    // Nothing is hidden until the user hides something HERE — Teams' own `hidden` flag
+    // is not a hide, and reading it as one buried every 1:1 chat on the real account
+    // (95 of 95, see `chatIsHidden`). The mock marks Olivia Martins hidden exactly to
+    // pin that: the row belongs in Recent all the same.
+    await expect(sectionHeader(page, "hidden")).toHaveCount(0);
+    const flagged = page
+      .locator('[data-testid="conversation-row"]', { hasText: "Olivia Martins" })
+      .first();
+    await flagged.scrollIntoViewIfNeeded();
+    await expect(flagged).toHaveAttribute("data-section", "recent");
   });
 
   test("pinning from the menu lifts the chat into Pinned, and unpinning returns it", async ({
@@ -108,7 +104,9 @@ test.describe("chat sections and the row menu", () => {
     await expect(row(page, id)).not.toHaveAttribute("data-pinned", "true");
   });
 
-  test("muting a chat dims it, states why, and drops its unread marker", async ({ page }) => {
+  test("muting a chat publishes it, dims the row, and drops its unread marker", async ({
+    page,
+  }) => {
     await gotoApp(page);
 
     const unread = page
@@ -118,6 +116,8 @@ test.describe("chat sections and the row menu", () => {
     expect(id).toBeTruthy();
 
     await openChatMenu(page, id);
+    // The mute goes out through `set_chat_muted`; the mock stores it on the
+    // conversation, exactly as the tenant does, so the row below reflects the ACCOUNT.
     await page.locator('[data-testid="chat-menu-mute"]').click();
 
     const muted = row(page, id);
@@ -142,7 +142,7 @@ test.describe("chat sections and the row menu", () => {
 
     await openChatMenu(page, id);
     await page.locator('[data-testid="chat-menu-hide"]').click();
-    // Out of the list: the section it went to is folded, so the row is gone entirely.
+    // Out of the list: the Hidden section it created opens folded, so the row is gone.
     await expect(row(page, id)).toHaveCount(0);
 
     await scrollSidebarToEnd(page);
@@ -159,7 +159,7 @@ test.describe("chat sections and the row menu", () => {
     await expect(row(page, id)).toHaveAttribute("data-section", "recent");
   });
 
-  test("a pin, a mute and a fold survive a reload", async ({ page }) => {
+  test("a pin and a fold survive a reload, and so does a published mute", async ({ page }) => {
     await gotoApp(page);
 
     // A chat the mock does NOT already report as muted, so that "Mute" is what the item
@@ -184,8 +184,17 @@ test.describe("chat sections and the row menu", () => {
     await gotoApp(page);
     await expect(sectionHeader(page, "pinned")).toHaveAttribute("data-collapsed", "true");
     await sectionHeader(page, "pinned").click();
+    // The pin and the fold are this browser's, held in localStorage; the mute is the
+    // account's, and comes back from the backend rather than from the page.
     await expect(row(page, id)).toHaveAttribute("data-section", "pinned");
     await expect(row(page, id)).toHaveAttribute("data-muted", "true");
+
+    // Leave the shared mock as it was found: an account-level setting outlives this
+    // spec's page, so a mute left on would follow every later spec (see
+    // e2e/helpers.ts — one mock serves the whole run).
+    await openChatMenu(page, id);
+    await page.locator('[data-testid="chat-menu-mute"]').click();
+    await expect(row(page, id)).not.toHaveAttribute("data-muted", "true");
   });
 
   test("marks an unread chat read without opening it", async ({ page }) => {

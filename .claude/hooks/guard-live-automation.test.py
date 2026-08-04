@@ -70,6 +70,24 @@ FIXTURES = {
         "await fetch(`${chat}/v1/users/ME/conversations/${id}/properties?name=consumptionhorizon`,\n"
         "  { method: 'PUT', body: JSON.stringify({ consumptionhorizon: '1;2;0' }) });\n"
     ),
+    # A chat setting, straight to Teams: the pin, the mute and the hide land in every
+    # Teams client the user owns, past the backend's gate and past the app's own menu.
+    "chat-setting-writer.ts": (
+        "// PUTs a chat's mute straight to Teams.\n"
+        "await fetch(`${chat}/v1/users/ME/conversations/${id}/properties?name=alerts`,\n"
+        "  { method: 'PUT', body: JSON.stringify({ alerts: 'false' }) });\n"
+    ),
+    # The same three settings through the backend's gated RPCs: still writes.
+    "chat-pin-writer.ts": (
+        "// Pins a real chat through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'set_chat_pinned' }));\n"
+    ),
+    # Reading the conversation list — properties and all — is ordinary recon.
+    "chat-setting-reader.ts": (
+        "// GETs the conversation list the settings live on.\n"
+        "await fetch(`${chat}/v1/users/ME/conversations?view=msnp24Equivalent`);\n"
+    ),
     # Our own presence, published straight to Teams: the green dot appears for every
     # colleague, past the backend's gate and past the switch's own off state.
     "presence-publisher.ts": (
@@ -243,6 +261,27 @@ EXAMPLE_FIXTURES = {
         "    http.put(\"https://presence.teams.microsoft.com/v1/me/forceavailability/\");\n"
         "}\n"
     ),
+    # A chat-settings write whose target comes from an argument: it pins, mutes or hides
+    # a chat in every Teams client the user owns, so it is refused like a loose send.
+    "guard-test-chat-setting-write.rs": (
+        "fn main() {\n"
+        "    let conversation = std::env::args().nth(1).unwrap();\n"
+        "    teams_chat_settings::set_chat_muted(&http, &session, &conversation, true);\n"
+        "}\n"
+    ),
+    # The legitimate shape: the same write, pinned to the sandbox chat and nothing else.
+    "guard-test-sandbox-chat-setting.rs": (
+        "const SANDBOX: &str = \"19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2\";\n"
+        "fn main() {\n"
+        "    teams_chat_settings::set_chat_muted(&http, &session, SANDBOX, true);\n"
+        "}\n"
+    ),
+    # Reading the same properties is the GET the sidebar is built on.
+    "guard-test-chat-setting-read.rs": (
+        "fn main() {\n"
+        "    http.get(\"https://fr.ng.msg.teams.microsoft.com/v1/users/ME/conversations\");\n"
+        "}\n"
+    ),
     # Reading a colleague's presence is what the person card is built on.
     "guard-test-presence-read.rs": (
         "fn main() { teams_presence::fetch_presence(&http, &session, &token, &mris); }\n"
@@ -301,6 +340,18 @@ def cases(tmp: Path):
             PROJECT,
             "curl -X PUT 'https://fr.ng.msg.teams.microsoft.com/v1/users/ME/"
             "conversations/19:x/properties?name=consumptionhorizon'",
+        ),
+        # A chat setting reaches every device the user owns: the pin re-orders their
+        # sidebar, the mute silences a thread, the hide takes it out of the list. Every
+        # shape is refused — the gated RPC, the property itself, a loose example, a curl.
+        ("BLOCK", PROJECT, f"bun run {tmp}/chat-pin-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/chat-setting-writer.ts"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-chat-setting-write"),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X PUT 'https://fr.ng.msg.teams.microsoft.com/v1/users/ME/"
+            "conversations/19:x/properties?name=ispinned'",
         ),
         # Publishing our own presence turns the green dot on for every colleague, in
         # every shape: the gated RPC, the service itself, a cargo example, a curl.
@@ -373,6 +424,13 @@ def cases(tmp: Path):
         # Reading the code that implements the write is ordinary work, like any search.
         ("ALLOW", PROJECT, 'grep -rn "name=consumptionhorizon" src'),
         ("ALLOW", PROJECT, "grep -rn set_consumption_horizon src launcher web"),
+        # The chat settings: reading them is what the sidebar is built on, and an example
+        # that pins the sandbox chat is the sanctioned way to exercise the write.
+        ("ALLOW", PROJECT, f"bun run {tmp}/chat-setting-reader.ts"),
+        ("ALLOW", PROJECT, "cargo run --example guard-test-chat-setting-read"),
+        ("ALLOW", PROJECT, "cargo run --example guard-test-sandbox-chat-setting"),
+        ("ALLOW", PROJECT, 'grep -rn "name=alerts" src'),
+        ("ALLOW", PROJECT, "grep -rn set_chat_muted src web"),
         # Reading presence is what the person card is built on, in every shape.
         ("ALLOW", PROJECT, f"bun run {tmp}/presence-reader.ts"),
         ("ALLOW", PROJECT, "cargo run --example guard-test-presence-read"),

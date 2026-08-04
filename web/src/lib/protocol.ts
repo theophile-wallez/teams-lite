@@ -1363,26 +1363,28 @@ export function previewLine(c: Conversation): string {
 
 /**
  * The user's own local placement of the chat list, persisted client-side by the
- * store. Each map holds one override per chat id; a chat absent from a map keeps
- * whatever Microsoft Teams reported.
+ * store — the two settings this app cannot publish. A chat absent from a map sits
+ * where Microsoft Teams put it.
+ *
+ * The MUTE is not here, and deliberately: it is published to Teams and read back from
+ * it (`set_chat_muted`, over `src/teams_chat_settings.rs`), so the conversation's own
+ * `is_muted` is the only truth about it. A local override beside it would be a second
+ * answer to a question the account already answers.
  */
 export type ChatPrefs = {
   /** Chat id → pinned here, overriding `is_pinned`. */
   pins: Record<string, boolean>;
-  /** Chat id → muted here, overriding `is_muted`. */
-  mutes: Record<string, boolean>;
   /**
    * Chat id → the hide watermark, in the same epoch milliseconds as
    * `last_message_time`: the chat stays hidden while its newest message is no newer
    * than the watermark, so a NEW message brings it back — which is what Teams' own
-   * Hide does. `0` is an explicit "show it here", the one way back for a chat Teams
-   * itself hides (this app cannot unhide it on the account).
+   * Hide does. `0` is an explicit "show it here".
    */
   hides: Record<string, number>;
 };
 
 /** No override at all: every chat sits where Microsoft Teams put it. */
-export const NO_CHAT_PREFS: ChatPrefs = { pins: {}, mutes: {}, hides: {} };
+export const NO_CHAT_PREFS: ChatPrefs = { pins: {}, hides: {} };
 
 /** Whether this chat is pinned to the top of the list, honouring a local override. */
 export function chatIsPinned(c: Conversation, prefs: ChatPrefs): boolean {
@@ -1391,29 +1393,31 @@ export function chatIsPinned(c: Conversation, prefs: ChatPrefs): boolean {
 }
 
 /**
- * Whether this chat is muted, honouring a local override.
+ * Whether this chat is muted — in Microsoft Teams, which is the only place a mute
+ * lives. The backend mirrors CSA's `isMuted`, publishes a change to the same property
+ * Teams reads (`alerts`), and reports the new value back, so there is one answer on
+ * every device rather than one per browser.
  *
- * A muted chat is dimmed, never raises an unread marker, and chimes at nobody: this
- * app's own notification for a message in it is dropped (see {@link shouldNotify}).
- * The mute is local to this app, so the backend's Web Push still reaches the user's
- * phone — the menu that offers the switch says so.
+ * A muted chat is dimmed, raises no unread marker, and chimes at nobody: this app's
+ * own notification for a message in it is dropped (see {@link shouldNotify}).
  */
-export function chatIsMuted(c: Conversation, prefs: ChatPrefs): boolean {
-  const override = prefs.mutes[c.id];
-  return override === undefined ? c.is_muted === true : override;
+export function chatIsMuted(c: Conversation): boolean {
+  return c.is_muted === true;
 }
 
 /**
  * Whether this chat is hidden — out of the list until it has something new to say.
  *
- * Absent a local watermark this mirrors Teams' own `is_hidden`, which is why 182 of
- * this tenant's 595 chats belong in the Hidden section rather than in Recent: the
- * user already put them away, in Teams, and this app was showing them anyway.
+ * This reads the user's own hide HERE and nothing else. Teams' `hidden` flag is
+ * deliberately not consulted: measured against the tenant it is true on all 95 of the
+ * user's one-to-one chats — including the colleagues they message daily — and on 87 of
+ * 499 group chats, so it cannot mean "the user put this away" (see
+ * `examples/chat_settings_recon.rs`). Bucketing on it emptied Recent of every direct
+ * message.
  */
 export function chatIsHidden(c: Conversation, prefs: ChatPrefs): boolean {
   const watermark = prefs.hides[c.id];
-  if (watermark === undefined) return c.is_hidden === true;
-  if (watermark <= 0) return false;
+  if (watermark === undefined || watermark <= 0) return false;
   return c.last_message_time <= watermark;
 }
 
@@ -1439,13 +1443,12 @@ export type ChatRow =
  *  a group never looks like losing it. */
 export function chatSectionCollapsedHint(
   section: ChatSection,
-  prefs: ChatPrefs,
   openId: string | null,
 ): { hidesUnread: boolean; hidesOpen: boolean } {
   return {
     // A muted chat is not something a folded section should shout about, exactly as
     // it raises no unread marker of its own.
-    hidesUnread: section.chats.some((c) => !c.is_read && !chatIsMuted(c, prefs)),
+    hidesUnread: section.chats.some((c) => !c.is_read && !chatIsMuted(c)),
     hidesOpen: section.chats.some((c) => c.id === openId),
   };
 }

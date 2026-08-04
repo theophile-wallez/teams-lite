@@ -1143,56 +1143,56 @@ describe("organizeChannels", () => {
   });
 });
 
-describe("chat placement overrides", () => {
+describe("chat placement: what is local and what is the account's", () => {
   const prefs = (over: Partial<ChatPrefs> = {}): ChatPrefs => ({
     ...NO_CHAT_PREFS,
     ...over,
   });
 
-  it("reads the Teams-sourced pin and mute when there is no override", () => {
-    const c = conversation({ id: "x", is_pinned: true, is_muted: true });
-    expect(chatIsPinned(c, prefs())).toBe(true);
-    expect(chatIsMuted(c, prefs())).toBe(true);
-    const plain = conversation({ id: "x" });
-    expect(chatIsPinned(plain, prefs())).toBe(false);
-    expect(chatIsMuted(plain, prefs())).toBe(false);
+  it("reads the Teams-sourced pin when there is no override", () => {
+    expect(chatIsPinned(conversation({ id: "x", is_pinned: true }), prefs())).toBe(true);
+    expect(chatIsPinned(conversation({ id: "x" }), prefs())).toBe(false);
   });
 
-  it("lets a local pin or mute override win over the Teams value", () => {
-    const c = conversation({ id: "x", is_pinned: true, is_muted: true });
-    expect(chatIsPinned(c, prefs({ pins: { x: false } }))).toBe(false);
-    expect(chatIsMuted(c, prefs({ mutes: { x: false } }))).toBe(false);
-    const plain = conversation({ id: "x" });
-    expect(chatIsPinned(plain, prefs({ pins: { x: true } }))).toBe(true);
-    expect(chatIsMuted(plain, prefs({ mutes: { x: true } }))).toBe(true);
+  it("lets a local pin override win over the Teams value", () => {
+    const pinned = conversation({ id: "x", is_pinned: true });
+    expect(chatIsPinned(pinned, prefs({ pins: { x: false } }))).toBe(false);
+    expect(chatIsPinned(conversation({ id: "x" }), prefs({ pins: { x: true } }))).toBe(true);
   });
 
   it("reads only its own id's override", () => {
-    const c = conversation({ id: "x" });
-    expect(chatIsPinned(c, prefs({ pins: { y: true } }))).toBe(false);
-    expect(chatIsMuted(c, prefs({ mutes: { y: true } }))).toBe(false);
+    expect(chatIsPinned(conversation({ id: "x" }), prefs({ pins: { y: true } }))).toBe(false);
   });
 
-  it("mirrors Teams' own hide when the user set no watermark", () => {
-    expect(chatIsHidden(conversation({ id: "x", is_hidden: true }), prefs())).toBe(true);
+  it("takes the mute from the conversation, which is the account's answer", () => {
+    // The mute is published to Teams and read back from it (`set_chat_muted`), so
+    // there is nothing local to override — one answer, on every device.
+    expect(chatIsMuted(conversation({ id: "x", is_muted: true }))).toBe(true);
+    expect(chatIsMuted(conversation({ id: "x", is_muted: false }))).toBe(false);
+  });
+
+  it("never reads Teams' own `hidden` flag as a hide", () => {
+    // Measured against the tenant: `hidden` is true on all 95 one-to-one chats,
+    // the colleagues the user messages daily included. Reading it as "the user put
+    // this away" emptied Recent of every direct message.
+    expect(chatIsHidden(conversation({ id: "x", is_hidden: true }), prefs())).toBe(false);
     expect(chatIsHidden(conversation({ id: "x", is_hidden: false }), prefs())).toBe(false);
   });
 
   it("keeps a locally hidden chat away until a NEW message arrives", () => {
-    const hidden = { x: 1_000 };
+    const hides = { x: 1_000 };
     // The message it was hidden on, and an older one, stay away.
-    expect(chatIsHidden(conversation({ id: "x", last_message_time: 1_000 }), prefs({ hides: hidden }))).toBe(true);
-    expect(chatIsHidden(conversation({ id: "x", last_message_time: 900 }), prefs({ hides: hidden }))).toBe(true);
+    expect(chatIsHidden(conversation({ id: "x", last_message_time: 1_000 }), prefs({ hides }))).toBe(true);
+    expect(chatIsHidden(conversation({ id: "x", last_message_time: 900 }), prefs({ hides }))).toBe(true);
     // A newer one brings the chat back on its own, exactly as Teams' Hide does.
-    expect(chatIsHidden(conversation({ id: "x", last_message_time: 1_001 }), prefs({ hides: hidden }))).toBe(false);
+    expect(chatIsHidden(conversation({ id: "x", last_message_time: 1_001 }), prefs({ hides }))).toBe(false);
   });
 
-  it("shows a chat Teams itself hides once the user asks for it here", () => {
-    // `0` is the explicit "show it here" — the one way back for a chat this app
-    // cannot unhide on the account.
+  it("shows a chat again once the user asks for it, whatever Teams says", () => {
+    // `0` is the explicit "show it here", and it holds even for a chat with no
+    // message at all, whose time is 0 too.
     const c = conversation({ id: "x", is_hidden: true, last_message_time: 5_000 });
     expect(chatIsHidden(c, prefs({ hides: { x: 0 } }))).toBe(false);
-    // Including a chat with no message at all, whose time is 0 too.
     const empty = conversation({ id: "x", is_hidden: true, last_message_time: 0 });
     expect(chatIsHidden(empty, prefs({ hides: { x: 0 } }))).toBe(false);
   });
@@ -1225,8 +1225,8 @@ describe("organizeChats", () => {
   });
 
   it("counts the hidden chats in the section's own label", () => {
-    const chats = [chat("a", 2), chat("b", 1, { is_hidden: true }), chat("c", 3, { is_hidden: true })];
-    const sections = organizeChats(chats, NO_CHAT_PREFS);
+    const chats = [chat("a", 2), chat("b", 1), chat("c", 3)];
+    const sections = organizeChats(chats, { pins: {}, hides: { b: 1, c: 3 } });
     expect(sections.map((s) => s.id)).toEqual(["recent", "hidden"]);
     expect(sections[1]!.label).toBe("Hidden chats (2)");
     expect(sections[1]!.chats.map((c) => c.id)).toEqual(["c", "b"]);
@@ -1234,18 +1234,14 @@ describe("organizeChats", () => {
 
   it("hides a pinned chat rather than pinning a hidden one", () => {
     // Putting a chat away is the stronger statement: the user asked not to see it.
-    const chats = [chat("a", 1, { is_pinned: true, is_hidden: true })];
-    const sections = organizeChats(chats, NO_CHAT_PREFS);
+    const chats = [chat("a", 1, { is_pinned: true })];
+    const sections = organizeChats(chats, { pins: {}, hides: { a: 1 } });
     expect(sections.map((s) => s.id)).toEqual(["hidden"]);
   });
 
   it("honours the local overrides when deciding the sections", () => {
     const chats = [chat("a", 3, { is_pinned: true }), chat("b", 2), chat("c", 1)];
-    const sections = organizeChats(chats, {
-      pins: { a: false, b: true },
-      mutes: {},
-      hides: { c: 1 },
-    });
+    const sections = organizeChats(chats, { pins: { a: false, b: true }, hides: { c: 1 } });
     expect(sections.map((s) => s.id)).toEqual(["pinned", "recent", "hidden"]);
     expect(sections[0]!.chats.map((c) => c.id)).toEqual(["b"]);
     expect(sections[1]!.chats.map((c) => c.id)).toEqual(["a"]);
@@ -1301,7 +1297,7 @@ describe("chatSectionCollapsedHint", () => {
       conversation({ id: "b", is_pinned: true }),
     ];
     const [pinned] = organizeChats(chats, NO_CHAT_PREFS);
-    expect(chatSectionCollapsedHint(pinned!, NO_CHAT_PREFS, "b")).toEqual({
+    expect(chatSectionCollapsedHint(pinned!, "b")).toEqual({
       hidesUnread: true,
       hidesOpen: true,
     });
@@ -1312,7 +1308,7 @@ describe("chatSectionCollapsedHint", () => {
     // not shout on its behalf.
     const chats = [conversation({ id: "a", is_read: false, is_muted: true, is_pinned: true })];
     const [pinned] = organizeChats(chats, NO_CHAT_PREFS);
-    expect(chatSectionCollapsedHint(pinned!, NO_CHAT_PREFS, null)).toEqual({
+    expect(chatSectionCollapsedHint(pinned!, null)).toEqual({
       hidesUnread: false,
       hidesOpen: false,
     });

@@ -1240,8 +1240,9 @@ if (import.meta.main) {
   // mock answers `mark_read` itself.
   if (args.includes("--chat-menu")) {
     await withPreview(async ({ page, shot, setTheme }) => {
-      // The list as it arrives: a Pinned section (the mock pins two chats), Recent,
-      // and the chats Teams itself hides folded at the foot.
+      // The list as it arrives: a Pinned section (the mock pins two chats) and Recent.
+      // Nothing is hidden until the user hides something — Teams' own `hidden` flag is
+      // not a hide (see `chatIsHidden`), so the app does not bucket on it.
       await shot(`${out}-sections-light.png`);
       // The menu on a Recent row — every item, in both themes.
       const chat = await page
@@ -1254,14 +1255,23 @@ if (import.meta.main) {
       await shot(`${out}-menu-dark.png`);
       await setTheme("light");
       // Pin it, then mute it. Each item acts and closes, as in Teams, so the menu is
-      // opened again on the row — which has moved up into Pinned by then.
+      // opened again on the row — which has moved up into Pinned by then. The mute goes
+      // out through `set_chat_muted`, which the mock answers as the tenant would.
       await page.locator('[data-testid="chat-menu-pin"]').click();
       await page.waitForTimeout(250);
       await openChatMenu(page, chat ?? undefined);
       await page.locator('[data-testid="chat-menu-mute"]').click();
       await page.waitForTimeout(250);
       await shot(`${out}-pinned-light.png`);
-      // The Hidden section opened: where a chat put away is brought back.
+      // Hide a chat, which is what creates the Hidden section at the foot of the list —
+      // and where a chat put away is brought back from.
+      const other = await page
+        .locator('[data-testid="conversation-row"][data-section="recent"]')
+        .first()
+        .getAttribute("data-conversation-id");
+      await openChatMenu(page, other ?? undefined);
+      await page.locator('[data-testid="chat-menu-hide"]').click();
+      await page.waitForTimeout(250);
       await toggleChatSection(page, "hidden");
       await page
         .locator('[data-testid="conversation-row"][data-section="hidden"]')

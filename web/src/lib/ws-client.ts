@@ -457,6 +457,18 @@ export class Backend {
   markRead(conversation: string): Promise<{ read: boolean; ghost: boolean }> {
     return this.writeRequest<{ read: boolean; ghost: boolean }>("mark_read", { conversation });
   }
+  /** Mute or unmute one chat IN MICROSOFT TEAMS — the "…" menu's Mute item.
+   *
+   *  A WRITE, and gated like one: Teams keeps a mute as the conversation's own `alerts`
+   *  property, so the setting lands on every device the user is signed in on and their
+   *  phone stops notifying them about the thread. The reply carries the value the
+   *  backend published, so the row follows the account rather than this browser.
+   *
+   *  The chat's PIN and HIDE have no counterpart here: neither write round-trips through
+   *  the tenant, so both stay local to this app (see `ChatPrefs` in lib/protocol.ts). */
+  setChatMuted(conversation: string, muted: boolean): Promise<{ muted: boolean }> {
+    return this.writeRequest<{ muted: boolean }>("set_chat_muted", { conversation, muted });
+  }
   /** Ask the backend to repair sign-in: it starts a systemd unit that restarts the
    *  Intune container, because the container's login keyring re-locks and the broker
    *  then answers no token call at all.

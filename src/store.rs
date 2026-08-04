@@ -2979,6 +2979,21 @@ impl Store {
         Ok(false)
     }
 
+    /// Record a chat's mute after Teams accepted it, so the sidebar dims the row now
+    /// rather than on the next CSA sync.
+    ///
+    /// The mirror is not the truth here — Teams is, and the next sync overwrites this
+    /// column from CSA's `isMuted`. That is exactly why this write is safe: it can only
+    /// ever be a few seconds ahead of the value it will be told. Returns whether the
+    /// row moved, so the caller only announces a real change.
+    pub fn set_conversation_muted(&self, conversation_id: &str, muted: bool) -> Result<bool> {
+        let changed = self.exec(
+            "UPDATE conversations SET is_muted = ?2 WHERE id = ?1 AND is_muted <> ?2",
+            params![conversation_id, muted as i64],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// The id of the newest message we hold for a thread, oldest-to-newest by `seq` —
     /// the read position to publish when marking it read. `None` when we hold no
     /// message (a thread never opened, or one whose history is only a system frame we
