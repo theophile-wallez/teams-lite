@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS conversations (
     kind                  TEXT NOT NULL DEFAULT 'unknown',
     last_message_preview  TEXT NOT NULL DEFAULT '',
     last_message_sender   TEXT NOT NULL DEFAULT '',
+    -- Who wrote that preview, as an identity rather than as a name, so the sidebar's
+    -- "Bob: hello" line follows a `person_overrides` nickname like every other name
+    -- this app states. Empty for a preview whose frame carried no `from`.
+    last_message_sender_mri TEXT NOT NULL DEFAULT '',
     last_message_from_me  INTEGER NOT NULL DEFAULT 0,
     is_read               INTEGER NOT NULL DEFAULT 1,
     is_muted              INTEGER NOT NULL DEFAULT 0,
@@ -67,6 +71,36 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- What the USER decided to call somebody, and the face they gave them. Teams has
+-- neither: a colleague's name and photo are theirs to set, so this is the one thing
+-- in the store that no sync can ever supply and no sync may ever overwrite.
+--
+-- A LOCAL OVERRIDE, exactly like a fold, a pin or a local read position: it wins over
+-- the Teams-sourced value from here on, and nothing writes it back. Publishing a name
+-- or a picture to the user's account would be an outward action needing its own
+-- consent gate (see AGENTS.md), and Teams offers no such call anyway.
+--
+-- Keyed by MRI rather than by name, because a name is a cache derived from the MRI
+-- (see `Message::sender_mri`) — and because an override keyed on a display name would
+-- rename everybody who shares it. A row exists only while at least one half is set:
+-- clearing both deletes it, so "no override" is the absence of a row and every read
+-- can treat an empty table as the common case.
+--
+-- The avatar is held as BYTES, not as a path or a URL. A path would break the moment
+-- the user moved the file, and a URL would make rendering a colleague's face a network
+-- request to a third party — the same reason a mail body is stripped of remote
+-- references. The bytes are capped at `MAX_PERSON_AVATAR_BYTES` on the way in.
+CREATE TABLE IF NOT EXISTS person_overrides (
+    mri                 TEXT PRIMARY KEY,
+    -- What the user wants to see instead of the directory's name. Empty means they
+    -- overrode only the picture.
+    display_name        TEXT NOT NULL DEFAULT '',
+    -- The MIME type of `avatar_bytes`, so the UI can build a blob without sniffing.
+    -- Empty (with NULL bytes) means they overrode only the name.
+    avatar_content_type TEXT NOT NULL DEFAULT '',
+    avatar_bytes        BLOB,
+    updated_at          INTEGER NOT NULL DEFAULT 0
+);
 -- Team channels, kept SEPARATE from `conversations` so channel posts never mix
 -- into the chat list. A channel's messages still live in the shared `messages`
 -- table keyed by its thread id, so open/backfill/send/react reuse the same
@@ -104,6 +138,8 @@ CREATE TABLE IF NOT EXISTS channels (
     last_message_time     INTEGER NOT NULL DEFAULT 0,
     last_message_preview  TEXT NOT NULL DEFAULT '',
     last_message_sender   TEXT NOT NULL DEFAULT '',
+    -- The identity behind that name, for the same reason as on `conversations`.
+    last_message_sender_mri TEXT NOT NULL DEFAULT '',
     last_message_from_me  INTEGER NOT NULL DEFAULT 0,
     is_read               INTEGER NOT NULL DEFAULT 1,
     draft                 TEXT NOT NULL DEFAULT '',
@@ -388,7 +424,12 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// v11 adds `mail_messages.local_read` and its partial index, our own read mark on a
 /// mail (the mailbox itself stays read-only — see [`Store::mark_mail_read_locally`]).
 /// Additive, so an older binary keeps working on a v11 store.
-const SCHEMA_VERSION: i64 = 11;
+///
+/// v12 adds `person_overrides` — the name and the face the USER gave somebody — and
+/// `last_message_sender_mri` on `conversations` and `channels`, so the sidebar's
+/// preview attribution can follow a nickname. Additive on both counts: an older
+/// binary names neither, and a store with no overrides reads exactly as before.
+const SCHEMA_VERSION: i64 = 12;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -666,6 +707,9 @@ pub struct ConversationUpdate<'a> {
     pub kind: ConversationKind,
     pub last_message_preview: &'a str,
     pub last_message_sender: &'a str,
+    /// Who wrote the preview, as an MRI, so the sidebar's attribution follows a
+    /// nickname. Empty when the frame carried no `from`.
+    pub last_message_sender_mri: &'a str,
     pub last_message_from_me: bool,
     pub is_read: bool,
     pub is_muted: bool,
@@ -734,6 +778,8 @@ pub struct ChannelUpdate<'a> {
     pub last_message_time: i64,
     pub last_message_preview: &'a str,
     pub last_message_sender: &'a str,
+    /// Who wrote the preview, as an MRI. Same job as on [`ConversationUpdate`].
+    pub last_message_sender_mri: &'a str,
     pub last_message_from_me: bool,
     pub is_read: bool,
     /// Zero-based index of the parent team in the CSA `teams` array. Drives the
@@ -974,9 +1020,75 @@ pub struct AgentRun {
     pub heartbeat_ms: i64,
 }
 
+/// What the user decided to call somebody, and the face they gave them — the whole
+/// row, avatar bytes included. See the `person_overrides` note in [`SCHEMA`].
+///
+/// A row always overrides at least one of the two: `display_name` is empty when only
+/// the picture was replaced, and `avatar_bytes` is empty when only the name was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonOverride {
+    pub mri: String,
+    pub display_name: String,
+    pub avatar_content_type: String,
+    pub avatar_bytes: Vec<u8>,
+    pub updated_at: i64,
+}
+
+/// One override without its avatar bytes, for listing them all. `has_avatar` is what
+/// the UI needs to say "a picture is set"; fetching it is a separate, per-person read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonOverrideSummary {
+    pub mri: String,
+    pub display_name: String,
+    pub has_avatar: bool,
+    pub updated_at: i64,
+}
+
 pub struct Store {
     conn: Connection,
 }
+
+/// SQL for "the name the user gave this person, or the one Teams gave them".
+///
+/// `$mri` and `$name` are the column references holding the person's MRI and their
+/// Teams-sourced display name. It builds a `COALESCE` over a primary-key lookup in
+/// `person_overrides`, so it costs one index probe on a table that stays EMPTY unless
+/// the user renamed somebody.
+///
+/// It exists as a macro rather than a function so the result is still a `&'static str`
+/// and can be baked into the `const` column lists below. That matters: putting the
+/// resolution in the column list is what makes EVERY read state the chosen name — a
+/// message page, a single row re-read after an edit, the row a push notification is
+/// built from — instead of leaving each of a dozen callers to remember.
+///
+/// The name is a local override and never travels back to Teams. See the
+/// `person_overrides` note in [`SCHEMA`].
+macro_rules! nicknamed {
+    ($mri:expr, $name:expr) => {
+        concat!(
+            "COALESCE(NULLIF((SELECT o.display_name FROM person_overrides o WHERE o.mri = ",
+            $mri,
+            "), ''), ",
+            $name,
+            ")"
+        )
+    };
+}
+
+/// The other party of a 1:1 chat, as a scalar subquery correlated on `c` (the
+/// `conversations` row) and on `?1` (our own display name): the newest message sender
+/// who is not us. NULL for anything but a 1:1, because a group has no single face and
+/// no single name.
+///
+/// Written once and used twice by [`Store::conversations`] — for the photo it hands
+/// the UI, and for the nickname that titles the row — so the two can never disagree
+/// about which person a 1:1 is with.
+const OTHER_PARTY_MRI: &str = "SELECT messages.sender_mri FROM messages
+     WHERE c.kind = 'one_on_one'
+       AND messages.conversation_id = c.id
+       AND messages.sender_mri IS NOT NULL AND messages.sender_mri <> ''
+       AND messages.sender <> '' AND messages.sender <> ?1
+     ORDER BY messages.seq DESC LIMIT 1";
 
 fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
     Ok(Message {
@@ -1007,7 +1119,16 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
     })
 }
 
-const SELECT_COLS: &str = "id, conversation_id, seq, compose_time, sender, sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions";
+/// The columns [`row_to_msg`] reads, in its order. `sender` is resolved through the
+/// user's own nickname for the author (see [`nicknamed`]) rather than read raw, so a
+/// person the user renamed is renamed on every message of theirs ever stored — which
+/// is the only way a rename can hold, since [`Store::insert_message`] freezes a
+/// message's `sender` at first insert and no sync ever refreshes it.
+const SELECT_COLS: &str = concat!(
+    "id, conversation_id, seq, compose_time, ",
+    nicknamed!("messages.sender_mri", "sender"),
+    ", sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions"
+);
 
 fn row_to_mail(row: &Row) -> rusqlite::Result<MailMessageRow> {
     Ok(MailMessageRow {
@@ -1309,6 +1430,16 @@ fn migrate(conn: &Connection) -> Result<()> {
     // thread columns above, 0 can only ever leave an unread marker standing, never
     // hide one.
     add_column("ALTER TABLE mail_messages ADD COLUMN local_read INTEGER NOT NULL DEFAULT 0")?;
+
+    // last_message_sender_mri: the identity behind the sidebar preview's "Bob: hello"
+    // attribution, so it follows a `person_overrides` nickname. Legacy rows get '',
+    // which simply means the preview keeps the Teams-sourced name until the next sync
+    // — the same thing they showed before the column existed.
+    for table in ["conversations", "channels"] {
+        add_column(&format!(
+            "ALTER TABLE {table} ADD COLUMN last_message_sender_mri TEXT NOT NULL DEFAULT ''"
+        ))?;
+    }
     Ok(())
 }
 
@@ -1821,9 +1952,10 @@ impl Store {
         let changed = self.exec(
             "INSERT INTO conversations (
                 id, display_name, last_message_time, kind,
-                last_message_preview, last_message_sender, last_message_from_me,
+                last_message_preview, last_message_sender, last_message_sender_mri,
+                last_message_from_me,
                 is_read, is_muted, is_pinned, is_hidden, thread_type, picture_url)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?14, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 display_name = CASE
                     WHEN excluded.display_name IS NOT NULL AND excluded.display_name <> ''
@@ -1841,6 +1973,10 @@ impl Store {
                 last_message_sender = CASE
                     WHEN excluded.last_message_time >= conversations.last_message_time
                     THEN excluded.last_message_sender ELSE conversations.last_message_sender END,
+                last_message_sender_mri = CASE
+                    WHEN excluded.last_message_time >= conversations.last_message_time
+                    THEN excluded.last_message_sender_mri
+                    ELSE conversations.last_message_sender_mri END,
                 last_message_from_me = CASE
                     WHEN excluded.last_message_time >= conversations.last_message_time
                     THEN excluded.last_message_from_me ELSE conversations.last_message_from_me END,
@@ -1867,6 +2003,7 @@ impl Store {
                 OR (excluded.last_message_time >= conversations.last_message_time AND (
                        excluded.last_message_preview <> conversations.last_message_preview
                     OR excluded.last_message_sender  <> conversations.last_message_sender
+                    OR excluded.last_message_sender_mri <> conversations.last_message_sender_mri
                     OR excluded.last_message_from_me <> conversations.last_message_from_me
                     OR excluded.is_read              <> conversations.is_read))
                 OR excluded.is_muted  <> conversations.is_muted
@@ -1888,6 +2025,7 @@ impl Store {
                 u.is_hidden as i64,
                 u.thread_type,
                 u.picture_url,
+                u.last_message_sender_mri,
             ],
         )?;
         Ok(changed > 0)
@@ -1905,9 +2043,10 @@ impl Store {
             "INSERT INTO channels (
                 id, team_id, team_name, display_name, is_general, is_shown,
                 last_message_time, last_message_preview, last_message_sender,
+                last_message_sender_mri,
                 last_message_from_me, is_read, team_pos, channel_pos, team_group_id,
                 alerts, is_pinned, team_collapsed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?18, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(id) DO UPDATE SET
                 team_id = excluded.team_id,
                 team_name = CASE
@@ -1935,6 +2074,10 @@ impl Store {
                 last_message_sender = CASE
                     WHEN excluded.last_message_time >= channels.last_message_time
                     THEN excluded.last_message_sender ELSE channels.last_message_sender END,
+                last_message_sender_mri = CASE
+                    WHEN excluded.last_message_time >= channels.last_message_time
+                    THEN excluded.last_message_sender_mri
+                    ELSE channels.last_message_sender_mri END,
                 last_message_from_me = CASE
                     WHEN excluded.last_message_time >= channels.last_message_time
                     THEN excluded.last_message_from_me ELSE channels.last_message_from_me END,
@@ -1959,6 +2102,7 @@ impl Store {
                 OR (excluded.last_message_time >= channels.last_message_time AND (
                        excluded.last_message_preview <> channels.last_message_preview
                     OR excluded.last_message_sender  <> channels.last_message_sender
+                    OR excluded.last_message_sender_mri <> channels.last_message_sender_mri
                     OR excluded.last_message_from_me <> channels.last_message_from_me
                     OR excluded.is_read              <> channels.is_read))",
             params![
@@ -1979,6 +2123,7 @@ impl Store {
                 u.alerts.as_str(),
                 u.is_pinned as i64,
                 u.team_collapsed as i64,
+                u.last_message_sender_mri,
             ],
         )?;
         Ok(changed > 0)
@@ -2041,15 +2186,20 @@ impl Store {
     /// preview is always empty — it is derived here from the newest message we hold
     /// (see [`Store::derived_preview`]).
     pub fn channels(&self) -> Result<Vec<ChannelRow>> {
-        let mut stmt = self.conn.prepare_cached(
+        // A channel's own name is a channel's, never a person's, so only the preview
+        // attribution passes through the user's nicknames here.
+        let sql = format!(
             "SELECT id, team_id, team_name, display_name, is_general, is_shown,
-                    last_message_time, last_message_preview, last_message_sender,
+                    last_message_time, last_message_preview, {PREVIEW_SENDER},
                     last_message_from_me, is_read, draft, team_group_id, alerts,
                     local_read_time, local_read_ghost, is_pinned, team_collapsed
              FROM channels
              ORDER BY team_pos ASC, team_name ASC, team_id ASC,
                       is_general DESC, channel_pos ASC, display_name ASC, id ASC",
-        )?;
+            PREVIEW_SENDER =
+                nicknamed!("channels.last_message_sender_mri", "last_message_sender"),
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([], |r| {
             let last_message_time: i64 = r.get(6)?;
             let (is_read, is_ghost_read) = read_state(
@@ -3047,7 +3197,11 @@ impl Store {
     ///
     /// Used by the push path, which has a message id and needs one line of context
     /// (see [`crate::push_policy::Placement`]).
-    pub fn conversation_context(&self, id: &str) -> Result<String> {
+    ///
+    /// `self_mri` is who WE are, so a 1:1's title can be resolved through the user's
+    /// own nickname for the person on the other side and never through their nickname
+    /// for themselves. Pass `""` when it is unknown; the title then stays as stored.
+    pub fn conversation_context(&self, id: &str, self_mri: &str) -> Result<String> {
         let channel = self
             .query_one(
                 "SELECT team_name, display_name FROM channels WHERE id = ?1",
@@ -3063,10 +3217,26 @@ impl Store {
                 (team, channel) => format!("{team} · {channel}"),
             });
         }
+        // A 1:1's stored title IS a person's name, so a nickname has to reach it here
+        // too. Without this the push on the user's phone read "Bob · Robert SMITH":
+        // the sender renamed, the thread it arrived in not.
         Ok(self
             .query_one(
-                "SELECT display_name FROM conversations WHERE id = ?1",
-                params![id],
+                "SELECT COALESCE(
+                     NULLIF((
+                         SELECT o.display_name FROM person_overrides o
+                         WHERE c.kind = 'one_on_one' AND ?2 <> '' AND o.mri = (
+                             SELECT messages.sender_mri FROM messages
+                             WHERE messages.conversation_id = c.id
+                               AND messages.sender_mri <> ''
+                               AND messages.sender_mri <> ?2
+                             ORDER BY messages.seq DESC LIMIT 1
+                         )
+                     ), ''),
+                     c.display_name
+                 )
+                 FROM conversations c WHERE c.id = ?1",
+                params![id, self_mri],
                 |row| row.get::<_, Option<String>>(0),
             )
             .optional()?
@@ -3321,23 +3491,33 @@ impl Store {
     /// from the most recent message sender that is not `self_name`. `self_name`
     /// may be empty (then no derivation happens).
     pub fn conversations(&self, self_name: &str) -> Result<Vec<ConversationRow>> {
-        // Correlated subquery fills the blank 1:1 titles in a single pass.
-        let mut stmt = self.conn.prepare_cached(
+        // Correlated subqueries fill the blank 1:1 titles, pick each 1:1's other
+        // party, and resolve both names the row states through the user's own
+        // nicknames — all in a single pass.
+        let sql = format!(
             "SELECT c.id,
-                    CASE
-                        WHEN c.display_name IS NOT NULL AND c.display_name <> ''
-                        THEN c.display_name
-                        ELSE COALESCE((
-                            SELECT m.sender FROM messages m
-                            WHERE m.conversation_id = c.id
-                              AND m.sender <> '' AND m.sender <> ?1
-                            ORDER BY m.seq DESC LIMIT 1
-                        ), '')
-                    END AS name,
+                    -- A 1:1's title IS a person, so the user's own name for them wins
+                    -- over both the synced title and the derived one. The other-party
+                    -- subquery tests the kind itself, so a group is never retitled by
+                    -- renaming one of its members: its title names no single person.
+                    COALESCE(
+                        NULLIF((
+                            SELECT o.display_name FROM person_overrides o
+                            WHERE o.mri = ({OTHER_PARTY_MRI})
+                        ), ''),
+                        NULLIF(c.display_name, ''),
+                        (
+                            SELECT {SENDER} FROM messages
+                            WHERE messages.conversation_id = c.id
+                              AND messages.sender <> '' AND messages.sender <> ?1
+                            ORDER BY messages.seq DESC LIMIT 1
+                        ),
+                        ''
+                    ) AS name,
                     c.last_message_time,
                     c.kind,
                     c.last_message_preview,
-                    c.last_message_sender,
+                    {PREVIEW_SENDER} AS last_message_sender,
                     c.last_message_from_me,
                     c.is_read,
                     c.is_muted,
@@ -3348,13 +3528,7 @@ impl Store {
                     -- the other party's MRI, for their profile photo. Only for 1:1
                     -- chats (a group has no single face); the newest message sender
                     -- that isn't us, mirroring the name-derivation filter above.
-                    CASE WHEN c.kind = 'one_on_one' THEN COALESCE((
-                        SELECT m.sender_mri FROM messages m
-                        WHERE m.conversation_id = c.id
-                          AND m.sender_mri IS NOT NULL AND m.sender_mri <> ''
-                          AND m.sender <> '' AND m.sender <> ?1
-                        ORDER BY m.seq DESC LIMIT 1
-                    ), '') ELSE '' END AS avatar_mri,
+                    COALESCE(({OTHER_PARTY_MRI}), '') AS avatar_mri,
                     -- the group's own uploaded picture (empty for a 1:1, which has a
                     -- face already, and for a group that never set one)
                     c.picture_url,
@@ -3370,7 +3544,11 @@ impl Store {
              -- the collect below applies is_channel_thread_id as the canonical gate.
              WHERE c.id NOT IN (SELECT id FROM channels)
              ORDER BY c.is_pinned DESC, c.last_message_time DESC, c.id ASC",
-        )?;
+            OTHER_PARTY_MRI = OTHER_PARTY_MRI,
+            SENDER = nicknamed!("messages.sender_mri", "messages.sender"),
+            PREVIEW_SENDER = nicknamed!("c.last_message_sender_mri", "c.last_message_sender"),
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![self_name], |r| {
             let last_message_time: i64 = r.get(2)?;
             let (is_read, is_ghost_read) = read_state(
@@ -3425,24 +3603,51 @@ impl Store {
     /// carry no names). Heuristic: the most recent message sender that is NOT us.
     /// Returns None when we hold no message from the other party yet.
     pub fn other_party_name(&self, conversation_id: &str, self_name: &str) -> Result<Option<String>> {
+        let sql = format!(
+            "SELECT {SENDER} FROM messages
+             WHERE messages.conversation_id = ?1
+               AND messages.sender <> '' AND messages.sender <> ?2
+             ORDER BY messages.seq DESC LIMIT 1",
+            SENDER = nicknamed!("messages.sender_mri", "messages.sender"),
+        );
         let name: Option<String> = self
-            .query_one(
-                "SELECT sender FROM messages
-                 WHERE conversation_id = ?1 AND sender <> '' AND sender <> ?2
-                 ORDER BY seq DESC LIMIT 1",
-                params![conversation_id, self_name],
-                |r| r.get(0),
-            )
+            .query_one(&sql, params![conversation_id, self_name], |r| r.get(0))
             .ok();
         Ok(name)
     }
 
-    /// Resolve a display name for a sender MRI from the messages we already hold.
-    /// Used by the typing indicator: a `Control/Typing` frame carries the typer's
-    /// MRI but no display name, and this is a local, network-free lookup (in a
-    /// group chat the person has almost always sent a message we've stored).
-    /// Returns the most recent non-empty `sender` for that MRI, or None.
+    /// Resolve a display name for a sender MRI without going to the network. Used by
+    /// the typing indicator (a `Control/Typing` frame carries the typer's MRI but no
+    /// display name) and by the read receipts.
+    ///
+    /// The user's own nickname for that person answers first, so a rename holds even
+    /// for somebody who has never written in a thread we hold; otherwise it is the
+    /// most recent non-empty `sender` we stored for that MRI. None when neither exists.
     pub fn display_name_for_mri(&self, sender_mri: &str) -> Result<Option<String>> {
+        if sender_mri.is_empty() {
+            return Ok(None);
+        }
+        let name: Option<String> = self
+            .query_one(
+                "SELECT COALESCE(
+                     NULLIF((SELECT o.display_name FROM person_overrides o WHERE o.mri = ?1), ''),
+                     (SELECT sender FROM messages
+                      WHERE sender_mri = ?1 AND sender <> ''
+                      ORDER BY seq DESC LIMIT 1)
+                 )",
+                params![sender_mri],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten();
+        Ok(name)
+    }
+
+    /// The name TEAMS holds for a person, from the messages we already store, with no
+    /// override applied. The counterpart to [`Store::display_name_for_mri`], and the
+    /// reason a rename is not a lie: the surface that offers the rename shows this
+    /// beside it, so the user can always see who a renamed person actually is.
+    pub fn teams_display_name_for_mri(&self, sender_mri: &str) -> Result<Option<String>> {
         if sender_mri.is_empty() {
             return Ok(None);
         }
@@ -3458,9 +3663,119 @@ impl Store {
         Ok(name)
     }
 
+    // ---- person overrides (the name and face the USER gave somebody) ------------
+
+    /// Read back the override the user set for one person, or None when they set
+    /// none. The avatar bytes come with it, because the only caller that wants the
+    /// row at all is either serving that picture or showing the user what they set.
+    pub fn person_override(&self, mri: &str) -> Result<Option<PersonOverride>> {
+        if mri.is_empty() {
+            return Ok(None);
+        }
+        let row = self.query_one(
+            "SELECT mri, display_name, avatar_content_type, avatar_bytes, updated_at
+             FROM person_overrides WHERE mri = ?1",
+            params![mri],
+            |r| {
+                Ok(PersonOverride {
+                    mri: r.get(0)?,
+                    display_name: r.get(1)?,
+                    avatar_content_type: r.get(2)?,
+                    avatar_bytes: r.get::<_, Option<Vec<u8>>>(3)?.unwrap_or_default(),
+                    updated_at: r.get(4)?,
+                })
+            },
+        );
+        match row {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Every person the user renamed or gave a face, newest change first — without the
+    /// avatar BYTES, which the caller does not need to list them and which would make
+    /// listing cost megabytes. `has_avatar` says whether a picture is set; the bytes
+    /// come from [`Store::person_override`], one person at a time, the way the UI asks
+    /// for a photo anyway.
+    pub fn person_overrides(&self) -> Result<Vec<PersonOverrideSummary>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT mri, display_name, avatar_bytes IS NOT NULL, updated_at
+             FROM person_overrides ORDER BY updated_at DESC, mri ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PersonOverrideSummary {
+                mri: r.get(0)?,
+                display_name: r.get(1)?,
+                has_avatar: r.get::<_, i64>(2)? != 0,
+                updated_at: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Set — or with `None`, clear — the name the user wants to see for one person.
+    /// The picture they set is left alone: the two halves of an override are
+    /// independent, so renaming somebody never drops the face they were given.
+    ///
+    /// Clearing the last half of an override DELETES the row, so "no override" is
+    /// always the absence of a row (see the `person_overrides` note in [`SCHEMA`]).
+    pub fn set_person_name(&self, mri: &str, name: Option<&str>, now_ms: i64) -> Result<()> {
+        anyhow::ensure!(!mri.is_empty(), "a person override needs an MRI");
+        let name = name.unwrap_or("").trim();
+        self.exec(
+            "INSERT INTO person_overrides (mri, display_name, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(mri) DO UPDATE SET display_name = ?2, updated_at = ?3",
+            params![mri, name, now_ms],
+        )?;
+        self.prune_empty_person_override(mri)?;
+        Ok(())
+    }
+
+    /// Set — or with `None`, clear — the picture the user gave one person. The name
+    /// they set is left alone, for the same reason as above.
+    ///
+    /// The bytes are stored verbatim; validating the type and the size is the RPC's
+    /// job (see `set_person_avatar` in `src/bin/server.rs`), because that is where a
+    /// client's input arrives.
+    pub fn set_person_avatar(
+        &self,
+        mri: &str,
+        avatar: Option<(&str, &[u8])>,
+        now_ms: i64,
+    ) -> Result<()> {
+        anyhow::ensure!(!mri.is_empty(), "a person override needs an MRI");
+        let (content_type, bytes) = match avatar {
+            Some((t, b)) => (t, Some(b)),
+            None => ("", None),
+        };
+        self.exec(
+            "INSERT INTO person_overrides (mri, avatar_content_type, avatar_bytes, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(mri) DO UPDATE SET
+                avatar_content_type = ?2, avatar_bytes = ?3, updated_at = ?4",
+            params![mri, content_type, bytes, now_ms],
+        )?;
+        self.prune_empty_person_override(mri)?;
+        Ok(())
+    }
+
+    /// Drop an override row that no longer overrides anything, so every read can treat
+    /// the presence of a row as "the user decided something about this person".
+    fn prune_empty_person_override(&self, mri: &str) -> Result<()> {
+        self.exec(
+            "DELETE FROM person_overrides
+             WHERE mri = ?1 AND display_name = '' AND avatar_bytes IS NULL",
+            params![mri],
+        )?;
+        Ok(())
+    }
+
     /// Everybody who has written in a conversation, most recent contributor first:
     /// their MRI and the display name their newest message carries (empty when we
-    /// never captured one). Local and network-free.
+    /// never captured one), resolved through the user's own nickname for them.
+    /// Local and network-free.
     ///
     /// This is what an @mention list is built from in a CHANNEL, whose roster Teams
     /// does not expose on the thread (see src/teams_members.rs), and what completes a
@@ -3468,13 +3783,17 @@ impl Store {
     /// well-defined bare column in SQLite — the value from the row that holds the
     /// maximum — so each person is named by their latest message, not an arbitrary one.
     pub fn thread_senders(&self, conversation_id: &str, limit: i64) -> Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT sender_mri, sender, MAX(seq) AS last_seq FROM messages
+        // The nickname is resolved OUTSIDE the aggregate, on the grouping key, so it
+        // cannot depend on which row `MAX(seq)` picked.
+        let sql = format!(
+            "SELECT sender_mri, {SENDER}, MAX(seq) AS last_seq FROM messages
              WHERE conversation_id = ?1 AND sender_mri <> ''
              GROUP BY sender_mri
              ORDER BY last_seq DESC
              LIMIT ?2",
-        )?;
+            SENDER = nicknamed!("messages.sender_mri", "sender"),
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![conversation_id, limit], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
@@ -3564,6 +3883,7 @@ mod tests {
             kind,
             last_message_preview: "",
             last_message_sender: "",
+            last_message_sender_mri: "",
             last_message_from_me: false,
             is_read: true,
             is_muted: false,
@@ -3596,6 +3916,7 @@ mod tests {
             last_message_time: time,
             last_message_preview: "",
             last_message_sender: "",
+            last_message_sender_mri: "",
             last_message_from_me: false,
             is_read: true,
             alerts: ChannelAlerts::MentionsOnly,
@@ -3829,7 +4150,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (11, 0x58d1_7bbe_4053_1b93);
+        const PINNED: (i64, u64) = (12, 0x9372_926b_8b32_d7d5);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -4912,6 +5233,7 @@ mod tests {
             kind: ConversationKind::Group,
             last_message_preview: "ship it",
             last_message_sender: "Clément",
+            last_message_sender_mri: "",
             last_message_from_me: false,
             is_read: false,
             is_muted: true,
@@ -5098,6 +5420,204 @@ mod tests {
         };
         assert_eq!(by_id("dm").avatar_mri, "8:orgid:leonor");
         assert_eq!(by_id("grp").avatar_mri, "", "a group has no single-person avatar");
+    }
+
+    /// Insert a message from one person, so a nickname has something to override.
+    fn msg_from(conv: &str, seq: i64, sender: &str, mri: &str) -> Message {
+        let mut m = msg(conv, seq);
+        m.sender = sender.into();
+        m.sender_mri = mri.into();
+        m
+    }
+
+    #[test]
+    fn a_nickname_renames_the_person_on_every_message_they_ever_sent() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation_full(&upd("grp", "Team chat", 500, ConversationKind::Group)).unwrap();
+        s.insert_message(&msg_from("grp", 1, "Robert SMITH", "8:orgid:rob")).unwrap();
+        s.insert_message(&msg_from("grp", 2, "Grace HOPPER", "8:orgid:grace")).unwrap();
+        // A second message from the same person, so this pins that the rename is not a
+        // one-row update: `insert_message` freezes `sender` at first insert, so every
+        // stored message has to be renamed on the way OUT or none of them is.
+        s.insert_message(&msg_from("grp", 3, "Robert SMITH", "8:orgid:rob")).unwrap();
+
+        s.set_person_name("8:orgid:rob", Some("Bob"), 1_000).unwrap();
+
+        let senders: Vec<String> =
+            s.newest_messages("grp", 50).unwrap().into_iter().map(|m| m.sender).collect();
+        assert_eq!(senders, vec!["Bob", "Grace HOPPER", "Bob"]);
+        // The identity never moves — it is what the override is keyed on.
+        assert!(s.newest_messages("grp", 50).unwrap().iter().all(|m| !m.sender_mri.is_empty()));
+
+        // And the same name comes back from the lookups the typing line, the read
+        // receipts and the @mention list use.
+        assert_eq!(s.display_name_for_mri("8:orgid:rob").unwrap().as_deref(), Some("Bob"));
+        assert_eq!(
+            s.thread_senders("grp", 10).unwrap(),
+            vec![
+                ("8:orgid:rob".to_string(), "Bob".to_string()),
+                ("8:orgid:grace".to_string(), "Grace HOPPER".to_string()),
+            ]
+        );
+        // Teams' own name stays readable, so the UI can always say who this really is.
+        assert_eq!(
+            s.teams_display_name_for_mri("8:orgid:rob").unwrap().as_deref(),
+            Some("Robert SMITH")
+        );
+    }
+
+    #[test]
+    fn a_nickname_titles_a_one_to_one_but_never_a_group() {
+        let s = Store::open_in_memory().unwrap();
+        let me = "Théophile WALLEZ";
+
+        // A 1:1 whose title Teams DID supply — the nickname still wins, or renaming
+        // somebody would work on their messages and not on their chat.
+        s.upsert_conversation_full(&upd("dm", "Robert SMITH", 500, ConversationKind::OneOnOne))
+            .unwrap();
+        s.insert_message(&msg_from("dm", 1, me, "8:orgid:me")).unwrap();
+        s.insert_message(&msg_from("dm", 2, "Robert SMITH", "8:orgid:rob")).unwrap();
+
+        // A group Robert also writes in. Its title is the group's, not his.
+        s.upsert_conversation_full(&upd("grp", "Team chat", 400, ConversationKind::Group)).unwrap();
+        s.insert_message(&msg_from("grp", 1, "Robert SMITH", "8:orgid:rob")).unwrap();
+
+        let title = |id: &str| {
+            s.conversations(me).unwrap().into_iter().find(|c| c.id == id).unwrap().display_name
+        };
+        assert_eq!(title("dm"), "Robert SMITH");
+
+        s.set_person_name("8:orgid:rob", Some("Bob"), 1_000).unwrap();
+        assert_eq!(title("dm"), "Bob");
+        assert_eq!(title("grp"), "Team chat", "renaming a member must not retitle a group");
+
+        // Clearing it puts Teams' own title back.
+        s.set_person_name("8:orgid:rob", None, 2_000).unwrap();
+        assert_eq!(title("dm"), "Robert SMITH");
+        assert_eq!(s.person_override("8:orgid:rob").unwrap(), None, "the row is gone");
+    }
+
+    #[test]
+    fn a_nickname_follows_the_sidebar_preview_attribution() {
+        let s = Store::open_in_memory().unwrap();
+        let me = "Théophile WALLEZ";
+        let mut u = upd("grp", "Team chat", 500, ConversationKind::Group);
+        u.last_message_preview = "ship it";
+        u.last_message_sender = "Robert SMITH";
+        u.last_message_sender_mri = "8:orgid:rob";
+        s.upsert_conversation_full(&u).unwrap();
+
+        let sender = || {
+            s.conversations(me).unwrap().into_iter().find(|c| c.id == "grp").unwrap().last_message_sender
+        };
+        assert_eq!(sender(), "Robert SMITH");
+        s.set_person_name("8:orgid:rob", Some("Bob"), 1_000).unwrap();
+        assert_eq!(sender(), "Bob");
+
+        // The same for a channel row.
+        let mut c = chan_upd("19:general@thread.tacv2", "19:t@thread.tacv2", "Eng", "General", 600);
+        c.last_message_preview = "ship it";
+        c.last_message_sender = "Robert SMITH";
+        c.last_message_sender_mri = "8:orgid:rob";
+        s.upsert_channel_full(&c).unwrap();
+        assert_eq!(s.channels().unwrap()[0].last_message_sender, "Bob");
+    }
+
+    #[test]
+    fn the_two_halves_of_an_override_are_independent() {
+        let s = Store::open_in_memory().unwrap();
+        let mri = "8:orgid:rob";
+        let png: &[u8] = &[0x89, b'P', b'N', b'G'];
+
+        s.set_person_name(mri, Some("Bob"), 100).unwrap();
+        s.set_person_avatar(mri, Some(("image/png", png)), 200).unwrap();
+        let o = s.person_override(mri).unwrap().unwrap();
+        assert_eq!(o.display_name, "Bob");
+        assert_eq!(o.avatar_bytes, png);
+        assert_eq!(o.avatar_content_type, "image/png");
+
+        // Undoing the rename keeps the face.
+        s.set_person_name(mri, None, 300).unwrap();
+        let o = s.person_override(mri).unwrap().unwrap();
+        assert_eq!(o.display_name, "");
+        assert_eq!(o.avatar_bytes, png, "clearing a name must not drop the picture");
+
+        // Only when the last half goes does the row go, so "no override" is always
+        // the absence of a row.
+        s.set_person_avatar(mri, None, 400).unwrap();
+        assert_eq!(s.person_override(mri).unwrap(), None);
+
+        // A name is trimmed, and a blank one is a clear rather than an empty name.
+        s.set_person_name(mri, Some("  Bob  "), 500).unwrap();
+        assert_eq!(s.person_override(mri).unwrap().unwrap().display_name, "Bob");
+        s.set_person_name(mri, Some("   "), 600).unwrap();
+        assert_eq!(s.person_override(mri).unwrap(), None);
+    }
+
+    #[test]
+    fn overrides_list_without_their_bytes_newest_first() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_person_name("8:orgid:rob", Some("Bob"), 100).unwrap();
+        s.set_person_avatar("8:orgid:grace", Some(("image/png", &[1, 2, 3])), 200).unwrap();
+
+        let list = s.person_overrides().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].mri, "8:orgid:grace", "newest change first");
+        assert!(list[0].has_avatar);
+        assert_eq!(list[0].display_name, "");
+        assert_eq!(list[1].mri, "8:orgid:rob");
+        assert!(!list[1].has_avatar);
+        assert_eq!(list[1].display_name, "Bob");
+    }
+
+    #[test]
+    fn an_override_needs_an_mri_and_never_matches_a_legacy_row() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.set_person_name("", Some("Bob"), 100).is_err());
+        assert!(s.set_person_avatar("", Some(("image/png", &[1])), 100).is_err());
+
+        // A message stored before `sender_mri` existed has an empty MRI. Nothing may
+        // ever rename it: an override row with an empty key would rewrite the author
+        // of every such message at once.
+        s.upsert_conversation_full(&upd("grp", "Team chat", 500, ConversationKind::Group)).unwrap();
+        s.insert_message(&msg_from("grp", 1, "Legacy AUTHOR", "")).unwrap();
+        s.set_person_name("8:orgid:rob", Some("Bob"), 100).unwrap();
+        assert_eq!(s.newest_messages("grp", 10).unwrap()[0].sender, "Legacy AUTHOR");
+        assert_eq!(s.display_name_for_mri("").unwrap(), None);
+    }
+
+    #[test]
+    fn a_nickname_answers_for_somebody_who_never_wrote_here() {
+        let s = Store::open_in_memory().unwrap();
+        // Nothing stored from this person at all — a colleague who only ever typed.
+        assert_eq!(s.display_name_for_mri("8:orgid:rob").unwrap(), None);
+        s.set_person_name("8:orgid:rob", Some("Bob"), 100).unwrap();
+        assert_eq!(s.display_name_for_mri("8:orgid:rob").unwrap().as_deref(), Some("Bob"));
+        assert_eq!(s.teams_display_name_for_mri("8:orgid:rob").unwrap(), None);
+    }
+
+    #[test]
+    fn migration_adds_the_person_overrides_table_to_an_existing_store() {
+        let path = temp_db("person_overrides_migration");
+        {
+            // A store from before the table and the column existed.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversations (id TEXT PRIMARY KEY, display_name TEXT,
+                     last_message_time INTEGER NOT NULL DEFAULT 0,
+                     last_message_sender TEXT NOT NULL DEFAULT '');
+                 CREATE TABLE messages (id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+                     seq INTEGER NOT NULL DEFAULT 0, compose_time INTEGER NOT NULL DEFAULT 0,
+                     sender TEXT, content TEXT, PRIMARY KEY (conversation_id, id));",
+            )
+            .unwrap();
+        }
+        let s = Store::open(path.to_str().unwrap()).unwrap();
+        // The table is there and usable, and so is the preview's MRI column.
+        s.set_person_name("8:orgid:rob", Some("Bob"), 100).unwrap();
+        assert_eq!(s.person_override("8:orgid:rob").unwrap().unwrap().display_name, "Bob");
+        assert!(s.conversations("me").is_ok());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -6293,7 +6813,7 @@ mod tests {
     fn conversation_context_names_a_chat_or_a_teams_channel() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_conversation("19:group@thread.v2", "Release train", 100).unwrap();
-        assert_eq!(s.conversation_context("19:group@thread.v2").unwrap(), "Release train");
+        assert_eq!(s.conversation_context("19:group@thread.v2", "8:orgid:me").unwrap(), "Release train");
 
         s.upsert_channel_full(&ChannelUpdate {
             id: "19:chan@thread.tacv2",
@@ -6308,6 +6828,7 @@ mod tests {
             last_message_time: 100,
             last_message_preview: "",
             last_message_sender: "",
+            last_message_sender_mri: "",
             last_message_from_me: false,
             is_read: true,
             alerts: ChannelAlerts::MentionsOnly,
@@ -6315,8 +6836,8 @@ mod tests {
             channel_pos: 0,
         })
         .unwrap();
-        assert_eq!(s.conversation_context("19:chan@thread.tacv2").unwrap(), "Engine · General");
-        assert_eq!(s.conversation_context("19:unknown@thread.v2").unwrap(), "");
+        assert_eq!(s.conversation_context("19:chan@thread.tacv2", "8:orgid:me").unwrap(), "Engine · General");
+        assert_eq!(s.conversation_context("19:unknown@thread.v2", "8:orgid:me").unwrap(), "");
     }
 
     #[test]

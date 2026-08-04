@@ -52,6 +52,7 @@ import {
   type Notification,
   type NotificationTab,
   type PersonPresence,
+  type PersonOverride,
   type PersonProfile,
   type ReadReceipt,
   type ReadReceiptSignal,
@@ -612,6 +613,18 @@ export class TeamsController {
   private addressQueue = new Map<string, (person: AddressPerson | null) => void>();
   private addressBatchTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // What the USER decided to call people, and who they gave a face to, keyed by MRI.
+  // Not a source of truth for any rendered name — the backend already resolves those
+  // (see `person_overrides` in src/store.rs) — but the surface that OFFERS a rename
+  // has to know the current state to show it, and re-asking on every card open would
+  // put a round trip in front of a hover. Dropped per person when one changes.
+  private overrideCache = new Map<string, Promise<PersonOverride | null>>();
+
+  // Surfaces that LIST the overrides rather than read one, so they can re-read when
+  // any of them changes. A set rather than a state slice: the list is not part of what
+  // the app renders on every frame, and only Settings asks for it.
+  private overrideListeners = new Set<() => void>();
+
   // Live OS dark-mode query, watched only while appearance === "system".
   private darkQuery: MediaQueryList | null = null;
   private darkListener: ((e: MediaQueryListEvent) => void) | null = null;
@@ -909,6 +922,14 @@ export class TeamsController {
       if (d.conversation === this.get().openId) {
         this.set({ messagesError: d.error || "Couldn't load messages", loadingMessages: false });
       }
+    });
+
+    // The user renamed somebody, or gave them a face — here, or in the other backend
+    // sharing this store. Drop what we hold about them and re-read: the name lives on
+    // every message they ever sent, and the avatar cache never evicts on its own.
+    on("person_override_changed", (raw) => {
+      const mri = (raw as { mri?: string } | null)?.mri;
+      if (mri) this.forgetPerson(mri);
     });
 
     on("conversations_changed", () => void this.refreshConversations());
@@ -2409,6 +2430,80 @@ export class TeamsController {
    *  Cached for the session and de-duplicated per MRI — a card barely changes —
    *  while a transient failure is evicted so a later hover can retry. Returns
    *  `null` immediately for an empty MRI. */
+  // ---- the name and face the USER gave somebody ---------------------------
+
+  /** Read back what the user chose for one person — their nickname, whether they
+   *  gave them a face, and what Teams itself calls them. Cached per MRI and dropped
+   *  when it changes, so the card that offers the rename opens without a round trip.
+   *  Resolves to `null` for an empty MRI or when the backend cannot answer. */
+  loadPersonOverride(mri: string): Promise<PersonOverride | null> {
+    if (!mri) return Promise.resolve(null);
+    const cached = this.overrideCache.get(mri);
+    if (cached) return cached;
+    const pending = this.backend.personOverride(mri).catch(() => null);
+    this.overrideCache.set(mri, pending);
+    return pending;
+  }
+
+  /** Every override the user set, newest change first, without the avatar bytes.
+   *  Never cached: it is read by a settings pane that must show the current state,
+   *  and it is one small round trip. */
+  async loadPersonOverrides(): Promise<PersonOverride[]> {
+    const res = await this.backend.personOverrides();
+    return res.overrides ?? [];
+  }
+
+  /** Call `listener` whenever any person's override changes — here, or in another page
+   *  on this store. Returns the unsubscribe. For a surface that LISTS them: every other
+   *  reader is served by `forgetPerson`, which re-reads what it holds. */
+  onPersonOverrideChange(listener: () => void): () => void {
+    this.overrideListeners.add(listener);
+    return () => {
+      this.overrideListeners.delete(listener);
+    };
+  }
+
+  /** Rename one person, or with an empty name, put their real name back. */
+  async setPersonName(mri: string, name: string): Promise<void> {
+    await this.backend.setPersonName(mri, name.trim());
+    this.forgetPerson(mri);
+  }
+
+  /** Give one person a face, or with `null`, take it back. */
+  async setPersonAvatar(
+    mri: string,
+    avatar: { content_type: string; data_base64: string } | null,
+  ): Promise<void> {
+    await this.backend.setPersonAvatar(mri, avatar);
+    this.forgetPerson(mri);
+  }
+
+  /**
+   * Drop everything we hold about one person, so the next render asks again.
+   *
+   * The backend resolves a person's name on the way out of the store, so a rename
+   * changes what every already-loaded message says — and this app holds those
+   * messages in memory. Nothing here can patch them one by one without re-deriving
+   * the sidebar's title rules, so it re-reads instead: the lists, and the open
+   * thread. Three caches go with them, and the AVATAR one is the load-bearing part —
+   * it never evicts on its own (an avatar is small and stays on screen for the whole
+   * session), so without this the old face would survive until a reload.
+   *
+   * Called both when this app makes the change and when the other backend sharing
+   * this store does (`person_override_changed`), so two open pages agree.
+   */
+  private forgetPerson(mri: string): void {
+    this.overrideCache.delete(mri);
+    for (const listener of this.overrideListeners) listener();
+    this.profileCache.delete(mri);
+    this.avatarCache.delete(`user:${mri}`);
+    void this.refreshConversations();
+    void this.refreshChannels();
+    void this.refreshNotifications();
+    const openId = this.get().openId;
+    if (openId) void this.reconcileOpen(openId);
+  }
+
   loadProfile(mri: string): Promise<PersonProfile | null> {
     if (!mri) return Promise.resolve(null);
     const cached = this.profileCache.get(mri);

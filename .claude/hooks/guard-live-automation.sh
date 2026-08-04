@@ -433,8 +433,15 @@ if ! sanctioned_automation; then
     # because nothing in this app can put such a marker BACK (there is no mark-unread,
     # and Outlook still calls the mail unread, so the local mark stands), so a script
     # walking a live inbox would quietly erase what the user had not read yet.
+    #
+    # `set_person_name` and `set_person_avatar` write only to the local store too, and
+    # are in the list because of WHAT they write: the name and the face this app puts on
+    # a colleague's messages, everywhere from the sidebar to the push on the user's
+    # phone. A script that could set them could make one person's post appear to come
+    # from another (MACHINE_METHODS in src/bin/server.rs). Reading them back is not a
+    # write and is not listed.
     if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that

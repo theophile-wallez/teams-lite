@@ -43,6 +43,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/preview --scrolled # history scrolled up (jump button)
 //   bun run web/scripts/preview.ts --out /tmp/ghost --ghost     # read state + Ghost mode
 //   bun run web/scripts/preview.ts --out /tmp/set --settings    # the Settings pane
+//   bun run web/scripts/preview.ts --out /tmp/person --person   # rename + custom avatar
 //   bun run web/scripts/preview.ts --out /tmp/agent --agent     # the local-agent menu
 //   bun run web/scripts/preview.ts --out /tmp/reply --agent-reply  # the agent answering
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
@@ -1485,6 +1486,52 @@ if (import.meta.main) {
         await shot(`${out}-own-config-light.png`, element);
         console.log(
           `[preview] wrote ${out}-{light,dark,granted-light,own-config-light}.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
+  // Renaming somebody and giving them a face — the card that offers it, and the dialog
+  // it opens. Three captures, because three states have to be looked at rather than
+  // assumed: the card before anything is overridden, the dialog with a nickname typed,
+  // and the card afterwards — which has to keep saying who Teams calls this person.
+  if (args.includes("--person")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        // A 1:1, deliberately: its title IS a person, so the header itself offers the
+        // card — which is what makes the retitling visible in the same capture.
+        await openConversation(page, "Ava Thompson");
+        const header = page.locator('[data-testid="conversation-title"]');
+        await header.hover();
+        await page.waitForSelector('[data-testid="person-card"]');
+        await shot(`${out}-card-light.png`, element ?? '[data-testid="person-card"]');
+
+        await page.locator('[data-testid="person-card-edit"]').click();
+        await page.waitForSelector('[data-testid="person-edit-dialog"]');
+        await page.locator('[data-testid="person-name-field"]').fill("Ava (design)");
+        const dialog = element ?? '[data-testid="person-edit-dialog"]';
+        await shot(`${out}-dialog-light.png`, dialog);
+        await setTheme("dark");
+        await shot(`${out}-dialog-dark.png`, dialog);
+        await setTheme("light");
+
+        // Saved: the card now leads with the chosen name and keeps the real one under
+        // it. That second line is the honesty half of the whole feature, so it is the
+        // one thing here that must be looked at rather than trusted.
+        await page.locator('[data-testid="person-edit-save"]').click();
+        await page.waitForSelector('[data-testid="person-edit-dialog"]', { state: "detached" });
+        await header.hover();
+        await page.waitForSelector('[data-testid="person-card-renamed-from"]');
+        await shot(`${out}-renamed-light.png`, element ?? '[data-testid="person-card"]');
+
+        // And Settings, which is where a rename made months ago is still reversible.
+        await openSettings(page);
+        await page.waitForSelector('[data-testid="renamed-person-row"]');
+        await shot(`${out}-list-light.png`, element ?? '[data-testid="renamed-people-settings"]');
+        console.log(
+          `[preview] wrote ${out}-{card-light,dialog-light,dialog-dark,renamed-light,list-light}.png`,
         );
       },
       { deviceScaleFactor: dpr },

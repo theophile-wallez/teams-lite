@@ -80,6 +80,10 @@ type Conversation = {
   kind: ConversationKind;
   last_message_preview: string;
   last_message_sender: string;
+  /** Who wrote that preview, as an identity rather than a name, so the sidebar's
+   *  attribution follows a nickname the user set (see `last_message_sender_mri` in
+   *  src/store.rs). Absent when the frame carried no person `from`. */
+  last_message_sender_mri?: string;
   last_message_from_me: boolean;
   is_read: boolean;
   /** Read HERE ONLY (Ghost mode): the marker is clear, Teams still holds it unread. */
@@ -128,6 +132,8 @@ type Channel = {
   last_message_time: number;
   last_message_preview: string;
   last_message_sender: string;
+  /** The identity behind that name. Same job as on `Conversation`. */
+  last_message_sender_mri?: string;
   last_message_from_me: boolean;
   is_read: boolean;
   /** Read HERE ONLY (Ghost mode) — see `Conversation.is_ghost_read`. */
@@ -738,6 +744,8 @@ function recomputeSummary(cs: ConvState): void {
     ? systemEventSidebarLabel(last.system_event)
     : previewOf(last.content);
   cs.conv.last_message_sender = last.system_event ? "" : last.sender;
+  // The identity too, so the attribution follows a nickname like every other name.
+  cs.conv.last_message_sender_mri = last.system_event ? "" : (last.sender_mri ?? "");
   cs.conv.last_message_from_me = Boolean(last.is_self) && !last.system_event;
 }
 
@@ -750,6 +758,7 @@ function recomputeChannelSummary(chs: ChannelState): void {
     ? systemEventSidebarLabel(last.system_event)
     : previewOf(last.content);
   chs.channel.last_message_sender = last.system_event ? "" : last.sender;
+  chs.channel.last_message_sender_mri = last.system_event ? "" : (last.sender_mri ?? "");
   chs.channel.last_message_from_me = Boolean(last.is_self) && !last.system_event;
 }
 
@@ -2261,14 +2270,93 @@ function seedAgentSandbox(): void {
 /** Newest page: the last PAGE_SIZE messages; has_more when older ones exist. */
 function newestPage(messages: ChatMessage[]): MessagePage {
   const page = messages.slice(-PAGE_SIZE);
-  return { messages: page, has_more: messages.length > page.length };
+  return { messages: page.map(nicknamed), has_more: messages.length > page.length };
 }
 
 /** Older page: up to PAGE_SIZE messages with seq < before_seq (ascending). */
 function pageBefore(messages: ChatMessage[], beforeSeq: number): MessagePage {
   const older = messages.filter((m) => m.seq < beforeSeq); // still ascending
   const page = older.slice(-PAGE_SIZE);
-  return { messages: page, has_more: older.length > page.length };
+  return { messages: page.map(nicknamed), has_more: older.length > page.length };
+}
+
+// ---------------------------------------------------------------------------
+// The name and face the USER gave somebody — the mock's half of
+// `person_overrides` (src/store.rs). Microsoft Teams holds neither, so both are
+// local overrides that no sync ever supplies or takes away.
+//
+// The Rust store resolves a nickname on the way OUT of every read, which is what
+// makes one rename cover every message the person ever sent, the title of their
+// 1:1, the sidebar's preview attribution and the typing line at once. The mock
+// mirrors that placement rather than the storage: the fixtures keep the Teams
+// name, and it is replaced at the read boundary.
+// ---------------------------------------------------------------------------
+
+type PersonOverrideEntry = {
+  display_name: string;
+  avatar: { content_type: string; data_base64: string } | null;
+  updated_at: number;
+};
+
+const personOverrides = new Map<string, PersonOverrideEntry>();
+
+/** The name the user chose for this person, or "" when they chose none. */
+function nickname(mri: string | undefined): string {
+  if (!mri) return "";
+  return personOverrides.get(mri)?.display_name ?? "";
+}
+
+/** One message with its author renamed, when the user renamed them. */
+function nicknamed(m: ChatMessage): ChatMessage {
+  const own = nickname(m.sender_mri);
+  return own ? { ...m, sender: own } : m;
+}
+
+/** Drop an override entry that no longer overrides anything, so "no override" is
+ *  always the absence of an entry — same rule as the Rust store's row. */
+function pruneEmptyOverride(mri: string): void {
+  const entry = personOverrides.get(mri);
+  if (entry && !entry.display_name && !entry.avatar) personOverrides.delete(mri);
+}
+
+/** One conversation with the names it states resolved through the user's nicknames:
+ *  a 1:1's title (which IS a person) and the sidebar's preview attribution. A group's
+ *  title is the group's, so renaming a member never retitles it — the same rule the
+ *  Rust query encodes by testing the kind. */
+function nicknamedConversation(c: Conversation): Conversation {
+  const titled = c.kind === "one_on_one" ? nickname(c.avatar_mri) : "";
+  const attributed = nickname(c.last_message_sender_mri);
+  return {
+    ...c,
+    name: titled || c.name,
+    last_message_sender: attributed || c.last_message_sender,
+  };
+}
+
+/** What TEAMS calls this person — never overridden, so a surface offering a rename
+ *  can always say who it belongs to. The Rust store reads it off the newest message
+ *  they sent; the mock reads its own roster, which is the same fact. */
+function teamsNameFor(mri: string): string {
+  return PEOPLE.find((p) => p.mri === mri)?.name ?? "";
+}
+
+/** What the `person_override` method answers: the user's choice, plus what Teams
+ *  itself calls this person so a surface can always show both. */
+function personOverrideView(mri: string): {
+  mri: string;
+  display_name: string;
+  has_avatar: boolean;
+  teams_name: string;
+  updated_at: number;
+} {
+  const entry = personOverrides.get(mri);
+  return {
+    mri,
+    display_name: entry?.display_name ?? "",
+    has_avatar: !!entry?.avatar,
+    teams_name: teamsNameFor(mri),
+    updated_at: entry?.updated_at ?? 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2424,6 +2512,14 @@ function mockAvatar(
   kind: "user" | "team",
   id: string,
 ): { found: true; content_type: string; data_base64: string } | { found: false } {
+  // A face the USER gave this person wins, exactly as in the Rust backend: the
+  // override answers before anything the tenant would have. This is what makes a
+  // custom avatar visible everywhere at once in the mock, since every render site
+  // already asks this method.
+  const own = personOverrides.get(id);
+  if (kind === "user" && own?.avatar) {
+    return { found: true, content_type: own.avatar.content_type, data_base64: own.avatar.data_base64 };
+  }
   if (hashString(`${kind}:${id}`) % 3 === 0) return { found: false };
   const hue = hashString(id) % 360;
   const svg =
@@ -3360,7 +3456,13 @@ function buildNotificationFeeds(): {
 /** Wrap a stream as a `MockFeed` (items + unread count), matching the Rust
  *  `feed_json` shape the `notifications` method returns per tab. */
 function toFeed(items: MockNotification[]): MockFeed {
-  return { unread: items.filter((n) => !n.is_read).length, items };
+  // The actor's name comes off the activity feed rather than out of the message
+  // store, so it needs the nickname applied here — as the Rust `feed_json` does.
+  const named = items.map((n) => {
+    const own = nickname(n.actor_mri);
+    return own ? { ...n, actor_name: own } : n;
+  });
+  return { unread: named.filter((n) => !n.is_read).length, items: named };
 }
 
 // ---------------------------------------------------------------------------
@@ -3889,7 +3991,7 @@ function dispatch(method: string, params: unknown): unknown {
         .map((id) => store.get(id)!.conv)
         .slice()
         .sort((a, b) => b.last_message_time - a.last_message_time)
-        .map((c) => ({ ...c }));
+        .map(nicknamedConversation);
     }
 
     case "channels": {
@@ -3898,7 +4000,11 @@ function dispatch(method: string, params: unknown): unknown {
       // General-first and channel_pos add up to — NOT an alphabetical sort.
       // `channelOrder` already holds ids in that order, and the sidebar's
       // `groupChannelsByTeam` preserves it.
-      return channelOrder.map((id) => ({ ...channelStore.get(id)!.channel }));
+      return channelOrder.map((id) => {
+        const channel = channelStore.get(id)!.channel;
+        const attributed = nickname(channel.last_message_sender_mri);
+        return { ...channel, last_message_sender: attributed || channel.last_message_sender };
+      });
     }
 
     case "notifications": {
@@ -3926,7 +4032,13 @@ function dispatch(method: string, params: unknown): unknown {
       // nobody — which is exactly what the real backend leaves out.
       const id = requireString(params, "conversation");
       const t = threadFor(id);
-      const members = (t?.participants ?? []).map((p) => ({ mri: p.mri, name: p.name }));
+      // Named through the user's nicknames, like the Rust `thread_senders` read the
+      // real list is completed from: a person the user renamed is renamed in the
+      // @mention list too, or they could not find them by the name they gave them.
+      const members = (t?.participants ?? []).map((p) => ({
+        mri: p.mri,
+        name: nickname(p.mri) || p.name,
+      }));
       return { members };
     }
 
@@ -4082,6 +4194,49 @@ function dispatch(method: string, params: unknown): unknown {
         ? o.addresses.filter((a): a is string => typeof a === "string")
         : [requireString(params, "address")];
       return { people: addresses.map(mockAddressPerson).filter((p) => p !== null) };
+    }
+
+    // ---- the name and face the USER gave somebody ---------------------------
+    // Teams holds neither, so nothing here reaches a tenant even in the real
+    // backend. Reading is open; setting carries the write token (MACHINE_METHODS in
+    // src/bin/server.rs), which the mock does not enforce — the point of the mock is
+    // to exercise the flow, and the token gate is pinned by the Rust tests.
+
+    case "person_override": {
+      return personOverrideView(requireString(params, "mri"));
+    }
+
+    case "person_overrides": {
+      const overrides = [...personOverrides.keys()]
+        .map(personOverrideView)
+        .sort((a, b) => b.updated_at - a.updated_at || a.mri.localeCompare(b.mri));
+      return { overrides };
+    }
+
+    case "set_person_name": {
+      const mri = requireString(params, "mri");
+      const name = String(asObject(params).name ?? "").trim();
+      const entry = personOverrides.get(mri) ?? { display_name: "", avatar: null, updated_at: 0 };
+      personOverrides.set(mri, { ...entry, display_name: name, updated_at: Date.now() });
+      pruneEmptyOverride(mri);
+      broadcast("person_override_changed", { mri });
+      return { saved: true };
+    }
+
+    case "set_person_avatar": {
+      const mri = requireString(params, "mri");
+      const o = asObject(params);
+      const data = typeof o.data_base64 === "string" ? o.data_base64 : "";
+      const contentType = typeof o.content_type === "string" ? o.content_type : "";
+      const entry = personOverrides.get(mri) ?? { display_name: "", avatar: null, updated_at: 0 };
+      personOverrides.set(mri, {
+        ...entry,
+        avatar: data ? { content_type: contentType, data_base64: data } : null,
+        updated_at: Date.now(),
+      });
+      pruneEmptyOverride(mri);
+      broadcast("person_override_changed", { mri });
+      return { saved: true };
     }
 
     case "presence": {
@@ -4313,7 +4468,7 @@ function editMessage(convId: string, messageId: string, text: string): void {
   if (msg.content === content) return; // no-op edit: nothing to broadcast
   msg.content = content;
   t.recompute();
-  broadcast("message", msg);
+  broadcast("message", nicknamed(msg));
   broadcast(t.changedEvent, {});
 }
 
@@ -4329,7 +4484,7 @@ function deleteMessage(convId: string, messageId: string): void {
   msg.deleted = true;
   // The message event only, exactly like the Rust `delete`: the sidebar preview
   // belongs to Teams' own conversation sync, not to this call.
-  broadcast("message", msg);
+  broadcast("message", nicknamed(msg));
 }
 
 /** Toggle OUR reaction on a message and broadcast it, mirroring the Rust
@@ -4359,7 +4514,7 @@ function reactMessage(convId: string, messageId: string, key: string): boolean {
   }
 
   msg.reactions = next;
-  broadcast("message", msg);
+  broadcast("message", nicknamed(msg));
   return on;
 }
 
@@ -4405,7 +4560,7 @@ function scheduleSendEcho(
     t.recompute();
     t.setRead(true); // it's ours
     t.setDraft(""); // the accepted send clears the persisted draft
-    broadcast("message", msg);
+    broadcast("message", nicknamed(msg));
     broadcast(t.changedEvent, {});
     maybeRunMockAgent(convId, msg);
   }, SEND_ECHO_DELAY_MS);
@@ -4660,7 +4815,7 @@ function editAgentReply(convId: string, messageId: string, content: string): voi
   if (!msg || msg.content === content) return;
   msg.content = content;
   t.recompute();
-  broadcast("message", msg);
+  broadcast("message", nicknamed(msg));
   broadcast(t.changedEvent, {});
 }
 
@@ -4701,7 +4856,7 @@ function startLiveFeed(): void {
     t.messages.push(msg);
     t.recompute();
     t.setRead(false); // a new incoming message is unread
-    broadcast("message", msg);
+    broadcast("message", nicknamed(msg));
     broadcast(t.changedEvent, {});
   }, LIVE_INTERVAL_MS);
 }
@@ -4745,7 +4900,7 @@ function injectMessage(input: {
   t.messages.push(msg);
   t.recompute();
   t.setRead(isSelf); // an incoming message is unread; ours is read
-  broadcast("message", msg);
+  broadcast("message", nicknamed(msg));
   broadcast(t.changedEvent, {});
   return msg;
 }
@@ -4833,11 +4988,17 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // Broadcast a typing/presence signal, exactly like the Rust backend's
     // `typing` event, so the E2E suite can drive the indicator deterministically.
     if (body.kind === "typing") {
+      const typerMri = typeof body.sender_mri === "string" ? body.sender_mri : "8:orgid:riley";
       broadcast("typing", {
         conversation_id:
           typeof body.conversation === "string" ? body.conversation : (order[0] ?? ""),
-        sender_mri: typeof body.sender_mri === "string" ? body.sender_mri : "8:orgid:riley",
-        sender: typeof body.sender === "string" ? body.sender : "Riley Carter",
+        sender_mri: typerMri,
+        // The Rust backend resolves the typer's name through `display_name_for_mri`,
+        // which answers with the nickname first — so the indicator names them the way
+        // every other surface does.
+        sender:
+          nickname(typerMri) ||
+          (typeof body.sender === "string" ? body.sender : "Riley Carter"),
         is_typing: body.is_typing === undefined ? true : Boolean(body.is_typing),
       });
       return Response.json({ ok: true }, { status: 200 });
@@ -4886,6 +5047,16 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // avatar row deterministically. Defaults anchor the reader to the newest
     // message (avatars land at the bottom), and persist so a re-open's
     // `read_receipts` fetch returns the same position.
+    // Clear every name and face the user gave somebody. One mock process serves the
+    // whole run, so a rename left behind would rename that person for the next spec
+    // too — and a spec asserting a fixture's real name would fail for no visible
+    // reason. Same job as the read_receipt reset below.
+    if (body.kind === "person_overrides" && body.clear === true) {
+      const affected = [...personOverrides.keys()];
+      personOverrides.clear();
+      for (const mri of affected) broadcast("person_override_changed", { mri });
+      return Response.json({ ok: true, cleared: affected.length }, { status: 200 });
+    }
     if (body.kind === "read_receipt") {
       // Clear all injected read positions — lets a serial E2E suite reset the
       // shared mock between specs so "seen by" avatars never leak across tests.
@@ -4900,9 +5071,13 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         typeof body.last_read_message_id === "string"
           ? body.last_read_message_id
           : (t?.messages.at(-1)?.id ?? "");
+      const readerMri = typeof body.member_mri === "string" ? body.member_mri : "8:orgid:riley";
       const receipt = setReceipt(conversation, {
-        member_mri: typeof body.member_mri === "string" ? body.member_mri : "8:orgid:riley",
-        member: typeof body.member === "string" ? body.member : "Riley Carter",
+        member_mri: readerMri,
+        // Resolved like the typing line, and for the same reason.
+        member:
+          nickname(readerMri) ||
+          (typeof body.member === "string" ? body.member : "Riley Carter"),
         last_read_message_id: lastReadMessageId,
         read_time_ms: typeof body.read_time_ms === "number" ? body.read_time_ms : Date.now(),
       });
@@ -4937,7 +5112,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       const mine = Boolean(body.mine);
       const others = (msg.reactions ?? []).filter((r) => r.key !== key);
       msg.reactions = count > 0 ? [...others, { key, count, mine }] : others;
-      broadcast("message", msg);
+      broadcast("message", nicknamed(msg));
       return Response.json({ ok: true, message: msg }, { status: 200 });
     }
     const conversation =

@@ -25,6 +25,7 @@ import type {
   MembersResult,
   MessagePage,
   NotificationFeeds,
+  PersonOverride,
   PersonProfile,
   PresenceResult,
   ReadReceiptsResult,
@@ -607,6 +608,47 @@ export class Backend {
    *  a shared mailbox — is simply absent from `people`. */
   peopleByAddress(addresses: string[]): Promise<AddressPeopleResult> {
     return this.request<AddressPeopleResult>("people_by_address", { addresses });
+  }
+
+  // ---- the name and face the USER gave somebody ---------------------------
+  //
+  // Microsoft Teams holds neither: a colleague's display name and photo are theirs
+  // to set. These are LOCAL overrides, stored on this machine only, and nothing ever
+  // publishes them back — see `person_overrides` in src/store.rs.
+  //
+  // Reading one is open; setting one carries the write token, because what it decides
+  // is the name and the face this app puts on somebody's messages.
+
+  /** What the user chose for one person, and what Teams itself calls them, so a
+   *  surface can show both. `display_name` is empty when they overrode only the
+   *  picture, and `has_avatar` false when they overrode only the name. */
+  personOverride(mri: string): Promise<PersonOverride> {
+    return this.request<PersonOverride>("person_override", { mri });
+  }
+
+  /** Every override the user set, newest change first, without the avatar bytes. */
+  personOverrides(): Promise<{ overrides: PersonOverride[] }> {
+    return this.request<{ overrides: PersonOverride[] }>("person_overrides");
+  }
+
+  /** Rename one person, or with an empty `name`, put their real name back. The
+   *  picture they were given is left alone. */
+  setPersonName(mri: string, name: string): Promise<{ saved: boolean }> {
+    return this.writeRequest<{ saved: boolean }>("set_person_name", { mri, name });
+  }
+
+  /** Give one person a face, or with `null`, take it back. The name they were given
+   *  is left alone. `data_base64` is the raw image; the backend caps its size and
+   *  accepts only PNG, JPEG, GIF and WebP. */
+  setPersonAvatar(
+    mri: string,
+    avatar: { content_type: string; data_base64: string } | null,
+  ): Promise<{ saved: boolean }> {
+    return this.writeRequest<{ saved: boolean }>("set_person_avatar", {
+      mri,
+      content_type: avatar?.content_type ?? "",
+      data_base64: avatar?.data_base64 ?? "",
+    });
   }
 
   /** Read live presence ("Available", "In a meeting", "Offline", …) for one or

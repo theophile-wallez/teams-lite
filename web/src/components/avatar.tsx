@@ -245,8 +245,15 @@ export function Avatar(props: {
   /** A test handle on the avatar itself, for a spec that reads the tint or the
    *  initials it settled on. A glyph avatar keeps its own `avatar-glyph`. */
   testId?: string;
+  /** A picture to draw INSTEAD of resolving `photo` — an image the caller already
+   *  holds and the backend has never seen. The one caller is the dialog that gives
+   *  somebody a custom face (see person-edit-dialog.tsx): the file the user just
+   *  picked is not stored yet, so there is nothing for `photo` to fetch, and the
+   *  preview still has to be the same avatar in the same shape. */
+  overrideSrc?: string;
 }) {
-  const photoUrl = useAvatarPhoto(props.photo);
+  const resolved = useAvatarPhoto(props.overrideSrc ? undefined : props.photo);
+  const photoUrl = props.overrideSrc ?? resolved;
   const person = props.fallback === "person";
   const glyph =
     props.fallback === "meeting" || props.fallback === "group"

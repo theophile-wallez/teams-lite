@@ -394,6 +394,70 @@ describe("Backend request/response", () => {
     backend.close();
   });
 
+  it("frames the person-override reads and carries the write token on the writes", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("tok");
+
+    // Reading is open — no token, so a client that only reads never has to hold one.
+    const read = backend.personOverride("8:orgid:rob");
+    let frame = JSON.parse(socket.sent[0]!) as {
+      id: number;
+      method: string;
+      params?: Record<string, unknown>;
+    };
+    expect(frame.method).toBe("person_override");
+    expect(frame.params).toEqual({ mri: "8:orgid:rob" });
+    socket.simulateMessage(
+      JSON.stringify({
+        id: frame.id,
+        result: {
+          mri: "8:orgid:rob",
+          display_name: "Bob",
+          has_avatar: false,
+          teams_name: "Robert Smith",
+        },
+      }),
+    );
+    await expect(read).resolves.toMatchObject({ display_name: "Bob", teams_name: "Robert Smith" });
+
+    // Renaming and re-facing are writes: the backend refuses either without the token.
+    const renamed = backend.setPersonName("8:orgid:rob", "Bob");
+    frame = JSON.parse(socket.sent[1]!) as typeof frame;
+    expect(frame.method).toBe("set_person_name");
+    expect(frame.params).toEqual({ mri: "8:orgid:rob", name: "Bob", write_token: "tok" });
+    socket.simulateMessage(JSON.stringify({ id: frame.id, result: { saved: true } }));
+    await expect(renamed).resolves.toEqual({ saved: true });
+
+    const refaced = backend.setPersonAvatar("8:orgid:rob", {
+      content_type: "image/png",
+      data_base64: "AAAA",
+    });
+    frame = JSON.parse(socket.sent[2]!) as typeof frame;
+    expect(frame.method).toBe("set_person_avatar");
+    expect(frame.params).toEqual({
+      mri: "8:orgid:rob",
+      content_type: "image/png",
+      data_base64: "AAAA",
+      write_token: "tok",
+    });
+    socket.simulateMessage(JSON.stringify({ id: frame.id, result: { saved: true } }));
+    await expect(refaced).resolves.toEqual({ saved: true });
+
+    // Clearing a picture is the same call with nothing in it — the backend reads an
+    // empty `data_base64` as "take it back", and leaves the name alone.
+    const cleared = backend.setPersonAvatar("8:orgid:rob", null);
+    frame = JSON.parse(socket.sent[3]!) as typeof frame;
+    expect(frame.params).toEqual({
+      mri: "8:orgid:rob",
+      content_type: "",
+      data_base64: "",
+      write_token: "tok",
+    });
+    socket.simulateMessage(JSON.stringify({ id: frame.id, result: { saved: true } }));
+    await expect(cleared).resolves.toEqual({ saved: true });
+    backend.close();
+  });
+
   it("rejects immediately when not connected", async () => {
     const backend = new Backend("ws://test");
     await expect(backend.open("c1")).rejects.toThrow("not connected");

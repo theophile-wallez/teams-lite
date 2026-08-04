@@ -740,6 +740,77 @@ notifies a colleague, a tag starts a program on this machine.
   --agent-tag` captures the list, both chips and the sent bubble, and
   `web/e2e/agent-tag.spec.ts` pins every rule above.
 
+## Renaming a person, and giving them a face (LOCAL, and gated)
+
+The user can call somebody whatever they like and hand them any picture, in this app
+only. **Microsoft Teams holds neither** — a colleague's display name and photo are
+theirs to set — so there is no upstream to write to and nothing here tries: the pair
+lives in `store::person_overrides`, keyed by MRI, and is a LOCAL OVERRIDE exactly like
+a fold, a pin or a local read position.
+
+- **One change reaches every surface, because the resolution lives in the STORE's
+  reads.** `nicknamed!` is baked into `SELECT_COLS` and into the `conversations` /
+  `channels` / `display_name_for_mri` / `other_party_name` / `thread_senders` queries,
+  so a rename covers every message that person ever sent, the title of their 1:1, the
+  sidebar's preview attribution, the typing line, the "seen by" row and the @mention
+  list at once. That placement is the whole design: `insert_message` freezes a
+  message's `sender` at first insert and no sync refreshes it, so a rename applied at
+  render time would have to be applied at a dozen render sites — and the one that got
+  forgotten is the bug. Never move it out to a caller.
+- **What the store never produced, the server resolves explicitly.** Three names do not
+  come through a store read: the activity feed's actor (`feed_json`), the sender of a
+  live push (`push_live_message`, which gets the frame that just arrived), and a 1:1's
+  title in `conversation_context` — which is why that one takes `self_mri`, so a
+  nickname the user gave THEMSELVES can never retitle their own chat. The phone is the
+  sharpest case: it is the one surface the user cannot correct by looking again.
+- **The override never rewrites a message.** An @mention chip inside a body, the author
+  of a reply quote, and the participant list of a call event all keep the words their
+  frame carried. The rule is one sentence: it applies to every name this app STATES
+  about a person, and never to the record of a Teams frame.
+- **Setting one needs the write token; reading one does not.** `set_person_name` and
+  `set_person_avatar` are `MACHINE_METHODS` entries — the only two that write nothing
+  but the local store — because of WHAT they write: a client that could set them could
+  make one colleague's post appear to come from another, in the sidebar, in the bubble
+  and in the notification on the user's phone. Authorship is the one thing this app
+  never misstates. The automation hook blocks both against a live port for the same
+  reason. `person_override` / `person_overrides` stay open: they return what the user
+  themselves chose.
+- **The real name stays visible, and that is load-bearing.** `person_override` returns
+  `teams_name` beside the nickname, the dialog keeps it under the field, and the person
+  card shows it under a renamed person's name. A nickname the user cannot see through
+  is one they cannot undo — so never drop that line to save space, and never let the
+  `profile` RPC return anything but the directory's own truth.
+- **The two halves are independent.** Clearing a name never drops a picture and
+  vice-versa; clearing the last half deletes the row, so "no override" is always the
+  absence of a row and every read can treat an empty table as the common case.
+- **A custom avatar is raster bytes, capped, and served before the network.**
+  `PERSON_AVATAR_TYPES` is PNG/JPEG/GIF/WebP and nothing else — SVG is a document, not
+  a bitmap — capped at `MAX_PERSON_AVATAR_BYTES`, stored as BLOB rather than as a path
+  (which breaks when the file moves) or a URL (which would make drawing a colleague's
+  face a request to a third party). `fetch_avatar` answers from the override first, so
+  one picture covers every render site that already asks it.
+- **A change drops what the frontend holds about that person.** `forgetPerson` in
+  `web/src/lib/store.ts` evicts the override, profile and AVATAR caches and re-reads the
+  lists and the open thread. The avatar cache is the load-bearing one: it never evicts
+  on its own, so without this the old face would survive until a reload. It runs both
+  on our own change and on the backend's `person_override_changed`, so two open pages
+  and the two backends sharing the store agree.
+
+**Two surfaces, and both are needed.** The rename is offered on the person CARD
+(`web/src/components/person-card.tsx` → `person-edit-dialog.tsx`, over
+`web/src/lib/person-override.ts`), because that is the surface which already answers
+"who is this?" — the one place the user can read the real name at the moment they
+replace it. Settings › Renamed people (`renamed-people-settings.tsx`) lists every
+override and undoes it, because a card has to be FOUND and a nickname is precisely what
+makes somebody hard to find again: the user would be searching for a name Teams never
+had. Do not drop either one for the other.
+
+`web/mock/server.ts` mirrors the whole flow with no tenant — including the
+`{kind: "person_overrides", clear: true}` test hook, which a spec MUST call afterwards
+since one mock process serves the whole run and a rename left behind renames that person
+for every later spec. `bun run preview -- --out /tmp/person --person` captures the card,
+the dialog and the list; `web/e2e/person-override.spec.ts` pins them.
+
 ## Language policy (MANDATORY)
 
 - **All artifacts are in English.** This includes: UI strings, labels, button text,

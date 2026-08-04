@@ -172,6 +172,9 @@ export type Conversation = {
   last_message_time: number;
   kind: ConversationKind;
   last_message_preview: string;
+  /** Who wrote the preview. Already resolved through the user's own nickname for them
+   *  when they set one — the backend does that on the way out of the store, so no
+   *  caller has to (see `person_overrides` in src/store.rs). */
   last_message_sender: string;
   last_message_from_me: boolean;
   /** False when the chat has unread messages. Teams' own flag OR our local read
@@ -499,6 +502,35 @@ export type AddressPerson = PersonProfile & { address: string };
  *  answered for. An address it knows nobody by (an external sender, a distribution
  *  list, a shared mailbox) is simply absent, and the UI keeps its tinted initials. */
 export type AddressPeopleResult = { people: AddressPerson[] };
+
+/**
+ * The name and the face the USER gave somebody, as the `person_override` and
+ * `person_overrides` methods return them.
+ *
+ * Microsoft Teams holds neither — a colleague's display name and photo are theirs to
+ * set — so this is a local override stored on this machine only, and nothing ever
+ * publishes it back. The two halves are independent: `display_name` is empty when only
+ * the picture was replaced, and `has_avatar` is false when only the name was.
+ *
+ * `teams_name` is what Teams itself calls this person, never overridden, so a surface
+ * that shows a nickname can always say who it belongs to. That is the point of
+ * carrying it: a rename the user cannot see through would leave them unable to tell
+ * who a message is from.
+ */
+export type PersonOverride = {
+  mri: string;
+  display_name: string;
+  has_avatar: boolean;
+  teams_name: string;
+  /** When it was last changed (epoch ms). Absent on a single-person read. */
+  updated_at?: number;
+};
+
+/** Whether a person carries any override at all. An entry with neither half set is
+ *  never stored, so this is the one test a caller needs. */
+export function hasPersonOverride(o: PersonOverride | null | undefined): boolean {
+  return !!o && (o.display_name.trim().length > 0 || o.has_avatar);
+}
 
 /** One person's live presence, as the `presence` method returns it (mirrors the
  *  Rust `Presence` in src/teams_presence.rs).

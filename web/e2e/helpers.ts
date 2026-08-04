@@ -247,6 +247,16 @@ export async function clearReadReceipts(page: Page): Promise<void> {
   expect(res.ok()).toBeTruthy();
 }
 
+/** Clear every name and face the user gave somebody, through the mock's gated test
+ *  hook. One mock process serves the whole run, so a rename left behind would rename
+ *  that person for every later spec. */
+export async function clearPersonOverrides(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "person_overrides", clear: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Set a reaction on an existing message through the mock's gated test hook
  *  (from someone else by default), then the mock re-broadcasts the message. */
 export async function emitReaction(

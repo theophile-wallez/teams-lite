@@ -6,11 +6,13 @@ import {
   Building02Icon,
   Mail01Icon,
   MapPinIcon,
+  PencilEdit02Icon,
 } from "@hugeicons/core-free-icons";
-import type { PersonProfile } from "~/lib/protocol";
+import { hasPersonOverride, type PersonOverride, type PersonProfile } from "~/lib/protocol";
 import { lastSeenLabel, presenceIsUnknown, presenceLabel } from "~/lib/presence";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
+import { PersonEditDialog } from "./person-edit-dialog";
 import { PresenceBadge } from "./presence-badge";
 import { usePresence } from "./use-presence";
 import { useController } from "./controller-context";
@@ -47,6 +49,7 @@ type PersonIdentity = { mri: string; name: string };
 function usePersonDetails(mri: string, open: boolean) {
   const controller = useController();
   const [profile, setProfile] = useState<PersonProfile | null | undefined>(undefined);
+  const [override, setOverride] = useState<PersonOverride | null>(null);
   const presence = usePresence(open ? mri : undefined);
 
   useEffect(() => {
@@ -56,12 +59,19 @@ function usePersonDetails(mri: string, open: boolean) {
       .loadProfile(mri)
       .then((p) => alive && setProfile(p))
       .catch(() => alive && setProfile(null));
+    // Whether the user renamed or re-faced this person. Not needed to DRAW the card —
+    // the backend already resolved the name and the photo — but it decides whether the
+    // card says who Teams calls them, which is the honesty half of the rename.
+    controller
+      .loadPersonOverride(mri)
+      .then((o) => alive && setOverride(o))
+      .catch(() => alive && setOverride(null));
     return () => {
       alive = false;
     };
   }, [controller, mri, open]);
 
-  return { profile, presence };
+  return { profile, presence, override };
 }
 
 /** One detail row: an icon, the value, and (for an email) a mailto link. */
@@ -94,11 +104,28 @@ function DetailRow(props: {
 
 /** The card's body — exported for the hover wrapper below and for tests, which
  *  render it directly instead of driving a real hover. */
-export function PersonCard(props: { identity: PersonIdentity; open: boolean }) {
+export function PersonCard(props: {
+  identity: PersonIdentity;
+  open: boolean;
+  /** Open the rename dialog. Owned by the WRAPPER rather than by this card, because
+   *  the card lives inside a hover card that closes the moment the pointer leaves it
+   *  — a dialog mounted in here would be unmounted by its own opening click. */
+  onEdit?: () => void;
+}) {
   const { identity } = props;
-  const { profile, presence } = usePersonDetails(identity.mri, props.open);
+  const { profile, presence, override } = usePersonDetails(identity.mri, props.open);
+  const renamed = override?.display_name?.trim() || "";
   // The name we already have is the floor: a directory lookup can only improve it.
-  const name = profile?.display_name?.trim() || identity.name;
+  // Except when the USER named this person — then their choice is the answer, and the
+  // directory's is demoted to the line below (see `renamedFrom`). Teams itself never
+  // knows about a nickname, so a lookup can only ever contradict one.
+  const name = renamed || profile?.display_name?.trim() || identity.name;
+  // Who Teams says this is, shown only when the user renamed them. Kept on the card
+  // for the same reason the dialog keeps it: a nickname the user cannot see through is
+  // a nickname they cannot undo, and a card is where they come to ask "who is this?".
+  const renamedFrom = renamed
+    ? profile?.display_name?.trim() || override?.teams_name?.trim() || ""
+    : "";
   const presenceKnown = presence !== undefined && !presenceIsUnknown(presence);
   const lastSeen = lastSeenLabel(presence ?? null);
   const note = presence?.out_of_office_note?.trim() || presence?.note?.trim() || "";
@@ -128,6 +155,11 @@ export function PersonCard(props: { identity: PersonIdentity; open: boolean }) {
           <div data-testid="person-card-name" className="truncate font-semibold text-foreground">
             {name}
           </div>
+          {renamedFrom ? (
+            <div data-testid="person-card-renamed-from" className="truncate text-xs text-text-faint">
+              Teams calls them {renamedFrom}
+            </div>
+          ) : null}
           {profile?.job_title ? (
             <div data-testid="person-card-title" className="truncate text-xs text-text-dim">
               {profile.job_title}
@@ -204,6 +236,22 @@ export function PersonCard(props: { identity: PersonIdentity; open: boolean }) {
           <span className="h-3 w-32 rounded bg-accent/50" />
         </div>
       ) : null}
+
+      {/* Rename them, and give them a face — here only. The card is where this
+          belongs: it is the surface that already answers "who is this?", so it is the
+          one place the user can see the real name at the moment they replace it. Only
+          offered for somebody we can address, since an override is keyed on their MRI. */}
+      {identity.mri && props.onEdit ? (
+        <button
+          type="button"
+          data-testid="person-card-edit"
+          className="-mx-1.5 -my-1 flex items-center gap-1.5 self-start rounded-md px-1.5 py-1 text-xs text-text-dim transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={props.onEdit}
+        >
+          <HugeiconsIcon icon={PencilEdit02Icon} className="size-3.5" strokeWidth={1.8} />
+          {hasPersonOverride(override) ? "Edit your name for them" : "Rename them here"}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -216,6 +264,10 @@ export function PersonCard(props: { identity: PersonIdentity; open: boolean }) {
  *
  * Without an MRI there is nobody to look up, so the children render bare: no
  * trigger, no hover affordance, no request.
+ *
+ * The rename dialog is mounted HERE, beside the hover card rather than inside it: the
+ * card closes the instant the pointer leaves, so a dialog living in its content would
+ * be unmounted by the very click that opened it.
  */
 export function PersonHoverCard(props: {
   mri: string | undefined;
@@ -224,9 +276,12 @@ export function PersonHoverCard(props: {
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
-  if (!props.mri) return <>{props.children}</>;
+  const [editing, setEditing] = useState(false);
+  const mri = props.mri;
+  if (!mri) return <>{props.children}</>;
 
   return (
+    <>
     <HoverCardPrimitive.Root
       open={open}
       onOpenChange={setOpen}
@@ -251,9 +306,20 @@ export function PersonHoverCard(props: {
           collisionPadding={12}
           className="z-50 rounded-xl border border-border/60 bg-popover p-3.5 text-popover-foreground shadow-pop backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95 data-[side=bottom]:slide-in-from-top-1 data-[side=top]:slide-in-from-bottom-1"
         >
-          <PersonCard identity={{ mri: props.mri, name: props.name }} open={open} />
+          <PersonCard
+            identity={{ mri, name: props.name }}
+            open={open}
+            onEdit={() => {
+              // Close the card as the dialog takes over: leaving it open behind a modal
+              // overlay would leave a card nothing can dismiss.
+              setOpen(false);
+              setEditing(true);
+            }}
+          />
         </HoverCardPrimitive.Content>
       </HoverCardPrimitive.Portal>
     </HoverCardPrimitive.Root>
+    <PersonEditDialog open={editing} onOpenChange={setEditing} mri={mri} name={props.name} />
+    </>
   );
 }

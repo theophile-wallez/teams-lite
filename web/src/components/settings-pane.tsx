@@ -21,6 +21,7 @@ import type { SettingsPatch } from "~/lib/protocol";
 import { pushBlockerMessage } from "~/lib/push";
 import { cn } from "~/lib/utils";
 import { AiProvidersSettings } from "./ai-providers-settings";
+import { RenamedPeopleSettings } from "./renamed-people-settings";
 import { useAppState, useController } from "./controller-context";
 import { LinearLogo } from "./linear-logo";
 import { Button } from "./ui/button";
@@ -66,7 +67,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
         <div className="flex min-w-0 flex-col">
           <h2 className="truncate text-sm font-medium text-foreground">Settings</h2>
           <p className="truncate text-[11px] text-text-faint">
-            AI providers, integrations, privacy, appearance, and sounds
+            AI providers, integrations, privacy, people, appearance, and sounds
           </p>
         </div>
       </header>
@@ -78,6 +79,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
           <LinearSettings />
           <GhostModeSettings />
           <AlwaysAvailableSettings />
+          <RenamedPeopleSettings />
           <NotificationSettings />
           <AppearanceSettings />
           <SoundsSettings />

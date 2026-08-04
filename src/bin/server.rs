@@ -17,11 +17,12 @@
 //          | calendars | calendar_view
 //          | agent_status | agent_set_mode | agent_set_tools | agent_set_provider
 //          | agent_set_unrestricted
+//          | person_override | person_overrides | set_person_name | set_person_avatar
 // Events:  status | message | conversations_changed | notifications_changed | typing
 //          | read_receipt | call | call_signal | update_available
 //          | mail_folders_changed | mail_list_updated | mail_list_error
 //          | calendars_changed | calendar_view_updated | calendar_view_error
-//          | agent_stream
+//          | agent_stream | person_override_changed
 //
 // The `mail_*` methods are the READ-ONLY Outlook surface (see `mail`): the same
 // broker identity carries the mailbox, and the app lists folders, reads messages and
@@ -147,6 +148,23 @@ const SETTING_PRESENCE_ENDPOINT_ID: &str = "presence_endpoint_id";
 /// [`teams_lite::push::VapidKey`]).
 const SETTING_PUSH_VAPID_PRIVATE: &str = "push_vapid_private";
 
+/// Longest nickname the user may give somebody. Generous next to a real display name
+/// (the longest in this tenant is 31 bytes) and small enough that a stored override
+/// can never grow into something a sidebar row has to truncate to nothing.
+const MAX_PERSON_NAME_BYTES: usize = 120;
+
+/// Largest custom avatar accepted, in bytes. The picture is fetched over the same
+/// WebSocket as everything else and base64 costs a third on top, so a generous photo
+/// budget rather than a media one — and the app renders it at 192px at most.
+const MAX_PERSON_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+
+/// The image types a custom avatar may be. Raster formats only, on purpose: these
+/// bytes come back out of this app into an `<img>`, and an allowlist of four decoders
+/// is a thing a reader can check at a glance. SVG is deliberately absent — it is a
+/// document, not a bitmap, and an avatar has no need to be one.
+const PERSON_AVATAR_TYPES: [&str; 4] =
+    ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
 /// How long a claim on a live message is kept before [`Store::prune_claims`] drops
 /// it. Only there to stop two backends acting twice on the same LIVE message — a
 /// double push, or one `@claude` trigger answered twice — and every policy already
@@ -188,7 +206,7 @@ const OUTWARD_METHODS: [&str; 7] = [
     "set_chat_muted",
 ];
 
-/// The RPC methods that act on THIS MACHINE, outside the store and the network.
+/// The RPC methods that act on THIS MACHINE rather than on the user's Teams account.
 ///
 /// A second reason to need the write token, and deliberately not folded into
 /// {@link OUTWARD_METHODS}: that list means "posts as the user", three tests iterate
@@ -221,7 +239,16 @@ const OUTWARD_METHODS: [&str; 7] = [
 /// own configuration — every MCP server, every tool, their own permission mode. It is
 /// the one switch in this file that a stranger on the socket could turn into code
 /// execution, so it is gated exactly like the others and off in a fresh store.
-const MACHINE_METHODS: [&str; 9] = [
+///
+/// `set_person_name` and `set_person_avatar` are the two entries that write only to the
+/// store, and they are here because of WHAT they write: the name and the face this app
+/// puts on somebody's messages. A client that could set them could make a colleague's
+/// post appear to come from another person — in the sidebar, in the bubble, in the
+/// notification on the user's phone. Authorship is the one thing this app never
+/// misstates (see the local agent's signature line in AGENTS.md), so relabelling it is
+/// the user's own act and nothing that merely found this socket gets to perform it.
+/// Reading the overrides back stays open: it returns what the user themselves chose.
+const MACHINE_METHODS: [&str; 11] = [
     "repair_broker",
     "push_subscribe",
     "push_unsubscribe",
@@ -231,6 +258,8 @@ const MACHINE_METHODS: [&str; 9] = [
     "agent_set_tools",
     "agent_set_provider",
     "agent_set_unrestricted",
+    "set_person_name",
+    "set_person_avatar",
 ];
 
 /// What a {@link MACHINE_METHODS} entry actually does to the machine, for its
@@ -256,6 +285,9 @@ fn machine_effect(method: &str) -> &'static str {
         "agent_set_unrestricted" => {
             "lets a local agent this machine runs use the user's own Claude Code \
              configuration — every tool it holds"
+        }
+        "set_person_name" | "set_person_avatar" => {
+            "decides the name and the face this machine puts on a colleague's messages"
         }
         // Unreachable while the two lists agree; the test below pins that they do.
         _ => "changes this machine",
@@ -1742,6 +1774,25 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 teams_avatars::is_valid_avatar_id(&id),
                 "malformed avatar id"
             );
+            // A face the USER gave this person wins, and answers without the network:
+            // Teams holds no such picture, so there is nothing up there to ask. Doing
+            // it HERE rather than at each render site is what makes one override cover
+            // the sidebar, the header, the bubble stack, the mention list, the "seen
+            // by" row and the card at once — every one of them already asks this RPC.
+            if kind == teams_avatars::AvatarKind::User {
+                if let Some(o) = ctx.store().ok().and_then(|s| s.person_override(&id).ok().flatten())
+                {
+                    if !o.avatar_bytes.is_empty() {
+                        let data =
+                            base64::engine::general_purpose::STANDARD.encode(&o.avatar_bytes);
+                        return Ok(json!({
+                            "found": true,
+                            "content_type": o.avatar_content_type,
+                            "data_base64": data,
+                        }));
+                    }
+                }
+            }
             let http = ctx.http.clone();
             let tokens = ctx.tokens.clone();
             let media = ctx
@@ -1776,6 +1827,119 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let text = param_str(params, "text")?;
             let store = ctx.store()?;
             store.set_draft(&conv, &text)?;
+            Ok(json!({ "saved": true }))
+        }
+
+        // What the user decided to call somebody, and the face they gave them. Teams
+        // holds neither — a colleague's name and photo are theirs to set — so this is
+        // a purely LOCAL override, and the one thing in the store no sync can supply.
+        //
+        // Reading it back is open: it returns the user's own decision, plus the name
+        // the directory actually holds, so the app can show both. That second half is
+        // the point. A rename that erased the real name everywhere would leave the user
+        // unable to tell who a message is from, so the card that offers the rename is
+        // also the place that keeps stating who Teams says this is.
+        "person_override" => {
+            let mri = param_str(params, "mri")?;
+            anyhow::ensure!(
+                teams_profiles::is_person_mri(&mri),
+                "a person override needs a person MRI"
+            );
+            let store = ctx.store()?;
+            let o = store.person_override(&mri)?;
+            Ok(json!({
+                "mri": mri,
+                "display_name": o.as_ref().map(|o| o.display_name.clone()).unwrap_or_default(),
+                "has_avatar": o.as_ref().is_some_and(|o| !o.avatar_bytes.is_empty()),
+                // The name Teams itself holds for this person, from the messages we
+                // already store — never overridden, so the UI can always say who this
+                // really is next to the name the user chose.
+                "teams_name": store.teams_display_name_for_mri(&mri)?.unwrap_or_default(),
+            }))
+        }
+
+        // Every override the user set, so a settings pane can list and undo them
+        // without hunting for each person in a thread.
+        "person_overrides" => {
+            let store = ctx.store()?;
+            let overrides = store.person_overrides()?;
+            let list: Vec<Value> = overrides
+                .into_iter()
+                .map(|o| {
+                    let teams_name =
+                        store.teams_display_name_for_mri(&o.mri).ok().flatten().unwrap_or_default();
+                    json!({
+                        "mri": o.mri,
+                        "display_name": o.display_name,
+                        "has_avatar": o.has_avatar,
+                        "updated_at": o.updated_at,
+                        "teams_name": teams_name,
+                    })
+                })
+                .collect();
+            Ok(json!({ "overrides": list }))
+        }
+
+        // Rename one person, or with an empty/absent `name`, put their real name back.
+        // The face they were given is untouched: the two halves are independent, so
+        // undoing a rename never silently drops a picture.
+        "set_person_name" => {
+            let mri = param_str(params, "mri")?;
+            anyhow::ensure!(
+                teams_profiles::is_person_mri(&mri),
+                "a person override needs a person MRI"
+            );
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+            anyhow::ensure!(
+                name.len() <= MAX_PERSON_NAME_BYTES,
+                "that name is too long ({} bytes, max {MAX_PERSON_NAME_BYTES})",
+                name.len()
+            );
+            // A control character would let a name break the line it is rendered on,
+            // and a name is drawn in a dozen places that each assume one line.
+            anyhow::ensure!(
+                !name.chars().any(char::is_control),
+                "a name cannot contain control characters"
+            );
+            let store = ctx.store()?;
+            store.set_person_name(&mri, Some(name).filter(|n| !n.is_empty()), now_ms())?;
+            ctx.emit("person_override_changed", json!({ "mri": mri }));
+            Ok(json!({ "saved": true }))
+        }
+
+        // Give one person a face, or with absent `data_base64`, take it back. The name
+        // they were given is untouched, for the same reason as above.
+        "set_person_avatar" => {
+            let mri = param_str(params, "mri")?;
+            anyhow::ensure!(
+                teams_profiles::is_person_mri(&mri),
+                "a person override needs a person MRI"
+            );
+            let store = ctx.store()?;
+            match params.get("data_base64").and_then(|v| v.as_str()) {
+                None | Some("") => store.set_person_avatar(&mri, None, now_ms())?,
+                Some(data) => {
+                    let content_type = param_str(params, "content_type")?;
+                    // An image and nothing else. These bytes come back out of this app
+                    // as an avatar `<img>`, so a body typed `text/html` would be a
+                    // script the user pasted into their own page.
+                    anyhow::ensure!(
+                        PERSON_AVATAR_TYPES.contains(&content_type.as_str()),
+                        "an avatar must be a PNG, JPEG, GIF or WebP image"
+                    );
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(data)
+                        .context("avatar data is not valid base64")?;
+                    anyhow::ensure!(!bytes.is_empty(), "an avatar cannot be empty");
+                    anyhow::ensure!(
+                        bytes.len() <= MAX_PERSON_AVATAR_BYTES,
+                        "that picture is too large ({} bytes, max {MAX_PERSON_AVATAR_BYTES})",
+                        bytes.len()
+                    );
+                    store.set_person_avatar(&mri, Some((&content_type, &bytes)), now_ms())?;
+                }
+            }
+            ctx.emit("person_override_changed", json!({ "mri": mri }));
             Ok(json!({ "saved": true }))
         }
 
@@ -2109,10 +2273,24 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     }
                 })
                 .await?;
+            // The actor's name comes live off the activity feed, so it never passed
+            // through the store's own name resolution — apply the user's nicknames
+            // here, or a renamed colleague would be the one place still showing their
+            // directory name.
+            let store = ctx.store().ok();
+            let nick = |mri: &str| -> Option<String> {
+                let mri = mri.trim();
+                if mri.is_empty() {
+                    return None;
+                }
+                store.as_ref()?.person_override(mri).ok().flatten().and_then(|o| {
+                    Some(o.display_name).filter(|n| !n.is_empty())
+                })
+            };
             Ok(json!({
-                "activity": feed_json(&activity),
-                "mentions": feed_json(&mentions),
-                "following": feed_json(&following),
+                "activity": feed_json(&activity, &nick),
+                "mentions": feed_json(&mentions, &nick),
+                "following": feed_json(&following, &nick),
             }))
         }
 
@@ -3358,7 +3536,14 @@ fn data_db_path() -> Result<String> {
 
 /// Serialize one activity stream for the UI: the decoded notifications plus the
 /// unread count (derived from Teams' own read-state) so the panel can badge it.
-fn feed_json(items: &[teams_activity::Notification]) -> Value {
+///
+/// `nickname` answers with the name the user gave an actor, or None when they gave
+/// none. Passed in rather than looked up here so one store read serves all three
+/// streams, and so this stays a pure function of what it is given.
+fn feed_json(
+    items: &[teams_activity::Notification],
+    nickname: &dyn Fn(&str) -> Option<String>,
+) -> Value {
     let unread = items.iter().filter(|n| !n.is_read).count();
     json!({
         "unread": unread,
@@ -3368,7 +3553,7 @@ fn feed_json(items: &[teams_activity::Notification]) -> Value {
                 "id": n.id,
                 "activity_type": n.activity_type,
                 "activity_subtype": n.activity_subtype,
-                "actor_name": n.actor_name,
+                "actor_name": nickname(&n.actor_mri).unwrap_or_else(|| n.actor_name.clone()),
                 "actor_mri": n.actor_mri,
                 "source_thread_id": n.source_thread_id,
                 "source_message_id": n.source_message_id,
@@ -4113,7 +4298,7 @@ fn push_live_message(
     if read_only() || !push_subscriptions_exist(store) {
         return;
     }
-    let context = store.conversation_context(&message.conversation_id).unwrap_or_default();
+    let context = store.conversation_context(&message.conversation_id, self_mri).unwrap_or_default();
     // A channel is gated on the user's own Teams notification setting for it, so the
     // placement carries that setting. An unreadable store answers with Teams'
     // default rather than with silence.
@@ -4125,6 +4310,19 @@ fn push_live_message(
     } else {
         push_policy::Placement::Chat { title: &context }
     };
+    // The notification names the sender, and this `message` is the frame that just
+    // arrived rather than a row read back through the store, so its `sender` has not
+    // been through the nickname resolution every read applies. Do it here: the phone
+    // in the user's pocket is the LAST place a rename should fail to hold, because it
+    // is the one surface they cannot correct by looking again.
+    let renamed = store
+        .person_override(&message.sender_mri)
+        .ok()
+        .flatten()
+        .map(|o| o.display_name)
+        .filter(|n| !n.is_empty())
+        .map(|display_name| Message { sender: display_name, ..message.clone() });
+    let message = renamed.as_ref().unwrap_or(message);
     let Some(notification) =
         push_policy::notification_for(message, &placement, self_mri, from_me, now_ms())
     else {
@@ -4322,7 +4520,7 @@ fn log_agent_backends(unrestricted: bool) {
 /// drive the user's real store, and an agent that answers a message in their name is
 /// the loudest possible thing for a screenshot script to do — the check is here, not
 /// only at the dispatch gate, because this path never passes through the gate.
-fn agent_live_message(ctx: &Ctx, store: &Store, message: &Message, from_me: bool) {
+fn agent_live_message(ctx: &Ctx, store: &Store, message: &Message, from_me: bool, self_mri: &str) {
     if read_only() {
         return;
     }
@@ -4380,7 +4578,7 @@ fn agent_live_message(ctx: &Ctx, store: &Store, message: &Message, from_me: bool
             return;
         }
     }
-    let request = match agent_request(store, &command) {
+    let request = match agent_request(store, &command, self_mri) {
         Ok(request) => request,
         Err(e) => {
             eprintln!("[agent] could not prepare the run: {e}");
@@ -4398,12 +4596,16 @@ fn agent_live_message(ctx: &Ctx, store: &Store, message: &Message, from_me: bool
 /// Assemble everything a run needs from the store: the thread as context, the tool
 /// allowlist, the workspace, the model this provider runs, and the agent session this
 /// thread already has.
-fn agent_request(store: &Store, command: &agent_policy::Command) -> Result<agent::Request> {
+fn agent_request(
+    store: &Store,
+    command: &agent_policy::Command,
+    self_mri: &str,
+) -> Result<agent::Request> {
     let history = store
         .messages_before(&command.conversation_id, i64::MAX, 60)
         .unwrap_or_default();
     let transcript = agent_policy::transcript(&history, &command.message_id);
-    let title = store.conversation_context(&command.conversation_id).unwrap_or_default();
+    let title = store.conversation_context(&command.conversation_id, self_mri).unwrap_or_default();
     let workspace = store
         .get_setting(agent::SETTING_WORKSPACE)?
         .map(|path| path.trim().to_string())
@@ -5086,7 +5288,7 @@ fn spawn_realtime(ctx: Ctx, session: Session, db_path: String) {
                             // …and answer it, when the user summoned a local agent
                             // with it. Same place for the same reason: a fresh insert
                             // is the one event that means "this message is new".
-                            agent_live_message(&ctx_msgs, store, &row, from_me);
+                            agent_live_message(&ctx_msgs, store, &row, from_me, &self_mri);
                         }
                     }
                 }
@@ -5811,6 +6013,104 @@ mod tests {
     }
 
     #[test]
+    fn renaming_a_person_needs_the_write_token_and_is_refused_read_only() {
+        // A client that merely found this socket must not be able to relabel who wrote
+        // a message — in the sidebar, in a bubble, or in the push on the user's phone.
+        for method in ["set_person_name", "set_person_avatar"] {
+            let err = check_write_allowed(method, &json!({}), Some("tok")).unwrap_err().to_string();
+            assert!(err.contains("write token"), "{method}: {err}");
+            assert!(check_write_allowed(method, &json!({ "write_token": "tok" }), Some("tok")).is_ok());
+            // Read-only refuses it even with the right token: a screenshot backend
+            // must not rewrite what the user's own app says about their colleagues.
+            assert!(check_write_allowed(method, &json!({ "write_token": "tok" }), None).is_err());
+        }
+        // Reading them back is open — it returns the user's own decision.
+        for method in ["person_override", "person_overrides"] {
+            assert!(check_write_allowed(method, &json!({}), Some("tok")).is_ok());
+        }
+    }
+
+    #[test]
+    fn only_raster_images_are_accepted_as_a_custom_avatar() {
+        // These bytes come back out of this app into an `<img>`, so the list is short
+        // on purpose. SVG is a document, not a bitmap, and is deliberately absent.
+        for good in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+            assert!(PERSON_AVATAR_TYPES.contains(&good), "{good}");
+        }
+        for bad in ["image/svg+xml", "text/html", "application/pdf", "image/PNG", ""] {
+            assert!(!PERSON_AVATAR_TYPES.contains(&bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_nickname_renames_the_sender_of_a_push_notification() {
+        // The phone is the one surface the user cannot correct by looking again, so a
+        // rename has to reach it. `push_live_message` gets the frame that just arrived
+        // rather than a row read back through the store, which is why it resolves the
+        // nickname itself — this pins that the resolution and the title agree.
+        let store = Store::open_in_memory().unwrap();
+        store.set_person_name("8:orgid:rob", Some("Bob"), 1_000).unwrap();
+        let message = Message {
+            id: "m1".into(),
+            conversation_id: "19:dm@unq.gbl.spaces".into(),
+            seq: 1,
+            compose_time: 1_700_000_000_000,
+            sender: "Robert SMITH".into(),
+            sender_mri: "8:orgid:rob".into(),
+            content: "<p>ping</p>".into(),
+            attachments: "[]".into(),
+            reactions: "[]".into(),
+            message_type: "RichText/Html".into(),
+            system_event: String::new(),
+            thread_root_id: String::new(),
+            thread_subject: String::new(),
+            deleted: false,
+            mentions: "[]".into(),
+        };
+        let renamed = store
+            .person_override(&message.sender_mri)
+            .unwrap()
+            .map(|o| o.display_name)
+            .filter(|n| !n.is_empty())
+            .map(|display_name| Message { sender: display_name, ..message.clone() })
+            .expect("the override is set");
+        // The thread's own title goes through the same resolution, or the push would
+        // read "Bob · Robert SMITH": the sender renamed, the chat it arrived in not.
+        store
+            .upsert_conversation_full(&teams_lite::store::ConversationUpdate {
+                id: &message.conversation_id,
+                display_name: "Robert SMITH",
+                last_message_time: message.compose_time,
+                kind: teams_lite::store::ConversationKind::OneOnOne,
+                last_message_preview: "ping",
+                last_message_sender: "Robert SMITH",
+                last_message_sender_mri: "8:orgid:rob",
+                last_message_from_me: false,
+                is_read: false,
+                is_muted: false,
+                is_pinned: false,
+                is_hidden: false,
+                thread_type: "chat",
+                picture_url: "",
+            })
+            .unwrap();
+        store.insert_message(&message).unwrap();
+        let context = store.conversation_context(&message.conversation_id, "8:orgid:me").unwrap();
+        assert_eq!(context, "Bob");
+
+        let notification = push_policy::notification_for(
+            &renamed,
+            &push_policy::Placement::Chat { title: &context },
+            "8:orgid:me",
+            false,
+            1_700_000_000_000,
+        )
+        .expect("a chat message always notifies");
+        assert!(notification.title.contains("Bob"), "{}", notification.title);
+        assert!(!notification.title.contains("Robert"), "{}", notification.title);
+    }
+
+    #[test]
     fn repair_broker_passes_with_the_published_token() {
         let params = json!({ "write_token": "tok" });
         assert!(check_write_allowed("repair_broker", &params, Some("tok")).is_ok());
@@ -6159,6 +6459,7 @@ mod tests {
                 last_message_time: 1_700_000_000_000,
                 last_message_preview: "Ship it",
                 last_message_sender: "Alice",
+                last_message_sender_mri: "8:orgid:alice",
                 last_message_from_me: false,
                 is_read: false,
                 alerts: teams_lite::store::ChannelAlerts::MentionsOnly,

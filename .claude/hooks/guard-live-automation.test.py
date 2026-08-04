@@ -204,6 +204,24 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'agent_status' }));\n"
     ),
+    # Person overrides: writing one decides the name and the face this app puts on a
+    # colleague's messages — a script that could set them could make one person's post
+    # appear to come from another (MACHINE_METHODS in src/bin/server.rs).
+    "person-renamer.ts": (
+        "// Renames a real colleague in the user's own app.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'set_person_name' }));\n"
+    ),
+    "person-refacer.ts": (
+        "// Replaces a real colleague's face, through the app's own relay.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19441');\n"
+        "ws.send(JSON.stringify({ method: 'set_person_avatar' }));\n"
+    ),
+    "person-override-reader.ts": (
+        "// Reads back what the user themselves chose, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'person_overrides' }));\n"
+    ),
     "token-thief.ts": (
         "// Fetches the write capability from the app's own server.\n"
         "const res = await fetch('http://127.0.0.1:19440/__write-token');\n"
@@ -319,6 +337,10 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/agent-tooler.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/agent-provider-setter.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/agent-unrestrictor.ts"),
+        # Renaming or re-facing a colleague writes only to the local store, but what it
+        # writes is who this app says a message is from.
+        ("BLOCK", PROJECT, f"bun run {tmp}/person-renamer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/person-refacer.ts"),
         # A cargo example reaches Teams with a broker token, past every port rule.
         ("BLOCK", PROJECT, "cargo run --example guard-test-loose-send"),
         ("BLOCK", PROJECT, "cargo run --example guard-test-real-send"),
@@ -443,6 +465,8 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/settings-reader.ts"),
         # …and so is which conversations the agent answers in.
         ("ALLOW", PROJECT, f"bun run {tmp}/agent-status-reader.ts"),
+        # …and so is reading back the names and faces the user chose themselves.
+        ("ALLOW", PROJECT, f"bun run {tmp}/person-override-reader.ts"),
         # An example pinned to the pre-authorized channel is the sanctioned shape,
         # and one that only reads needs no target at all.
         ("ALLOW", PROJECT, "cargo run --example guard-test-sandbox-send"),

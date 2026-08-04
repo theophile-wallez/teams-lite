@@ -69,6 +69,10 @@ pub struct Conversation {
     /// Display name of the last message's sender (`lastMessage.imDisplayName`).
     /// Empty when unknown. The UI renders "You:" instead when `last_message_from_me`.
     pub last_message_sender: String,
+    /// That sender's MRI (`lastMessage.from`, normalized), so the stored preview
+    /// attribution can be resolved through the user's own nickname for them. Empty
+    /// when the frame carried no person `from`.
+    pub last_message_sender_mri: String,
     /// True when we sent the last message — the UI prefixes the preview with "You:".
     pub last_message_from_me: bool,
     /// False when the thread has unread messages. Drives the unread marker.
@@ -227,6 +231,8 @@ pub struct Channel {
     pub is_empty: bool,
     pub last_message_preview: String,
     pub last_message_sender: String,
+    /// That sender's MRI. Same job as on [`Conversation`].
+    pub last_message_sender_mri: String,
     pub last_message_from_me: bool,
     /// False when the channel has unread messages. Drives the unread marker.
     pub is_read: bool,
@@ -243,6 +249,10 @@ struct LastMessage {
     has_message: bool,
     preview: String,
     sender: String,
+    /// The sender's MRI, normalized off `lastMessage.from`. Carried alongside the
+    /// name because a name is not an identity: it is what lets the sidebar's
+    /// attribution follow a nickname the user set (see `store::person_overrides`).
+    sender_mri: String,
 }
 
 /// Parse the shared `lastMessage` sub-object of a CSA chat or channel container.
@@ -293,7 +303,17 @@ fn parse_last_message(container: &Value) -> LastMessage {
         .or_else(|| container.pointer("/lastMessage/fromDisplayNameInToken").and_then(|x| x.as_str()))
         .unwrap_or("")
         .to_string();
-    LastMessage { time, has_message, preview, sender }
+    // `from` is an identity, delivered either bare or as a contacts URL — the same
+    // shape a message frame uses, so it goes through the same normalizer. Only a
+    // PERSON is kept: a channel post's `from` can be the thread itself, and an
+    // override keyed on a thread id would rename nobody.
+    let sender_mri = container
+        .pointer("/lastMessage/from")
+        .and_then(|x| x.as_str())
+        .map(normalize_mri)
+        .filter(|mri| crate::teams_profiles::is_person_mri(mri))
+        .unwrap_or_default();
+    LastMessage { time, has_message, preview, sender, sender_mri }
 }
 
 /// The custom picture a group chat carries, as an absolute URL the media proxy can
@@ -491,6 +511,7 @@ fn upsert_conversations(store: &Store, convs: &[Conversation]) -> usize {
             kind: c.kind(),
             last_message_preview: &c.last_message_preview,
             last_message_sender: &c.last_message_sender,
+            last_message_sender_mri: &c.last_message_sender_mri,
             last_message_from_me: c.last_message_from_me,
             is_read: c.is_read,
             is_muted: c.is_muted,
@@ -559,6 +580,7 @@ fn upsert_channels(store: &Store, teams: &[Team]) -> (usize, usize) {
                 last_message_time: c.last_message_time,
                 last_message_preview: &c.last_message_preview,
                 last_message_sender: &c.last_message_sender,
+            last_message_sender_mri: &c.last_message_sender_mri,
                 last_message_from_me: c.last_message_from_me,
                 is_read: c.is_read,
                 team_pos: team_idx as i64,
@@ -726,6 +748,7 @@ fn parse_conversations_with_self(v: &Value, self_mri: &str) -> Vec<Conversation>
         let last_message_time = lm.time;
         let last_message_preview = lm.preview;
         let last_message_sender = lm.sender;
+        let last_message_sender_mri = lm.sender_mri;
         let last_message_from_me = chat.get("isLastMessageFromMe").and_then(|x| x.as_bool()).unwrap_or(false);
         // `isRead` absent -> assume read, so a partial payload never floods the UI
         // with false unread markers.
@@ -761,6 +784,7 @@ fn parse_conversations_with_self(v: &Value, self_mri: &str) -> Vec<Conversation>
             other_member_mri,
             last_message_preview,
             last_message_sender,
+            last_message_sender_mri,
             last_message_from_me,
             is_read,
             is_muted,
@@ -854,6 +878,7 @@ fn parse_teams_with_self(v: &Value, _self_mri: &str) -> Vec<Team> {
                 is_empty: !lm.has_message,
                 last_message_preview: lm.preview,
                 last_message_sender: lm.sender,
+                last_message_sender_mri: lm.sender_mri,
                 last_message_from_me: ch.get("isLastMessageFromMe").and_then(|x| x.as_bool()).unwrap_or(false),
                 // `isRead` absent -> assume read, so a partial payload never floods
                 // the UI with false unread markers (mirrors the chat path).
@@ -2468,12 +2493,48 @@ mod tests {
         let c = &convs[0];
         assert_eq!(c.last_message_preview, "ship it & relax");
         assert_eq!(c.last_message_sender, "Clément BOSLE");
+        // The preview's author as an IDENTITY, not just a name, so the sidebar's
+        // attribution can follow a nickname the user set for them.
+        assert_eq!(c.last_message_sender_mri, "8:orgid:clement");
         assert!(!c.last_message_from_me);
         assert!(!c.is_read); // unread
         assert!(c.is_muted);
         assert!(c.is_pinned); // isSticky
         assert!(!c.is_hidden);
         assert_eq!(c.thread_type, "chat");
+    }
+
+    #[test]
+    fn a_preview_author_is_kept_only_when_it_is_a_person() {
+        // `from` arrives either bare or as a contacts URL, exactly like a message
+        // frame's — both must land on the same MRI, or an override keyed on one would
+        // miss the other.
+        let url = json!({ "chats": [{ "id": "19:a@unq.gbl.spaces", "lastMessage": {
+            "id": "1", "composeTime": "2026-07-16T16:05:26.767Z", "content": "<p>hi</p>",
+            "imDisplayName": "Ada", "messageType": "RichText/Html",
+            "from": "https://fr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:ada"
+        }}]});
+        assert_eq!(parse_conversations(&url)[0].last_message_sender_mri, "8:orgid:ada");
+
+        // A channel post's `from` can be the THREAD, and a bot's is a `28:` app. An
+        // override keyed on either would rename nobody, so neither is kept.
+        for not_a_person in ["19:abc@thread.tacv2", "28:app-guid", "48:notifications", ""] {
+            let v = json!({ "chats": [{ "id": "19:a@unq.gbl.spaces", "lastMessage": {
+                "id": "1", "composeTime": "2026-07-16T16:05:26.767Z", "content": "<p>hi</p>",
+                "imDisplayName": "Ada", "messageType": "RichText/Html", "from": not_a_person
+            }}]});
+            assert_eq!(
+                parse_conversations(&v)[0].last_message_sender_mri, "",
+                "{not_a_person} is not a person"
+            );
+        }
+
+        // No `from` at all (a system-ish frame) is simply nobody.
+        let none = json!({ "chats": [{ "id": "19:a@unq.gbl.spaces", "lastMessage": {
+            "id": "1", "composeTime": "2026-07-16T16:05:26.767Z", "content": "<p>hi</p>",
+            "imDisplayName": "Ada", "messageType": "RichText/Html"
+        }}]});
+        assert_eq!(parse_conversations(&none)[0].last_message_sender_mri, "");
     }
 
     #[test]
@@ -2907,6 +2968,7 @@ mod tests {
             other_member_mri: "".into(),
             last_message_preview: String::new(),
             last_message_sender: String::new(),
+            last_message_sender_mri: String::new(),
             last_message_from_me: false,
             is_read: true,
             is_muted: false,
@@ -3749,6 +3811,7 @@ mod tests {
             other_member_mri: String::new(),
             last_message_preview: String::new(),
             last_message_sender: String::new(),
+            last_message_sender_mri: String::new(),
             last_message_from_me: false,
             is_read: true,
             is_muted: false,
@@ -4064,6 +4127,7 @@ mod tests {
                 is_empty: false,
                 last_message_preview: "hi".into(),
                 last_message_sender: "Ada".into(),
+                last_message_sender_mri: String::new(),
                 last_message_from_me: false,
                 is_read: true,
             }],
@@ -4107,6 +4171,7 @@ mod tests {
                 is_empty: false,
                 last_message_preview: "hi".into(),
                 last_message_sender: "Ada".into(),
+                last_message_sender_mri: String::new(),
                 last_message_from_me: false,
                 is_read: true,
             }],
@@ -4226,6 +4291,7 @@ mod tests {
             is_empty: false,
             last_message_preview: "hi".into(),
             last_message_sender: "Ada".into(),
+            last_message_sender_mri: String::new(),
             last_message_from_me: false,
             is_read: true,
             alerts: ChannelAlerts::MentionsOnly,
