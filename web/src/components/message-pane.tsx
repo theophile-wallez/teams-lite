@@ -31,7 +31,7 @@ import { ModifierKey } from "./shortcut";
 import { PersonHoverCard } from "./person-card";
 import { PresenceBadge } from "./presence-badge";
 import { usePresence } from "./use-presence";
-import { presenceIsUnknown, presenceLabel } from "~/lib/presence";
+import { presenceIsUnknown } from "~/lib/presence";
 import { useModifierLabel } from "~/lib/platform";
 import { groupThreads, type Thread } from "~/lib/threads";
 import { Composer } from "./composer";
@@ -172,9 +172,10 @@ export function MessagePane(props: { onBack?: () => void }) {
       : undefined;
 
   // A 1:1 header is a person, so it carries their live presence like Teams' own:
-  // the badge on the avatar, the state in words beside the name. A group, a channel
-  // and the notes chat name no single human, so they ask for nothing (an undefined
-  // MRI fetches nothing) and show nothing.
+  // the badge on the avatar, and nothing else. The dot says the state on its own —
+  // in colour, in its glyph and in its title — so the name keeps the whole row. A
+  // group, a channel and the notes chat name no single human, so they ask for
+  // nothing (an undefined MRI fetches nothing) and show nothing.
   const partnerMri = openConv?.kind === "one_on_one" ? openConv.avatar_mri : undefined;
   const partnerPresence = usePresence(partnerMri, { refresh: true });
   // Only once the state is actually known: a header that reads "Offline" while the
@@ -578,9 +579,13 @@ export function MessagePane(props: { onBack?: () => void }) {
               className="size-9"
             />
             {presenceKnown && (
+              // Nothing beside the name says the state in words, so the badge is
+              // what states it: it carries the label itself rather than staying
+              // decorative.
               <PresenceBadge
                 presence={partnerPresence ?? null}
                 ring
+                labelled
                 className="absolute -bottom-0.5 -right-0.5 size-3"
               />
             )}
@@ -590,23 +595,11 @@ export function MessagePane(props: { onBack?: () => void }) {
           {/* In a 1:1 the title IS a person, so it offers their card on hover —
               like every other name in the app. A group/channel title names no
               single human, so it stays plain text (no MRI, no trigger). */}
-          <div className="flex min-w-0 items-baseline gap-2">
-            <PersonHoverCard mri={partnerMri} name={headerLabel} className="min-w-0">
-              <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">
-                {headerLabel}
-              </h2>
-            </PersonHoverCard>
-            {/* The state in words, beside the name. The name gives way first, so a
-                long one truncates rather than pushing the status out of the row. */}
-            {presenceKnown && (
-              <span
-                data-testid="header-presence"
-                className="shrink-0 whitespace-nowrap text-[11px] font-medium text-text-dim"
-              >
-                {presenceLabel(partnerPresence)}
-              </span>
-            )}
-          </div>
+          <PersonHoverCard mri={partnerMri} name={headerLabel} className="min-w-0">
+            <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">
+              {headerLabel}
+            </h2>
+          </PersonHoverCard>
           {openConv ? (
             <p
               data-testid="conversation-subtitle"

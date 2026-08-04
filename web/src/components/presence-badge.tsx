@@ -59,8 +59,9 @@ export function PresenceBadge(props: {
    *  colour, and a hollow tone gains that colour as its fill, so the badge stays
    *  legible over a photo instead of showing it through. */
   ring?: boolean;
-  /** Expose the state to assistive tech (the card's status line already says it in
-   *  words, so the overlay badge stays decorative). */
+  /** Expose the state to assistive tech. Pass it wherever the badge is the only
+   *  thing that states the presence — the chat header. Leave it off beside a status
+   *  line that already says it in words, so the state is not announced twice. */
   labelled?: boolean;
 }) {
   const tone = presenceTone(props.presence);
@@ -72,7 +73,9 @@ export function PresenceBadge(props: {
       role={props.labelled ? "img" : undefined}
       aria-label={props.labelled ? label : undefined}
       aria-hidden={props.labelled ? undefined : true}
-      title={props.labelled ? undefined : label}
+      // The tooltip stays in both modes: it is how a pointer reads the state where no
+      // words state it. `aria-label` names the badge for a reader, so it never doubles.
+      title={label}
       className={cn(
         "grid size-2.5 shrink-0 place-items-center rounded-full text-[10px] leading-none",
         TONE_STYLES[tone],

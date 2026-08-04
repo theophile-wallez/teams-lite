@@ -1,8 +1,9 @@
 import { test, expect, gotoApp, realErrors } from "./helpers";
 import type { Page } from "@playwright/test";
 
-// The chat header carries the other party's live presence, like Teams: the badge
-// on their avatar, the state in words beside their name. It is a 1:1 affordance
+// The chat header carries the other party's live presence, like Teams: the badge on
+// their avatar, and nothing else. The dot states the whole thing — its tone, its
+// glyph and its label — so no words sit next to the name. It is a 1:1 affordance
 // only — a group and a channel name no single person — and it appears only once the
 // state is actually known.
 //
@@ -23,21 +24,22 @@ async function openByPalette(page: Page, name: string): Promise<void> {
 }
 
 const header = (page: Page) => page.locator('[data-testid="message-pane"] > header');
-const status = (page: Page) => page.locator('[data-testid="header-presence"]');
+const badge = (page: Page) => header(page).locator('[data-testid="presence-badge"]');
 
 test.describe("presence in the chat header", () => {
-  test("a 1:1 header states the other party's presence, in words and as a badge", async ({
+  test("a 1:1 header states the other party's presence as a badge, and in no words", async ({
     page,
     consoleErrors,
   }) => {
     await gotoApp(page);
     await openByPalette(page, "Ava Thompson");
 
-    await expect(status(page)).toHaveText("In a meeting", { timeout: 10_000 });
-    await expect(header(page).locator('[data-testid="presence-badge"]')).toHaveAttribute(
-      "data-tone",
-      "busy",
-    );
+    await expect(badge(page)).toHaveAttribute("data-tone", "busy", { timeout: 10_000 });
+    // The dot is the only statement of the state, so it carries the words itself
+    // rather than putting them beside the name.
+    await expect(badge(page)).toHaveAttribute("aria-label", "In a meeting");
+    await expect(badge(page)).toHaveAttribute("title", "In a meeting");
+    await expect(header(page)).not.toContainText("In a meeting");
 
     expect(realErrors(consoleErrors)).toEqual([]);
   });
@@ -46,8 +48,7 @@ test.describe("presence in the chat header", () => {
     await gotoApp(page);
     await openByPalette(page, "Platform Team");
 
-    await expect(status(page)).toHaveCount(0);
-    await expect(header(page).locator('[data-testid="presence-badge"]')).toHaveCount(0);
+    await expect(badge(page)).toHaveCount(0);
 
     expect(realErrors(consoleErrors)).toEqual([]);
   });
@@ -62,8 +63,7 @@ test.describe("presence in the chat header", () => {
     // Give the lookup time to land: the point is that an unknown state stays
     // silent, not that the header is slow.
     await page.waitForTimeout(1_000);
-    await expect(status(page)).toHaveCount(0);
-    await expect(header(page).locator('[data-testid="presence-badge"]')).toHaveCount(0);
+    await expect(badge(page)).toHaveCount(0);
 
     expect(realErrors(consoleErrors)).toEqual([]);
   });
