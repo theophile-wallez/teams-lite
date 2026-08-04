@@ -1009,13 +1009,15 @@ export function parseRichMessage(html: string): ParsedRichMessage {
 }
 
 /** Index a message's @mentions by the `itemid` its body spans carry, so rendering
- *  a mention can look up who it names in one step. People only: a channel/team/tag
- *  mention points at a thread, and hovering it must not offer a person's card.
- *  Returns an empty map for a message that mentions nobody. */
+ *  a mention can look up what it names in one step. Every kind is indexed — the map
+ *  says what a span points at, and the renderer decides what to do with it: only a
+ *  `person` is offered as a card, while a channel/team/tag mention stays inert. An
+ *  entry with no MRI names nothing, so it is left out. Returns an empty map for a
+ *  message that mentions nobody. */
 export function mentionsByItemId(message: ChatMessage): Map<number, MessageMention> {
   const map = new Map<number, MessageMention>();
   for (const mention of message.mentions ?? []) {
-    if (mention.kind !== "person" || !mention.mri) continue;
+    if (!mention.mri) continue;
     map.set(mention.itemid, mention);
   }
   return map;

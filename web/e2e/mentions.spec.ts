@@ -135,6 +135,41 @@ test.describe("@mentions", () => {
     expect(sent?.content_html).toContain(`>${firstWord}</span>`);
   });
 
+  test("a name Teams split across spans reads as one chip", async ({ page }) => {
+    // Teams sends a full name as one span PER WORD, all naming one MRI, and only
+    // tints them in its own client — so the split shows up here as two chips. The
+    // seeded message holds both cases: one person over two spans, then two people.
+    await gotoApp(page);
+    await openByPalette(page, "Mention Demo");
+    // The history is virtualized and one mock serves the whole run, so the seeded
+    // message sits above whatever the specs before this one sent: scroll up to it.
+    const message = page.locator('[data-testid="message"]', { hasText: "ping me" }).first();
+    const scroller = page.locator('[data-testid="message-scroll"]');
+    await expect
+      .poll(
+        async () => {
+          if ((await message.count()) > 0) return true;
+          await scroller.evaluate((el) => {
+            el.scrollTop = Math.max(0, el.scrollTop - el.clientHeight);
+          });
+          await page.waitForTimeout(150);
+          return (await message.count()) > 0;
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+    const chips = message.locator(".mention-chip");
+    // Four spans, three chips: the name's two words are one, and the two people
+    // after them keep one chip each (merging those would leave two chips).
+    await expect(chips).toHaveCount(3);
+    await expect(chips.nth(0)).toHaveText(/Clément\s+BOSLE/);
+    // And the merged chip still names the person its first span pointed at.
+    const trigger = message.locator('[data-testid="person-hover-trigger"]', {
+      has: page.locator(".mention-chip"),
+    });
+    await expect(trigger.first()).toHaveAttribute("data-person-mri", "8:orgid:clement");
+  });
+
   test("an email address is not a mention", async ({ page }) => {
     await gotoApp(page);
     await openByPalette(page, "Mention Demo");

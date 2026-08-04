@@ -949,6 +949,14 @@ if (import.meta.main) {
   if (args.includes("--mentions")) {
     await withPreview(async ({ page, shot, setTheme }) => {
       await openConversation(page, "Mention Demo");
+      // How Teams really sends a full name: one span per WORD of it. The two words
+      // must read as ONE chip, while the two people written after them stay two.
+      const split = '[data-testid="message"]:has-text("ping me")';
+      await page.waitForSelector(split);
+      await shot(`${out}-split-light.png`, split);
+      await setTheme("dark");
+      await shot(`${out}-split-dark.png`, split);
+      await setTheme("light");
       // The list, opened by the "@" alone: everybody this thread can mention.
       await typeInComposer(page, "@");
       await page.waitForSelector('[data-testid="mention-suggestions"]');
@@ -973,8 +981,9 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-sent-dark.png`);
       console.log(
-        `[preview] wrote ${out}-list-light.png, ${out}-filtered-light.png, ` +
-          `${out}-composed-{light,dark}.png and ${out}-sent-{light,dark}.png`,
+        `[preview] wrote ${out}-split-{light,dark}.png, ${out}-list-light.png, ` +
+          `${out}-filtered-light.png, ${out}-composed-{light,dark}.png and ` +
+          `${out}-sent-{light,dark}.png`,
       );
     });
     process.exit(0);

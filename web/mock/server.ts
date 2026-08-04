@@ -1527,6 +1527,26 @@ function seedMentionSamples(): void {
     },
     60_000,
   );
+  // How Teams really sends a full name: one span PER WORD, each with its own itemid,
+  // all of them naming one MRI. They must read as ONE chip. The two people written
+  // back to back after them must not: same shape, two MRIs, so two chips.
+  push(
+    {
+      sender: ava.name,
+      sender_mri: ava.mri,
+      content:
+        `<p>${mentionSpan(0, "Clément")}&nbsp;${mentionSpan(1, "BOSLE")} ping me — ` +
+        `${mentionSpan(2, ava.name)}&nbsp;${mentionSpan(3, liam.name)} too.</p>`,
+      is_self: false,
+      mentions: [
+        { itemid: 0, mri: "8:orgid:clement", kind: "person", display_name: "Clément" },
+        { itemid: 1, mri: "8:orgid:clement", kind: "person", display_name: "BOSLE" },
+        { itemid: 2, mri: ava.mri, kind: "person", display_name: ava.name },
+        { itemid: 3, mri: liam.mri, kind: "person", display_name: liam.name },
+      ],
+    },
+    75_000,
+  );
   // A mention in OUR OWN message: the chip sits on the accent-filled bubble, where a
   // light blue wash would disappear, so it must render in its `-mine` colours.
   push(

@@ -339,6 +339,9 @@ html[data-virtual-keyboard-open] .composer-shell {
   color: var(--mention);
   padding: 0.05rem 0.25rem;
   font-weight: 600;
+  /* One name, one chip: a line break inside it would draw the two halves as two
+     chips, which is the very thing `mergeAdjacentMentions` exists to prevent. */
+  white-space: nowrap;
 }
 [data-mine="true"] .mention-chip {
   background-color: var(--mention-surface-mine);

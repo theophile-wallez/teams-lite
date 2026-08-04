@@ -4,8 +4,11 @@ import { GlobeIcon, Unlink02Icon } from "@hugeicons/core-free-icons";
 import {
   dropLinks,
   hasVisibleContent,
+  mergeAdjacentMentions,
+  nodeText,
   parseMessageBody,
   parseRelayedEmail,
+  type RichElement,
   type RichNode,
   type RichTag,
 } from "~/lib/rich-text";
@@ -31,10 +34,11 @@ import { renderWordEffects } from "./word-effect";
  * `hiddenHrefs` drops anchors with those hrefs from the output — used when a link
  * is surfaced as a rich preview card instead, so it is never shown twice.
  *
- * `mentions` maps each mention span's `itemid` to the person it names (see
+ * `mentions` maps each mention span's `itemid` to what it names (see
  * `mentionsByItemId`): given one, a mention of a person becomes hoverable and
- * reveals their card. Without it — or for a mention of a channel/team/tag — the
- * mention still renders, just as inert accent text.
+ * reveals their card, and the spans Teams split a name across are drawn as one chip
+ * (see {@link mergeMentionRuns}). Without it — or for a mention of a
+ * channel/team/tag — the mention still renders, just as inert accent text.
  *
  * `cardShownSeparately` says the message carries a decoded card attachment, so the
  * body's empty app-card placeholder ("Link preview unavailable") is dropped — the
@@ -100,10 +104,14 @@ export function RichNodes(props: {
   /** See {@link RichContent}'s `tokens`. */
   tokens?: boolean;
 }) {
-  if (!hasVisibleContent(props.nodes)) return null;
+  const nodes = useMemo(
+    () => mergeMentionRuns(props.nodes, props.mentions),
+    [props.nodes, props.mentions],
+  );
+  if (!hasVisibleContent(nodes)) return null;
   return (
     <div className={cn("break-words", props.className)}>
-      {props.nodes.map((node, i) =>
+      {nodes.map((node, i) =>
         renderNode(node, i, {
           mentions: props.mentions,
           cardShownSeparately: props.cardShownSeparately,
@@ -112,6 +120,37 @@ export function RichNodes(props: {
       )}
     </div>
   );
+}
+
+/**
+ * What a mention span names: the message's own mention list, keyed by the `itemid`
+ * the span carries — or, in the composer's own markup, the MRI the span itself holds
+ * (a message being written has no list beside it yet).
+ */
+function mentionTarget(
+  node: RichElement,
+  mentions?: Map<number, MessageMention>,
+): MessageMention | undefined {
+  const itemid = Number(node.attrs.itemid);
+  const listed = Number.isInteger(itemid) ? mentions?.get(itemid) : undefined;
+  if (listed) return listed;
+  return node.attrs.mri
+    ? { itemid, mri: node.attrs.mri, kind: "person", display_name: nodeText(node.children) }
+    : undefined;
+}
+
+/**
+ * Draw the words of one name as one chip: Teams splits a mention across the WORDS of
+ * the name it shows ("Clément BOSLE" is two spans, two `itemid`s, one MRI), and its
+ * own client only tints them, so the split shows here and nowhere else. The identity
+ * is the MRI, so it is the message's own mention list that proves two spans name one
+ * person — see {@link mergeAdjacentMentions} for what happens when nothing does.
+ */
+function mergeMentionRuns(
+  nodes: RichNode[],
+  mentions?: Map<number, MessageMention>,
+): RichNode[] {
+  return mergeAdjacentMentions(nodes, (node) => mentionTarget(node, mentions)?.mri);
 }
 
 /**
@@ -504,12 +543,14 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
       // sits in our own bubble is the BUBBLE's business: `[data-mine]` on the message
       // switches it (see styles/app.css), so the renderer needs no flag threaded
       // through every node.
-      const itemid = Number(node.attrs.itemid);
-      const mention = Number.isInteger(itemid) ? ctx.mentions?.get(itemid) : undefined;
+      const mention = mentionTarget(node, ctx.mentions);
       const text = <span className="mention-chip">{children}</span>;
-      if (!mention) return <span key={key}>{text}</span>;
+      if (mention?.kind !== "person") return <span key={key}>{text}</span>;
+      // The card's name is the chip's own text, because the mention list names each
+      // WORD of a name separately: no single entry of it holds the whole name (see
+      // {@link mergeMentionRuns}).
       return (
-        <PersonHoverCard key={key} mri={mention.mri} name={mention.display_name}>
+        <PersonHoverCard key={key} mri={mention.mri} name={nodeText([node]).trim()}>
           {text}
         </PersonHoverCard>
       );

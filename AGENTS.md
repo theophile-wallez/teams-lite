@@ -649,6 +649,16 @@ mention whole. The chip is blue on a light blue wash in the composer and in the 
   says who each index names. Get one half wrong and nothing fails: the message simply
   arrives with blue text that notifies nobody. Verified end to end against the tenant,
   by a self-mention in the sandbox chat (`examples/mention_send_probe.rs`).
+- **An INBOUND mention is split across the words of the name it shows.** Teams sends
+  "Clément BOSLE" as TWO spans, with two `itemid`s, and two entries in the mention list
+  carrying one MRI — 8 spans for the 4 people of one message is the normal shape here.
+  Its own client only tints the words, so the split is invisible there and reads as two
+  chips in a client that draws one. So the renderer joins a run of adjacent spans that
+  resolve to the SAME MRI into one chip (`mergeAdjacentMentions` in
+  `web/src/lib/rich-text.ts`, over the map `mentionsByItemId` builds), and
+  `.mention-chip` is `nowrap` so a line break cannot split it back in two. The identity
+  must be PROVEN: two spans nobody can resolve stay apart, because "@Alice @Bob" has
+  exactly that shape and joining those would draw a person nobody mentioned.
 - **A mention is part of the send, so it needs no gate of its own** — and it gets no
   relaxation either. `send` is already an `OUTWARD_METHODS` entry; the mentions ride in
   its params (`teams_send::parse_mentions`), and every entry must name a person

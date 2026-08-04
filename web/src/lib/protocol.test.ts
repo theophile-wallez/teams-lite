@@ -614,7 +614,7 @@ describe("formatMeetingSchedule", () => {
 });
 
 describe("mentionsByItemId", () => {
-  it("indexes person mentions by the itemid their span carries", () => {
+  it("indexes mentions by the itemid their span carries", () => {
     const map = mentionsByItemId(
       message(1, {
         mentions: [
@@ -628,16 +628,26 @@ describe("mentionsByItemId", () => {
     expect(map.get(1)).toBeUndefined();
   });
 
-  it("keeps out everything that is not a person", () => {
-    // A channel/team/tag mention points at a thread, so hovering it must not
-    // offer somebody's card; a person entry without an MRI is unusable too.
+  it("indexes a channel or team mention too, with its kind", () => {
+    // Such a mention points at a thread rather than at somebody, so the renderer
+    // keeps it inert — but it is still what the span names, and two adjacent spans
+    // naming one thread are one mention (see mergeAdjacentMentions).
     const map = mentionsByItemId(
       message(1, {
         mentions: [
           { itemid: 0, mri: "19:abc@thread.tacv2", kind: "channel", display_name: "[Run]" },
           { itemid: 1, mri: "19:team@thread.tacv2", kind: "team", display_name: "Platform" },
-          { itemid: 2, mri: "", kind: "person", display_name: "Nobody" },
         ],
+      }),
+    );
+    expect(map.get(0)?.kind).toBe("channel");
+    expect(map.get(1)?.kind).toBe("team");
+  });
+
+  it("keeps out an entry that names nothing", () => {
+    const map = mentionsByItemId(
+      message(1, {
+        mentions: [{ itemid: 2, mri: "", kind: "person", display_name: "Nobody" }],
       }),
     );
     expect(map.size).toBe(0);

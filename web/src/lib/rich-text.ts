@@ -594,7 +594,7 @@ const TABLE_TAGS = new Set<RichTag>(["table", "thead", "tbody", "tr", "td", "th"
 /** Which table slot a node sits in: table structure is only valid in its own. */
 type TableSlot = "flow" | "table" | "section" | "row";
 
-type RichElement = Extract<RichNode, { type: "element" }>;
+export type RichElement = Extract<RichNode, { type: "element" }>;
 
 function element(tag: RichTag, children: RichNode[]): RichElement {
   return { type: "element", tag, attrs: {}, children };
@@ -794,7 +794,7 @@ export function isRelayedEmail(html: string): boolean {
 }
 
 /** The visible text of a fragment, with `<br>` counting as a space. */
-function nodeText(nodes: RichNode[]): string {
+export function nodeText(nodes: RichNode[]): string {
   let out = "";
   for (const node of nodes) {
     if (node.type === "text") out += node.text;
@@ -945,6 +945,72 @@ export function dropLinks(nodes: RichNode[], hidden: Set<string>): RichNode[] {
     return out;
   };
   return normalize(prune(nodes));
+}
+
+/** Nothing but whitespace — the `&nbsp;` Teams writes between two spans included. */
+function isBlankText(node: RichNode): boolean {
+  return node.type === "text" && /^\s+$/.test(node.text);
+}
+
+/**
+ * Join a run of adjacent mention spans that name the SAME person into one mention.
+ *
+ * Teams splits a mention across the WORDS of the name it shows: "Clément BOSLE"
+ * arrives as two spans, with two `itemid`s, and two entries in the message's mention
+ * list carrying one MRI. Its own client only tints the words, so the split never
+ * shows there; a chip draws it as two mentions of two people. One person, one chip.
+ *
+ * `identityOf` says who a span names, and the merge happens only when it answers the
+ * same identity for both — the whitespace between the words is kept inside the chip.
+ * A span nobody can resolve stays on its own, because "@Alice @Bob" is also two
+ * adjacent spans and joining those would draw a person nobody mentioned. A separator
+ * that is not whitespace (a comma between two mentioned people) ends the run for the
+ * same reason.
+ */
+export function mergeAdjacentMentions(
+  nodes: RichNode[],
+  identityOf: (mention: RichElement) => string | undefined,
+): RichNode[] {
+  const merge = (list: RichNode[]): RichNode[] => {
+    const out: RichNode[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const node = list[i]!;
+      if (node.type !== "element") {
+        out.push(node);
+        continue;
+      }
+      if (node.tag !== "mention") {
+        out.push({ ...node, children: merge(node.children) });
+        continue;
+      }
+      const identity = identityOf(node);
+      const children = [...node.children];
+      // The last index folded into this chip: `i` while the run is one span long.
+      let end = i;
+      while (identity !== undefined) {
+        // Whitespace between the two spans belongs to the name, so it is only
+        // carried over once the span after it turns out to be the same person.
+        let next = end + 1;
+        const gap: RichNode[] = [];
+        while (next < list.length && isBlankText(list[next]!)) gap.push(list[next++]!);
+        const candidate = list[next];
+        if (
+          !candidate ||
+          candidate.type !== "element" ||
+          candidate.tag !== "mention" ||
+          identityOf(candidate) !== identity
+        ) {
+          break;
+        }
+        children.push(...gap, ...candidate.children);
+        end = next;
+      }
+      out.push(end === i ? node : { type: "element", tag: "mention", attrs: node.attrs, children });
+      i = end;
+    }
+    return out;
+  };
+  return merge(nodes);
 }
 
 function escapeText(text: string): string {

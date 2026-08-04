@@ -11,6 +11,7 @@ import {
   hasNonImageContent,
   hasVisibleContent,
   isRelayedEmail,
+  mergeAdjacentMentions,
   parseMessageBody,
   parsePlainText,
   parseRelayedEmail,
@@ -336,6 +337,103 @@ describe("parseRichHtml — mentions", () => {
     const strong = nodes.find((n) => n.type === "element" && n.tag === "strong");
     expect(strong && strong.type === "element" && tags([strong])).toEqual(["strong", "mention"]);
     expect(text(nodes)).toBe("hi Cy bye");
+  });
+});
+
+// Teams splits a mention across the WORDS of the name it shows: "Clément BOSLE" is two
+// spans with two itemids, and the message's mention list gives both of them the same
+// MRI. One person must read as one chip.
+describe("mergeAdjacentMentions", () => {
+  /** A mention span with its own itemid, as Teams writes it. */
+  const span = (itemid: number, name: string) =>
+    `<span itemscope itemtype="http://schema.skype.com/Mention" itemid="${itemid}">${name}</span>`;
+
+  /** Who each itemid names, the way a message's `mentions` list does. */
+  const listed =
+    (owners: Record<number, string>) =>
+    (node: RichElement): string | undefined =>
+      owners[Number(node.attrs.itemid)];
+
+  /** The text of every mention in the tree, in document order. */
+  function mentionTexts(nodes: RichNode[]): string[] {
+    const out: string[] = [];
+    for (const node of nodes) {
+      if (node.type !== "element") continue;
+      if (node.tag === "mention") out.push(text([node]));
+      else out.push(...mentionTexts(node.children));
+    }
+    return out;
+  }
+
+  it("joins the words of one name into one mention, whitespace included", () => {
+    const nodes = mergeAdjacentMentions(
+      parseRichHtml(`${span(0, "Clément")}&nbsp;${span(1, "BOSLE")} je te mets`),
+      listed({ 0: "8:orgid:clement", 1: "8:orgid:clement" }),
+    );
+    // The `&nbsp;` Teams writes between the words is kept inside the chip (the parser
+    // decodes it to a plain space, and `.mention-chip` is `nowrap` so it never breaks).
+    expect(mentionTexts(nodes)).toEqual(["Clément BOSLE"]);
+    expect(text(nodes)).toBe("Clément BOSLE je te mets");
+  });
+
+  it("joins a run of any length, and stops at the next person", () => {
+    const nodes = mergeAdjacentMentions(
+      parseRichHtml(`${span(0, "Jean")} ${span(1, "Paul")} ${span(2, "SARTRE")} ${span(3, "Ada")}`),
+      listed({ 0: "8:jp", 1: "8:jp", 2: "8:jp", 3: "8:ada" }),
+    );
+    expect(mentionTexts(nodes)).toEqual(["Jean Paul SARTRE", "Ada"]);
+  });
+
+  it("keeps two people apart, even written back to back", () => {
+    // The very shape a merged run has, with two MRIs: joining these would draw a
+    // person nobody mentioned.
+    const nodes = mergeAdjacentMentions(
+      parseRichHtml(`${span(0, "Ann")}&nbsp;${span(1, "Bob")}`),
+      listed({ 0: "8:ann", 1: "8:bob" }),
+    );
+    expect(mentionTexts(nodes)).toEqual(["Ann", "Bob"]);
+  });
+
+  it("ends a run at anything that is not whitespace", () => {
+    const nodes = mergeAdjacentMentions(
+      parseRichHtml(`${span(0, "Ann")}, ${span(1, "Ann again")}`),
+      listed({ 0: "8:ann", 1: "8:ann" }),
+    );
+    expect(mentionTexts(nodes)).toEqual(["Ann", "Ann again"]);
+  });
+
+  it("leaves a mention nobody can identify on its own", () => {
+    // Without a mention list there is nothing to prove the two spans name one
+    // person, and "@Ann @Bob" has exactly this shape.
+    const nodes = mergeAdjacentMentions(
+      parseRichHtml(`${span(0, "Ann")}&nbsp;${span(1, "Bob")}`),
+      () => undefined,
+    );
+    expect(mentionTexts(nodes)).toEqual(["Ann", "Bob"]);
+  });
+
+  it("merges inside formatting and inside blocks", () => {
+    const nodes = mergeAdjacentMentions(
+      parseRichHtml(
+        `<p><strong>${span(0, "Ada")}&nbsp;${span(1, "LOVELACE")}</strong> shipped.</p>`,
+      ),
+      listed({ 0: "8:ada", 1: "8:ada" }),
+    );
+    expect(mentionTexts(nodes)).toEqual(["Ada LOVELACE"]);
+    expect(text(nodes)).toBe("Ada LOVELACE shipped.");
+  });
+
+  it("keeps the first span's itemid, so the merged chip still resolves", () => {
+    const [merged] = mergeAdjacentMentions(
+      parseRichHtml(`${span(4, "Ada")}&nbsp;${span(5, "LOVELACE")}`),
+      listed({ 4: "8:ada", 5: "8:ada" }),
+    );
+    expect(merged).toMatchObject({ tag: "mention", attrs: { itemid: "4" } });
+  });
+
+  it("leaves a body with no mention in it untouched", () => {
+    const nodes = parseRichHtml("<p>plain <strong>words</strong></p>");
+    expect(text(mergeAdjacentMentions(nodes, () => "8:ada"))).toBe("plain words");
   });
 });
 
