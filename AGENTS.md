@@ -402,7 +402,9 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/cal --calendar`, or `openCalendarTab` /
   `openCalendarView` / `openFirstEvent`. For the team → channel tree:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
-  `toggleTeamSection` from the same file. For the settings pane:
+  `toggleTeamSection` from the same file. For the chat list's sections and the "…"
+  menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
+  `toggleChatSection` from the same file. For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
   file. To review a detail too small to read in a
   1200px page — a 16px icon, a chip, a badge — crop to it and raise the pixel
@@ -522,8 +524,10 @@ an outward action, so it is gated on purpose:
   in `Message::mentions`, never on a display name), and every post — with or without
   thread replies — when they asked Teams for that. The setting is stored as the
   decision, not as the three raw CSA signals, and the sidebar reads the same field to
-  dim a muted channel. A **chat**'s `is_muted` is NOT yet wired into any notification
-  path: it only dims the sidebar row, so a muted chat still pushes.
+  dim a muted channel. A **chat**'s mute silences this app — the in-page notification
+  and its cue (`shouldNotify`, over `chatIsMuted`) — but NOT Web Push: the mute may be
+  a local override that only the browser holds, so the backend never sees it and the
+  phone still buzzes. The menu that offers the switch says so (see § The chat list).
 
 ## The channel sidebar mirrors Teams, and mirrors it READ-ONLY
 
@@ -553,6 +557,42 @@ these fields after something they are not.
 over the Teams-sourced value from then on, and nothing writes any of them back:
 publishing a setting to the user's account is an outward action and would need its own
 consent gate and its own `OUTWARD_METHODS` entry, exactly like a send.
+
+## The chat list mirrors Teams too, and the "…" menu is LOCAL
+
+Hovering a chat row reveals Teams' own "…", and it holds the three settings Teams puts
+there plus the one read action: **pin to top**, **mute**, **hide**, **mark as read**
+(`web/src/components/chat-menu.tsx`). The list is then drawn in Teams' own sections —
+**Pinned**, **Recent**, **Hidden chats** — by `organizeChats` in `web/src/lib/protocol.ts`,
+and `web/e2e/chat-menu.spec.ts` pins the lot.
+
+- **The backend already mirrors all three settings** from CSA: `is_pinned` (from
+  `isSticky`), `is_muted`, `is_hidden`. So a chat pinned, muted or hidden in Teams
+  arrives that way — and 182 of this tenant's 595 chats are hidden ones the list used
+  to show anyway.
+- **A change made here is a LOCAL override, exactly like a channel pin** (`ChatPrefs`,
+  persisted per browser). Nothing is written back: publishing a chat setting to the
+  user's account is an outward action and would need its own consent gate and its own
+  `OUTWARD_METHODS` entry. The menu says so in one line, because a mute that silenced
+  this app while the phone kept buzzing would otherwise read as a broken switch.
+- **A hide is held by a watermark, not a flag.** `chatIsHidden` keeps the chat away
+  while its newest message is no newer than the watermark, so a NEW message brings it
+  back on its own — which is what Teams' Hide does. `0` means "shown here", the one way
+  back for a chat Teams itself hides.
+- **Mark as read is the one item that leaves the machine.** It is the same `mark_read`
+  the app makes on open — the user's consumption horizon, so the sender is shown a read
+  receipt — and Ghost mode still decides whether Teams is told. It is offered because
+  the user asked for it on that chat, it is never automatic, and a failure is reported
+  rather than swallowed.
+- **The sections ARE the keyboard's order.** The selection is an index into the list as
+  rendered, so the sidebar and the app shell both read `useChatSections()`: a chat in a
+  folded section is out of the keyboard's reach as well as out of sight. Deriving that
+  order twice is how ArrowDown opens a chat other than the highlighted row.
+- **A phone gets the same menu from a long press.** The "…" is a pointer affordance:
+  hover reveals it on a fine pointer and it is not rendered at all on a coarse one,
+  where a still touch on the row opens the menu (`useLongPress`, the plain half of the
+  message gestures). The app is used from a phone, so a menu behind hover alone would be
+  a feature that does not exist there — `web/e2e/mobile.spec.ts` pins both halves.
 
 ## The user's own status (outward, and gated like one)
 

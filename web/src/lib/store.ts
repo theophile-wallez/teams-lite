@@ -17,6 +17,9 @@ import type { SendImage } from "./composer-image";
 import { dedupeCandidates, type MentionCandidate, type OutboundMention } from "./mentions";
 import {
   appendLiveMessage,
+  channelIsMuted,
+  chatIsMuted,
+  chatIsPinned,
   copyableMessageText,
   mergeOlderHistoryPage,
   mergeOlderMailPage,
@@ -36,6 +39,7 @@ import {
   type CallSignalFrame,
   type Channel,
   type ChatMessage,
+  type ChatPrefs,
   type Conversation,
   type IncomingCall,
   type LinkMetadata,
@@ -147,6 +151,36 @@ function writeFlagMap(key: string, flags: Record<string, boolean>): void {
   }
 }
 
+/** Read an id → number map out of localStorage (the chat hide watermarks), with the
+ *  same best-effort contract as `readFlagMap`: anything unusable degrades to the
+ *  default rather than failing a render. A non-finite entry is dropped, because a
+ *  `NaN` watermark would compare false against every message time and so hide a
+ *  chat the user could no longer bring back. */
+function readTimeMap(key: string): Record<string, number> | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    const times: Record<string, number> = {};
+    for (const [id, time] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof time === "number" && Number.isFinite(time)) times[id] = time;
+    }
+    return times;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist an id → number map. Same best-effort contract as `writeFlagMap`. */
+function writeTimeMap(key: string, times: Record<string, number>): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(times));
+  } catch {
+    /* ignore — the preference stays in memory for this session */
+  }
+}
+
 export type AppState = {
   conversations: Conversation[];
   /** The team/channel tree (flat, pre-sorted; grouped for display by
@@ -160,12 +194,18 @@ export type AppState = {
    *  absent here falls back to that value. Drives the sidebar's top Pinned
    *  section (see `channelIsPinned`/`organizeChannels`). */
   channelPins: Record<string, boolean>;
+  /** The user's own local placement of the chat list — which chats they pinned, muted
+   *  or hid HERE, persisted to localStorage. Each map overrides the Teams-sourced
+   *  value on the conversation row; a chat absent from a map keeps it. Drives the
+   *  chat list's Pinned / Recent / Hidden sections (see `organizeChats`). */
+  chatPrefs: ChatPrefs;
   /** Which sidebar sections the user has collapsed, keyed by team id (and
-   *  `"pinned"` for the top section, `"hidden:<team id>"` for a team's hidden
-   *  channels), persisted to localStorage. A team section absent here is expanded,
-   *  so a fresh install shows the whole tree; a hidden-channels section is the one
-   *  exception and defaults to collapsed, exactly as in Microsoft Teams. */
-  collapsedTeams: Record<string, boolean>;
+   *  `"pinned"` for the channel tree's top section, `"hidden:<team id>"` for a team's
+   *  hidden channels, `"chats:<section>"` for a chat-list group), persisted to
+   *  localStorage. A section absent here is expanded, so a fresh install shows the
+   *  whole tree; the two hidden-things sections are the exception and default to
+   *  collapsed, exactly as in Microsoft Teams. */
+  collapsedSections: Record<string, boolean>;
   openId: string | null;
   messages: ChatMessage[];
   loadingMessages: boolean;
@@ -342,7 +382,15 @@ const CHANNEL_PINS_KEY = "teams-lite:channel-pins";
 // false on all 12 teams here — see examples/team_order_recon.rs), so wiring it is
 // possible. Folding a team is a per-screen decision, and a 320px column is not the
 // window their desktop client has.
-const COLLAPSED_TEAMS_KEY = "teams-lite:collapsed-teams";
+// The key keeps its old name so a fold the user already made survives: it now holds
+// the chat-list groups as well, which is why the state it feeds is `collapsedSections`.
+const COLLAPSED_SECTIONS_KEY = "teams-lite:collapsed-teams";
+// Where the local chat pin / mute / hide overrides are persisted (client-only, like
+// the channel pins). Three maps rather than one blob, so a malformed value can only
+// ever cost the one setting it belongs to.
+const CHAT_PINS_KEY = "teams-lite:chat-pins";
+const CHAT_MUTES_KEY = "teams-lite:chat-mutes";
+const CHAT_HIDES_KEY = "teams-lite:chat-hides";
 // How many conversations keep a cached message page at all. Re-opening one of
 // these is instant; beyond that the least-recently-opened page is dropped, so a
 // long session spent hopping between dozens of chats doesn't accumulate their
@@ -398,7 +446,10 @@ function initialState(): AppState {
     channels: [],
     sidebarTab: "chats",
     channelPins: {},
-    collapsedTeams: {},
+    // A fresh set of maps per store, not the shared `NO_CHAT_PREFS` constant: two
+    // controllers (a test spawns several) must never share one object.
+    chatPrefs: { pins: {}, mutes: {}, hides: {} },
+    collapsedSections: {},
     openId: null,
     messages: [],
     loadingMessages: false,
@@ -622,7 +673,8 @@ export class TeamsController {
     this.applyPersistedAppearance();
     this.applyPersistedSounds();
     this.applyPersistedChannelPins();
-    this.applyPersistedCollapsedTeams();
+    this.applyPersistedChatPrefs();
+    this.applyPersistedCollapsedSections();
     this.applyPersistedVisibleCalendars();
     this.applyPersistedCalendarSettings();
     this.wireEvents();
@@ -788,7 +840,7 @@ export class TeamsController {
         // only if the user is actually looking: a background tab reads nothing, and
         // claiming otherwise would tell the sender the user saw a message they did not.
         if (document.visibilityState === "visible") this.markThreadRead(m.conversation_id);
-      } else if (shouldNotify(m, this.get().openId)) {
+      } else if (shouldNotify(m, this.get().openId, this.threadIsMuted(m.conversation_id))) {
         // The message's own text, read the way its type says it must be (a `Text`
         // body is plain, not HTML) — so a notification never eats what it quotes.
         notifyMessage(m.sender, copyableMessageText(m));
@@ -1520,9 +1572,26 @@ export class TeamsController {
 
   /** Load the persisted collapsed sidebar sections. Same best-effort contract as
    *  the pins: on any failure every section keeps its default state. */
-  private applyPersistedCollapsedTeams(): void {
-    const collapsed = readFlagMap(COLLAPSED_TEAMS_KEY);
-    if (collapsed) this.set({ collapsedTeams: collapsed });
+  private applyPersistedCollapsedSections(): void {
+    const collapsed = readFlagMap(COLLAPSED_SECTIONS_KEY);
+    if (collapsed) this.set({ collapsedSections: collapsed });
+  }
+
+  /** Load the persisted local chat pin / mute / hide overrides. Same best-effort
+   *  contract as the channel pins: on any failure the chat keeps the placement
+   *  Microsoft Teams reported. */
+  private applyPersistedChatPrefs(): void {
+    const pins = readFlagMap(CHAT_PINS_KEY);
+    const mutes = readFlagMap(CHAT_MUTES_KEY);
+    const hides = readTimeMap(CHAT_HIDES_KEY);
+    if (!pins && !mutes && !hides) return;
+    this.set({
+      chatPrefs: {
+        pins: pins ?? {},
+        mutes: mutes ?? {},
+        hides: hides ?? {},
+      },
+    });
   }
 
   /** Toggle a channel's pin, lifting it into (or out of) the sidebar's top Pinned
@@ -1537,19 +1606,88 @@ export class TeamsController {
     writeFlagMap(CHANNEL_PINS_KEY, next);
   }
 
-  /** Collapse or expand one sidebar section — a team by its id, the Pinned section
-   *  by `"pinned"`, or a team's hidden channels by `"hidden:<team id>"`. Persisted,
-   *  so a user who works out of two of their fifteen teams keeps the other thirteen
-   *  folded away across reloads.
+  /** Toggle a chat's pin, lifting it into (or out of) the chat list's Pinned section.
+   *  A local override over Teams' own pin, persisted client-side — nothing is written
+   *  back to the account (see `ChatPrefs`). */
+  toggleChatPin(id: string): void {
+    const conversation = this.get().conversations.find((c) => c.id === id);
+    if (!conversation) return;
+    const prefs = this.get().chatPrefs;
+    const pins = { ...prefs.pins, [id]: !chatIsPinned(conversation, prefs) };
+    this.set({ chatPrefs: { ...prefs, pins } });
+    writeFlagMap(CHAT_PINS_KEY, pins);
+  }
+
+  /** Toggle a chat's mute: the row dims, it raises no unread marker, and a message in
+   *  it chimes at nobody here. Local like the pin, so the backend's Web Push still
+   *  reaches the user's phone — the menu that offers the switch says so. */
+  toggleChatMute(id: string): void {
+    const conversation = this.get().conversations.find((c) => c.id === id);
+    if (!conversation) return;
+    const prefs = this.get().chatPrefs;
+    const mutes = { ...prefs.mutes, [id]: !chatIsMuted(conversation, prefs) };
+    this.set({ chatPrefs: { ...prefs, mutes } });
+    writeFlagMap(CHAT_MUTES_KEY, mutes);
+  }
+
+  /** Hide a chat away in the list, or bring it back.
+   *
+   *  Hiding records the newest message the chat holds as its watermark, so a NEW
+   *  message brings the chat back on its own — which is what Teams' own Hide does.
+   *  Showing records `0`, the one way back for a chat Teams itself hides: this app
+   *  cannot unhide it on the account, so it says "shown here" instead. */
+  setChatHidden(id: string, hidden: boolean): void {
+    const conversation = this.get().conversations.find((c) => c.id === id);
+    if (!conversation) return;
+    const prefs = this.get().chatPrefs;
+    const hides = { ...prefs.hides, [id]: hidden ? conversation.last_message_time : 0 };
+    this.set({ chatPrefs: { ...prefs, hides } });
+    writeTimeMap(CHAT_HIDES_KEY, hides);
+  }
+
+  /** Is this thread quiet? A chat muted in Teams or here, or a channel the user muted
+   *  in Teams. Read on every inbound message, so a mute silences this app's own
+   *  notification and cue as well as dimming the row. */
+  private threadIsMuted(id: string): boolean {
+    const conversation = this.get().conversations.find((c) => c.id === id);
+    if (conversation) return chatIsMuted(conversation, this.get().chatPrefs);
+    const channel = this.get().channels.find((c) => c.id === id);
+    return channel ? channelIsMuted(channel) : false;
+  }
+
+  /**
+   * Mark one chat read from the sidebar, without opening it.
+   *
+   * This is the same outward call the app makes when the user opens a thread
+   * (`mark_read` publishes their consumption horizon, so the sender is shown a read
+   * receipt) — it is here because the user asked for it on this chat, and Ghost mode
+   * still decides whether Teams is told at all. Unlike the automatic mark on open, a
+   * failure is reported: the user clicked, so they must learn it did not happen.
+   */
+  async markConversationRead(id: string): Promise<void> {
+    try {
+      const { ghost } = await this.backend.markRead(id);
+      this.applyLocalRead(id, ghost);
+    } catch (e) {
+      this.set({ status: `mark read failed: ${errText(e)}` });
+      playCue("error");
+    }
+  }
+
+  /** Collapse or expand one sidebar section — a team by its id, the channel tree's
+   *  Pinned section by `"pinned"`, a team's hidden channels by `"hidden:<team id>"`,
+   *  or a chat-list group by `"chats:<section>"`. Persisted, so a user who works out
+   *  of two of their fifteen teams keeps the other thirteen folded away across
+   *  reloads.
    *
    *  The caller states the target, rather than this deriving it from the stored map:
-   *  a section absent from the map is not necessarily expanded (the hidden-channels
-   *  one defaults to folded), so flipping the stored value would need a first click
-   *  that appears to do nothing. */
-  setTeamCollapsed(id: string, collapsed: boolean): void {
-    const next = { ...this.get().collapsedTeams, [id]: collapsed };
-    this.set({ collapsedTeams: next });
-    writeFlagMap(COLLAPSED_TEAMS_KEY, next);
+   *  a section absent from the map is not necessarily expanded (the hidden-things ones
+   *  default to folded), so flipping the stored value would need a first click that
+   *  appears to do nothing. */
+  setSectionCollapsed(id: string, collapsed: boolean): void {
+    const next = { ...this.get().collapsedSections, [id]: collapsed };
+    this.set({ collapsedSections: next });
+    writeFlagMap(COLLAPSED_SECTIONS_KEY, next);
   }
 
   // ---- calendar (read-only Teams/Outlook surface) --------------------------

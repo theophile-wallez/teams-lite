@@ -130,6 +130,32 @@ test.describe("mobile single-pane layout", () => {
     await expect(page.locator('[data-testid="action-copy"]')).toBeVisible();
   });
 
+  test("a long press on a chat row opens its Teams settings menu", async ({ page }) => {
+    await gotoApp(page);
+
+    // The "…" belongs to a pointer, so a phone never shows it — the hold is the way in.
+    const row = page.locator('[data-testid="conversation-row"]').first();
+    await expect(page.locator('[data-testid="chat-menu"]').first()).not.toBeVisible();
+
+    await touchGesture(page, row, [], 550);
+
+    await expect(page.locator('[data-testid="chat-menu-pin"]')).toBeVisible();
+    await expect(page.locator('[data-testid="chat-menu-mute"]')).toBeVisible();
+    // The hold opened the menu and nothing else: the chat stayed shut.
+    await expect(page.locator('[data-testid="detail-pane"]')).not.toHaveAttribute(
+      "data-open",
+      "true",
+    );
+  });
+
+  test("a short tap on a chat row opens the chat, not its menu", async ({ page }) => {
+    await gotoApp(page);
+
+    await touchGesture(page, page.locator('[data-testid="conversation-row"]').first());
+
+    await expect(page.locator('[data-testid="chat-menu-pin"]')).toHaveCount(0);
+  });
+
   test("a short tap does not open message actions", async ({ page }) => {
     await gotoApp(page);
     await openConversationAt(page, 0);

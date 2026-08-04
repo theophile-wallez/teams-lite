@@ -10,6 +10,7 @@ import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
 import { IncomingCallBanner } from "./incoming-call-banner";
 import { Splash } from "./splash";
+import { useChatSections } from "./use-chat-sections";
 import { TooltipProvider } from "./ui/tooltip";
 import { Button } from "./ui/button";
 import { hasModifier } from "~/lib/platform";
@@ -34,12 +35,12 @@ function AppInner() {
   // Survives the socket drop, because it is plain state rather than connection state.
   const repairing = useAppState((s) => s.brokerStatus?.repairing ?? false);
   const splashMessage = useAppState((s) => s.splashMessage);
-  const conversations = useAppState((s) => s.conversations);
   const sidebarTab = useAppState((s) => s.sidebarTab);
   const openId = useAppState((s) => s.openId);
   const replyingTo = useAppState((s) => s.replyingTo);
   const mailMessages = useAppState((s) => s.mailMessages);
   const openMailId = useAppState((s) => s.openMailId);
+  const { chats: visibleChats } = useChatSections();
 
   // The URL is the source of truth for what is open. `/` means nothing; `/c/<id>` a
   // conversation; `/m/<id>` a mail. `strict: false` lets this shell read either
@@ -121,7 +122,12 @@ function AppInner() {
   // The keyboard-navigable list is whichever the active tab shows: chats or mail.
   // (The channel tree is a tree, not a flat list, and the calendar is a grid — both
   // use click/Tab focus, and the calendar pane owns its own arrow keys.)
-  const keyboardList = sidebarTab === "mail" ? mailMessages : conversations;
+  //
+  // For chats it is the list AS RENDERED — the sidebar's own sections, minus whatever
+  // is folded away (see `useChatSections`). The selection is an index into that order,
+  // so deriving it from anywhere else is how ArrowDown ends up opening a chat other
+  // than the highlighted row.
+  const keyboardList = sidebarTab === "mail" ? mailMessages : visibleChats;
 
   // Keep the selection in range as the active list changes.
   useEffect(() => {

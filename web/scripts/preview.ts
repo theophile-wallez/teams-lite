@@ -47,6 +47,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/reply --agent-reply  # the agent answering
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
 //   bun run web/scripts/preview.ts --out /tmp/tag --agent-tag   # tagging an agent
+//   bun run web/scripts/preview.ts --out /tmp/chat --chat-menu  # chat sections + the row's "…" menu
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -315,6 +316,55 @@ async function openRow(page: Page, row: ReturnType<Page["locator"]>): Promise<st
 export async function openChannelsTab(page: Page): Promise<void> {
   await page.locator('[data-testid="tab-channels"]').click();
   await page.waitForSelector('[data-testid="channel-row"]', { timeout: APP_READY_TIMEOUT_MS });
+}
+
+/**
+ * Open the "…" menu on a chat row — Teams' own settings for that chat (pin, mute,
+ * hide, mark read; see `web/src/components/chat-menu.tsx`). Returns the chat's id.
+ *
+ * The chat is named by its id, not by its place in the list: the list is virtualized
+ * AND the menu moves a row between sections, so a position is only ever a guess about
+ * what is on screen. Without an id the first row on screen is used.
+ *
+ * The trigger only shows on hover, so this hovers the row first, exactly as a person
+ * does. Every item in the menu is a local setting or the same `mark_read` the app makes
+ * on open, and none of them types into a thread — but the sentinel is asserted all the
+ * same, because a menu that can mark a chat read publishes a read receipt.
+ */
+export async function openChatMenu(page: Page, conversationId?: string): Promise<string> {
+  await assertMockBackend(page);
+  const row = conversationId
+    ? page.locator(`[data-testid="conversation-row"][data-conversation-id="${conversationId}"]`)
+    : page.locator('[data-testid="conversation-row"]').first();
+  await row.scrollIntoViewIfNeeded();
+  await row.hover();
+  // An item that was just clicked closes the menu with an animation, and the trigger
+  // TOGGLES — so a click landing while the last panel is still closing is swallowed.
+  await page.waitForSelector('[data-testid="chat-menu-pin"]', { state: "detached" });
+  const id = (await row.getAttribute("data-conversation-id")) ?? "";
+  await page.locator(`[data-testid="chat-menu"][data-conversation-id="${id}"]`).click();
+  await page.waitForSelector('[data-testid="chat-menu-pin"]');
+  await page.waitForTimeout(250); // the panel zooms in; capture it settled
+  return id;
+}
+
+/** Collapse (or expand) the chat-list section named by `section` (`pinned`,
+ *  `recent` or `hidden`), by its header — the same toggle a person clicks. */
+export async function toggleChatSection(
+  page: Page,
+  section: "pinned" | "recent" | "hidden",
+): Promise<void> {
+  const header = page.locator(`[data-testid="chat-section-header"][data-section="${section}"]`);
+  // The chat list is virtualized and a header is a row in it, so the Hidden one at the
+  // foot of 34 chats is simply not in the DOM until the list has been scrolled to it.
+  while ((await header.count()) === 0) {
+    if (!(await scrollDown(page, "sidebar-scroll"))) {
+      throw new Error(`no "${section}" section in the chat list, after scrolling to its end`);
+    }
+    await page.waitForTimeout(150);
+  }
+  await header.click();
+  await page.waitForTimeout(250); // the chevron rotates; capture it settled
 }
 
 /** Collapse (or expand) the team section at `index`, by its header — the same
@@ -1178,6 +1228,52 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-thread-light.png, ${out}-open-light.png, ` +
           `${out}-zoomed-light.png and ${out}-small-{light,dark}.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // The chat list's own sections and the "…" menu that fills them: Teams' settings
+  // for one chat (pin, mute, hide, mark read), and what each one does to the list.
+  //
+  // Nothing here leaves the machine — pin, mute and hide are local overrides, and the
+  // mock answers `mark_read` itself.
+  if (args.includes("--chat-menu")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      // The list as it arrives: a Pinned section (the mock pins two chats), Recent,
+      // and the chats Teams itself hides folded at the foot.
+      await shot(`${out}-sections-light.png`);
+      // The menu on a Recent row — every item, in both themes.
+      const chat = await page
+        .locator('[data-testid="conversation-row"][data-section="recent"]')
+        .first()
+        .getAttribute("data-conversation-id");
+      await openChatMenu(page, chat ?? undefined);
+      await shot(`${out}-menu-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-menu-dark.png`);
+      await setTheme("light");
+      // Pin it, then mute it. Each item acts and closes, as in Teams, so the menu is
+      // opened again on the row — which has moved up into Pinned by then.
+      await page.locator('[data-testid="chat-menu-pin"]').click();
+      await page.waitForTimeout(250);
+      await openChatMenu(page, chat ?? undefined);
+      await page.locator('[data-testid="chat-menu-mute"]').click();
+      await page.waitForTimeout(250);
+      await shot(`${out}-pinned-light.png`);
+      // The Hidden section opened: where a chat put away is brought back.
+      await toggleChatSection(page, "hidden");
+      await page
+        .locator('[data-testid="conversation-row"][data-section="hidden"]')
+        .first()
+        .scrollIntoViewIfNeeded();
+      await page.waitForTimeout(200);
+      await shot(`${out}-hidden-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-hidden-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-sections-light.png, ${out}-menu-{light,dark}.png, ` +
+          `${out}-pinned-light.png and ${out}-hidden-{light,dark}.png`,
       );
     });
     process.exit(0);

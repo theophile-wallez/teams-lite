@@ -762,6 +762,10 @@ function addConversation(input: {
   isRead: boolean;
   isMuted: boolean;
   isPinned: boolean;
+  /** A chat the user hid in Microsoft Teams. It renders under the chat list's own
+   *  "Hidden chats" section, exactly as it does on the tenant (182 of 595 chats
+   *  there). */
+  isHidden?: boolean;
   /** A custom group picture, as on a real tenant where some groups have one. */
   pictureUrl?: string;
   /** CSA's own `threadType`. Pass `"meeting"` for a thread Teams opened for a
@@ -782,7 +786,7 @@ function addConversation(input: {
     is_ghost_read: false,
     is_muted: input.isMuted,
     is_pinned: input.isPinned,
-    is_hidden: false,
+    is_hidden: input.isHidden === true,
     thread_type:
       input.threadType ??
       (input.kind === "one_on_one" || input.kind === "group" ? "chat" : ""),
@@ -815,6 +819,9 @@ function seed(): void {
       isRead: rand() >= 0.35,
       isMuted: rand() < 0.08,
       isPinned: idx === 0, // pin one 1:1
+      // Hide exactly one, so the chat list's "Hidden chats" section is exercised
+      // against a known row: Olivia Martins, the third person.
+      isHidden: idx === 2,
     });
   });
 

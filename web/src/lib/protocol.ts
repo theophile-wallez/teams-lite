@@ -1348,6 +1348,163 @@ export function previewLine(c: Conversation): string {
   return body;
 }
 
+// ---- chat placement: pin, mute, hide ----------------------------------------
+//
+// Microsoft Teams gives a chat three settings that decide WHERE it sits in the list
+// and HOW LOUD it is: pinned to the top, muted, hidden away. The backend already
+// mirrors all three from CSA (`is_pinned` from `isSticky`, `is_muted`, `is_hidden`),
+// so a chat pinned, muted or hidden in Teams arrives that way here.
+//
+// A change made HERE is a LOCAL override that wins over the mirrored value from then
+// on, and nothing writes it back: publishing a setting to the user's account is an
+// outward action and would need its own consent gate, exactly like a send. The
+// channel pin works the same way (see `channelIsPinned`), and this is the same rule
+// applied to the three settings a chat has.
+
+/**
+ * The user's own local placement of the chat list, persisted client-side by the
+ * store. Each map holds one override per chat id; a chat absent from a map keeps
+ * whatever Microsoft Teams reported.
+ */
+export type ChatPrefs = {
+  /** Chat id → pinned here, overriding `is_pinned`. */
+  pins: Record<string, boolean>;
+  /** Chat id → muted here, overriding `is_muted`. */
+  mutes: Record<string, boolean>;
+  /**
+   * Chat id → the hide watermark, in the same epoch milliseconds as
+   * `last_message_time`: the chat stays hidden while its newest message is no newer
+   * than the watermark, so a NEW message brings it back — which is what Teams' own
+   * Hide does. `0` is an explicit "show it here", the one way back for a chat Teams
+   * itself hides (this app cannot unhide it on the account).
+   */
+  hides: Record<string, number>;
+};
+
+/** No override at all: every chat sits where Microsoft Teams put it. */
+export const NO_CHAT_PREFS: ChatPrefs = { pins: {}, mutes: {}, hides: {} };
+
+/** Whether this chat is pinned to the top of the list, honouring a local override. */
+export function chatIsPinned(c: Conversation, prefs: ChatPrefs): boolean {
+  const override = prefs.pins[c.id];
+  return override === undefined ? c.is_pinned === true : override;
+}
+
+/**
+ * Whether this chat is muted, honouring a local override.
+ *
+ * A muted chat is dimmed, never raises an unread marker, and chimes at nobody: this
+ * app's own notification for a message in it is dropped (see {@link shouldNotify}).
+ * The mute is local to this app, so the backend's Web Push still reaches the user's
+ * phone — the menu that offers the switch says so.
+ */
+export function chatIsMuted(c: Conversation, prefs: ChatPrefs): boolean {
+  const override = prefs.mutes[c.id];
+  return override === undefined ? c.is_muted === true : override;
+}
+
+/**
+ * Whether this chat is hidden — out of the list until it has something new to say.
+ *
+ * Absent a local watermark this mirrors Teams' own `is_hidden`, which is why 182 of
+ * this tenant's 595 chats belong in the Hidden section rather than in Recent: the
+ * user already put them away, in Teams, and this app was showing them anyway.
+ */
+export function chatIsHidden(c: Conversation, prefs: ChatPrefs): boolean {
+  const watermark = prefs.hides[c.id];
+  if (watermark === undefined) return c.is_hidden === true;
+  if (watermark <= 0) return false;
+  return c.last_message_time <= watermark;
+}
+
+/** The three groups the chat list renders, in the order they appear. */
+export type ChatSectionId = "pinned" | "recent" | "hidden";
+
+/** One group of the chat list: the chats in it, newest first. */
+export type ChatSection = {
+  id: ChatSectionId;
+  label: string;
+  chats: Conversation[];
+};
+
+/** One rendered line of the chat list — a section header or a chat row. Flat,
+ *  because the list is virtualized: a header is a row like any other. */
+export type ChatRow =
+  | { kind: "header"; section: ChatSection }
+  /** `index` is the row's place among the chats currently ON SCREEN, which is what
+   *  the keyboard selection counts — a chat inside a folded section has none. */
+  | { kind: "chat"; chat: Conversation; sectionId: ChatSectionId; index: number };
+
+/** Every section header carries the state of what it hides while folded, so folding
+ *  a group never looks like losing it. */
+export function chatSectionCollapsedHint(
+  section: ChatSection,
+  prefs: ChatPrefs,
+  openId: string | null,
+): { hidesUnread: boolean; hidesOpen: boolean } {
+  return {
+    // A muted chat is not something a folded section should shout about, exactly as
+    // it raises no unread marker of its own.
+    hidesUnread: section.chats.some((c) => !c.is_read && !chatIsMuted(c, prefs)),
+    hidesOpen: section.chats.some((c) => c.id === openId),
+  };
+}
+
+/**
+ * Split the chat list into its sections, mirroring Microsoft Teams: the pinned chats
+ * on top, then the recent ones, then the chats that are put away.
+ *
+ * Only a non-empty section is returned, so a list with nothing pinned and nothing
+ * hidden is one plain group — the shape this sidebar always had.
+ *
+ * Each section is sorted newest-first rather than kept in the incoming order: the
+ * backend sorts pinned chats to the head of the flat list, and a chat unpinned HERE
+ * would otherwise sit at the top of Recent with a two-week-old message. Pure, so the
+ * sidebar and the keyboard agree on the order by construction.
+ */
+export function organizeChats(conversations: Conversation[], prefs: ChatPrefs): ChatSection[] {
+  const pinned: Conversation[] = [];
+  const recent: Conversation[] = [];
+  const hidden: Conversation[] = [];
+  for (const c of conversations) {
+    if (chatIsHidden(c, prefs)) hidden.push(c);
+    else if (chatIsPinned(c, prefs)) pinned.push(c);
+    else recent.push(c);
+  }
+  const newestFirst = (a: Conversation, b: Conversation) =>
+    b.last_message_time - a.last_message_time || a.id.localeCompare(b.id);
+  const sections: ChatSection[] = [
+    { id: "pinned", label: "Pinned", chats: pinned.sort(newestFirst) },
+    { id: "recent", label: "Recent", chats: recent.sort(newestFirst) },
+    { id: "hidden", label: `Hidden chats (${hidden.length})`, chats: hidden.sort(newestFirst) },
+  ];
+  return sections.filter((s) => s.chats.length > 0);
+}
+
+/**
+ * Flatten the sections into the rows the virtualizer renders.
+ *
+ * A header only appears when there is more than one section to tell apart: a single
+ * group needs no name, and Teams shows none either. A folded section contributes its
+ * header alone, so its chats are out of the keyboard's reach as well as out of sight.
+ */
+export function chatRows(
+  sections: ChatSection[],
+  collapsed: Record<ChatSectionId, boolean>,
+): ChatRow[] {
+  const rows: ChatRow[] = [];
+  let index = 0;
+  for (const section of sections) {
+    if (sections.length > 1) rows.push({ kind: "header", section });
+    if (sections.length > 1 && collapsed[section.id]) continue;
+    for (const chat of section.chats) {
+      rows.push({ kind: "chat", chat, sectionId: section.id, index });
+      index += 1;
+    }
+  }
+  return rows;
+}
+
 // ---- channel display helpers -----------------------------------------------
 
 /** The channel's display name, with a safe fallback for an unnamed channel. */
@@ -1469,12 +1626,20 @@ export function organizeChannels(
   return { pinned, teams: groupChannelsByTeam(rest) };
 }
 
-/** Should an incoming message raise a notification? Pure, so it is testable. */
+/**
+ * Should an incoming message raise a notification? Pure, so it is testable.
+ *
+ * `muted` is the thread's own quiet setting — a chat muted in Teams or here (see
+ * {@link chatIsMuted}), a channel the user muted in Teams ({@link channelIsMuted}).
+ * A mute that dimmed the row and still chimed would not be a mute.
+ */
 export function shouldNotify(
   msg: { conversation_id: string; is_self?: boolean },
   openConversationId: string | null,
+  muted = false,
 ): boolean {
   if (msg.is_self) return false;
+  if (muted) return false;
   if (openConversationId !== null && msg.conversation_id === openConversationId) return false;
   return true;
 }

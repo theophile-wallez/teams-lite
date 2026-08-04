@@ -1,4 +1,4 @@
-import { useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -22,12 +22,17 @@ import {
   channelIsPinned,
   channelIsShown,
   channelLabel,
+  chatIsMuted,
+  chatIsPinned,
+  chatSectionCollapsedHint,
   convLabel,
   mailUnreadBadge,
   organizeChannels,
   previewLine,
   typingLabel,
   type Channel,
+  type ChatSection,
+  type ChatSectionId,
   type Conversation,
 } from "~/lib/protocol";
 import { formatShortcut, useModifierLabel } from "~/lib/platform";
@@ -36,14 +41,20 @@ import { cn } from "~/lib/utils";
 import { Avatar, conversationFallback, conversationPhoto } from "./avatar";
 import { BrokerBanner } from "./broker-banner";
 import { CalendarSidebar } from "./calendar-sidebar";
+import { ChatMenu } from "./chat-menu";
 import { useAppState, useController } from "./controller-context";
 import { MailList } from "./mail-list";
 import { NotificationsBell } from "./notifications-bell";
 import { ShortcutChord } from "./shortcut";
 import { StatusBar } from "./status-bar";
 import { Tabs, TabsList, TabsPanel, TabsTrigger } from "./ui/tabs";
+import { chatSectionKey, useChatSections } from "./use-chat-sections";
+import { useLongPress } from "./use-long-press";
 
 const ROW_HEIGHT = 64;
+/** One section header of the chat list, as a virtualized row. Fixed, because every
+ *  row of that list is positioned from its own height (see `ChatList`). */
+const SECTION_HEADER_HEIGHT = 32;
 
 /** One icon-only tab in the sidebar strip: a taller target than a text tab needs,
  *  the glyph centred in it, and the active section tinted the accent colour. */
@@ -261,26 +272,42 @@ function MailUnreadBadge() {
   );
 }
 
-/** The virtualized chat list (the Chats tab). Keyboard selection is driven from
- *  the app shell via `selectedIndex`/`onSelect`. */
+/**
+ * The virtualized chat list (the Chats tab), in the sections Microsoft Teams shows:
+ * the pinned chats on top, then the recent ones, then the ones that are put away.
+ * Keyboard selection is driven from the app shell via `selectedIndex`/`onSelect`,
+ * over the same row model this renders (see `useChatSections`).
+ *
+ * A header is a virtualized row like any other, which is what keeps a 595-chat list
+ * cheap: nothing renders per section, so folding Recent costs the same as folding a
+ * team in the channel tree. Every row is positioned from its own height, so both
+ * heights are fixed constants rather than measured.
+ */
 function ChatList(props: { selectedIndex: number; onSelect: (index: number) => void }) {
-  const conversations = useAppState((s) => s.conversations);
   const openId = useAppState((s) => s.openId);
+  const prefs = useAppState((s) => s.chatPrefs);
   const navigate = useNavigate();
+  const { rows, collapsed } = useChatSections();
 
   const parentRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
-    count: conversations.length,
+    count: rows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => ROW_HEIGHT,
+    estimateSize: (index) =>
+      rows[index]?.kind === "header" ? SECTION_HEADER_HEIGHT : ROW_HEIGHT,
     overscan: 12,
   });
+  // `estimateSize` reads `rows`, so a fold (or a new pin) changes the height of rows
+  // the virtualizer already measured — re-measure, or the list keeps the old offsets.
+  useEffect(() => {
+    virtualizer.measure();
+  }, [rows, virtualizer]);
 
   // Say something when there is nothing, the way the channel tree and the mail list
   // already do. A blank scroll box was the whole of the app's answer to "where did my
   // chats go" during a sign-in outage — the banner below explains the usual cause, and
   // this makes sure the list itself is never silently empty.
-  if (conversations.length === 0) {
+  if (rows.length === 0) {
     return (
       <div
         data-testid="chats-empty"
@@ -298,32 +325,86 @@ function ChatList(props: { selectedIndex: number; onSelect: (index: number) => v
       className="flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2"
     >
       <div className="relative w-full" style={{ height: `${virtualizer.getTotalSize()}px` }}>
-        {virtualizer.getVirtualItems().map((row) => {
-          const c = conversations[row.index];
-          if (!c) return null;
+        {virtualizer.getVirtualItems().map((item) => {
+          const row = rows[item.index];
+          if (!row) return null;
+          const isHeader = row.kind === "header";
           return (
             <div
-              key={c.id}
+              key={isHeader ? `section:${row.section.id}` : row.chat.id}
               className="absolute left-0 top-0 w-full"
-              style={{ height: `${ROW_HEIGHT}px`, transform: `translateY(${row.start}px)` }}
+              style={{
+                height: `${isHeader ? SECTION_HEADER_HEIGHT : ROW_HEIGHT}px`,
+                transform: `translateY(${item.start}px)`,
+              }}
             >
-              <ConversationRow
-                conversation={c}
-                open={openId === c.id}
-                selected={props.selectedIndex === row.index}
-                onClick={() => {
-                  props.onSelect(row.index);
-                  void navigate({
-                    to: "/c/$conversationId",
-                    params: { conversationId: c.id },
-                  });
-                }}
-              />
+              {row.kind === "header" ? (
+                <ChatSectionHeader
+                  section={row.section}
+                  collapsed={collapsed[row.section.id] === true}
+                  openId={openId}
+                />
+              ) : (
+                <ConversationRow
+                  conversation={row.chat}
+                  open={openId === row.chat.id}
+                  selected={props.selectedIndex === row.index}
+                  pinned={chatIsPinned(row.chat, prefs)}
+                  muted={chatIsMuted(row.chat, prefs)}
+                  section={row.sectionId}
+                  onClick={() => {
+                    props.onSelect(row.index);
+                    void navigate({
+                      to: "/c/$conversationId",
+                      params: { conversationId: row.chat.id },
+                    });
+                  }}
+                />
+              )}
             </div>
           );
         })}
       </div>
     </div>
+  );
+}
+
+/** One header of the chat list — Pinned, Recent, or the chats put away. Folding it is
+ *  persisted like a team's fold, and a folded section still reports what it holds. */
+function ChatSectionHeader(props: {
+  section: ChatSection;
+  collapsed: boolean;
+  openId: string | null;
+}) {
+  const controller = useController();
+  const prefs = useAppState((s) => s.chatPrefs);
+  const hint = chatSectionCollapsedHint(props.section, prefs, props.openId);
+  return (
+    <SectionHeader
+      testId="chat-section-header"
+      nameTestId="chat-section-name"
+      sectionId={props.section.id}
+      label={props.section.label}
+      glyph={
+        // Recent carries no glyph: it is the list itself, and Teams marks it with
+        // nothing either. The other two say in a symbol what they did to a chat.
+        props.section.id === "recent" ? null : (
+          <HugeiconsIcon
+            icon={props.section.id === "pinned" ? PinIcon : EyeOffIcon}
+            className="size-3.5 shrink-0 text-text-faint"
+            strokeWidth={1.6}
+            aria-hidden
+          />
+        )
+      }
+      collapsed={props.collapsed}
+      hidesUnread={props.collapsed && hint.hidesUnread}
+      hidesOpen={props.collapsed && hint.hidesOpen}
+      onToggle={() =>
+        controller.setSectionCollapsed(chatSectionKey(props.section.id), !props.collapsed)
+      }
+      className="h-full"
+    />
   );
 }
 
@@ -471,7 +552,7 @@ function ChannelSection(props: {
   hidden?: Channel[];
 }) {
   const controller = useController();
-  const stored = useAppState((s) => s.collapsedTeams[props.sectionId]);
+  const stored = useAppState((s) => s.collapsedSections[props.sectionId]);
   const collapsed = stored === undefined ? props.collapsedByDefault === true : stored;
   const hidden = props.hidden ?? [];
   const headerPrefix = props.headerPrefix ?? "team";
@@ -487,41 +568,17 @@ function ChannelSection(props: {
       data-team-id={props.teamId}
       data-collapsed={collapsed ? "true" : undefined}
     >
-      <h3 className={props.indented ? "pt-1" : "pt-2"}>
-        <button
-          type="button"
-          data-testid={`${headerPrefix}-header`}
-          data-cuelume-press=""
-          aria-expanded={!collapsed}
-          onClick={() => controller.setTeamCollapsed(props.sectionId, !collapsed)}
-          className={cn(
-            "flex w-full items-center gap-1.5 rounded-lg py-1 pr-2 text-left transition-colors hover:bg-row-hovered",
-            props.indented ? "pl-6" : "pl-1",
-          )}
-        >
-          <HugeiconsIcon
-            icon={ChevronRightIcon}
-            className={cn(
-              "size-3.5 shrink-0 text-text-faint transition-transform duration-150",
-              !collapsed && "rotate-90",
-            )}
-            strokeWidth={2}
-            aria-hidden
-          />
-          {props.glyph}
-          <span
-            data-testid={`${headerPrefix}-name`}
-            className={cn(
-              "min-w-0 flex-1 truncate text-[13px]",
-              props.indented ? "text-text-dim" : "text-foreground",
-              hidesUnread ? "font-semibold" : "font-medium",
-            )}
-          >
-            {props.label}
-          </span>
-          {hidesOpen && <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden />}
-        </button>
-      </h3>
+      <SectionHeader
+        testId={`${headerPrefix}-header`}
+        nameTestId={`${headerPrefix}-name`}
+        label={props.label}
+        glyph={props.glyph}
+        collapsed={collapsed}
+        hidesUnread={hidesUnread}
+        hidesOpen={hidesOpen}
+        indented={props.indented}
+        onToggle={() => controller.setSectionCollapsed(props.sectionId, !collapsed)}
+      />
       {!collapsed && props.channels.map(props.renderRow)}
       {!collapsed && hidden.length > 0 && (
         <ChannelSection
@@ -549,6 +606,75 @@ function ChannelSection(props: {
   );
 }
 
+/**
+ * The header of one foldable sidebar group, shared by the chat list and the channel
+ * tree so the two read as one sidebar: a chevron, an optional glyph, the name, and —
+ * while folded — what the group is holding back.
+ *
+ * The whole header is the toggle, as in Microsoft Teams. It reports rather than hides:
+ * the name turns bold when something unread is folded away, and a dot marks the group
+ * that holds the open thread. Otherwise folding would look like losing.
+ */
+function SectionHeader(props: {
+  testId: string;
+  nameTestId: string;
+  label: string;
+  glyph?: ReactNode;
+  collapsed: boolean;
+  hidesUnread: boolean;
+  hidesOpen: boolean;
+  onToggle: () => void;
+  /** Sit one level deeper, as a sub-entry of a group rather than a top-level one. */
+  indented?: boolean;
+  /** Marks which chat-list group this is, for the tests and for the DOM to state. */
+  sectionId?: string;
+  /** Extra classes for the wrapper — the chat list gives its header a fixed height,
+   *  because there it is a virtualized row rather than a heading above one. */
+  className?: string;
+}) {
+  return (
+    <h3 className={cn(props.indented ? "pt-1" : "pt-2", props.className)}>
+      <button
+        type="button"
+        data-testid={props.testId}
+        data-section={props.sectionId}
+        data-collapsed={props.collapsed ? "true" : undefined}
+        data-cuelume-press=""
+        aria-expanded={!props.collapsed}
+        onClick={props.onToggle}
+        className={cn(
+          "flex h-full w-full items-center gap-1.5 rounded-lg py-1 pr-2 text-left transition-colors hover:bg-row-hovered",
+          props.indented ? "pl-6" : "pl-1",
+        )}
+      >
+        <HugeiconsIcon
+          icon={ChevronRightIcon}
+          className={cn(
+            "size-3.5 shrink-0 text-text-faint transition-transform duration-150",
+            !props.collapsed && "rotate-90",
+          )}
+          strokeWidth={2}
+          aria-hidden
+        />
+        {props.glyph}
+        <span
+          data-testid={props.nameTestId}
+          className={cn(
+            "min-w-0 flex-1 truncate text-[13px]",
+            props.indented ? "text-text-dim" : "text-foreground",
+            props.hidesUnread ? "font-semibold" : "font-medium",
+          )}
+        >
+          {props.label}
+        </span>
+        {props.hidesOpen && (
+          <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden />
+        )}
+      </button>
+    </h3>
+  );
+}
+
 /** The Ghost-mode read mark: this thread is read HERE, and Teams was never told, so
  *  the sender still sees it as unread. It stands where the unread dot stood, because it
  *  answers the question that dot's absence raises — "did they see that I read it?".
@@ -571,14 +697,23 @@ function GhostReadMark(props: { on?: boolean }) {
   );
 }
 
+/** One chat row. Hovering it reveals the "…" menu that holds Microsoft Teams' own
+ *  settings for the chat — pin, mute, hide, mark read (see `ChatMenu`); on a phone,
+ *  where there is no hover, a long press on the row opens the same menu. The menu is a
+ *  SIBLING of the row rather than a child: the row is a button, and a button inside a
+ *  button is neither valid markup nor clickable apart from the row. */
 function ConversationRow(props: {
   conversation: Conversation;
   open: boolean;
   selected: boolean;
+  pinned: boolean;
+  muted: boolean;
+  /** Which chat-list group the row is rendered in, stated on the DOM node. */
+  section: ChatSectionId;
   onClick: () => void;
 }) {
   const c = props.conversation;
-  const unread = !c.is_read && !c.is_muted;
+  const unread = !c.is_read && !props.muted;
   const preview = previewLine(c);
   const label = convLabel(c);
   const time = useMemo(() => formatTime(c.last_message_time), [c.last_message_time]);
@@ -587,87 +722,133 @@ function ConversationRow(props: {
   const typingText = typers && typers.length > 0 ? typingLabel(typers.map((t) => t.name)) : "";
 
   const emphasizeTitle = props.open || unread;
+  // The menu is opened from two places — its own trigger with a mouse, a long press on
+  // the row with a finger — so the row owns the state rather than the trigger.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const longPress = useLongPress({ onLongPress: () => setMenuOpen(true) });
 
   return (
-    <button
-      type="button"
-      onClick={props.onClick}
-      data-testid="conversation-row"
-      data-conversation-id={c.id}
-      data-open={props.open ? "true" : undefined}
-      data-selected={props.selected ? "true" : undefined}
-      data-unread={unread ? "true" : undefined}
-      aria-current={props.open ? "true" : undefined}
-      className={cn(
-        "my-0.5 flex h-[60px] w-full items-center gap-3 rounded-xl px-2.5 text-left transition-all",
-        props.open
-          ? "bg-row-open shadow-card"
-          : props.selected
-            ? "bg-row-selected ring-1 ring-inset ring-border-subtle"
-            : "hover:bg-row-hovered",
-      )}
-    >
-      <Avatar
-        seed={c.id}
-        label={label}
-        photo={conversationPhoto(c)}
-        fallback={conversationFallback(c)}
-      />
+    <div className="group/chat relative">
+      <button
+        type="button"
+        onClick={props.onClick}
+        {...longPress.handlers}
+        data-testid="conversation-row"
+        data-conversation-id={c.id}
+        data-section={props.section}
+        data-open={props.open ? "true" : undefined}
+        data-selected={props.selected ? "true" : undefined}
+        data-unread={unread ? "true" : undefined}
+        data-pinned={props.pinned ? "true" : undefined}
+        data-muted={props.muted ? "true" : undefined}
+        aria-current={props.open ? "true" : undefined}
+        className={cn(
+          "my-0.5 flex h-[60px] w-full items-center gap-3 rounded-xl px-2.5 text-left transition-all",
+          props.open
+            ? "bg-row-open shadow-card"
+            : props.selected
+              ? "bg-row-selected ring-1 ring-inset ring-border-subtle"
+              : "hover:bg-row-hovered",
+        )}
+      >
+        <Avatar
+          seed={c.id}
+          label={label}
+          photo={conversationPhoto(c)}
+          fallback={conversationFallback(c)}
+        />
 
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="flex items-center gap-2">
-          <span
-            data-testid="conversation-name"
-            className={cn(
-              "truncate text-[13px]",
-              props.open
-                ? "font-medium text-foreground"
-                : c.is_muted
-                  ? "text-text-faint"
-                  : emphasizeTitle
-                    ? "font-medium text-foreground"
-                    : "text-text-dim",
-            )}
-          >
-            {label}
-          </span>
-          {time && (
-            <time className="ml-auto shrink-0 text-[11px] tabular-nums text-text-faint">
-              {time}
-            </time>
-          )}
-        </span>
-        <span className="flex items-center gap-1.5">
-          {typingText ? (
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="flex items-center gap-2">
             <span
-              data-testid="conversation-typing"
-              className="flex flex-1 items-center gap-1.5 truncate text-xs text-primary"
-            >
-              <span className="typing-dots" aria-hidden="true">
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-              </span>
-              <span className="truncate">{typingText}</span>
-            </span>
-          ) : (
-            <span
+              data-testid="conversation-name"
               className={cn(
-                "flex-1 truncate text-xs",
-                props.open ? "text-text-dim" : unread ? "text-text-dim" : "text-text-faint",
+                "truncate text-[13px]",
+                props.open
+                  ? "font-medium text-foreground"
+                  : props.muted
+                    ? "text-text-faint"
+                    : emphasizeTitle
+                      ? "font-medium text-foreground"
+                      : "text-text-dim",
               )}
             >
-              {preview || " "}
+              {label}
             </span>
-          )}
-          {unread ? (
-            <span className="size-2 shrink-0 rounded-full bg-unread-dot" aria-hidden />
-          ) : (
-            <GhostReadMark on={c.is_ghost_read} />
-          )}
+            {/* The reason the row is quiet, stated rather than implied — a dim name
+                alone reads as "read", not as "muted". The same mark a muted channel
+                carries, so one glyph means one thing across the sidebar. */}
+            {props.muted && (
+              <span
+                data-testid="conversation-muted-glyph"
+                role="img"
+                aria-label="Muted"
+                title="Muted — this app raises no notification for it"
+                className="ml-auto grid shrink-0 place-items-center text-text-faint"
+              >
+                <HugeiconsIcon icon={BellOffIcon} className="size-3" aria-hidden />
+              </span>
+            )}
+            {time && (
+              <time
+                className={cn(
+                  // Faded on hover so the "…" menu takes the corner instead of sitting
+                  // on top of the date. Only where hovering means something: on a phone
+                  // the menu is behind a long press, and the date stays put.
+                  "shrink-0 text-[11px] tabular-nums text-text-faint transition-opacity",
+                  "[@media(pointer:fine)]:group-hover/chat:opacity-0",
+                  !props.muted && "ml-auto",
+                )}
+              >
+                {time}
+              </time>
+            )}
+          </span>
+          <span className="flex items-center gap-1.5">
+            {typingText ? (
+              <span
+                data-testid="conversation-typing"
+                className="flex flex-1 items-center gap-1.5 truncate text-xs text-primary"
+              >
+                <span className="typing-dots" aria-hidden="true">
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                </span>
+                <span className="truncate">{typingText}</span>
+              </span>
+            ) : (
+              <span
+                className={cn(
+                  "flex-1 truncate text-xs",
+                  props.open ? "text-text-dim" : unread ? "text-text-dim" : "text-text-faint",
+                )}
+              >
+                {preview || " "}
+              </span>
+            )}
+            {unread ? (
+              <span className="size-2 shrink-0 rounded-full bg-unread-dot" aria-hidden />
+            ) : (
+              <GhostReadMark on={c.is_ghost_read} />
+            )}
+          </span>
         </span>
-      </span>
-    </button>
+      </button>
+
+      {/* Teams' own "…" on the row. It carries the row's own background, so the preview
+          line behind it is covered rather than reading through the glyph; when and how it
+          shows is the menu's own business (see `ChatMenu`). */}
+      <ChatMenu
+        conversation={c}
+        open={menuOpen}
+        onOpenChange={setMenuOpen}
+        className={cn(
+          "absolute right-1.5 top-1/2 -translate-y-1/2 transition-opacity",
+          props.open ? "bg-row-open" : props.selected ? "bg-row-selected" : "bg-row-hovered",
+        )}
+      />
+    </div>
   );
 }
 
