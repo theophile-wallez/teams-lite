@@ -1,5 +1,5 @@
 import { test, expect, gotoApp, realErrors } from "./helpers";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 /** Open a conversation by name via the command palette — robust to sidebar
  *  ordering and virtualization (the shared mock is mutated by other specs). */
@@ -11,6 +11,35 @@ async function openByPalette(page: Page, name: string): Promise<void> {
   await input.press("Enter");
   await expect(page.locator("[cmdk-input]")).toHaveCount(0);
   await expect(page.locator('[data-testid="conversation-title"]')).toContainText(name);
+}
+
+/** The first chat image of the open conversation, once its bytes have decoded —
+ *  the lightbox measures the thumbnail to fly the picture out of it. */
+async function loadedThumb(page: Page) {
+  const images = page.locator('[data-testid="message-image"]');
+  await expect.poll(() => images.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+  const thumb = images.first();
+  await expect(thumb).toBeVisible();
+  await expect
+    .poll(() => thumb.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0))
+    .toBe(true);
+  return thumb;
+}
+
+/** The picture's box once it has stopped moving. The lightbox flies the picture
+ *  out of its thumbnail over 300 ms, so a box measured on the frame the dialog
+ *  opens is a box in mid-flight. */
+async function settledBox(picture: Locator): Promise<{ width: number; height: number }> {
+  let last = { width: -1, height: -1 };
+  await expect
+    .poll(async () => {
+      const box = (await picture.boundingBox())!;
+      const stable = Math.abs(box.width - last.width) < 0.5;
+      last = { width: box.width, height: box.height };
+      return stable;
+    })
+    .toBe(true);
+  return last;
 }
 
 test.describe("media (images + attachments)", () => {
@@ -72,30 +101,21 @@ test.describe("media (images + attachments)", () => {
     await gotoApp(page);
     await openByPalette(page, "Media Gallery");
 
-    const images = page.locator('[data-testid="message-image"]');
-    await expect.poll(() => images.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
-    const thumb = images.first();
-    // The zoom library ignores the click until the picture has decoded, so wait
-    // for it to actually load before clicking.
-    await expect(thumb).toBeVisible();
-    await expect
-      .poll(() => thumb.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0))
-      .toBe(true);
+    const thumb = await loadedThumb(page);
     await thumb.click();
 
-    // react-medium-image-zoom opens a native <dialog> portaled to <body>, so the
-    // enlarged picture renders in the top layer, above the messages. Only the
-    // clicked image's dialog carries the `open` attribute.
-    const lightbox = page.locator("dialog[data-rmiz-modal][open]");
+    // The lightbox is a native <dialog> portaled to <body> and opened with
+    // showModal(), so the enlarged picture renders in the top layer, above the
+    // messages. Only the clicked image's dialog is in the DOM at all.
+    const lightbox = page.locator('dialog[data-testid="image-lightbox"][open]');
     await expect(lightbox).toBeVisible();
-    await expect(lightbox).toHaveAttribute("role", "dialog");
-    // The zoomed image shows the same proxied blob as the thumbnail.
-    const zoomed = lightbox.locator("img[data-rmiz-modal-img]");
+    // The enlarged picture shows the same proxied blob as the thumbnail.
+    const zoomed = lightbox.locator('[data-testid="image-lightbox-image"]');
     await expect(zoomed).toBeVisible();
     await expect(zoomed).toHaveAttribute("src", /^blob:/);
 
     // Escape closes the lightbox and must NOT also fall through to the app's
-    // global handler (which would leave the conversation). The library catches
+    // global handler (which would leave the conversation). The lightbox catches
     // Escape in the capture phase and stops propagation, so we stay put.
     await page.keyboard.press("Escape");
     await expect(lightbox).toHaveCount(0);
@@ -104,31 +124,107 @@ test.describe("media (images + attachments)", () => {
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 
-  test("closes the lightbox via the close button and the backdrop", async ({ page }) => {
+  test("closes the lightbox via the close button and the void around the picture", async ({
+    page,
+  }) => {
     await gotoApp(page);
     await openByPalette(page, "Media Gallery");
 
-    const images = page.locator('[data-testid="message-image"]');
-    await expect.poll(() => images.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
-    const thumb = images.first();
-    await expect(thumb).toBeVisible();
-    await expect
-      .poll(() => thumb.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0))
-      .toBe(true);
-    const lightbox = page.locator("dialog[data-rmiz-modal][open]");
+    const thumb = await loadedThumb(page);
+    const lightbox = page.locator('dialog[data-testid="image-lightbox"][open]');
 
-    // Close button (the library's unzoom control, named via a11yNameButtonUnzoom).
     await thumb.click();
     await expect(lightbox).toBeVisible();
     await lightbox.getByRole("button", { name: "Close image preview" }).click();
     await expect(lightbox).toHaveCount(0);
 
-    // Clicking the dimmed area around the picture (the modal content, not the
-    // image itself) closes it.
+    // Clicking the dim void around the picture closes it — the top-left corner is
+    // outside the centred picture whatever its aspect ratio.
     await thumb.click();
     await expect(lightbox).toBeVisible();
     await lightbox.click({ position: { x: 8, y: 8 } });
     await expect(lightbox).toHaveCount(0);
+  });
+
+  test("zooms the open picture in and out with the wheel", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    const thumb = await loadedThumb(page);
+    await thumb.click();
+    const lightbox = page.locator('dialog[data-testid="image-lightbox"][open]');
+    await expect(lightbox).toHaveAttribute("data-phase", "open");
+    const picture = lightbox.locator('[data-testid="image-lightbox-image"]');
+    const fitted = await settledBox(picture);
+
+    // Scrolling up magnifies the picture rather than dismissing it.
+    await page.mouse.move(640, 360);
+    await page.mouse.wheel(0, -300);
+    await expect.poll(() => lightbox.getAttribute("data-zoom")).not.toBe("1.00");
+    await expect(lightbox).toBeVisible();
+    const magnified = await settledBox(picture);
+    expect(magnified.width).toBeGreaterThan(fitted.width);
+
+    // Scrolling back down returns to the fit box, and stops there: the picture
+    // never shrinks away, and the wheel never closes the lightbox.
+    await page.mouse.wheel(0, 900);
+    await expect.poll(() => lightbox.getAttribute("data-zoom")).toBe("1.00");
+    await expect(lightbox).toBeVisible();
+    const back = await settledBox(picture);
+    expect(back.width).toBeCloseTo(fitted.width, 0);
+  });
+
+  test("a click on a magnified picture returns to fit, and one more closes", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    const thumb = await loadedThumb(page);
+    await thumb.click();
+    const lightbox = page.locator('dialog[data-testid="image-lightbox"][open]');
+    await expect(lightbox).toHaveAttribute("data-phase", "open");
+    const picture = lightbox.locator('[data-testid="image-lightbox-image"]');
+
+    await page.mouse.move(640, 360);
+    await page.mouse.wheel(0, -300);
+    await expect.poll(() => lightbox.getAttribute("data-zoom")).not.toBe("1.00");
+
+    // Magnified, the picture itself is the way back out of the zoom. Clicked
+    // through the mouse at the middle of the viewport, because a magnified
+    // picture reaches past the viewport and has no clickable corner of its own.
+    await expect(picture).toBeVisible();
+    await page.mouse.click(640, 360);
+    await expect.poll(() => lightbox.getAttribute("data-zoom")).toBe("1.00");
+    await expect(lightbox).toBeVisible();
+
+    // …and at fit, it closes.
+    await page.mouse.click(640, 360);
+    await expect(lightbox).toHaveCount(0);
+  });
+
+  test("grows a picture that is smaller than the viewport", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    // A 64×48 raster picture: the thumbnail is its own 64 px, and opening it must
+    // show something bigger than that. See MAX_UPSCALE in lib/image-zoom.ts.
+    const message = page.locator("[data-message-id]").filter({ hasText: "The exported icon" });
+    const thumb = message.locator('[data-testid="message-image"]');
+    await expect(thumb).toBeVisible();
+    await expect
+      .poll(() => thumb.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0))
+      .toBe(true);
+    const small = (await thumb.boundingBox())!;
+    expect(small.width).toBeLessThan(200);
+
+    await thumb.click();
+    const lightbox = page.locator('dialog[data-testid="image-lightbox"][open]');
+    await expect(lightbox).toHaveAttribute("data-phase", "open");
+    const picture = lightbox.locator('[data-testid="image-lightbox-image"]');
+    const grown = await settledBox(picture);
+
+    expect(grown.width).toBeGreaterThan(small.width * 2);
+    // Grown by the picture's own ratio, so it is not stretched.
+    expect(grown.width / grown.height).toBeCloseTo(small.width / small.height, 1);
   });
 
   test("renders an image-only message without a bubble, mine and incoming alike", async ({

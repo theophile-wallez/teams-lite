@@ -38,6 +38,7 @@
 // English only: this repo mandates English artifacts. No non-English strings.
 
 import type { ServerWebSocket } from "bun";
+import { deflateSync } from "node:zlib";
 
 // ---------------------------------------------------------------------------
 // Protocol types — mirror web/src/lib/protocol.ts exactly.
@@ -1151,7 +1152,30 @@ function seedMediaSamples(): void {
     360_000,
   );
 
-  // 7. Several files at once, of different types: the chips must name each family
+  // 7. A SMALL raster picture (64×48 px). It is the one case an SVG fixture
+  //    cannot express: a picture with a fixed resolution, smaller than the
+  //    viewport, which the lightbox has to GROW when it opens (see
+  //    lib/image-zoom.ts). It carries text, so it is not one of the two
+  //    image-only messages the mat specs count.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: `<p>The exported icon, small on purpose:</p>`,
+      attachments: [
+        {
+          name: "icon-small.png",
+          content_type: "image/png",
+          url: "https://eu-api.asm.skype.com/v1/objects/mock-img-small/views/original",
+          kind: "image",
+        },
+      ],
+      is_self: false,
+    },
+    390_000,
+  );
+
+  // 8. Several files at once, of different types: the chips must name each family
   //    by its own coloured icon (see components/file-type-icon.tsx), and the last
   //    one carries a name with no extension — the case that falls back to the MIME
   //    type, and then to a plain page.
@@ -2236,6 +2260,7 @@ function hashString(s: string): number {
  *  distinct, visible image in the UI without any real tenant. */
 function mockMedia(url: string): { content_type: string; data_base64: string } {
   if (url.endsWith("/views/avatar_fullsize")) return mockGroupPicture(url);
+  if (url.includes("mock-img-small")) return mockSmallPng(url);
   const hue = hashString(url) % 360;
   const label = (url.split("/").filter(Boolean).pop() ?? "media").slice(0, 24);
   const svg =
@@ -2247,6 +2272,94 @@ function mockMedia(url: string): { content_type: string; data_base64: string } {
     content_type: "image/svg+xml",
     data_base64: Buffer.from(svg, "utf8").toString("base64"),
   };
+}
+
+/** A small RASTER picture (64×48 px), for the one thing the SVG above cannot
+ *  express: a fixed resolution. An SVG has none, so it says nothing about whether
+ *  the lightbox grows a picture that is smaller than the viewport. */
+function mockSmallPng(url: string): { content_type: string; data_base64: string } {
+  const hue = hashString(url) % 360;
+  return {
+    content_type: "image/png",
+    data_base64: solidPng(64, 48, hslToRgb(hue, 0.65, 0.52)).toString("base64"),
+  };
+}
+
+/** HSL (h in degrees, s and l in 0..1) as 8-bit RGB, so the raster picture is
+ *  tinted from the same per-URL hue as every other mock image. */
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const chroma = (1 - Math.abs(2 * l - 1)) * s;
+  const sector = ((h % 360) + 360) % 360 / 60;
+  const second = chroma * (1 - Math.abs((sector % 2) - 1));
+  const [r, g, b] =
+    sector < 1
+      ? [chroma, second, 0]
+      : sector < 2
+        ? [second, chroma, 0]
+        : sector < 3
+          ? [0, chroma, second]
+          : sector < 4
+            ? [0, second, chroma]
+            : sector < 5
+              ? [second, 0, chroma]
+              : [chroma, 0, second];
+  const base = l - chroma / 2;
+  const byte = (v: number) => Math.round((v + base) * 255);
+  return [byte(r), byte(g), byte(b)];
+}
+
+/** Encode a one-colour truecolour PNG. Written out by hand (header, one deflated
+ *  IDAT of unfiltered scanlines, IEND, each chunk CRC'd) because this file takes
+ *  no dependency beyond the Bun runtime, and `node:zlib` is part of it. */
+function solidPng(width: number, height: number, rgb: [number, number, number]): Buffer {
+  const stride = width * 3 + 1;
+  const raw = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) {
+    const row = y * stride;
+    raw[row] = 0; // filter type: none
+    for (let x = 0; x < width; x++) {
+      raw[row + 1 + x * 3] = rgb[0];
+      raw[row + 2 + x * 3] = rgb[1];
+      raw[row + 3 + x * 3] = rgb[2];
+    }
+  }
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8; // 8 bits per sample
+  header[9] = 2; // colour type: truecolour
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/** One length-type-body-CRC PNG chunk. */
+function pngChunk(type: string, body: Buffer): Buffer {
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(body.length, 0);
+  const typed = Buffer.concat([Buffer.from(type, "ascii"), body]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(typed), 0);
+  return Buffer.concat([length, typed, crc]);
+}
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes: Buffer): number {
+  let c = 0xffffffff;
+  for (const byte of bytes) c = CRC_TABLE[(c ^ byte) & 0xff]! ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
 }
 
 /** A group chat's own picture: a square emblem on a per-URL gradient, so it reads

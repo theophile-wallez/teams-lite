@@ -37,6 +37,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/cal --calendar     # the Calendar surface
 //   bun run web/scripts/preview.ts --out /tmp/chan --channels    # the team → channel tree
 //   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
+//   bun run web/scripts/preview.ts --out /tmp/img --image       # the picture lightbox
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
 //   bun run web/scripts/preview.ts --out /tmp/del --delete      # delete: menu, confirm, placeholder
 //   bun run web/scripts/preview.ts --out /tmp/preview --scrolled # history scrolled up (jump button)
@@ -506,6 +507,23 @@ export async function armDeleteConfirmation(page: Page): Promise<void> {
  * emoji-mart has mounted and its Apple images (served from our own origin) have
  * had a beat to arrive, so a capture isn't of a half-loaded grid.
  */
+/**
+ * Open a chat image in the lightbox and wait for its travel to end, so a capture
+ * shows the picture where it lands rather than mid-flight.
+ *
+ * `thumb` is the picture to open — pass one from the message you mean, since the
+ * gallery holds several and the interesting one is the smallest.
+ */
+export async function openImageLightbox(
+  page: Page,
+  thumb: ReturnType<Page["locator"]>,
+): Promise<void> {
+  await thumb.waitFor({ state: "visible" });
+  await thumb.click();
+  await page.waitForSelector('dialog[data-testid="image-lightbox"][data-phase="open"]');
+  await page.waitForTimeout(500);
+}
+
 export async function openReactionPicker(page: Page): Promise<void> {
   await assertMockBackend(page);
   await page.locator('[data-testid="menu-reaction-picker"] [data-testid="reaction-more"]').click();
@@ -1125,6 +1143,41 @@ if (import.meta.main) {
         `[preview] wrote ${out}-tree-light.png, ${out}-open-light.png, ` +
           `${out}-collapsed-light.png, ${out}-placement-light.png, ${out}-card-light.png, ` +
           `${out}-card-dark.png, ${out}-card-actions-dark.png and ${out}-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // The picture lightbox: a chat image opened, the same picture magnified with the
+  // wheel, and a SMALL picture — the one that has to grow, since a preview the size
+  // of the thumbnail it came from reads as a dead click.
+  if (args.includes("--image")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openConversation(page, "Media Gallery");
+      const images = page.locator('[data-testid="message-image"]');
+      await shot(`${out}-thread-light.png`);
+
+      await openImageLightbox(page, images.first());
+      await shot(`${out}-open-light.png`);
+      // Scrolling magnifies around the pointer instead of dismissing.
+      await page.mouse.move(760, 300);
+      await page.mouse.wheel(0, -400);
+      await page.waitForTimeout(300);
+      await shot(`${out}-zoomed-light.png`);
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(500);
+
+      const small = page
+        .locator("[data-message-id]")
+        .filter({ hasText: "The exported icon" })
+        .locator('[data-testid="message-image"]');
+      await openImageLightbox(page, small);
+      await shot(`${out}-small-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-small-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-thread-light.png, ${out}-open-light.png, ` +
+          `${out}-zoomed-light.png and ${out}-small-{light,dark}.png`,
       );
     });
     process.exit(0);

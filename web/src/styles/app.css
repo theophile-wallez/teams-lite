@@ -11,12 +11,6 @@
  * which keeps the app local-first and offline-safe. */
 @import "@fontsource-variable/inter";
 @import "./theme.css";
-/* Medium-style click-to-zoom for chat images (react-medium-image-zoom). Its
- * modal is a native <dialog> portaled to <body>, so the enlarged picture is
- * never clipped by, or drawn under, the message list. The overlay is restyled
- * from its shipped white to the app's dark scrim further down this file. */
-@import "react-medium-image-zoom/dist/styles.css";
-
 /* teams-lite web — Clean UI Tailwind wiring.
  *
  * Design-token values (light + dark) live in ./theme.css, keyed off
@@ -261,23 +255,44 @@ html[data-virtual-keyboard-open] .composer-shell {
   margin-bottom: 0;
 }
 
-/* react-medium-image-zoom: the library lays its thumbnail wrappers out as
-   inline spans and ships a white fullscreen modal overlay. Restore block flow
-   so the wrappers shrink-wrap the picture (and there is no inline baseline gap
-   beneath it), and repaint the backdrop in the app's dark scrim. Both fade
-   states share the one black so the 0.3s transition never washes through grey.
-   Scoped to `.teams-image-zoom` (our `classDialog`) so only chat-image modals
-   are affected. */
-[data-rmiz],
-[data-rmiz-content] {
-  display: block;
+/* The chat-image lightbox (components/image-lightbox.tsx). The <dialog> is opened
+   with showModal(), so the picture is drawn in the browser's top layer — never
+   clipped by, nor drawn under, the message scroller, which is what every in-flow
+   overlay tried here kept hitting. The dialog fills the viewport itself (its own
+   scrim animates inside it), `touch-action: none` gives the pan and pinch
+   gestures every touch move, and `overscroll-behavior` stops a wheel or a swipe
+   from reaching the thread underneath. */
+.image-lightbox[open] {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  width: 100dvw;
+  height: 100vh;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+  cursor: zoom-out;
 }
-.teams-image-zoom [data-rmiz-modal-overlay="hidden"] {
-  background-color: rgb(0 0 0 / 0);
+/* The UA backdrop would fade in on its own schedule, in its own grey. */
+.image-lightbox::backdrop {
+  display: none;
 }
-.teams-image-zoom [data-rmiz-modal-overlay="visible"] {
-  background-color: rgb(0 0 0 / 0.8);
-  backdrop-filter: blur(4px);
+.image-lightbox img {
+  image-rendering: high-quality;
+  will-change: transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  .image-lightbox img,
+  .image-lightbox [data-testid="image-lightbox-scrim"] {
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* TipTap rich-text composer. The editor renders raw ProseMirror HTML, so it

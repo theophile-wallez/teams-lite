@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Download04Icon,
@@ -8,11 +8,11 @@ import {
   Loading02Icon,
   PlayIcon,
 } from "@hugeicons/core-free-icons";
-import Zoom from "react-medium-image-zoom";
 import { formatCallDuration, mediaNeedsProxy, type Attachment } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
 import { FileTypeIcon } from "./file-type-icon";
+import { ImageLightbox } from "./image-lightbox";
 
 /**
  * An image from a chat message. Authenticated Teams hosted content (inline
@@ -28,6 +28,9 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
   // Public images render straight from their URL; proxied ones wait for a blob.
   const [objectUrl, setObjectUrl] = useState<string | null>(proxied ? null : props.src);
   const [failed, setFailed] = useState(false);
+  const [zoomed, setZoomed] = useState(false);
+  const thumbRef = useRef<HTMLImageElement>(null);
+  const onClosed = useCallback(() => setZoomed(false), []);
 
   useEffect(() => {
     if (!proxied) {
@@ -90,33 +93,35 @@ export function MediaImage(props: { src: string; alt?: string; className?: strin
 
   const alt = props.alt || "image";
   return (
-    // Click-to-zoom is delegated to react-medium-image-zoom: it portals a native
-    // <dialog> (opened with showModal → the top layer) to <body>, so the
-    // enlarged picture and its zoom/close transition are never clipped by, nor
-    // drawn under, the message scroller — the failure the previous hand-rolled
-    // Motion morph kept hitting. It also centres the picture with a symmetric
-    // margin on every side. The wrapping span shrink-wraps the thumbnail and
-    // carries `props.className` (e.g. the inline image's `my-1`) at the same
-    // depth the old trigger button did, so the image-only "atelier mat" still
-    // zeroes that margin (see `.image-mat` in app.css). `wrapElement="span"`
-    // keeps the whole subtree phrasing content — valid inside a rich-text <p>.
+    // The wrapping span shrink-wraps the thumbnail and carries `props.className`
+    // (e.g. the inline image's `my-1`), so the image-only "atelier mat" still
+    // zeroes that margin (see `.image-mat` in app.css). Span and button are both
+    // phrasing content, which keeps the subtree valid inside a rich-text <p>.
     <span className={cn("block w-fit max-w-full", props.className)}>
-      <Zoom
-        wrapElement="span"
-        classDialog="teams-image-zoom"
-        zoomMargin={32}
-        a11yNameButtonZoom="View image"
-        a11yNameButtonUnzoom="Close image preview"
+      <button
+        type="button"
+        aria-label={`View image: ${alt}`}
+        onClick={() => setZoomed(true)}
+        className="block w-fit max-w-full cursor-zoom-in rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
       >
         <img
+          ref={thumbRef}
           data-testid="message-image"
           src={objectUrl}
           alt={alt}
           loading="lazy"
           onError={() => setFailed(true)}
           className="block max-h-80 max-w-full rounded-xl object-contain shadow-card transition-opacity duration-150 ease-out hover:opacity-90"
+          // The picture is in the lightbox while it is open: leaving it drawn here
+          // too would show through the travel and behind the scrim. `visibility`
+          // rather than `display`, so the thumbnail keeps the space it holds — the
+          // lightbox measures that spot to fly the picture back into it.
+          style={{ visibility: zoomed ? "hidden" : undefined }}
         />
-      </Zoom>
+      </button>
+      {zoomed ? (
+        <ImageLightbox src={objectUrl} alt={alt} anchor={thumbRef} onClosed={onClosed} />
+      ) : null}
     </span>
   );
 }
