@@ -87,6 +87,22 @@
   --mention-mine: rgba(255, 255, 255, 0.96);
   --mention-surface-mine: rgba(255, 255, 255, 0.22);
 
+  /* An agent TAG, which is not a mention: it notifies nobody and starts a program on
+   * this machine instead. So it never wears the mention's blue — each CLI wears its own
+   * vendor colour, the one its mark beside the name is already drawn in, and the eye
+   * separates "this pings a colleague" from "this runs a program" without reading a word.
+   *
+   * Claude: the coral its symbol is filled with (#d97757), as a light wash under a
+   * darker coral text. opencode: their mark is greyscale, so its wash is graphite. The
+   * fallback pair (`--agent-*`) is for a CLI this app does not know yet, which the mark
+   * itself also falls back on. */
+  --agent-tag: #57534e; /* stone-600 */
+  --agent-tag-surface: #ececea;
+  --agent-tag-claude: #a34f2a;
+  --agent-tag-surface-claude: #fbe9e0;
+  --agent-tag-opencode: #55504c;
+  --agent-tag-surface-opencode: #e9e7e5;
+
   /* Reaction pills straddle the bubble's bottom edge, and their fill is
    * translucent so that edge shows faintly through the chip. The chip pairs it
    * with a backdrop blur, which keeps the emoji legible over whatever is behind.
@@ -206,6 +222,15 @@
   --mention-surface: rgba(59, 130, 246, 0.24);
   --mention-mine: rgba(255, 255, 255, 0.96);
   --mention-surface-mine: rgba(255, 255, 255, 0.22);
+
+  /* The agent tag on dark: the same two vendor colours, lightened for a dark surface
+   * (the light washes would glare). See the light block for what each pair is for. */
+  --agent-tag: #d6d3d1; /* stone-300 */
+  --agent-tag-surface: rgba(214, 211, 209, 0.18);
+  --agent-tag-claude: #f0b49b;
+  --agent-tag-surface-claude: rgba(217, 119, 87, 0.24);
+  --agent-tag-opencode: #d6d1d1;
+  --agent-tag-surface-opencode: rgba(183, 177, 177, 0.2);
 
   --reaction-chip: rgba(46, 46, 46, 0.7);
   --reaction-chip-mine: rgba(58, 65, 128, 0.76);

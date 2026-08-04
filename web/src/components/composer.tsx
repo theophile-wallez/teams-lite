@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type ClipboardEvent } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import type { Editor } from "@tiptap/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -15,7 +15,7 @@ import {
   sendImage,
   type ComposerImage,
 } from "~/lib/composer-image";
-import type { OutboundMention } from "~/lib/mentions";
+import { agentCandidatesFor, type OutboundMention } from "~/lib/mentions";
 import { copyableMessageText } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
@@ -64,7 +64,8 @@ function clipboardImage(event: ClipboardEvent): File | null {
  * upwards from its fixed bottom edge and the words do not move.
  *
  * Typing "@" opens the mention list, and a picked person travels with the message as
- * a real Teams mention — see `RichEditor`.
+ * a real Teams mention — see `RichEditor`. An "@" that opens the message also offers the
+ * agents this machine can run, which travel as the plain prefix that summons them.
  *
  * One image can ride along with the message — picked with the image button or
  * pasted from the clipboard, previewed above the field, and uploaded to Teams by
@@ -80,6 +81,14 @@ export function Composer(props: { focusToken: unknown }) {
   // Who this thread can @mention. Loaded on the first "@" (see
   // `ensureMentionCandidates`), so a conversation nobody mentions in costs nothing.
   const mentionCandidates = useAppState((s) => s.mentionCandidates);
+  // The agents THIS thread can summon. Read from the backend's own status and the
+  // conversation's own mode, so a thread nobody opted in offers none — a tag there would
+  // look like it started a program while nothing ran.
+  const agentStatus = useAppState((s) => s.agent);
+  const agentCandidates = useMemo(
+    () => agentCandidatesFor(agentStatus, openId),
+    [agentStatus, openId],
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [toolbarOpen, setToolbarOpen] = useState(false);
   // The editor owns its content, so it registers a submit callback here, reports
@@ -358,6 +367,7 @@ export function Composer(props: { focusToken: unknown }) {
               onPaste={handlePaste}
               onSubmit={(html, mentions) => send("", html, mentions)}
               mentionCandidates={mentionCandidates}
+              agentCandidates={agentCandidates}
               onMentionQuery={() => void controller.ensureMentionCandidates()}
             />
           </Suspense>

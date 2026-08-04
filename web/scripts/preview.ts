@@ -45,6 +45,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/agent --agent     # the local-agent menu
 //   bun run web/scripts/preview.ts --out /tmp/reply --agent-reply  # the agent answering
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
+//   bun run web/scripts/preview.ts --out /tmp/tag --agent-tag   # tagging an agent
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -220,6 +221,22 @@ export async function typeInComposer(
     await page.keyboard.press("Enter");
     await page.waitForTimeout(600);
   }
+}
+
+/**
+ * Empty the composer, so a capture starts from a field nobody wrote in.
+ *
+ * Worth a helper because the mock persists drafts for the whole run: whatever an earlier
+ * step (or an earlier flow) left in this thread is still there, and a leftover word in
+ * front of the caret is not a mention query. It only deletes, and only in the app's own
+ * field, but it asserts the sentinel like every other keystroke does.
+ */
+export async function clearComposer(page: Page): Promise<void> {
+  await assertMockBackend(page);
+  const composer = page.locator('[data-testid="composer-rich"] .tiptap-message').first();
+  await composer.click();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.press("Backspace");
 }
 
 /**
@@ -891,6 +908,62 @@ if (import.meta.main) {
         `[preview] wrote ${out}-list-light.png, ${out}-filtered-light.png, ` +
           `${out}-composed-{light,dark}.png and ${out}-sent-{light,dark}.png`,
       );
+    });
+    process.exit(0);
+  }
+
+  // Agent tags: the same "@" list, in the one thread that is opted in out of the box,
+  // where it offers the agents this machine can run above the people. A picked agent
+  // leaves a chip in the vendor's own colour — which is the thing to look at here, in
+  // both themes and up close.
+  if (args.includes("--agent-tag")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openConversation(page, "Agent Sandbox");
+      // Nothing is switched on first: this thread answers by default, the way the
+      // backend's own policy has it (see `seedAgentSandbox` in web/mock/server.ts).
+      await typeInComposer(page, "@");
+      await page.waitForSelector('[data-testid="mention-suggestion"][data-kind="agent"]');
+      await page.waitForTimeout(250);
+      await shot(`${out}-list-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-list-dark.png`);
+      await setTheme("light");
+      // Picked with Enter — the agent is the first row — and then a prompt after it.
+      await page.keyboard.press("Enter");
+      await page.waitForSelector('.tiptap-message [data-testid="agent-tag"]');
+      await typeInComposer(page, "which port does the backend listen on?");
+      await shot(`${out}-composed-light.png`, '[data-testid="composer-shell"]');
+      await setTheme("dark");
+      await shot(`${out}-composed-dark.png`, '[data-testid="composer-shell"]');
+      await setTheme("light");
+      // The chip itself, at four times the pixels: the mark, the name and the wash are
+      // 16px things, and that is where this feature is either right or wrong.
+      await shot(`${out}-chip-light.png`, '.tiptap-message [data-testid="agent-tag"]');
+      await setTheme("dark");
+      await shot(`${out}-chip-dark.png`, '.tiptap-message [data-testid="agent-tag"]');
+      await setTheme("light");
+      console.log(
+        `[preview] wrote ${out}-list-{light,dark}.png, ${out}-composed-{light,dark}.png ` +
+          `and ${out}-chip-{light,dark}.png`,
+      );
+      // Each CLI wears its own colour, so the second one is worth its own capture — but
+      // only this machine says which CLIs it holds, and the mock holds one. Skipping is
+      // said out loud rather than passed over in silence.
+      await clearComposer(page);
+      await typeInComposer(page, "@open");
+      const second = page.locator('[data-testid="mention-suggestion"][data-agent="opencode"]');
+      if ((await second.count()) === 0) {
+        console.log("[preview] no second agent on this backend: no opencode chip captured");
+        return;
+      }
+      await page.keyboard.press("Enter");
+      await page.waitForSelector(
+        '.tiptap-message [data-testid="agent-tag"][data-agent="opencode"]',
+      );
+      await shot(`${out}-opencode-light.png`, '.tiptap-message [data-testid="agent-tag"]');
+      await setTheme("dark");
+      await shot(`${out}-opencode-dark.png`, '.tiptap-message [data-testid="agent-tag"]');
+      console.log(`[preview] wrote ${out}-opencode-{light,dark}.png`);
     });
     process.exit(0);
   }

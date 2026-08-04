@@ -23,13 +23,16 @@ import {
 } from "@hugeicons/core-free-icons";
 import { COMPOSER_FIELD_CLASS } from "~/lib/composer-field";
 import {
-  matchMentionCandidates,
+  mentionOptions,
   mentionQueryBefore,
+  type AgentCandidate,
   type MentionCandidate,
+  type MentionOption,
   type OutboundMention,
 } from "~/lib/mentions";
 import { serializeTeamsMessage } from "~/lib/rich-text";
 import { cn } from "~/lib/utils";
+import { AgentTagNode } from "./agent-tag-extension";
 import { MentionNode } from "./mention-extension";
 import { MentionSuggestions } from "./mention-suggestions";
 
@@ -57,15 +60,22 @@ const EXTENSIONS = [
   // @mentions: an atomic inline node that carries who is mentioned, shrinks by one
   // word per Backspace, and serializes to the markup Teams notifies people from.
   MentionNode,
+  // Agent tags: the same shape of node for a thing that is not a person — it summons a
+  // CLI on the backend's machine and serializes to the plain prefix that trigger reads.
+  AgentTagNode,
 ];
 
-/** An "@…" being typed: what was typed, and the document range it occupies (so
- *  picking somebody replaces exactly that text). */
-type MentionQueryState = { query: string; from: number; to: number };
+/** An "@…" being typed: what was typed, the document range it occupies (so picking
+ *  somebody replaces exactly that text), and whether it opens the message. */
+type MentionQueryState = { query: string; from: number; to: number; atStart: boolean };
 
 /** The `@…` the caret sits in, in document coordinates, or null when it sits in
  *  ordinary text. The text is read from the caret's own block, so a mention can only
- *  start at the beginning of a line or after a space (see `mentionQueryBefore`). */
+ *  start at the beginning of a line or after a space (see `mentionQueryBefore`).
+ *
+ *  `atStart` says whether this "@" OPENS the message — the document's first block, with
+ *  nothing but whitespace in front of it. Only there does a prefix summon an agent
+ *  (`agent_policy::split_prefix`), so only there is one offered. */
 function mentionQueryInEditor(editor: Editor): MentionQueryState | null {
   const { $from, empty } = editor.state.selection;
   if (!empty || !$from.parent.isTextblock) return null;
@@ -74,7 +84,11 @@ function mentionQueryInEditor(editor: Editor): MentionQueryState | null {
   const before = $from.parent.textBetween(0, $from.parentOffset, undefined, "\ufffc");
   const found = mentionQueryBefore(before);
   if (!found) return null;
-  return { query: found.query, from: $from.start() + found.at, to: $from.pos };
+  // A paragraph straight in the document, and its first one: a list item, or a second
+  // block, carries text ahead of the prefix even when its own line does not.
+  const atStart =
+    $from.depth === 1 && $from.index(0) === 0 && before.slice(0, found.at).trim() === "";
+  return { query: found.query, from: $from.start() + found.at, to: $from.pos, atStart };
 }
 
 /** Prompt for a URL and apply it as a link to the current selection. */
@@ -105,6 +119,11 @@ function promptForLink(editor: Editor) {
  * `MentionSuggestions`): arrows move, Enter or Tab picks, Escape closes it and leaves
  * the "@" as text. A picked person becomes one atomic node whose name shrinks by a word
  * per Backspace, exactly as in Teams (see components/mention-extension.ts).
+ *
+ * An "@" that OPENS the message also offers the agents this machine can run, above the
+ * people. That tag is a different node and a different promise — it notifies nobody and
+ * starts a program instead (see components/agent-tag-extension.ts) — so it is drawn
+ * differently and it goes out as the plain prefix the backend's trigger reads.
  */
 export function RichEditor(props: {
   initialContent: string;
@@ -127,6 +146,9 @@ export function RichEditor(props: {
   onEditorChange?: (editor: Editor | null) => void;
   /** The people this conversation can mention. */
   mentionCandidates?: readonly MentionCandidate[];
+  /** The agents this conversation can summon — empty unless one really would answer
+   *  (see `agentCandidatesFor`). */
+  agentCandidates?: readonly AgentCandidate[];
   /** Called the moment an "@…" starts, so the candidates can be fetched on demand. */
   onMentionQuery?: () => void;
 }) {
@@ -136,7 +158,7 @@ export function RichEditor(props: {
   const mentionRef = useRef<MentionQueryState | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const activeIndexRef = useRef(0);
-  const rankedRef = useRef<MentionCandidate[]>([]);
+  const rankedRef = useRef<MentionOption[]>([]);
   // The exact query the user dismissed with Escape. Typing on reopens the list; the
   // same query does not, so Escape means "not this one" rather than "not ever".
   const dismissedRef = useRef<string | null>(null);
@@ -205,8 +227,8 @@ export function RichEditor(props: {
           }
           if (event.key === "Enter" || event.key === "Tab") {
             event.preventDefault();
-            const candidate = rankedRef.current[activeIndexRef.current];
-            if (candidate) pickMention(candidate);
+            const option = rankedRef.current[activeIndexRef.current];
+            if (option) pick(option);
             return true;
           }
           if (event.key === "Escape") {
@@ -237,23 +259,32 @@ export function RichEditor(props: {
 
   // The ranked list this render shows. Kept in a ref as well, for `handleKeyDown`.
   const ranked = mention
-    ? matchMentionCandidates(props.mentionCandidates ?? [], mention.query)
+    ? mentionOptions({
+        people: props.mentionCandidates ?? [],
+        agents: props.agentCandidates ?? [],
+        query: mention.query,
+        atMessageStart: mention.atStart,
+      })
     : [];
   rankedRef.current = ranked;
 
-  /** Replace the typed "@…" with a real mention of `candidate`. */
-  const pickMention = (candidate: MentionCandidate) => {
+  /** Replace the typed "@…" with the thing that was picked: a mention of a person, or a
+   *  tag summoning an agent. */
+  const pick = (option: MentionOption) => {
     const state = mentionRef.current;
     if (!editor || !state) return;
     closeMentions();
+    const { from, to } = state;
+    if (option.kind === "agent") {
+      editor
+        .chain()
+        .insertAgentTag({ backend: option.agent.backend, prefix: option.agent.prefix, from, to })
+        .run();
+      return;
+    }
     editor
       .chain()
-      .insertMention({
-        mri: candidate.mri,
-        label: candidate.name,
-        from: state.from,
-        to: state.to,
-      })
+      .insertMention({ mri: option.person.mri, label: option.person.name, from, to })
       .run();
   };
 
@@ -313,9 +344,9 @@ export function RichEditor(props: {
           It is rendered only while an "@…" is being typed AND somebody matches it. */}
       {mention && (
         <MentionSuggestions
-          candidates={ranked}
+          options={ranked}
           activeIndex={activeIndex}
-          onPick={pickMention}
+          onPick={pick}
           onActivate={setActive}
         />
       )}

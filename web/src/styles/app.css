@@ -341,6 +341,45 @@ html[data-virtual-keyboard-open] .composer-shell {
   font-weight: 600;
   white-space: nowrap;
 }
+/* An agent tag: the CLI's own mark and its name, on a wash of that vendor's own colour
+   (see `--agent-tag-*` in theme.css). Deliberately not the mention's blue — a mention
+   notifies a colleague, a tag starts a program on this machine, and the two must not read
+   as one thing. A CLI this app does not know yet keeps the neutral base pair, exactly as
+   its mark falls back to a generic glyph. */
+.agent-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2em;
+  border-radius: 0.25rem;
+  background-color: var(--agent-tag-surface);
+  color: var(--agent-tag);
+  padding: 0.05rem 0.3rem;
+  font-weight: 600;
+  white-space: nowrap;
+  /* An inline-flex box sits on its own bottom edge, which would lift the chip off the
+     line it is written on. */
+  vertical-align: -0.15em;
+}
+.agent-tag[data-agent="claude"] {
+  background-color: var(--agent-tag-surface-claude);
+  color: var(--agent-tag-claude);
+}
+.agent-tag[data-agent="opencode"] {
+  background-color: var(--agent-tag-surface-opencode);
+  color: var(--agent-tag-opencode);
+}
+/* The mark rides with the text: sized in `em` so it follows the font of whatever the tag
+   sits in, and never bigger than the letters beside it. */
+.agent-tag-logo {
+  width: 0.9em;
+  height: 0.9em;
+}
+/* The node view's wrapper (components/agent-tag.tsx). It only has to stop the span from
+   introducing a line box of its own; the chip inside carries the whole look. */
+.agent-tag-node {
+  display: inline;
+}
+
 /* Placeholder shown while the editor is empty (from extension-placeholder). */
 .tiptap-message p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);

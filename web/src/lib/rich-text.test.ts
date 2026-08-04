@@ -989,3 +989,36 @@ describe("serializeTeamsMessage — @mentions", () => {
     expect(serializeTeamsMessage("<p></p>")).toEqual({ html: "", mentions: [] });
   });
 });
+
+describe("serializeTeamsMessage — agent tags", () => {
+  /** What the composer's agent tag renders (see components/agent-tag-extension.ts). The
+   *  drawn chip is a node view; this is the markup `getHTML()` hands over. */
+  const tagged = (backend: string, prefix: string) =>
+    `<span data-agent-tag="${backend}">${prefix}</span>`;
+  const mentioned = (mri: string, label: string) =>
+    `<span itemscope="" itemtype="http://schema.skype.com/Mention" data-mri="${mri}">${label}</span>`;
+
+  it("goes out as the plain prefix the backend's trigger reads", () => {
+    // The whole contract of the tag: what reaches Teams is exactly what the user would
+    // have typed by hand, so `agent_policy::split_prefix` finds it — and every other
+    // client shows words rather than markup it does not know.
+    const { html, mentions } = serializeTeamsMessage(
+      `<p>${tagged("claude", "@claude")} what is the port?</p>`,
+    );
+    expect(html).toBe("<p>@claude what is the port?</p>");
+    expect(mentions).toEqual([]);
+  });
+
+  it("never becomes a mention, whatever it sits beside", () => {
+    // An agent has no MRI, so a mention of one would be coloured text that pings
+    // nobody. The person beside it is still mentioned properly.
+    const { html, mentions } = serializeTeamsMessage(
+      `<p>${tagged("opencode", "@opencode")} ask ${mentioned("8:orgid:ada", "Ada")}</p>`,
+    );
+    expect(html).toBe(
+      '<p>@opencode ask <span itemscope="" itemtype="http://schema.skype.com/Mention" ' +
+        'itemid="0">Ada</span></p>',
+    );
+    expect(mentions).toEqual([{ itemid: 0, mri: "8:orgid:ada", display_name: "Ada" }]);
+  });
+});

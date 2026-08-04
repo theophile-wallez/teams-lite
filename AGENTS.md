@@ -593,6 +593,38 @@ mention whole. The chip is blue on a light blue wash in the composer and in the 
   `serializeTeamsMessage` in `web/src/lib/rich-text.ts`, which is where the outbound
   pair is made.
 
+## Tagging an agent (the same "@", a different promise)
+
+That same list also offers the agent CLIs this machine can run, above the people
+(`agentCandidatesFor` / `mentionOptions` in `web/src/lib/mentions.ts`, drawn by
+`web/src/components/agent-tag-extension.ts` and `agent-tag.tsx`). A picked one becomes a
+chip wearing that vendor's own mark and colour — Claude's coral, opencode's graphite —
+and never the mention's blue, because the two promise different things: a mention
+notifies a colleague, a tag starts a program on this machine.
+
+- **A tag is NOT a mention, and must never become one.** An agent has no MRI, so a
+  mention naming one would be coloured text that notifies nobody. The tag serializes to
+  the bare prefix as plain text (`@claude …`) and adds nothing to `properties.mentions` —
+  which is exactly what the user would have typed by hand, so
+  `agent_policy::split_prefix` reads it back, and every other client shows words rather
+  than markup it cannot render.
+- **It is offered only where it would work: at the START of the message.** The backend
+  summons an agent from the prefix a message OPENS with, so a tag anywhere else runs
+  nothing — and a chip that looks like it started a program while nothing ran is worse
+  than plain text. It is the same rule that refuses a mention with no visible span.
+- **A row is drawn only for an agent that would really answer**: the backend is not
+  read-only, the CLI is installed and that provider is on (`usableBackends`), and THIS
+  conversation is opted in (`agentModeFor`). The consent gate stays where it is — the
+  thread's own menu — and the composer never widens it, it only reflects it.
+- **One Backspace removes the whole tag.** A person's name shrinks by a word because
+  that is how people address each other in a thread; half a prefix summons nothing, so
+  there is nothing to shrink.
+- `web/mock/server.ts` seeds the sandbox thread as a conversation of its own
+  (`seedAgentSandbox`), so the tag is exercised in the state a fresh backend is really in:
+  one thread opted in, every other off. `cd web && bun run preview -- --out /tmp/tag
+  --agent-tag` captures the list and both chips, and `web/e2e/agent-tag.spec.ts` pins
+  every rule above.
+
 ## Language policy (MANDATORY)
 
 - **All artifacts are in English.** This includes: UI strings, labels, button text,

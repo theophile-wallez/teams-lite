@@ -1,10 +1,19 @@
 // @mentions in the composer: who can be mentioned, which of them a half-typed "@…"
 // means, and how a mention's own text shrinks.
 //
+// An "@" offers two kinds of thing, and they are not the same kind: the PEOPLE this
+// thread can notify, and the AGENTS this machine can summon (see `AgentCandidate`). One
+// travels as a Teams mention pair; the other travels as the plain prefix the backend's
+// own trigger reads.
+//
 // Everything here is pure — no editor, no DOM, no network — so the rules that decide
 // whether the suggestion list opens, who it offers and what Backspace does to a mention
-// are unit-tested directly. The editor side (the node, the popup, the keys) lives in
-// components/mention-extension.ts and components/mention-suggestions.tsx.
+// are unit-tested directly. The editor side (the nodes, the popup, the keys) lives in
+// components/mention-extension.ts, components/agent-tag-extension.ts and
+// components/mention-suggestions.tsx.
+
+import { agentModeFor, usableBackends, type AgentStatus } from "./agent";
+import { agentDisplayName } from "./agent-message";
 
 /** Somebody a message can @mention: their MRI, and the name to show. */
 export type MentionCandidate = {
@@ -125,6 +134,105 @@ export function shortenMentionLabel(label: string): string | null {
   const words = label.trim().split(/\s+/).filter(Boolean);
   if (words.length <= 1) return null;
   return words.slice(0, -1).join(" ");
+}
+
+// ---- agents ---------------------------------------------------------------
+
+/**
+ * An agent CLI this machine can run, as the composer offers it. Not a person: a program.
+ *
+ * Tagging one is NOT a Teams mention, and must never become one. There is nobody to
+ * notify, so the pair a mention needs (an indexed span plus an entry naming an MRI) would
+ * be blue text that pings nobody — the exact failure `serializeTeamsMessage` refuses. What
+ * a tag becomes on the wire is the plain prefix the backend's own trigger reads
+ * (`agent_policy::split_prefix`), which is what the user would otherwise have typed by
+ * hand.
+ */
+export type AgentCandidate = {
+  /** The backend name (`claude`, `opencode`): the mark it wears and the palette it uses. */
+  backend: string;
+  /** How it is named to a reader — each vendor's own casing. */
+  name: string;
+  /** The prefix a message must open with to summon it, as the BACKEND spelled it. */
+  prefix: string;
+};
+
+/**
+ * The agents the open conversation could really summon, in the backend's own order.
+ *
+ * Three things must hold, and each of them is somebody's decision rather than our guess:
+ * this backend can answer at all (a read-only one never does), the CLI is installed and
+ * the user left that provider on ({@link usableBackends}), and THIS conversation is opted
+ * in ({@link agentModeFor}). A tag offered without them would summon nobody — the same
+ * lie as a mention that notifies nobody — so the list names none.
+ */
+export function agentCandidatesFor(
+  status: AgentStatus | null,
+  conversationId: string | null,
+): AgentCandidate[] {
+  if (!status?.enabled) return [];
+  if (agentModeFor(status, conversationId) !== "reply") return [];
+  return usableBackends(status).map((backend) => ({
+    backend: backend.name,
+    name: agentDisplayName(backend.name),
+    prefix: backend.prefix,
+  }));
+}
+
+/** The agents a query offers, matched on the name they are written with and on the
+ *  prefix that summons them — so "@Cla", "@cl" and "@claude" all find the same one. */
+export function matchAgentCandidates(
+  candidates: readonly AgentCandidate[],
+  query: string,
+): AgentCandidate[] {
+  const needle = fold(query);
+  if (needle.length === 0) return [...candidates];
+  return candidates.filter(
+    (agent) => fold(agent.name).startsWith(needle) || fold(agent.backend).startsWith(needle),
+  );
+}
+
+/** One row of the list an "@" opens: somebody to notify, or an agent to summon. */
+export type MentionOption =
+  | { kind: "person"; person: MentionCandidate }
+  | { kind: "agent"; agent: AgentCandidate };
+
+/** A stable key for one row, per kind, so two lists never collide on one id. */
+export function mentionOptionKey(option: MentionOption): string {
+  return option.kind === "agent" ? `agent:${option.agent.backend}` : `person:${option.person.mri}`;
+}
+
+/**
+ * Everything one "@…" offers: the agents first, then the people.
+ *
+ * Agents lead because there are at most two of them and they are what an "@" at the
+ * start of a message usually means — and they are offered ONLY there
+ * (`atMessageStart`). That is not a style choice: the backend summons an agent from the
+ * prefix the message OPENS with (`agent_policy::split_prefix`), so a tag anywhere else
+ * runs nothing, and a chip that looks like it summoned a program while nothing ran is
+ * worse than plain text.
+ *
+ * The total is capped like the people-only list was, so the menu stays a menu.
+ */
+export function mentionOptions(input: {
+  people: readonly MentionCandidate[];
+  agents: readonly AgentCandidate[];
+  query: string;
+  /** Whether the "@" being typed opens the message (nothing but space before it). */
+  atMessageStart: boolean;
+  limit?: number;
+}): MentionOption[] {
+  const limit = input.limit ?? MAX_MENTION_SUGGESTIONS;
+  const agents = input.atMessageStart ? matchAgentCandidates(input.agents, input.query) : [];
+  const people = matchMentionCandidates(
+    input.people,
+    input.query,
+    Math.max(0, limit - agents.length),
+  );
+  return [
+    ...agents.map((agent): MentionOption => ({ kind: "agent", agent })),
+    ...people.map((person): MentionOption => ({ kind: "person", person })),
+  ];
 }
 
 /** De-duplicate candidates by MRI, keeping the first (most relevant) of each and the

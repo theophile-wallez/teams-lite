@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
+import type { AgentStatus } from "./agent";
 import {
+  agentCandidatesFor,
   dedupeCandidates,
+  matchAgentCandidates,
   matchMentionCandidates,
+  mentionOptionKey,
+  mentionOptions,
   mentionQueryBefore,
   shortenMentionLabel,
+  type AgentCandidate,
   type MentionCandidate,
 } from "./mentions";
 
@@ -13,6 +19,39 @@ const PEOPLE: MentionCandidate[] = [
   { mri: "8:orgid:john", name: "John De Doe" },
   { mri: "8:orgid:duncan", name: "Duncan Charles" },
 ];
+
+const CLAUDE: AgentCandidate = { backend: "claude", name: "Claude", prefix: "@claude" };
+const OPENCODE: AgentCandidate = { backend: "opencode", name: "opencode", prefix: "@opencode" };
+
+/** An `agent_status` with both CLIs installed and one conversation opted in. */
+function status(overrides: Partial<AgentStatus> = {}): AgentStatus {
+  return {
+    backends: [
+      {
+        name: "claude",
+        prefix: "@claude",
+        available: true,
+        enabled: true,
+        model: null,
+        models: [],
+      },
+      {
+        name: "opencode",
+        prefix: "@opencode",
+        available: true,
+        enabled: true,
+        model: null,
+        models: [],
+      },
+    ],
+    conversations: [{ conversation: "19:on@thread.v2", mode: "reply" }],
+    tools: [],
+    workspace: "/home/me",
+    enabled: true,
+    sandbox_conversation: "19:sandbox@thread.v2",
+    ...overrides,
+  };
+}
 
 describe("mentionQueryBefore", () => {
   it("opens on a bare @ at the start of a block and after a space", () => {
@@ -99,6 +138,92 @@ describe("shortenMentionLabel", () => {
   it("has nothing to drop in an empty label", () => {
     expect(shortenMentionLabel("")).toBeNull();
     expect(shortenMentionLabel("   ")).toBeNull();
+  });
+});
+
+describe("agentCandidatesFor", () => {
+  it("offers the installed, enabled agents of an opted-in conversation", () => {
+    expect(agentCandidatesFor(status(), "19:on@thread.v2")).toEqual([
+      { backend: "claude", name: "Claude", prefix: "@claude" },
+      // Each vendor's own casing: Claude is a proper noun, opencode is not.
+      { backend: "opencode", name: "opencode", prefix: "@opencode" },
+    ]);
+  });
+
+  it("offers none in a conversation nobody opted in", () => {
+    // The consent gate of the whole feature: a tag there would summon nothing.
+    expect(agentCandidatesFor(status(), "19:off@thread.v2")).toEqual([]);
+    expect(agentCandidatesFor(status(), null)).toEqual([]);
+  });
+
+  it("offers none before the backend has answered, and none from a read-only one", () => {
+    expect(agentCandidatesFor(null, "19:on@thread.v2")).toEqual([]);
+    expect(agentCandidatesFor(status({ enabled: false }), "19:on@thread.v2")).toEqual([]);
+  });
+
+  it("skips a CLI this machine has not got, and one the user switched off", () => {
+    const partial = status();
+    partial.backends[0]!.available = false;
+    partial.backends[1]!.enabled = false;
+    expect(agentCandidatesFor(partial, "19:on@thread.v2")).toEqual([]);
+  });
+});
+
+describe("matchAgentCandidates", () => {
+  it("offers every agent for a bare @", () => {
+    expect(matchAgentCandidates([CLAUDE, OPENCODE], "")).toEqual([CLAUDE, OPENCODE]);
+  });
+
+  it("matches the name and the prefix's own spelling, ignoring case", () => {
+    expect(matchAgentCandidates([CLAUDE, OPENCODE], "cl")).toEqual([CLAUDE]);
+    expect(matchAgentCandidates([CLAUDE, OPENCODE], "Claude")).toEqual([CLAUDE]);
+    expect(matchAgentCandidates([CLAUDE, OPENCODE], "OPEN")).toEqual([OPENCODE]);
+  });
+
+  it("offers nobody for a query that names neither", () => {
+    expect(matchAgentCandidates([CLAUDE, OPENCODE], "charlotte")).toEqual([]);
+  });
+});
+
+describe("mentionOptions", () => {
+  const both = (query: string, atMessageStart: boolean) =>
+    mentionOptions({ people: PEOPLE, agents: [CLAUDE, OPENCODE], query, atMessageStart });
+
+  it("puts the agents above the people", () => {
+    expect(both("", true).map(mentionOptionKey).slice(0, 3)).toEqual([
+      "agent:claude",
+      "agent:opencode",
+      "person:8:orgid:charlotte",
+    ]);
+  });
+
+  it("offers no agent once the @ is not the start of the message", () => {
+    // The backend summons an agent from the prefix a message OPENS with, so a tag
+    // anywhere else would look like a run that never happened.
+    expect(both("", false).every((option) => option.kind === "person")).toBe(true);
+    expect(both("cl", false)).toEqual([]);
+  });
+
+  it("caps the whole list, agents included", () => {
+    const options = mentionOptions({
+      people: PEOPLE,
+      agents: [CLAUDE, OPENCODE],
+      query: "",
+      atMessageStart: true,
+      limit: 3,
+    });
+    expect(options.map(mentionOptionKey)).toEqual([
+      "agent:claude",
+      "agent:opencode",
+      "person:8:orgid:charlotte",
+    ]);
+  });
+
+  it("keeps the two kinds of key apart", () => {
+    expect(mentionOptionKey({ kind: "agent", agent: CLAUDE })).toBe("agent:claude");
+    expect(mentionOptionKey({ kind: "person", person: PEOPLE[0]! })).toBe(
+      "person:8:orgid:charlotte",
+    );
   });
 });
 

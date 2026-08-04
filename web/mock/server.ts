@@ -2165,6 +2165,42 @@ function seedPlainTextSamples(): void {
   addFixtureConversation(convId, "Plain Text", messages);
 }
 
+/** Register the SANDBOX thread as a conversation of its own — the one the Rust policy
+ *  opts in out of the box (`MOCK_AGENT_SANDBOX`, after `agent_policy::SANDBOX_THREAD`).
+ *
+ *  It exists so the composer's agent tag can be exercised in the state a fresh backend is
+ *  really in: a thread that would answer, with nothing switched on by a test first. Every
+ *  other conversation here is off, which is the other half of that rule. Dated in the past
+ *  like the rest of the fixtures, so it never sorts to the top of the sidebar. */
+function seedAgentSandbox(): void {
+  const convId = MOCK_AGENT_SANDBOX;
+  const base = Date.now() - 22 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const other = PEOPLE[1]!;
+
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: "<p>This thread is where we try things out.</p>",
+      is_self: false,
+    },
+    0,
+  );
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content: "<p>Good — the agent answers here, and nowhere else.</p>",
+      is_self: true,
+    },
+    60_000,
+  );
+
+  addFixtureConversation(convId, "Agent Sandbox", messages);
+}
+
 // ---------------------------------------------------------------------------
 // Paging (operate on ascending-by-seq arrays, mirroring the Rust store).
 // ---------------------------------------------------------------------------
@@ -5082,6 +5118,7 @@ seedAppCards();
 seedThreadActivity();
 seedForwardedMessages();
 seedPlainTextSamples();
+seedAgentSandbox();
 // Seed channels LAST so the chat seed's PRNG sequence (and thus the Chats list
 // the existing specs assert on) is left completely unchanged.
 seedChannels();
