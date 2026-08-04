@@ -113,18 +113,36 @@ describe("agentAuthorship", () => {
     }
   });
 
-  it("never reads somebody else's message as an agent reply", () => {
-    // The reply is posted through the USER's account, so a signature on an incoming
-    // message was typed by a colleague — and a colleague cannot summon the agent
-    // either (see `command_for` in src/agent_policy.rs).
-    const content = "<p>Hello.</p><p><em>— claude, via teams-lite</em></p>";
-    expect(agentAuthorship(message({ content, is_self: false }))).toBeNull();
+  it("reads a colleague's reply too, because their teams-lite signs it the same way", () => {
+    // A colleague in the thread may run teams-lite, and their agent's answer arrives as an
+    // incoming message signed exactly like ours. Read as an ordinary message it would show
+    // the reader the raw signature line the mark above the bubble exists to replace, tucked
+    // against that colleague's own words. Whose account it went out under is not guessed:
+    // the bubble names the message's own sender beside the mark.
+    const content = "<p>Sonnet 4.5.</p><p><em>— claude, via teams-lite</em></p>";
+    const found = agentAuthorship(message({ content, is_self: false, sender: "MST-Eago" }));
+    expect(found!.backend).toBe("claude");
+    expect(found!.bodyHtml).toBe("<p>Sonnet 4.5.</p>");
+    expect(found!.pending).toBe(false);
   });
 
   it("never reads a deleted message as an agent reply", () => {
     // A deletion has its own treatment (a ghost bubble, revealable when cached), and
-    // it must not be replaced by an agent bubble.
+    // it must not be replaced by an agent bubble — whoever posted it.
     const content = "<p>Gone.</p><p><em>— claude, via teams-lite</em></p>";
     expect(agentAuthorship(message({ content, deleted: true }))).toBeNull();
+    expect(agentAuthorship(message({ content, deleted: true, is_self: false }))).toBeNull();
+  });
+
+  it("is not fooled by a colleague's message either", () => {
+    // The signature is closed on the names we know, in both directions: an incoming
+    // message that merely talks about the agent stays an ordinary message.
+    for (const content of [
+      "<p>claude answered me in the other thread</p>",
+      "<p><em>— someone else, via teams-lite</em></p>",
+      "<p><em>— claude, via teams-lite</em></p><p>and then I added this</p>",
+    ]) {
+      expect(agentAuthorship(message({ content, is_self: false })), content).toBeNull();
+    }
   });
 });

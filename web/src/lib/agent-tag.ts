@@ -10,13 +10,19 @@
 // message read back covers every message ever sent, including the ones written from a
 // phone while this app was closed.
 //
-// It answers ONE question — would this body really have summoned an agent? — and marks
-// nothing unless the answer is yes. A chip on a message that started no program is the
-// lie the composer refuses to tell when it decides which rows an "@" offers (see
+// It answers ONE question — did this body really address an agent? — and marks nothing
+// unless the answer is yes. A chip on a message that addressed nobody is the lie the
+// composer refuses to tell when it decides which rows an "@" offers (see
 // `mentionOptions`), and a sent message cannot be taken back.
+//
+// WHOSE agent decides which gates apply, and that split is the whole of
+// `agentTagsInMessage`. On a message of ours the chip says a program started on THIS
+// machine, so every condition that would have to hold for that is checked. On a
+// colleague's it says only that they addressed an agent — their own teams-lite decides
+// whether one ran, and this app cannot know and must not pretend to.
 
 import type { AgentStatus } from "./agent";
-import { agentAuthorship } from "./agent-message";
+import { agentAuthorship, agentDisplayName } from "./agent-message";
 import { agentCandidatesFor, type AgentCandidate } from "./mentions";
 import type { ChatMessage } from "./protocol";
 import { nodeText, type RichNode } from "./rich-text";
@@ -29,29 +35,64 @@ const MAX_PROMPT_CHARS = 4_000;
 const PREFIX_PUNCTUATION = [":", ","];
 
 /**
- * The agents ONE MESSAGE could really have summoned — the list its body's opening prefix
- * is marked against, and empty for a message that summoned nobody.
+ * The agents ONE MESSAGE could really have addressed — the list its body's opening prefix
+ * is marked against, and empty for a message that addressed nobody.
  *
- * Every gate the composer applies before it offers a tag applies here too, because the
- * chip means the same thing in both places: a program was started on this machine.
+ * Two rules hold whoever wrote it, because they are about the message rather than about
+ * any machine:
  *
- * - **Only the user summons an agent.** The backend's trigger requires `from_me`
- *   (`agent_policy::trigger_for`), so a colleague's `@claude` ran nothing at all — and a
- *   chip on their message would say a stranger can start a program on the user's machine.
- *   Never relax this one.
- * - **The agent's own reply is not a trigger.** It is the user's message on the wire, and
- *   it opens with the answer.
- * - **The thread must be opted in and the provider on** (`agentCandidatesFor`), which
- *   keeps the consent gate where it is: the thread's own menu.
+ * - **A deleted message tags nothing.** Its bubble is a placeholder, and the words behind
+ *   it are only revealed on the reader's own ask.
+ * - **The agent's own reply is not a trigger.** It is posted under a person's name and it
+ *   opens with the answer.
+ *
+ * Then the sender decides the rest.
+ *
+ * **Our own message.** The chip says a program started on THIS machine, so every gate the
+ * composer applies before it OFFERS a tag applies here too (`agentCandidatesFor`): this
+ * backend can answer at all, the CLI is installed, the user left that provider on, and
+ * THIS conversation is opted in. That keeps the consent gate where it belongs — the
+ * thread's own menu — and it is why a prefix the user typed in a thread nobody opted in
+ * stays plain words.
+ *
+ * **A colleague's message.** None of those gates are about their machine, so none of them
+ * apply: the backend's trigger requires `from_me` (`agent_policy::trigger_for`), so their
+ * `@claude` ran nothing HERE, and it is their own teams-lite that decides whether one ran
+ * there. So the chip is marked from the prefix alone ({@link addressableAgents}) and it
+ * claims only what they wrote: this message addresses that agent. It never says a stranger
+ * started a program on the user's machine — nothing on a colleague's bubble names this
+ * machine, and the answer that follows is attributed to the account it went out under
+ * (`AgentSignature`), which is theirs.
  */
 export function agentTagsInMessage(
   message: ChatMessage,
   status: AgentStatus | null,
 ): AgentCandidate[] {
-  if (message.is_self !== true) return [];
   if (message.deleted === true) return [];
   if (agentAuthorship(message)) return [];
-  return agentCandidatesFor(status, message.conversation_id);
+  if (message.is_self === true) return agentCandidatesFor(status, message.conversation_id);
+  return addressableAgents(status);
+}
+
+/**
+ * Every agent a message can ADDRESS, from the backend's own list of CLIs — the vocabulary
+ * of prefixes, with none of the gates {@link agentCandidatesFor} applies.
+ *
+ * Those gates answer "would this machine run it?", which is the wrong question about
+ * somebody else's message: a colleague's own teams-lite may hold a CLI this one does not,
+ * and may have been opted into a thread this one is not. What is left is the only thing
+ * both machines agree on — how an agent is addressed — and the backend is still where that
+ * comes from, so there is one spelling of `@claude` in this app and not two.
+ *
+ * **Never offer these in the composer.** They are read off a message that was already
+ * sent; a tag is offered only from `agentCandidatesFor`, where the consent lives.
+ */
+function addressableAgents(status: AgentStatus | null): AgentCandidate[] {
+  return (status?.backends ?? []).map((backend) => ({
+    backend: backend.name,
+    name: agentDisplayName(backend.name),
+    prefix: backend.prefix,
+  }));
 }
 
 /**

@@ -70,11 +70,42 @@ describe("agentTagsInMessage", () => {
     ]);
   });
 
-  it("offers NONE on a colleague's message", () => {
-    // THE gate: the backend's trigger requires `from_me`, so a colleague's prefix ran
-    // nothing — and a chip on it would say they can start a program on this machine.
-    expect(agentTagsInMessage(message({ is_self: false }), STATUS)).toEqual([]);
-    expect(agentTagsInMessage(message({ is_self: undefined }), STATUS)).toEqual([]);
+  it("offers every backend on a colleague's message, since their machine ran it", () => {
+    // A colleague running teams-lite summons their OWN agent: the backend's trigger
+    // requires `from_me`, so their prefix ran nothing here — and every gate that would
+    // decide whether it ran (this thread's mode, this machine's CLIs, this backend's
+    // write lock) is about this machine and none of them is about theirs. So the chip is
+    // marked from the prefix alone, and it claims only what they wrote.
+    for (const from of [{ is_self: false }, { is_self: undefined }]) {
+      expect(agentTagsInMessage(message(from), STATUS).map((a) => a.backend)).toEqual([
+        "claude",
+        "opencode",
+      ]);
+    }
+  });
+
+  it("offers them on a colleague's message in a thread nobody opted in, and with the providers off", () => {
+    // The consent gate is about posting from THIS machine. Their agent already answered.
+    const off: AgentStatus = {
+      ...STATUS,
+      enabled: false,
+      conversations: [],
+      backends: [
+        { ...STATUS.backends[0]!, enabled: false },
+        { ...STATUS.backends[1]!, available: false },
+      ],
+    };
+    expect(
+      agentTagsInMessage(message({ is_self: false, conversation_id: "19:other@thread.v2" }), off).map(
+        (a) => a.backend,
+      ),
+    ).toEqual(["claude", "opencode"]);
+  });
+
+  it("offers none on a colleague's message before the backend names its CLIs", () => {
+    // How an agent is addressed still comes from the backend, so there is one spelling of
+    // `@claude` in this app and not two.
+    expect(agentTagsInMessage(message({ is_self: false }), null)).toEqual([]);
   });
 
   it("offers none in a thread nobody opted in, and none before the backend answers", () => {
@@ -85,14 +116,15 @@ describe("agentTagsInMessage", () => {
   });
 
   it("offers none on a deleted message, and none on the agent's own reply", () => {
+    // Both rules hold whoever wrote it: they are about the message, not about a machine.
     expect(agentTagsInMessage(message({ deleted: true }), STATUS)).toEqual([]);
-    const reply = message({
-      content: "<p>19420.</p><p><em>— claude, via teams-lite</em></p>",
-    });
-    expect(agentTagsInMessage(reply, STATUS)).toEqual([]);
+    expect(agentTagsInMessage(message({ deleted: true, is_self: false }), STATUS)).toEqual([]);
+    const reply = { content: "<p>19420.</p><p><em>— claude, via teams-lite</em></p>" };
+    expect(agentTagsInMessage(message(reply), STATUS)).toEqual([]);
+    expect(agentTagsInMessage(message({ ...reply, is_self: false }), STATUS)).toEqual([]);
   });
 
-  it("offers only the providers that would answer", () => {
+  it("offers only the providers that would answer, on a message of OURS", () => {
     const off: AgentStatus = {
       ...STATUS,
       backends: [

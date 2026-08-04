@@ -220,10 +220,12 @@ function MessageBubbleImpl(props: {
   onCancelEdit: () => void;
   onDelete: (message: ChatMessage) => void;
 }) {
-  // A message the local agent wrote, from the line it signs itself with. It went out
-  // through the user's account, so the wire calls it ours — but they did not write it,
-  // and it takes the side of everything that arrives rather than of everything they
-  // sent (see components/agent-reply.tsx for why that is the honest choice).
+  // A message an agent wrote, from the line it signs itself with. Ours went out through
+  // the user's account, so the wire calls it theirs — but they did not write it, and it
+  // takes the side of everything that arrives rather than of everything they sent (see
+  // components/agent-reply.tsx for why that is the honest choice). A colleague running
+  // teams-lite in this thread posts the same shape under their own name, and it is drawn
+  // the same way: what changes is only the account the signature names.
   const agent = useMemo(() => agentAuthorship(props.message), [props.message]);
   const mine = props.message.is_self === true && !agent;
   // How this body must be read. A `Text` message is plain text: it carries no Teams
@@ -241,11 +243,11 @@ function MessageBubbleImpl(props: {
   // their card on hover (the span itself only carries an index — see
   // `mentionsByItemId`).
   const mentions = useMemo(() => mentionsByItemId(props.message), [props.message]);
-  // The agents this message could really have summoned, which is what decides whether the
+  // The agents this message could really have addressed, which is what decides whether the
   // `@claude` it opens with is drawn as the chip the composer drew (see `agentTagsInMessage`
-  // and `markAgentTag`). A colleague's prefix stays words, and so does ours in a thread
-  // nobody opted in: the chip says a program was started, and a sent message cannot take
-  // that back.
+  // and `markAgentTag`). Ours in a thread nobody opted in stays words — the chip would say
+  // a program started here, and a sent message cannot take that back — while a colleague's
+  // is marked from the prefix alone, since their own machine is what ran it.
   const agentStatus = useAppState((s) => s.agent);
   const agentTags = useMemo(
     () => agentTagsInMessage(props.message, agentStatus),
@@ -687,10 +689,11 @@ function MessageBubbleImpl(props: {
           </div>
         )}
 
-        {/* Who wrote this, and whose request it answers: the message's own sender is the
-            account it went out under, which is the user who summoned it (only they can).
-            Busy while a run is still going — including a reply we are only seeing the tail
-            of, because its stored body says it was still being written. */}
+        {/* Who wrote this, and whose account it went out under: the message's own sender,
+            which is the person whose teams-lite ran it — the user for a reply of ours, a
+            colleague for a reply of theirs. Busy while a run is still going — including a
+            reply we are only seeing the tail of, because its stored body says it was still
+            being written. */}
         {agent && !props.editing ? (
           <AgentSignature
             backend={agent.backend}

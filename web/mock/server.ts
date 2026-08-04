@@ -337,9 +337,14 @@ function plain(html: string): string {
     .trim();
 }
 
-/** Plain, whitespace-collapsed, ~80-char preview of a message's HTML content. */
+/** Plain, whitespace-collapsed, ~80-char preview of a message's HTML content.
+ *
+ *  The quoted part of a reply is dropped first, as `teams_read::preview_from_html` drops
+ *  it (`preview_drops_the_quoted_part_of_a_reply`): a sidebar row says what the message
+ *  ADDS to the thread, and a preview opening with the words being answered names the
+ *  wrong message. */
 function previewOf(content: string): string {
-  const text = plain(content).replace(/\s+/g, " ").trim();
+  const text = plain(withoutQuotedBlocks(content)).replace(/\s+/g, " ").trim();
   return text.length > 80 ? `${text.slice(0, 80)}…` : text;
 }
 
@@ -2233,7 +2238,13 @@ function seedPlainTextSamples(): void {
  *  It exists so the composer's agent tag can be exercised in the state a fresh backend is
  *  really in: a thread that would answer, with nothing switched on by a test first. Every
  *  other conversation here is off, which is the other half of that rule. Dated in the past
- *  like the rest of the fixtures, so it never sorts to the top of the sidebar. */
+ *  like the rest of the fixtures, so it never sorts to the top of the sidebar.
+ *
+ *  It also holds the OTHER machine's half of the feature: a colleague who runs teams-lite
+ *  too, their own `@claude` and the answer their agent posted under their name. Both are
+ *  drawn exactly as ours are — the prefix as that vendor's chip, the reply under the CLI's
+ *  mark with the signature line stripped — and nothing here can be faked by this app's own
+ *  gates, which is what makes the pair reviewable with no second tenant. */
 function seedAgentSandbox(): void {
   const convId = MOCK_AGENT_SANDBOX;
   const base = Date.now() - 22 * 24 * 60 * 60_000;
@@ -2258,6 +2269,29 @@ function seedAgentSandbox(): void {
       is_self: true,
     },
     60_000,
+  );
+  // A colleague summoning THEIR agent. It ran on their machine, not on this one, so no
+  // setting of ours decides whether the chip is drawn.
+  const trigger = { compose_time: base + 120_000, preview: "@claude which model do you run?" };
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: "<p>@claude which model do you run?</p>",
+      is_self: false,
+    },
+    120_000,
+  );
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        quoteBlock({ ...trigger, sender: other.name, sender_mri: other.mri }) +
+        agentSignedHtml("claude", "I run **Sonnet 4.5** here.", { pending: false }),
+      is_self: false,
+    },
+    121_000,
   );
 
   addFixtureConversation(convId, "Agent Sandbox", messages);

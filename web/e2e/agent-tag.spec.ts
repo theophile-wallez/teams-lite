@@ -152,6 +152,35 @@ test.describe("agent tags", () => {
     await expect(bubble.locator(".mention-chip")).toHaveCount(0);
   });
 
+  test("a colleague's prefix wears the same chip, and their agent's reply the same mark", async ({
+    page,
+  }) => {
+    // The other half of the feature: a colleague in this thread runs teams-lite too. Their
+    // `@claude` ran on THEIR machine, so no setting of ours decides whether it is drawn —
+    // and their agent's answer is signed exactly like ours, so it takes the CLI's mark and
+    // loses the raw signature line rather than reading as words that colleague typed
+    // (`seedAgentSandbox` in web/mock/server.ts).
+    await openSandbox(page);
+    const theirs = page.locator('[data-testid="message"][data-mine="false"]', {
+      hasText: "which model do you run?",
+    });
+
+    const trigger = theirs.filter({ hasNot: page.locator('[data-testid="agent-signature"]') });
+    await expect(trigger.locator('[data-testid="agent-tag"]')).toHaveAttribute(
+      "data-agent",
+      "claude",
+    );
+
+    const reply = page.locator('[data-testid="message"]', { hasText: "Sonnet 4.5" }).last();
+    // The mark says a machine wrote it, and names the account it went out under: theirs.
+    await expect(reply.locator('[data-testid="agent-signature"]')).toContainText("Claude");
+    await expect(reply.locator('[data-testid="agent-signature"]')).toContainText("by");
+    // Said once: the line the body carries for other clients is stripped here.
+    await expect(reply).not.toContainText("via teams-lite");
+    // It arrives, so it sits on the left with everything else that arrives.
+    await expect(reply).toHaveAttribute("data-mine", "false");
+  });
+
   test("a prefix that summons nothing stays plain words", async ({ page }) => {
     await openSandbox(page);
     // Typed by hand, mid-sentence: the backend reads the prefix a message OPENS with, so

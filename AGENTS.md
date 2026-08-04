@@ -100,6 +100,11 @@ that surface together:
   most of them. In the bubble the words are replaced by the CLI's own mark and
   "Claude by <the account it went out under>", which says the same two things in less
   space; the line itself is stripped from the body so it is never stated twice.
+  It is read on EVERY message, not only on ours: a colleague in the thread may run
+  teams-lite too, and their agent's answer arrives signed exactly the same way. Read as an
+  ordinary message it hands the reader that raw line tucked against that colleague's own
+  words, as if they had typed it. Whose machine wrote it is never guessed — the mark names
+  the message's own sender beside it, so a reply of theirs is attributed to them.
 - **The answer sits on the LEFT.** The message is genuinely the user's — it went out
   through their account and a colleague sees their name on it — but they did not write
   it, and putting it beside the things they did write is the one place this app would be
@@ -762,16 +767,26 @@ notifies a colleague, a tag starts a program on this machine.
   `rich-content.tsx` an `agent` node, drawn by the composer's own `AgentTagChip`. It is the
   choice `agent-message.ts` makes for a reply's signature, and for the same reason: a
   message read back covers the tags typed from a phone too. The rules above still decide —
-  `agentTagInText` is a port of `agent_policy::split_prefix` plus its prompt rules, and
-  `agentTagsInMessage` re-applies every gate the composer applies (`from_me` first, then
-  `agentCandidatesFor`'s own list) — so a colleague's prefix, a prefix mid-sentence and ours
-  in a thread nobody opted in all stay plain words.
-  A quote keeps its words too: the backend strips quoted blocks before it reads a trigger,
-  so a prefix inside one started nothing.
+  `agentTagInText` is a port of `agent_policy::split_prefix` plus its prompt rules — so a
+  prefix mid-sentence and one in a quote stay plain words: the backend strips quoted blocks
+  before it reads a trigger, so a prefix inside one started nothing.
+- **WHOSE agent decides which gates apply**, and that split is the whole of
+  `agentTagsInMessage`. On a message of OURS the chip says a program started on THIS
+  machine, so every gate the composer applies before it offers a tag applies again
+  (`agentCandidatesFor`) — which is why ours in a thread nobody opted in stays plain words.
+  On a COLLEAGUE's it says only that they addressed an agent: they may run teams-lite too,
+  the trigger's `from_me` means their prefix ran nothing HERE, and every one of those gates
+  is about this machine rather than theirs. So it is marked from the prefix alone
+  (`addressableAgents`, the backend's own list of CLIs, so there is one spelling of
+  `@claude` in this app and not two). It never says a stranger started a program on the
+  user's machine — nothing on their bubble names this machine, and the reply that follows is
+  attributed to the account it went out under, which is theirs.
 - `web/mock/server.ts` seeds the sandbox thread as a conversation of its own
   (`seedAgentSandbox`), so the tag is exercised in the state a fresh backend is really in:
-  one thread opted in, every other off. `cd web && bun run preview -- --out /tmp/tag
-  --agent-tag` captures the list, both chips and the sent bubble, and
+  one thread opted in, every other off — plus the other machine's half, a colleague's own
+  `@claude` and the answer their agent posted under their name, which is what makes that
+  pair reviewable with no second tenant. `cd web && bun run preview -- --out /tmp/tag
+  --agent-tag` captures the list, both chips, the sent bubble and theirs, and
   `web/e2e/agent-tag.spec.ts` pins every rule above.
 
 ## Renaming a person, and giving them a face (LOCAL, and gated)

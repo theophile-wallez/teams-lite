@@ -998,6 +998,19 @@ if (import.meta.main) {
   if (args.includes("--agent-tag")) {
     await withPreview(async ({ page, shot, setTheme }) => {
       await openConversation(page, "Agent Sandbox");
+      // The other machine's half, which the thread already holds: a colleague who runs
+      // teams-lite too, their own `@claude` and the answer their agent posted under their
+      // name. Their prefix wears the same chip — nothing of ours decides whether it ran —
+      // and their reply wears the CLI's mark with the signature line stripped, so it reads
+      // as an answer rather than as words that colleague typed.
+      await page.waitForSelector(
+        '[data-testid="message"][data-mine="false"] [data-testid="agent-tag"]',
+      );
+      await page.waitForTimeout(250);
+      await shot(`${out}-theirs-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-theirs-dark.png`);
+      await setTheme("light");
       // Nothing is switched on first: this thread answers by default, the way the
       // backend's own policy has it (see `seedAgentSandbox` in web/mock/server.ts).
       await typeInComposer(page, "@");
@@ -1042,9 +1055,9 @@ if (import.meta.main) {
       );
       await setTheme("light");
       console.log(
-        `[preview] wrote ${out}-list-{light,dark}.png, ${out}-composed-{light,dark}.png, ` +
-          `${out}-chip-{light,dark}.png, ${out}-sent-{light,dark}.png and ` +
-          `${out}-sent-chip-{light,dark}.png`,
+        `[preview] wrote ${out}-theirs-{light,dark}.png, ${out}-list-{light,dark}.png, ` +
+          `${out}-composed-{light,dark}.png, ${out}-chip-{light,dark}.png, ` +
+          `${out}-sent-{light,dark}.png and ${out}-sent-chip-{light,dark}.png`,
       );
       // Each CLI wears its own colour, so the second one is worth its own capture — but
       // only this machine says which CLIs it holds, and the mock holds one. Skipping is

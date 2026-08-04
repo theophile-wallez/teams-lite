@@ -13,6 +13,20 @@
  * closed — which is most of them, since the point of the feature is answering from a
  * phone.
  *
+ * It is read on EVERY message, not only on ours. Our own runs go out through the user's
+ * account and arrive as ours, but a colleague in the thread may run teams-lite too, and
+ * their agent's answer is an agent's answer: read as an ordinary message it hands the
+ * reader the raw `— claude, via teams-lite` line the mark above the bubble exists to
+ * replace, tucked against that colleague's own words as if they had written it. Whose
+ * account it went out under is never guessed — the bubble names it beside the mark, from
+ * the message's own sender ("Claude by <sender>"), so a reply from another machine is
+ * attributed to that machine's owner and never to this one.
+ *
+ * A colleague could of course end a message with that italic line by hand and be drawn
+ * under the CLI's mark. That is the same claim the user can make about their own
+ * messages, it takes deliberate effort, and it hides nothing the reader cannot see: the
+ * account that posted the words is still named beside the mark.
+ *
  * The four shapes are `agent_policy::thinking_html`, `reply_html` (streaming and
  * finished) and `failure_html` in src/agent_policy.rs. The patterns tolerate the
  * whitespace Teams inserts when it stores a body, because it does (`</p>\r\n<p>` for
@@ -62,12 +76,15 @@ const FAILED = new RegExp(`^(${NAME}) could not answer:\\s*(.*)$`, "i");
 /**
  * Read a message's agent signature, or null when it has none.
  *
- * Only a message of OURS can be one: the backend posts as the user, so a signature on
- * somebody else's message was typed by them and means nothing. That check is first
- * because it is also the cheap one — most messages in a thread are not ours.
+ * Whoever wrote it: a reply is recognised from the line it signs itself with and from
+ * nothing else, so a colleague's teams-lite answering in this thread renders exactly as
+ * ours does (see the note on authorship at the top of this module).
+ *
+ * A DELETED message is never one. Its own placeholder is the body — a ghost bubble the
+ * reader can unveil when we cached the original — and an agent bubble must not replace
+ * it.
  */
 export function agentAuthorship(message: ChatMessage): AgentAuthorship | null {
-  if (message.is_self !== true) return null;
   if (message.deleted === true) return null;
   const content = message.content ?? "";
   const signature = SIGNATURE.exec(content);
