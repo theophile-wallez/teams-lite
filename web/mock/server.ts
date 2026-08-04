@@ -266,11 +266,12 @@ const SEED = 0x7ea115;
 const LIVE_INTERVAL_MS = Number(process.env.MOCK_LIVE_MS ?? 7_000);
 /** Delay before echoing a sent message, simulating the real-time round trip. */
 const SEND_ECHO_DELAY_MS = 150;
-/** How long a mock outgoing call rings before the far side picks up, and before its
- *  audio is reported as flowing. Short enough for a spec to wait through, long enough
- *  that the "Calling…" state is really drawn. */
-const MOCK_CALL_ANSWER_MS = 400;
-const MOCK_CALL_CONNECT_MS = 700;
+/** How long a mock call rings before the far side picks up, and before its audio is
+ *  reported as flowing — the same two beats a meeting join uses for its lobby and its
+ *  roster. Short by default, so a spec waits through them; the preview script raises
+ *  them, because a state nobody can see is a state nobody reviewed. */
+const MOCK_CALL_ANSWER_MS = Number(process.env.MOCK_CALL_ANSWER_MS ?? 400);
+const MOCK_CALL_CONNECT_MS = Number(process.env.MOCK_CALL_CONNECT_MS ?? 700);
 
 /** When "1", expose an HTTP control plane (POST /__test/emit, GET
  *  /__test/conversations) so E2E tests can drive live events deterministically.
@@ -2958,16 +2959,26 @@ function agentStatusView(): {
 type MockCall = {
   id: string;
   direction: "incoming" | "outgoing";
+  kind: "call" | "meeting";
   phase: "ringing" | "dialing" | "connecting" | "connected" | "ended";
   conversation_id: string | null;
   peer: string;
   peer_mri: string;
+  /** Everybody else in a meeting, the way a roster frame names them. */
+  others: string[];
+  other_mris: string[];
+  in_lobby: boolean;
+  waiting_in_lobby: number;
   muted: boolean;
   connected_at_ms: number | null;
   end_reason: string | null;
   can_accept: boolean;
   can_hangup: boolean;
 };
+
+/** The people the mock puts in a meeting once the join is answered — a roster arriving
+ *  after the fact, which is what the real service sends. */
+const MOCK_MEETING_ROSTER = ["Ava Thompson", "Liam Nguyen", "Priya Raman"];
 
 /** Off, exactly like a fresh Rust store: turning it on is the consent, so a spec has to
  *  perform that step rather than find it already done. */
@@ -3030,10 +3041,15 @@ function injectMockCallInvite(conversation: string): MockCall | null {
   mockCall = {
     id: `mock-call-${Date.now()}`,
     direction: "incoming",
+    kind: "call",
     phase: "ringing",
     conversation_id: conversation,
     peer: person?.name ?? "Someone",
     peer_mri: person?.mri ?? "8:orgid:someone",
+    others: [],
+    other_mris: [],
+    in_lobby: false,
+    waiting_in_lobby: 0,
     muted: false,
     connected_at_ms: null,
     end_reason: null,
@@ -4699,6 +4715,38 @@ function dispatch(method: string, params: unknown): unknown {
           ice_servers: [{ urls: ["stun:mock.invalid:3478"] }],
         };
       }
+      // Joining a meeting: reserve it from the link, exactly like the Rust one. The
+      // mock checks the link shape too, so a spec can prove the refusal.
+      if (typeof o.join_url === "string") {
+        if (!/\/meetup-join\/(19%3a|19:)/i.test(o.join_url)) {
+          throw new Error("call_prepare: that is not a Teams meeting link");
+        }
+        if (mockCall && mockCall.phase !== "ended") {
+          throw new Error("call_prepare: this machine is already in a call — leave it first");
+        }
+        clearMockCallTimers();
+        mockCall = {
+          id: `mock-meeting-${Date.now()}`,
+          direction: "outgoing",
+          kind: "meeting",
+          // Joining, not ringing: nobody has to pick up.
+          phase: "connecting",
+          conversation_id: null,
+          peer: typeof o.subject === "string" && o.subject.trim() ? o.subject.trim() : "Meeting",
+          peer_mri: "",
+          others: [],
+          other_mris: [],
+          in_lobby: false,
+          waiting_in_lobby: 0,
+          muted: false,
+          connected_at_ms: null,
+          end_reason: null,
+          can_accept: false,
+          can_hangup: true,
+        };
+        broadcastMockCall();
+        return { call_id: mockCall.id, ice_servers: [{ urls: ["stun:mock.invalid:3478"] }] };
+      }
       const conversation = requireString(params, "conversation");
       const thread = threadFor(conversation);
       if (!thread) throw new Error(`call_prepare: no such conversation: ${conversation}`);
@@ -4710,10 +4758,15 @@ function dispatch(method: string, params: unknown): unknown {
       mockCall = {
         id: `mock-call-${Date.now()}`,
         direction: "outgoing",
+        kind: "call",
         phase: "dialing",
         conversation_id: conversation,
         peer: person?.name ?? "Someone",
         peer_mri: person?.mri ?? "8:orgid:someone",
+        others: [],
+        other_mris: [],
+        in_lobby: false,
+        waiting_in_lobby: 0,
         muted: false,
         connected_at_ms: null,
         end_reason: null,
@@ -4745,6 +4798,44 @@ function dispatch(method: string, params: unknown): unknown {
         setTimeout(() => {
           if (!mockCall || mockCall.id !== callId) return;
           mockCall = { ...mockCall, phase: "connected", connected_at_ms: Date.now() };
+          broadcastMockCall();
+        }, MOCK_CALL_CONNECT_MS),
+      );
+      return { call_id: callId };
+    }
+
+    case "call_join": {
+      const callId = requireString(params, "call_id");
+      requireString(params, "sdp");
+      requireString(params, "join_url");
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_join: no such meeting");
+      // The lobby first, then somebody lets us in, then the roster arrives. Three
+      // frames, in the order the real service sends them — which is what makes the
+      // states the UI draws reviewable.
+      mockCall = { ...mockCall, in_lobby: true };
+      broadcastMockCall();
+      mockCallTimers.push(
+        setTimeout(() => {
+          if (!mockCall || mockCall.id !== callId) return;
+          mockCall = {
+            ...mockCall,
+            in_lobby: false,
+            phase: "connected",
+            connected_at_ms: Date.now(),
+          };
+          broadcastMockCall();
+        }, MOCK_CALL_ANSWER_MS),
+      );
+      mockCallTimers.push(
+        setTimeout(() => {
+          if (!mockCall || mockCall.id !== callId) return;
+          mockCall = {
+            ...mockCall,
+            others: MOCK_MEETING_ROSTER,
+            other_mris: MOCK_MEETING_ROSTER.map(
+              (name) => PEOPLE.find((p) => p.name === name)?.mri ?? "8:orgid:someone",
+            ),
+          };
           broadcastMockCall();
         }, MOCK_CALL_CONNECT_MS),
       );
@@ -5868,8 +5959,14 @@ function addMockEvent(
 /** Seed the calendars and a month of events around today. Deterministic given the
  *  date, so screenshots and E2E assertions are stable within a day. */
 function seedCalendar(): void {
+  // The real shape a Teams join link has, context included: the thread, the message id
+  // ("0" for a meeting on the calendar) and the `{Tid, Oid}` the calling service reads as
+  // its `meetingInfo` (see `calling::MeetingJoin`). The ids are invented; the shape is
+  // not, and it is the shape the Join button and the backend both parse.
   const teamsJoin =
-    "https://teams.microsoft.com/l/meetup-join/19%3Ameeting_mock%40thread.v2/0?context=%7B%7D";
+    "https://teams.microsoft.com/l/meetup-join/19%3Ameeting_mock%40thread.v2/0" +
+    "?context=%7B%22Tid%22%3A%2200000000-0000-4000-8000-000000000001%22%2C" +
+    "%22Oid%22%3A%2200000000-0000-4000-8000-000000000002%22%7D";
 
   // A recurring stand-up on every weekday of the surrounding five weeks: the case
   // that proves the backend expands recurrence and the grid draws one row per

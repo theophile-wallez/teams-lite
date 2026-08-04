@@ -1,7 +1,10 @@
 import { expect } from "@playwright/test";
 import {
+  calendarEvent,
   emitCallInvite,
   gotoApp,
+  openCalendarTab,
+  openCalendarView,
   openConversationNamed,
   resetCall,
   test,
@@ -170,5 +173,80 @@ test.describe("Audio calling", () => {
     await expect(page.locator('[data-testid="call-bar"]')).toHaveCount(0);
     // This ending the user did not ask for, so it is stated once.
     await expect(page.locator('[data-testid="call-notice"]')).toContainText("turned off");
+  });
+});
+
+test.describe("Joining a meeting", () => {
+  test.afterEach(async ({ page }) => {
+    await resetCall(page);
+  });
+
+  /** The calendar keeps its link to real Teams. This app joins with a microphone and
+   *  nothing else, so a meeting with a shared screen is still one to open there — both
+   *  actions exist, and neither replaces the other. */
+  test("offers Join here beside the link to Teams, and says why when it cannot", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+    await calendarEvent(page, "ev-overlap-a").click();
+
+    const details = page.locator('[data-testid="calendar-event-details"]');
+    await expect(details).toBeVisible();
+    // The link out is still there, and still a link.
+    await expect(details.locator('[data-testid="calendar-event-join"]')).toHaveAttribute(
+      "target",
+      "_blank",
+    );
+    // The in-app join exists, and is refused while calling is off — the one case the
+    // user can fix.
+    const join = details.locator('[data-testid="meeting-join-here"]');
+    await expect(join).toBeVisible();
+    await expect(join).toBeDisabled();
+    await expect(join).toHaveAttribute("aria-label", /Settings/);
+  });
+
+  test("joins a meeting: the lobby, then the meeting, then who is in it", async ({ page }) => {
+    await gotoApp(page);
+    // Turning calling on is the consent for this too: joining opens the microphone to
+    // everybody in the meeting.
+    await page.locator('[data-testid="open-settings"]').click();
+    await page.locator('[data-testid="calling-toggle"]').click();
+    await expect(page.locator('[data-testid="calling-toggle"]')).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    // Settings owns the detail pane while it is open, so leave it the way the user
+    // would before opening the calendar.
+    await page.goBack();
+    await expect(page.locator('[data-testid="settings-pane"]')).toHaveCount(0);
+
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+    await calendarEvent(page, "ev-overlap-a").click();
+    await page.locator('[data-testid="meeting-join-here"]').click();
+
+    const bar = page.locator('[data-testid="call-bar"]');
+    await expect(bar).toBeVisible();
+    // The meeting's own title, not a person: a meeting is not somebody.
+    await expect(page.locator('[data-testid="call-peer"]')).toContainText("Architecture guild");
+    // The lobby is its own state, and the user is told nobody has let them in yet.
+    await expect(page.locator('[data-testid="call-phase"]')).toContainText("Waiting to be let in");
+    // Nothing to answer: a meeting is joined, never offered.
+    await expect(page.locator('[data-testid="call-answer"]')).toHaveCount(0);
+
+    // Admitted, then the roster arrives and the bar says who is there.
+    await expect(bar).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    await expect(page.locator('[data-testid="call-phase"]')).toContainText(/With \d+ others|With /, {
+      timeout: 10_000,
+    });
+
+    // While a meeting is up, nothing else can start: one microphone.
+    await calendarEvent(page, "ev-overlap-a").click();
+    await expect(page.locator('[data-testid="meeting-join-here"]')).toBeDisabled();
+
+    await page.locator('[data-testid="call-hangup"]').click();
+    await expect(bar).toHaveCount(0);
   });
 });

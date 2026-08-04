@@ -238,6 +238,7 @@ Seven RPCs, and the split between them IS the consent design (see § 7):
 | `set_calling` | `MACHINE_METHODS` | Registers (or unregisters) this machine as a device the user's calls ring on. |
 | `call_prepare` | `MACHINE_METHODS` | Reserves the one call, and returns the ICE servers (plus the offer, when answering). |
 | `call_place` | `OUTWARD_METHODS` | The § 2.3 POST, carrying our offer. Rings a person. |
+| `call_join` | `OUTWARD_METHODS` | The same POST for a MEETING: no `to`, plus `meetingInfo`. Rings nobody. |
 | `call_accept` | `OUTWARD_METHODS` | Answers with our SDP. Opens the microphone to them. |
 | `call_hangup` | `OUTWARD_METHODS` | Ends the call, or declines it while it is still ringing. |
 | `call_mute` | `OUTWARD_METHODS` | Publishes whether the user can be heard. |
@@ -262,9 +263,16 @@ The browser half is two files: `web/src/lib/call.ts` (pure state model) and
 UI is `call-bar.tsx` (ringing and in-call, one component), `call-button.tsx` (a 1:1
 header) and the Settings switch.
 
-What is deliberately NOT built: video, a group call, transfer, hold, DTMF, and a call the
-app places without a click. Each is a product decision with its own surface, and audio has
-to be solid first.
+A meeting is joined rather than placed, and it is the same plane: the join link carries
+the thread and the `{Tid, Oid}` the service wants as `meetingInfo`
+(`calling::MeetingJoin`), the lobby is a state of its own, and the roster arrives as
+`rosterUpdate` frames. The one media difference is that a meeting sends several voices as
+several streams, so the page keeps one audio element per stream.
+
+What is deliberately NOT built: video, screen sharing, a group call the user assembles
+themselves, transfer, hold, DTMF, admitting somebody from a lobby, and any call this app
+places without a click. Each is a product decision with its own surface, and audio has to
+be solid first.
 
 ## 7. Consent — a call is at least as outward as a send
 

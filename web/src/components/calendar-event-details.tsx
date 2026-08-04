@@ -23,6 +23,7 @@ import {
 import { formatEventTime, isDeclined } from "~/lib/calendar";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
+import { MeetingJoinButton } from "./meeting-join-button";
 
 // One event's details, as a self-contained panel. Its host decides where it appears:
 // a popover pinned to the event on a wide screen, a dialog on a narrow one (see
@@ -182,16 +183,20 @@ export function CalendarEventDetails(props: {
       {/* The user's own clicks. Nothing here acts on the calendar. */}
       <footer className="flex shrink-0 flex-col gap-2 border-t border-border-subtle p-3.5">
         <div className="flex flex-wrap items-center gap-2">
+          {/* Join with audio, HERE. Beside the link that opens real Teams rather than
+              instead of it: this app carries a microphone and nothing else, so a meeting
+              with a shared screen is still one to open there. */}
+          <MeetingJoinButton joinUrl={event.join_url} subject={event.subject} />
           {event.join_url && (
             <a
               data-testid="calendar-event-join"
               href={event.join_url}
               target="_blank"
               rel="noreferrer noopener"
-              className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
+              className="flex items-center gap-1.5 rounded-lg bg-card px-3 py-1.5 text-[13px] text-text-dim shadow-chip transition-colors hover:text-foreground"
             >
               <HugeiconsIcon icon={Video01Icon} className="size-3.5" strokeWidth={1.8} />
-              Join meeting
+              Open in Teams
             </a>
           )}
           {event.web_link && (

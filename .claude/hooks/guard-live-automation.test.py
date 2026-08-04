@@ -212,6 +212,11 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'call_place', params: { sdp: 'v=0' } }));\n"
     ),
+    "meeting-joiner.ts": (
+        "// Walks the user into a real meeting, where everybody present sees them.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19440');\n"
+        "ws.send(JSON.stringify({ method: 'call_join', params: { sdp: 'v=0' } }));\n"
+    ),
     "call-answerer.ts": (
         "// Opens the user's microphone to whoever is calling, through the app's relay.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19441');\n"
@@ -381,6 +386,7 @@ def cases(tmp: Path):
         # A call rings a real person; registering decides whether their calls ring here.
         ("BLOCK", PROJECT, f"bun run {tmp}/call-placer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/call-answerer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/meeting-joiner.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/call-registrar.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/call-preparer.ts"),
         # A cargo example reaches Teams with a broker token, past every port rule.

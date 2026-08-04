@@ -601,6 +601,277 @@ pub fn mute_payload(local: &LocalParticipant, muted: bool) -> Value {
     })
 }
 
+/// Everything a meeting join needs, read out of the link the calendar already holds.
+///
+/// A Teams join link carries all of it (`onlineMeeting.joinUrl` from Graph):
+///
+/// ```text
+/// https://teams.microsoft.com/l/meetup-join/{threadId}/{messageId}?context={"Tid":…,"Oid":…}
+/// ```
+///
+/// The thread is the meeting's own conversation, the message id is `0` for a meeting
+/// from the calendar and a real id for a channel meeting, and the context names the
+/// tenant and the organizer — which is exactly the `meetingInfo` the calling service
+/// asks for. So joining needs no new service: the link the user could click is the
+/// whole address. `examples/meeting_join_recon.rs` checks this parse against the
+/// user's own real meetings, READ-ONLY.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeetingJoin {
+    /// The meeting's thread (`19:meeting_…@thread.v2`, or a channel's own thread).
+    pub thread_id: String,
+    /// The message the meeting hangs off. `"0"` for a calendar meeting.
+    pub message_id: String,
+    /// The tenant the meeting belongs to, from the link's context.
+    pub tenant_id: Option<String>,
+    /// The organizer, as an mri. The link states a bare oid; this is `8:orgid:{oid}`,
+    /// which is the form the service's `meetingInfo` wants.
+    pub organizer_mri: Option<String>,
+}
+
+impl MeetingJoin {
+    /// Read a join link. `None` when it is not one — a link to something else, or a
+    /// shape this does not know, which is a thing to add rather than to guess at.
+    pub fn from_join_url(url: &str) -> Option<Self> {
+        // The path, up to the query: `…/l/meetup-join/{thread}/{message}`.
+        let (base, query) = match url.split_once('?') {
+            Some((base, query)) => (base, Some(query)),
+            None => (url, None),
+        };
+        let after = base.split("/meetup-join/").nth(1)?;
+        let mut segments = after.split('/').filter(|s| !s.is_empty());
+        let thread_id = decode(segments.next()?);
+        if !thread_id.starts_with("19:") {
+            return None;
+        }
+        let message_id = segments.next().map(decode).unwrap_or_else(|| "0".into());
+
+        // The context is a JSON object, URL-encoded, and its keys are capitalised the
+        // way Teams writes them. A link without one still joins: the thread is what
+        // addresses the meeting, and `meetingInfo` is what the service prefers.
+        let context = query
+            .and_then(|q| {
+                q.split('&').find_map(|pair| pair.strip_prefix("context=").map(decode))
+            })
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let field = |name: &str| {
+            context
+                .as_ref()
+                .and_then(|c| c.get(name))
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        Some(Self {
+            thread_id,
+            message_id,
+            tenant_id: field("Tid"),
+            organizer_mri: field("Oid").map(|oid| {
+                // The link states a bare object id; the service speaks mris.
+                if oid.contains(':') { oid } else { format!("8:orgid:{oid}") }
+            }),
+        })
+    }
+
+    /// True for a meeting that lives in a CHANNEL rather than on the calendar alone.
+    /// Its thread is the channel's, and the message id is the post the meeting hangs
+    /// off — so both have to travel, or the join addresses the channel instead of the
+    /// meeting inside it.
+    pub fn is_channel_meeting(&self) -> bool {
+        !self.thread_id.starts_with("19:meeting_") && self.message_id != "0"
+    }
+
+    /// The `meetingInfo` object the service wants, or `None` when the link named no
+    /// context. Only the two fields the client sends are included; a meeting type or
+    /// a reply chain would be added here, not guessed.
+    fn meeting_info(&self) -> Option<Value> {
+        let tenant = self.tenant_id.as_ref()?;
+        let organizer = self.organizer_mri.as_ref()?;
+        Some(json!({ "tenantId": tenant, "organizerId": organizer }))
+    }
+}
+
+/// Percent-decode one URL piece, leaving it alone when it is not encoded.
+fn decode(value: &str) -> String {
+    urlencoding::decode(value).map(|v| v.into_owned()).unwrap_or_else(|_| value.to_string())
+}
+
+/// Build the POST that JOINS a meeting.
+///
+/// The same shape as an invitation with two differences, and both matter: there is no
+/// `participants.to` (a join rings nobody — the meeting is already there), and it
+/// carries `meetingInfo` plus the meeting's own thread. The service answers with the
+/// conversation, and from then on a meeting is the same set of links as a call.
+pub fn join_payload(
+    local: &LocalParticipant,
+    meeting: &MeetingJoin,
+    offer: &MediaContent,
+    callbacks: &CallbackBase,
+) -> Value {
+    let mut payload = json!({
+        "conversationRequest": {
+            "conversationType": "conversation",
+            // "Delta" is what the web client asks for: send me roster CHANGES. A
+            // meeting's roster is the one thing that moves all through it.
+            "roster": {
+                "type": "Delta",
+                "rosterUpdate": callbacks.link(paths::CONVERSATION_ROSTER_UPDATE),
+            },
+            "properties": { "enableGroupCallEventMessages": true },
+            "links": {
+                "conversationEnd": callbacks.link(paths::CONVERSATION_END),
+                "conversationUpdate": callbacks.link(paths::CONVERSATION_UPDATE),
+                "localParticipantUpdate":
+                    callbacks.link(paths::CONVERSATION_LOCAL_PARTICIPANT_UPDATE),
+                "addParticipantSuccess":
+                    callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_SUCCESS),
+                "addParticipantFailure":
+                    callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_FAILURE),
+                "confirmUnmute": callbacks.link(paths::CONVERSATION_CONFIRM_UNMUTE),
+                "receiveMessage": callbacks.link(paths::CONVERSATION_RECEIVE_MESSAGE),
+            },
+        },
+        // The meeting's own thread, and the message it hangs off. A channel meeting
+        // needs both; a calendar meeting's message id is "0".
+        "groupChat": { "threadId": meeting.thread_id, "messageId": message_id_or_null(meeting) },
+        "participants": { "from": local.json() },
+        "callInvitation": {
+            "callModalities": [MODALITY_AUDIO],
+            "links": {
+                "progress": callbacks.link(paths::CALL_PROGRESS),
+                "mediaAnswer": callbacks.link(paths::CALL_MEDIA_ANSWER),
+                "acceptance": callbacks.link(paths::CALL_ACCEPTANCE),
+                "redirection": callbacks.link(paths::CALL_REDIRECTION),
+                "end": callbacks.link(paths::CALL_END),
+            },
+            "mediaContent": offer.json(),
+        },
+    });
+    if let Some(info) = meeting.meeting_info() {
+        payload["meetingInfo"] = info;
+    }
+    json!({ "payload": payload })
+}
+
+/// `"0"` means "no message" for a calendar meeting, and the service is given null
+/// rather than the string.
+fn message_id_or_null(meeting: &MeetingJoin) -> Value {
+    if meeting.message_id == "0" || meeting.message_id.is_empty() {
+        Value::Null
+    } else {
+        Value::String(meeting.message_id.clone())
+    }
+}
+
+/// Join a meeting: one POST to the conversation service, exactly like placing a call.
+#[allow(clippy::too_many_arguments)]
+pub async fn join_meeting(
+    http: &reqwest::Client,
+    session: &Session,
+    ic3: &str,
+    local: &LocalParticipant,
+    meeting: &MeetingJoin,
+    offer: &MediaContent,
+    callbacks: &CallbackBase,
+    correlation_id: &str,
+) -> Result<PlacedCall> {
+    let endpoints = endpoints(session)?;
+    let payload = join_payload(local, meeting, offer, callbacks);
+    let raw =
+        post_signal(http, &endpoints.conversation_service, session, ic3, correlation_id, &payload)
+            .await?;
+    Ok(PlacedCall {
+        links: Links::collect(&raw),
+        conversation_url: ["/conversationUrl/Location", "/conversation/url", "/Location"]
+            .iter()
+            .find_map(|p| raw.pointer(p).and_then(Value::as_str))
+            .map(String::from),
+        raw,
+    })
+}
+
+/// Where a join has landed: in the meeting, or in its lobby waiting to be let in.
+///
+/// The lobby is not a failure and not a connection. Teams reports it as a state of its
+/// own (`ConnectedForRosterOnly`), the user is told nobody has admitted them yet, and
+/// the same call continues when somebody does — so it must be visible rather than
+/// hidden behind "connecting…".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LobbyState {
+    /// In the meeting.
+    Admitted,
+    /// Waiting for somebody in the meeting to admit us.
+    Waiting,
+}
+
+/// Read the lobby state out of a frame, or `None` when it says nothing about it.
+///
+/// Two spellings, because the service states it two ways: the call's own status, and a
+/// participant's state in the roster.
+pub fn lobby_state_in_frame(frame: &Value) -> Option<LobbyState> {
+    fn state_of(value: &str) -> Option<LobbyState> {
+        match value {
+            "ConnectedForRosterOnly" | "Lobby" | "InLobby" => Some(LobbyState::Waiting),
+            "Connected" => Some(LobbyState::Admitted),
+            _ => None,
+        }
+    }
+    fn walk(value: &Value) -> Option<LobbyState> {
+        match value {
+            Value::Object(map) => {
+                for key in ["callState", "state", "participantState", "status"] {
+                    if let Some(found) = map.get(key).and_then(Value::as_str).and_then(state_of) {
+                        return Some(found);
+                    }
+                }
+                map.values().find_map(walk)
+            }
+            Value::Array(items) => items.iter().find_map(walk),
+            _ => None,
+        }
+    }
+    walk(frame)
+}
+
+/// One person in a meeting, as a roster frame names them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterMember {
+    pub mri: String,
+    pub display_name: String,
+    /// True while they are only in the lobby, so a count of who can hear us is honest.
+    pub in_lobby: bool,
+}
+
+/// Read the roster out of a `rosterUpdate` frame, or `None` when the frame is not one.
+///
+/// Everybody the frame names, us included: the caller knows its own mri and drops it,
+/// and doing that here would make an empty roster and "only me" the same answer.
+pub fn roster_in_frame(frame: &Value) -> Option<Vec<RosterMember>> {
+    let participants = ["/_decoded/rosterUpdate/participants", "/rosterUpdate/participants"]
+        .iter()
+        .find_map(|p| frame.pointer(p))
+        .and_then(Value::as_array)?;
+    let members: Vec<RosterMember> = participants
+        .iter()
+        .filter_map(|person| {
+            let mri = person
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| id.starts_with('8') || id.starts_with('4'))?;
+            let state = person.get("state").and_then(Value::as_str).unwrap_or_default();
+            Some(RosterMember {
+                mri: mri.to_string(),
+                display_name: person
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                in_lobby: matches!(state, "Lobby" | "InLobby" | "ConnectedForRosterOnly"),
+            })
+        })
+        .collect();
+    Some(members)
+}
+
 /// A call the service accepted: the links it answered with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacedCall {
@@ -1085,6 +1356,161 @@ mod tests {
             "8:orgid:me"
         );
         assert_eq!(mute_payload(&local(), true).pointer("/payload/muteUnmute/muted").unwrap(), true);
+    }
+
+    // ---- joining a meeting -------------------------------------------------
+
+    /// The link the calendar already holds carries everything a join needs. This is
+    /// the real shape Graph hands back for a meeting on the calendar.
+    #[test]
+    fn a_calendar_meeting_link_yields_its_thread_and_its_meeting_info() {
+        let url = "https://teams.microsoft.com/l/meetup-join/\
+                   19%3ameeting_NTk4YzY0MTQt%40thread.v2/0\
+                   ?context=%7b%22Tid%22%3a%22af1bbf3d-1111-2222-3333-444455556666%22%2c\
+                   %22Oid%22%3a%2299887766-5544-3322-1100-aabbccddeeff%22%7d";
+        let join = MeetingJoin::from_join_url(url).expect("a join link");
+        assert_eq!(join.thread_id, "19:meeting_NTk4YzY0MTQt@thread.v2");
+        // A calendar meeting hangs off no message.
+        assert_eq!(join.message_id, "0");
+        assert!(!join.is_channel_meeting());
+        assert_eq!(join.tenant_id.as_deref(), Some("af1bbf3d-1111-2222-3333-444455556666"));
+        // The link states a bare oid; the service speaks mris.
+        assert_eq!(
+            join.organizer_mri.as_deref(),
+            Some("8:orgid:99887766-5544-3322-1100-aabbccddeeff")
+        );
+    }
+
+    /// A meeting inside a CHANNEL is the other shape: the channel's own thread, and the
+    /// post the meeting hangs off. Both have to survive the parse, or the join
+    /// addresses the channel instead of the meeting in it.
+    #[test]
+    fn a_channel_meeting_link_keeps_the_message_it_hangs_off() {
+        let url = "https://teams.microsoft.com/l/meetup-join/\
+                   19%3aabc123%40thread.tacv2/1719400000000?context=%7b%22Tid%22%3a%22t%22%7d";
+        let join = MeetingJoin::from_join_url(url).expect("a join link");
+        assert_eq!(join.thread_id, "19:abc123@thread.tacv2");
+        assert_eq!(join.message_id, "1719400000000");
+        assert!(join.is_channel_meeting());
+        // A context with no organizer names no `meetingInfo` rather than half of one.
+        assert_eq!(join.meeting_info(), None);
+    }
+
+    /// A link that is not a meeting join must read as one thing: not a meeting. The
+    /// UI decides whether to offer a Join button from exactly this answer.
+    #[test]
+    fn a_link_that_is_not_a_meeting_join_is_refused() {
+        for url in [
+            "",
+            "https://teams.microsoft.com/l/channel/19%3aabc%40thread.tacv2/General",
+            "https://zoom.us/j/123456",
+            // The path is right but the thread is not a thread.
+            "https://teams.microsoft.com/l/meetup-join/not-a-thread/0",
+            "https://teams.microsoft.com/l/meetup-join/",
+        ] {
+            assert_eq!(MeetingJoin::from_join_url(url), None, "url: {url}");
+        }
+    }
+
+    /// A join link with no context at all still joins: the thread is what addresses the
+    /// meeting, and `meetingInfo` is the service's preference rather than its key.
+    #[test]
+    fn a_join_link_without_a_context_still_names_the_meeting() {
+        let join =
+            MeetingJoin::from_join_url("https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0")
+                .expect("a join link");
+        assert_eq!(join.thread_id, "19:meeting_x@thread.v2");
+        assert_eq!(join.tenant_id, None);
+        assert_eq!(join.meeting_info(), None);
+    }
+
+    #[test]
+    fn a_join_rings_nobody_and_names_the_meeting() {
+        let meeting = MeetingJoin::from_join_url(
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0\
+             ?context=%7b%22Tid%22%3a%22tenant%22%2c%22Oid%22%3a%22organizer%22%7d",
+        )
+        .expect("a join link");
+        let payload =
+            join_payload(&local(), &meeting, &MediaContent::sdp("v=0 offer"), &callbacks());
+
+        // A join has no `to`: the meeting is already there, and nobody is rung.
+        assert!(payload.pointer("/payload/participants/to").is_none());
+        assert_eq!(payload.pointer("/payload/participants/from/id").unwrap(), "8:orgid:me");
+        assert_eq!(
+            payload.pointer("/payload/groupChat/threadId").unwrap(),
+            "19:meeting_x@thread.v2"
+        );
+        // "0" is no message, and the service is told null rather than a string.
+        assert_eq!(payload.pointer("/payload/groupChat/messageId").unwrap(), &Value::Null);
+        assert_eq!(payload.pointer("/payload/meetingInfo/tenantId").unwrap(), "tenant");
+        assert_eq!(
+            payload.pointer("/payload/meetingInfo/organizerId").unwrap(),
+            "8:orgid:organizer"
+        );
+        // Audio, and a roster we ask to be kept up to date about.
+        assert_eq!(
+            payload.pointer("/payload/callInvitation/callModalities").unwrap(),
+            &json!(["audio"])
+        );
+        assert!(payload
+            .pointer("/payload/conversationRequest/roster/rosterUpdate")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .ends_with("/conversation/rosterUpdate/"));
+        assert!(!payload.to_string().contains("video"), "a join offers audio only");
+    }
+
+    #[test]
+    fn a_channel_meeting_join_carries_the_message_id() {
+        let meeting = MeetingJoin::from_join_url(
+            "https://teams.microsoft.com/l/meetup-join/19%3aabc%40thread.tacv2/1719400000000",
+        )
+        .expect("a join link");
+        let payload = join_payload(&local(), &meeting, &MediaContent::sdp("v=0"), &callbacks());
+        assert_eq!(payload.pointer("/payload/groupChat/messageId").unwrap(), "1719400000000");
+    }
+
+    /// The lobby is a state of its own, not a failure and not a connection: the user is
+    /// waiting to be let in, and the same call continues when somebody admits them.
+    #[test]
+    fn the_lobby_is_read_from_either_spelling() {
+        assert_eq!(
+            lobby_state_in_frame(&json!({ "callState": "ConnectedForRosterOnly" })),
+            Some(LobbyState::Waiting)
+        );
+        assert_eq!(
+            lobby_state_in_frame(&json!({ "_decoded": { "rosterUpdate": { "participants": [
+                { "id": "8:orgid:me", "state": "Lobby" }
+            ] } } })),
+            Some(LobbyState::Waiting)
+        );
+        assert_eq!(
+            lobby_state_in_frame(&json!({ "callState": "Connected" })),
+            Some(LobbyState::Admitted)
+        );
+        // A frame that says nothing about it must not be read as either.
+        assert_eq!(lobby_state_in_frame(&json!({ "callEnd": { "code": 0 } })), None);
+    }
+
+    #[test]
+    fn a_roster_frame_names_everybody_and_who_is_still_in_the_lobby() {
+        let roster = roster_in_frame(&json!({
+            "_decoded": { "rosterUpdate": { "participants": [
+                { "id": "8:orgid:her", "displayName": "Her", "state": "Connected" },
+                { "id": "8:orgid:him", "displayName": "Him", "state": "Lobby" },
+                // A resource that is not a person keeps out of the list.
+                { "id": "19:meeting_x@thread.v2", "displayName": "the meeting" },
+            ] } }
+        }))
+        .expect("a roster");
+        assert_eq!(roster.len(), 2);
+        assert_eq!(roster[0].display_name, "Her");
+        assert!(!roster[0].in_lobby);
+        assert!(roster[1].in_lobby);
+        // Not a roster frame at all.
+        assert_eq!(roster_in_frame(&json!({ "callEnd": {} })), None);
     }
 
     #[test]

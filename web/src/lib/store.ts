@@ -1404,6 +1404,32 @@ export class TeamsController {
     }
   }
 
+  /**
+   * Join a meeting from the link its calendar event carries.
+   *
+   * The same three steps as placing a call, and the same gate: the backend reserves the
+   * call and hands back what a peer connection needs, the page opens the microphone,
+   * and the SDP goes back. Nothing is joined without this click — the calendar's join
+   * link is never followed on the user's behalf.
+   */
+  async joinMeeting(joinUrl: string, subject?: string): Promise<void> {
+    if (isLive(this.get().callStatus.call)) return;
+    this.set({ callError: null });
+    this.showCallNotice(null);
+    let callId: string | null = null;
+    try {
+      const prepared = await this.backend.callPrepare({ joinUrl, subject });
+      callId = prepared.call_id;
+      this.callMedia = await this.openCallMedia({ iceServers: prepared.ice_servers });
+      await this.backend.callJoin(prepared.call_id, joinUrl, this.callMedia.localSdp);
+    } catch (error) {
+      this.set({ callError: callErrorText(error) });
+      this.stopCallMedia();
+      if (callId) await this.hangUpCall();
+      await this.refreshCallStatus();
+    }
+  }
+
   /** Answer the call that is ringing: take its offer, open the microphone, answer. */
   async answerCall(): Promise<void> {
     const call = this.get().callStatus.call;

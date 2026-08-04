@@ -752,10 +752,11 @@ call does — this side never handles RTP, and the page never learns a Teams URL
 - **One call at a time.** A second simultaneous call needs a second microphone and a UI
   that can hold two. An invite that arrives while a call is up is left for the user's
   other devices to ring, which is what Teams does with a client that does not answer.
-- **A one-to-one chat and nothing else.** A group call needs a roster, a mixer and more
-  than one audio element, so the button is not drawn outside a 1:1 and the backend
-  refuses a conversation with more than one other person. Widening that is a product
-  decision with its own UI, not a cleanup.
+- **A CALL is one-to-one; a MEETING is joined.** The call button is not drawn outside a
+  1:1 and the backend refuses a conversation with more than one other person — a group
+  call would need a roster the caller assembles and a UI that rings three people. A
+  meeting is the other shape and it IS supported (see § Joining a meeting): its roster
+  already exists, so joining one is a POST rather than a product.
 - **The microphone is released on ONE path.** Every ending — our hangup, theirs, a
   dropped connection, calling switched off — arrives as the backend's `call_state` frame,
   and the store's handler is the only place that stops the media. A path that released it
@@ -782,6 +783,38 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   target: the sandbox chat is a group thread, and ringing it would ring real people. A
   live test is the user's own click, on their own machine, to somebody who agreed to it
   beforehand — see NATIVE-CALLING.md § 8 for what is still unverified against the tenant.
+
+## Joining a meeting (the calendar stays read-only)
+
+A calendar event with a Teams link offers **Join here** beside the link that opens real
+Teams (`web/src/components/meeting-join-button.tsx`). It joins with a microphone and
+nothing else, so both actions exist and neither replaces the other: a meeting whose point
+is a shared screen is still one to open in Teams.
+
+- **The link IS the address.** `calling::MeetingJoin::from_join_url` reads the thread, the
+  message id and the `{Tid, Oid}` context out of `onlineMeeting.joinUrl`, and that
+  context is exactly the `meetingInfo` the calling service asks for. So joining needs no
+  new service and no new token — the link the user could click is the whole address.
+  `examples/meeting_join_recon.rs` checks the parse against the user's own real meetings,
+  READ-ONLY, and prints shapes rather than values because a join URL is a key.
+- **A join rings nobody**, which is the only thing it does differently from a call: the
+  payload carries no `participants.to`. `call_join` is still an `OUTWARD_METHODS` entry,
+  because everybody already in the meeting sees the user arrive and their microphone is
+  opened to all of them.
+- **The lobby is its own state.** A meeting may hold the user in its lobby
+  (`ConnectedForRosterOnly`), and the UI says "Waiting to be let in…" rather than
+  "Connecting…" — the one thing they have to know is that nobody has admitted them yet.
+- **The roster is what "who" means in a meeting.** `rosterUpdate` frames replace the list
+  wholesale, we are dropped from it (`CallSession::others`), and the bar names one or two
+  people and counts a crowd. A meeting's title stands where a call names a person.
+- **Several voices, several audio elements.** Teams sends a meeting's voices as separate
+  streams, so `call-media.ts` keeps one `<audio>` per remote stream and drops each when
+  its stream ends. A single element would play one person and silently drop the rest.
+- **The calendar is untouched.** Joining writes nothing, answers no invitation and
+  follows no link on the user's behalf — the app still never opens `join_url` itself, and
+  the read-only rules of § The calendar hold exactly as before.
+- `cd web && bun run preview -- --out /tmp/call --call` captures the Join button, the
+  lobby and the roster, and `web/e2e/calling.spec.ts` pins them.
 
 ## The user's own status (outward, and gated like one)
 

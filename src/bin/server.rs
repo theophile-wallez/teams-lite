@@ -226,7 +226,7 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// be taken back, and none is ever automatic: each one carries out a click the user
 /// just made. `call_prepare` is the one calling method that is NOT here — it posts
 /// nothing, and sits in {@link MACHINE_METHODS} with its own refusal text.
-const OUTWARD_METHODS: [&str; 11] = [
+const OUTWARD_METHODS: [&str; 12] = [
     "send",
     "edit",
     "delete",
@@ -235,6 +235,7 @@ const OUTWARD_METHODS: [&str; 11] = [
     "set_always_available",
     "set_chat_muted",
     "call_place",
+    "call_join",
     "call_accept",
     "call_hangup",
     "call_mute",
@@ -901,6 +902,22 @@ struct CallingPlane {
     connection: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// A one-to-one call, or a meeting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallKind {
+    Call,
+    Meeting,
+}
+
+impl CallKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            CallKind::Call => "call",
+            CallKind::Meeting => "meeting",
+        }
+    }
+}
+
 /// Which way a call was set up. It decides which payload ends it and which side of
 /// the SDP handshake this app performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -952,12 +969,24 @@ struct CallSession {
     /// every request, and the id every RPC about this call names.
     id: String,
     direction: CallDirection,
+    /// A one-to-one call, or a meeting this machine joined. It changes what the UI
+    /// says, what the roster means, and nothing about the signaling: a meeting is the
+    /// same set of links once the join is answered.
+    kind: CallKind,
     phase: CallPhase,
-    /// The chat or channel the call belongs to, when it has one.
+    /// The chat, channel or meeting thread the call belongs to, when it has one.
     conversation_id: Option<String>,
-    /// Who is on the other end (one person: a group call is not offered).
+    /// Who is on the other end of a one-to-one call. A meeting names its subject here
+    /// instead, because "who" is the roster.
     peer_mri: String,
     peer_name: String,
+    /// Everybody the meeting's roster names, us included, newest frame wins. Empty for
+    /// a one-to-one call, where the peer above is the whole answer.
+    roster: Vec<calling::RosterMember>,
+    /// True while the meeting has us in its LOBBY: joined, and waiting for somebody
+    /// inside to admit us. Not a failure and not a connection — its own state, because
+    /// the user has to know nobody has let them in yet.
+    in_lobby: bool,
     /// Every link the service has handed us so far, newest merged over oldest.
     links: calling::Links,
     local: calling::LocalParticipant,
@@ -975,12 +1004,19 @@ struct CallSession {
 }
 
 impl CallSession {
+    /// Everybody in the meeting but us. Our own mri is dropped here rather than in the
+    /// caller, so a count of "who else is here" is one answer in one place.
+    fn others(&self) -> Vec<&calling::RosterMember> {
+        self.roster.iter().filter(|member| member.mri != self.local.id).collect()
+    }
+
     /// The view of this call every client gets. It carries no SDP and no
     /// credentials: those only ever leave through a token-gated method.
     fn json(&self) -> Value {
         json!({
             "id": self.id,
             "direction": self.direction.as_str(),
+            "kind": self.kind.as_str(),
             "phase": self.phase.as_str(),
             "conversation_id": self.conversation_id,
             "peer": self.peer_name,
@@ -988,6 +1024,13 @@ impl CallSession {
             "muted": self.muted,
             "connected_at_ms": self.connected_at_ms,
             "end_reason": self.end_reason,
+            "in_lobby": self.in_lobby,
+            // Who else is in the meeting, by name, and how many of them there are.
+            // Ourselves excluded: a count that includes the reader reads as one person
+            // too many, and the name of the person reading is not news.
+            "others": self.others().iter().map(|m| m.display_name.clone()).collect::<Vec<_>>(),
+            "other_mris": self.others().iter().map(|m| m.mri.clone()).collect::<Vec<_>>(),
+            "waiting_in_lobby": self.others().iter().filter(|m| m.in_lobby).count(),
             // What the user may do next, decided HERE rather than in the page: the
             // links are what make an action possible, and only this side sees them.
             "can_accept": self.phase == CallPhase::Ringing && self.offer.is_some(),
@@ -3146,6 +3189,74 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // is ringing (and returns the caller's own offer). The ICE servers are why
         // this is gated: they carry the relay credentials this backend holds.
         "call_prepare" => {
+            // A meeting: reserve the call against the link the calendar already holds.
+            // Its own shape rather than a flag, because what comes back differs — a
+            // join has no offer to answer, and no person to name.
+            if let Some(join_url) = params.get("join_url").and_then(Value::as_str) {
+                let meeting = calling::MeetingJoin::from_join_url(join_url).context(
+                    "call_prepare: that is not a Teams meeting link — this app joins a \
+                     meeting from its own join link and nothing else",
+                )?;
+                let (session, endpoint_id, surl) = {
+                    let (endpoint_id, surl) = {
+                        let plane = ctx.calling.lock().unwrap();
+                        let channel = plane.channel.as_ref().filter(|_| plane.connected).context(
+                            "call_prepare: calling is not connected yet — turn it on in \
+                             Settings, then try again",
+                        )?;
+                        (channel.endpoint_id.clone(), channel.surl.clone())
+                    };
+                    (ctx.session().await?, endpoint_id, surl)
+                };
+                // The meeting's title, passed by whoever clicked Join, because that is
+                // where it exists: the join link carries no subject, and the caller is
+                // holding the calendar event it came from.
+                let subject = params
+                    .get("subject")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("Meeting")
+                    .to_string();
+                let call_id = uuid::Uuid::new_v4().to_string();
+                let call = CallSession {
+                    id: call_id.clone(),
+                    direction: CallDirection::Outgoing,
+                    kind: CallKind::Meeting,
+                    // Joining, not ringing: nobody has to pick up.
+                    phase: CallPhase::Connecting,
+                    conversation_id: Some(meeting.thread_id.clone()),
+                    peer_mri: String::new(),
+                    peer_name: subject,
+                    roster: Vec::new(),
+                    in_lobby: false,
+                    links: calling::Links::default(),
+                    local: ctx.local_participant(&session, &endpoint_id),
+                    callbacks: calling::CallbackBase {
+                        surl,
+                        session_id: uuid::Uuid::new_v4().to_string(),
+                        cause_id: short_cause_id(),
+                    },
+                    offer: None,
+                    muted: false,
+                    connected_at_ms: None,
+                    end_reason: None,
+                };
+                {
+                    let mut plane = ctx.calling.lock().unwrap();
+                    if plane.call.as_ref().is_some_and(|c| c.phase != CallPhase::Ended) {
+                        anyhow::bail!(
+                            "call_prepare: this machine is already in a call — leave it first"
+                        );
+                    }
+                    plane.call = Some(call);
+                }
+                ctx.emit_call_state();
+                return Ok(json!({
+                    "call_id": call_id,
+                    "ice_servers": ctx.call_ice_servers().await,
+                }));
+            }
             let ringing_id = params.get("call_id").and_then(Value::as_str);
             match ringing_id {
                 // Answering: hand back the offer that is already ringing.
@@ -3242,6 +3353,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let call = CallSession {
                         id: call_id.clone(),
                         direction: CallDirection::Outgoing,
+                        kind: CallKind::Call,
                         phase: CallPhase::Dialing,
                         conversation_id: Some(conversation.clone()),
                         peer_mri,
@@ -3254,6 +3366,8 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             cause_id: short_cause_id(),
                         },
                         offer: None,
+                        roster: Vec::new(),
+                        in_lobby: false,
                         muted: false,
                         connected_at_ms: None,
                         end_reason: None,
@@ -3327,6 +3441,64 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
                 Err(e) => {
                     ctx.end_call_locally("CallEndReasonPlaceFailed").await;
+                    Err(e)
+                }
+            }
+        }
+
+        // Join a meeting: the same one POST, carrying our offer and the meeting's own
+        // thread instead of somebody to ring (NATIVE-CALLING.md § 2.3).
+        //
+        // Outward, like placing a call: everybody already in the meeting sees the user
+        // arrive, and their microphone is opened to all of them. A join rings nobody,
+        // which is the only difference in what it does to other people.
+        "call_join" => {
+            let call_id = param_str(params, "call_id")?;
+            let sdp = param_str(params, "sdp")?;
+            let join_url = param_str(params, "join_url")?;
+            let meeting = calling::MeetingJoin::from_join_url(&join_url)
+                .context("call_join: that is not a Teams meeting link")?;
+            let (local, callbacks) = {
+                let plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_ref()
+                    .filter(|c| c.id == call_id && c.kind == CallKind::Meeting)
+                    .context("call_join: no such meeting — call_prepare first")?;
+                (call.local.clone(), call.callbacks.clone())
+            };
+            let session = ctx.session().await?;
+            let ic3 = ctx.tokens.get(IC3_SCOPE).await?;
+            let joined = calling::join_meeting(
+                &ctx.http,
+                &session,
+                &ic3,
+                &local,
+                &meeting,
+                &calling::MediaContent::sdp(sdp),
+                &callbacks,
+                &call_id,
+            )
+            .await;
+            match joined {
+                Ok(joined) => {
+                    {
+                        let mut plane = ctx.calling.lock().unwrap();
+                        if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                            call.links.merge(&joined.links);
+                            // The service's answer may already say we are in the lobby.
+                            if calling::lobby_state_in_frame(&joined.raw)
+                                == Some(calling::LobbyState::Waiting)
+                            {
+                                call.in_lobby = true;
+                            }
+                        }
+                    }
+                    ctx.emit_call_state();
+                    Ok(json!({ "call_id": call_id, "links": joined.links.names() }))
+                }
+                Err(e) => {
+                    ctx.end_call_locally("CallEndReasonJoinFailed").await;
                     Err(e)
                 }
             }
@@ -6531,6 +6703,51 @@ impl Ctx {
             return;
         }
 
+        // A meeting's roster: who is in it, and who is still in its lobby. Every frame
+        // replaces the list, because the service sends the whole roster it wants us to
+        // hold rather than a diff we would have to reconcile.
+        if let Some(roster) = calling::roster_in_frame(&frame.body) {
+            let changed = {
+                let mut plane = self.calling.lock().unwrap();
+                match plane.call.as_mut() {
+                    Some(call) if call.roster != roster => {
+                        call.roster = roster;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if changed {
+                self.emit_call_state();
+            }
+        }
+
+        // The lobby: joined, and waiting for somebody inside to admit us. It is read
+        // from OUR OWN state in the frame, and only for a meeting — a one-to-one call
+        // has no lobby, and reading one into it would show a state that cannot end.
+        if let Some(state) = calling::lobby_state_in_frame(&frame.body) {
+            let changed = {
+                let mut plane = self.calling.lock().unwrap();
+                match plane.call.as_mut() {
+                    Some(call) if call.kind == CallKind::Meeting => {
+                        let waiting = state == calling::LobbyState::Waiting;
+                        let changed = call.in_lobby != waiting;
+                        call.in_lobby = waiting;
+                        // Being admitted is what turns a join into audio.
+                        if !waiting && call.phase == CallPhase::Connecting {
+                            call.phase = CallPhase::Connected;
+                            call.connected_at_ms.get_or_insert(now_ms());
+                        }
+                        changed
+                    }
+                    _ => false,
+                }
+            };
+            if changed {
+                self.emit_call_state();
+            }
+        }
+
         // The far side picked up. Audio still waits for their SDP, so this only stops
         // the ringing tone.
         if calling::call_accepted_in_frame(&frame.body) {
@@ -6616,6 +6833,9 @@ impl Ctx {
                 invite.call_id.clone()
             },
             direction: CallDirection::Incoming,
+            // An invite on the calling socket is a call. A meeting is joined, never
+            // offered: this app is not invited to a meeting, it walks in.
+            kind: CallKind::Call,
             phase: CallPhase::Ringing,
             conversation_id: invite.thread_id.clone(),
             peer_mri: invite.caller_mri.clone(),
@@ -6636,6 +6856,8 @@ impl Ctx {
                 cause_id: short_cause_id(),
             },
             offer: invite.offer.clone(),
+            roster: Vec::new(),
+            in_lobby: false,
             muted: false,
             connected_at_ms: None,
             end_reason: None,
@@ -7489,6 +7711,9 @@ mod tests {
         let call = CallSession {
             id: "call-1".into(),
             direction: CallDirection::Incoming,
+            // An invite on the calling socket is a call. A meeting is joined, never
+            // offered: this app is not invited to a meeting, it walks in.
+            kind: CallKind::Call,
             phase: CallPhase::Ringing,
             conversation_id: Some("19:thread@thread.v2".into()),
             peer_mri: "8:orgid:her".into(),
@@ -7508,6 +7733,8 @@ mod tests {
                 cause_id: "c".into(),
             },
             offer: Some(calling::MediaContent::sdp("v=0 secret-sdp")),
+            roster: Vec::new(),
+            in_lobby: false,
             muted: false,
             connected_at_ms: None,
             end_reason: None,
@@ -7532,6 +7759,9 @@ mod tests {
         let mut call = CallSession {
             id: "call-1".into(),
             direction: CallDirection::Incoming,
+            // An invite on the calling socket is a call. A meeting is joined, never
+            // offered: this app is not invited to a meeting, it walks in.
+            kind: CallKind::Call,
             phase: CallPhase::Ringing,
             conversation_id: None,
             peer_mri: "8:orgid:her".into(),
@@ -7549,6 +7779,8 @@ mod tests {
                 cause_id: "c".into(),
             },
             offer: None,
+            roster: Vec::new(),
+            in_lobby: false,
             muted: false,
             connected_at_ms: None,
             end_reason: None,

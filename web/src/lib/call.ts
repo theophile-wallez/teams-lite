@@ -24,6 +24,10 @@ export type CallPhase = "ringing" | "dialing" | "connecting" | "connected" | "en
 /** Which way it was set up. */
 export type CallDirection = "incoming" | "outgoing";
 
+/** A one-to-one call, or a meeting this machine joined. It changes what the UI says and
+ *  what the roster means — the signaling is the same either way. */
+export type CallKind = "call" | "meeting";
+
 /** The one call this machine is in, as every client is shown it.
  *
  *  It deliberately carries no SDP, no links and no credentials: those leave the backend
@@ -32,13 +36,23 @@ export type CallDirection = "incoming" | "outgoing";
 export type ActiveCall = {
   id: string;
   direction: CallDirection;
+  kind: CallKind;
   phase: CallPhase;
-  /** The chat the call belongs to, when it has one. */
+  /** The chat, channel or meeting thread the call belongs to, when it has one. */
   conversation_id: string | null;
-  /** Who is on the other end, named the way every other surface names them — the
-   *  user's own nickname for them included. */
+  /** Who is on the other end of a one-to-one call. A meeting names its own title here
+   *  instead, because "who" is the roster below. */
   peer: string;
   peer_mri: string;
+  /** Everybody else in a meeting, by name. Empty for a one-to-one call. */
+  others: string[];
+  /** Their MRIs, aligned with `others`, for their faces. */
+  other_mris: string[];
+  /** True while the meeting has us in its LOBBY: joined, and waiting to be let in. */
+  in_lobby: boolean;
+  /** How many of `others` are themselves still in the lobby — people who cannot hear
+   *  the user yet. */
+  waiting_in_lobby: number;
   muted: boolean;
   /** When audio started (epoch ms), so a duration counts from the backend's clock. */
   connected_at_ms: number | null;
@@ -114,8 +128,17 @@ export function conversationIsCallable(kind: ConversationKind | undefined): bool
 }
 
 /** What the call is doing, in the words the UI shows. Written for somebody glancing at
- *  a bar while doing something else, so it names the person once and the state once. */
+ *  a bar while doing something else, so it names the person once and the state once.
+ *
+ *  A meeting says different things for the same phases: nobody is being rung, and the
+ *  lobby is a state a call does not have. */
 export function callPhaseLabel(call: ActiveCall): string {
+  if (call.kind === "meeting") {
+    if (call.phase === "ended") return "Meeting left";
+    if (call.in_lobby) return "Waiting to be let in…";
+    if (call.phase === "connected") return meetingPresenceLabel(call);
+    return "Joining…";
+  }
   switch (call.phase) {
     case "ringing":
       return "Incoming call";
@@ -128,6 +151,23 @@ export function callPhaseLabel(call: ActiveCall): string {
     case "ended":
       return "Call ended";
   }
+}
+
+/** Who else is in the meeting, in the fewest words that are true.
+ *
+ *  One or two people are NAMED — that is what somebody glancing at the bar wants to
+ *  know — and a crowd is counted, because six names do not fit and would not be read.
+ *  A roster that has not arrived says nothing about it rather than "0 others". */
+export function meetingPresenceLabel(call: ActiveCall): string {
+  const others = call.others.filter((name) => name.trim().length > 0);
+  if (others.length === 0) return "In the meeting";
+  if (others.length <= 2) return `With ${others.join(" and ")}`;
+  return `With ${others.length} others`;
+}
+
+/** Whether this call is a meeting the user joined. */
+export function isMeeting(call: ActiveCall | null): boolean {
+  return call?.kind === "meeting";
 }
 
 /** A running call duration as "0:07" / "12:45" / "1:02:03", from the backend's own
@@ -159,6 +199,8 @@ export function callEndLabel(call: ActiveCall | null): string {
       return "The call could not be placed.";
     case "CallEndReasonAcceptFailed":
       return "The call could not be answered.";
+    case "CallEndReasonJoinFailed":
+      return "The meeting could not be joined.";
     case "CallEndReasonNoAcceptLink":
       return "This call cannot be answered here.";
     case "CallEndReasonReconnected":
@@ -168,6 +210,49 @@ export function callEndLabel(call: ActiveCall | null): string {
     default:
       return "The call ended.";
   }
+}
+
+/**
+ * Whether a URL is a Teams meeting link this app can join.
+ *
+ * A small port of `calling::MeetingJoin::from_join_url`, and deliberately only the part
+ * that decides whether to OFFER the join: the path names a meetup-join, and it addresses
+ * a thread. The backend parses it again and refuses anything it disagrees with, so the
+ * worst a mismatch here costs is a button that reports a refusal — never a join to
+ * somewhere else.
+ */
+export function isMeetingJoinLink(url: string | undefined | null): boolean {
+  if (!url) return false;
+  const after = url.split("?")[0]?.split("/meetup-join/")[1];
+  if (!after) return false;
+  const thread = decodeURIComponentSafe(after.split("/")[0] ?? "");
+  return thread.startsWith("19:");
+}
+
+function decodeURIComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/** Whether a meeting could be joined right now: calling is on, the connection is up, and
+ *  this machine is not already in a call.
+ *
+ *  The one-to-one rule does NOT apply — a meeting is many people by definition, and it is
+ *  the service that mixes them. What still applies is one call at a time. */
+export function canJoinMeeting(status: CallStatus): boolean {
+  return status.enabled && status.ready && !isLive(status.call);
+}
+
+/** Why a meeting cannot be joined right now, for the tooltip on a disabled Join button.
+ *  Empty when it can. */
+export function meetingUnavailableReason(status: CallStatus): string {
+  if (!status.enabled) return "Turn calling on in Settings to join a meeting here.";
+  if (!status.ready) return "This machine is not registered for calls yet.";
+  if (isLive(status.call)) return "This app holds one call at a time.";
+  return "";
 }
 
 /** Why calling cannot be used right now, for the tooltip on a disabled call button.

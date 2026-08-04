@@ -16,6 +16,8 @@
  * - **The SDP is not rewritten.** `application/sdp-ngc-1.0` is a label the service puts
  *   on ordinary WebRTC SDP, so what Chrome produced is what goes out. Munging it here
  *   would be guessing at a service that already accepts it.
+ * - **Every remote stream gets its own element.** A meeting sends one stream per voice,
+ *   so the call plays as many as it is sent (see {@link RemoteAudio}).
  * - **Stopping releases the microphone.** The browser shows a recording indicator for as
  *   long as a track is live, so every path out of a call — hang up, the far side hanging
  *   up, an error, the page closing — goes through {@link CallMedia.stop}.
@@ -78,10 +80,14 @@ export async function startCallMedia(options: CallMediaOptions): Promise<CallMed
   const stream = await openMicrophone();
   const pc = new RTCPeerConnection({ iceServers: options.iceServers });
   try {
-    const remoteAudio = createRemoteAudioElement();
+    // One element per remote STREAM, not one for the call. A meeting sends the voices
+    // it wants us to hear as separate streams (the service's own
+    // `multipleAudioStreams`), so a single element would play one person and drop the
+    // rest — and a one-to-one call is just the case where there is exactly one.
+    const remoteAudio = new RemoteAudio();
     pc.addEventListener("track", (event) => {
       const [remote] = event.streams;
-      if (remote) remoteAudio.srcObject = remote;
+      if (remote) remoteAudio.play(remote);
     });
     if (options.onConnectionStateChange) {
       pc.addEventListener("connectionstatechange", () =>
@@ -148,19 +154,53 @@ function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
   });
 }
 
-/** The element the far side's voice comes out of.
+/**
+ * Every voice on the call, one `<audio>` element per remote stream.
  *
- *  Made here and owned here: an `<audio>` in the React tree would be unmounted by any
- *  navigation, and the call would go silent while it was still up. */
-function createRemoteAudioElement(): HTMLAudioElement {
-  const audio = document.createElement("audio");
-  audio.autoplay = true;
-  // Nothing to look at, and nothing for a screen reader to announce: the bar in the UI
-  // is what says a call is up.
-  audio.hidden = true;
-  audio.setAttribute("data-testid", "call-remote-audio");
-  document.body.append(audio);
-  return audio;
+ * Owned here and made here: an `<audio>` in the React tree would be unmounted by any
+ * navigation, and the call would go silent while it was still up.
+ *
+ * Keyed by stream id, so a stream announced twice (a renegotiation re-fires `track`)
+ * plays once, and a meeting that adds a fifth voice adds a fifth element rather than
+ * replacing the fourth. Each element removes itself when its stream ends, and
+ * {@link RemoteAudio.stop} removes whatever is left.
+ */
+class RemoteAudio {
+  private elements = new Map<string, HTMLAudioElement>();
+
+  play(stream: MediaStream): void {
+    const existing = this.elements.get(stream.id);
+    if (existing) {
+      existing.srcObject = stream;
+      return;
+    }
+    const audio = document.createElement("audio");
+    audio.autoplay = true;
+    // Nothing to look at, and nothing for a screen reader to announce: the bar in the
+    // UI is what says a call is up.
+    audio.hidden = true;
+    audio.setAttribute("data-testid", "call-remote-audio");
+    audio.srcObject = stream;
+    document.body.append(audio);
+    this.elements.set(stream.id, audio);
+    // A voice that leaves the call takes its element with it, so a long meeting does
+    // not accumulate one dead element per person who came and went.
+    stream.addEventListener("removetrack", () => {
+      if (stream.getAudioTracks().length === 0) this.drop(stream.id);
+    });
+  }
+
+  private drop(id: string): void {
+    const audio = this.elements.get(id);
+    if (!audio) return;
+    audio.srcObject = null;
+    audio.remove();
+    this.elements.delete(id);
+  }
+
+  stop(): void {
+    for (const id of [...this.elements.keys()]) this.drop(id);
+  }
 }
 
 function stopTracks(stream: MediaStream): void {
@@ -170,7 +210,7 @@ function stopTracks(stream: MediaStream): void {
 function liveCallMedia(
   pc: RTCPeerConnection,
   stream: MediaStream,
-  remoteAudio: HTMLAudioElement,
+  remoteAudio: RemoteAudio,
   localSdp: string,
 ): CallMedia {
   let stopped = false;
@@ -193,8 +233,7 @@ function liveCallMedia(
       stopped = true;
       stopTracks(stream);
       pc.close();
-      remoteAudio.srcObject = null;
-      remoteAudio.remove();
+      remoteAudio.stop();
     },
     get connectionState() {
       return stopped ? "closed" : pc.connectionState;

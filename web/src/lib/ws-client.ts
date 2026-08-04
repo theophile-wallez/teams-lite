@@ -554,17 +554,34 @@ export class Backend {
    *  Two shapes, one per direction: a conversation starts an outgoing call, a call id
    *  prepares to answer the one that is ringing (and returns its offer). A WRITE
    *  request because it hands out the relay credentials the backend holds. */
-  callPrepare(target: { conversation: string } | { callId: string }): Promise<CallPreparation> {
+  callPrepare(
+    target:
+      | { conversation: string }
+      | { callId: string }
+      | { joinUrl: string; subject?: string },
+  ): Promise<CallPreparation> {
     const params =
       "conversation" in target
         ? { conversation: target.conversation }
-        : { call_id: target.callId };
+        : "joinUrl" in target
+          ? { join_url: target.joinUrl, subject: target.subject }
+          : { call_id: target.callId };
     return this.writeRequest<CallPreparation>("call_prepare", params);
   }
   /** Place the call: one POST carrying our offer. This is what makes a device buzz in
    *  somebody's pocket, so it is an `OUTWARD_METHODS` entry and carries out one click. */
   callPlace(callId: string, sdp: string): Promise<{ call_id: string }> {
     return this.writeRequest<{ call_id: string }>("call_place", { call_id: callId, sdp });
+  }
+  /** Join a meeting: the same one POST, with the meeting's own thread instead of
+   *  somebody to ring. Outward, because everybody already in the meeting sees the user
+   *  arrive and their microphone is opened to all of them. */
+  callJoin(callId: string, joinUrl: string, sdp: string): Promise<{ call_id: string }> {
+    return this.writeRequest<{ call_id: string }>("call_join", {
+      call_id: callId,
+      join_url: joinUrl,
+      sdp,
+    });
   }
   /** Answer the ringing call with our own SDP. Outward: it opens the user's microphone
    *  to whoever is on the other end. */

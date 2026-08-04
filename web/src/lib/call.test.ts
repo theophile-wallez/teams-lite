@@ -5,10 +5,15 @@ import {
   callEndLabel,
   callPhaseLabel,
   callUnavailableReason,
+  canJoinMeeting,
   canPlaceCall,
   conversationIsCallable,
   holdsMicrophone,
   isLive,
+  isMeeting,
+  isMeetingJoinLink,
+  meetingPresenceLabel,
+  meetingUnavailableReason,
   type ActiveCall,
   type CallPhase,
   type CallStatus,
@@ -18,10 +23,15 @@ function call(overrides: Partial<ActiveCall> = {}): ActiveCall {
   return {
     id: "call-1",
     direction: "incoming",
+    kind: "call",
     phase: "ringing",
     conversation_id: "19:thread@thread.v2",
     peer: "Riley Carter",
     peer_mri: "8:orgid:riley",
+    others: [],
+    other_mris: [],
+    in_lobby: false,
+    waiting_in_lobby: 0,
     muted: false,
     connected_at_ms: null,
     end_reason: null,
@@ -138,5 +148,84 @@ describe("what the bar says", () => {
     );
     // A code we have never seen still says something rather than nothing.
     expect(callEndLabel(call({ end_reason: "code 486" }))).toBe("The call ended.");
+  });
+});
+
+describe("joining a meeting", () => {
+  const meeting = (overrides: Partial<ActiveCall> = {}) =>
+    call({ kind: "meeting", direction: "outgoing", peer: "Quarterly planning", ...overrides });
+
+  /** The check that decides whether a Join button is drawn at all. It is a small port of
+   *  the Rust parse, so it has to agree with it on both answers. */
+  it("recognises a Teams meeting link, and nothing else", () => {
+    expect(
+      isMeetingJoinLink(
+        "https://teams.microsoft.com/l/meetup-join/19%3Ameeting_x%40thread.v2/0?context=%7B%7D",
+      ),
+    ).toBe(true);
+    // A channel meeting is the other real shape.
+    expect(
+      isMeetingJoinLink("https://teams.microsoft.com/l/meetup-join/19%3Aabc%40thread.tacv2/17194"),
+    ).toBe(true);
+    for (const url of [
+      "",
+      null,
+      undefined,
+      "https://teams.microsoft.com/l/channel/19%3Aabc%40thread.tacv2/General",
+      "https://zoom.us/j/123",
+      // The path is right, the thread is not one.
+      "https://teams.microsoft.com/l/meetup-join/quarterly-planning",
+    ]) {
+      expect(isMeetingJoinLink(url)).toBe(false);
+    }
+  });
+
+  /** A meeting is many people by definition, so the one-to-one rule does not apply to
+   *  it. One call at a time still does — there is one microphone. */
+  it("needs calling on and a free machine, and no one-to-one rule", () => {
+    expect(canJoinMeeting(status())).toBe(true);
+    expect(canJoinMeeting(status({ enabled: false }))).toBe(false);
+    expect(canJoinMeeting(status({ ready: false }))).toBe(false);
+    expect(canJoinMeeting(status({ call: meeting({ phase: "connected" }) }))).toBe(false);
+    expect(meetingUnavailableReason(status({ enabled: false }))).toMatch(/Settings/);
+    expect(meetingUnavailableReason(status({ call: meeting() }))).toMatch(/one call at a time/);
+    expect(meetingUnavailableReason(status())).toBe("");
+  });
+
+  /** The lobby is its own state. "Connecting…" would hide the one thing the user has to
+   *  know: nobody has let them in yet. */
+  it("says the lobby, the join, and who is there", () => {
+    expect(callPhaseLabel(meeting({ phase: "connecting" }))).toBe("Joining…");
+    expect(callPhaseLabel(meeting({ phase: "connecting", in_lobby: true }))).toMatch(
+      /Waiting to be let in/,
+    );
+    // Admitted, but the roster has not arrived: it says nothing about who is there
+    // rather than "0 others".
+    expect(callPhaseLabel(meeting({ phase: "connected" }))).toBe("In the meeting");
+    expect(callPhaseLabel(meeting({ phase: "ended" }))).toBe("Meeting left");
+  });
+
+  /** One or two people are named, because that is what a glance wants. A crowd is
+   *  counted, because six names do not fit and would not be read. */
+  it("names a couple of people and counts a crowd", () => {
+    expect(meetingPresenceLabel(meeting({ others: ["Ava"] }))).toBe("With Ava");
+    expect(meetingPresenceLabel(meeting({ others: ["Ava", "Liam"] }))).toBe("With Ava and Liam");
+    expect(meetingPresenceLabel(meeting({ others: ["Ava", "Liam", "Priya"] }))).toBe(
+      "With 3 others",
+    );
+    // A roster of blanks is a roster that has not arrived.
+    expect(meetingPresenceLabel(meeting({ others: ["", " "] }))).toBe("In the meeting");
+  });
+
+  it("tells a meeting apart from a call", () => {
+    expect(isMeeting(meeting())).toBe(true);
+    expect(isMeeting(call())).toBe(false);
+    expect(isMeeting(null)).toBe(false);
+  });
+
+  it("explains a join that failed", () => {
+    expect(callEndLabel(meeting({ end_reason: "CallEndReasonJoinFailed" }))).toMatch(
+      /could not be joined/,
+    );
   });
 });

@@ -839,6 +839,10 @@ function startMock(): ReturnType<typeof Bun.spawn> {
       // last long enough to be captured, and to be read in a recording. The E2E suite
       // sets its own (faster) value, and so may the caller.
       MOCK_AGENT_STEP_MS: process.env.MOCK_AGENT_STEP_MS ?? "650",
+      // Same reasoning for a call: the ring, the lobby and the roster each have to last
+      // long enough to be captured and to be read in a recording.
+      MOCK_CALL_ANSWER_MS: process.env.MOCK_CALL_ANSWER_MS ?? "1800",
+      MOCK_CALL_CONNECT_MS: process.env.MOCK_CALL_CONNECT_MS ?? "2600",
     },
     stdout: "inherit",
     stderr: "inherit",
@@ -1212,10 +1216,41 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-connected-card-dark.png`, '[data-testid="call-bar"]');
       await page.locator('[data-testid="call-hangup"]').click();
+
+      // 6. A meeting: the Join button beside the link out, the lobby, then the roster.
+      //
+      // Back to the root first: the calendar pane only shows when no conversation is in
+      // the URL, and step 3 opened one (see app.tsx).
+      await page.goto(WEB_ORIGIN, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector('[data-testid="conversation-row"]');
+      await openCalendarTab(page);
+      await openCalendarView(page, "day");
+      // A fixture that HAS a join link: the seed gives one to every other event, so
+      // `.first()` is a coin toss and a Join button that is simply absent reads as a bug.
+      await page
+        .locator('[data-testid="calendar-event"][data-event-id="ev-overlap-a"]')
+        .first()
+        .click();
+      const details = page.locator('[data-testid="calendar-event-details"]');
+      await details.waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-meeting-actions-light.png`, '[data-testid="calendar-event-details"]');
+      await page.locator('[data-testid="meeting-join-here"]').click();
+      await page.waitForSelector('[data-testid="call-phase"]:has-text("Waiting")');
+      await shot(`${out}-meeting-lobby-light.png`, '[data-testid="call-bar"]');
+      await page.waitForSelector('[data-testid="call-bar"][data-phase="connected"]');
+      await page.waitForSelector('[data-testid="call-phase"]:has-text("others")');
+      await shot(`${out}-meeting-card-light.png`, '[data-testid="call-bar"]');
+      await setTheme("dark");
+      await shot(`${out}-meeting-card-dark.png`, '[data-testid="call-bar"]');
+      await setTheme("light");
+      await page.locator('[data-testid="call-hangup"]').click();
+
       console.log(
         `[preview] wrote ${out}-off-light.png, ${out}-settings-{light,on-light,on-dark}.png, ` +
           `${out}-button-light.png, ${out}-ringing-{light,card-light,card-dark}.png and ` +
-          `${out}-{connected-card-light,muted-card-light,connected-card-dark}.png`,
+          `${out}-{connected-card-light,muted-card-light,connected-card-dark}.png and ` +
+          `${out}-meeting-{actions-light,lobby-light,card-light,card-dark}.png`,
       );
     });
     process.exit(0);

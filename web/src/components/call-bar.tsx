@@ -6,8 +6,16 @@ import {
   CallIcon,
   Mic01Icon,
   MicOff01Icon,
+  UserGroupIcon,
 } from "@hugeicons/core-free-icons";
-import { callDurationLabel, callPhaseLabel, isLive, type ActiveCall } from "~/lib/call";
+import {
+  callDurationLabel,
+  callPhaseLabel,
+  isLive,
+  isMeeting,
+  meetingPresenceLabel,
+  type ActiveCall,
+} from "~/lib/call";
 import { useAppState, useController } from "./controller-context";
 import { Avatar } from "./avatar";
 import { Button } from "./ui/button";
@@ -59,6 +67,7 @@ function CallCard(props: { call: ActiveCall }) {
   const controller = useController();
   const reduce = useReducedMotion();
   const ringing = call.phase === "ringing";
+  const meeting = isMeeting(call);
 
   return (
     <motion.div
@@ -73,7 +82,15 @@ function CallCard(props: { call: ActiveCall }) {
       className="pointer-events-auto flex w-full items-center gap-3 rounded-2xl border border-border bg-card p-3 shadow-pop sm:w-80"
     >
       <span className="relative shrink-0">
-        <Avatar seed={call.peer_mri} label={call.peer} className="size-10" />
+        {/* A meeting is not a person, so it gets its own mark rather than a face
+            seeded from an empty mri. */}
+        {meeting ? (
+          <span className="grid size-10 place-items-center rounded-xl bg-primary/10 text-primary">
+            <HugeiconsIcon icon={UserGroupIcon} className="size-5" strokeWidth={1.8} />
+          </span>
+        ) : (
+          <Avatar seed={call.peer_mri} label={call.peer} className="size-10" />
+        )}
         {ringing && (
           <span className="absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-success text-white">
             <HugeiconsIcon icon={CallIcon} className="size-2.5 animate-pulse" strokeWidth={2.4} />
@@ -83,10 +100,20 @@ function CallCard(props: { call: ActiveCall }) {
 
       <div className="min-w-0 flex-1">
         <p data-testid="call-peer" className="truncate text-sm font-semibold text-foreground">
-          {call.peer || "Unknown caller"}
+          {call.peer || (meeting ? "Meeting" : "Unknown caller")}
         </p>
         <p data-testid="call-phase" className="truncate text-xs text-text-faint">
-          {call.phase === "connected" ? <CallClock call={call} /> : callPhaseLabel(call)}
+          {/* Connected: the duration, and — in a meeting — who else is in it, because
+              "how long" alone does not answer the question a meeting raises. Any other
+              phase says what it is doing instead. */}
+          {call.phase === "connected" ? (
+            <>
+              {isMeeting(call) && <>{meetingPresenceLabel(call)} · </>}
+              <CallClock call={call} />
+            </>
+          ) : (
+            callPhaseLabel(call)
+          )}
         </p>
       </div>
 
@@ -123,7 +150,7 @@ function CallCard(props: { call: ActiveCall }) {
         <button
           type="button"
           data-testid="call-hangup"
-          aria-label={ringing ? "Decline" : "Hang up"}
+          aria-label={ringing ? "Decline" : meeting ? "Leave the meeting" : "Hang up"}
           onClick={() => void controller.hangUpCall()}
           className="grid size-9 place-items-center rounded-full bg-destructive/15 text-destructive transition-colors hover:bg-destructive/25"
         >
