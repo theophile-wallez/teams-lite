@@ -62,6 +62,11 @@ def steps():
         ("backend", "BLOCK", f"{PLAY}click", {"element": "x", "ref": "e1"}),
         ("devpair", "ALLOW", f"{PLAY}navigate", {"url": "http://localhost:19441/"}),
         ("devpair", "BLOCK", f"{PLAY}type", {"element": "composer", "ref": "e1", "text": "hi"}),
+        # The RELEASED build's own front (19442, teams-lite-app.service) is a third door to
+        # the same account, so looking is fine and typing is not.
+        ("released", "ALLOW", f"{PLAY}navigate", {"url": "http://127.0.0.1:19442/"}),
+        ("released", "ALLOW", f"{PLAY}take_screenshot", {}),
+        ("released", "BLOCK", f"{PLAY}type", {"element": "composer", "ref": "e1", "text": "hi"}),
         # A tailnet name is a live front whatever port it is served on.
         ("tailnet", "ALLOW", f"{PLAY}navigate", {"url": "https://theophile-remote.taild26c06.ts.net/"}),
         ("tailnet", "BLOCK", f"{PLAY}press_key", {"key": "Enter"}),

@@ -1119,25 +1119,30 @@ can never lose a race to it.
 | --------- | ------------------------------------------------- | ----------------------- |
 | **19420** | Backend, send-capable — the always-on service      | `src/bin/server.rs` `DEFAULT_PORT` |
 | **19421** | Backend, send-capable — the user's hands-on dev one | `bin/teams-dev-server.sh` |
+| **19422** | Backend, send-capable — the RELEASED build beside it | `bin/teams-lite-service.sh` `APP_BACKEND_PORT` |
 | **19430** | Backend, read-only (`TEAMS_LITE_READ_ONLY=1`)      | `src/bin/server.rs` `READ_ONLY_PORT` |
 | **19440** | Web app, production — the always-on service, and `teams` | `web/server.ts`, `launcher/src/launch.ts` |
 | **19441** | Web UI, `vite dev`                                 | `web/vite.config.ts` `DEV_PORT` |
+| **19442** | Web app — the RELEASED build's own front            | `bin/teams-lite-service.sh` `APP_WEB_PORT` |
 | 19455 / 19445 | `bun run dev:mock` — mock backend / app        | `web/package.json` |
 | 19456 / 19446 | `bun run preview` — mock backend / app         | `web/scripts/preview.ts` |
 | 19457 / 19447 | E2E — mock backend / app                       | `web/playwright.config.ts` |
 | 8443      | Tailnet HTTPS front for the web UI (`tailscale serve`) | `bin/teams-lite-service.sh` |
 
-**The x420/x440 pair is the service; x421/x441 is the user's dev pair.** They are two
-send-capable backends on one SQLite store, so they must never share a port: the service
-holds 19420 for weeks, and `bin/teams-dev-server.sh` plus `bun run dev` step aside to
-19421/19441 so both can run at once. Read-only is the exception that keeps its own
-19430 — and `teams-dev-server.sh` deliberately does not pin `TEAMS_LITE_PORT` when
-`TEAMS_LITE_READ_ONLY=1`, because an explicit port would drag it off 19430.
+**The x420/x440 pair is the service; x421/x441 is the user's dev pair; x422/x442 is the
+RELEASED build.** All three are send-capable backends on one SQLite store, so they must
+never share a port: the service holds 19420 for weeks, `bin/teams-dev-server.sh` plus
+`bun run dev` step aside to 19421/19441, and `teams-lite-app.service` takes 19422/19442
+(see § Running the released build beside the staged one). Read-only is the exception that
+keeps its own 19430 — and `teams-dev-server.sh` deliberately does not pin
+`TEAMS_LITE_PORT` when `TEAMS_LITE_READ_ONLY=1`, because an explicit port would drag it
+off 19430.
 
 `TEAMS_LITE_PORT` overrides a backend's, `PORT` a web server's,
 `E2E_MOCK_PORT` / `E2E_WEB_PORT` the suite's. Change a default in code and this table
-in the same commit — and check `.claude/hooks/guard-live-automation.sh`, which matches
-19420, 19421, 19440 and 19441 by number.
+in the same commit — and check both hooks: `guard-live-automation.sh` and
+`guard-prod-chat-target.sh` match 1942[0-2] and 1944[0-2] by number, so a new
+send-capable port they do not know is a hole in the guard.
 
 ## Updating the app from inside it (two clicks, and one install shape)
 
@@ -1194,7 +1199,9 @@ button says what it costs before it is pressed.
   accepts and never reads back. That install is updated by `bin/teams-lite-service.sh
   update` (see § The always-on service), and widening the in-app update to cover it is a
   deliberate feature — the release would have to carry the scripts and units too — never a
-  quiet swap of a staged file.
+  quiet swap of a staged file. What the user gets INSTEAD is both at once: the released
+  build runs beside the staged pair on ports of its own, and updates itself there (see
+  § Running the released build beside the staged one).
 - The notice used to be an eleven-pixel link that REPLACED the status line, where it hid
   the truncated `error:` a sign-in outage puts there (see `broker-banner.tsx`). It has its
   own row now, and `web/e2e/update.spec.ts` pins that it never covers that line again.
@@ -1238,6 +1245,9 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   `update` holds the `try-restart` until the agent is quiet — bounded, then it proceeds
   (see § The local agent for the other half, which closes what a restart did leave
   behind). `--now` skips the wait and is the user's: the hook refuses it.
+- **It is not the only install on this machine.** `teams-lite-app.service` runs the
+  RELEASED build beside it, on 19422/19442, and the same script owns that unit — see
+  § Running the released build beside the staged one for what keeps the two apart.
 - **What is yours:** `install`, `update`, `units`, `status`, `logs`, `stop`,
   `uninstall`, and every `systemctl --user status|cat|show` /
   `journalctl --user -u …`. Diagnosing the service is normal work.
@@ -1268,6 +1278,57 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
 - **Tailscale, never Funnel.** `tailscale serve` is tailnet-only, behind Tailscale's
   own authenticated HTTPS. `tailscale funnel` would publish the user's Teams account
   to the internet, send included.
+
+## Running the released build BESIDE the staged one
+
+`teams-lite-app.service` runs the single `teams` binary install.sh downloads — the GitHub
+release asset itself — on ports of its own, at the same time as the staged pair. Two
+installs, one machine, and each answers a question the other cannot:
+
+- **the staged pair (19420 / 19440)** follows the checkout: a push, and the phone is on
+  that commit a minute later through `tailscale serve`. It cannot update itself.
+- **the released build (19422 / 19442)** follows CI, and it is the ONLY shape that can
+  update itself from inside the app (see § Updating the app from inside it) — so it is
+  also the only way to find out that the published artifact is broken before somebody
+  else does.
+
+`bin/teams-lite-service.sh` owns the unit like the others (`units`, `status`, `logs`,
+`stop`, `uninstall` all cover it), and starting it stays the user's:
+`systemctl --user enable --now teams-lite-app.service`. Four things hold the two apart,
+and `update::tests::the_released_build_runs_beside_the_staged_one_and_never_over_it` pins
+every one:
+
+- **Ports of its own, stated rather than defaulted.** The default IS the staged backend's
+  port, and a second backend that bound it would either fail to start or — worse — be
+  ATTACHED to by the wrong launcher (`ensureBackend` attaches to whatever already listens).
+- **No `TEAMS_NO_IDLE_EXIT`, which is the opposite of the staged backend unit** where it is
+  mandatory. The launcher holds its own keepalive, so nothing idles out while the unit
+  runs; and the idle exit is what clears a backend whose launcher died. One left holding
+  19422 would be attached to by the next start, and an attached backend published its own
+  write token — so the page would be handed a token that backend refuses and every send
+  would come back refused, with nothing looking wrong.
+- **Not `PartOf=teams-lite.target`.** Restarting or enabling the staged pair's target must
+  not reach a second app the user did not ask for.
+- **No unit at all when the binary is absent.** `install_units` skips it rather than
+  writing a unit systemd rejects and whose start would fail with 203/EXEC.
+
+**The write token is what makes sharing a machine safe**, and it is the one thing that had
+to change for this: there is ONE token file per machine, so a second backend that
+published would overwrite the first one's token — and the first one's own frontend would
+then be refused every send while reads kept working, which on the always-on service means
+the user's phone quietly losing the ability to answer anybody. So a PINNED token is never
+published (`write_token` in `src/bin/server.rs`, pinned by
+`a_pinned_write_token_is_never_published`): the launcher mints one per backend it spawns
+and hands the same value to the web server it runs in-process, and the staged service's
+file is left alone.
+
+What the two DO share is the SQLite store, deliberately — that is a shape this app already
+has, and every duplication hazard is handled where it belongs: a live notification is
+claimed in `push_deliveries` before it is pushed, an `@claude` trigger is claimed before it
+is answered, and the presence endpoint id lives in the store so both backends refresh ONE
+registration. Two things are deliberately NOT shared: the tailnet mapping (give the
+released one its own port if the phone should reach it) and calling, which stays off in
+that unit — two registered calling endpoints on one machine would ring both.
 
 ## A broken sign-in costs the LIVE feed, never the history
 

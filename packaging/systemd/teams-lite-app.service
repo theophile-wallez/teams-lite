@@ -1,0 +1,111 @@
+[Unit]
+# Installed by bin/teams-lite-service.sh, which substitutes every @token@ below.
+# Do not hand-edit the installed copy: `teams-lite-service.sh units` rewrites it.
+# Local overrides go in @CONFIG_DIR@/app.env; an update does not touch that file.
+#
+# THE RELEASED BUILD, BESIDE THE STAGED ONE. This unit runs the single `teams` binary
+# install.sh downloads — the GitHub release asset itself — on ports of its own, so it can
+# run at the same time as the staged pair (teams-lite-backend + teams-lite-web) rather
+# than instead of it. Two reasons that is worth a unit:
+#
+#   • It is the artifact other people get. Running it here is the only way to find out
+#     that the published build is broken before somebody else does.
+#   • It can update ITSELF (see AGENTS.md § Updating the app from inside it): that binary
+#     IS the release asset, so the in-app button can replace it and restart onto it. The
+#     staged install cannot, and keeps a link to the release instead.
+#
+# The staged pair stays the one the phone uses through `tailscale serve` and stays on the
+# commit the checkout is on, a minute after a push. This one follows CI. Neither is a
+# replacement for the other, which is why the ports differ and nothing here is shared:
+#
+#   staged:   backend 19420, web 19440   (built from the checkout, updated by `update`)
+#   released: backend @APP_BACKEND_PORT@, web @APP_WEB_PORT@   (from CI, updates itself)
+#
+# ONE thing IS shared, deliberately: the SQLite store. Two send-capable backends on one
+# store is a shape this app already has (the always-on service and the user's dev backend
+# — see AGENTS.md § Ports), and the duplication hazards are already handled where they
+# belong: a live notification is claimed in `push_deliveries` before it is pushed, an
+# `@claude` trigger is claimed before it is answered, and the presence endpoint id lives
+# in the store so both backends refresh ONE registration rather than two.
+Description=teams-lite, the RELEASED build (backend @APP_BACKEND_PORT@ + web UI 127.0.0.1:@APP_WEB_PORT@)
+Documentation=https://github.com/theophile-wallez/teams-lite
+Documentation=file://@REPO@/README.md
+
+# Same relationship to the Intune container as the staged backend: the first action is a
+# broker token call over D-Bus, so the container has to be up — Wants=, not Requires=,
+# because retrying beats refusing to start. A container restart mints a new leader PID and
+# so moves the broker's bus, which is what PartOf= propagates here;
+# teams-lite-broker-bus.path covers the container restarting itself without its unit
+# changing state (through teams-lite-backend-restart.service, which try-restarts this too).
+Wants=intune-container.service
+After=intune-container.service
+PartOf=intune-container.service
+
+# Deliberately NOT PartOf=teams-lite.target: the staged pair and this one are two installs
+# that happen to share a machine, so `systemctl --user restart teams-lite.target` must not
+# reach in here — and enabling the target must not start a second app the user did not ask
+# for. This unit is enabled and started on its own.
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+
+# The wrapper install.sh writes, never the binary beside it. It resolves the broker's
+# D-Bus address at every start (the bus path embeds the container's leader PID, which
+# changes on every container boot) and then execs the binary, so the binary stays this
+# unit's MainPID.
+#
+# WHICH FILE THE IN-APP UPDATE REPLACES, and why this line is the right one: the update
+# swaps `teams-bin`, the binary the wrapper execs (`TEAMS_LITE_LAUNCHER_BIN` is
+# `process.execPath`, see launcher/src/backend.ts). The wrapper itself is untouched, so
+# this ExecStart keeps naming a file that exists. The restart then goes through systemd
+# rather than through the launcher's own re-spawn: the launcher starts the new build
+# detached and exits, KillMode=control-group takes that child down with the unit, and
+# Restart=always brings the unit back up — on the new binary, because the wrapper execs
+# whatever is at that path now.
+WorkingDirectory=@APP_BIN_DIR@
+ExecStart=@APP_BIN@ --no-open --host 127.0.0.1 --port @APP_WEB_PORT@
+
+# The backend this launcher spawns, on a port of its own. Stated here rather than left to
+# the default, because the default is the staged backend's port — and a second backend
+# that bound it would either fail or, worse, be ATTACHED to by the wrong launcher.
+Environment=TEAMS_LITE_PORT=@APP_BACKEND_PORT@
+
+# NO TEAMS_NO_IDLE_EXIT, and that is the opposite of the staged backend unit — where it is
+# mandatory. Here the launcher holds a keepalive socket of its own, so the backend never
+# sees an empty client list while this unit runs; and the idle exit is what cleans up a
+# backend whose launcher died. A backend left holding @APP_BACKEND_PORT@ would be ATTACHED
+# to by the next start (see `ensureBackend` in launcher/src/backend.ts), and an attached
+# backend published its own write token — so this instance's page would be handed a token
+# that backend refuses, and every send would come back refused with nothing looking wrong.
+
+# The local agent spawns its CLI by name, and the systemd user manager's PATH holds
+# neither ~/.local/bin nor ~/.bun/bin (the same gap the staged units work around).
+Environment=PATH=@AGENT_PATH@
+
+# Local overrides, e.g. TEAMS_LITE_CALLING=1. The "-" makes a missing file harmless.
+# Deliberately NOT set here, exactly as for the staged backend: TEAMS_LITE_CALLING (it
+# re-routes how the user's real calls ring across their endpoints — and two registered
+# calling endpoints on one machine would ring both), TEAMS_LITE_CALL_DEBUG and
+# TEAMS_LITE_CALL_CAPTURE.
+EnvironmentFile=-@CONFIG_DIR@/app.env
+
+Restart=always
+RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=300
+
+# KillMode is left at control-group on purpose: the backend is a CHILD of this launcher,
+# and stopping the unit has to take it down too. Anything left behind would hold
+# @APP_BACKEND_PORT@ and be attached to by the next start.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=teams-lite-app
+
+[Install]
+# Its own target membership: `systemctl --user enable --now teams-lite-app.service` starts
+# it, and the staged pair's target is untouched either way.
+WantedBy=default.target

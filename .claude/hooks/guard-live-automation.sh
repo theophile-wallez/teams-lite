@@ -18,8 +18,9 @@
 #      to a real keystroke: it types only in the designated sandbox chat, and proves
 #      that from the app's own state before every key;
 #   2. a script that calls send/edit/delete/react against the live backend — on its own
-#      port (19420 for the always-on service, 19421 for the dev one) or through an
-#      app server that relays to it (19440 / 19441, and whatever tailnet name it is
+#      port (19420 for the always-on service, 19421 for the dev one, 19422 for the
+#      released build the app unit runs) or through an
+#      app server that relays to it (19440 / 19441 / 19442, and whatever tailnet name it is
 #      served under: see the relay in web/server.ts);
 #   2b. fetching the backend's write token, from the file it publishes or from the
 #      endpoint the app's own server exposes it on. It is a capability: holding it
@@ -413,7 +414,7 @@ if ! sanctioned_automation; then
     # any host it is reachable on, such as a tailnet name — is a second address for
     # the user's live account, not merely a static-file server.
     #
-    # FOUR ports, not two. 19420/19440 are the always-on service; 19421/19441 are the
+    # SIX ports, not two. 19420/19440 are the always-on service; 19421/19441 are the
     # user's hands-on dev pair (bin/teams-dev-server.sh and `bun run dev`), which is
     # just as send-capable. Only 19430 — read-only — is absent, by design.
     #
@@ -459,7 +460,7 @@ if ! sanctioned_automation; then
     # phone. A script that could set them could make one person's post appear to come
     # from another (MACHINE_METHODS in src/bin/server.rs). Reading them back is not a
     # write and is not listed.
-    if grep -qE '(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
+    if grep -qE '(127\.0\.0\.1|localhost):(1942[0-2]|1944[0-2])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
       grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
@@ -474,7 +475,8 @@ fi
 # --- 1. no writes to the live backend, and no ad-hoc browser drivers ----------
 if [ -n "$scripts_writing_to_the_backend" ]; then
   block "This command runs a script that calls a WRITE method on the REAL backend — its own
-port (19420 service / 19421 dev) or an app server that relays to it (19440 / 19441 /
+port (19420 service / 19421 dev / 19422 released) or an app server that relays to it
+(19440 / 19441 / 19442 /
 a tailnet name):
    ${scripts_writing_to_the_backend# }
 

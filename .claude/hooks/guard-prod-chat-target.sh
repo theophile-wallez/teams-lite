@@ -22,8 +22,9 @@
 # id out of the app's own state before every keypress and refuses anything but the
 # designated sandbox chat. That is why this hook can afford to be absolute.
 #
-# WHAT COUNTS AS LIVE. The backend's own ports (19420 service / 19421 dev), the app
-# servers that relay to them (19440 / 19441), and any `*.ts.net` host — the tailnet
+# WHAT COUNTS AS LIVE. The backend's own ports (19420 service / 19421 dev / 19422 the
+# released build the app unit runs), the app
+# servers that relay to them (19440 / 19441 / 19442), and any `*.ts.net` host — the tailnet
 # front of the always-on web unit is the same app, reachable under a name instead of
 # a port. The mock's ports (19445/19446/19447/1945x) are deliberately absent.
 #
@@ -72,11 +73,11 @@ block() {
 
 # An address that reaches the user's real account: the two send-capable backends, the
 # two app servers that relay to them, and the tailnet name in front of the service.
-live_address='(127\.0\.0\.1|localhost):(1942[01]|1944[01])|[A-Za-z0-9-]+\.ts\.net'
+live_address='(127\.0\.0\.1|localhost):(1942[0-2]|1944[0-2])|[A-Za-z0-9-]+\.ts\.net'
 # A live port on its own, with no host: `preview_navigate` also takes
 # `{target:{kind:"environment-port",port:19440}}`, which names the same app server
 # without ever spelling a hostname.
-live_port='(^|[^0-9])(1942[01]|1944[01])([^0-9]|$)'
+live_port='(^|[^0-9])(1942[0-2]|1944[0-2])([^0-9]|$)'
 
 state_dir="${XDG_RUNTIME_DIR:-/tmp}/teams-lite"
 state_file="$state_dir/mcp-browser-target-${session_id//[^A-Za-z0-9_-]/_}"

@@ -748,6 +748,77 @@ mod tests {
         }
     }
 
+    /// The unit that runs the RELEASED build beside the staged one, and the three things
+    /// that keep the two apart (see packaging/systemd/teams-lite-app.service).
+    ///
+    /// It exists because this is the only install shape that can update itself, so the
+    /// user can dogfood the published artifact without giving up the staged pair their
+    /// phone uses. Sharing a machine is fine — two send-capable backends on one store is
+    /// a shape this app already has — but sharing a PORT is not, and neither is sharing a
+    /// lifecycle.
+    #[test]
+    fn the_released_build_runs_beside_the_staged_one_and_never_over_it() {
+        let unit = include_str!("../packaging/systemd/teams-lite-app.service");
+
+        // Ports of its own, named rather than defaulted: the default IS the staged
+        // backend's port, and a second backend that bound it would either fail to start
+        // or be attached to by the wrong launcher.
+        assert!(
+            unit.contains("Environment=TEAMS_LITE_PORT=@APP_BACKEND_PORT@"),
+            "the released build's backend needs a port of its own"
+        );
+        assert!(
+            unit.contains("--port @APP_WEB_PORT@"),
+            "the released build's web server needs a port of its own"
+        );
+
+        // NO idle-exit override, which is the OPPOSITE of the staged backend unit — where
+        // it is mandatory. Here the launcher holds its own keepalive, and the idle exit is
+        // what clears a backend whose launcher died: one left holding the port would be
+        // ATTACHED to by the next start, and an attached backend published its own write
+        // token, so every send from this instance's page would be refused.
+        // The directive, not the word: the unit's own comment explains the absence, and a
+        // comment is what stops the next reader from "fixing" it.
+        let sets_idle_exit = unit.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("Environment=") && line.contains("TEAMS_NO_IDLE_EXIT")
+        });
+        assert!(
+            !sets_idle_exit,
+            "the app unit must NOT disable the idle exit — that is what cleans up an \
+             orphaned backend holding its port"
+        );
+
+        // Not part of the staged pair's target: restarting or enabling that target must
+        // not reach a second app the user did not ask for.
+        let joins_staged_target = unit
+            .lines()
+            .any(|line| line.trim_start().starts_with("PartOf=teams-lite.target"));
+        assert!(
+            !joins_staged_target,
+            "the released build is its own install, not a member of the staged target"
+        );
+
+        // A container restart moves the broker's bus, and each backend reads that address
+        // from its own frozen environment — so BOTH have to be restarted, or the released
+        // one stays up, unauthenticated and silent.
+        let bus_restart = include_str!("../packaging/systemd/teams-lite-backend-restart.service");
+        for named in ["teams-lite-backend.service", "teams-lite-app.service"] {
+            assert!(
+                bus_restart.contains(&format!("try-restart {named}")),
+                "the broker-bus restart must cover {named}"
+            );
+        }
+
+        // And the installer must not write a unit whose program is absent: systemd
+        // rejects it, and a start would fail with 203/EXEC.
+        let installer = include_str!("../bin/teams-lite-service.sh");
+        assert!(
+            installer.contains(r#"[ "$unit" = teams-lite-app.service ] && [ ! -x "$APP_BIN" ]"#),
+            "teams-lite-app.service must be skipped when the released binary is not installed"
+        );
+    }
+
     /// The restart must not cut a local-agent reply in half.
     ///
     /// This is the second half of a real failure. A run was answering in the sandbox

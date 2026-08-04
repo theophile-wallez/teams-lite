@@ -57,9 +57,21 @@ WEB_PORT="${TEAMS_LITE_WEB_PORT:-19440}"
 # taken on a machine that serves something else, so 8443 is the default here.
 TAILSCALE_PORT="${TEAMS_LITE_TAILSCALE_PORT:-8443}"
 
+# --- the RELEASED build, beside the staged one (teams-lite-app.service) -------
+# The single `teams` binary install.sh downloads, on ports of its own so it runs at the
+# same time as the staged pair rather than instead of it. It is the artifact other people
+# get, and the only install shape that can update ITSELF from the app (see AGENTS.md
+# § Updating the app from inside it). Its ports keep the block's convention: x422/x442,
+# next door to the service's x420/x440 and the dev pair's x421/x441.
+APP_BIN="${TEAMS_LITE_APP_BIN:-$HOME/.teams-lite/bin/teams}"
+INSTALL_SH_URL="https://raw.githubusercontent.com/theophile-wallez/teams-lite/master/install.sh"
+APP_BACKEND_PORT="${TEAMS_LITE_APP_BACKEND_PORT:-19422}"
+APP_WEB_PORT="${TEAMS_LITE_APP_WEB_PORT:-19442}"
+
 UNITS=(
   teams-lite-backend.service
   teams-lite-web.service
+  teams-lite-app.service
   teams-lite-backend-restart.service
   teams-lite-broker-bus.path
   teams-lite-broker-repair.service
@@ -208,8 +220,24 @@ EOF
 install_units() {
   say "Writing the units into $UNIT_DIR…"
   mkdir -p "$UNIT_DIR" "$CONFIG_DIR"
-  local unit
+
+  # Which units this machine can actually run. The app unit runs the RELEASED binary,
+  # which install.sh downloads and which most machines do not have — and a unit whose
+  # ExecStart does not exist is one systemd rejects here and would fail at start with
+  # 203/EXEC. So it is written only when the binary is there, and a stale copy is removed
+  # when it is not: no unit for a program that is absent.
+  local units=()
   for unit in "${UNITS[@]}"; do
+    if [ "$unit" = teams-lite-app.service ] && [ ! -x "$APP_BIN" ]; then
+      rm -f "$UNIT_DIR/$unit"
+      info "$unit: skipped — no released build at $APP_BIN"
+      continue
+    fi
+    units+=("$unit")
+  done
+
+  local unit
+  for unit in "${units[@]}"; do
     [ -f "$REPO/packaging/systemd/$unit" ] || die "missing template: packaging/systemd/$unit"
     sed \
       -e "s|@SERVICE_DIR@|$SERVICE_DIR|g" \
@@ -222,6 +250,10 @@ install_units() {
       -e "s|@AGENT_PATH@|$AGENT_PATH|g" \
       -e "s|@BACKEND_PORT@|$BACKEND_PORT|g" \
       -e "s|@WEB_PORT@|$WEB_PORT|g" \
+      -e "s|@APP_BIN_DIR@|$(dirname "$APP_BIN")|g" \
+      -e "s|@APP_BIN@|$APP_BIN|g" \
+      -e "s|@APP_BACKEND_PORT@|$APP_BACKEND_PORT|g" \
+      -e "s|@APP_WEB_PORT@|$APP_WEB_PORT|g" \
       "$REPO/packaging/systemd/$unit" >"$UNIT_DIR/$unit"
     info "$unit"
   done
@@ -229,12 +261,12 @@ install_units() {
   # Leftover placeholders mean a template gained a token this script does not know:
   # fail loudly rather than install a unit systemd will reject at start time.
   local leftovers
-  leftovers="$(grep -l '@[A-Z_]\+@' "${UNITS[@]/#/$UNIT_DIR/}" 2>/dev/null || true)"
+  leftovers="$(grep -l '@[A-Z_]\+@' "${units[@]/#/$UNIT_DIR/}" 2>/dev/null || true)"
   [ -z "$leftovers" ] || die "unsubstituted placeholders in: $leftovers"
 
   # Let systemd itself judge the result, while a mistake is still one sed away.
   if command -v systemd-analyze >/dev/null 2>&1; then
-    systemd-analyze --user verify "${UNITS[@]/#/$UNIT_DIR/}" ||
+    systemd-analyze --user verify "${units[@]/#/$UNIT_DIR/}" ||
       die "systemd rejected the generated units (see the errors above)"
   fi
 
@@ -402,6 +434,21 @@ print_artifact() {
   fi
 }
 
+# The other install on this machine: the released `teams` binary the app unit runs. It
+# is not staged and not built here — install.sh downloads it, and the in-app update
+# button replaces it — so what `status` can say about it is whether it is there.
+print_released_build() {
+  say "Released build (teams-lite-app.service)"
+  if [ -x "$APP_BIN" ]; then
+    info "$APP_BIN"
+    info "backend $APP_BACKEND_PORT, web http://127.0.0.1:$APP_WEB_PORT"
+    info "updates itself: the app's own button replaces this binary"
+  else
+    warn "not installed at $APP_BIN — teams-lite-app.service would fail to start"
+    warn "install it with: curl -fsSL $INSTALL_SH_URL | sh"
+  fi
+}
+
 print_next_steps() {
   cat <<EOF
 
@@ -416,6 +463,19 @@ $(say "Next step — yours to run")
 
   Follow it with:
     journalctl --user -u teams-lite-backend -u teams-lite-web -f
+
+$(say "Optional — the RELEASED build, beside this one")
+  The staged pair above follows your checkout. The published build can run at the
+  same time, on ports of its own ($APP_BACKEND_PORT / $APP_WEB_PORT), and it is the
+  only install that can update itself from inside the app:
+
+    curl -fsSL $INSTALL_SH_URL | sh
+    systemctl --user enable --now teams-lite-app.service
+
+  Both are send-capable, so that second command is yours to run too. They share the
+  message store, which two backends here already do, and the released one answers on
+  http://127.0.0.1:$APP_WEB_PORT. For the tailnet, give it a port of its own:
+    tailscale serve --bg --https=8444 http://127.0.0.1:$APP_WEB_PORT
 EOF
 }
 
@@ -448,7 +508,11 @@ cmd_update() {
   # Restart only what is already running: an update must not start a service the
   # user chose to keep down.
   say "Restarting whatever is running…"
-  "$SYSTEMCTL" --user try-restart teams-lite-backend.service teams-lite-web.service
+  # The app unit too: `units` may have rewritten it, and `try-restart` does nothing when
+  # it is not running. It restarts onto the SAME released binary — an `update` builds the
+  # staged artifacts and never touches that one, which the app's own button owns.
+  "$SYSTEMCTL" --user try-restart teams-lite-backend.service teams-lite-web.service \
+    teams-lite-app.service
   print_units_state
   print_artifact
 }
@@ -456,6 +520,7 @@ cmd_update() {
 cmd_status() {
   print_units_state
   print_artifact
+  print_released_build
   # Why an update may be sitting there doing nothing: it is waiting for this.
   say "Local agent"
   info "$(live_agent_runs) run(s) writing a reply"
@@ -464,17 +529,20 @@ cmd_status() {
 }
 
 cmd_logs() {
-  exec journalctl --user -u teams-lite-backend.service -u teams-lite-web.service "$@"
+  exec journalctl --user -u teams-lite-backend.service -u teams-lite-web.service \
+    -u teams-lite-app.service "$@"
 }
 
 cmd_stop() {
-  "$SYSTEMCTL" --user stop teams-lite.target teams-lite-backend.service teams-lite-web.service
+  "$SYSTEMCTL" --user stop teams-lite.target teams-lite-backend.service \
+    teams-lite-web.service teams-lite-app.service
   print_units_state
 }
 
 cmd_uninstall() {
   say "Stopping and disabling…"
   "$SYSTEMCTL" --user disable --now teams-lite.target 2>/dev/null || true
+  "$SYSTEMCTL" --user disable --now teams-lite-app.service 2>/dev/null || true
   "$SYSTEMCTL" --user stop teams-lite-backend.service teams-lite-web.service 2>/dev/null || true
   "$SYSTEMCTL" --user disable teams-lite-backend.service teams-lite-web.service \
     teams-lite-broker-bus.path 2>/dev/null || true

@@ -136,6 +136,24 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19441');\n"
         "ws.send(JSON.stringify({ method: 'edit' }));\n"
     ),
+    # The RELEASED build's pair (19422 / 19442, teams-lite-app.service), which runs beside
+    # the staged one on the same account and the same store. A third send-capable backend
+    # is a third way to post as the user, so the same rule covers it.
+    "released-backend-writer.ts": (
+        "// Writes to the RELEASED build's backend, which is also the real account.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19422');\n"
+        "ws.send(JSON.stringify({ method: 'send' }));\n"
+    ),
+    "released-relay-writer.ts": (
+        "// Writes through the RELEASED build's own web server.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19442');\n"
+        "ws.send(JSON.stringify({ method: 'delete' }));\n"
+    ),
+    "released-backend-reader.ts": (
+        "// Reads the RELEASED build's backend, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19422');\n"
+        "ws.send(JSON.stringify({ method: 'conversations' }));\n"
+    ),
     "dev-backend-reader.ts": (
         "// Reads the DEV backend, which is allowed.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19421');\n"
@@ -383,6 +401,9 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/person-renamer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/person-refacer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/self-updater.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/released-backend-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/released-relay-writer.ts"),
+        ("ALLOW", PROJECT, f"bun run {tmp}/released-backend-reader.ts"),
         # A call rings a real person; registering decides whether their calls ring here.
         ("BLOCK", PROJECT, f"bun run {tmp}/call-placer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/call-answerer.ts"),

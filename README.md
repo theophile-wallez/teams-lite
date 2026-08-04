@@ -210,6 +210,7 @@ systemctl --user enable --now teams-lite.target   # start it (and at every boot)
 | -------------------------------- | ----------------------------------------------------- |
 | `teams-lite-backend.service`     | the Rust backend on `ws://127.0.0.1:19420`            |
 | `teams-lite-web.service`         | the production SSR server on `127.0.0.1:19440`        |
+| `teams-lite-app.service`         | *optional* — the released `teams` build, 19422 / 19442  |
 | `teams-lite-broker-bus.path`     | restarts the backend when the Intune container moves   |
 | `teams-lite-broker-health.timer` | checks the sign-in keyring every 15 minutes            |
 | `teams-lite-broker-repair.service` | restarts the Intune container when that keyring locked |
@@ -246,6 +247,20 @@ Worth knowing:
   `bun run dev:server` + `bun run dev` work while the service keeps running on
   19420/19440. Both are send-capable backends over one SQLite store, so they get
   separate ports rather than fighting for one.
+- **You can run the RELEASED build at the same time**, on 19422 / 19442, and it is the
+  only install that updates itself from inside the app (the button in the sidebar).
+  The service above follows your checkout; this one follows CI, which is how you find
+  out that the published build is broken before anybody else does:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/theophile-wallez/teams-lite/master/install.sh | sh
+  bin/teams-lite-service.sh units                       # writes teams-lite-app.service
+  systemctl --user enable --now teams-lite-app.service   # start it (and at every boot)
+  ```
+
+  It shares your message store — as the dev backend already does — and answers on
+  `http://127.0.0.1:19442`. For your phone, give it a port of its own:
+  `tailscale serve --bg --https=8444 http://127.0.0.1:19442`.
 
 #### When sign-in breaks
 
