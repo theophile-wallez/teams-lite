@@ -401,6 +401,50 @@ export type BrokerStatus = {
   repairing: boolean;
 };
 
+/** Where this page stands with the backend's write lock (its `write_lock_status`
+ *  answer — see `write_lock_payload` in src/bin/server.rs).
+ *
+ *  `held` is the ordinary case: the token this page was handed is the one the backend
+ *  gates writes on. `foreign` means it is not, so every send, reaction, mark-as-read and
+ *  update will be refused while every read keeps answering — the state a user met on the
+ *  update button, and the reason this question exists at all. `read_only` is a backend
+ *  started with `TEAMS_LITE_READ_ONLY=1`, where nothing is misconfigured and no page can
+ *  write.
+ *
+ *  `unknown` is ours, never the backend's: it is what a backend too old to answer and a
+ *  call that failed both leave, and it must stay silent. */
+export type WriteLockState = "held" | "foreign" | "read_only" | "unknown";
+
+export type WriteLock = {
+  state: WriteLockState;
+  /** Whether the backend's token was pinned by the launcher that spawned it, so it is
+   *  published in no file. It is what tells the two causes of `foreign` apart, and so
+   *  what the page can honestly offer to do about it. */
+  pinned: boolean;
+};
+
+export const UNKNOWN_WRITE_LOCK: WriteLock = { state: "unknown", pinned: false };
+
+/** Read a `write_lock_status` answer, keeping nothing that was not stated. An older
+ *  backend answers an error and never gets here; anything else lands on `unknown`. */
+export function parseWriteLock(raw: unknown): WriteLock {
+  if (!raw || typeof raw !== "object") return UNKNOWN_WRITE_LOCK;
+  const { state, pinned } = raw as { state?: unknown; pinned?: unknown };
+  if (state !== "held" && state !== "foreign" && state !== "read_only") return UNKNOWN_WRITE_LOCK;
+  return { state, pinned: pinned === true };
+}
+
+/** Is this write-lock state worth telling the user about?
+ *
+ *  Only `foreign`, and deliberately not `read_only`: that one is a backend somebody
+ *  started for tooling, where refusing is the feature and no banner would help — while
+ *  `foreign` is an app that looks like it works and does not. `unknown` is silence for the
+ *  same reason a missing broker status is: a banner that appears by default is worse than
+ *  the bug it guesses at. */
+export function writeLockNeedsAttention(lock: WriteLock | null | undefined): boolean {
+  return lock?.state === "foreign";
+}
+
 /** Is this broker state worth telling the user about? A missing state (an older
  *  backend, or the mock) and a healthy one are both silence.
  *

@@ -958,6 +958,44 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // The write-lock banner: what the sidebar says when this page holds a token its backend
+  // does not accept — every read answers, every send is refused, and nothing else in the app
+  // shows it. Driven through the mock's own control plane, and reloaded after arming because
+  // the page asks the question once per connection.
+  if (args.includes("--write-lock")) {
+    await withPreview(async ({ page, shot, setTheme, emit }) => {
+      const banner = '[data-testid="write-lock-banner"]';
+      // A backend another instance owns: its token is pinned, so no file holds the right
+      // one and the way out is outside this app.
+      await emit({ kind: "write_lock", state: "foreign", pinned: true });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector('[data-testid="conversation-row"]');
+      await page.locator(banner).waitFor({ state: "visible" });
+      await shot(`${out}-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-dark.png`);
+      await shot(`${out}-banner-dark.png`, banner);
+
+      // The other cause: this app serving a token that is not that backend's, which a
+      // restart of the app re-reads. Same banner, a different sentence — and the sentence
+      // is the whole of what the reader gets, so both are captured.
+      await emit({ kind: "write_lock", state: "foreign", pinned: false });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector('[data-testid="conversation-row"]');
+      await page.locator(banner).waitFor({ state: "visible" });
+      await shot(`${out}-published-dark.png`, banner);
+
+      // Leave the shared mock accepting the page's token, or this banner sits above every
+      // later capture.
+      await emit({ kind: "write_lock", reset: true });
+      console.log(
+        `[preview] wrote ${out}-light.png, ${out}-dark.png, ${out}-banner-dark.png ` +
+          `and ${out}-published-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
   // The update: the blue button, its progress mid-download, the restart it offers next,
   // and the plain link an install that cannot replace itself keeps instead. Driven
   // through the mock's own control plane — the real thing needs a published release

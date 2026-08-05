@@ -829,4 +829,74 @@ describe("Backend write-token recovery", () => {
     expect(socket.sent).toHaveLength(1);
     backend.close();
   });
+
+  // A refusal a FRESH token could not heal is not about the button that was pressed: this
+  // page holds no token this backend accepts, so everything it would do as the user is
+  // refused. That is a state worth saying out loud once (the banner, over
+  // `refreshWriteLock` in lib/store.ts), which is why the client reports it.
+  it("reports a refusal a fresh token could not heal, and only that one", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("tok");
+    backend.setWriteTokenSource(async () => "tok");
+    let reported = 0;
+    backend.setWriteRefusedHandler(() => {
+      reported += 1;
+    });
+
+    const refused = backend.send("c1", "hello");
+    answer(socket, 0, { error: REFUSAL });
+    await expect(refused).rejects.toThrow(/needs the write token/);
+    expect(reported).toBe(1);
+
+    // Any other failure says nothing about the lock, and a healed one says nothing either.
+    const other = backend.send("c1", "hello");
+    answer(socket, 1, { error: "send failed: 503" });
+    await expect(other).rejects.toThrow();
+    backend.setWriteTokenSource(async () => "fresh");
+    const healed = backend.send("c1", "hello");
+    answer(socket, 2, { error: REFUSAL });
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(4));
+    answer(socket, 3, { result: { sent: true } });
+    await healed;
+    expect(reported).toBe(1);
+
+    backend.close();
+  });
+});
+
+// The one question a page may ask BEFORE it acts: does this backend accept the token this
+// page holds? Everything else about the write lock is learned from a refusal, which is one
+// click too late (see `write_lock_state` in src/bin/server.rs).
+describe("Backend.writeLockStatus", () => {
+  function paramsOf(socket: FakeWebSocket, index: number): Record<string, unknown> {
+    return (JSON.parse(socket.sent[index]!) as { params: Record<string, unknown> }).params;
+  }
+
+  it("presents the token it holds, and is not itself a write", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("tok");
+
+    const promise = backend.writeLockStatus();
+    const frame = JSON.parse(socket.sent[0]!) as { id: number; method: string };
+    expect(frame.method).toBe("write_lock_status");
+    expect(paramsOf(socket, 0).write_token).toBe("tok");
+    socket.simulateMessage(
+      JSON.stringify({ id: frame.id, result: { state: "foreign", pinned: true } }),
+    );
+    await expect(promise).resolves.toEqual({ state: "foreign", pinned: true });
+    backend.close();
+  });
+
+  // A page with no token at all is exactly the one that has to be told, so the question is
+  // still asked — and the backend reads a missing token as `foreign`, which is true.
+  it("asks with nothing when it holds nothing, and keeps only a stated answer", async () => {
+    const { backend, socket } = await connected();
+
+    const promise = backend.writeLockStatus();
+    const frame = JSON.parse(socket.sent[0]!) as { id: number };
+    expect(paramsOf(socket, 0).write_token).toBeUndefined();
+    socket.simulateMessage(JSON.stringify({ id: frame.id, result: { state: "nonsense" } }));
+    await expect(promise).resolves.toEqual({ state: "unknown", pinned: false });
+    backend.close();
+  });
 });

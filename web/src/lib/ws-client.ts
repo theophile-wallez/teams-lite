@@ -34,7 +34,9 @@ import type {
   ReplyTo,
   SettingsPatch,
   UpdateProgress,
+  WriteLock,
 } from "./protocol";
+import { parseWriteLock } from "./protocol";
 import type { PushStatus, SubscriptionPayload } from "./push";
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
@@ -188,6 +190,8 @@ export class Backend {
   // How to read that token again, when the backend says the one we hold is not its
   // own (see `retryWithAFreshToken`).
   private writeTokenSource: (() => Promise<string | null>) | null = null;
+  // Told once when a refusal survived a fresh token (see `setWriteRefusedHandler`).
+  private onWriteRefused: (() => void) | undefined;
   private firstFailureAt: number | null = null;
   private readonly giveUpMs: number;
   private readonly initialDelayMs: number;
@@ -386,7 +390,14 @@ export class Backend {
       return await this.request<T>(method, { ...params, write_token: presented ?? undefined });
     } catch (e) {
       const fresh = await this.retryWithAFreshToken(e, presented);
-      if (fresh === null) throw e;
+      if (fresh === null) {
+        // A refusal a fresh token could not heal is the proof that this page holds no
+        // token this backend accepts — which is a state about the whole app, not about
+        // the button that was pressed. Tell the caller once so it can say so where a
+        // person can read it, and never from here: this class knows no UI.
+        if (isWriteTokenRefusal(e)) this.onWriteRefused?.();
+        throw e;
+      }
       return await this.request<T>(method, { ...params, write_token: fresh });
     }
   }
@@ -450,6 +461,30 @@ export class Backend {
    */
   setWriteTokenSource(source: (() => Promise<string | null>) | null): void {
     this.writeTokenSource = source;
+  }
+
+  /**
+   * Be told when a write was refused for the token and a fresh one did not help — the
+   * moment the page learns it cannot act at all (see `refreshWriteLock` in lib/store.ts).
+   */
+  setWriteRefusedHandler(handler: (() => void) | null): void {
+    this.onWriteRefused = handler ?? undefined;
+  }
+
+  /**
+   * Where this page stands with the write lock, asked with the token it holds.
+   *
+   * A plain READ — the one question that must not be gated behind the very token it is
+   * about, so `write_lock_status` is open (see `write_lock_state` in src/bin/server.rs).
+   * The answer never carries a token, in either direction: this presents the one the page
+   * was handed, exactly as a write would, and gets back only where that leaves it.
+   */
+  async writeLockStatus(): Promise<WriteLock> {
+    return parseWriteLock(
+      await this.request<unknown>("write_lock_status", {
+        write_token: this.writeToken ?? undefined,
+      }),
+    );
   }
 
   // ---- typed API ----------------------------------------------------------

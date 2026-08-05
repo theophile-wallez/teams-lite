@@ -597,6 +597,38 @@ user. Two independent mechanisms enforce that split:
   - **A refused write says so in the journal** (`[write-lock] refused \`<method>\``), the
     method and never the token. A message that did not go out used to leave no trace on
     this machine at all.
+  - **A page can ASK where it stands, and it asks before it acts.** `write_lock_status` is
+    an OPEN method — the one question that must not be gated behind the token it is about
+    — and it answers `held`, `foreign` or `read_only` plus whether this backend's token was
+    pinned, never the token itself (`write_lock_state` in `src/bin/server.rs`). It exists
+    because the pairing between a page and a backend breaks in two ways nothing on either
+    side could see, and the retry above cannot heal either one: `teams` ATTACHES to a
+    backend that is already listening (`ensureBackend`), and a backend another launcher
+    spawned carries a PINNED token — which is in no file, on purpose — so the attached
+    instance serves its page a token nothing accepts; and `TEAMS_LITE_WS_URL`, when it is
+    already set, points the page's socket at one backend while its token comes from
+    another. In both, every read answers and every outward and machine method is refused.
+    It reached a real user as **Update failed — try again**, and the refusal text of the
+    button they had pressed was the only place this app ever said so. Three things follow,
+    and each is pinned by a test:
+    - **The page says it, once, in the sidebar** (`write-lock-banner.tsx`, over the pure
+      `web/src/lib/write-lock.ts`): "This window can read, but not send", the cause, and
+      the one thing that mends it — which is never something the page can do, so the only
+      action offered is **Check again**. It is drawn for `foreign` alone. `read_only` is
+      silent because refusing is that backend's whole purpose, and an unanswered status is
+      silent because a banner that appears by default is worse than the bug it guesses at.
+      A REFUSED write that a fresh token could not heal re-asks the question
+      (`setWriteRefusedHandler`), because that refusal is proof about the whole app rather
+      than about one button.
+    - **The launcher says it at startup**, in one line, for whoever ran the command and for
+      a unit's journal (`launcher/src/write-lock.ts`). It asks with the token its own
+      server hands the page — the chain the user's clicks travel down, not our idea of it.
+    - **An ATTACHED launcher serves the token FILE and nothing else.** `serveWriteToken`
+      REMOVES an inherited `TEAMS_LITE_WRITE_TOKEN` when we did not spawn the backend: this
+      process inherits its parent's environment, and for an in-app update that parent is
+      the launcher it replaced, whose token died with its backend. Left in place,
+      `web/write-token.ts` reads the environment first and would serve a dead token in
+      front of the file that holds the live one.
 - **The hook (harness).** Blocks, before execution, any command that would write:
   ad-hoc browser drivers, scripts calling `send`/`edit`/`delete`/`react`/`mark_read` against
   `127.0.0.1:19420` or `19421` (and the 19440 / 19441 relays in front of them), a
@@ -635,7 +667,8 @@ user. Two independent mechanisms enforce that split:
   file. For Settings › AI providers and its model picker, open and closed in both
   themes: `bun run preview -- --out /tmp/prov --ai-providers`. For the update button, its
   progress mid-download and the link the other install shape keeps:
-  `bun run preview -- --out /tmp/upd --update`. To review a detail too
+  `bun run preview -- --out /tmp/upd --update`. For the write-lock banner, in both of its
+  causes: `bun run preview -- --out /tmp/wl --write-lock`. To review a detail too
   small to read in a
   1200px page — a 16px icon, a chip, a badge — crop to it and raise the pixel
   density: `bun run preview -- --out /tmp/chip --element

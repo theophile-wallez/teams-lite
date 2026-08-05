@@ -714,6 +714,78 @@ fn check_write_allowed(method: &str, params: &Value, token: Option<&str>) -> Res
     }
 }
 
+/// Where a client stands with the write lock — the question every refusal above
+/// answers, one click too late.
+///
+/// WHY IT IS ASKABLE AT ALL. A frontend holds the token the server that serves it handed
+/// over (`/__write-token`, over `web/write-token.ts`), and that pairing breaks in two ways
+/// neither side can see. `teams` ATTACHES to a backend that is already listening
+/// (`ensureBackend` in launcher/src/backend.ts), and a backend another launcher spawned
+/// carries a PINNED token — which is in no file, on purpose — so the attached instance
+/// serves its page a token nothing accepts. And `TEAMS_LITE_WS_URL`, when it is already
+/// set, points the page's socket at one backend while its token comes from another. In
+/// both, reads answer normally and every outward and machine method is refused: the app
+/// looks healthy, the composer only chimes, and the state is stated nowhere but in the
+/// refusal text of whatever the user pressed. A user met it on the update button.
+///
+/// It leaks nothing. Any client that can ask this can present the same token to `send`
+/// and read the same answer out of the refusal it gets; the token itself never travels
+/// back (`the_write_lock_payload_never_carries_the_token` pins that).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteLockState {
+    /// This backend gates writes, and the client presented the token it gates them
+    /// with. Every method is open to it.
+    Held,
+    /// This backend gates writes and the client does not hold that token, so every
+    /// `OUTWARD_METHODS` and `MACHINE_METHODS` call it makes will be refused.
+    Foreign,
+    /// `TEAMS_LITE_READ_ONLY=1`: there is no token, and no client writes. Deliberately
+    /// its own state rather than `Foreign` — nothing is misconfigured, and no frontend
+    /// can mend it (see the refusal text `check_write_allowed` gives that case).
+    ReadOnly,
+}
+
+impl WriteLockState {
+    /// The wire name. Kept identical to the union in web/src/lib/protocol.ts.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Held => "held",
+            Self::Foreign => "foreign",
+            Self::ReadOnly => "read_only",
+        }
+    }
+}
+
+/// Resolve [`WriteLockState`] for one client. Pure (both tokens injected) so the
+/// policy is unit-testable without a live backend, exactly like
+/// [`check_write_allowed`], whose comparison it must keep matching.
+fn write_lock_state(presented: Option<&str>, token: Option<&str>) -> WriteLockState {
+    let Some(token) = token else {
+        return WriteLockState::ReadOnly;
+    };
+    match presented {
+        Some(presented) if presented == token => WriteLockState::Held,
+        _ => WriteLockState::Foreign,
+    }
+}
+
+/// The `write_lock_status` answer: where the client stands, and where this backend's
+/// token lives.
+///
+/// `pinned` is what makes the answer actionable rather than merely true: a pinned token
+/// was handed over by the launcher that spawned this process and was published nowhere,
+/// so a `foreign` client cannot go and read the right one — another instance owns this
+/// backend, and the way out is to stop it or to give this one a port of its own. An
+/// unpinned one sits in the file every frontend already reads, so a `foreign` client is
+/// simply holding a token from before a restart and re-reading it is the whole fix
+/// (which `retryWithAFreshToken` in web/src/lib/ws-client.ts does on its own).
+fn write_lock_payload(presented: Option<&str>, token: Option<&str>, pinned: bool) -> Value {
+    json!({
+        "state": write_lock_state(presented, token).tag(),
+        "pinned": pinned,
+    })
+}
+
 /// The `broker_status` event payload: what the backend thinks of the identity
 /// broker, and whether it can do anything about it.
 ///
@@ -2290,6 +2362,25 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
     }
     match method {
         "ping" => Ok(json!("pong")),
+
+        // Whether the client that asked holds this backend's write token (see
+        // `write_lock_state`). Open, and it must stay open: it is the one question whose
+        // answer a frontend otherwise learns only from an action it already took — and
+        // gating it behind the very token it asks about would answer nobody.
+        "write_lock_status" => {
+            let presented = params.get("write_token").and_then(Value::as_str);
+            let state = write_lock_state(presented, write_token());
+            // Say it here too, for the same reason a refusal is logged: the user reads a
+            // chat app, and "every send comes back refused" left no trace on the machine
+            // that could tell a broken instance from a broken account.
+            if state == WriteLockState::Foreign {
+                eprintln!(
+                    "[write-lock] a client asked with a token that is not mine — its writes \
+                     will be refused"
+                );
+            }
+            Ok(write_lock_payload(presented, write_token(), write_token_pinned()))
+        }
         // Restart the Intune container, through its own systemd unit, because the
         // container's login keyring re-locks and the broker then answers every token
         // call with NoReply. The only RPC with an effect outside the store and the
@@ -7775,6 +7866,51 @@ mod tests {
                 .expect_err("must refuse a write on a read-only backend");
             assert!(!err.contains(WRITE_TOKEN_REFUSAL), "{method}: {err}");
         }
+    }
+
+    /// The three states a client can be in, and the one the refusal above cannot state
+    /// in time (see `write_lock_state`). A missing token is `foreign` like a wrong one:
+    /// both mean the same thing to the user, which is that nothing they press will act.
+    #[test]
+    fn the_write_lock_states_are_the_three_a_client_can_be_in() {
+        assert_eq!(write_lock_state(Some("tok"), Some("tok")), WriteLockState::Held);
+        assert_eq!(write_lock_state(Some("stale"), Some("tok")), WriteLockState::Foreign);
+        assert_eq!(write_lock_state(None, Some("tok")), WriteLockState::Foreign);
+        // Read-only comes first, and outranks whatever was presented: there is no token
+        // to hold, so no frontend is at fault and none can mend it.
+        assert_eq!(write_lock_state(None, None), WriteLockState::ReadOnly);
+        assert_eq!(write_lock_state(Some("tok"), None), WriteLockState::ReadOnly);
+    }
+
+    /// Asking must never need the answer. `write_lock_status` is in neither list — a
+    /// client with no token is exactly the one that has to be told.
+    #[test]
+    fn asking_about_the_write_lock_is_not_itself_gated() {
+        assert!(write_class("write_lock_status").is_none());
+        for token in [Some("tok"), None] {
+            assert!(check_write_allowed("write_lock_status", &json!({}), token).is_ok());
+        }
+    }
+
+    /// The answer says WHERE the client stands and nothing about the secret it stands
+    /// against. An endpoint that echoed the token back would hand every local process
+    /// the one thing the write lock keeps from them.
+    #[test]
+    fn the_write_lock_payload_never_carries_the_token() {
+        for presented in [Some("tok"), Some("stale"), None] {
+            for pinned in [true, false] {
+                let payload = write_lock_payload(presented, Some("tok"), pinned);
+                let mut keys: Vec<&str> =
+                    payload.as_object().expect("an object").keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                assert_eq!(keys, ["pinned", "state"], "only the two fields: {payload}");
+                assert!(!payload.to_string().contains("tok\""), "{payload}");
+                assert_eq!(payload["pinned"], json!(pinned));
+            }
+        }
+        assert_eq!(write_lock_payload(Some("tok"), Some("tok"), true)["state"], json!("held"));
+        assert_eq!(write_lock_payload(None, Some("tok"), true)["state"], json!("foreign"));
+        assert_eq!(write_lock_payload(None, None, false)["state"], json!("read_only"));
     }
 
     #[test]

@@ -3758,6 +3758,16 @@ const MOCK_UPDATE_SIZE = 133 * 1024 * 1024;
 const MOCK_DOWNLOAD_MS = 2000;
 const MOCK_DOWNLOAD_TICK_MS = 100;
 
+/** What this mock answers `write_lock_status` with.
+ *
+ *  `held` by default, which is the truth for a page driving the mock: this backend gates
+ *  nothing, so nothing it presses is refused. The other states are armed by
+ *  `{kind: "write_lock", state: …}` so the banner they draw can be looked at and pinned —
+ *  a spec MUST put it back (`{kind: "write_lock", reset: true}`), because one mock process
+ *  serves the whole run and a banner left armed sits in every later sidebar. */
+let mockWriteLockState: "held" | "foreign" | "read_only" = "held";
+let mockWriteLockPinned = true;
+
 /** The update the mock reports, or null for "this build is current" — the default, so
  *  every existing spec keeps seeing a sidebar with no update row. Armed through the test
  *  hook (`{kind: "update"}`), exactly like the broker status, and HELD rather than only
@@ -4496,6 +4506,15 @@ function dispatch(method: string, params: unknown): unknown {
   switch (method) {
     case "ping":
       return "pong";
+
+    // Where the asking client stands with the write lock (`write_lock_status` in
+    // src/bin/server.rs). This backend gates nothing — it has no token and no account to
+    // protect — so the honest answer for a page driving the mock is `held`: nothing it
+    // presses will be refused. The `{kind: "write_lock"}` test hook arms the other states,
+    // because the banner they draw is the whole point of the feature and the mock is the
+    // only place it can be looked at.
+    case "write_lock_status":
+      return { state: mockWriteLockState, pinned: mockWriteLockPinned };
 
     case "conversations": {
       // Newest activity first, exactly like the sidebar expects. Channels live
@@ -5970,6 +5989,26 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           default_provider: mockAgentDefaultProvider,
           available: [...mockAgentProviders].map(([name, p]) => ({ name, available: p.available })),
         },
+        { status: 200 },
+      );
+    }
+    // Arm where this page stands with the write lock, so the banner that says "this window
+    // can read, but not send" can be driven (see write-lock-banner.tsx). A spec MUST reset
+    // it: one mock process serves the whole run, and a left-behind banner sits above every
+    // later sidebar.
+    if (body.kind === "write_lock") {
+      if (body.reset === true) {
+        mockWriteLockState = "held";
+        mockWriteLockPinned = true;
+        return Response.json({ ok: true, reset: true }, { status: 200 });
+      }
+      const state = body.state;
+      if (state === "held" || state === "foreign" || state === "read_only") {
+        mockWriteLockState = state;
+      }
+      if (typeof body.pinned === "boolean") mockWriteLockPinned = body.pinned;
+      return Response.json(
+        { ok: true, state: mockWriteLockState, pinned: mockWriteLockPinned },
         { status: 200 },
       );
     }

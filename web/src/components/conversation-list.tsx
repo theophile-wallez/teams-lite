@@ -40,6 +40,7 @@ import type { SidebarTab } from "~/lib/store";
 import { cn } from "~/lib/utils";
 import { Avatar, conversationFallback, conversationPhoto } from "./avatar";
 import { BrokerBanner } from "./broker-banner";
+import { WriteLockBanner } from "./write-lock-banner";
 import { CalendarSidebar } from "./calendar-sidebar";
 import { ChatMenu } from "./chat-menu";
 import { useAppState, useController } from "./controller-context";
@@ -246,8 +247,14 @@ export function ConversationList(props: {
       {/* Above the status bar and below every list, so both show on all four tabs and
           neither is missable — unlike the status line, which truncates at eleven pixels.
           The update sits between them: it is an invitation, so it stays under an outage
-          that is telling the user why the app is empty. */}
+          that is telling the user why the app is empty.
+
+          The write-lock banner sits under the broker's: both say "nothing can be sent",
+          and a broken sign-in is the cause that comes first — it explains an empty app,
+          while the write lock explains a full one. They are disjoint in practice, so the
+          order only decides which is on top in the case nobody wants. */}
       <BrokerBanner />
+      <WriteLockBanner />
       <UpdateButton />
       <StatusBar />
     </aside>

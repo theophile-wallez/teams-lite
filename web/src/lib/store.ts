@@ -67,6 +67,8 @@ import {
   type TypingSignal,
   type UpdateInfo,
   type UpdateProgress,
+  type WriteLock,
+  UNKNOWN_WRITE_LOCK,
 } from "./protocol";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import {
@@ -251,6 +253,15 @@ export type AppState = {
    *  the empty sidebar it replaces. Disjoint from `fatal`: that one means the socket
    *  is gone, this one means the socket works and the credentials do not. */
   brokerStatus: BrokerStatus | null;
+  /** Where this page stands with the backend's write lock, or null until it answers.
+   *
+   *  It is a state about the whole app rather than about one button: `foreign` means
+   *  every send, reaction, mark-as-read and update will be refused while every read keeps
+   *  working, which is the one failure this app cannot let itself look healthy through.
+   *  Null and `unknown` must stay silent — the mock and an older backend never answer —
+   *  and `read_only` is silent too, because there refusing is the feature. See
+   *  {@link writeLockNeedsAttention}. */
+  writeLock: WriteLock | null;
   ready: boolean;
   splashMessage: string;
   fatal: string | null;
@@ -526,6 +537,7 @@ function initialState(): AppState {
     live: "connecting",
     backendIsMock: false,
     brokerStatus: null,
+    writeLock: null,
     ready: false,
     splashMessage: "connecting",
     fatal: null,
@@ -796,6 +808,10 @@ export class TeamsController {
     // back refused until something re-reads the file. This is what lets the refusal
     // itself heal it (see `retryWithAFreshToken` in lib/ws-client.ts).
     this.backend.setWriteTokenSource(() => this.loadWriteToken());
+    // And when even a fresh token is refused, this page cannot act at all — every send,
+    // reaction and update will come back refused while every read answers. That is worth
+    // a banner rather than one more failed button, so the refusal re-asks where we stand.
+    this.backend.setWriteRefusedHandler(() => void this.refreshWriteLock());
     await this.loadWriteToken();
 
     try {
@@ -824,6 +840,10 @@ export class TeamsController {
       // is already subscribed (a browser may have rotated the subscription while the
       // app was closed — see syncPush).
       void this.syncPush();
+      // And whether the token we just read is the one this backend accepts. Asked BEFORE
+      // anything is pressed, because the answer used to arrive as the refusal of whatever
+      // the user pressed first — see `refreshWriteLock`.
+      void this.refreshWriteLock();
     } catch (e) {
       const msg = errText(e);
       this.set({
@@ -868,6 +888,38 @@ export class TeamsController {
     } catch {
       /* offline or no endpoint: leave the client read-only */
       return null;
+    }
+  }
+
+  /**
+   * Ask the backend whether the token this page holds is the one it accepts, and keep
+   * the answer for the banner (see `WriteLockBanner`).
+   *
+   * WHY THE PAGE ASKS AT ALL. The pairing between a page and its backend can break with
+   * nothing visible: `teams` attaches to a backend another instance spawned — whose token
+   * is pinned, so it is in no file — or `TEAMS_LITE_WS_URL` points this page's socket at
+   * one backend while its token came from another. Reads keep answering in both, so the
+   * app looks healthy and every outward action is refused. It reached a user as
+   * "Update failed", and before this the state was stated nowhere but in the refusal text
+   * of whatever they had pressed.
+   *
+   * Best-effort and quiet on failure: an older backend answers `unknown method`, which
+   * must read as "nothing to say" rather than as a fault — exactly like a missing broker
+   * status.
+   */
+  /** Re-read the token and ask again — the banner's own button
+   *  (see `WriteLockBanner`). The user mends this outside the app, by stopping the other
+   *  instance, so the one action it can offer is to look again. */
+  async checkWriteLock(): Promise<void> {
+    await this.loadWriteToken();
+    await this.refreshWriteLock();
+  }
+
+  private async refreshWriteLock(): Promise<void> {
+    try {
+      this.set({ writeLock: await this.backend.writeLockStatus() });
+    } catch {
+      this.set({ writeLock: UNKNOWN_WRITE_LOCK });
     }
   }
 
@@ -1170,7 +1222,12 @@ export class TeamsController {
       // keep working, which is what makes it nasty: the tab looks healthy and every
       // send is refused until someone reloads the page. On a phone left open for
       // days that is the normal outcome of a restart, so recovery has to be here.
-      void this.loadWriteToken();
+      // And ask again where that leaves us, AFTER the re-read: the backend that answers
+      // now may be another process, or another INSTANCE — a restart is exactly how a page
+      // ends up holding a token nothing accepts, so the banner has to follow the socket.
+      // Chained rather than fired beside it, or the question would carry the old token and
+      // the answer would accuse a page that had already healed itself.
+      void this.loadWriteToken().then(() => this.refreshWriteLock());
       // Forget what we knew about an update, and let the backend that just answered say
       // it again. The socket coming back is precisely how a RESTART onto a new build ends
       // (see lib/update.ts): that backend is current, so it announces no update at all —

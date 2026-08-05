@@ -277,6 +277,23 @@ export async function emitUpdate(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Arm where the page stands with the write lock in the mock, through its gated test
+ *  hook. `foreign` is the state in which every read answers and every outward action is
+ *  refused — the one the banner exists for.
+ *
+ *  ALWAYS reset it with `{ reset: true }` before the spec ends. The mock is a shared
+ *  process and `reuseExistingServer` adopts it across runs, so a banner left armed would
+ *  sit above every later sidebar. */
+export async function emitWriteLock(
+  page: Page,
+  body: { state?: "held" | "foreign" | "read_only"; pinned?: boolean; reset?: boolean } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "write_lock", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Set the broker health the mock reports, through its gated test hook; the mock then
  *  broadcasts `broker_status`, mirroring the Rust backend's own event.
  *
