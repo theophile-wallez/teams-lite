@@ -215,6 +215,66 @@ which is the half this app got right from prior art.
   SDES key, and MS-encoded URIs for `abs-send-time` and `transport-cc`. None of the rest is
   implemented, because the service has not refused what it would replace — and it explains
   itself when it does.
+
+#### The real client's audio section, on the wire
+
+Captured 2026-08-05 from Teams web itself, joining this tenant's own authorized meeting
+(anonymous guest, which reaches the same calling stack). This is the `mediaContent.blob`
+the service accepts, beside what Chrome had produced for the same call — so the whole
+outbound transform is a diff rather than a reading of minified code. Keys elided.
+
+```
+v=0
+o=- 3612792551793344528 2 IN IP4 127.0.0.1
+s=-
+b=CT:4000                                     <- ADDED
+t=0 0
+a=extmap-allow-mixed
+a=msid-semantic: WMS *                        <- Chrome wrote `a=msid-semantic:  WMS` (no token)
+a=group:BUNDLE 0 1 2 3 4 5 6 7 8 9 10 11 12
+m=audio 1234 RTP/SAVP 105 111 97 9 0 8 13 110 126
+      ^^^^ ^^^^^^^^ Chrome wrote `m=audio 9 UDP/TLS/RTP/SAVPF …`
+c=IN IP4 10.10.10.10                          <- Chrome wrote `c=IN IP4 0.0.0.0`
+a=x-signaling-fb:* x-message app recv:dsh     <- ADDED
+a=x-ssrc-range:4195875351-4195875351          <- ADDED (the `a=ssrc:` line stays too)
+a=rtpmap:105 CN/48000
+a=rtpmap:111 opus/48000/2
+a=rtpmap:97 RED/8000                          <- Chrome wrote `red/48000/2`
+a=rtpmap:9 G722/8000 … 0 PCMU … 8 PCMA … 13 CN/8000 … 110/126 telephone-event
+a=fmtp:111 minptime=10;useinbandfec=1
+a=fmtp:97 111/111
+a=rtcp:1234                                   <- Chrome wrote `a=rtcp:9 IN IP4 0.0.0.0`
+a=rtcp-fb:105 rrtr                            <- ADDED (Chrome had no `rrtr` for 105)
+a=rtcp-fb:111|97|9|0|8|13|110|126 rrtr
+a=rtcp-fb:111 transport-cc
+a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
+a=extmap:2 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time
+a=extmap:3 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01
+      ^^ BACKSLASHES: the MS-encoded spelling of those two URIs
+a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid
+a=setup:actpass
+a=mid:0
+a=recvonly
+a=ice-ufrag:… / a=ice-pwd:… / a=fingerprint:sha-256 …    <- Chrome's own, untouched
+a=candidate:1755259772 1 UDP 2122197247 10.10.10.10 1234 typ host
+                            ^^^ uppercase; Chrome writes `udp`
+a=ice-options:trickle
+a=ssrc:4195875351 cname:…
+a=rtcp-mux
+a=label:main-audio                            <- ADDED
+```
+
+Two things this settles beyond the profile. **The m-line port and the `c=` line carry the
+first host candidate's address and port** rather than the placeholder `9` / `0.0.0.0` a
+bundled offer uses — so a service that cannot read candidates still has somewhere to send.
+And **the answer comes back in the service's spelling**: the same capture shows Chrome
+being handed `m=audio 3478 UDP/TLS/RTP/SAVPF …`, which is the client's inbound transform
+having already run. Both are why `ms-sdp.ts` has two directions.
+
+`examples/` cannot reproduce this: the capture needs a real browser inside the real client.
+It was taken through the browser MCP tools against `teams.microsoft.com` — which is not one
+of this app's own fronts, so `guard-prod-chat-target.sh` permits it — with the user's
+explicit authorization for that one meeting, and it stayed in the lobby and left.
 - Keying is **DTLS-SRTP** (`a=fingerprint`, `a=setup:actpass`, `RTP/SAVPF`). SDES is
   touched only when a legacy remote offers `a=crypto`, and then the client strips its
   own fingerprint — a compatibility path, not the normal one.
