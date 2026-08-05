@@ -392,10 +392,35 @@ export async function fetchAgentModes(page: Page): Promise<{
   tools: string[];
   providers: { name: string; available: boolean; enabled: boolean; model: string | null }[];
   unrestricted: boolean;
+  default_provider: string;
 }> {
   const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/agent`);
   expect(res.ok()).toBeTruthy();
   return res.json();
+}
+
+/**
+ * Arm which agent CLIs the mock machine holds, and which provider is the default.
+ *
+ * A machine with TWO usable providers is what proves the split: a message's ⋯ menu offers
+ * the default alone, and the composer's own "@" still offers both. The mock installs one
+ * CLI out of the box, so a spec that needs the second one arms it here.
+ *
+ * **Reset it afterwards** (`setAgentProviders(page, "reset")`). One mock process serves the
+ * whole run, and a second CLI left installed changes what every later spec's menu holds.
+ * Arm it BEFORE `gotoApp`: the page reads `agent_status` when it connects.
+ */
+export async function setAgentProviders(
+  page: Page,
+  body: { available?: Record<string, boolean>; default?: string } | "reset",
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data:
+      body === "reset"
+        ? { kind: "agent_providers", reset: true }
+        : { kind: "agent_providers", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
 }
 
 /** Switch the sidebar to the Channels tab and wait for the tree to populate. */

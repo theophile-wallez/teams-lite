@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { test, fetchAgentModes, gotoApp } from "./helpers";
+import { test, fetchAgentModes, gotoApp, setAgentProviders } from "./helpers";
 
 // Settings → AI providers: which coding agent this machine may run, and on which model
 // (see web/src/components/ai-providers-settings.tsx, src/agent_policy.rs).
@@ -133,6 +133,46 @@ test.describe("AI providers", () => {
     expect(stored.providers.find((p) => p.name === "claude")?.model).toBe("claude-opus-4-5");
     // And the trigger still shows what IS stored, not what was refused.
     await expect(select).toHaveAttribute("data-value", "claude-opus-4-5");
+  });
+
+  // The default provider: which single one a message's ⋯ menu offers. Claude Code out of
+  // the box, and moved by naming the other one — there is always exactly one, so the row
+  // that has it shows a chip and offers no switch to clear.
+  test("claude is the default, and the other row takes it over", async ({ page }) => {
+    // Both CLIs installed: a machine with one usable provider could not tell a default
+    // apart from the only choice.
+    await setAgentProviders(page, { available: { opencode: true } });
+    try {
+      const section = await openProviders(page);
+      const claude = section.locator('[data-testid="ai-provider"][data-provider="claude"]');
+      const opencode = section.locator('[data-testid="ai-provider"][data-provider="opencode"]');
+
+      await expect(claude).toHaveAttribute("data-default", "true");
+      await expect(claude.locator('[data-testid="ai-provider-default"]')).toHaveAttribute(
+        "data-state",
+        "on",
+      );
+      // Exactly one provider carries it, so the chip is not a switch: the way to move it
+      // is the button on the other row.
+      await expect(claude.locator('button[data-testid="ai-provider-default"]')).toHaveCount(0);
+
+      await opencode.locator('[data-testid="ai-provider-default"][data-state="off"]').click();
+      await expect(opencode).toHaveAttribute("data-default", "true");
+      await expect(claude).toHaveAttribute("data-default", "false");
+      // And the BACKEND is what proves it, not the chip that just moved.
+      await expect.poll(async () => (await fetchAgentModes(page)).default_provider).toBe("opencode");
+    } finally {
+      await setAgentProviders(page, "reset");
+    }
+  });
+
+  // A provider that would never answer must not be offered the default either: the menu
+  // falls back to what does answer, so the setting would decide nothing.
+  test("a provider that cannot answer is offered no default", async ({ page }) => {
+    const section = await openProviders(page);
+    const opencode = section.locator('[data-testid="ai-provider"][data-provider="opencode"]');
+    await expect(opencode).toHaveAttribute("data-available", "false");
+    await expect(opencode.locator('[data-testid="ai-provider-default"]')).toHaveCount(0);
   });
 
   test("a provider reads by its own name and mark", async ({ page }) => {

@@ -2422,8 +2422,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             agent_status_json(&store)
         }
 
-        // Enable or disable one AI provider, and choose the model it runs. Both halves
-        // are optional, so the UI can flip a switch without restating the model.
+        // Enable or disable one AI provider, choose the model it runs, and make it the
+        // DEFAULT one. Every half is optional, so the UI can flip a switch without
+        // restating the model.
         //
         // A provider this machine holds is enabled out of the box (see
         // `agent_policy::Providers`), so this method is how the user narrows the set —
@@ -2455,6 +2456,18 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
             }
             store.set_setting(agent_policy::SETTING_PROVIDERS, &providers.to_json())?;
+            // Make this provider the default: the one a surface with room for a single
+            // row offers (a message's "…" menu). There is always exactly one, so the way
+            // to move it is to name the other provider — clearing it would leave none.
+            if let Some(default) = params.get("default").and_then(Value::as_bool) {
+                anyhow::ensure!(
+                    default,
+                    "a machine has exactly one default provider: name the other one \
+                     instead of clearing this one"
+                );
+                store.set_setting(agent_policy::SETTING_DEFAULT_PROVIDER, backend.name)?;
+                eprintln!("[agent] {} is now the default provider", backend.name);
+            }
             eprintln!(
                 "[agent] {} is now {} on model {}",
                 backend.name,
@@ -6807,8 +6820,15 @@ fn agent_status_json(store: &Store) -> Result<Value> {
             })
         })
         .collect();
+    // The one provider a surface offers when it offers a single row — a message's "…"
+    // menu. Every enabled provider still answers its own prefix; this only says which one
+    // is named where there is room for one (`agent_policy::default_backend`).
+    let default_provider = agent_policy::default_backend(
+        store.get_setting(agent_policy::SETTING_DEFAULT_PROVIDER)?.as_deref(),
+    );
     Ok(json!({
         "backends": backends,
+        "default_provider": default_provider.name,
         "conversations": conversations,
         "tools": agent::tools_from_setting(store.get_setting(agent::SETTING_TOOLS)?.as_deref()),
         "tool_grants": tool_grants,
@@ -8485,6 +8505,20 @@ mod tests {
             .map(|model| model["id"].as_str().unwrap())
             .collect();
         assert_eq!(ids, ["fable", "opus", "sonnet", "haiku"]);
+    }
+
+    #[test]
+    fn the_agent_status_names_claude_code_as_the_default_provider() {
+        // What a message's "…" menu offers on a machine nobody configured: one row, and
+        // it is Claude Code.
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(agent_status_json(&store).unwrap()["default_provider"], "claude");
+
+        store.set_setting(agent_policy::SETTING_DEFAULT_PROVIDER, "opencode").unwrap();
+        assert_eq!(agent_status_json(&store).unwrap()["default_provider"], "opencode");
+        // And a stored name this build does not know never leaves the menu without a row.
+        store.set_setting(agent_policy::SETTING_DEFAULT_PROVIDER, "gemini").unwrap();
+        assert_eq!(agent_status_json(&store).unwrap()["default_provider"], "claude");
     }
 
     #[test]

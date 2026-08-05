@@ -3,6 +3,7 @@ import type { AgentStatus } from "./agent";
 import {
   agentCandidatesFor,
   dedupeCandidates,
+  defaultAgentCandidatesFor,
   matchAgentCandidates,
   matchMentionCandidates,
   mentionOptionKey,
@@ -166,6 +167,31 @@ describe("agentCandidatesFor", () => {
     partial.backends[0]!.available = false;
     partial.backends[1]!.enabled = false;
     expect(agentCandidatesFor(partial, "19:on@thread.v2")).toEqual([]);
+  });
+});
+
+describe("defaultAgentCandidatesFor", () => {
+  // What a message's ⋯ menu offers: one row, the provider the user chose in Settings —
+  // while the composer's own "@" (agentCandidatesFor, above) still offers both.
+  it("offers the default provider alone", () => {
+    expect(defaultAgentCandidatesFor(status(), "19:on@thread.v2")).toEqual([CLAUDE]);
+    expect(
+      defaultAgentCandidatesFor(status({ default_provider: "opencode" }), "19:on@thread.v2"),
+    ).toEqual([OPENCODE]);
+  });
+
+  it("keeps every gate the wider list applies", () => {
+    // It narrows the list; it can never widen it.
+    expect(defaultAgentCandidatesFor(status(), "19:off@thread.v2")).toEqual([]);
+    expect(defaultAgentCandidatesFor(status({ enabled: false }), "19:on@thread.v2")).toEqual([]);
+    expect(defaultAgentCandidatesFor(null, "19:on@thread.v2")).toEqual([]);
+  });
+
+  it("offers the other one when the default itself would never answer", () => {
+    // A row that summons nothing is the one thing worse than two rows.
+    const missing = status({ default_provider: "claude" });
+    missing.backends[0]!.available = false;
+    expect(defaultAgentCandidatesFor(missing, "19:on@thread.v2")).toEqual([OPENCODE]);
   });
 });
 

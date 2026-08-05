@@ -3015,6 +3015,35 @@ const mockAgentProviders = new Map<
   ["opencode", { prefix: "@opencode", available: false, enabled: true, model: null, models: [] }],
 ]);
 
+/** Which provider a message's ⋯ menu offers — `claude`, exactly like a fresh Rust store
+ *  (`agent_policy::DEFAULT_BACKEND`). Moved by `agent_set_provider {default: true}`, and by
+ *  the `{kind: "agent_providers"}` test hook, which a spec MUST reset. */
+let mockAgentDefaultProvider = "claude";
+
+/** Whether this pretend machine holds the `opencode` CLI. The default is NO — one
+ *  installed CLI and one missing is the state that keeps the pane's own "Not installed" row
+ *  honest — so a spec that needs two usable providers arms it through the
+ *  `{kind: "agent_providers"}` test hook and resets it afterwards. */
+const MOCK_OPENCODE_INSTALLED = false;
+
+/** Put the providers back the way this file declares them. One mock process serves the
+ *  whole E2E run, so a spec that armed a second CLI or moved the default has to hand the
+ *  next one the state it expects. */
+function resetMockAgentProviders(): void {
+  const claude = mockAgentProviders.get("claude");
+  const opencode = mockAgentProviders.get("opencode");
+  if (claude) {
+    claude.enabled = true;
+    claude.model = null;
+  }
+  if (opencode) {
+    opencode.available = MOCK_OPENCODE_INSTALLED;
+    opencode.enabled = true;
+    opencode.model = null;
+  }
+  mockAgentDefaultProvider = "claude";
+}
+
 /** Whether the agent would run on the user's own Claude Code configuration. Off, like a
  *  fresh Rust store: the mock runs no CLI, so this is only the setting travelling to the
  *  backend and back — which is exactly what the switch has to prove. */
@@ -3030,6 +3059,7 @@ function agentStatusView(): {
     model: string | null;
     models: MockAgentModel[];
   }[];
+  default_provider: string;
   conversations: { conversation: string; mode: string }[];
   tools: string[];
   tool_grants: { key: string; label: string; detail: string; tools: string[] }[];
@@ -3040,6 +3070,7 @@ function agentStatusView(): {
 } {
   return {
     backends: [...mockAgentProviders].map(([name, provider]) => ({ name, ...provider })),
+    default_provider: mockAgentDefaultProvider,
     conversations: [...mockAgentModes].map(([conversation, mode]) => ({ conversation, mode })),
     tools: [...mockAgentTools],
     tool_grants: MOCK_AGENT_TOOL_GRANTS,
@@ -4883,6 +4914,17 @@ function dispatch(method: string, params: unknown): unknown {
           provider.model = model;
         }
       }
+      // Exactly one provider is the default, so `false` is refused rather than leaving
+      // none — the same sentence the Rust handler answers with.
+      if (typeof o.default === "boolean") {
+        if (!o.default) {
+          throw new Error(
+            "a machine has exactly one default provider: name the other one instead of " +
+              "clearing this one",
+          );
+        }
+        mockAgentDefaultProvider = name;
+      }
       return agentStatusView();
     }
 
@@ -5903,6 +5945,34 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       broadcast("broker_status", mockBrokerStatus);
       return Response.json({ ok: true, broker: mockBrokerStatus }, { status: 200 });
     }
+    // Arm which CLIs this pretend machine holds and which provider is the default, so a
+    // spec can put two usable providers in front of the app — the state that proves the ⋯
+    // menu offers ONE of them (`defaultUsableBackends`) while the composer offers both. A
+    // spec MUST reset it afterwards (`{kind: "agent_providers", reset: true}`): one mock
+    // process serves the whole run, and a second CLI left installed changes what every
+    // later spec's menu holds.
+    if (body.kind === "agent_providers") {
+      if (body.reset === true) {
+        resetMockAgentProviders();
+        return Response.json({ ok: true, reset: true }, { status: 200 });
+      }
+      const available = asObject(body.available);
+      for (const [name, provider] of mockAgentProviders) {
+        const installed = available[name];
+        if (typeof installed === "boolean") provider.available = installed;
+      }
+      if (typeof body.default === "string" && mockAgentProviders.has(body.default)) {
+        mockAgentDefaultProvider = body.default;
+      }
+      return Response.json(
+        {
+          ok: true,
+          default_provider: mockAgentDefaultProvider,
+          available: [...mockAgentProviders].map(([name, p]) => ({ name, available: p.available })),
+        },
+        { status: 200 },
+      );
+    }
     // Arm (or clear) a pending update, and say whether this pretend install can replace
     // itself — the difference between the button and the plain link (`can_install` in
     // src/update.rs). A spec MUST clear it afterwards: one mock process serves the whole
@@ -6112,6 +6182,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       // the same reason — a switch is only meaningful if the backend stored it.
       tools: [...mockAgentTools],
       unrestricted: mockAgentUnrestricted,
+      default_provider: mockAgentDefaultProvider,
       providers: [...mockAgentProviders].map(([name, p]) => ({
         name,
         available: p.available,

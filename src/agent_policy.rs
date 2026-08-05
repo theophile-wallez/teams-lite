@@ -162,6 +162,30 @@ pub fn backend_named(name: &str) -> Option<&'static Backend> {
     BACKENDS.iter().find(|b| b.name.eq_ignore_ascii_case(name))
 }
 
+/// The provider a machine falls back to: Claude Code, the first entry of [`BACKENDS`].
+///
+/// First and default are one answer on purpose — [`BACKENDS`] is the order every surface
+/// lists the providers in, so the default is the one the reader already sees at the top.
+pub const DEFAULT_BACKEND: &Backend = &BACKENDS[0];
+
+/// The store key holding the name of the DEFAULT provider. Absent means
+/// [`DEFAULT_BACKEND`].
+pub const SETTING_DEFAULT_PROVIDER: &str = "agent_default_provider";
+
+/// The provider a surface offers when it offers exactly ONE.
+///
+/// Every provider the machine holds is enabled (see [`Providers`]) and every enabled one
+/// answers its own prefix — this setting changes none of that. It answers a different
+/// question: which single one a surface with room for one row names, which is what a
+/// message's "…" menu has. Two rows there is a menu asking the reader to pick a vendor
+/// before they have asked their question.
+///
+/// An unreadable or unknown stored name reads as [`DEFAULT_BACKEND`], never as "no
+/// default": there is always exactly one, so a typo must not empty a menu.
+pub fn default_backend(stored: Option<&str>) -> &'static Backend {
+    stored.map(str::trim).and_then(backend_named).unwrap_or(DEFAULT_BACKEND)
+}
+
 /// The store key holding the per-provider settings, as
 /// `{"<backend name>": {"enabled": false, "model": "opus"}}`. Absent means every
 /// provider this machine can run is on, with the CLI's own default model.
@@ -891,6 +915,23 @@ mod tests {
         let cleared = Providers::parse(Some(&cleared.to_json()));
         assert_eq!(cleared.model("claude"), None);
         assert!(!cleared.is_enabled("claude"));
+    }
+
+    #[test]
+    fn claude_code_is_the_default_provider_out_of_the_box() {
+        // The one a message's "…" menu offers, on a machine nobody configured.
+        assert_eq!(DEFAULT_BACKEND.name, "claude");
+        assert_eq!(default_backend(None).name, "claude");
+    }
+
+    #[test]
+    fn a_stored_default_wins_and_a_broken_one_never_empties_the_menu() {
+        assert_eq!(default_backend(Some("opencode")).name, "opencode");
+        assert_eq!(default_backend(Some("  opencode  ")).name, "opencode");
+        // A name this crate does not know — a provider a newer backend added and this one
+        // dropped, or a typo — reads as the built-in default. There is always exactly one.
+        assert_eq!(default_backend(Some("gemini")).name, "claude");
+        assert_eq!(default_backend(Some("")).name, "claude");
     }
 
     #[test]

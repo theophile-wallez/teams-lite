@@ -1901,13 +1901,14 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  // Settings › AI providers: the two provider rows, then the model picker open over
-  // them. Both halves need a look in both themes — each row wears a vendor's own
-  // artwork, and opencode's mark ships one file per theme, so one capture proves half
-  // of it (web/src/components/ai-providers-settings.tsx and agent-model-select.tsx).
+  // Settings › AI providers: the two provider rows, the default control as a pair, then
+  // the model picker open over them. Every half needs a look in both themes — each row
+  // wears a vendor's own artwork, and opencode's mark ships one file per theme, so one
+  // capture proves half of it (web/src/components/ai-providers-settings.tsx and
+  // agent-model-select.tsx).
   if (args.includes("--ai-providers")) {
     await withPreview(
-      async ({ page, shot, setTheme }) => {
+      async ({ page, shot, setTheme, emit }) => {
         await openSettings(page);
         const section = '[data-testid="ai-providers-settings"]';
         await page.locator(section).scrollIntoViewIfNeeded();
@@ -1915,6 +1916,24 @@ if (import.meta.main) {
         await setTheme("dark");
         await shot(`${out}-dark.png`, section);
         await setTheme("light");
+
+        // The default control as a PAIR, which needs a machine holding both CLIs: the
+        // chip on the provider that has it, the button on the one that could take it.
+        // The mock installs one CLI out of the box, so the state is armed and reset.
+        await emit({ kind: "agent_providers", available: { opencode: true } });
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.waitForSelector('[data-testid="conversation-row"]');
+        await openSettings(page);
+        await page.locator(section).scrollIntoViewIfNeeded();
+        await shot(`${out}-default-light.png`, section);
+        await setTheme("dark");
+        await shot(`${out}-default-dark.png`, section);
+        await setTheme("light");
+        await emit({ kind: "agent_providers", reset: true });
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.waitForSelector('[data-testid="conversation-row"]');
+        await openSettings(page);
+        await page.locator(section).scrollIntoViewIfNeeded();
 
         // The picker open on the installed provider, which is the one with a list.
         await page
@@ -1928,7 +1947,9 @@ if (import.meta.main) {
         await shot(`${out}-open-light.png`);
         await setTheme("dark");
         await shot(`${out}-open-dark.png`);
-        console.log(`[preview] wrote ${out}-{light,dark,open-light,open-dark}.png`);
+        console.log(
+          `[preview] wrote ${out}-{light,dark,default-light,default-dark,open-light,open-dark}.png`,
+        );
       },
       { deviceScaleFactor: dpr },
     );

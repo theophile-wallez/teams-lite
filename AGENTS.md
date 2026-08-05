@@ -222,6 +222,22 @@ Five more things worth knowing before touching it:
   first is consent to post, the second is only which installed CLI answers once that
   consent exists. A disabled provider ignores its own prefix everywhere, and says so in
   the journal.
+- **One provider is the DEFAULT, and it is Claude Code out of the box**
+  (`agent_policy::DEFAULT_BACKEND`, stored under `SETTING_DEFAULT_PROVIDER`, moved by
+  `agent_set_provider {default: true}` from the same pane). It takes nothing away: every
+  enabled provider still answers its own prefix, and the composer's "@" still offers all of
+  them. What it decides is which single one a surface with room for ONE row names — a
+  message's "…" menu, whose "Answer with" and "Review with" rows come from
+  `defaultAgentCandidatesFor` rather than `agentCandidatesFor`. That menu is a column of
+  actions on one message, and a row per vendor asks the reader to choose a program before
+  they have said what they want. Three rules hold it, and each is pinned by a test: there
+  is always exactly ONE — an unknown stored name, and a backend too old to name one, both
+  read as Claude Code, because a typo must not empty a menu; `default: false` is refused,
+  so the way to move it is to name the other provider; and the preference LOSES to the
+  older rule that a row must really answer — a default whose CLI this machine lacks, or
+  which the user switched off, hands the menu back to what does answer
+  (`defaultUsableBackends`), because a row that summons nothing is worse than two that
+  work.
 - **The model is picked from THIS machine's list, and the list is never the limit.**
   `agent_status` publishes, per provider, the models it can offer with what a reader
   needs to choose one — the vendor's own name for the model, whose mark to draw, and
@@ -1167,10 +1183,12 @@ else wrote, three screens up, that the user wants an answer to.
   summons nothing — `agent_policy::split_prefix` refuses an empty prompt — so a draft
   holding only the chip would post a message that starts no program. A half-written draft
   is kept instead and becomes the request: the user's own sentence beats ours.
-- **The rows are the composer's own list** (`agentCandidatesFor`), so a thread nobody opted
-  in offers none. The consent gate stays in the thread's own menu; this reflects it and
-  never widens it. A request also carries the conversation it was asked in, so walking to
-  another chat drops it rather than leaving a tag in a draft nobody asked for.
+- **The row is the composer's own list, narrowed to the DEFAULT provider**
+  (`defaultAgentCandidatesFor`), so a thread nobody opted in offers none and a machine
+  holding two CLIs still offers one row — see the default provider under § The local agent.
+  The consent gate stays in the thread's own menu; this reflects it and never widens it. A
+  request also carries the conversation it was asked in, so walking to another chat drops it
+  rather than leaving a tag in a draft nobody asked for.
 - **The reply is how the agent knows WHICH message.** The prompt is the body with the
   quote stripped (`teams_read::plain_text_from_html`), so "answer this message" would
   otherwise name nothing. `agent_policy::answering` reads the quote back out of the trigger

@@ -12,7 +12,13 @@
 // components/mention-extension.ts, components/agent-tag-extension.ts and
 // components/mention-suggestions.tsx.
 
-import { agentModeFor, usableBackends, type AgentStatus } from "./agent";
+import {
+  agentModeFor,
+  defaultUsableBackends,
+  usableBackends,
+  type AgentBackend,
+  type AgentStatus,
+} from "./agent";
 import { agentDisplayName } from "./agent-message";
 
 /** Somebody a message can @mention: their MRI, and the name to show. */
@@ -170,9 +176,39 @@ export function agentCandidatesFor(
   status: AgentStatus | null,
   conversationId: string | null,
 ): AgentCandidate[] {
+  return candidatesFrom(status, conversationId, usableBackends);
+}
+
+/**
+ * The same list narrowed to the machine's DEFAULT provider — what a message's ⋯ menu
+ * offers.
+ *
+ * The composer's own "@" offers every usable agent, because the user is typing there and
+ * the list is what they are reading. A message menu is the other case: it is a column of
+ * actions on one message, and a row per vendor asks the reader to choose a program before
+ * they have said what they want. So it names the one the user chose in Settings (see
+ * {@link defaultUsableBackends}, which is also what keeps a default this machine cannot
+ * run from emptying the menu).
+ *
+ * Every gate {@link agentCandidatesFor} applies still applies: this narrows the list, and
+ * never widens it.
+ */
+export function defaultAgentCandidatesFor(
+  status: AgentStatus | null,
+  conversationId: string | null,
+): AgentCandidate[] {
+  return candidatesFrom(status, conversationId, defaultUsableBackends);
+}
+
+/** The two lists above, minus the one line they differ in: which backends to draw from. */
+function candidatesFrom(
+  status: AgentStatus | null,
+  conversationId: string | null,
+  backends: (status: AgentStatus | null) => AgentBackend[],
+): AgentCandidate[] {
   if (!status?.enabled) return [];
   if (agentModeFor(status, conversationId) !== "reply") return [];
-  return usableBackends(status).map((backend) => ({
+  return backends(status).map((backend) => ({
     backend: backend.name,
     name: agentDisplayName(backend.name),
     prefix: backend.prefix,

@@ -21,7 +21,7 @@ import {
 import type { AgentAnswer } from "~/lib/agent-answer";
 import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
-import { agentCandidatesFor, type AgentCandidate } from "~/lib/mentions";
+import { defaultAgentCandidatesFor, type AgentCandidate } from "~/lib/mentions";
 import { reviewRequest, type MergeRequestLink } from "~/lib/merge-request";
 import { useAppState, useController } from "./controller-context";
 import { AgentMenu } from "./agent-menu";
@@ -126,13 +126,16 @@ export function MessagePane(props: { onBack?: () => void }) {
   );
   const modifier = useModifierLabel();
 
-  // The agents a message's ⋯ menu may offer to answer with — the backend's own state and
-  // this thread's own mode, so a thread nobody opted in offers none. Computed once here
-  // rather than per bubble: the pane keeps every bubble prop reference-stable so a live
-  // message re-renders one row and not the whole history.
+  // The agent a message's ⋯ menu may offer to answer with — the backend's own state and
+  // this thread's own mode, so a thread nobody opted in offers none. Narrowed to the
+  // machine's DEFAULT provider, because this menu is a column of actions on one message
+  // and a row per vendor would ask the reader to choose a program first (see
+  // `defaultAgentCandidatesFor`); the composer's own "@" still offers every one of them.
+  // Computed once here rather than per bubble: the pane keeps every bubble prop
+  // reference-stable so a live message re-renders one row and not the whole history.
   const agentStatus = useAppState((s) => s.agent);
   const answerAgents = useMemo(
-    () => agentCandidatesFor(agentStatus, openId),
+    () => defaultAgentCandidatesFor(agentStatus, openId),
     [agentStatus, openId],
   );
 

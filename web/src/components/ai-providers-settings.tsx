@@ -1,7 +1,12 @@
 import { useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CheckIcon, SparklesIcon } from "@hugeicons/core-free-icons";
-import { agentBackendLabel, type AgentBackend } from "~/lib/agent";
+import {
+  agentBackendLabel,
+  agentDefaultProvider,
+  type AgentBackend,
+  type AgentProviderPatch,
+} from "~/lib/agent";
 import { cn } from "~/lib/utils";
 import { AgentLogo } from "./agent-logo";
 import { AgentModelSelect } from "./agent-model-select";
@@ -24,6 +29,12 @@ import { useAppState, useController } from "./controller-context";
  *   vendor does, so the picker offers models rather than ids. It stays a picker and
  *   never a limit — the search field doubles as the free-form entry the RPC has always
  *   accepted, because a list that is right on this machine would be wrong on the next.
+ * - **One of them is the DEFAULT, and Claude Code is it out of the box.** Every enabled
+ *   provider answers its own prefix, so the default takes nothing away: it says which
+ *   single one a surface with room for one row offers — a message's ⋯ menu. It is chosen
+ *   here rather than in that menu because it is a fact about the machine, like the model.
+ *   Exactly one provider carries it, so the row that has it shows a chip and offers no
+ *   switch: it is moved by naming the other one.
  *
  * The providers are rows of one list, not a card each. A card frames one thing to say
  * it stands alone; these two are the same kind of thing, read in order, so the eye
@@ -38,6 +49,7 @@ import { useAppState, useController } from "./controller-context";
 export function AiProvidersSettings() {
   const status = useAppState((s) => s.agent);
   const backends = status?.backends ?? [];
+  const defaultProvider = agentDefaultProvider(status);
 
   return (
     <section className="flex flex-col gap-4" data-testid="ai-providers-settings">
@@ -49,7 +61,8 @@ export function AiProvidersSettings() {
           <h3 className="text-[15px] font-medium text-foreground">AI providers</h3>
           <p className="text-[13px] text-text-faint">
             The coding agents this machine can run when you write their prefix in a
-            conversation you armed. Choose which ones answer, and on which model.
+            conversation you armed. Choose which ones answer, on which model, and which one
+            a message&rsquo;s ⋯ menu offers.
           </p>
         </div>
       </div>
@@ -71,7 +84,12 @@ export function AiProvidersSettings() {
       ) : (
         <div className="flex flex-col rounded-xl bg-card shadow-chip">
           {backends.map((backend, index) => (
-            <ProviderRow key={backend.name} backend={backend} first={index === 0} />
+            <ProviderRow
+              key={backend.name}
+              backend={backend}
+              isDefault={backend.name === defaultProvider}
+              first={index === 0}
+            />
           ))}
         </div>
       )}
@@ -79,15 +97,16 @@ export function AiProvidersSettings() {
   );
 }
 
-/** One provider: whether it is installed, whether it answers, and which model it runs. */
-function ProviderRow(props: { backend: AgentBackend; first: boolean }) {
+/** One provider: whether it is installed, whether it answers, which model it runs, and
+ *  whether it is the one a message's ⋯ menu offers. */
+function ProviderRow(props: { backend: AgentBackend; isDefault: boolean; first: boolean }) {
   const controller = useController();
   const { backend } = props;
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const save = async (patch: { enabled?: boolean; model?: string }) => {
+  const save = async (patch: AgentProviderPatch) => {
     setBusy(true);
     setError(null);
     try {
@@ -108,6 +127,7 @@ function ProviderRow(props: { backend: AgentBackend; first: boolean }) {
       data-provider={backend.name}
       data-available={backend.available}
       data-enabled={backend.enabled}
+      data-default={props.isDefault}
       className={cn("flex flex-col gap-3 p-4", !props.first && "border-t border-border-subtle")}
     >
       <div className="flex items-center justify-between gap-3">
@@ -149,29 +169,64 @@ function ProviderRow(props: { backend: AgentBackend; first: boolean }) {
           </div>
         </div>
 
-        <button
-          type="button"
-          role="switch"
-          aria-checked={on}
-          aria-label={`Enable the ${label} provider`}
-          data-testid="ai-provider-toggle"
-          disabled={busy || !backend.available}
-          onClick={() => void save({ enabled: !backend.enabled })}
-          className={cn(
-            "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-            busy && "opacity-60",
-            backend.available ? "cursor-pointer" : "cursor-not-allowed opacity-40",
-            on ? "bg-primary" : "bg-element",
+        <div className="flex shrink-0 items-center gap-2">
+          {/* Which one a message's ⋯ menu offers. A chip on the row that has it — exactly
+              one provider does, so there is nothing to switch off — and a button on a row
+              that could take it. A provider that would never answer is offered neither:
+              the menu falls back to what does answer (`defaultUsableBackends`), so making
+              that one the default would decide nothing. */}
+          {props.isDefault ? (
+            <span
+              data-testid="ai-provider-default"
+              data-state="on"
+              className="inline-flex items-center gap-1 rounded-full bg-primary/12 px-2 py-1 text-[11px] font-semibold text-primary"
+            >
+              <HugeiconsIcon icon={CheckIcon} className="size-3" strokeWidth={2.5} /> Default
+            </span>
+          ) : (
+            on && (
+              <button
+                type="button"
+                data-testid="ai-provider-default"
+                data-state="off"
+                disabled={busy}
+                onClick={() => void save({ default: true })}
+                title={`Offer ${label} in a message's ⋯ menu`}
+                className={cn(
+                  "cursor-pointer rounded-full bg-element px-2 py-1 text-[11px] font-medium text-text-dim transition-colors hover:text-foreground",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  busy && "opacity-60",
+                )}
+              >
+                Set as default
+              </button>
+            )
           )}
-        >
-          <span
+
+          <button
+            type="button"
+            role="switch"
+            aria-checked={on}
+            aria-label={`Enable the ${label} provider`}
+            data-testid="ai-provider-toggle"
+            disabled={busy || !backend.available}
+            onClick={() => void save({ enabled: !backend.enabled })}
             className={cn(
-              "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
-              on ? "translate-x-[22px]" : "translate-x-0.5",
+              "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+              busy && "opacity-60",
+              backend.available ? "cursor-pointer" : "cursor-not-allowed opacity-40",
+              on ? "bg-primary" : "bg-element",
             )}
-          />
-        </button>
+          >
+            <span
+              className={cn(
+                "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
+                on ? "translate-x-[22px]" : "translate-x-0.5",
+              )}
+            />
+          </button>
+        </div>
       </div>
 
       {/* No CLI, no model to choose: a control that could never change a run is a

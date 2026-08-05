@@ -57,12 +57,16 @@ export type AgentBackend = {
   models: AgentModel[];
 };
 
-/** What one `agent_set_provider` call changes. Both halves are optional, so a switch
+/** What one `agent_set_provider` call changes. Every half is optional, so a switch
  *  can be flipped without restating the model. */
 export type AgentProviderPatch = {
   enabled?: boolean;
   /** A model name, or "" to go back to the CLI's own default. */
   model?: string;
+  /** Make this provider the default one — see {@link agentDefaultProvider}. Only `true`
+   *  is accepted: a machine has exactly one default, so it is moved by naming the other
+   *  provider, never by clearing this one. */
+  default?: true;
 };
 
 /** What one conversation does with a trigger the user writes in it. */
@@ -98,6 +102,9 @@ export type AgentConversationMode = {
 /** Everything `agent_status` reports. */
 export type AgentStatus = {
   backends: AgentBackend[];
+  /** The provider a surface offers when it offers ONE — see {@link agentDefaultProvider}.
+   *  Absent on a backend too old to name one, which then reads as the first provider. */
+  default_provider?: string;
   conversations: AgentConversationMode[];
   /** The tools an agent may use without being asked — read-only by default. */
   tools: string[];
@@ -142,6 +149,40 @@ export function availableBackends(status: AgentStatus | null): AgentBackend[] {
  *  what a hint may name, because a disabled provider ignores its own prefix. */
 export function usableBackends(status: AgentStatus | null): AgentBackend[] {
   return availableBackends(status).filter((b) => b.enabled);
+}
+
+/**
+ * The provider the machine names as its default, as a name (`claude`).
+ *
+ * Every enabled provider still answers its own prefix — the default changes none of that.
+ * It answers the other question: which single one a surface with room for one row offers,
+ * which is what a message's ⋯ menu has (see {@link defaultUsableBackends}).
+ *
+ * A backend too old to name one, and a name none of them carries, both read as the FIRST
+ * provider — the order this app lists them in, and the one the backend's own
+ * `agent_policy::DEFAULT_BACKEND` holds. There is always exactly one, so an unanswered
+ * status must not leave a menu with no row.
+ */
+export function agentDefaultProvider(status: AgentStatus | null): string {
+  const backends = status?.backends ?? [];
+  const named = backends.find((backend) => backend.name === status?.default_provider);
+  return (named ?? backends[0])?.name ?? "";
+}
+
+/**
+ * The one provider a menu should offer: the default, when it would really answer.
+ *
+ * Two rules meet here, and the order between them is the whole of it. The default is a
+ * preference, so it wins — one row, the vendor the user chose. But a row that summons
+ * nothing is the lie {@link usableBackends} exists to prevent, so a default whose CLI this
+ * machine lacks (or which the user switched off) hands the menu back to the providers that
+ * would answer, rather than leaving the reader a row that does nothing.
+ */
+export function defaultUsableBackends(status: AgentStatus | null): AgentBackend[] {
+  const usable = usableBackends(status);
+  const preferred = agentDefaultProvider(status);
+  const only = usable.filter((backend) => backend.name === preferred);
+  return only.length > 0 ? only : usable;
 }
 
 /** The groups this backend offers. Empty before it has answered, and on a backend too

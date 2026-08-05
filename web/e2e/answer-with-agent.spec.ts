@@ -1,4 +1,11 @@
-import { test, expect, fetchCapturedSends, gotoApp, openConversationNamed } from "./helpers";
+import {
+  test,
+  expect,
+  fetchCapturedSends,
+  gotoApp,
+  openConversationNamed,
+  setAgentProviders,
+} from "./helpers";
 import type { Page } from "@playwright/test";
 
 // "Answer with <agent>" in a message's ⋯ menu: the composer's agent tag, reached from the
@@ -43,18 +50,54 @@ test.describe("answer with an agent", () => {
     return bubble;
   }
 
-  test("offers one row per agent that would really answer, wearing its own mark", async ({
-    page,
-  }) => {
+  test("offers one row, wearing the mark of the agent it starts", async ({ page }) => {
     await openSandbox(page);
     await openMessageMenu(page);
-    // The mock holds `claude` and not `opencode`, so exactly one row: a CLI this machine
-    // lacks is never offered, exactly as in the composer's own list.
+    // The mock holds `claude` and not `opencode`, so a CLI this machine lacks is never
+    // offered — exactly as in the composer's own list.
     await expect(page.locator(row)).toHaveCount(1);
     await expect(page.locator(row)).toHaveAttribute("data-agent", "claude");
     await expect(page.locator(row)).toContainText("Answer with Claude");
     // The vendor's own artwork, not a glyph of ours — it says which program the row starts.
     await expect(page.locator(`${row} [data-testid="claude-logo"]`)).toHaveCount(1);
+  });
+
+  // The menu names the DEFAULT provider and only it, even on a machine that holds two:
+  // this is a column of actions on one message, and a row per vendor would ask the reader
+  // to choose a program before they have said what they want. Settings › AI providers is
+  // where that choice is made (see `defaultUsableBackends`).
+  test("offers the default provider alone on a machine holding two", async ({ page }) => {
+    await setAgentProviders(page, { available: { opencode: true } });
+    try {
+      await openSandbox(page);
+      await openMessageMenu(page);
+      await expect(page.locator(row)).toHaveCount(1);
+      await expect(page.locator(row)).toHaveAttribute("data-agent", "claude");
+
+      // Away from the menu through the MOUSE: an open menu is modal, so it is the only
+      // layer taking pointer events, and Escape is read by the app as "leave this
+      // conversation" (see delete-message.spec.ts for the same pair of reasons).
+      await page.mouse.click(5, 5);
+      await expect(page.locator('[data-testid="action-reply"]')).toHaveCount(0);
+      await expect(page.locator("body")).not.toHaveCSS("pointer-events", "none");
+
+      // The composer's own "@" is the other case: the user is reading that list, so it
+      // still offers both. The menu narrows; it never narrows the keyboard.
+      await page.locator(editable).click();
+      await page.keyboard.type("@");
+      const suggestions = page.locator('[data-testid="mention-suggestion"][data-kind="agent"]');
+      await expect(suggestions).toHaveCount(2);
+
+      // Name the other provider, and the menu follows. The reload clears the "@" with it.
+
+      await setAgentProviders(page, { default: "opencode" });
+      await openSandbox(page);
+      await openMessageMenu(page);
+      await expect(page.locator(row)).toHaveCount(1);
+      await expect(page.locator(row)).toHaveAttribute("data-agent", "opencode");
+    } finally {
+      await setAgentProviders(page, "reset");
+    }
   });
 
   test("offers nothing in a conversation nobody opted in", async ({ page }) => {

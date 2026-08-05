@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agentBackendLabel,
+  agentDefaultProvider,
   agentGrantIsOn,
   agentHint,
   agentIsUnrestricted,
@@ -11,6 +12,7 @@ import {
   agentToolGrants,
   agentToolsWithGrant,
   availableBackends,
+  defaultUsableBackends,
   formatTokens,
   usableBackends,
   type AgentBackend,
@@ -138,6 +140,54 @@ describe("usableBackends", () => {
     });
     expect(availableBackends(mixed).map((b) => b.name)).toEqual(["claude", "opencode"]);
     expect(usableBackends(mixed).map((b) => b.name)).toEqual(["claude"]);
+  });
+});
+
+describe("the default provider", () => {
+  const both = (over: Partial<AgentStatus> = {}) =>
+    status({
+      backends: [backend(), backend({ name: "opencode", prefix: "@opencode" })],
+      ...over,
+    });
+
+  it("is the one the backend named", () => {
+    expect(agentDefaultProvider(both({ default_provider: "opencode" }))).toBe("opencode");
+    expect(defaultUsableBackends(both({ default_provider: "opencode" })).map((b) => b.name)).toEqual(
+      ["opencode"],
+    );
+  });
+
+  // Claude Code is the first entry everywhere, and what the Rust default holds. A
+  // backend too old to name one, and a name none of them carries, must not leave a menu
+  // with no row at all.
+  it("falls back to the first provider when the backend named none, or named a stranger", () => {
+    expect(agentDefaultProvider(both({ default_provider: undefined }))).toBe("claude");
+    expect(agentDefaultProvider(both({ default_provider: "gemini" }))).toBe("claude");
+    expect(defaultUsableBackends(both({ default_provider: "gemini" })).map((b) => b.name)).toEqual([
+      "claude",
+    ]);
+  });
+
+  it("names nothing before the backend has answered", () => {
+    expect(agentDefaultProvider(null)).toBe("");
+    expect(defaultUsableBackends(null)).toEqual([]);
+  });
+
+  // The one rule that outranks the preference: a row that summons nothing is worse than
+  // two rows that work. So a default whose CLI is missing — or which the user switched
+  // off — hands the choice back to whatever would answer.
+  it("hands the list back when the default itself would never answer", () => {
+    const missing = both({ default_provider: "claude" });
+    missing.backends[0]!.available = false;
+    expect(defaultUsableBackends(missing).map((b) => b.name)).toEqual(["opencode"]);
+
+    const off = both({ default_provider: "claude" });
+    off.backends[0]!.enabled = false;
+    expect(defaultUsableBackends(off).map((b) => b.name)).toEqual(["opencode"]);
+  });
+
+  it("offers nothing where nothing would answer at all", () => {
+    expect(defaultUsableBackends(status({ enabled: true, backends: [] }))).toEqual([]);
   });
 });
 
