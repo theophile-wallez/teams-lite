@@ -78,8 +78,9 @@ pub fn looks_actionable(text: &str) -> bool {
     let lower = text.to_lowercase();
     let trimmed = lower.trim();
 
-    // Shorter than the shortest term below ("please"), so nothing dropped here could have
-    // matched anyway — and "ok" is the shape of most of what this saves reading.
+    // A cheap cut that drops very short notes including "ok". Also drops bare task words
+    // like "eod", "todo", "asap" — which cost nothing, since a four-character self-note
+    // not arming a scan is harmless.
     if trimmed.len() < 6 {
         return false;
     }

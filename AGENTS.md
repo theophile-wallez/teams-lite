@@ -432,7 +432,7 @@ what ships.
   thing runs rather than whether a machine posts in their name — the shape
   `agent_policy::Providers` already takes. What a feature that spends money on somebody
   else's message may not be is undeclinable, which is the whole reason the switch exists. Four
-  things about it, each pinned by a test:
+  things about it:
   - **Both ends read it, at the moment of the decision.** `arm_task_scan` arms nothing while
     it is off, and every tick of `spawn_task_scan` asks again — so turning it off stops the
     next scan rather than the next restart, including one armed five minutes ago. An arming is
