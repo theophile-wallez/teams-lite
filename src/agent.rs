@@ -499,6 +499,26 @@ async fn run_once(request: &Request, progress: &watch::Sender<Progress>) -> Resu
     Ok(outcome)
 }
 
+/// Whether THIS APP can say "no tools" on that backend's command line at all.
+///
+/// It is not a claim about a vendor's trustworthiness — it is a claim about
+/// [`build_command`], and only about what the arm below it spells. `claude` consults
+/// [`Request::permissions`]: an empty [`Permissions::Granted`] skips `--allowed-tools`
+/// while still passing `--permission-mode default`, so any tool the model reaches for is
+/// prompted, there is no terminal to answer the prompt, and it is refused. The other arm
+/// consults `permissions` not at all, so its CLI runs with whatever tool set its own
+/// configuration gives it and this app cannot narrow that from here.
+///
+/// A caller that NEEDS the empty allowlist honoured (the task scan, whose prompt is a
+/// colleague's words) asks this first and refuses to run rather than running a child it
+/// cannot bound. `an_empty_allowlist_is_only_claimed_where_the_command_line_states_it`
+/// keeps this from drifting away from `build_command` when a backend is added — and if
+/// opencode ever grows a tool-restriction flag, this is the one place that changes.
+pub fn enforces_empty_allowlist(backend: &Backend) -> bool {
+    // The same arms `build_command` matches on, and deliberately no wider.
+    matches!(backend.name, "claude")
+}
+
 /// Spell the command line for one backend, returning the prompt to write on stdin
 /// when that backend reads it there.
 ///
@@ -1265,6 +1285,35 @@ mod tests {
         request.permissions = Permissions::Granted(Vec::new());
         let (args, _) = argv(&request);
         assert!(!args.contains(&"--allowed-tools".to_string()));
+    }
+
+    /// `enforces_empty_allowlist` must agree with what `build_command` really spells, per
+    /// backend — a caller that trusts it refuses to run rather than running a child whose
+    /// tools this app cannot narrow. A backend added without touching either half is
+    /// caught here rather than by a scan quietly holding every tool its CLI defaults to.
+    #[test]
+    fn an_empty_allowlist_is_only_claimed_where_the_command_line_states_it() {
+        for backend in &BACKENDS {
+            let mut request = request(backend);
+            request.permissions = Permissions::Granted(Vec::new());
+            let (args, _) = argv(&request);
+            let names_the_mode = args
+                .iter()
+                .position(|a| a == "--permission-mode")
+                .is_some_and(|at| args.get(at + 1).map(String::as_str) == Some("default"));
+            assert!(
+                !args.contains(&"--allowed-tools".to_string()),
+                "{}: an empty allowlist must pass no list at all: {args:?}",
+                backend.name
+            );
+            assert_eq!(
+                enforces_empty_allowlist(backend),
+                names_the_mode,
+                "{} claims to honour an empty allowlist without naming a permission mode \
+                 that refuses what the list does not: {args:?}",
+                backend.name
+            );
+        }
     }
 
     /// The run the user's own terminal gives them: this app names neither the tools nor

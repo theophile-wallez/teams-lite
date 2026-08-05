@@ -4807,8 +4807,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "deleted": deleted }))
         }
 
-        // Sweep once, now, because the user asked. It runs an agent that holds no tools
-        // at all (see `task_scan_request`) and answers how many suggestions it wrote.
+        // Sweep once, now, because the user asked. It grants the run no tool and refuses
+        // to start on a CLI where this app cannot say that (see `task_scan_backend`), and
+        // answers how many suggestions it wrote.
         "tasks_scan" => Ok(json!({ "found": run_task_scan(ctx).await? })),
 
         other => anyhow::bail!("unknown method: {other}"),
@@ -7201,9 +7202,9 @@ fn agent_status_json(store: &Store) -> Result<Value> {
 // The task scan (see `teams_lite::tasks` and the `tasks` note in src/store.rs)
 //
 // One sweep of the messages and mail that arrived since the last one, read by an agent
-// that holds NO tools, and written back as `suggested` rows the user accepts or refuses.
-// Nothing here reaches Teams: the whole feature is local, and the only thing it spends
-// is one agent run.
+// this app grants NO tool to — on a CLI where it can say so, and on no other — and written
+// back as `suggested` rows the user accepts or refuses. Nothing here reaches Teams: the
+// whole feature is local, and the only thing it spends is one agent run.
 // ---------------------------------------------------------------------------
 
 /// The four states a task moves through. Checked here rather than in the store, whose
@@ -7215,14 +7216,27 @@ const TASK_STATES: [&str; 4] = ["suggested", "open", "done", "dismissed"];
 ///
 /// Every field is optional and an absent one stays `None`, which is what tells
 /// [`Store::save_task`] to leave that column alone — a client that ticks a task off
-/// restates nothing else. The state and the day are checked in the shape
-/// [`tasks::parse_extraction`] checks them, because a client is no more trusted than a
-/// model: a state outside the four would sit in the store as a row the panel cannot
-/// group, and a due date that is not a day would mis-sort against every other one.
+/// restates nothing else. `id` is what makes it a patch rather than an insert.
+///
+/// The three values checked are checked in the shape [`tasks::parse_extraction`] checks
+/// them, because a client is no more trusted than a model — and these are the three doors
+/// the two share: a state outside the four would sit in the store as a row the panel cannot
+/// group, a due date that is not a day would mis-sort against every other one, and a blank
+/// title is a row nobody can read or act on.
 fn task_write_from_params(params: &Value) -> Result<store::TaskWrite> {
     let field = |key: &str| params.get(key).and_then(Value::as_str).map(String::from);
+    let id = field("id");
+    let title = field("title");
     let state = field("state");
     let due_date = field("due_date");
+
+    // A title that is NAMED must say something, and an insert must name one: without both
+    // halves a blank row reaches the panel, through the door the model is already refused
+    // at. The insert half is why `id` decides — a patch that names no title changes none.
+    if let Some(title) = title.as_deref() {
+        anyhow::ensure!(!title.trim().is_empty(), "a task's title cannot be blank");
+    }
+    anyhow::ensure!(id.is_some() || title.is_some(), "a new task needs a title");
 
     if let Some(state) = state.as_deref() {
         anyhow::ensure!(
@@ -7240,8 +7254,8 @@ fn task_write_from_params(params: &Value) -> Result<store::TaskWrite> {
     }
 
     Ok(store::TaskWrite {
-        id: field("id"),
-        title: field("title"),
+        id,
+        title,
         body: field("body"),
         state,
         due_date,
@@ -7283,20 +7297,50 @@ fn task_scan_sweep(store: &Store, now_ms: i64) -> Result<Option<store::TaskCandi
     Ok(Some(found))
 }
 
-/// Everything a scan run needs: the candidates as its prompt, and no tools at all.
+/// Which CLI runs a scan: the user's default provider when this app can run it with NO
+/// tools, else the first installed backend it can, else nothing and the scan is refused.
+///
+/// It diverges from the default-provider preference on purpose. That preference decides
+/// which program answers a chat MESSAGE, which is a choice about voice — every enabled
+/// provider still answers its own prefix. A scan is a fixed-prompt classification job over
+/// a colleague's words, and its one requirement is that the child hold no tools; where the
+/// two disagree the narrower requirement wins, because a preference cannot make a
+/// guarantee true. `agent::enforces_empty_allowlist` is what "can" means here, and it is a
+/// question about THIS app's command line rather than about a vendor.
+///
+/// Refusing beats falling back to a run this app cannot bound: a scan nobody can hold
+/// tool-less is the one Task 4 would let a colleague's message arm.
+fn task_scan_backend(stored_default: Option<&str>) -> Result<&'static agent_policy::Backend> {
+    let usable = |backend: &'static agent_policy::Backend| {
+        agent::is_available(backend) && agent::enforces_empty_allowlist(backend)
+    };
+    let preferred = agent_policy::default_backend(stored_default);
+    if usable(preferred) {
+        return Ok(preferred);
+    }
+    agent_policy::BACKENDS.iter().find(|backend| usable(backend)).with_context(|| {
+        "this machine holds no agent CLI that can be run with no tools at all, and a task \
+         scan reads a colleague's words — so none is started"
+    })
+}
+
+/// Everything a scan run needs: the candidates as its prompt, and no tool granted.
 ///
 /// The permissions are an EMPTY allowlist rather than the user's stored one
-/// ([`agent::permissions_from_settings`]): no files, no MCP servers, no shell. `agent.rs`
-/// documents that as a legitimate choice — an agent that only talks — and it is the whole
-/// security story for a run whose prompt is a colleague's words. It resumes no session
-/// either: a scan is one window of candidates, not a follow-up to anything.
+/// ([`agent::permissions_from_settings`]), so this app grants no tool and names no
+/// permission mode beyond `default` — and [`task_scan_backend`] refuses to run at all on a
+/// backend whose command line cannot spell that. What the child then holds is what those
+/// two facts leave it: nothing this app handed over, and nothing its own configuration can
+/// be prompted into. That is the security story for a run whose prompt is a colleague's
+/// words, and it is a statement about this command line rather than about the CLI.
 ///
-/// The provider is the machine's default one, so this run uses whichever CLI the user
-/// chose for a surface with room for one, and the model they picked for it.
-fn task_scan_request(store: &Store, candidates: &[tasks::Candidate]) -> Result<agent::Request> {
-    let backend = agent_policy::default_backend(
-        store.get_setting(agent_policy::SETTING_DEFAULT_PROVIDER)?.as_deref(),
-    );
+/// It resumes no session either: a scan is one window of candidates, not a follow-up to
+/// anything.
+fn task_scan_request(
+    store: &Store,
+    backend: &'static agent_policy::Backend,
+    candidates: &[tasks::Candidate],
+) -> Result<agent::Request> {
     Ok(agent::Request {
         backend,
         prompt: tasks::build_prompt(candidates),
@@ -7322,6 +7366,10 @@ fn task_scan_request(store: &Store, candidates: &[tasks::Candidate]) -> Result<a
 ///
 /// The watermark comes from what the SWEEP examined rather than from what was accepted:
 /// a candidate the model passed over was still read.
+///
+/// The rows and the watermark go in ONE transaction, so a run that fails halfway costs
+/// nothing at all rather than nearly nothing: a row inserted beside an `Err` would be
+/// invisible until something else refetched, while the RPC said the scan had failed.
 fn record_task_scan(
     store: &Store,
     found: &store::TaskCandidates,
@@ -7330,42 +7378,43 @@ fn record_task_scan(
 ) -> Result<usize> {
     let extracted = tasks::parse_extraction(answer, &found.candidates)?;
 
-    let mut written = 0;
-    for task in &extracted {
-        // `parse_extraction` drops a source the model invented, so this always names one.
-        let Some(candidate) = found.candidates.iter().find(|c| c.id == task.source_id) else {
-            continue;
-        };
-        let (conversation_id, message_id, mail_id) = match &candidate.kind {
-            tasks::CandidateKind::Message { conversation_id } => {
-                (conversation_id.clone(), candidate.id.clone(), String::new())
-            }
-            // A mail names its sender by SMTP address and not by an mri, so there is no
-            // mri to record — `asked_by` then falls back to the name the mail carried.
-            tasks::CandidateKind::Mail => (String::new(), String::new(), candidate.id.clone()),
-        };
-        let write = store::TaskWrite {
-            // `suggested`: the panel offers it, and one click accepts or refuses. An
-            // extraction never asserts that the user owes something.
-            state: Some("suggested".to_string()),
-            title: Some(task.title.clone()),
-            due_date: Some(task.due_date.clone().unwrap_or_default()),
-            source_conversation_id: Some(conversation_id),
-            source_message_id: Some(message_id),
-            source_mail_id: Some(mail_id),
-            asked_by_mri: Some(candidate.author_mri.clone()),
-            ..store::TaskWrite::default()
-        };
-        // A row that would not insert stops the whole record, watermark included, exactly
-        // as a bad answer does: the window is then swept again, and the rows already
-        // written are not offered twice because `task_candidates` skips a source that has
-        // already produced a task.
-        store.save_task(&write, now_ms)?;
-        written += 1;
-    }
-
-    store.set_task_scan_watermark(found.newest_compose_time, &found.newest_received)?;
-    Ok(written)
+    store.transaction(|| {
+        let mut written = 0;
+        for task in &extracted {
+            // `parse_extraction` drops a source the model invented, so this always names one.
+            let Some(candidate) = found.candidates.iter().find(|c| c.id == task.source_id) else {
+                continue;
+            };
+            let (conversation_id, message_id, mail_id) = match &candidate.kind {
+                tasks::CandidateKind::Message { conversation_id } => {
+                    (conversation_id.clone(), candidate.id.clone(), String::new())
+                }
+                // A mail names its sender by SMTP address and not by an mri, so there is
+                // no mri to record — `asked_by` falls back to the name the mail carried.
+                tasks::CandidateKind::Mail => {
+                    (String::new(), String::new(), candidate.id.clone())
+                }
+            };
+            store.save_task(
+                &store::TaskWrite {
+                    // `suggested`: the panel offers it, and one click accepts or refuses.
+                    // An extraction never asserts that the user owes something.
+                    state: Some("suggested".to_string()),
+                    title: Some(task.title.clone()),
+                    due_date: Some(task.due_date.clone().unwrap_or_default()),
+                    source_conversation_id: Some(conversation_id),
+                    source_message_id: Some(message_id),
+                    source_mail_id: Some(mail_id),
+                    asked_by_mri: Some(candidate.author_mri.clone()),
+                    ..store::TaskWrite::default()
+                },
+                now_ms,
+            )?;
+            written += 1;
+        }
+        store.set_task_scan_watermark(found.newest_compose_time, &found.newest_received)?;
+        Ok(written)
+    })
 }
 
 /// Sweep once: the candidates since the watermark, one agent run, the tasks it found.
@@ -7386,7 +7435,10 @@ async fn run_task_scan(ctx: &Ctx) -> Result<usize> {
         return Ok(0);
     };
 
-    let request = task_scan_request(&store, &found.candidates)?;
+    let backend = task_scan_backend(
+        store.get_setting(agent_policy::SETTING_DEFAULT_PROVIDER)?.as_deref(),
+    )?;
+    let request = task_scan_request(&store, backend, &found.candidates)?;
     // The progress channel is required by `agent::run` and nothing here reads it: a scan
     // is not drawn being written, unlike a reply in a thread.
     let (progress, _watch) = tokio::sync::watch::channel(agent::Progress::default());
@@ -9362,38 +9414,61 @@ mod tests {
     /// wrong are checked at the RPC, in the shape `tasks::parse_extraction` checks them.
     #[test]
     fn a_task_write_refuses_a_state_and_a_day_it_does_not_know() {
+        // A patch names an id, so these vary one field and restate nothing else.
+        let patch = |field: &str, value: &str| json!({ "id": "t1", field: value });
         for state in ["suggested", "open", "done", "dismissed"] {
-            let write = task_write_from_params(&json!({ "state": state })).expect(state);
+            let write = task_write_from_params(&patch("state", state)).expect(state);
             assert_eq!(write.state.as_deref(), Some(state));
         }
         for refused in ["Done", "archived", "", "open "] {
             assert!(
-                task_write_from_params(&json!({ "state": refused })).is_err(),
+                task_write_from_params(&patch("state", refused)).is_err(),
                 "{refused:?} is not one of the four states"
             );
         }
         // A cleared due date is the empty string, because that is how the column spells
         // "no day" — every other shape is refused rather than stored and mis-sorted.
         for day in ["2026-08-12", ""] {
-            assert!(task_write_from_params(&json!({ "due_date": day })).is_ok(), "{day:?}");
+            assert!(task_write_from_params(&patch("due_date", day)).is_ok(), "{day:?}");
         }
         for refused in ["next friday", "2026-8-1", "2026-08-12T00:00:00Z", "12/08/2026"] {
             assert!(
-                task_write_from_params(&json!({ "due_date": refused })).is_err(),
+                task_write_from_params(&patch("due_date", refused)).is_err(),
                 "{refused:?} is not a day"
             );
         }
+    }
+
+    /// A blank title is a row nobody can read or act on, and `parse_extraction` already
+    /// refuses one — so the client's door refuses it too, from both directions: a NEW task
+    /// must name a title, and a title that is named must say something.
+    #[test]
+    fn a_task_write_refuses_a_blank_title() {
+        assert!(
+            task_write_from_params(&json!({})).is_err(),
+            "an insert with no title at all would be a blank, sourceless row"
+        );
+        for blank in ["", "   ", "\t\n"] {
+            assert!(task_write_from_params(&json!({ "title": blank })).is_err(), "{blank:?}");
+            assert!(
+                task_write_from_params(&json!({ "id": "t1", "title": blank })).is_err(),
+                "a patch must not blank a title either: {blank:?}"
+            );
+        }
+        assert!(task_write_from_params(&json!({ "title": "Review the doc" })).is_ok());
+        // A patch that names no title changes none, so it needs none.
+        assert!(task_write_from_params(&json!({ "id": "t1", "state": "done" })).is_ok());
     }
 
     /// Every field the panel sends, and nothing invented: an absent field stays `None`,
     /// which is what tells `Store::save_task` to leave that column alone.
     #[test]
     fn a_task_write_names_only_the_fields_it_was_given() {
-        let empty = task_write_from_params(&json!({})).unwrap();
-        assert_eq!(empty.id, None);
-        assert_eq!(empty.title, None);
-        assert_eq!(empty.state, None);
-        assert_eq!(empty.asked_by_mri, None);
+        let patch = task_write_from_params(&json!({ "id": "t1", "state": "done" })).unwrap();
+        assert_eq!(patch.title, None);
+        assert_eq!(patch.due_date, None);
+        assert_eq!(patch.body, None);
+        assert_eq!(patch.asked_by_mri, None);
 
         let full = task_write_from_params(&json!({
             "id": "t1",
@@ -9416,17 +9491,51 @@ mod tests {
         assert_eq!(full.asked_by_mri.as_deref(), Some("8:orgid:abc"));
     }
 
-    /// The scan's agent holds NO tools — no files, no MCP servers, no shell. That empty
-    /// allowlist is the whole security story for a run whose prompt is a colleague's
-    /// words, so it is pinned rather than left to a settings lookup.
+    /// What the SCAN'S REQUEST spells: no tool granted, no session resumed, the candidates
+    /// marked as data. It is not a claim about what the child ends up holding — that also
+    /// takes the backend check below, which is why the two are named apart.
     #[test]
-    fn the_scan_agent_holds_no_tools_and_resumes_no_session() {
+    fn the_scan_request_grants_no_tool_and_resumes_no_session() {
         let store = Store::open_in_memory().unwrap();
-        let request = task_scan_request(&store, &[scan_candidate("m1")]).unwrap();
+        let backend = &agent_policy::BACKENDS[0];
+        let request = task_scan_request(&store, backend, &[scan_candidate("m1")]).unwrap();
         assert_eq!(request.permissions, agent::Permissions::Granted(Vec::new()));
         assert_eq!(request.resume_session, None, "a scan is its own window, never a follow-up");
         assert!(request.system_prompt.contains("DATA"), "the candidates must be marked as data");
         assert!(request.prompt.contains("m1"), "the model must be able to cite the source");
+    }
+
+    /// The empty allowlist is only honoured where this app's command line can state it
+    /// (`agent::enforces_empty_allowlist`), so a scan takes a backend that can be held
+    /// tool-less and refuses when none is — even when the one that cannot is the user's
+    /// own default provider. That preference decides which program answers a chat message;
+    /// it cannot make a guarantee true.
+    #[test]
+    fn the_scan_never_runs_a_backend_it_cannot_hold_toolless() {
+        // opencode's arm of `build_command` consults `permissions` not at all, so it is
+        // never the scan's backend however the machine is configured.
+        assert_eq!(agent_policy::default_backend(Some("opencode")).name, "opencode");
+        assert!(!agent::enforces_empty_allowlist(agent_policy::default_backend(Some("opencode"))));
+        assert_ne!(
+            task_scan_backend(Some("opencode")).map(|b| b.name).unwrap_or("refused"),
+            "opencode",
+            "a backend this app cannot bound must never run a scan"
+        );
+        // The invariant, whatever this machine holds: a backend that is returned satisfies
+        // both halves, and a refusal says which requirement went unmet.
+        for stored in [None, Some("claude"), Some("opencode"), Some("not-a-provider")] {
+            match task_scan_backend(stored) {
+                Ok(backend) => {
+                    assert!(agent::is_available(backend), "{stored:?}: {}", backend.name);
+                    assert!(
+                        agent::enforces_empty_allowlist(backend),
+                        "{stored:?}: {}",
+                        backend.name
+                    );
+                }
+                Err(e) => assert!(e.to_string().contains("no tools"), "{stored:?}: {e}"),
+            }
+        }
     }
 
     /// An answer that could not be read costs the window nothing: no task is written and
@@ -9532,27 +9641,12 @@ mod tests {
     fn a_window_that_yields_no_candidate_is_still_marked_as_read() {
         let store = Store::open_in_memory().unwrap();
         store.set_task_scan_watermark(1000, "2026-08-01T00:00:00Z").unwrap();
-        let quoting = Message {
-            id: "m1".into(),
-            conversation_id: "19:c@thread.v2".into(),
-            seq: 1,
-            compose_time: 9000,
-            sender: "Lucas Silva".into(),
-            sender_mri: "8:orgid:abc".into(),
-            // The ask is only in the QUOTE, so the SQL cut admits the row and
-            // `plain_text_from_html` leaves the authority nothing to accept.
-            content: "<blockquote itemtype=\"http://schema.skype.com/Reply\">please review the \
-                      doc</blockquote><p>done, thanks</p>"
-                .into(),
-            attachments: "[]".into(),
-            reactions: "[]".into(),
-            message_type: String::new(),
-            system_event: String::new(),
-            thread_root_id: String::new(),
-            thread_subject: String::new(),
-            deleted: false,
-            mentions: "[]".into(),
-        };
+        // The ask is only in the QUOTE, so the SQL cut admits the row and
+        // `plain_text_from_html` leaves the authority nothing to accept.
+        let mut quoting = scan_message("m1", 9000);
+        quoting.content = "<blockquote itemtype=\"http://schema.skype.com/Reply\">please review \
+                           the doc</blockquote><p>done, thanks</p>"
+            .into();
         store.insert_message(&quoting).unwrap();
 
         assert!(task_scan_sweep(&store, 20_000).unwrap().is_none(), "nothing to ask a model");
@@ -9561,6 +9655,62 @@ mod tests {
             9000,
             "the row was read, so the window must never be swept again"
         );
+    }
+
+    /// A window that DOES hold an ask hands the candidates back and moves nothing. That is
+    /// the half the whole failure rule rests on: advancing here rather than after the
+    /// answer is read would make a bad run cost the window, and every other test would
+    /// still pass.
+    #[test]
+    fn a_sweep_with_something_to_ask_about_leaves_the_watermark_alone() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_task_scan_watermark(1000, "2026-08-01T00:00:00Z").unwrap();
+        store.insert_message(&scan_message("m1", 9000)).unwrap();
+
+        let found = task_scan_sweep(&store, 20_000).unwrap().expect("one candidate");
+        assert_eq!(found.candidates.len(), 1);
+        assert_eq!(found.candidates[0].id, "m1");
+        assert_eq!(found.newest_compose_time, 9000, "the sweep reports where it read to");
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (1000, "2026-08-01T00:00:00Z".to_string()),
+            "the window moves only once the answer has been read"
+        );
+    }
+
+    /// One sweep is bounded at `tasks::MAX_CANDIDATES`, which is what keeps a busy week
+    /// from becoming one unbounded prompt — and never narrower, because the store's shared
+    /// cap has a tie-break that starves one source at a limit of 1.
+    #[test]
+    fn a_sweep_is_bounded_at_the_number_the_prompt_can_hold() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_task_scan_watermark(1000, "").unwrap();
+        for n in 0..tasks::MAX_CANDIDATES as i64 + 20 {
+            store.insert_message(&scan_message(&format!("m{n}"), 2000 + n)).unwrap();
+        }
+        let found = task_scan_sweep(&store, 1_000_000).unwrap().expect("candidates");
+        assert_eq!(found.candidates.len(), tasks::MAX_CANDIDATES);
+    }
+
+    /// One stored message the candidate sweep accepts, for the sweep tests above.
+    fn scan_message(id: &str, compose_time: i64) -> Message {
+        Message {
+            id: id.to_string(),
+            conversation_id: "19:c@thread.v2".into(),
+            seq: compose_time,
+            compose_time,
+            sender: "Lucas Silva".into(),
+            sender_mri: "8:orgid:abc".into(),
+            content: "<p>can you review the deployment doc before friday?</p>".into(),
+            attachments: "[]".into(),
+            reactions: "[]".into(),
+            message_type: String::new(),
+            system_event: String::new(),
+            thread_root_id: String::new(),
+            thread_subject: String::new(),
+            deleted: false,
+            mentions: "[]".into(),
+        }
     }
 
     /// One candidate, message-shaped, for the scan tests above.
