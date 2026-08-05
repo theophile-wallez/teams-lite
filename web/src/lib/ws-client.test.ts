@@ -671,3 +671,116 @@ describe("Backend retryNow", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 });
+
+// A backend mints its write token per PROCESS, so any restart — an update, a re-stage of
+// the always-on service, a crash — invalidates the one this page holds. Nothing about
+// that is visible from here: reads keep answering and the socket stays up, so the only
+// symptom is a message that never leaves. The refusal is the proof, and the client heals
+// itself from it (see `retryWithAFreshToken`).
+describe("Backend write-token recovery", () => {
+  /** The backend's own refusal, in the words src/bin/server.rs pins for us. */
+  const REFUSAL =
+    "refused: `send` needs the write token this backend published for the user's own frontends.";
+
+  /** Answer the request `socket` last sent, as the backend would. */
+  function answer(socket: FakeWebSocket, index: number, body: Record<string, unknown>): void {
+    const frame = JSON.parse(socket.sent[index]!) as { id: number };
+    socket.simulateMessage(JSON.stringify({ id: frame.id, ...body }));
+  }
+
+  function paramsOf(socket: FakeWebSocket, index: number): Record<string, unknown> {
+    return (JSON.parse(socket.sent[index]!) as { params: Record<string, unknown> }).params;
+  }
+
+  it("re-reads the token and sends once more when the backend refuses the stale one", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("dead-backend");
+    let reads = 0;
+    backend.setWriteTokenSource(async () => {
+      reads += 1;
+      return "live-backend";
+    });
+
+    const promise = backend.send("c1", "hello");
+    answer(socket, 0, { error: REFUSAL });
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(2));
+    answer(socket, 1, { result: { sent: true } });
+
+    await expect(promise).resolves.toEqual({ sent: true });
+    expect(reads).toBe(1);
+    expect(paramsOf(socket, 0).write_token).toBe("dead-backend");
+    expect(paramsOf(socket, 1).write_token).toBe("live-backend");
+    backend.close();
+  });
+
+  it("keeps the fresh token for the next write, so one refusal is the whole cost", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("dead-backend");
+    backend.setWriteTokenSource(async () => "live-backend");
+
+    const first = backend.send("c1", "hello");
+    answer(socket, 0, { error: REFUSAL });
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(2));
+    answer(socket, 1, { result: { sent: true } });
+    await first;
+
+    const second = backend.send("c1", "again");
+    expect(paramsOf(socket, 2).write_token).toBe("live-backend");
+    answer(socket, 2, { result: { sent: true } });
+    await expect(second).resolves.toEqual({ sent: true });
+    backend.close();
+  });
+
+  it("retries once and no more: an unchanged token means the refusal stands", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("tok");
+    backend.setWriteTokenSource(async () => "tok");
+
+    const promise = backend.send("c1", "hello");
+    answer(socket, 0, { error: REFUSAL });
+
+    await expect(promise).rejects.toThrow(/needs the write token/);
+    expect(socket.sent).toHaveLength(1);
+    backend.close();
+  });
+
+  // A read-only backend refuses in different words on purpose: it holds no token at all,
+  // so re-reading one would loop and the user would wait on a call that cannot succeed.
+  it("never retries a read-only refusal, or any other failure", async () => {
+    for (const error of [
+      "refused: `send` acts on the real Teams account and this server runs read-only (TEAMS_LITE_READ_ONLY=1).",
+      "send failed: 403 Forbidden",
+    ]) {
+      const { backend, socket } = await connected();
+      backend.setWriteToken("tok");
+      let reads = 0;
+      backend.setWriteTokenSource(async () => {
+        reads += 1;
+        return "fresh";
+      });
+
+      const promise = backend.send("c1", "hello");
+      answer(socket, 0, { error });
+
+      await expect(promise).rejects.toThrow();
+      expect(socket.sent).toHaveLength(1);
+      expect(reads).toBe(0);
+      backend.close();
+    }
+  });
+
+  it("lets the refusal stand when the app's own server cannot be reached", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("tok");
+    backend.setWriteTokenSource(async () => {
+      throw new Error("offline");
+    });
+
+    const promise = backend.send("c1", "hello");
+    answer(socket, 0, { error: REFUSAL });
+
+    await expect(promise).rejects.toThrow(/needs the write token/);
+    expect(socket.sent).toHaveLength(1);
+    backend.close();
+  });
+});

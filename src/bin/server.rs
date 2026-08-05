@@ -610,6 +610,16 @@ fn publish_write_token(token: &str) -> Result<()> {
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no writable location for the write token")))
 }
 
+/// The words every "the token you presented is not mine" refusal carries.
+///
+/// A frontend reads them back: a page holds the token its own server handed it, and the
+/// one thing that invalidates it is a backend RESTART — which the page cannot see, since
+/// reads keep answering. So it re-reads the token and retries the call once when it meets
+/// this phrase (`isWriteTokenRefusal` in web/src/lib/ws-client.ts), and that is safe
+/// because the refusal happens here, before any network call. Keep the two spellings in
+/// step; `the_token_refusal_says_what_a_frontend_looks_for` pins them.
+const WRITE_TOKEN_REFUSAL: &str = "needs the write token";
+
 /// Gate one request against the write lock. Reads always pass; an outward-facing
 /// method must carry a `write_token` matching this process's own.
 ///
@@ -637,7 +647,7 @@ fn check_write_allowed(method: &str, params: &Value, token: Option<&str>) -> Res
         Some(presented) if presented == token => Ok(()),
         _ => Err(match class {
             WriteClass::Outward => format!(
-                "refused: `{method}` needs the write token this backend published for the user's \
+                "refused: `{method}` {WRITE_TOKEN_REFUSAL} this backend published for the user's \
                  own frontends. A client that was not given it (an ad-hoc script, an automated \
                  driver) may read everything here, but must not act as the user — post a \
                  message, or publish their status. If you are a \
@@ -645,7 +655,7 @@ fn check_write_allowed(method: &str, params: &Value, token: Option<&str>) -> Res
                  logged at startup; if you are automation, drive web/mock/server.ts instead."
             ),
             WriteClass::Machine => format!(
-                "refused: `{method}` needs the write token this backend published for the user's \
+                "refused: `{method}` {WRITE_TOKEN_REFUSAL} this backend published for the user's \
                  own frontends. It {} — not something a client that merely found this socket gets \
                  to do. If you are a frontend, read the token from {WRITE_TOKEN_ENV} or from the \
                  file the backend logged at startup.",
@@ -1773,6 +1783,42 @@ async fn main() -> Result<()> {
         )
     })?;
 
+    // ARM THE WRITE LOCK NEXT, before anything that can block.
+    //
+    // Minting the token also PUBLISHES it (see `write_token`), and the file is the one
+    // place a frontend reads it from — so until this line runs, that file still holds the
+    // token of the process this one replaced. A page that reconnects inside that window
+    // picks the dead token up and every send it makes is refused, silently: reads keep
+    // working, so the app looks healthy while the composer only chimes.
+    //
+    // The window used to be the whole of sign-in, which on this machine is a D-Bus call
+    // to a broker whose keyring re-locks — seconds, sometimes tens of them. And a
+    // reconnecting page really is served in it: the port is bound above, so the relay in
+    // `web/server.ts` opens the page's socket at once and the page then asks its own
+    // server for the token (`loadWriteToken` in web/src/lib/store.ts).
+    //
+    // Publishing here closes the window: the file names this process before anything can
+    // reach it. The frontend still recovers from a refusal on its own — the token may go
+    // stale for other reasons, and a lock nobody can re-read is a lock that needs a
+    // reload — but it no longer has to.
+    match write_token() {
+        None => eprintln!("[write-lock] read-only: {OUTWARD_METHODS:?} are refused"),
+        // A pinned token is in no file, on purpose: the parent that pinned it hands the
+        // same value to its own frontend, and publishing would overwrite the token of
+        // the other backend sharing this machine (see `write_token`).
+        Some(_) if write_token_pinned() => eprintln!(
+            "[write-lock] armed: {OUTWARD_METHODS:?} require the token pinned by our \
+             parent in {WRITE_TOKEN_ENV} — nothing was published"
+        ),
+        Some(_) => match write_token_path() {
+            Ok(path) => eprintln!(
+                "[write-lock] armed: {OUTWARD_METHODS:?} require the token at {}",
+                path.display()
+            ),
+            Err(e) => eprintln!("[write-lock] armed: token published nowhere ({e})"),
+        },
+    }
+
     let http = reqwest::Client::builder().user_agent(UA).http1_only().build()?;
     let tokens = auth::TokenCache::new();
 
@@ -1896,25 +1942,6 @@ async fn main() -> Result<()> {
     spawn_update_check(ctx.clone());
 
     eprintln!("[ok] server ws://{addr} — ready");
-    // Say which write policy is in force, and where a frontend can pick up the
-    // token — never the token itself (it must not land in a log or a scrollback).
-    match write_token() {
-        None => eprintln!("[write-lock] read-only: {OUTWARD_METHODS:?} are refused"),
-        // A pinned token is in no file, on purpose: the parent that pinned it hands the
-        // same value to its own frontend, and publishing would overwrite the token of
-        // the other backend sharing this machine (see `write_token`).
-        Some(_) if write_token_pinned() => eprintln!(
-            "[write-lock] armed: {OUTWARD_METHODS:?} require the token pinned by our \
-             parent in {WRITE_TOKEN_ENV} — nothing was published"
-        ),
-        Some(_) => match write_token_path() {
-            Ok(path) => eprintln!(
-                "[write-lock] armed: {OUTWARD_METHODS:?} require the token at {}",
-                path.display()
-            ),
-            Err(e) => eprintln!("[write-lock] armed: token published nowhere ({e})"),
-        },
-    }
     // Read once at boot: a machine that answers a chat message with the user's own
     // configuration must say so in its own journal, not only in a browser menu.
     let unrestricted = match ctx.store() {
@@ -2055,6 +2082,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
     // rather than trusting each handler, or each client, to check. Reads are
     // unaffected. See `write_token` / `check_write_allowed`.
     if let Err(refusal) = check_write_allowed(method, params, write_token()) {
+        // Say it in the journal too, and say it every time. The client is told, but the
+        // user reads a chat app rather than a socket: "my message did not go out" left no
+        // trace on this machine at all, which is precisely the shape of failure that
+        // cannot be diagnosed after the fact. The method, never the token.
+        eprintln!("[write-lock] refused `{method}`");
         anyhow::bail!(refusal);
     }
     match method {
@@ -7378,6 +7410,26 @@ mod tests {
         assert!(check_write_allowed("send", &params, Some("tok")).is_err());
     }
 
+    /// A page cannot see that the backend it talks to is a NEW process, because reads
+    /// keep answering — so the refusal is what tells it, and it re-reads the token and
+    /// retries once on these words (`isWriteTokenRefusal` in web/src/lib/ws-client.ts).
+    /// Both classes must carry them, and the read-only refusal must NOT: no token exists
+    /// there, so re-reading one would loop.
+    #[test]
+    fn the_token_refusal_says_what_a_frontend_looks_for() {
+        let stale = json!({ "conversation": "c1", "write_token": "a-dead-backend's-token" });
+        for method in ["send", "set_person_name"] {
+            let err = check_write_allowed(method, &stale, Some("tok"))
+                .expect_err("must refuse another process's token");
+            assert!(err.contains(WRITE_TOKEN_REFUSAL), "{method}: {err}");
+        }
+        for method in ["send", "set_person_name"] {
+            let err = check_write_allowed(method, &stale, None)
+                .expect_err("must refuse a write on a read-only backend");
+            assert!(!err.contains(WRITE_TOKEN_REFUSAL), "{method}: {err}");
+        }
+    }
+
     #[test]
     fn outward_methods_pass_with_the_published_token() {
         let params = json!({ "conversation": "c1", "write_token": "tok" });
@@ -8951,6 +9003,19 @@ mod lifecycle_tests {
                  whose failure main handles."
             );
         }
+
+        // And the write token is published before that same sign-in, for the other half
+        // of the story: minting it REPLACES the file a frontend reads, so until this runs
+        // the file still names the process this one replaced. A page reconnecting through
+        // the relay in that window holds a dead token and every send it makes is refused
+        // — reads keep working, so the app looks healthy and only the composer chimes.
+        let arm_at = main.find("match write_token() {").expect("main arms the write lock");
+        assert!(
+            arm_at < sign_in_at,
+            "main signs in before it publishes the write token. Sign-in is a D-Bus call to \
+             a broker that can hang for tens of seconds, and this port is already bound — \
+             so a page can be served the PREVIOUS backend's token and lose every send."
+        );
     }
 
     // The identity is the ONE thing every local read needs from a session, so it is

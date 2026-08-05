@@ -143,6 +143,20 @@ export function defaultWsUrl(): string {
   return reachableFromThisPage(PRODUCTION_WS_URL);
 }
 
+/**
+ * The words the backend's "that is not my write token" refusal carries
+ * (`WRITE_TOKEN_REFUSAL` in src/bin/server.rs, pinned there by a test that names this
+ * function).
+ *
+ * It is matched on the phrase rather than on the whole sentence because that sentence
+ * tells a human what to do about it and will be reworded; and it deliberately does NOT
+ * match a read-only backend's refusal, which names no token because there is none.
+ */
+export function isWriteTokenRefusal(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.includes("needs the write token");
+}
+
 const RECONNECT_GIVE_UP_MS = 30_000;
 const RECONNECT_MAX_DELAY_MS = 10_000;
 const RECONNECT_INITIAL_DELAY_MS = 500;
@@ -170,6 +184,9 @@ export class Backend {
   private everConnected = false;
   // The backend's write-lock capability token, when the app's server gave us one.
   private writeToken: string | null = null;
+  // How to read that token again, when the backend says the one we hold is not its
+  // own (see `retryWithAFreshToken`).
+  private writeTokenSource: (() => Promise<string | null>) | null = null;
   private firstFailureAt: number | null = null;
   private readonly giveUpMs: number;
   private readonly initialDelayMs: number;
@@ -355,12 +372,64 @@ export class Backend {
    * write lock in `src/bin/server.rs`). Only the app's own server hands us the
    * token; if we have none, the request goes out anyway so the backend's own
    * refusal message surfaces in the UI rather than a silently different failure.
+   *
+   * A refusal that names the token is RETRIED once, with a freshly read one. See
+   * {@link retryWithAFreshToken} for why that is both necessary and safe.
    */
-  private writeRequest<T = unknown>(
+  private async writeRequest<T = unknown>(
     method: string,
     params: Record<string, unknown>,
   ): Promise<T> {
-    return this.request<T>(method, { ...params, write_token: this.writeToken ?? undefined });
+    const presented = this.writeToken;
+    try {
+      return await this.request<T>(method, { ...params, write_token: presented ?? undefined });
+    } catch (e) {
+      const fresh = await this.retryWithAFreshToken(e, presented);
+      if (fresh === null) throw e;
+      return await this.request<T>(method, { ...params, write_token: fresh });
+    }
+  }
+
+  /**
+   * The token to retry a refused write with, or null to let the failure stand.
+   *
+   * The backend mints its token per PROCESS, so a restart — an update, a re-stage of
+   * the always-on service, a crash — invalidates the one this page was handed. Nothing
+   * about that is visible from here: reads keep answering, the socket is up, and the
+   * only symptom is that every write comes back refused until somebody reloads. A page
+   * left open on a phone for days is the normal way to meet it, and the failure it
+   * produces — a message that does not leave, over and over — is the one this app can
+   * least afford.
+   *
+   * The page re-reads the token on every reconnect for that reason, and this is the
+   * second half: a refusal is the only proof that what it holds is stale, because a
+   * restart the socket never noticed leaves the reconnect path unused.
+   *
+   * Three rails keep it honest:
+   *
+   *  - **Only that refusal.** The backend says so in words it pins for us
+   *    (`WRITE_TOKEN_REFUSAL` in src/bin/server.rs). A read-only backend refuses in
+   *    different words on purpose: it has no token, so re-reading one would loop.
+   *  - **Only a token that CHANGED.** Presenting the same value again would be a
+   *    second identical refusal, so the failure stands and reaches the user.
+   *  - **Once.** Retrying is safe because the refusal happens at the backend's
+   *    dispatch gate, before any network call: nothing was posted, so nothing can be
+   *    posted twice. That is the whole reason this may retry at all — and it is why it
+   *    must never be widened to a failure that could have reached Teams.
+   */
+  private async retryWithAFreshToken(error: unknown, presented: string | null): Promise<string | null> {
+    if (!isWriteTokenRefusal(error)) return null;
+    const source = this.writeTokenSource;
+    if (!source) return null;
+    let fresh: string | null = null;
+    try {
+      fresh = await source();
+    } catch {
+      return null; // the app's own server is unreachable: the refusal stands
+    }
+    if (!fresh || fresh === presented) return null;
+    this.writeToken = fresh;
+    return fresh;
   }
 
   /**
@@ -370,6 +439,16 @@ export class Backend {
    */
   setWriteToken(token: string | null): void {
     this.writeToken = token;
+  }
+
+  /**
+   * Teach this client how to re-read the token, for {@link retryWithAFreshToken}.
+   *
+   * The fetch itself stays with the caller: it is an HTTP call to the app's own server,
+   * which this class knows nothing about (see `loadWriteToken` in lib/store.ts).
+   */
+  setWriteTokenSource(source: (() => Promise<string | null>) | null): void {
+    this.writeTokenSource = source;
   }
 
   // ---- typed API ----------------------------------------------------------

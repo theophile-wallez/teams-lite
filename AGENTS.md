@@ -59,6 +59,15 @@
   which conversation a keystroke lands in.
 - Reading, searching, drafting, and showing a proposed message to the user for
   review are always fine. Only the actual send requires a green light.
+- **A send that FAILS says so at the composer**, in one sentence beside the words that
+  are still in the box (`sendError`, over `web/src/lib/send-failure.ts`). It is the mirror
+  of the rule above: this app never posts without the user, so it must never leave them
+  believing it did — and a message that did not leave is invisible to them, because the
+  composer keeps their text either way. It used to be reported by the status line alone —
+  eleven truncated pixels at the foot of the sidebar, which on a phone is not on screen at
+  all — so the whole event was an error chime. The status line still carries the RAW
+  failure for whoever reads a screenshot; the composer carries the half the user acts on.
+  Never trade one for the other, and never swallow a send failure into a cue.
 - Outside the sandbox chat, consent is per-message and never standing: approval
   to send one message is not permission to send others. When in doubt, draft it and
   ask first.
@@ -463,6 +472,23 @@ user. Two independent mechanisms enforce that split:
   outright, token or not. **Never read that token file, pass it to a script, or
   weaken the lock to get a write through.** Fetching a secret you were not handed
   is precisely the line this draws.
+  - **A token is per PROCESS, so a restart invalidates every page's copy** — and this
+    backend restarts many times a day (a re-stage, an update, the broker path unit). The
+    page cannot see it happen: reads keep answering, the socket is up, and the only
+    symptom is that every send comes back refused until somebody reloads. On a phone left
+    open for days that was the normal outcome of a restart, and it read as a Send button
+    that chimed and did nothing. Three things hold it shut, and each is pinned by a test:
+    the backend publishes the token **before it signs in** (which is a D-Bus call to a
+    keyring that re-locks, so it can hang for tens of seconds while the port is already
+    bound and the relay is already serving pages); the page re-reads it on every
+    reconnect; and a REFUSED write re-reads it and retries **once**
+    (`retryWithAFreshToken`), which is safe only because the refusal happens at the
+    dispatch gate, before any network call — nothing was posted, so nothing can be posted
+    twice. Never widen that retry to a failure that could have reached Teams, and never
+    let it retry with the same token it just presented.
+  - **A refused write says so in the journal** (`[write-lock] refused \`<method>\``), the
+    method and never the token. A message that did not go out used to leave no trace on
+    this machine at all.
 - **The hook (harness).** Blocks, before execution, any command that would write:
   ad-hoc browser drivers, scripts calling `send`/`edit`/`delete`/`react`/`mark_read` against
   `127.0.0.1:19420` or `19421` (and the 19440 / 19441 relays in front of them), a

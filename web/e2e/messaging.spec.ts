@@ -7,6 +7,7 @@ import {
   gotoApp,
   openConversationAt,
   sendFromComposer,
+  setSendControl,
 } from "./helpers";
 
 test.describe("messaging", () => {
@@ -97,5 +98,44 @@ test.describe("messaging", () => {
     await page.locator('[data-testid="action-copy"]').click();
     // The app reports success in the status bar.
     await expect(page.locator('[data-testid="status-bar"]')).toContainText("copied");
+  });
+
+  // A send that fails is the one failure this app must not swallow. It used to be
+  // reported by the status line alone — eleven truncated pixels at the foot of the
+  // sidebar, and on a phone not on screen at all — so pressing Send chimed, kept the
+  // words in the box, and said nothing about why.
+  test("says why a message did not leave, at the composer", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    await setSendControl(page, { error: "mock send refused", clear: true });
+
+    await fillComposer(page, "This one must not vanish");
+    await page.locator('[data-testid="composer-send"]').click();
+
+    const failure = page.locator('[data-testid="composer-send-error"]');
+    await expect(failure).toBeVisible();
+    await expect(failure).toContainText("Not sent");
+    await expect(failure).toContainText("mock send refused");
+    // The words stay in the box, so the user can retry rather than retype.
+    await expect(composerField(page)).toHaveText("This one must not vanish");
+
+    // A send that works answers it, and walking to another thread drops it: the
+    // failure belongs to the conversation it happened in.
+    await setSendControl(page, { clear: true });
+    await sendFromComposer(page, `recovered-${Date.now()}`);
+    await expect(failure).toHaveCount(0);
+  });
+
+  test("leaves a failed send behind when the user walks to another thread", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    await setSendControl(page, { error: "mock send refused", clear: true });
+    await fillComposer(page, "stays here");
+    await page.locator('[data-testid="composer-send"]').click();
+    await expect(page.locator('[data-testid="composer-send-error"]')).toBeVisible();
+
+    await setSendControl(page, { clear: true });
+    await openConversationAt(page, 1);
+    await expect(page.locator('[data-testid="composer-send-error"]')).toHaveCount(0);
   });
 });

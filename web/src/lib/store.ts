@@ -119,6 +119,7 @@ import {
   type Appearance,
   type ResolvedTheme,
 } from "./appearance";
+import { sendFailureMessage } from "./send-failure";
 import {
   DEFAULT_SOUNDS_ENABLED,
   SOUNDS_STORAGE_KEY,
@@ -257,6 +258,15 @@ export type AppState = {
    *  draws its bar from. See {@link updateView}. */
   updateProgress: UpdateProgress | null;
   draft: string;
+  /** Why the last send in the OPEN conversation did not leave, in one sentence for the
+   *  person who pressed the button (see {@link sendFailureMessage}), or null while
+   *  nothing has failed.
+   *
+   *  It is drawn in the composer, above the field, because that is where the user is
+   *  looking. It used to be reported by the status line alone — eleven truncated pixels
+   *  at the foot of the sidebar, which is not on screen at all on a phone — so a refused
+   *  send read as a button that chimed and did nothing. */
+  sendError: string | null;
   replyingTo: PendingReply | null;
   /** The notifications panel's three activity streams (newest-first each), one
    *  per tab: Activity, Mentions, Following. */
@@ -510,6 +520,7 @@ function initialState(): AppState {
     update: null,
     updateProgress: null,
     draft: "",
+    sendError: null,
     replyingTo: null,
     notifications: { activity: [], mentions: [], following: [] },
     notificationsUnread: 0,
@@ -758,6 +769,12 @@ export class TeamsController {
     // Pick up the backend's write token from our own server before connecting, so
     // the first send of the session already carries it. Reads never need it; a
     // failure here just leaves this client read-only (see loadWriteToken).
+    //
+    // The client keeps the way back to it, because a backend that restarts mints a new
+    // one and a page cannot see that happen: reads keep answering, and every write comes
+    // back refused until something re-reads the file. This is what lets the refusal
+    // itself heal it (see `retryWithAFreshToken` in lib/ws-client.ts).
+    this.backend.setWriteTokenSource(() => this.loadWriteToken());
     await this.loadWriteToken();
 
     try {
@@ -810,16 +827,26 @@ export class TeamsController {
    * server can read the token file, so this hop is how the browser gets it. When
    * there is none — the mock backend, or a server that cannot read the file — we
    * stay read-only and let the backend's own refusal surface if a send is tried.
+   *
+   * Called three times over a session's life, for three different reasons: once at
+   * startup, again on every reconnect (a restarted backend minted a new one), and once
+   * more by the client itself when a write is REFUSED — which is the only proof that
+   * what this page holds went stale without the socket ever dropping. Returns the token
+   * so that third caller can tell a fresh one from the value it just presented (see
+   * `retryWithAFreshToken` in lib/ws-client.ts).
    */
-  private async loadWriteToken(): Promise<void> {
-    if (typeof window === "undefined") return; // SSR: no writes happen there
+  private async loadWriteToken(): Promise<string | null> {
+    if (typeof window === "undefined") return null; // SSR: no writes happen there
     try {
-      const res = await fetch("/__write-token");
-      if (!res.ok) return;
+      const res = await fetch("/__write-token", { cache: "no-store" });
+      if (!res.ok) return null;
       const body = (await res.json()) as { token?: string };
-      if (body.token) this.backend.setWriteToken(body.token);
+      if (!body.token) return null;
+      this.backend.setWriteToken(body.token);
+      return body.token;
     } catch {
       /* offline or no endpoint: leave the client read-only */
+      return null;
     }
   }
 
@@ -1110,7 +1137,11 @@ export class TeamsController {
       // Clear the fatal overlay too: a socket that reopened proves the backend is
       // back, and `watchWakeups` retries long after the backoff gave up — so this
       // is the normal path out of "backend lost" for a phone returning to the tab.
-      this.set({ live: "connected", fatal: null, status: "reconnected" });
+      // A socket that came back invalidates the reason the last send failed — "the
+      // backend is not reachable" under a green dot is a sentence the page can no longer
+      // stand behind, and the token is re-read below. The words stay in the composer, so
+      // the user retries rather than retypes.
+      this.set({ live: "connected", fatal: null, status: "reconnected", sendError: null });
       // Refetch the write token. The backend mints a new one per PROCESS, so a
       // backend that restarted — a crash, an update, a `systemctl restart` of the
       // always-on service — invalidates the one this page fetched at startup. Reads
@@ -2303,6 +2334,8 @@ export class TeamsController {
       olderError: null,
       loadingOlder: false,
       draft: nextDraft,
+      // A send fails in one thread; the sentence about it belongs to that thread alone.
+      sendError: null,
       messages: cached?.messages ?? [],
       hasMoreOlder: cached?.has_more ?? false,
       loadingMessages: !cached,
@@ -2448,9 +2481,15 @@ export class TeamsController {
       this.flushDraft(id);
       this.trimCachedHistory(id);
     }
-    // The read-receipts and mention slices are single-conversation — drop them when
-    // nothing is open.
-    this.set({ openId: null, replyingTo: null, readReceipts: [], mentionCandidates: [] });
+    // The read-receipts, mention and send-failure slices are single-conversation — drop
+    // them when nothing is open.
+    this.set({
+      openId: null,
+      replyingTo: null,
+      readReceipts: [],
+      mentionCandidates: [],
+      sendError: null,
+    });
   }
 
   async loadOlderMessages(): Promise<void> {
@@ -3374,7 +3413,13 @@ export class TeamsController {
     try {
       await this.backend.send(id, clean, replyTo, richHtml, image, mentions);
     } catch (e) {
+      // Both surfaces, and each has its reader. The status line keeps the RAW failure,
+      // which is what a developer reads off a screenshot; the composer gets one sentence
+      // for the person who pressed the button, next to the words that did not leave (see
+      // lib/send-failure.ts). Only the open conversation is told: the message failed in
+      // this one, and a sentence about it hanging over another thread would name nothing.
       this.set({ status: `send failed: ${errText(e)}` });
+      if (this.get().openId === id) this.set({ sendError: sendFailureMessage(e) });
       playCue("error");
       return false;
     }
@@ -3397,6 +3442,8 @@ export class TeamsController {
       this.set({
         replyingTo: this.get().replyingTo === reply ? null : this.get().replyingTo,
         scrollToBottomNonce: this.get().scrollToBottomNonce + 1,
+        // A message that left answers the last one that did not.
+        sendError: null,
       });
     }
     return true;

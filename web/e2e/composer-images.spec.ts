@@ -151,6 +151,8 @@ test.describe("composer images", () => {
     await page.locator('[data-testid="composer-send"]').click();
 
     await expect(page.locator('[data-testid="status-bar"]')).toContainText("mock image send failed");
+    // And beside the picture that did not leave, where the user is looking.
+    await expect(page.locator('[data-testid="composer-send-error"]')).toContainText("Not sent");
     await expect(page.locator(IMAGE_PREVIEW)).toBeVisible();
     await expect(composerField(page)).toHaveText("Keep this caption");
     expect(await fetchCapturedSends(page)).toHaveLength(1);

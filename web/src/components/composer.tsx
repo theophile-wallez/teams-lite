@@ -84,6 +84,9 @@ export function Composer(props: {
 }) {
   const controller = useController();
   const draft = useAppState((s) => s.draft);
+  // Why the last send in this thread did not leave, in one sentence. The controller
+  // sets it and clears it on the next send that works (see `sendDraft`).
+  const sendError = useAppState((s) => s.sendError);
   const replyingTo = useAppState((s) => s.replyingTo);
   const openId = useAppState((s) => s.openId);
   // Who this thread can @mention. Loaded on the first "@" (see
@@ -352,6 +355,15 @@ export function Composer(props: {
           {imageError && (
             <div role="alert" data-testid="composer-image-error" className="text-xs text-destructive">
               {imageError}
+            </div>
+          )}
+          {/* Why the last message did not leave, beside the words that are still in the
+              box. The status line at the foot of the sidebar carries the raw failure for
+              whoever debugs it; this is the half the user reads, and without it a refused
+              send is a button that chimes and does nothing (see lib/send-failure.ts). */}
+          {sendError && (
+            <div role="alert" data-testid="composer-send-error" className="text-xs text-destructive">
+              {sendError}
             </div>
           )}
 
