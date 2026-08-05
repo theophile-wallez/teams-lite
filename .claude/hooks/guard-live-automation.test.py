@@ -539,6 +539,12 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "TEAMS_LITE_AGENT_WAIT=0 bin/teams-lite-service.sh update --now"),
         # The staged copy the service runs is a second path to the same binary.
         ("BLOCK", PROJECT, "$HOME/.local/share/teams-lite/service/server"),
+        # And the released install's is a third: `teams` extracts the embedded backend
+        # there before spawning it, so it is send-capable and needs no build at all —
+        # which is exactly why an agent with nothing compiled reaches for it.
+        ("BLOCK", PROJECT, "~/.cache/teams-lite/server"),
+        ("BLOCK", PROJECT, "TEAMS_NO_IDLE_EXIT=1 nohup /home/claude/.cache/teams-lite/server &"),
+        ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 $HOME/.cache/teams-lite/server"),
         ("BLOCK", PROJECT, "bin/teams-lite-backend.sh"),
         ("BLOCK", PROJECT, "bash bin/teams-dev-server.sh"),
         # An environment assignment is a prefix, not a disguise: the path class holds
@@ -714,6 +720,9 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, "systemctl --user daemon-reload"),
         ("ALLOW", PROJECT, "journalctl --user -u teams-lite-backend -n 50 --no-pager"),
         ("ALLOW", PROJECT, "ls -la $HOME/.local/share/teams-lite/service/server"),
+        # Looking at the released install starts nothing either.
+        ("ALLOW", PROJECT, "ls -la ~/.cache/teams-lite/server"),
+        ("ALLOW", PROJECT, "pgrep -af 'cache/teams-lite/server'"),
         # Diagnosing the container is the normal way to answer "why is it empty".
         ("ALLOW", PROJECT, "intune-container status"),
         ("ALLOW", PROJECT, "intune-container doctor"),
