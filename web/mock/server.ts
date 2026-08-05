@@ -2355,7 +2355,7 @@ function seedAgentSandbox(): void {
       sender_mri: other.mri,
       content:
         '<p>Got it <img itemtype="http://schema.skype.com/Emoji" itemid="shipit" ' +
-        'alt=":shipit:" src="https://eu-api.asm.skype.com/v1/objects/0-mock/views/imgo" ' +
+        `alt=":shipit:" src="https://eu-api.asm.skype.com/v1/objects/0-${EMOJI_OBJECT}-inbound/views/imgo" ` +
         'width="20" height="20"> — thanks!</p>',
       is_self: false,
     },
@@ -2524,6 +2524,12 @@ type CustomEmojiEntry = {
 
 const customEmojiPack = new Map<string, CustomEmojiEntry>();
 
+/** The AMS object id an emoji's art hangs off, in the mock's own hosted-content URLs. Its
+ *  own word so `mockMedia` can tell a glyph from a picture and answer with glyph-shaped
+ *  bytes — a message's emoji is drawn from ITS OWN src, never from the pack, so those bytes
+ *  are the only ones a bubble ever shows. */
+const EMOJI_OBJECT = "mock-emoji";
+
 function seedCustomEmoji(): void {
   const now = Date.now();
   customEmojiPack.set("shipit", {
@@ -2534,7 +2540,7 @@ function seedCustomEmoji(): void {
     height: 20,
     source: "mock",
     added_ms: now - 1000,
-    data_base64: mockEmojiImage("shipit", 180),
+    data_base64: solidPng(20, 20, hslToRgb(180, 0.72, 0.52)).toString("base64"),
   });
   customEmojiPack.set("partyparrot", {
     name: "partyparrot",
@@ -2544,7 +2550,7 @@ function seedCustomEmoji(): void {
     height: 20,
     source: "mock",
     added_ms: now - 500,
-    data_base64: mockEmojiImage("partyparrot", 270),
+    data_base64: solidGif(20, hslToRgb(270, 0.72, 0.52)),
   });
   customEmojiPack.set("ship", {
     name: "ship",
@@ -2558,15 +2564,58 @@ function seedCustomEmoji(): void {
   });
 }
 
-function mockEmojiImage(name: string, hue: number): string {
-  const letters = name.slice(0, 2).toUpperCase();
-  const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">` +
-    `<rect width="20" height="20" rx="3" fill="hsl(${hue} 72% 52%)"/>` +
-    `<text x="10" y="14" text-anchor="middle" font-family="Arial, sans-serif" ` +
-    `font-size="12" font-weight="bold" fill="#ffffff">${letters}</text>` +
-    `</svg>`;
-  return Buffer.from(svg, "utf8").toString("base64");
+/**
+ * Encode a one-colour GIF, so the `image/gif` half of the pack is a REAL GIF.
+ *
+ * It has to decode: the page turns these bytes into a Blob of the type the pack DECLARES,
+ * so art whose bytes disagree with its type draws nowhere — and every emoji surface then
+ * captures as a broken image while every test that only counts elements still passes.
+ *
+ * Written out by hand beside {@link solidPng}, and for the same reason: this file takes no
+ * dependency beyond the Bun runtime. The LZW is deliberately the dumbest stream that is
+ * still valid — a CLEAR before every pixel, which holds the dictionary at its initial size
+ * so no code ever has to widen. Wasteful, and a few hundred bytes for a glyph.
+ */
+function solidGif(size: number, rgb: [number, number, number]): string {
+  const CLEAR = 4;
+  const END = 5;
+  const codes: number[] = [];
+  for (let i = 0; i < size * size; i++) codes.push(CLEAR, 1);
+  codes.push(END);
+  // 3-bit codes, packed least-significant bit first, as GIF wants them.
+  const bytes: number[] = [];
+  let acc = 0;
+  let filled = 0;
+  for (const code of codes) {
+    acc |= code << filled;
+    filled += 3;
+    while (filled >= 8) {
+      bytes.push(acc & 0xff);
+      acc >>= 8;
+      filled -= 8;
+    }
+  }
+  if (filled > 0) bytes.push(acc & 0xff);
+  // The image data travels in sub-blocks of at most 255 bytes, each led by its length.
+  const blocks: number[] = [];
+  for (let i = 0; i < bytes.length; i += 255) {
+    const chunk = bytes.slice(i, i + 255);
+    blocks.push(chunk.length, ...chunk);
+  }
+  return Buffer.from([
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, // "GIF89a"
+    size & 0xff, size >> 8, size & 0xff, size >> 8, // logical screen, size × size
+    0x80, 0x00, 0x00, // a global colour table of two entries
+    0x00, 0x00, 0x00, // colour 0, unused
+    rgb[0], rgb[1], rgb[2], // colour 1, every pixel
+    0x2c, 0x00, 0x00, 0x00, 0x00, // image descriptor, at the origin
+    size & 0xff, size >> 8, size & 0xff, size >> 8,
+    0x00, // no local colour table, not interlaced
+    0x02, // LZW minimum code size
+    ...blocks,
+    0x00, // end of the image data
+    0x3b, // trailer
+  ]).toString("base64");
 }
 
 // ---------------------------------------------------------------------------
@@ -2587,6 +2636,17 @@ function hashString(s: string): number {
 function mockMedia(url: string): { content_type: string; data_base64: string } {
   if (url.endsWith("/views/avatar_fullsize")) return mockGroupPicture(url);
   if (url.includes("mock-img-small")) return mockSmallPng(url);
+  // A custom emoji travels as hosted content like any inline image, but it is a GLYPH:
+  // the 320×200 picture below would draw it as a flat bar sized to the text, which says
+  // nothing about the size a capture is meant to show. Square, and its own hue per code.
+  if (url.includes(EMOJI_OBJECT)) {
+    return {
+      content_type: "image/png",
+      data_base64: solidPng(20, 20, hslToRgb(hashString(url) % 360, 0.72, 0.52)).toString(
+        "base64",
+      ),
+    };
+  }
   const hue = hashString(url) % 360;
   const label = (url.split("/").filter(Boolean).pop() ?? "media").slice(0, 24);
   const svg =
@@ -4930,8 +4990,12 @@ function dispatch(method: string, params: unknown): unknown {
 
     case "custom_emoji_image": {
       const name = requireString(params, "name");
-      const entry = customEmojiPack.get(name);
-      if (!entry || !entry.data_base64) {
+      const asked = customEmojiPack.get(name);
+      // An alias holds no art of its own: follow ONE hop to its target, exactly as
+      // `Store::custom_emoji_art` does. Without it `:ship:` draws nothing anywhere the
+      // pack's own art is shown — the composer chip, the suggestion row, the settings list.
+      const entry = asked?.alias_of ? customEmojiPack.get(asked.alias_of) : asked;
+      if (!entry || entry.alias_of || !entry.data_base64) {
         return { content_type: "", data_base64: "" };
       }
       return { content_type: entry.content_type, data_base64: entry.data_base64 };
@@ -5580,7 +5644,7 @@ function substituteInText(
         const target = aliases.get(name) || name;
         const emoji = names.get(target);
         if (emoji) {
-          out += `<img itemtype="http://schema.skype.com/Emoji" itemid="${name}" alt=":${name}:" src="https://eu-api.asm.skype.com/v1/objects/0-mock-${name}/views/imgo" width="20" height="20">`;
+          out += `<img itemtype="http://schema.skype.com/Emoji" itemid="${name}" alt=":${name}:" src="https://eu-api.asm.skype.com/v1/objects/0-${EMOJI_OBJECT}-${name}/views/imgo" width="20" height="20">`;
         } else {
           out += text.slice(start, pos);
         }

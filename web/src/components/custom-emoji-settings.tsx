@@ -35,7 +35,9 @@ export function CustomEmojiSettings() {
   const [showAddAlias, setShowAddAlias] = useState(false);
   const [aliasTarget, setAliasTarget] = useState("");
   const [aliasName, setAliasName] = useState("");
-  const [deletingName, setDeletingName] = useState<string | null>(null);
+  // Which row is armed. Delete asks twice — the trash arms, the named button calls — the
+  // way a message's own Delete does (message-bubble.tsx) and for the same reason: an
+  // emoji is used in messages that are already sent, and nothing here brings it back.
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
 
   const reload = useCallback(() => {
@@ -65,7 +67,6 @@ export function CustomEmojiSettings() {
     try {
       await controller.removeCustomEmoji(name);
       setConfirmingDelete(null);
-      setDeletingName(null);
     } catch {
       // The backend already reported the failure; nothing more to show.
     }
@@ -229,7 +230,6 @@ export function CustomEmojiSettings() {
       ) : (
         <ul className="flex flex-col gap-2">
           {filtered.map((e) => {
-            const isDeleting = deletingName === e.name;
             const isConfirming = confirmingDelete === e.name;
             return (
               <li key={e.name} data-testid={`custom-emoji-row-${e.name}`}>
@@ -263,20 +263,8 @@ export function CustomEmojiSettings() {
                     <button
                       type="button"
                       data-testid={`custom-emoji-delete-${e.name}`}
-                      onClick={() => {
-                        if (isDeleting) {
-                          setConfirmingDelete(e.name);
-                        } else {
-                          setDeletingName(e.name);
-                          setConfirmingDelete(null);
-                        }
-                      }}
-                      className={cn(
-                        "grid size-8 shrink-0 place-items-center rounded-lg transition-colors",
-                        isDeleting
-                          ? "bg-destructive/10 text-destructive"
-                          : "text-text-dim hover:bg-accent hover:text-foreground",
-                      )}
+                      onClick={() => setConfirmingDelete(e.name)}
+                      className="grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground"
                       aria-label={`Delete :${e.name}:`}
                     >
                       <HugeiconsIcon

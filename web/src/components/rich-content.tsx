@@ -318,6 +318,10 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
     inPre: ctx.inPre || node.tag === "pre",
     cardShownSeparately: ctx.cardShownSeparately,
     tokens: ctx.tokens,
+    // An emoji-only body is decided once, on the whole tree, so it has to travel DOWN
+    // it: a one-emoji message serializes as `<p><img …></p>`, so the emoji is never a
+    // top-level node and a `jumbo` left behind here reached nothing.
+    jumbo: ctx.jumbo,
   };
   const children = node.children.map((child, i) => renderNode(child, i, childCtx));
 

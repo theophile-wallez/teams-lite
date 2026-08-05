@@ -205,7 +205,11 @@ export const REACTION_PICKER: ReadonlyArray<{ key: string; emoji: string }> = [
   "angry",
 ].map((key) => ({ key, emoji: reactionEmoji(key) }));
 
-const CUSTOM_REACTION_PREFIX = "tlcustom-";
+/** What marks a reaction key as one of the user's own emoji rather than one of Microsoft's.
+ *  Exported because the two surfaces that OFFER such a reaction — the quick row and the
+ *  picker's Custom category — mint the key before the AMS id exists (the backend appends
+ *  it), and one spelling of it is what keeps them the same action. */
+export const CUSTOM_REACTION_PREFIX = "tlcustom-";
 
 /**
  * The Teams emotion key for a custom emoji: `tlcustom-<name>-<amsId>`, which is

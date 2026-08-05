@@ -1884,17 +1884,51 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  // Custom emoji: the picker, the Add Emoji dialog in both tabs, and the Settings section.
-  // Both themes, because each surface must be reviewable. The mock already seeds three
-  // emoji: :shipit: (PNG), :partyparrot: (animated GIF), and :ship: (an alias of shipit).
+  // Custom emoji: the picker, the Add Emoji dialog in both tabs, the `:` list mid-type, a
+  // bubble with an inline emoji, an emoji-only bubble drawn jumbo, and the Settings section.
+  // Both themes, because each surface must be reviewable. The mock seeds three emoji into
+  // the sandbox thread: :shipit: (PNG), :partyparrot: (GIF), and :ship: (an alias of shipit).
   if (args.includes("--custom-emoji")) {
     await withPreview(
       async ({ page, shot, setTheme }) => {
-        await openFirstConversation(page);
+        // The sandbox thread, because it is the one the mock seeds a colleague's own emoji
+        // markup into — the inbound half of this feature has no fixture anywhere else.
+        await openConversation(page, "Agent Sandbox");
+        await clearComposer(page);
+
+        // The `:` list mid-type: the pack's own emoji above the Unicode ones, which is the
+        // ordering the whole typeahead promises.
+        await typeInComposer(page, ":ship");
+        await page.waitForSelector('[data-testid="emoji-suggestions"]');
+        await shot(`${out}-typeahead-light.png`, '[data-testid="emoji-suggestions"]');
+        await setTheme("dark");
+        await shot(`${out}-typeahead-dark.png`, '[data-testid="emoji-suggestions"]');
+        await setTheme("light");
+        await clearComposer(page);
+
+        // A sent bubble with the art inline in the words, and one that is nothing BUT the
+        // art, which Slack draws jumbo — the two sizes side by side in one capture.
+        await typeInComposer(page, "shipping it :shipit: today", { send: true });
+        await typeInComposer(page, ":shipit:", { send: true });
+        await page.waitForSelector('[data-testid="message"] img[alt=":shipit:"]');
+        await shot(`${out}-bubbles-light.png`, '[data-testid="message-pane"]');
+        await setTheme("dark");
+        await shot(`${out}-bubbles-dark.png`, '[data-testid="message-pane"]');
+        await setTheme("light");
 
         // The emoji picker with custom emoji, reached through a message's reaction menu.
         await openMessageActions(page);
         await openReactionPicker(page);
+        // The pack's own category, which the picker only grows once the art has loaded — and
+        // it is the one surface this feature has that no unit test can reach (emoji-mart
+        // draws in a shadow root), so the capture waits for it and then opens it, rather
+        // than photographing whatever was on screen first.
+        const customCategory = page.locator(
+          '[data-testid="emoji-picker"] [aria-label="Custom"]',
+        );
+        await customCategory.waitFor();
+        await customCategory.click();
+        await page.waitForTimeout(300); // the grid scrolls to the category
         await shot(`${out}-picker-light.png`, '[data-testid="emoji-picker"]');
         await setTheme("dark");
         await shot(`${out}-picker-dark.png`, '[data-testid="emoji-picker"]');
@@ -1927,7 +1961,8 @@ if (import.meta.main) {
         await shot(`${out}-settings-dark.png`, section);
 
         console.log(
-          `[preview] wrote ${out}-{picker,add-upload,add-packs,settings}-{light,dark}.png`,
+          `[preview] wrote ` +
+            `${out}-{typeahead,bubbles,picker,add-upload,add-packs,settings}-{light,dark}.png`,
         );
       },
       { deviceScaleFactor: dpr },

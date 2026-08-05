@@ -48,6 +48,10 @@ export function EmojiSuggestions(props: {
             role="option"
             aria-selected={active}
             data-active={active}
+            // Which band the row is in. The two kinds can share a name — `:ship` is a
+            // custom alias here AND a Unicode shortcode — so the ordering the list
+            // promises (custom first) is only readable from the kind, never from the name.
+            data-kind={suggestion.kind}
             data-testid={`emoji-suggestion-${suggestion.name}`}
             onMouseDown={(event) => event.preventDefault()}
             onMouseEnter={() => props.onActivate(index)}

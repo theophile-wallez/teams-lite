@@ -15,7 +15,9 @@ import type { Page } from "@playwright/test";
 //
 // Everything happens in the "Agent Sandbox" thread, the one the backend's own policy opts
 // in out of the box (`seedAgentSandbox` in web/mock/server.ts). No test switches anything
-// on first, so this also pins that default — and no other spec types in that thread.
+// on first, so this also pins that default. `custom-emoji.spec.ts` types there too — it is
+// the one thread the mock seeds a colleague's own emoji markup into — so every locator here
+// names the message it wants rather than indexing the thread.
 test.describe("agent tags", () => {
   const editable = '[data-testid="composer-rich"] .tiptap-message';
   const suggestions = '[data-testid="mention-suggestions"]';

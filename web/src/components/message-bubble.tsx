@@ -26,7 +26,12 @@ import {
   type ParsedRichMessage,
   type Reaction,
 } from "~/lib/protocol";
-import { customReactionArt, reactionEmoji, REACTION_PICKER } from "~/lib/teams-emoji";
+import {
+  CUSTOM_REACTION_PREFIX,
+  customReactionArt,
+  reactionEmoji,
+  REACTION_PICKER,
+} from "~/lib/teams-emoji";
 import { hasActivePipeline } from "~/lib/gitlab-pipeline";
 import { LINEAR_WEB_HOST } from "~/lib/linear";
 import { mergeRequestsIn, type MergeRequestLink } from "~/lib/merge-request";
@@ -579,6 +584,7 @@ function MessageBubbleImpl(props: {
   const quotedBlock =
     parsed.quote ? (
       <div
+        data-testid="message-quote"
         className={cn(
           "my-1 rounded-lg border-l-2 px-2.5 py-1.5",
           mine ? "border-sender-name-mine bg-quote-mine" : "border-sender-name bg-quote-incoming",
@@ -1515,7 +1521,7 @@ function ReactionPicker(props: {
       {hasCustom && (
         <div role="group" aria-label="React with custom emoji" className="mb-2 flex items-center gap-0.5">
           {customReactions.map((emoji) => {
-            const key = `tlcustom-${emoji.name}`;
+            const key = `${CUSTOM_REACTION_PREFIX}${emoji.name}`;
             const active = props.activeKey?.startsWith(key);
             const src = `/api/custom-emoji/${encodeURIComponent(emoji.name)}`;
             return (

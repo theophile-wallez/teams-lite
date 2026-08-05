@@ -4,7 +4,12 @@ import rawData from "@emoji-mart/data";
 import { renderToString } from "react-dom/server";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Add01Icon, MessageSquareDashedIcon } from "@hugeicons/core-free-icons";
-import { appleEmojiUrlFromUnified, canReactWith, teamsReactionKey } from "~/lib/teams-emoji";
+import {
+  CUSTOM_REACTION_PREFIX,
+  appleEmojiUrlFromUnified,
+  canReactWith,
+  teamsReactionKey,
+} from "~/lib/teams-emoji";
 import { useController } from "./controller-context";
 import { AddEmojiDialog } from "./add-emoji-dialog";
 
@@ -60,8 +65,9 @@ function reactableData(): EmojiMartData {
   };
 }
 
-/** What emoji-mart hands back on a pick (the fields we use). */
-type PickedEmoji = { native: string };
+/** What emoji-mart hands back on a pick (the fields we use). A custom emoji carries no
+ *  `native` — it is art, not a character — so `id` is what names it. */
+type PickedEmoji = { id?: string; native?: string };
 
 /**
  * The full emoji picker for reactions: emoji-mart in Apple mode, drawing its
@@ -101,33 +107,31 @@ export default function EmojiPicker(props: {
     };
   }, [controller]);
 
-  // Merge custom emoji into emoji-mart's format
-  const dataWithCustom = useMemo(() => {
-    if (customEmoji.length === 0) return data;
-
-    const customCategory = {
-      id: "custom",
-      name: "Custom",
-      emojis: customEmoji.map((e) => e.name),
-    };
-
-    const customEmojis = Object.fromEntries(
-      customEmoji.map((e) => [
-        e.name,
-        {
+  // The pack, in the shape emoji-mart's own `custom` prop takes.
+  //
+  // It has to be THAT prop and not a category merged into `data`: emoji-mart reads `data`
+  // once, on the first init, and ignores every later one (`if (!Data)` in its `init`) — so a
+  // pack that arrives a moment after the picker mounted, which is always, never appeared at
+  // all. A changed `custom` is one of the two props that rebuild its grid, and it is
+  // re-applied on every init, so the category shows up the moment the art has loaded.
+  const custom = useMemo(
+    () => [
+      {
+        id: "custom",
+        name: "Custom",
+        emojis: customEmoji.map((e) => ({
           id: e.name,
           name: e.name,
+          keywords: [e.name],
           skins: [{ src: e.src }],
-        },
-      ]),
-    );
+        })),
+      },
+    ],
+    [customEmoji],
+  );
 
-    return {
-      ...data,
-      categories: [customCategory, ...data.categories],
-      emojis: { ...customEmojis, ...data.emojis },
-    };
-  }, [data, customEmoji]);
+  /** The codes the pack holds, so a pick can be told from a Unicode one by name. */
+  const customNames = useMemo(() => new Set(customEmoji.map((e) => e.name)), [customEmoji]);
 
   const categoryIcons = useMemo(
     () => ({
@@ -153,7 +157,8 @@ export default function EmojiPicker(props: {
         }
       >
         <Picker
-          data={dataWithCustom}
+          data={data}
+          custom={custom}
           theme={props.theme}
           set="apple"
           categoryIcons={categoryIcons}
@@ -164,7 +169,14 @@ export default function EmojiPicker(props: {
           getImageURL={(_set: string, unified: string) => appleEmojiUrlFromUnified(unified)}
           getSpritesheetURL={() => "/emoji/apple/64/spritesheet-unused.png"}
           onEmojiSelect={(emoji: PickedEmoji) => {
-            const key = teamsReactionKey(emoji.native);
+            // One of the user's own: it reacts under the `tlcustom-<name>` key the quick
+            // row mints, so the picker's Custom category is not a row that summons nothing.
+            // The backend appends the AMS id once it has uploaded the art.
+            if (emoji.id && customNames.has(emoji.id)) {
+              props.onPick(`${CUSTOM_REACTION_PREFIX}${emoji.id}`);
+              return;
+            }
+            const key = emoji.native ? teamsReactionKey(emoji.native) : undefined;
             if (key) props.onPick(key);
           }}
           autoFocus
