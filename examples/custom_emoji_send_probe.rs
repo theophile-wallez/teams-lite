@@ -29,6 +29,9 @@ use teams_lite::{teams, teams_send};
 /// target, and the only conversation this file may ever name.
 const SANDBOX: &str = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
 
+/// IC3 token scope for AMS uploads (from src/bin/server.rs:119).
+const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let http = reqwest::Client::new();
@@ -36,7 +39,7 @@ async fn main() -> Result<()> {
     println!("signed in as {} ({})", session.self_name, session.self_mri);
 
     // Get IC3 token for AMS uploads.
-    let ic3 = teams_lite::auth::get_token("https://api.aps.skype.com/.default")
+    let ic3 = teams_lite::auth::get_token(IC3_SCOPE)
         .await
         .context("acquire IC3 token")?;
 
