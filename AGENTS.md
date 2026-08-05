@@ -346,6 +346,181 @@ It also pins the fact the streaming rests on: a send returns no `id`, only
 `{"OriginalArrivalTime": …}` — and a Teams message id IS its arrival time in epoch
 ms, which is what the edits address.
 
+## A task list the app fills in
+
+The app keeps a short list of what the user owes and draws it beside the thread the ask was
+made in. A row is typed by hand, or extracted by an agent run over the messages and mail
+this store ALREADY holds — nothing is fetched for it: `src/tasks.rs` is the pure core (the
+candidate test, the prompt, the parse), the `tasks` table and the candidate sweep are in
+`src/store.rs`, the four RPCs and the scheduler in `src/bin/server.rs`, and the surface is
+`web/src/components/tasks-panel.tsx` over the pure `web/src/lib/tasks.ts`.
+
+- **Nothing here reaches Teams, a tracker or a person, which is why `OUTWARD_METHODS` is
+  untouched.** That is the honest classification and not a convenience: a task posts nothing,
+  publishes no read state, notifies nobody and writes to no tracker. `tasks` is open like
+  every other read of the user's own rows. The three writes are `MACHINE_METHODS` entries all
+  the same, and `task_save` / `task_delete` are there for the `set_person_name` reason rather
+  than because they write the local store — it is WHAT they write. A client that could set
+  `asked_by_mri` could make one colleague appear to have asked for something another
+  colleague never mentioned, in the panel and in the notification a phone draws from it, and
+  authorship is the one thing this app never misstates (§ Renaming a person). `tasks_scan` is
+  gated for a reason of its own: it starts an agent CLI on this machine, and that run costs
+  money. The automation hook blocks all three against a live port.
+- **Two tiers, and only the second one reads.** A keyword test decides what is a CANDIDATE;
+  the model reads the candidates and nothing else does. `tasks::looks_actionable` is that
+  test and it has exactly ONE spelling, because the ingest trigger (a message just arrived)
+  and the candidate sweep (a stored row is re-read) have to agree — a candidate the sweep
+  would accept but the trigger missed is one the user never sees. The SQL `LIKE` cut in front
+  of it (`store::CANDIDATE_TERMS`, over `candidate_prefilter`) is a prefilter of the
+  prefilter and decides NOTHING: a `%term%` match can use no index, so it exists only to let
+  the sweep's `LIMIT` bound what is read, and every row it admits is then put through the
+  authority itself. A term it forgets costs one candidate and never a task nobody asked for,
+  and `the_sql_prefilter_never_hides_what_the_authority_accepts` is what keeps the two from
+  drifting. It matches RAW HTML while the authority reads that body stripped, which is why
+  every space in a term becomes a `%`: the Teams composer writes `can&nbsp;you` and
+  `can <b>you</b>`, both of which the authority accepts as "can you" and neither of which
+  `LIKE '%can you%'` matches. Those were silently lost.
+- **The run holds NO tool, and that guarantee is CONDITIONAL — which is why a scan REFUSES
+  rather than falling back.** `task_scan_request` passes `agent::Permissions::Granted` with an
+  empty list, so this app grants nothing and names no permission mode beyond `default`; but
+  that is only enforced on a CLI whose command line consults it
+  (`agent::enforces_empty_allowlist`, pinned against what `build_command` really spells). The
+  other backend's argv reads no tool flag at all, so `task_scan_backend` starts no scan there
+  instead of starting an unrestricted one: a scan nobody can hold tool-less is exactly the one
+  an arriving message would otherwise arm. It therefore DIVERGES from the user's default
+  provider on purpose — that preference decides which program answers a chat message, which is
+  a choice about voice, while a fixed-prompt classification job over a colleague's words has a
+  requirement, and a preference cannot make a guarantee true. A provider the user switched off
+  is not started here either.
+- **A colleague's words ARM a scan, which is the one thing in this app somebody else can
+  trigger.** It is not remote code execution, and the reason is worth stating exactly: the
+  prompt is fixed (`tasks::SYSTEM` and `build_prompt`), a candidate's text travels
+  XML-escaped inside a `<candidates>` delimiter the system prompt introduces as data, the
+  child holds no tool by the rule above, and the write token is never in its environment.
+  What is left is a RESOURCE trigger the user does not control, and three numbers are the
+  whole of what bounds it — one run per BURST rather than per message
+  (`TASK_SCAN_DEBOUNCE`, five minutes, measured from the first hit and never pushed back by
+  the ones after it, since a window a busy thread keeps resetting is one that never elapses);
+  a ceiling of **four runs an hour per PROCESS** (`TASK_SCAN_MAX_PER_HOUR` — the ring lives in
+  that process's own memory, and the panel's button is deliberately not counted at all,
+  because a run the user asked for is the user); and a store-wide claim that SPACES claims
+  rather than serialising runs (`TASK_SCAN_LEASE`, ten minutes, shorter than a run's own
+  30-minute idle bound — so a slow run outlives its lease and the sibling backend may start a
+  second one over the same candidates. That overlap is harmless rather than prevented, and the
+  two rules below are what make it so). **So the machine-wide figure is neither 4 nor 8**:
+  with the released build running beside the staged one (§ Running the released build beside
+  the staged one) each keeps its own count and the lease only holds their claims ten minutes
+  apart, which works out at about **six an hour**. Price the cost off that number.
+- **A parse failure costs nothing, and never invents a task.** Prose, malformed JSON or a
+  dead CLI is an `Err` from `tasks::parse_extraction`, and it propagates BEFORE anything is
+  written: no row, and the watermark exactly where it was, so the next scan reads those
+  candidates again. An empty list is the opposite case and is a legitimate answer — "nothing
+  was asked of the user here" — so it DOES advance, or a window the model correctly found
+  nothing in would be re-read for ever. Reading a failure as an empty list would mark that
+  window read and lose it for good.
+- **The watermark is a `compose_time`, never a `seq`.** `messages.seq` counts within ONE
+  conversation, so a global floor on it excluded every quieter thread whose own counter sat
+  below the busiest one's — permanently, and with nothing to see. And it advances from the
+  window the sweep EXAMINED rather than from the candidates it accepted
+  (`store::TaskCandidates`): a window whose rows all pass the SQL cut and are all refused by
+  the authority yields no candidate and a real end, so a scan that left the watermark alone
+  there would read that same barren window for ever, with everything past it unreachable.
+  `plain_text_from_html` strips quoted blocks, so a run of replies quoting one "please" is
+  exactly that shape. A store that has never scanned reads `(0, "")` — "nothing has been
+  looked at", which on a real store is years and 11 739 messages back — so `task_scan_sweep`
+  PLANTS the watermark at `now` and the first scan covers what arrives from here. Whether to
+  walk a backlog is a decision about WHEN to scan, which is why the store leaves it to its
+  caller.
+- **One suggestion per source, by construction.** `tasks_one_per_source` is a PARTIAL unique
+  index over the three source columns, constraining only a row that HAS a source — every one
+  of them is `NOT NULL DEFAULT ''`, so a plain unique index would read all the hand-typed
+  tasks as one row and refuse every one after the first. Two scans may legitimately read one
+  window (the watermark moves only once a run has WRITTEN), and the loser then wastes its own
+  work instead of showing the user the same ask twice — which is what makes an overlapping
+  lease affordable. A rule every caller has to remember is one a caller added later will not.
+- **Whose ask counts is decided in the sweep, and nowhere else.** Mail comes from the INBOX
+  and the ARCHIVE alone, by `well_known`: Junk is where "claim your prize before friday"
+  lives, Deleted Items is what the user threw away, and Drafts, Outbox and Sent Items hold
+  what THEY asked of somebody else — each of those becoming a task the user owes is the same
+  failure, pointing one way or the other. A message the user wrote is not an ask of them
+  **except in the self-notes conversation**, and that exception is this feature's best input
+  rather than a nicety: every message in `48:notes` is theirs, and it is where somebody writes
+  down what they have to do. The identity is matched on the canonical TAIL of the mri
+  (`canonical_mri`, because Teams spells one three ways), and a store that cannot say whose it
+  is filters on nothing at all — dropping every message over a missing identity is much the
+  worse failure.
+- **`asked_by_mri` holds an MRI and never a name, and the name resolves in the store's own
+  read** (`TASK_SELECT_COLS`, through `nicknamed!`, exactly like `SELECT_COLS`), for the
+  reason § Renaming a person gives: a name applied at render time has to be applied at every
+  render site, and the one that gets forgotten is the bug. There is no Teams-sourced name
+  column on this table to fall back to, so `fill_asked_by` finishes the job from the stored
+  history — one name, two halves, and no second column a rename could leave stale. It is
+  empty for a hand-typed task and for one from mail, where the sender is an SMTP address
+  rather than a person Teams can name.
+- **A suggestion is a DECISION, not a task yet.** An extraction inserts `suggested`, and the
+  row carries Accept and Dismiss and no checkbox: ticking off something nobody agreed to is a
+  list that fills itself. It appears as soon as it is written, cited to its source and
+  attributed to whoever asked, and it arrives through `tasks_changed` rather than out of the
+  scan's answer — so the page that pressed the button and one that did not are updated by the
+  same path. A DISMISSED row is KEPT rather than deleted, and that is the whole reason the
+  state exists: the sweep skips a source that already has a task in any state, so what the
+  user refused can never come back.
+- **Every write repaints from the row the backend returned.** `task_save` answers with the
+  row as `Store::tasks` would read it back, and nothing on screen moves until it does: the
+  backend refuses a state outside the four, a due date that is not a day, and every write at
+  all when this page holds a token it does not accept — so an optimistic tick would show a
+  task the store never moved. A refusal, and a scan that could not run, is reported INSIDE the
+  panel beside the control that was pressed, for the reason § Sending messages gives for the
+  composer and § The trackers for the approval menu: an action that failed must never be left
+  looking like it worked, and the status line is eleven truncated pixels at the foot of a
+  sidebar a phone does not show at all. A first READ that failed says so too, because "No
+  tasks yet." is a claim about a list this page never managed to read.
+- **One `<aside>` in two shapes: a side column at `lg` and above, a full-screen sheet below
+  it.** Wide, it is 22rem with a left border, so opening it NARROWS the message pane instead
+  of covering it — being read beside the conversation is the whole point. `lg` (64rem) rather
+  than `md` is arithmetic: at 768px the sidebar's 320px plus this column leave about 96px of
+  thread, which is covering it. The number is spelled TWICE — `WIDE_QUERY` and the aside's own
+  `lg:` classes, which Tailwind compiles from the literal — and both sides of it are pinned,
+  because a mismatch is invisible until a tap opens a thread behind a sheet that covers it. It
+  is deliberately not a dialog and not a portal: a focus trap is exactly wrong for a surface
+  whose job is to sit beside a thread the user keeps reading and typing in. The four sections
+  are Suggested, Today, Open and Done, and Today also states the day's meetings — stated and
+  nothing more, because § The calendar is READ-ONLY holds here as everywhere: no join, and no
+  link this app follows on the user's behalf.
+- **On a phone the panel's own close button is the only way out**, since there is no Escape
+  and no `t` there and the sheet covers the screen — a broken one shuts the reader inside the
+  panel with their conversations behind it. Nothing on a row hides behind hover either, for
+  the reason § The chat list gives for its long press: a coarse pointer has no hover, so an
+  affordance that needed one is a control that phone does not have.
+- **The bare `t` cannot fire while the composer holds the focus, and opening a thread focuses
+  the composer — so in a thread the button is the way in.** That is a limitation and not a
+  design: the guard that makes `t` a letter while somebody is writing is the same guard that
+  puts it out of reach there, and both halves are wanted. It is swallowed by any floating
+  layer holding the keyboard (a menu's own typeahead is letters) and on the Calendar tab,
+  whose `t` is Today. Escape closes the panel BEFORE it leaves the conversation: Escape is
+  also "walk back to the list", and the user would otherwise lose both in one press.
+- **A comment here is a claim, and this branch wrote several that were false the day they
+  were written** — the empty allowlist stated unconditionally when it is enforced on one CLI
+  only, the lease described as "one backend at a time" when it only spaces claims, a
+  breakpoint named in prose after the code moved (twice), and two tests whose titles claimed
+  more than they asserted: a `toContain` that only bit in a timezone nobody runs, and a CSS
+  `opacity` read on a child of a transparent parent, since `opacity` does not inherit. Not one
+  of them was caught by a test — each was caught by reading the code beside the prose. Write
+  the guarantee the code gives, and no wider.
+
+`web/mock/server.ts` reproduces the whole flow with no CLI and no tenant, which is what makes
+the surface reviewable: it serves the four RPCs, seeds one suggestion so the decision half is
+there before any scan, and simulates a sweep that writes two rows and broadcasts
+`tasks_changed` — armed with the `{kind: "tasks"}` test hook (`fail_once`, `read_fails`,
+`empty`), which a spec MUST reset afterwards, since one mock process serves the whole run and
+a task left accepted is accepted for every later spec. `cd web && bun run preview -- --out
+/tmp/tasks --tasks` captures the panel in both themes, the two decisions, the scan mid-run and
+its report, the empty plate and the refusal. `web/e2e/tasks.spec.ts` pins the panel's half of
+the rules above — both ways in and the layers that swallow the key, the two decisions, the
+jump back to the ask, the refusal beside the button, and both shapes of the aside — and the
+Rust tests pin the other half: the prefilter's superset, the tool-less run and where it may be
+claimed, the watermark, the cap and the gating of all four methods.
+
 ## Mail is READ-ONLY (MANDATORY — no exception, not even a sandbox)
 
 The app reads the user's Outlook mailbox over Microsoft Graph (`src/mail.rs`). It
@@ -1403,8 +1578,10 @@ user's. What changes is only what is asked.
   request's approval, and its undo (`src/gitlab_approval.rs`, see § The trackers) —,
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
-  § The local agent) and the app's own update — the check, the download and the swap
-  (`src/update.rs`, see § Updating the app from inside it).
+  § The local agent), the LOCAL task list — the candidate test, the prompt and the parse
+  (`src/tasks.rs`), over the `tasks` table and the candidate sweep in `src/store.rs`
+  (see § A task list the app fills in) — and the app's own update — the check, the
+  download and the swap (`src/update.rs`, see § Updating the app from inside it).
   Exposed over a local WebSocket (`ws://127.0.0.1:19420`).
 - One front-end, talking to the backend only through that WebSocket. Local-first is
   enforced server-side; the front-end touches neither the network nor SQLite directly.

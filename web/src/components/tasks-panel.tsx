@@ -271,7 +271,7 @@ function TaskRow(props: { task: Task; today: string; onWrite: (run: Promise<void
     } else {
       void navigate({ to: "/m/$mailId", params: { mailId: task.source_mail_id } });
     }
-    // Below `md` this panel IS the screen, so the thread would open behind it and the tap
+    // Below `lg` this panel IS the screen, so the thread would open behind it and the tap
     // would look like it did nothing. Wide, the conversation appears in the pane beside
     // the panel, which is the arrangement the panel exists for — so it stays open.
     if (!window.matchMedia(WIDE_QUERY).matches) controller.closeTasksPanel();
