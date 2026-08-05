@@ -1,7 +1,7 @@
 # Native calling — audio only, the way the Teams web client does it
 
-Status: **a meeting join WORKS against the tenant** (verified 2026-08-05: joined, audio
-negotiated, held, left cleanly — see § 8). A one-to-one call is built on the same plane and
+Status: **a meeting join WORKS against the tenant, with audible audio both ways**
+(verified 2026-08-05: joined, held, voices heard, left cleanly — see § 8). A one-to-one call is built on the same plane and
 has never been rung: it has no sanctioned target, so the first one is the user's own click
 to somebody who agreed beforehand (§ 7).
 
@@ -478,10 +478,13 @@ sent 63177B in 1025 packets, received 0B in 0
 ```
 
 1025 RTP packets accepted by Teams' own relay over UDP. `received 0` is the correct
-answer for an empty meeting — nobody is talking — and it is also the limit of what can be
-checked alone: a fake capture device sends silence, so AUDIBILITY still needs a meeting
-with somebody in it. Everything up to and including "the far side accepts our audio" is
-now measured.
+answer for an empty meeting — nobody is talking — and a fake capture device sends silence,
+so those numbers stop one step short of "somebody heard it".
+
+**That last step is confirmed too: the user joined a real meeting from this app and the
+voices worked, in both directions (2026-08-05).** It could not be checked any other way —
+a driver with a fake microphone can prove the path carries packets and nothing more. So
+the feature is done rather than merely negotiated.
 
 `activeModalities.call` being null in the join RESPONSE turned out to be nothing: the leg
 is created after the answer, and the `conversationUpdate` frames a second later carry it as

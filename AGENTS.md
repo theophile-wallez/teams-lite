@@ -1005,7 +1005,10 @@ is a shared screen is still one to open in Teams.
 - `cd web && bun run preview -- --out /tmp/call --call` captures the Join button, the
   lobby and the roster, and `web/e2e/calling.spec.ts` pins them.
 - **A join is EXERCISED against the tenant by `cd web && bun run join-live`, and nothing
-  else can.** It works (verified 2026-08-05: joined, audio negotiated, held, left cleanly),
+  else can.** It works — verified 2026-08-05 end to end, with the user hearing and being
+  heard in a real meeting; the script itself proves the path as far as `getStats` can
+  (`connected/connected via prflx/udp -> relay/udp`, 2093 RTP packets sent), and a fake
+  microphone can never prove more than that —
   and it took five refusals to get there — every one of them named by the thing that
   refused it, and none visible without this script. That is the point of it: the mock has
   no tenant, and `examples/meeting_join_probe.rs` has no browser and fabricates the surl
