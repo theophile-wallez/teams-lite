@@ -4084,7 +4084,11 @@ impl Store {
                 )?;
             }
             (None, Some(target)) => {
-                // An alias may not point at an alias.
+                // An alias names art this pack already holds, and names it directly: one
+                // hop is what makes `custom_emoji_art` a lookup rather than a walk over
+                // user-controlled data. The two refusals are separate sentences because
+                // they send their reader to different places — one to add the target
+                // first, the other to point at what the target points at.
                 let target_row: Option<String> = self.conn
                     .query_row(
                         "SELECT alias_of FROM custom_emoji WHERE name = ?1",
@@ -4092,6 +4096,10 @@ impl Store {
                         |r| r.get(0),
                     )
                     .optional()?;
+                anyhow::ensure!(
+                    target_row.is_some(),
+                    "an alias must name an emoji this pack already holds: {target}"
+                );
                 anyhow::ensure!(
                     target_row == Some(String::new()),
                     "an alias may not point at an alias"

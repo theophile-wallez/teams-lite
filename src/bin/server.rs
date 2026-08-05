@@ -3120,7 +3120,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let mut added = 0;
             let mut errors = Vec::new();
 
-            for entry in emoji_list {
+            for entry in import_order(emoji_list) {
                 let name = entry
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -5413,6 +5413,23 @@ fn param_str(params: &Value, key: &str) -> Result<String> {
         .and_then(|v| v.as_str())
         .map(String::from)
         .with_context(|| format!("missing param: {key}"))
+}
+
+/// A custom emoji pack's entries in the order they can be IMPORTED: art first, aliases
+/// second, each half in the order the file gave them.
+///
+/// An alias may only name art the pack already holds, and `custom_emoji_export` sorts by
+/// NAME — so `ship`, the alias of `shipit`, arrived first and was refused every time a
+/// pack was exported and read back in. The order the file lists them in is not something
+/// the importer can rely on either way, since another machine wrote it.
+fn import_order(entries: &[Value]) -> Vec<&Value> {
+    let (aliases, art): (Vec<&Value>, Vec<&Value>) = entries.iter().partition(|entry| {
+        entry
+            .get("alias_of")
+            .and_then(|v| v.as_str())
+            .is_some_and(|alias| !alias.is_empty())
+    });
+    art.into_iter().chain(aliases).collect()
 }
 
 /// An optional array-of-strings parameter, empty when absent, not an array, or made
@@ -9190,6 +9207,71 @@ mod tests {
         for method in ["custom_emoji", "custom_emoji_image", "custom_emoji_export"] {
             assert_eq!(write_class(method), None, "{method} returns what the user themselves put in");
         }
+    }
+
+    // A pack exported from one machine has to import into the next one WHOLE. It did not:
+    // the export sorts by name, an alias may only name art the pack already holds, and
+    // `ship` sorts before `shipit` — so the seeded pack lost its own alias every time it
+    // made the round trip, and the refusal blamed "an alias may not point at an alias"
+    // for a target that simply was not there yet.
+    #[test]
+    fn a_pack_survives_being_exported_and_read_back() {
+        let png: &[u8] = &[0x89, 0x50, 0x4E, 0x47];
+        let from = Store::open_in_memory().unwrap();
+        from.set_custom_emoji("shipit", Some(("image/png", png, 20, 20)), None, "upload", 100)
+            .unwrap();
+        from.set_custom_emoji("ship", None, Some("shipit"), "upload", 101).unwrap();
+
+        // What `custom_emoji_export` writes out, in the order it writes it (by name, so
+        // the alias leads) — the only part of the RPC a unit test has to stand in for.
+        let exported: Vec<Value> = from
+            .custom_emoji()
+            .unwrap()
+            .into_iter()
+            .map(|e| json!({ "name": e.name, "alias_of": e.alias_of, "content_type": e.content_type }))
+            .collect();
+        assert_eq!(exported[0]["name"], "ship", "the export leads with the alias");
+
+        // And what the import does with it, through the real ordering.
+        let into = Store::open_in_memory().unwrap();
+        for entry in import_order(&exported) {
+            let name = entry["name"].as_str().unwrap();
+            let alias = entry["alias_of"].as_str().unwrap();
+            let art = if alias.is_empty() { Some(("image/png", png, 20u32, 20u32)) } else { None };
+            let alias = (!alias.is_empty()).then_some(alias);
+            into.set_custom_emoji(name, art, alias, "import", 200)
+                .unwrap_or_else(|e| panic!("{name} was refused: {e}"));
+        }
+
+        assert_eq!(into.custom_emoji().unwrap().len(), 2, "both rows made the trip");
+        assert_eq!(
+            into.custom_emoji_art("ship").unwrap().unwrap().1,
+            png.to_vec(),
+            "the alias still resolves to its target's art"
+        );
+    }
+
+    // The two refusals are different problems and say so: a missing target is one the user
+    // adds, a chain is one they re-point. They used to share the second sentence.
+    #[test]
+    fn an_alias_says_which_refusal_it_earned() {
+        let store = Store::open_in_memory().unwrap();
+        let missing = store
+            .set_custom_emoji("ship", None, Some("shipit"), "import", 100)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("already holds"), "{missing}");
+        assert!(!missing.contains("point at an alias"), "{missing}");
+
+        store
+            .set_custom_emoji("shipit", Some(("image/png", &[1], 8, 8)), None, "upload", 101)
+            .unwrap();
+        store.set_custom_emoji("ship", None, Some("shipit"), "import", 102).unwrap();
+        let chained = store
+            .set_custom_emoji("s", None, Some("ship"), "import", 103)
+            .unwrap_err()
+            .to_string();
+        assert!(chained.contains("point at an alias"), "{chained}");
     }
 
     #[test]
