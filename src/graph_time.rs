@@ -46,6 +46,30 @@ pub fn normalize_timestamp(raw: &str) -> String {
     format!("{head}Z")
 }
 
+/// An epoch-millisecond instant in the canonical shape — the inverse of
+/// [`crate::teams_read::parse_iso_ms`], truncated to whole seconds.
+///
+/// It exists because the two clocks this crate stores are not interchangeable: a message
+/// is ordered by epoch milliseconds and a mail by this text, so anything that has to name
+/// ONE instant to both of them (the task scan's watermark) needs the conversion. Howard
+/// Hinnant's `civil_from_days`, for the same reason its inverse is hand-written in
+/// `teams_read`: one field needs it, and a date crate for one field is a dependency.
+pub fn from_epoch_ms(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let (days, time) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let (hour, minute, second) = (time / 3600, (time % 3600) / 60, time % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
 /// The `YYYY-MM-DD` date part of a normalized timestamp, or `""` if it is not one.
 ///
 /// Used for the all-day boundary of a calendar event, whose start and end are
@@ -113,6 +137,24 @@ mod tests {
                 "2026-07-01T00:00:00Z",
             ]
         );
+    }
+
+    /// The two clocks must agree, so this is pinned as a round trip against the parser
+    /// rather than against a table: one of them drifting is the bug worth catching.
+    #[test]
+    fn an_instant_round_trips_through_both_clocks() {
+        for stamp in [
+            "1970-01-01T00:00:00Z",
+            "2000-02-29T12:00:00Z", // a leap day, in a leap year the century rule keeps
+            "2026-07-25T17:20:00Z",
+            "2026-12-31T23:59:59Z",
+            "2100-03-01T00:00:00Z", // the day after the century that is NOT a leap year
+        ] {
+            assert_eq!(from_epoch_ms(crate::teams_read::parse_iso_ms(stamp)), stamp);
+        }
+        // Sub-second precision is truncated, never rounded: the canonical shape holds
+        // whole seconds, and rounding up would name an instant that has not happened.
+        assert_eq!(from_epoch_ms(1_785_000_000_999), "2026-07-25T17:20:00Z");
     }
 
     #[test]

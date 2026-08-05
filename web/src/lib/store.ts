@@ -70,6 +70,7 @@ import {
   type WriteLock,
   UNKNOWN_WRITE_LOCK,
 } from "./protocol";
+import type { Task, TaskPatch } from "./tasks";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import {
   AGENT_RUN_STALE_MS,
@@ -443,6 +444,35 @@ export type AppState = {
   calendarError: string | null;
   /** The event whose details panel is open, or null. */
   openEventId: string | null;
+
+  // ---- tasks (a local list, see lib/tasks.ts) -------------------------------
+
+  /** Every task the backend holds, newest first — suggestions included. Grouped for
+   *  display by `taskSections`; `dismissed` rows travel with the rest and are drawn
+   *  nowhere, so a dismissal is undoable from the store rather than lost. */
+  tasks: Task[];
+  /** Whether the list has been read at least once. Until it has, the panel says nothing
+   *  about being empty: `tasks` is `[]` both before the first read and when there is
+   *  genuinely nothing to do, and stating the second while in the first is a claim about a
+   *  state nothing holds. */
+  tasksLoaded: boolean;
+  /** Why the FIRST read failed, or null. A later refresh failing is deliberately silent —
+   *  the panel keeps the list it has — but a first read has nothing to keep, so it is
+   *  reported instead of leaving the panel to announce an empty plate it never read. */
+  tasksError: string | null;
+  /** Whether the task panel is on screen. Local to this page: it is a view, not a
+   *  setting, and a second page has its own answer. */
+  tasksPanelOpen: boolean;
+  /** Where the last scan got to, for the button that started it. `found` is the count
+   *  the backend answered — null until a scan has answered at all — and `error` is why
+   *  one did not run, drawn beside that button rather than in the status line. */
+  taskScan: { running: boolean; error: string | null; found: number | null };
+  /** Whether this machine scans on its own when a message arrives, or `null` while the
+   *  backend has not said. Never assumed either way: the real default is ON, so guessing
+   *  `false` would tell the user nothing is spent while runs happen, and guessing `true`
+   *  would claim a machine acts on its own when it may not. The switch is disabled until
+   *  this answers, exactly as the agent's own switches are. */
+  taskScanAuto: boolean | null;
 };
 
 const DRAFT_SAVE_DELAY_MS = 150;
@@ -630,6 +660,14 @@ function initialState(): AppState {
     calendarLoading: false,
     calendarError: null,
     openEventId: null,
+    tasks: [],
+    tasksLoaded: false,
+    tasksError: null,
+    // Closed, like every other surface that costs a read: the list is fetched when the
+    // panel is first opened, so a user who never opens it pays nothing.
+    tasksPanelOpen: false,
+    taskScan: { running: false, error: null, found: null },
+    taskScanAuto: null,
   };
 }
 
@@ -1137,6 +1175,15 @@ export class TeamsController {
     on("conversations_changed", () => void this.refreshConversations());
     on("channels_changed", () => void this.refreshChannels());
     on("notifications_changed", () => void this.refreshNotifications());
+
+    // A task moved — here, in a second page, or in the other backend sharing this store,
+    // and a scan that wrote something emits it too. Re-read rather than patch: the row
+    // the event is about is not in it (the backend emits the bare fact), and the list is
+    // small and local. Only once the panel has been opened, so a background scan never
+    // makes a page that has no task surface up read one.
+    on("tasks_changed", () => {
+      if (this.get().tasksPanelOpen || this.get().tasks.length > 0) void this.loadTasks();
+    });
 
     // Mail folder metadata moved (new mail, something read elsewhere): refresh the
     // list so the unread badge and counts follow — but only once mail has been
@@ -2531,6 +2578,131 @@ export class TeamsController {
     }
   }
 
+  // ---- tasks (the local list, see lib/tasks.ts) ----------------------------
+  //
+  // Every write here goes out and comes back before anything is drawn: the backend
+  // refuses a patch that would blank a title, a state outside the four and a malformed
+  // due date, and it refuses every one of them outright when this page holds a token it
+  // does not accept. An optimistic tick would then show a task the store never moved,
+  // which is the one thing this app must not do — so the row that lands on screen is
+  // always the row the backend answered with.
+
+  /** Show or hide the task panel. Opening reads the list, so the panel is the only
+   *  thing that makes this app fetch tasks at all. */
+  toggleTasksPanel(): void {
+    // Closing goes through the one path that closes, so the scan's report is cleared
+    // whichever control put the panel away. Opening re-reads, which is also the retry
+    // after a first read that failed.
+    if (this.get().tasksPanelOpen) {
+      this.closeTasksPanel();
+      return;
+    }
+    this.set({ tasksPanelOpen: true });
+    void this.loadTasks();
+  }
+
+  /** Close the panel (Escape, and the panel's own close button), and drop the last scan's
+   *  report with it: a report belongs to the click it describes, and reopening the panel
+   *  must not put "Found 2 tasks…" beside a button nobody just pressed. A scan still in
+   *  flight keeps its `running`, or the button would offer a second sweep. */
+  closeTasksPanel(): void {
+    this.set({
+      tasksPanelOpen: false,
+      taskScan: { running: this.get().taskScan.running, error: null, found: null },
+    });
+  }
+
+  /** Re-read the whole list.
+   *
+   *  A REFRESH that fails keeps what is on screen: a list that empties itself on a dropped
+   *  socket reads as work that was lost. The FIRST read has nothing to keep, so its failure
+   *  is recorded — otherwise the panel would draw the empty state, which is a claim about a
+   *  list it never managed to read. */
+  async loadTasks(): Promise<void> {
+    try {
+      const res = await this.backend.tasks();
+      this.set({
+        tasks: res.tasks ?? [],
+        tasksLoaded: true,
+        tasksError: null,
+        // A backend too old to state it leaves the switch unknown rather than guessing:
+        // the panel then shows it disabled instead of claiming where money goes.
+        taskScanAuto: typeof res.auto_scan === "boolean" ? res.auto_scan : null,
+      });
+    } catch (e) {
+      if (!this.get().tasksLoaded) this.set({ tasksError: errText(e) });
+    }
+  }
+
+  /** Turn the AUTOMATIC scan on or off, and repaint from what the backend stored.
+   *
+   *  Non-optimistic like every other task write, and for the sharper reason: a switch that
+   *  moved on a refused write would tell the user this machine is not spending runs while
+   *  it is. Rejects so the panel can say why beside it. */
+  async setTaskScanAuto(enabled: boolean): Promise<void> {
+    const res = await this.backend.setTaskScan(enabled);
+    this.set({ taskScanAuto: res.auto_scan });
+  }
+
+  /** Create or patch one task, and repaint from the row the backend answered with.
+   *
+   *  Rejects on failure so the caller can say so where the click was made: a refused
+   *  write must leave the old state on screen, never a state nothing holds. */
+  async saveTask(patch: TaskPatch): Promise<void> {
+    const res = await this.backend.taskSave(patch);
+    const task = res.task;
+    const tasks = this.get().tasks;
+    this.set({
+      tasks: tasks.some((t) => t.id === task.id)
+        ? tasks.map((t) => (t.id === task.id ? task : t))
+        : [task, ...tasks],
+    });
+  }
+
+  /** Drop one task for good. Local and final — it reaches nobody, so there is nothing
+   *  to confirm — and the row goes as soon as the backend says it did. */
+  async deleteTask(id: string): Promise<void> {
+    await this.backend.taskDelete(id);
+    this.set({ tasks: this.get().tasks.filter((t) => t.id !== id) });
+  }
+
+  /** Turn a suggestion into a task the user owns. */
+  acceptTask(id: string): Promise<void> {
+    return this.saveTask({ id, state: "open" });
+  }
+
+  /** Say a suggestion was not one. The row is kept `dismissed` rather than deleted, so
+   *  the same message is never suggested twice. */
+  dismissTask(id: string): Promise<void> {
+    return this.saveTask({ id, state: "dismissed" });
+  }
+
+  /** Sweep the messages and mail that arrived since the last scan, because the user
+   *  asked. The list itself repaints on the backend's `tasks_changed`, which it emits
+   *  whenever a scan wrote anything — so a page that pressed the button and a page that
+   *  did not are updated by the same path. */
+  async scanTasks(): Promise<void> {
+    if (this.get().taskScan.running) return;
+    this.set({ taskScan: { running: true, error: null, found: null } });
+    let report: { error: string | null; found: number | null };
+    try {
+      report = { error: null, found: (await this.backend.tasksScan()).found ?? 0 };
+    } catch (e) {
+      report = { error: errText(e), found: null };
+    }
+    // The panel may have been closed while the sweep ran — it deliberately keeps running —
+    // and a report belongs to the click it describes, so it is DROPPED rather than kept:
+    // reopening the panel must not draw an answer to a question nobody asked there. The
+    // failure cue goes with it, for a surface that is not on screen to chime about.
+    const open = this.get().tasksPanelOpen;
+    this.set({
+      taskScan: open
+        ? { running: false, ...report }
+        : { running: false, error: null, found: null },
+    });
+    if (open && report.error) playCue("error");
+  }
+
   // ---- notifications (activity feed) --------------------------------------
 
   // Local "seen" high-water mark (epoch ms). The badge counts unread entries
@@ -3171,6 +3343,10 @@ export class TeamsController {
     void this.refreshConversations();
     void this.refreshChannels();
     void this.refreshNotifications();
+    // A task names who asked for it, resolved by the same store read — so a rename has
+    // to reach this list as well. Only when one is held: a page that never opened the
+    // panel must not be made to read tasks by somebody else's rename.
+    if (this.get().tasks.length > 0) void this.loadTasks();
     const openId = this.get().openId;
     if (openId) void this.reconcileOpen(openId);
   }

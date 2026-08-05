@@ -14,6 +14,7 @@
 
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row, ToSql};
+use serde::Serialize;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS conversations (
@@ -352,6 +353,50 @@ CREATE TABLE IF NOT EXISTS sender_icons (
     bytes        BLOB,
     fetched_ms   INTEGER NOT NULL DEFAULT 0
 );
+-- What the user owes: one row per task, whether extracted from a message or a mail or
+-- typed by hand (see src/tasks.rs).
+--
+-- Its own table because a task is neither a message nor an event: it carries a STATE
+-- the user moves (suggested → open → done, or dismissed), a DAY rather than an instant
+-- (a deadline is a date; a time would be a promise this app cannot keep), and it may
+-- have NO SOURCE at all — a hand-typed task belongs to no thread and no mailbox. Folded
+-- into `messages` it would have been four nullable columns and two meanings per row,
+-- and a task the user typed would have had to be a message nobody sent.
+--
+-- Nothing here alters an existing table: what has already been looked at is a watermark
+-- in `settings` and a `dismissed` row, never a flag on a message.
+--
+-- `asked_by_mri` holds an MRI and never a name, for the reason the `person_overrides`
+-- note gives: a name is a cache derived from the identity, and the name this app STATES
+-- must follow the nickname the user chose. Resolved in the store's own read
+-- (`TASK_SELECT_COLS`, through `nicknamed!`, exactly like `SELECT_COLS`) rather than by
+-- the caller, because a rename applied at render time has to be applied at every render
+-- site and the one that gets forgotten is the bug. Empty for a hand-typed task and for
+-- one extracted from mail, where the sender is an SMTP address rather than a person
+-- Teams can name.
+CREATE TABLE IF NOT EXISTS tasks (
+    id                     TEXT PRIMARY KEY,
+    title                  TEXT NOT NULL DEFAULT '',
+    -- The user's own notes. Never model output: the extractor writes a title and a day
+    -- and nothing else.
+    body                   TEXT NOT NULL DEFAULT '',
+    -- suggested | open | done | dismissed. 'suggested' is what an extraction inserts,
+    -- and one click accepts or refuses it; a `dismissed` row is KEPT, because it is what
+    -- stops a re-scan of the same window suggesting it again.
+    state                  TEXT NOT NULL DEFAULT 'open',
+    -- 'YYYY-MM-DD', or empty. A day, never a timestamp.
+    due_date               TEXT NOT NULL DEFAULT '',
+    -- Where the ask came from, so the panel can cite it and open it. Empty on a
+    -- hand-typed task; a message names both its thread and its id, a mail names itself.
+    source_conversation_id TEXT NOT NULL DEFAULT '',
+    source_message_id      TEXT NOT NULL DEFAULT '',
+    source_mail_id         TEXT NOT NULL DEFAULT '',
+    asked_by_mri           TEXT NOT NULL DEFAULT '',
+    created_at             INTEGER NOT NULL DEFAULT 0,
+    -- When the task was finished, or 0. Cleared when it is reopened, so it can never
+    -- disagree with `state`.
+    done_at                INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 /// Indexes, applied AFTER [`migrate`] because several of them cover columns that a
@@ -386,6 +431,24 @@ CREATE INDEX IF NOT EXISTS idx_mail_local_read ON mail_messages(folder_id)
 -- overlap predicate, `id` completes its ORDER BY (without it the last term needs a
 -- temp b-tree), and `calendar_id` serves the visible-calendars filter.
 CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc, end_utc, id, calendar_id);
+-- The candidate sweep asks, once per row it considers, whether that message or mail has
+-- ALREADY produced a task — in any state, since a dismissed suggestion must not come
+-- back either. Without these, one scan of a busy window re-reads the whole task table
+-- per candidate.
+CREATE INDEX IF NOT EXISTS idx_tasks_source_message ON tasks(source_message_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_source_mail ON tasks(source_mail_id);
+-- ONE suggestion per source, enforced by the table rather than promised by the callers.
+-- Two scans may legitimately read the same window: the watermark moves only once a run has
+-- WRITTEN, so a manual scan and an automatic one — or the two backends sharing this store —
+-- can both sweep it before either does, and the loser of that race would otherwise show the
+-- user the same ask twice. It is the argument that put the watermark's clamp in its setter:
+-- a rule every caller has to remember is one a caller added later will not.
+--
+-- PARTIAL, because every source column is `NOT NULL DEFAULT ''`: a plain unique index would
+-- read all the hand-typed tasks as one row and refuse every one after the first.
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_one_per_source
+    ON tasks (source_conversation_id, source_message_id, source_mail_id)
+    WHERE source_conversation_id <> '' OR source_message_id <> '' OR source_mail_id <> '';
 "#;
 
 /// Version of everything the file must physically contain: `SCHEMA`, [`migrate`]
@@ -447,7 +510,16 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// v13 adds `sender_icons`, the icon of an organisation that mails the user (see
 /// [`Store::sender_icon`]). A whole new table rather than columns, and additive: an
 /// older binary never names it.
-const SCHEMA_VERSION: i64 = 13;
+///
+/// v14 adds `tasks` — what the user owes — and its two source indexes. A whole new
+/// table rather than columns, and additive: an older binary never names it, and no
+/// existing table grows a column (see the `tasks` note in [`SCHEMA`]).
+///
+/// v15 adds `tasks_one_per_source`, the unique index that makes "one suggestion per
+/// message or mail" a property of the table. An INDEX rather than a column, so the
+/// fingerprint below is unchanged — but the bump is what makes an existing store create
+/// it, which is the whole point (`initialize` runs only when the version moves).
+const SCHEMA_VERSION: i64 = 15;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -471,6 +543,23 @@ const CLEANUP_SETTING: &str = "cleanup_revision";
 /// ([`Store::remember_self`]).
 const SETTING_SELF_NAME: &str = "self_name";
 const SETTING_SELF_MRI: &str = "self_mri";
+
+/// How far the task scan has read: the newest message `compose_time` and the newest mail
+/// `received` it has already looked at ([`Store::task_scan_watermark`]). Two keys rather
+/// than a column, because "already looked at" is not a property of a message.
+///
+/// A TIME and not a `seq`, which is what the first version of this stored. `messages.seq`
+/// is monotonic only WITHIN a conversation, so a global floor on it excluded every quieter
+/// thread whose own counter had not reached the busiest one's — permanently, and with
+/// nothing to see. The key is named after the column for that reason: a value written by
+/// that version (`500`) read as milliseconds is 1970, which sweeps the whole store, and
+/// that is the harmless direction for the wrong reason. A key of its own means the old
+/// value is simply never read.
+const SETTING_TASK_SCAN_COMPOSE_TIME: &str = "tasks_scan_compose_time";
+const SETTING_TASK_SCAN_RECEIVED: &str = "tasks_scan_received";
+
+/// The scan lease, as `<deadline_ms>:<holder>` ([`Store::claim_task_scan`]).
+const SETTING_TASK_SCAN_LOCK: &str = "tasks_scan_lock";
 
 /// Who this store belongs to: the account's own display name and mri.
 ///
@@ -1070,6 +1159,72 @@ pub struct PersonOverride {
     pub updated_at: i64,
 }
 
+/// One task, as the panel reads it (see the `tasks` note in [`SCHEMA`]).
+///
+/// Every absent value is the EMPTY STRING rather than a `None`: the columns are
+/// `NOT NULL DEFAULT ''`, so "no due date" and "no source" have one spelling here, on
+/// the wire and in the page, instead of three.
+///
+/// `asked_by` is derived, never stored — the nickname the user chose, else the name
+/// Teams gave them. `asked_by_mri` is the identity it was resolved from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TaskRow {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    pub state: String,
+    pub due_date: String,
+    pub source_conversation_id: String,
+    pub source_message_id: String,
+    pub source_mail_id: String,
+    pub asked_by_mri: String,
+    pub asked_by: String,
+    pub created_at: i64,
+    pub done_at: i64,
+}
+
+/// A task to insert, or the fields of one to change.
+///
+/// `None` means "leave this alone" on a patch and "take the default" on an insert, which
+/// is what lets one method serve both: a client that moves a state must not have to
+/// restate the title it is not touching, or a stale copy of it would overwrite the row.
+/// `id` is what decides which of the two it is — absent on an insert, and the row to
+/// patch otherwise.
+#[derive(Debug, Clone, Default)]
+pub struct TaskWrite {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub state: Option<String>,
+    pub due_date: Option<String>,
+    pub source_conversation_id: Option<String>,
+    pub source_message_id: Option<String>,
+    pub source_mail_id: Option<String>,
+    pub asked_by_mri: Option<String>,
+}
+
+/// What one sweep read: the candidates it accepted, and how far each source got.
+///
+/// The two watermarks are the whole reason this is a struct rather than a `Vec`. The `LIMIT`
+/// is spent on the PREFILTERED rows and only accepted candidates come back, so a window
+/// whose rows all pass the SQL cut and are all refused by
+/// [`crate::tasks::looks_actionable`] yields nothing — and a caller with nothing to advance
+/// to would read that same barren window for ever, with everything past it unreachable and
+/// no symptom to see. It is not a contrived case: `plain_text_from_html` strips quoted
+/// blocks, so a run of replies quoting one message that says "please" is exactly this.
+///
+/// One watermark per SOURCE, each taken from that source's own newest examined row, because
+/// the two are ordered by different columns and neither can speak for the other.
+#[derive(Debug, Clone)]
+pub struct TaskCandidates {
+    pub candidates: Vec<crate::tasks::Candidate>,
+    /// The newest message `compose_time` this sweep EXAMINED, accepted or not; 0 when it
+    /// read no message rows at all. Never past a candidate that was cut by the shared cap.
+    pub newest_compose_time: i64,
+    /// The same for mail, in the `received` ISO shape; empty when it read no mail.
+    pub newest_received: String,
+}
+
 /// One override without its avatar bytes, for listing them all. `has_avatar` is what
 /// the UI needs to say "a picture is set"; fetching it is a separate, per-person read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1223,6 +1378,88 @@ fn row_to_event(row: &Row) -> rusqlite::Result<CalendarEventRow> {
 }
 
 const EVENT_SELECT_COLS: &str = "id, calendar_id, subject, preview, start_utc, end_utc, is_all_day, is_cancelled, is_organizer, organizer_name, organizer_address, location, join_url, web_link, show_as, response, series, recurrence, importance, sensitivity, categories, attendees, attendee_count, has_attachments, reminder_minutes";
+
+fn row_to_task(row: &Row) -> rusqlite::Result<TaskRow> {
+    Ok(TaskRow {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        body: row.get(2)?,
+        state: row.get(3)?,
+        due_date: row.get(4)?,
+        source_conversation_id: row.get(5)?,
+        source_message_id: row.get(6)?,
+        source_mail_id: row.get(7)?,
+        asked_by_mri: row.get(8)?,
+        asked_by: row.get(9)?,
+        created_at: row.get(10)?,
+        done_at: row.get(11)?,
+    })
+}
+
+/// The columns [`row_to_task`] reads, in its order. `asked_by` is the nickname the user
+/// gave the person who asked (see [`nicknamed`]) — resolved HERE, in the read itself, for
+/// the reason `SELECT_COLS` gives: a name applied at render time has to be applied at
+/// every render site.
+///
+/// There is no Teams-sourced name column on this table to fall back to, so the macro's
+/// fallback is the empty string and [`Store::fill_asked_by`] finishes the job from the
+/// stored history. One name, two halves, and no second column that a rename could leave
+/// stale.
+const TASK_SELECT_COLS: &str = concat!(
+    "tasks.id, tasks.title, tasks.body, tasks.state, tasks.due_date, \
+     tasks.source_conversation_id, tasks.source_message_id, tasks.source_mail_id, \
+     tasks.asked_by_mri, ",
+    nicknamed!("tasks.asked_by_mri", "''"),
+    " AS asked_by, tasks.created_at, tasks.done_at"
+);
+
+/// The words the candidate sweep's SQL cut looks for — a SUPERSET of every phrase
+/// [`crate::tasks::looks_actionable`] accepts, and deliberately coarser than it: `forget`
+/// stands for both spellings of "don't forget", none of these needs an escaped quote, and a
+/// space in a term matches any markup between the words (see [`candidate_prefilter`]).
+///
+/// It exists only so the sweep's `LIMIT` bounds what is read (a `%term%` match uses no
+/// index, so the alternative is pulling every message body after the watermark into Rust
+/// to be filtered there). It decides NOTHING: `looks_actionable` is asked about every row
+/// this admits, so the cost of a term missing here is one candidate the user never sees,
+/// never a task nobody asked for. `the_sql_prefilter_never_hides_what_the_authority_accepts`
+/// is what keeps the two from drifting apart.
+const CANDIDATE_TERMS: &[&str] = &[
+    // an ask
+    "can you", "could you", "would you", "please", "forget", "need you to", "remember to",
+    // a task named as one
+    "todo", "to do", "to-do", "action item", "deadline",
+    // a deadline
+    "before ", "by end of", "eod", "asap", "this week", "next week", "monday", "tuesday",
+    "wednesday", "thursday", "friday", "saturday", "sunday",
+];
+
+/// A `YYYY-MM-DD` anywhere in the text, which is the one branch of
+/// [`crate::tasks::looks_actionable`] no keyword covers. SQLite's `GLOB` takes character
+/// classes, so the shape travels to the database rather than being approximated there.
+const CANDIDATE_DAY_GLOB: &str = "*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*";
+
+/// The SQL cut for one text expression (see [`CANDIDATE_TERMS`]). `LIKE` is
+/// case-insensitive over ASCII in SQLite, which is what `looks_actionable` does by
+/// lowercasing first.
+///
+/// **Every space in a term becomes a `%`**, because the cut reads a message's raw HTML while
+/// the authority reads it stripped: the Teams composer writes `can&nbsp;you` and
+/// `can <b>you</b>`, both of which the authority accepts as "can you" and neither of which
+/// `LIKE '%can you%'` matches. Those were silently lost. Widening the gap keeps the claim
+/// above true at the cost of admitting a few more rows, which is the cut's job anyway.
+///
+/// The expression it is given is a column, never anything a client supplied, and the terms
+/// are this file's own constants — so the literals are built here rather than bound as
+/// parameters, which keeps the statement one cacheable string.
+fn candidate_prefilter(text: &str) -> String {
+    let mut sql = String::from("(");
+    for term in CANDIDATE_TERMS {
+        sql.push_str(&format!("{text} LIKE '%{}%' OR ", term.replace(' ', "%")));
+    }
+    sql.push_str(&format!("{text} GLOB '{CANDIDATE_DAY_GLOB}')"));
+    sql
+}
 
 /// Canonicalize an MRI for identity comparison: keep only the last path segment
 /// (so a `.../contacts/8:orgid:<guid>` URL becomes a bare MRI) and drop a leading
@@ -4043,6 +4280,460 @@ impl Store {
             Err(e) => Err(e.into()),
         }
     }
+
+    // ---- tasks (what the user owes; see src/tasks.rs) ---------------------------
+
+    /// Every task, newest first. The whole list: it is the user's own short list, and a
+    /// panel that has to page it would be a panel with too much in it.
+    pub fn tasks(&self) -> Result<Vec<TaskRow>> {
+        let sql = format!("SELECT {TASK_SELECT_COLS} FROM tasks ORDER BY created_at DESC, id");
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([], row_to_task)?;
+        let mut tasks: Vec<TaskRow> = rows.collect::<rusqlite::Result<_>>()?;
+        self.fill_asked_by(&mut tasks)?;
+        Ok(tasks)
+    }
+
+    /// Insert a task, or — when `write.id` names one — change only the fields it names.
+    ///
+    /// One method for both, because a client that ticks a task off restates nothing else:
+    /// every `None` is left exactly as stored, so a stale copy of a title can never
+    /// overwrite the one the user just typed. An unknown id is an error rather than a
+    /// silent insert, since the caller believed it was patching something.
+    ///
+    /// `done_at` follows `state` and is never set by a caller: a task that becomes `done`
+    /// records when, and any other state clears it, so the two can never disagree. A
+    /// patch that does not name a state leaves it alone.
+    ///
+    /// Returns the row as [`Store::tasks`] would read it back — resolved name included —
+    /// so the caller and the panel cannot hold two versions of one task.
+    pub fn save_task(&self, write: &TaskWrite, now_ms: i64) -> Result<TaskRow> {
+        // A state that was NOT named leaves `done_at` alone; one that was decides it.
+        let done_at = write
+            .state
+            .as_deref()
+            .map(|state| if state == "done" { now_ms } else { 0 });
+
+        let id = match &write.id {
+            Some(id) => {
+                let changed = self.exec(
+                    "UPDATE tasks SET
+                        title                  = COALESCE(?2, title),
+                        body                   = COALESCE(?3, body),
+                        state                  = COALESCE(?4, state),
+                        due_date               = COALESCE(?5, due_date),
+                        source_conversation_id = COALESCE(?6, source_conversation_id),
+                        source_message_id      = COALESCE(?7, source_message_id),
+                        source_mail_id         = COALESCE(?8, source_mail_id),
+                        asked_by_mri           = COALESCE(?9, asked_by_mri),
+                        done_at                = COALESCE(?10, done_at)
+                      WHERE id = ?1",
+                    params![
+                        id,
+                        write.title,
+                        write.body,
+                        write.state,
+                        write.due_date,
+                        write.source_conversation_id,
+                        write.source_message_id,
+                        write.source_mail_id,
+                        write.asked_by_mri,
+                        done_at,
+                    ],
+                )?;
+                anyhow::ensure!(changed == 1, "no such task: {id}");
+                id.clone()
+            }
+            // Only `None` when the caller named a source that already has a task, and for a
+            // write the USER made that is a mistake worth reporting: the panel types tasks,
+            // it never re-posts an extraction. The scan's own path
+            // ([`Store::insert_suggested_task`]) is the one that expects it.
+            None => match self.insert_task(write, now_ms, done_at)? {
+                Some(id) => id,
+                None => anyhow::bail!("a task already exists for that source"),
+            },
+        };
+
+        let sql = format!("SELECT {TASK_SELECT_COLS} FROM tasks WHERE tasks.id = ?1");
+        let mut row = self.query_one(&sql, params![id], row_to_task)?;
+        self.fill_asked_by(std::slice::from_mut(&mut row))?;
+        Ok(row)
+    }
+
+    /// Insert one extracted suggestion, answering false because that source already has a
+    /// task — in any state, a `dismissed` one included.
+    ///
+    /// This is the write [`tasks_one_per_source`](INDEXES) exists for, and DO NOTHING rather
+    /// than a caught error for a reason the transaction makes sharp: a scan writes its whole
+    /// window and the watermark in one, so a constraint failure would roll the other rows
+    /// back and lose the window. "Already there" is not a failure — it is the answer.
+    ///
+    /// It returns no row because the only caller counts: what it reports is how many tasks a
+    /// scan really added, which is what the panel is told it found.
+    pub fn insert_suggested_task(&self, write: &TaskWrite, now_ms: i64) -> Result<bool> {
+        Ok(self.insert_task(write, now_ms, Some(0))?.is_some())
+    }
+
+    /// The one INSERT, shared so the column list has a single spelling: `None` when the row
+    /// was refused by `tasks_one_per_source`, else the id it minted.
+    ///
+    /// The conflict target NAMES that index rather than being bare, so the only duplicate
+    /// this tolerates is a source it already holds. A bare `DO NOTHING` would swallow a
+    /// primary-key collision too, and answer "already there" for a task that was lost.
+    ///
+    /// The id is a v4 UUID rather than anything derived from the source: a task typed by
+    /// hand has no source, and two backends sharing this store must never mint the same id.
+    fn insert_task(
+        &self,
+        write: &TaskWrite,
+        now_ms: i64,
+        done_at: Option<i64>,
+    ) -> Result<Option<String>> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let inserted = self.exec(
+            "INSERT INTO tasks (
+                id, title, body, state, due_date, source_conversation_id,
+                source_message_id, source_mail_id, asked_by_mri, created_at, done_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT (source_conversation_id, source_message_id, source_mail_id)
+                 WHERE source_conversation_id <> '' OR source_message_id <> ''
+                    OR source_mail_id <> ''
+             DO NOTHING",
+            params![
+                id,
+                write.title.as_deref().unwrap_or(""),
+                write.body.as_deref().unwrap_or(""),
+                write.state.as_deref().unwrap_or("open"),
+                write.due_date.as_deref().unwrap_or(""),
+                write.source_conversation_id.as_deref().unwrap_or(""),
+                write.source_message_id.as_deref().unwrap_or(""),
+                write.source_mail_id.as_deref().unwrap_or(""),
+                write.asked_by_mri.as_deref().unwrap_or(""),
+                now_ms,
+                done_at.unwrap_or(0),
+            ],
+        )?;
+        Ok((inserted > 0).then_some(id))
+    }
+
+    /// Delete a task. False when the id names none, which is not an error: two open
+    /// pages may delete the same row, and the second one is simply already done.
+    pub fn delete_task(&self, id: &str) -> Result<bool> {
+        Ok(self.exec("DELETE FROM tasks WHERE id = ?1", params![id])? > 0)
+    }
+
+    /// Finish the half of `asked_by` that SQL cannot state: the name the stored history
+    /// carries for a person the user never renamed.
+    ///
+    /// [`TASK_SELECT_COLS`] resolves the nickname (the half that must live in the read),
+    /// and leaves the rest empty because this table holds no Teams-sourced name column to
+    /// fall back to. One place fills it in, for both readers, so the two can never
+    /// disagree about who asked.
+    fn fill_asked_by(&self, rows: &mut [TaskRow]) -> Result<()> {
+        for row in rows.iter_mut() {
+            if row.asked_by.is_empty() && !row.asked_by_mri.is_empty() {
+                row.asked_by = self.display_name_for_mri(&row.asked_by_mri)?.unwrap_or_default();
+            }
+        }
+        Ok(())
+    }
+
+    /// The messages and mail that might hold a task: what has arrived since the scan
+    /// watermark and looks like somebody asking for something.
+    ///
+    /// `after_compose_time` is an epoch-ms message time and `after_received` an ISO mail
+    /// timestamp: two clocks, because the two sources are ordered by different columns.
+    /// Both are exclusive, so the window only ever moves forward — at the cost that two
+    /// messages composed in the SAME millisecond are one boundary, and a `>` past one of
+    /// them skips its sibling. That is the right trade for a watermark that can never go
+    /// backwards, and it costs nothing lasting: the next message to arrive arms the next
+    /// scan.
+    ///
+    /// Capped at `limit`, so one scan of a busy week cannot become an unbounded prompt —
+    /// and the cap is what makes the ordering load-bearing. The caller advances each source's
+    /// watermark to the end that source reports ([`TaskCandidates`]), so what comes back has
+    /// to be a PREFIX of that source's own order: the oldest unscanned messages by
+    /// `compose_time`, the oldest unscanned mail by `received`, each cut at its own end. A
+    /// window cut across the two — by time, after merging — would drop rows the advanced
+    /// watermark then steps over, and those candidates would be lost for good.
+    ///
+    /// Two filters, and only one of them is the authority. The SQL cut
+    /// ([`candidate_prefilter`]) is a superset of [`crate::tasks::looks_actionable`], so
+    /// the LIMIT bounds what is read; every surviving row is then put through
+    /// `looks_actionable` itself, which is the only thing that decides. A term the SQL cut
+    /// forgets costs one candidate and nothing else — never a wrong one — and
+    /// `the_sql_prefilter_never_hides_what_the_authority_accepts` pins that it forgets
+    /// none.
+    ///
+    /// A message or mail that has ALREADY produced a task is skipped, in every state: a
+    /// `dismissed` row is exactly what stops a re-scan of the same window suggesting what
+    /// the user already refused.
+    ///
+    /// Not a hot read path, unlike the sidebar: a `%term%` match can use no index, so this
+    /// scans the rows after the watermark, a few times an hour at most.
+    pub fn task_candidates(
+        &self,
+        after_compose_time: i64,
+        after_received: &str,
+        limit: usize,
+    ) -> Result<TaskCandidates> {
+        let (mut messages, mut newest_compose_time) =
+            self.message_candidates(after_compose_time, limit)?;
+        let (mut mail, mut newest_received) = self.mail_candidates(after_received, limit)?;
+        // Each source is already its own oldest `limit`; the shared budget is spent by
+        // dropping the NEWEST of whichever side has more, so both halves stay a prefix. A
+        // dropped candidate takes the watermark back with it, to the last one KEPT —
+        // everything below that was either accepted or examined and refused, and a window
+        // reported past a candidate nobody read would skip it for good.
+        while messages.len() + mail.len() > limit {
+            if messages.len() >= mail.len() {
+                messages.pop();
+                // `when` is that row's own `compose_time` truncated to the second, so this
+                // is never ahead of it — behind is safe, ahead would skip a row.
+                newest_compose_time = messages
+                    .last()
+                    .map_or(0, |c| crate::teams_read::parse_iso_ms(&c.when));
+            } else {
+                mail.pop();
+                newest_received = mail.last().map(|c| c.when.clone()).unwrap_or_default();
+            }
+        }
+        let mut candidates = messages;
+        candidates.extend(mail);
+        // Read as one chronological window: the prompt is a transcript, oldest first.
+        candidates.sort_by(|a, b| a.when.cmp(&b.when));
+        Ok(TaskCandidates { candidates, newest_compose_time, newest_received })
+    }
+
+    /// The message half of [`Store::task_candidates`].
+    ///
+    /// Ordered and bounded by `compose_time`, never by `seq`: Teams' `sequenceId` counts
+    /// within ONE conversation, so a global floor on it hid every thread whose own counter
+    /// sat below the busiest one's — the quieter the thread, the more certainly its asks
+    /// were never read. A time is the same for every conversation.
+    ///
+    /// **What the USER wrote is not an ask of them — except in their notes to themselves.**
+    /// That exception is this feature's best source rather than a nicety: every message in
+    /// `48:notes` is theirs, and it is where somebody writes down what they have to do. So
+    /// the predicate is "not from us, OR in the notes thread". The identity is the store's
+    /// own ([`Store::remembered_self`]), matched on the canonical TAIL of the mri because
+    /// Teams spells one three ways ([`canonical_mri`]) and a raw equality silently missed
+    /// our own rows once already; and a store that does not know whose it is filters on
+    /// nothing at all, since dropping every message over a missing identity is much the
+    /// worse failure.
+    ///
+    /// Answers the candidates it accepted and the newest `compose_time` it EXAMINED — see
+    /// [`TaskCandidates`] for why the second half cannot be derived from the first.
+    fn message_candidates(
+        &self,
+        after_compose_time: i64,
+        limit: usize,
+    ) -> Result<(Vec<crate::tasks::Candidate>, i64)> {
+        // Empty when the store cannot say whose it is, which the predicate reads as
+        // "filter on nobody".
+        let self_tail = self
+            .remembered_self()?
+            .map(|me| canonical_mri(&me.mri))
+            .unwrap_or_default();
+        let sql = format!(
+            "SELECT messages.id, messages.conversation_id, {SENDER}, messages.sender_mri,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', messages.compose_time / 1000, 'unixepoch'),
+                    messages.content, messages.compose_time
+               FROM messages
+              WHERE messages.compose_time > ?1
+                AND messages.deleted = 0
+                AND (?3 = ''
+                     OR messages.sender_mri NOT LIKE ('%' || ?3)
+                     OR messages.conversation_id = ?4)
+                AND {PREFILTER}
+                AND NOT EXISTS (
+                    SELECT 1 FROM tasks
+                     WHERE tasks.source_message_id <> ''
+                       AND tasks.source_message_id = messages.id
+                       AND tasks.source_conversation_id = messages.conversation_id)
+              ORDER BY messages.compose_time ASC, messages.id ASC
+              LIMIT ?2",
+            SENDER = nicknamed!("messages.sender_mri", "messages.sender"),
+            PREFILTER = candidate_prefilter("messages.content"),
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let params = params![
+            after_compose_time,
+            limit as i64,
+            self_tail,
+            crate::teams_activity::NOTES_THREAD,
+        ];
+        let rows = stmt.query_map(params, |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                r.get::<_, i64>(6)?,
+            ))
+        })?;
+        let mut found = Vec::new();
+        let mut newest = 0;
+        for row in rows {
+            let (id, conversation_id, author, author_mri, when, content, compose_time) = row?;
+            // Every row the query returned counts as examined, whatever the authority then
+            // says about it: that is what carries the scan past a window it refuses whole.
+            newest = newest.max(compose_time);
+            // The model reads words, not markup — and `looks_actionable` is asked about
+            // the same text the model will see, never about the HTML around it.
+            let text = crate::teams_read::plain_text_from_html(&content);
+            if !crate::tasks::looks_actionable(&text) {
+                continue;
+            }
+            found.push(crate::tasks::Candidate {
+                id,
+                kind: crate::tasks::CandidateKind::Message { conversation_id },
+                author,
+                author_mri,
+                when,
+                text,
+            });
+        }
+        Ok((found, newest))
+    }
+
+    /// The mail half of [`Store::task_candidates`]. The subject and the preview are read
+    /// as one piece of text, because half the asks a mailbox holds are in the subject —
+    /// and the preview is all of a body this app keeps until the mail is opened.
+    ///
+    /// **Only the INBOX and the ARCHIVE**, by `well_known` (the labels
+    /// `mail::WELL_KNOWN_FOLDERS` writes). Junk is where "please claim your prize before
+    /// friday" lives, Deleted Items is what the user already threw away, and Drafts, Outbox
+    /// and Sent Items hold what THEY asked of somebody else — every one of those becoming a
+    /// task the user owes is the same failure, pointing in one direction or the other.
+    ///
+    /// `author_mri` is empty on purpose: a sender is an SMTP address, not an MRI, so
+    /// putting one there would store a value no nickname lookup could ever match.
+    ///
+    /// Answers the newest `received` it EXAMINED beside the candidates, for the reason
+    /// [`TaskCandidates`] gives.
+    fn mail_candidates(
+        &self,
+        after_received: &str,
+        limit: usize,
+    ) -> Result<(Vec<crate::tasks::Candidate>, String)> {
+        let sql = format!(
+            "SELECT mail_messages.id,
+                    COALESCE(NULLIF(mail_messages.from_name, ''), mail_messages.from_address),
+                    mail_messages.received,
+                    mail_messages.subject || ' ' || mail_messages.preview AS text
+               FROM mail_messages
+              WHERE mail_messages.received > ?1
+                AND EXISTS (
+                    SELECT 1 FROM mail_folders
+                     WHERE mail_folders.id = mail_messages.folder_id
+                       AND mail_folders.well_known IN ('Inbox', 'Archive'))
+                AND {PREFILTER}
+                AND NOT EXISTS (
+                    SELECT 1 FROM tasks
+                     WHERE tasks.source_mail_id <> ''
+                       AND tasks.source_mail_id = mail_messages.id)
+              ORDER BY mail_messages.received ASC, mail_messages.id ASC
+              LIMIT ?2",
+            PREFILTER = candidate_prefilter("(mail_messages.subject || ' ' || mail_messages.preview)"),
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![after_received, limit as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut found = Vec::new();
+        let mut newest = String::new();
+        for row in rows {
+            let (id, author, when, text) = row?;
+            // Examined, whatever the authority says next — see `message_candidates`.
+            if when > newest {
+                newest = when.clone();
+            }
+            if !crate::tasks::looks_actionable(&text) {
+                continue;
+            }
+            found.push(crate::tasks::Candidate {
+                id,
+                kind: crate::tasks::CandidateKind::Mail,
+                author,
+                author_mri: String::new(),
+                when,
+                text,
+            });
+        }
+        Ok((found, newest))
+    }
+
+    /// How far the scan has read: the newest message `compose_time` (epoch ms) and the
+    /// newest mail `received` it has already looked at.
+    ///
+    /// `(0, "")` on a store that has never scanned, and it keeps saying so: that pair means
+    /// "nothing has been looked at", which is the truth. Whether to skip a backlog rather
+    /// than read it is a decision about WHEN to scan, and it belongs to whoever starts one.
+    pub fn task_scan_watermark(&self) -> Result<(i64, String)> {
+        let compose_time = self
+            .get_setting(SETTING_TASK_SCAN_COMPOSE_TIME)?
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        let received = self.get_setting(SETTING_TASK_SCAN_RECEIVED)?.unwrap_or_default();
+        Ok((compose_time, received))
+    }
+
+    /// Move the scan watermark. Written only after an extraction SUCCEEDED: a run that
+    /// failed to parse must leave the window unscanned, or those candidates are lost for
+    /// good (see the [`crate::tasks`] module doc).
+    ///
+    /// It only ever moves FORWARD, per source: a value behind what is stored is clamped to
+    /// what is stored, and that is not an error. "Strictly forward" is a property of the
+    /// watermark rather than a promise about its callers — a caller that derives the message
+    /// half from a candidate's `when` works at whole-second resolution, so it can legitimately
+    /// hand back a value a few hundred milliseconds behind an exact-ms watermark, and two
+    /// backends sharing this store can each report their own window.
+    pub fn set_task_scan_watermark(&self, compose_time: i64, received: &str) -> Result<()> {
+        let (stored_compose_time, stored_received) = self.task_scan_watermark()?;
+        self.set_setting(
+            SETTING_TASK_SCAN_COMPOSE_TIME,
+            &compose_time.max(stored_compose_time).to_string(),
+        )?;
+        if received > stored_received.as_str() {
+            self.set_setting(SETTING_TASK_SCAN_RECEIVED, received)?;
+        }
+        Ok(())
+    }
+
+    /// Take the scan lease for `lease_ms`, or answer false because somebody else holds it.
+    ///
+    /// Both send-capable backends on this machine share this store and each receives every
+    /// live frame independently (one endpoint id per backend, by rule), so without this
+    /// they would both spend an agent run on the same window and both insert the same
+    /// suggestions — the hazard `push_deliveries` solves for a push and `agent_runs` for a
+    /// reply. It costs money as well as duplicates, which is why it is a claim rather than
+    /// a de-duplication after the fact.
+    ///
+    /// ONE statement, so the compare-and-set cannot be split: the row holds
+    /// `<deadline_ms>:<holder>` and the conflict branch reads the deadline out of the row
+    /// it is about to replace. SQLite treats a `DO UPDATE` whose `WHERE` is false as a
+    /// no-op, so a refused claim changes nothing and returns 0 rows.
+    ///
+    /// It EXPIRES, because a backend killed mid-scan must not hold the lease for ever —
+    /// which is also why a value that is not `<deadline>:<holder>` reads as expired
+    /// (`CAST` of a non-number is 0) rather than as a lease nothing can break.
+    pub fn claim_task_scan(&self, holder: &str, now_ms: i64, lease_ms: i64) -> Result<bool> {
+        let taken = self.exec(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value
+             WHERE CAST(substr(settings.value, 1, instr(settings.value, ':') - 1) AS INTEGER) <= ?3",
+            params![SETTING_TASK_SCAN_LOCK, format!("{}:{holder}", now_ms + lease_ms), now_ms],
+        )?;
+        Ok(taken > 0)
+    }
 }
 
 #[cfg(test)]
@@ -4344,7 +5035,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (13, 0x1381_4ce2_589a_1a10);
+        const PINNED: (i64, u64) = (15, 0xefe8_4b57_e73b_bfe7);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -7199,5 +7890,735 @@ mod tests {
         s.begin_agent_run(&a_run("2001", 9_000)).unwrap();
         assert!(!s.take_abandoned_agent_run("19:c@thread.v2", "2001", 5_000).unwrap());
         assert_eq!(s.abandoned_agent_runs(i64::MAX).unwrap().len(), 1);
+    }
+
+    // ---- tasks (what the user owes, extracted locally) -----------------------
+
+    /// A message with a body of our choosing, at a chosen `seq`. `compose_time` is the
+    /// epoch-ms shape the column really holds, so the candidate's `when` is a real
+    /// timestamp rather than a number that happens to parse.
+    fn said(conv: &str, id: &str, seq: i64, html: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            conversation_id: conv.to_string(),
+            seq,
+            // 2026-08-05T09:00:00Z, plus a second per `seq`.
+            compose_time: 1_785_920_400_000 + seq * 1_000,
+            sender: "Lucas Silva".into(),
+            sender_mri: "8:orgid:abc".into(),
+            content: html.to_string(),
+            attachments: "[]".into(),
+            reactions: "[]".into(),
+            message_type: "RichText/Html".into(),
+            system_event: String::new(),
+            thread_root_id: String::new(),
+            thread_subject: String::new(),
+            deleted: false,
+            mentions: "[]".into(),
+        }
+    }
+
+    #[test]
+    fn a_task_round_trips_through_every_state() {
+        let store = Store::open_in_memory().unwrap();
+        let saved = store
+            .save_task(
+                &TaskWrite {
+                    title: Some("Review the deployment doc".into()),
+                    state: Some("suggested".into()),
+                    due_date: Some("2026-08-07".into()),
+                    source_conversation_id: Some("19:c@thread.v2".into()),
+                    source_message_id: Some("1754380000000".into()),
+                    asked_by_mri: Some("8:orgid:abc".into()),
+                    ..Default::default()
+                },
+                1_754_400_000_000,
+            )
+            .unwrap();
+        assert!(!saved.id.is_empty(), "an id is minted here");
+        assert_eq!(saved.created_at, 1_754_400_000_000);
+        assert_eq!(saved.done_at, 0);
+
+        let done = store
+            .save_task(
+                &TaskWrite { id: Some(saved.id.clone()), state: Some("done".into()), ..Default::default() },
+                1_754_400_001_000,
+            )
+            .unwrap();
+        assert_eq!(done.state, "done");
+        assert_eq!(done.done_at, 1_754_400_001_000, "finishing a task records when");
+        assert_eq!(done.title, "Review the deployment doc", "a patch touches only what it names");
+        assert_eq!(done.due_date, "2026-08-07");
+        assert_eq!(done.source_message_id, "1754380000000");
+        assert_eq!(done.asked_by_mri, "8:orgid:abc");
+        assert_eq!(done.created_at, saved.created_at, "a patch never re-dates the row");
+
+        let reopened = store
+            .save_task(
+                &TaskWrite { id: Some(saved.id.clone()), state: Some("open".into()), ..Default::default() },
+                1_754_400_002_000,
+            )
+            .unwrap();
+        assert_eq!(reopened.done_at, 0, "reopening clears the completion time");
+
+        // A patch that names no state leaves the completion time where it was.
+        store
+            .save_task(
+                &TaskWrite { id: Some(saved.id.clone()), state: Some("done".into()), ..Default::default() },
+                1_754_400_003_000,
+            )
+            .unwrap();
+        let renamed = store
+            .save_task(
+                &TaskWrite { id: Some(saved.id.clone()), title: Some("Review it twice".into()), ..Default::default() },
+                1_754_400_004_000,
+            )
+            .unwrap();
+        assert_eq!(renamed.state, "done");
+        assert_eq!(renamed.done_at, 1_754_400_003_000, "a title change is not a state change");
+
+        assert!(store.delete_task(&saved.id).unwrap());
+        assert!(!store.delete_task(&saved.id).unwrap(), "deleting twice is not an error");
+        assert!(store.tasks().unwrap().is_empty());
+
+        // A patch names a row the caller believes exists, so an id nothing holds is an error
+        // rather than a quiet insert under an id somebody else minted.
+        assert!(
+            store
+                .save_task(
+                    &TaskWrite { id: Some(saved.id.clone()), state: Some("open".into()), ..Default::default() },
+                    1_754_400_005_000,
+                )
+                .is_err()
+        );
+        assert!(store.tasks().unwrap().is_empty(), "and it wrote nothing");
+    }
+
+    #[test]
+    fn who_asked_reads_through_a_rename() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_person_name("8:orgid:abc", Some("Boss"), 1_754_000_000_000).unwrap();
+        let saved = store
+            .save_task(
+                &TaskWrite {
+                    title: Some("Send the numbers".into()),
+                    state: Some("open".into()),
+                    asked_by_mri: Some("8:orgid:abc".into()),
+                    ..Default::default()
+                },
+                1_754_400_000_000,
+            )
+            .unwrap();
+        let rows = store.tasks().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].asked_by, "Boss", "a nickname must cover this surface too");
+        assert_eq!(rows[0].asked_by_mri, "8:orgid:abc", "the mri is what is stored");
+        assert_eq!(saved.asked_by, "Boss", "the write returns what a read would");
+    }
+
+    #[test]
+    fn who_asked_falls_back_to_the_name_teams_gave_them() {
+        let store = Store::open_in_memory().unwrap();
+        store.insert_message(&said("19:c@thread.v2", "m1", 1, "hello")).unwrap();
+        let saved = store
+            .save_task(
+                &TaskWrite {
+                    title: Some("Send the numbers".into()),
+                    state: Some("open".into()),
+                    asked_by_mri: Some("8:orgid:abc".into()),
+                    ..Default::default()
+                },
+                1_754_400_000_000,
+            )
+            .unwrap();
+        assert_eq!(saved.asked_by, "Lucas Silva", "no override, so the stored history names them");
+        assert_eq!(store.tasks().unwrap()[0].asked_by, "Lucas Silva");
+    }
+
+    #[test]
+    fn a_hand_typed_task_carries_no_source() {
+        let store = Store::open_in_memory().unwrap();
+        let saved = store
+            .save_task(
+                &TaskWrite {
+                    title: Some("Water the plants".into()),
+                    state: Some("open".into()),
+                    ..Default::default()
+                },
+                1_754_400_000_000,
+            )
+            .unwrap();
+        assert!(saved.source_conversation_id.is_empty());
+        assert!(saved.source_message_id.is_empty());
+        assert!(saved.source_mail_id.is_empty());
+        assert!(saved.asked_by_mri.is_empty());
+        assert!(saved.asked_by.is_empty());
+    }
+
+    /// TWO scans may legitimately read the same window — the watermark only moves once a
+    /// run has written, so a manual scan and an automatic one can both sweep it before
+    /// either does. What must never happen is the user being shown the same ask twice, and
+    /// that is a property of the TABLE rather than a promise about the callers: whichever
+    /// one arrives second finds the row already there and says so.
+    #[test]
+    fn a_suggestion_is_written_once_per_source_however_many_scans_read_it() {
+        let store = Store::open_in_memory().unwrap();
+        let from_message = TaskWrite {
+            title: Some("Review the deployment doc".into()),
+            state: Some("suggested".into()),
+            source_conversation_id: Some("19:c@thread.v2".into()),
+            source_message_id: Some("1754380000000".into()),
+            ..Default::default()
+        };
+        assert!(store.insert_suggested_task(&from_message, 1_000).unwrap());
+        assert!(
+            !store.insert_suggested_task(&from_message, 2_000).unwrap(),
+            "the second scan of one window must report the row rather than add one"
+        );
+        // A different TITLE for the same message is the same ask, and the model wording it
+        // differently on a second pass is exactly how this happens.
+        let reworded =
+            TaskWrite { title: Some("Read the deploy doc".into()), ..from_message.clone() };
+        assert!(!store.insert_suggested_task(&reworded, 3_000).unwrap());
+
+        let from_mail = TaskWrite {
+            title: Some("Answer the invoice".into()),
+            state: Some("suggested".into()),
+            source_mail_id: Some("AAMkAD…".into()),
+            ..Default::default()
+        };
+        assert!(store.insert_suggested_task(&from_mail, 4_000).unwrap());
+        assert!(!store.insert_suggested_task(&from_mail, 5_000).unwrap(), "a mail is one ask too");
+        assert_eq!(store.tasks().unwrap().len(), 2, "one row per source, and nothing else");
+
+        // The constraint is on THIS table, so deleting the row frees its source — which is
+        // right: the user threw the task away, and a later scan of that window may offer it
+        // again. (A `dismissed` row is KEPT, which is what stops that.)
+        let mail_row = store
+            .tasks()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.source_mail_id == "AAMkAD…")
+            .expect("the mail's task");
+        assert!(store.delete_task(&mail_row.id).unwrap());
+        assert!(store.insert_suggested_task(&from_mail, 6_000).unwrap());
+    }
+
+    /// The index is PARTIAL for this: every source column is `NOT NULL DEFAULT ''`, so a
+    /// plain unique index would read two hand-typed tasks as one row and refuse the second.
+    /// The user must be able to type "buy milk" twice.
+    #[test]
+    fn hand_typed_tasks_never_collide_with_each_other() {
+        let store = Store::open_in_memory().unwrap();
+        for at in [1_000, 2_000, 3_000] {
+            store
+                .save_task(&TaskWrite { title: Some("Buy milk".into()), ..Default::default() }, at)
+                .unwrap();
+        }
+        assert_eq!(store.tasks().unwrap().len(), 3, "a task with no source constrains nothing");
+    }
+
+    #[test]
+    fn tasks_come_back_newest_first() {
+        let store = Store::open_in_memory().unwrap();
+        for (title, at) in [("First", 1_000), ("Second", 2_000), ("Third", 3_000)] {
+            store
+                .save_task(&TaskWrite { title: Some(title.into()), ..Default::default() }, at)
+                .unwrap();
+        }
+        let titles: Vec<String> = store.tasks().unwrap().into_iter().map(|t| t.title).collect();
+        assert_eq!(titles, vec!["Third", "Second", "First"]);
+    }
+
+    #[test]
+    fn the_candidate_sweep_only_returns_what_looks_actionable() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_message(&said(
+                "19:c@thread.v2",
+                "m1",
+                1,
+                "<p>hey, <b>can you</b> review the deployment doc?</p>",
+            ))
+            .unwrap();
+        store.insert_message(&said("19:c@thread.v2", "m2", 2, "<p>haha nice</p>")).unwrap();
+        store.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
+        store.upsert_mail_message(&mail("mail1", "f", "2026-07-01T09:00:00Z", true)).unwrap();
+
+        let found = store.task_candidates(0, "", 50).unwrap().candidates;
+        assert_eq!(found.len(), 1, "small talk must not reach the model");
+        assert!(found[0].text.contains("can you"));
+        assert!(!found[0].text.contains("<b>"), "the model reads words, not markup");
+        assert_eq!(found[0].id, "m1");
+        assert_eq!(
+            found[0].kind,
+            crate::tasks::CandidateKind::Message { conversation_id: "19:c@thread.v2".into() }
+        );
+        assert_eq!(found[0].author, "Lucas Silva");
+        assert_eq!(found[0].author_mri, "8:orgid:abc");
+        assert_eq!(found[0].when, "2026-08-05T09:00:01Z", "a real timestamp, so a deadline can be dated");
+    }
+
+    #[test]
+    fn a_candidate_names_the_person_the_user_renamed() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_person_name("8:orgid:abc", Some("Boss"), 1_754_000_000_000).unwrap();
+        store
+            .insert_message(&said("19:c@thread.v2", "m1", 1, "<p>can you send the numbers</p>"))
+            .unwrap();
+        let found = store.task_candidates(0, "", 50).unwrap().candidates;
+        assert_eq!(found[0].author, "Boss", "the sweep states a name, so the rename covers it");
+    }
+
+    #[test]
+    fn a_mail_is_a_candidate_too_and_carries_no_mri() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
+        let mut asking = mail("mail1", "f", "2026-07-01T09:00:00Z", true);
+        asking.subject = "Invoice";
+        asking.preview = "Please approve it before friday";
+        store.upsert_mail_message(&asking).unwrap();
+
+        let found = store.task_candidates(0, "", 50).unwrap().candidates;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "mail1");
+        assert_eq!(found[0].kind, crate::tasks::CandidateKind::Mail);
+        assert!(found[0].text.contains("Invoice"), "the subject is half the ask");
+        assert!(found[0].text.contains("Please approve"));
+        assert_eq!(found[0].when, "2026-07-01T09:00:00Z");
+        assert_eq!(found[0].author, "Lucas Silva");
+        assert!(
+            found[0].author_mri.is_empty(),
+            "an SMTP address is not an MRI, and a nickname lookup on one would never match"
+        );
+    }
+
+    #[test]
+    fn the_candidate_sweep_respects_the_watermark() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_message(&said("19:c@thread.v2", "m1", 1, "<p>can you review the doc</p>"))
+            .unwrap();
+        store
+            .insert_message(&said("19:c@thread.v2", "m2", 2, "<p>please send the numbers</p>"))
+            .unwrap();
+        // `said` composes at 2026-08-05T09:00:00Z plus a second per seq.
+        let first = 1_785_920_401_000;
+        assert_eq!(store.task_candidates(0, "", 50).unwrap().candidates.len(), 2);
+        let left = store.task_candidates(first, "", 50).unwrap().candidates;
+        assert_eq!(left.len(), 1, "the first message is already scanned");
+        assert_eq!(left[0].id, "m2", "and the one after it is not");
+
+        store.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
+        let mut asking = mail("mail1", "f", "2026-07-01T09:00:00Z", true);
+        asking.preview = "Please approve the invoice";
+        store.upsert_mail_message(&asking).unwrap();
+        let second = first + 1_000;
+        assert_eq!(
+            store.task_candidates(second, "", 50).unwrap().candidates.len(),
+            1,
+            "the mail has a watermark of its own, and it is still unscanned"
+        );
+        assert!(
+            store.task_candidates(second, "2026-07-01T09:00:00Z", 50).unwrap().candidates.is_empty(),
+            "and that watermark covers it"
+        );
+    }
+
+    #[test]
+    fn the_watermark_is_a_time_because_a_seq_is_per_conversation() {
+        // THE BUG THIS EXISTS FOR: Teams' `sequenceId` counts within one conversation, so a
+        // global floor on it hid every thread whose own counter sat below the busiest one's
+        // — the quieter the thread, the more certainly its asks were never read.
+        let store = Store::open_in_memory().unwrap();
+        let mut busy = said("19:busy@thread.v2", "m500", 500, "<p>can you review the doc</p>");
+        busy.compose_time = 1_785_920_400_000; // 2026-08-05T09:00:00Z
+        store.insert_message(&busy).unwrap();
+
+        let mut quiet = said("19:quiet@thread.v2", "q1", 1, "<p>can you send the numbers</p>");
+        quiet.compose_time = 1_785_920_460_000; // a minute LATER, at seq 1
+        store.insert_message(&quiet).unwrap();
+
+        let found = store.task_candidates(1_785_920_400_000, "", 50).unwrap().candidates;
+        assert_eq!(found.len(), 1, "the quiet thread's ask is not behind the busy one's counter");
+        assert_eq!(found[0].id, "q1");
+    }
+
+    #[test]
+    fn the_candidate_sweep_is_capped() {
+        let store = Store::open_in_memory().unwrap();
+        for seq in 1..=10 {
+            store
+                .insert_message(&said(
+                    "19:c@thread.v2",
+                    &format!("m{seq}"),
+                    seq,
+                    "<p>can you review the doc</p>",
+                ))
+                .unwrap();
+        }
+        let found = store.task_candidates(0, "", 4).unwrap().candidates;
+        assert_eq!(found.len(), 4, "a busy week must not become an unbounded prompt");
+        // OLDEST first: the caller advances the watermark to the newest row it was handed,
+        // so a window cut at its newest end would carry the watermark over what it dropped.
+        assert_eq!(found[0].id, "m1");
+        assert_eq!(found[3].id, "m4", "the rest is the next scan's window, not lost");
+    }
+
+    #[test]
+    fn a_shared_cap_leaves_both_sources_a_prefix_of_their_own_order() {
+        let store = Store::open_in_memory().unwrap();
+        for seq in 1..=3 {
+            store
+                .insert_message(&said(
+                    "19:c@thread.v2",
+                    &format!("m{seq}"),
+                    seq,
+                    "<p>can you review the doc</p>",
+                ))
+                .unwrap();
+        }
+        store.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
+        for day in 1..=3 {
+            let mut asking = mail("", "f", "", true);
+            let id = format!("mail{day}");
+            let received = format!("2026-07-0{day}T09:00:00Z");
+            asking.id = &id;
+            asking.received = &received;
+            asking.preview = "Please approve the invoice";
+            store.upsert_mail_message(&asking).unwrap();
+        }
+
+        // Two of the six, one from each source, and each the oldest its source holds:
+        // the caller's watermark advance steps over exactly what it was handed.
+        let found = store.task_candidates(0, "", 2).unwrap().candidates;
+        assert_eq!(found.len(), 2);
+        let ids: Vec<&str> = found.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&"mail1"), "the oldest mail, not the newest: {ids:?}");
+        assert!(ids.contains(&"m1"), "the oldest message, not the newest: {ids:?}");
+    }
+
+    #[test]
+    fn a_deleted_message_asks_for_nothing() {
+        let store = Store::open_in_memory().unwrap();
+        let mut retracted = said("19:c@thread.v2", "m1", 1, "<p>can you review the doc</p>");
+        retracted.deleted = true;
+        store.insert_message(&retracted).unwrap();
+        assert!(
+            store.task_candidates(0, "", 50).unwrap().candidates.is_empty(),
+            "an ask its author took back is not an ask"
+        );
+    }
+
+    #[test]
+    fn the_candidate_sweep_skips_a_message_that_already_produced_a_task() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_message(&said("19:c@thread.v2", "m1", 1, "<p>can you review the doc</p>"))
+            .unwrap();
+        store
+            .save_task(
+                &TaskWrite {
+                    title: Some("Already dismissed".into()),
+                    state: Some("dismissed".into()),
+                    source_conversation_id: Some("19:c@thread.v2".into()),
+                    source_message_id: Some("m1".into()),
+                    ..Default::default()
+                },
+                1_754_400_000_000,
+            )
+            .unwrap();
+        assert!(
+            store.task_candidates(0, "", 50).unwrap().candidates.is_empty(),
+            "a dismissed suggestion must not come back"
+        );
+    }
+
+    #[test]
+    fn the_candidate_sweep_skips_a_mail_that_already_produced_a_task() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
+        let mut asking = mail("mail1", "f", "2026-07-01T09:00:00Z", true);
+        asking.preview = "Please approve the invoice";
+        store.upsert_mail_message(&asking).unwrap();
+        store
+            .save_task(
+                &TaskWrite {
+                    title: Some("Approve the invoice".into()),
+                    state: Some("open".into()),
+                    source_mail_id: Some("mail1".into()),
+                    ..Default::default()
+                },
+                1_754_400_000_000,
+            )
+            .unwrap();
+        assert!(store.task_candidates(0, "", 50).unwrap().candidates.is_empty());
+    }
+
+    #[test]
+    fn the_sql_prefilter_never_hides_what_the_authority_accepts() {
+        // The SQL `LIKE`/`GLOB` cut is only a prefilter of `tasks::looks_actionable`, so
+        // every branch of that function must survive the trip through SQLite. A phrase
+        // the cut forgets is a candidate the user never sees, and nothing else fails.
+        let store = Store::open_in_memory().unwrap();
+        let phrases = [
+            "can you review the deployment doc",
+            "could you send me the numbers",
+            "would you mind checking this",
+            "please have a look at the invoice",
+            "don't forget the retro notes",
+            "dont forget the retro notes",
+            "I need you to sign the form",
+            "remember to renew the certificate",
+            "TODO: renew the certificate",
+            "a few things to do here",
+            "my to-do for the sprint",
+            "what to do about the staging outage",
+            "action item from the retro",
+            "the deadline moved",
+            "finish it before the demo",
+            "by end of day at the latest",
+            "ship it eod",
+            "we need this asap",
+            "some time this week",
+            "or next week if easier",
+            "monday works",
+            "tuesday works",
+            "wednesday works",
+            "thursday works",
+            "friday works",
+            "saturday works",
+            "sunday works",
+            "the audit lands 2026-08-12",
+            // The cut reads raw HTML and the authority reads it stripped, so the two ways
+            // the Teams composer breaks a phrase up belong in this list: both of these were
+            // silently lost while every term was matched as one unbroken word.
+            "<p>can <b>you</b> review the deployment doc</p>",
+            "<p>can&nbsp;you send me the numbers</p>",
+        ];
+        for (i, phrase) in phrases.iter().enumerate() {
+            let seq = i as i64 + 1;
+            store
+                .insert_message(&said("19:c@thread.v2", &format!("m{seq}"), seq, phrase))
+                .unwrap();
+            // Asked exactly as the sweep asks it: the authority reads the STRIPPED text,
+            // which is the whole reason the cut has to tolerate markup.
+            assert!(
+                crate::tasks::looks_actionable(&crate::teams_read::plain_text_from_html(phrase)),
+                "the fixture must be one the authority accepts: {phrase}"
+            );
+        }
+        let found = store.task_candidates(0, "", phrases.len()).unwrap().candidates;
+        assert_eq!(found.len(), phrases.len(), "the SQL cut dropped an actionable phrase");
+    }
+
+    #[test]
+    fn a_window_the_authority_refuses_whole_still_moves_the_scan_on() {
+        // THE STALL THIS EXISTS FOR: the cap is spent on the rows the SQL cut ADMITS, and
+        // only accepted candidates come back. A window whose every row passes the cut and is
+        // refused by the authority therefore yields nothing — and a caller with nothing to
+        // advance to reads that same window for ever, with everything past it unreachable.
+        let store = Store::open_in_memory().unwrap();
+        // "please" survives the cut and is stripped out of the text by the quote removal, so
+        // the authority sees a bare "ok" — exactly what a run of replies looks like.
+        for seq in 1..=3 {
+            store
+                .insert_message(&said(
+                    "19:c@thread.v2",
+                    &format!("r{seq}"),
+                    seq,
+                    "<blockquote itemtype=\"http://schema.skype.com/Reply\">please review it</blockquote><p>ok</p>",
+                ))
+                .unwrap();
+        }
+        store
+            .insert_message(&said("19:c@thread.v2", "m9", 9, "<p>can you review the doc</p>"))
+            .unwrap();
+
+        let barren = store.task_candidates(0, "", 3).unwrap();
+        assert!(barren.candidates.is_empty(), "the authority refused every row it was shown");
+        assert!(
+            barren.newest_compose_time > 0,
+            "but the window it read is reported, or the scan never gets past it"
+        );
+
+        let next = store.task_candidates(barren.newest_compose_time, "", 3).unwrap();
+        assert_eq!(next.candidates.len(), 1, "and the real ask beyond it is reached");
+        assert_eq!(next.candidates[0].id, "m9");
+    }
+
+    #[test]
+    fn the_reported_window_never_runs_past_a_candidate_the_shared_cap_dropped() {
+        // Two sources over one budget, so the cap really has to drop an ACCEPTED candidate.
+        // The window each source reports must then step back to the last one kept: a
+        // watermark past a candidate nobody was shown would skip it for good.
+        let store = Store::open_in_memory().unwrap();
+        for seq in 1..=2 {
+            store
+                .insert_message(&said(
+                    "19:c@thread.v2",
+                    &format!("m{seq}"),
+                    seq,
+                    "<p>can you review the doc</p>",
+                ))
+                .unwrap();
+        }
+        store.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
+        for day in 1..=2 {
+            let id = format!("mail{day}");
+            let received = format!("2026-07-0{day}T09:00:00Z");
+            let mut asking = mail("", "f", "", true);
+            asking.id = &id;
+            asking.received = &received;
+            asking.preview = "Please approve the invoice";
+            store.upsert_mail_message(&asking).unwrap();
+        }
+
+        let cut = store.task_candidates(0, "", 3).unwrap();
+        assert_eq!(cut.candidates.len(), 3, "four candidates, a budget of three");
+        let ids: Vec<&str> = cut.candidates.iter().map(|c| c.id.as_str()).collect();
+        assert!(!ids.contains(&"m2"), "the newest message was the one dropped: {ids:?}");
+        assert_eq!(
+            cut.newest_compose_time, 1_785_920_401_000,
+            "so the message window stops at m1, not at the m2 nobody read"
+        );
+        assert_eq!(cut.newest_received, "2026-07-02T09:00:00Z", "mail kept both, and says so");
+
+        let next = store
+            .task_candidates(cut.newest_compose_time, &cut.newest_received, 3)
+            .unwrap();
+        assert_eq!(next.candidates.len(), 1, "and the dropped ask is the next window");
+        assert_eq!(next.candidates[0].id, "m2");
+    }
+
+    #[test]
+    fn what_the_user_wrote_is_not_an_ask_of_them() {
+        let store = Store::open_in_memory().unwrap();
+        store.remember_self("Clément BOSLE", "8:orgid:me").unwrap();
+        let mut mine = said("19:c@thread.v2", "m1", 1, "<p>can you review the doc</p>");
+        mine.sender_mri = "8:orgid:me".into();
+        store.insert_message(&mine).unwrap();
+        assert!(
+            store.task_candidates(0, "", 50).unwrap().candidates.is_empty(),
+            "the user asking somebody else is not a task of the user's"
+        );
+
+        // The URL form of the same identity is still the same person.
+        let mut also_mine = said("19:c@thread.v2", "m2", 2, "<p>please send the numbers</p>");
+        also_mine.sender_mri = "https://teams.microsoft.com/api/mt/contacts/8:orgid:me".into();
+        store.insert_message(&also_mine).unwrap();
+        assert!(store.task_candidates(0, "", 50).unwrap().candidates.is_empty());
+    }
+
+    #[test]
+    fn a_note_to_self_is_the_one_place_the_user_asks_the_user() {
+        // Load-bearing exception: every message in the notes thread is theirs, and it is
+        // where somebody writes down what they have to do. A blanket from-me exclusion would
+        // delete this feature's best source.
+        let store = Store::open_in_memory().unwrap();
+        store.remember_self("Clément BOSLE", "8:orgid:me").unwrap();
+        let mut note = said("48:notes", "n1", 1, "<p>remember to renew the certificate</p>");
+        note.sender_mri = "8:orgid:me".into();
+        store.insert_message(&note).unwrap();
+
+        let found = store.task_candidates(0, "", 50).unwrap().candidates;
+        assert_eq!(found.len(), 1, "the user's own notes are candidates");
+        assert_eq!(
+            found[0].kind,
+            crate::tasks::CandidateKind::Message { conversation_id: "48:notes".into() }
+        );
+    }
+
+    #[test]
+    fn a_store_that_does_not_know_whose_it_is_filters_on_nobody() {
+        // A missing identity must cost a few of the user's own asks slipping through, never
+        // every message in the store.
+        let store = Store::open_in_memory().unwrap();
+        let mut mine = said("19:c@thread.v2", "m1", 1, "<p>can you review the doc</p>");
+        mine.sender_mri = "8:orgid:me".into();
+        store.insert_message(&mine).unwrap();
+        assert_eq!(store.task_candidates(0, "", 50).unwrap().candidates.len(), 1);
+    }
+
+    #[test]
+    fn only_the_inbox_and_the_archive_can_ask_anything_of_the_user() {
+        let store = Store::open_in_memory().unwrap();
+        for (id, label) in [
+            ("f-inbox", "Inbox"),
+            ("f-archive", "Archive"),
+            ("f-junk", "Junk"),
+            ("f-sent", "Sent"),
+            ("f-deleted", "Deleted"),
+            ("f-drafts", "Drafts"),
+            ("f-user", ""),
+        ] {
+            store.upsert_mail_folder(&folder(id, label, label, 0)).unwrap();
+            let mail_id = format!("mail-{id}");
+            let mut asking = mail("", "", "", true);
+            asking.id = &mail_id;
+            asking.folder_id = id;
+            asking.received = "2026-07-01T09:00:00Z";
+            asking.preview = "Please approve the invoice before friday";
+            store.upsert_mail_message(&asking).unwrap();
+        }
+
+        let ids: Vec<String> = store
+            .task_candidates(0, "", 50)
+            .unwrap()
+            .candidates
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids.len(), 2, "junk, sent, deleted, drafts and a user folder are all out: {ids:?}");
+        assert!(ids.contains(&"mail-f-inbox".to_string()));
+        assert!(ids.contains(&"mail-f-archive".to_string()));
+    }
+
+    #[test]
+    fn the_watermark_only_ever_moves_forward() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_task_scan_watermark(2_000, "2026-07-02T09:00:00Z").unwrap();
+        // A caller working at whole-second resolution can legitimately report a value just
+        // behind an exact-ms watermark; clamping is not an error.
+        store.set_task_scan_watermark(1_000, "2026-07-01T09:00:00Z").unwrap();
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (2_000, "2026-07-02T09:00:00Z".to_string())
+        );
+        store.set_task_scan_watermark(3_000, "2026-07-03T09:00:00Z").unwrap();
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (3_000, "2026-07-03T09:00:00Z".to_string())
+        );
+    }
+
+    #[test]
+    fn the_watermark_starts_at_the_beginning_and_moves_forward() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (0, String::new()),
+            "a store that never scanned says so, rather than guessing at a starting point"
+        );
+        store.set_task_scan_watermark(1_785_920_400_000, "2026-08-05T09:00:00Z").unwrap();
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (1_785_920_400_000, "2026-08-05T09:00:00Z".to_string()),
+            "epoch ms for a message, an ISO timestamp for a mail"
+        );
+    }
+
+    #[test]
+    fn only_one_backend_claims_a_scan_and_the_lease_expires() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.claim_task_scan("backend-19420", 1_000, 60_000).unwrap());
+        assert!(
+            !store.claim_task_scan("backend-19422", 2_000, 60_000).unwrap(),
+            "two backends share this store and must not both spend a run"
+        );
+        assert!(
+            store.claim_task_scan("backend-19422", 62_001, 60_000).unwrap(),
+            "a backend that died mid-scan must not block the next one for ever"
+        );
     }
 }

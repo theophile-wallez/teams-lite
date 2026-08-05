@@ -12,6 +12,7 @@ import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { CallPreparation, CallStatus } from "./call";
 import type { SendImage } from "./composer-image";
 import type { OutboundMention } from "./mentions";
+import type { Task, TaskPatch } from "./tasks";
 import type {
   AddressPeopleResult,
   AppSettings,
@@ -1097,6 +1098,47 @@ export class Backend {
    *  GitLab reports afterwards, so the menu shows what really happened. */
   gitlabSetApproval(url: string, approved: boolean): Promise<GitLabApprovalResult> {
     return this.writeRequest<GitLabApprovalResult>("gitlab_set_approval", { url, approved });
+  }
+
+  // ---- tasks --------------------------------------------------------------
+  //
+  // Local list of things asked for, filled by an agent scan over messages and mail
+  // already in the app's store. Nothing here writes to Teams or reaches anybody.
+
+  /** The user's own task list, and where the automatic scan's switch stands. An ordinary
+   *  read: it returns their rows and no secret, which is why it needs no write token.
+   *  `auto_scan` is absent from a backend too old to state it, which reads as unknown —
+   *  never as off. */
+  tasks(): Promise<{ tasks: Task[]; auto_scan?: boolean }> {
+    return this.request<{ tasks: Task[]; auto_scan?: boolean }>("tasks", {});
+  }
+
+  /** Create or patch one task. Token-gated, and not because it writes the local store:
+   *  it records which colleague asked for something, and authorship is the one thing
+   *  this app never misstates. Only the fields present are written. */
+  taskSave(patch: TaskPatch): Promise<{ task: Task }> {
+    return this.writeRequest<{ task: Task }>("task_save", patch);
+  }
+
+  /** Remove one task. Local and final, and it reaches nobody: there is nothing to
+   *  un-post, unlike a message. */
+  taskDelete(id: string): Promise<{ deleted: boolean }> {
+    return this.writeRequest<{ deleted: boolean }>("task_delete", { id });
+  }
+
+  /** Read the messages and mail nobody has scanned yet, and turn what looks like an
+   *  ask into a suggested task. Token-gated because it starts a program on this
+   *  machine; `found` is how many suggestions it produced. */
+  tasksScan(): Promise<{ found: number }> {
+    return this.writeRequest<{ found: number }>("tasks_scan", {});
+  }
+
+  /** Turn the AUTOMATIC scan on or off — the one this app starts because a message
+   *  arrived rather than because the user pressed something. Token-gated for a reason of
+   *  its own: it decides whether this machine spends an agent run without being asked.
+   *  The button above is untouched by it. */
+  setTaskScan(enabled: boolean): Promise<{ auto_scan: boolean }> {
+    return this.writeRequest<{ auto_scan: boolean }>("set_task_scan", { enabled });
   }
 
   // ---- events -------------------------------------------------------------

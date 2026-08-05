@@ -48,6 +48,7 @@ import { MailList } from "./mail-list";
 import { NotificationsBell } from "./notifications-bell";
 import { ShortcutChord } from "./shortcut";
 import { StatusBar } from "./status-bar";
+import { TasksToggle } from "./tasks-panel";
 import { UpdateButton } from "./update-button";
 import { Tabs, TabsList, TabsPanel, TabsTrigger } from "./ui/tabs";
 import { chatSectionKey, useChatSections } from "./use-chat-sections";
@@ -127,6 +128,9 @@ export function ConversationList(props: {
           <span className="truncate text-[11px] text-text-faint">Messages</span>
         </div>
         <NotificationsBell />
+        {/* The way into the task panel, beside the app's other global controls — and the
+            only one a phone has, where there is no keyboard to press `t` on. */}
+        <TasksToggle />
         <button
           type="button"
           aria-label="Appearance"

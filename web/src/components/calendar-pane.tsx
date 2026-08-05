@@ -107,7 +107,10 @@ export function CalendarPane(props: { onBack?: () => void }) {
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
       // A floating surface owns the keyboard while it has the focus — the view menu's
       // own arrow keys, and Escape inside the details panel, are Radix's to handle.
-      if (target?.closest('[role="dialog"],[role="menu"]')) return;
+      // `dialog` is named beside the roles because a NATIVE <dialog> (the picture
+      // lightbox is one) carries its role implicitly, so an attribute selector alone
+      // misses it — the same list the shell's own bare keys use (see app.tsx).
+      if (target?.closest('dialog,[role="dialog"],[role="menu"]')) return;
       switch (e.key) {
         case "ArrowLeft":
         case "j":

@@ -6,6 +6,7 @@ import { ConversationList } from "./conversation-list";
 import { MailPane } from "./mail-pane";
 import { MessagePane } from "./message-pane";
 import { SettingsPane } from "./settings-pane";
+import { TasksPanel } from "./tasks-panel";
 import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
 import { CallBar } from "./call-bar";
@@ -41,6 +42,7 @@ function AppInner() {
   const replyingTo = useAppState((s) => s.replyingTo);
   const mailMessages = useAppState((s) => s.mailMessages);
   const openMailId = useAppState((s) => s.openMailId);
+  const tasksPanelOpen = useAppState((s) => s.tasksPanelOpen);
   const { chats: visibleChats } = useChatSections();
 
   // The URL is the source of truth for what is open. `/` means nothing; `/c/<id>` a
@@ -65,6 +67,14 @@ function AppInner() {
   // soon as the tab is.
   const paneOpen =
     !!routeConversationId || !!routeMailId || onSettings || sidebarTab === "calendar";
+
+  // Whether the CalendarPane is the surface in that slot — Settings wins over it, and a
+  // conversation or a mail takes the pane over the grid. Named once because two things
+  // depend on it: the render below, and the keyboard, since that pane binds `t` to "today"
+  // on a window listener of its own and is the one place the task panel's `t` stands
+  // aside. Gating on the tab alone would have made `t` dead with a thread open beside it.
+  const onCalendar =
+    !onSettings && sidebarTab === "calendar" && !routeConversationId && !routeMailId;
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -162,10 +172,49 @@ function AppInner() {
           controller.cancelReply();
           return;
         }
+        // The panel is the thing on top — literally so on a phone, where it covers the
+        // conversation — so Escape puts it away before it walks back to the list.
+        if (tasksPanelOpen) {
+          controller.closeTasksPanel();
+          return;
+        }
         if (routeConversationId || routeMailId || onSettings) {
           goToList();
           return;
         }
+      }
+
+      // From here down every shortcut is a BARE key, so three things disqualify the event
+      // first, and ONE guard does it for all of them. Focus in a field means the user is
+      // writing — `isContentEditable` is what covers the composer, which is a TipTap
+      // contenteditable rather than a <textarea>, and which the list keys below only
+      // avoided because a composer exists on the routes they already skip. A floating layer
+      // owns the keyboard while it has the focus, and a menu's own typeahead is letters, so
+      // `t` inside one must never reach the app behind it (`dialog` is spelled beside the
+      // two roles because the picture lightbox is a NATIVE <dialog>, whose role is implicit
+      // and so unmatched by an attribute selector). And a held modifier means a shortcut:
+      // Cmd+K must never also move the selection up.
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable ||
+          target.closest('dialog,[role="dialog"],[role="menu"]'))
+      ) {
+        return;
+      }
+      if (hasModifier(e) || e.altKey) return;
+
+      // The task panel. Bare, because every modifier pair worth having is taken —
+      // Cmd+K/Cmd+P are this app's, Cmd+T/Cmd+Shift+T/Cmd+J the browser's, Cmd+B bold in
+      // the composer — and above the list keys, because the panel is meant to be read
+      // BESIDE an open thread. The one exception is the calendar's own `t` (see
+      // `onCalendar`): two handlers on one key would fire both.
+      if ((e.key === "t" || e.key === "T") && !onCalendar) {
+        e.preventDefault();
+        controller.toggleTasksPanel();
+        return;
       }
 
       // List navigation is only active when nothing is open and we're not on
@@ -174,11 +223,6 @@ function AppInner() {
       // the Channels tab is a tree and uses click/Tab focus.
       if (routeConversationId || routeMailId || onSettings) return;
       if (sidebarTab === "channels" || sidebarTab === "calendar") return;
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
-      // A held modifier means a shortcut, not list navigation: Cmd+K must never also
-      // move the selection up.
-      if (hasModifier(e) || e.altKey) return;
 
       if (e.key === "ArrowDown" || e.key === "j") {
         e.preventDefault();
@@ -197,9 +241,11 @@ function AppInner() {
       paletteOpen,
       settingsOpen,
       replyingTo,
+      tasksPanelOpen,
       routeConversationId,
       routeMailId,
       onSettings,
+      onCalendar,
       sidebarTab,
       keyboardList,
       selectedIndex,
@@ -248,7 +294,7 @@ function AppInner() {
               chat's empty state on the right. */}
           {onSettings ? (
             <SettingsPane onBack={goToList} />
-          ) : sidebarTab === "calendar" && !routeConversationId && !routeMailId ? (
+          ) : onCalendar ? (
             <CalendarPane onBack={() => controller.setSidebarTab("chats")} />
           ) : routeMailId || (sidebarTab === "mail" && !routeConversationId) ? (
             <MailPane onBack={goToList} />
@@ -256,6 +302,12 @@ function AppInner() {
             <MessagePane onBack={goToList} />
           )}
         </div>
+
+        {/* After the detail pane and inside the same flex row, which is what makes the
+            wide shape narrow the message pane rather than cover it. Below `lg` — the width
+            at which a thread still fits beside it, see `WIDE_QUERY` in tasks-panel.tsx — it
+            is a full-screen sheet of its own (z-40, over the pane's z-20). */}
+        {tasksPanelOpen && <TasksPanel />}
       </div>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
