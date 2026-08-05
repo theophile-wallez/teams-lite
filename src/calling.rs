@@ -41,16 +41,31 @@ pub const SDP_CONTENT_TYPE: &str = "application/sdp-ngc-1.0";
 const CAPTURED_ENDPOINT_CAPABILITIES: u32 = 73463;
 const CAPTURED_CLIENT_CAPABILITIES: u32 = 63928042;
 
-/// The one modality this app negotiates, and one of FOUR the service names —
-/// `Audio`, `Video`, `ScreenSharer`, `ScreenViewer` (the client's own `MEDIA_TYPES`; its
-/// comparison lowercases both sides, which is why this spelling is accepted).
+/// The four modalities the service names (`I.MEDIA_TYPES` in the client's own bundle).
 ///
-/// Video is deliberately absent, and the reason is bigger than an m-line: in a meeting the
-/// service sends the cameras a client ASKS for, one source request per stream, addressed by
-/// a media source id that arrives in the roster. That subscription plane does not exist
-/// here at all. NATIVE-CALLING.md § 10 is the map of it, and § 10.7 names the three
-/// measurements to take before any of it is written.
+/// The capitals are the client's; its comparison lowercases both sides, which is why the
+/// `"audio"` this app has always sent is accepted. Sending a screen and WATCHING one are two
+/// modalities, not one, and that split is why they cost so differently (NATIVE-CALLING.md
+/// § 10.5).
 pub const MODALITY_AUDIO: &str = "audio";
+/// A camera, sent or received.
+pub const MODALITY_VIDEO: &str = "Video";
+/// Sending a screen. Nothing in this app declares it yet.
+pub const MODALITY_SCREEN_SHARER: &str = "ScreenSharer";
+/// WATCHING somebody else's screen — the modality a viewer declares, which publishes
+/// nothing about the user.
+pub const MODALITY_SCREEN_VIEWER: &str = "ScreenViewer";
+
+/// The media labels the service reads, one per section (`MEDIA_LABEL` in the bundle).
+///
+/// The label is how a shared screen is told from a camera: both are `m=video` sections, and
+/// only this says which. Measured on the wire in both directions (NATIVE-CALLING.md § 10.2).
+pub mod labels {
+    pub const AUDIO: &str = "main-audio";
+    pub const VIDEO: &str = "main-video";
+    pub const SHARING: &str = "applicationsharing-video";
+    pub const DATA: &str = "data";
+}
 
 /// The trouter path segment every callback link is built under (`URL_BASE.CALLAGENT`
 /// in the web client's own calling bundle).
@@ -109,6 +124,19 @@ pub mod paths {
     pub const CONVERSATION_ADD_MODALITY_FAILURE: &str = "/conversation/addModalityFailure/";
     pub const CONVERSATION_CONFIRM_UNMUTE: &str = "/conversation/confirmUnmute/";
     pub const CONVERSATION_RECEIVE_MESSAGE: &str = "/conversation/receiveMessage/";
+    /// A media offer the service makes on its own, when a modality is not already
+    /// negotiated. Measured: it POSTs `mediaRenegotiation` unprompted, and its offer holds
+    /// the section for a shared screen (NATIVE-CALLING.md § 10.3a) — so a link we do not
+    /// publish is the shared screen we never see.
+    pub const CALL_NEW_MEDIA_OFFER: &str = "/call/newMediaOffer/";
+    /// Who is talking, and the contributing sources behind a mixed stream. Neither is acted
+    /// on yet; both are published so the service has somewhere to put them.
+    pub const CALL_DOMINANT_SPEAKER_INFO: &str = "/call/dominantSpeakerInfo/";
+    pub const CALL_CSRC_INFO: &str = "/call/csrcInfo/";
+    /// A content-sharing session starting and ending, which is how a meeting says whose
+    /// screen it is looking at.
+    pub const CONVERSATION_CONTENT_SHARING_UPDATE: &str = "/conversation/contentSharingUpdate/";
+    pub const CONVERSATION_CONTENT_SHARING_END: &str = "/conversation/contentSharingEnd/";
 }
 
 /// The calling plane's endpoints, read from the authz directory (`regionGtms`) this
@@ -332,6 +360,22 @@ impl Links {
         self.get(&["mute"])
     }
 
+    /// Where a source request goes — the NEWER of the two spellings, which is what the
+    /// client's own configuration uses on this tenant.
+    ///
+    /// Neither of these is in a join answer: both arrive on the `callAcceptance` frame, so
+    /// they exist only because `merge` keeps every link the service has ever named
+    /// (NATIVE-CALLING.md § 10.2).
+    pub fn apply_channel_parameters(&self) -> Option<&str> {
+        self.get(&["applyChannelParameters"])
+    }
+
+    /// The older spelling of the same thing, kept because the service offers both and a
+    /// tenant that stops offering the newer one must not lose video with it.
+    pub fn control_video_streaming(&self) -> Option<&str> {
+        self.get(&["controlVideoStreaming"])
+    }
+
     pub fn unmute(&self) -> Option<&str> {
         self.get(&["unmute"])
     }
@@ -517,6 +561,135 @@ pub fn media_answer_from_frame(frame: &Value) -> Option<MediaContent> {
     .and_then(MediaContent::parse)
 }
 
+/// A media OFFER the service made mid-call, and where to answer it.
+///
+/// **This is how a shared screen arrives, and it arrives unprompted.** Measured: ~9 s into
+/// every join the service POSTs a `mediaRenegotiation` whose offer carries the sections it
+/// is willing to send — and one second after somebody shares their screen, that offer grows
+/// `label:applicationsharing-video` at mid 3, `sendonly`, with its SSRC range declared
+/// (NATIVE-CALLING.md § 10.3a). So there is nothing to ask for: the section is offered, and
+/// the only question is whether this app answers.
+///
+/// It was previously read as an ANSWER (`media_answer_from_frame` matches `mediaNegotiation`
+/// too), which meant the page was handed an offer where it expected an answer, checked its
+/// signaling state, and dropped it — every time, silently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaRenegotiation {
+    pub offer: MediaContent,
+    /// The link to POST the answer to. **The frame's OWN link**, never the merged set: the
+    /// service names where this negotiation is answered, and an older call's link would
+    /// answer nothing.
+    pub answer_link: String,
+    /// Where to refuse it instead, when it offers something this app cannot carry.
+    pub reject_link: Option<String>,
+    /// What the offer says it is for, when it says.
+    pub modalities: Vec<String>,
+}
+
+/// Read a renegotiation offer out of a frame, or `None` when the frame is not one.
+///
+/// The test is the ANSWER LINK, not the body's name: a frame that offers media and tells us
+/// where to answer is a renegotiation, and one that does not is the answer to something we
+/// offered. That keeps the two apart without either reader guessing from a url.
+pub fn media_renegotiation_from_frame(frame: &Value) -> Option<MediaRenegotiation> {
+    let negotiation = [
+        "/_decoded/mediaNegotiation",
+        "/mediaNegotiation",
+        "/_decoded/newMediaOffer",
+        "/newMediaOffer",
+    ]
+    .iter()
+    .find_map(|p| frame.pointer(p))?;
+    let links = negotiation.get("links");
+    let answer_link = links
+        .and_then(|l| l.get("mediaAnswer"))
+        .and_then(Value::as_str)
+        // Some frames put the links beside the negotiation rather than inside it.
+        .or_else(|| frame.pointer("/links/mediaAnswer").and_then(Value::as_str))?;
+    let offer = negotiation.get("mediaContent").and_then(MediaContent::parse)?;
+    Some(MediaRenegotiation {
+        offer,
+        answer_link: answer_link.to_string(),
+        reject_link: links
+            .and_then(|l| l.get("rejection").or_else(|| l.get("mediaRejection")))
+            .and_then(Value::as_str)
+            .map(String::from),
+        modalities: negotiation
+            .get("callModalities")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter().filter_map(Value::as_str).map(String::from).collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// What a source request asks for when the caller names nothing better.
+///
+/// An H.264 fmtp, and the shape is the client's own capability probe — `max-fps` is in
+/// hundredths of a frame per second (RFC 6184), so `3000` is 30. `profile-level-id=42C02A`
+/// is constrained baseline at level 4.2, which is what Teams negotiates and what every
+/// browser decodes. A page drawing several tiles should ask for less than this per tile; a
+/// page drawing one shared screen wants all of it, because a screen is text.
+pub const DEFAULT_VIDEO_FMTP: &str = "max-fs=8160;max-mbps=245000;max-fps=3000;\
+     profile-level-id=42C02A;packetization-mode=1";
+
+/// One stream to subscribe to: put `source_id` on the section named `mid`.
+///
+/// `stream_msid` and `mid` are the PAGE's own — the receive stream's id as the browser
+/// reported it on the `track` event, and the section it arrived on. Neither exists before the
+/// answer is applied, which is why a subscription is strictly after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRequest {
+    pub mid: String,
+    pub source_id: i64,
+    pub stream_msid: String,
+    /// An H.264 fmtp, which is how a client asks for a small tile rather than a full stream.
+    /// The client's own builder throws without it, so it is not optional here either.
+    pub fmt_params: String,
+}
+
+/// Build the body that subscribes one of our receive sections to somebody's stream.
+///
+/// Two spellings, because the client sends whichever its config names and both links arrive
+/// on the `callAcceptance` frame (NATIVE-CALLING.md § 10.2). `applyChannelParameters` is the
+/// newer one — it addresses the section by mid, and its media parameter is a JSON STRING
+/// inside the JSON, which is the service's own shape and not an accident of this port.
+pub fn source_request_payload(request: &SourceRequest, sequence: u64, modern: bool) -> Value {
+    let control = json!({
+        "sourceId": request.source_id,
+        "streamMsid": request.stream_msid,
+        "fmtParams": request.fmt_params,
+    });
+    if modern {
+        let parameter = json!({
+            "controlVideoStreaming": { "sequenceNumber": sequence, "controlInfo": control }
+        });
+        return json!({
+            "applyChannelParameters": {
+                "multiChannelParameter": {
+                    "mids": [request.mid],
+                    // A string, deliberately: `JSON.stringify` in the client's own message
+                    // generator, and the service reads it back the same way.
+                    "mediaParameter": parameter.to_string(),
+                }
+            }
+        });
+    }
+    // The older shape, whose `controlInfo` is an ARRAY and which names the control itself.
+    json!({
+        "controlVideoStreaming": {
+            "sequenceNumber": sequence,
+            "controlInfo": [{
+                "control": "start",
+                "sourceId": request.source_id,
+                "streamMsid": request.stream_msid,
+                "fmtParams": request.fmt_params,
+            }]
+        }
+    })
+}
+
 /// The url a `callAcceptance` must be acknowledged on, if it named one.
 ///
 /// It is the acceptance's OWN link and never the merged set: the service waits for this
@@ -664,15 +837,20 @@ pub fn acceptance_payload(
 
 /// Build the body that answers a media offer on its own (a renegotiation, or an
 /// acceptance the service asked us to split in two).
+/// `modalities` is what the answer DECLARES, and it is the caller's because only the caller
+/// knows what the answer really carries: audio alone for the original handshake, and audio
+/// plus `ScreenViewer` for an answer that accepts a shared screen. A declaration wider than
+/// the SDP is a claim about the user's camera that the SDP does not back.
 pub fn media_answer_payload(
     local: &LocalParticipant,
     answer: &MediaContent,
     callbacks: &CallbackBase,
+    modalities: &[&str],
 ) -> Value {
     json!({
         "mediaAnswer": {
             "sender": local.json(),
-            "callModalities": [MODALITY_AUDIO],
+            "callModalities": modalities,
             "links": {
                 "mediaAcknowledgement": callbacks.link(paths::CALL_MEDIA_ACKNOWLEDGEMENT),
             },
@@ -1064,6 +1242,54 @@ pub fn lobby_state_in_frame(frame: &Value) -> Option<LobbyState> {
     walk(frame)
 }
 
+/// One stream a participant publishes into the meeting.
+///
+/// **`source_id` is the whole point of this type**: it is the media source id a
+/// subscription is addressed by, and the roster is the only place it exists
+/// (NATIVE-CALLING.md § 10.2). Measured values are small integers, per meeting, and they
+/// move between joins — so one is never cached across calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterStream {
+    /// `main-audio` / `main-video` / `applicationsharing-video` / `data`. The label is the
+    /// wire name, and the only thing that tells a shared screen from a camera.
+    pub label: String,
+    /// What the frame calls it, which FOLLOWS the label rather than the m-line kind: a
+    /// shared screen is `applicationsharing-video`, not `video`.
+    pub kind: String,
+    /// The media source id — what a source request names.
+    pub source_id: i64,
+    /// That endpoint's own direction, which is what says who is doing what: a sharer's
+    /// section is `sendonly`, and a camera nobody turned on is `recvonly`.
+    pub direction: String,
+    pub server_muted: bool,
+}
+
+impl RosterStream {
+    /// Whether this stream is a SHARED SCREEN being sent. The client's own test, verbatim
+    /// (`N2` in its bundle) — and measured against a real share.
+    pub fn is_shared_screen(&self) -> bool {
+        self.label == labels::SHARING && self.direction == "sendonly"
+    }
+
+    /// Whether this stream is a CAMERA being sent.
+    pub fn is_camera(&self) -> bool {
+        self.label == labels::VIDEO && self.direction != "recvonly" && self.direction != "inactive"
+    }
+
+    pub fn json(&self) -> Value {
+        json!({
+            "label": self.label,
+            "kind": self.kind,
+            "source_id": self.source_id,
+            "direction": self.direction,
+            "server_muted": self.server_muted,
+            // Decided HERE so the page never has to know the label vocabulary twice.
+            "shared_screen": self.is_shared_screen(),
+            "camera": self.is_camera(),
+        })
+    }
+}
+
 /// One person in a meeting, as a roster frame names them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterMember {
@@ -1075,6 +1301,10 @@ pub struct RosterMember {
     /// announces a departure by turning their state, not by omitting them, so a reader
     /// that ignored this would keep naming somebody who left.
     pub present: bool,
+    /// Everything they publish, across every endpoint they are joined from. One person on
+    /// a laptop and a phone has several, which is why this is flattened rather than kept
+    /// per endpoint: a subscription names a source id and nothing else.
+    pub streams: Vec<RosterStream>,
 }
 
 /// A roster frame's contents: who it names, and whether that is the WHOLE meeting.
@@ -1140,6 +1370,7 @@ pub fn roster_in_frame(frame: &Value) -> Option<RosterUpdate> {
                 // An unstated state is presence: the array shape never carried one, and a
                 // person the roster names is in the meeting until it says otherwise.
                 present: !matches!(state, "inactive" | "Inactive" | "Disconnected"),
+                streams: streams_of(person),
             })
         })
         .collect();
@@ -1147,6 +1378,52 @@ pub fn roster_in_frame(frame: &Value) -> Option<RosterUpdate> {
         members,
         delta: roster.get("type").and_then(Value::as_str) == Some("Delta"),
     })
+}
+
+/// Everything one participant publishes, from every endpoint they are joined from.
+///
+/// The nesting is measured: `endpoints` is an OBJECT keyed by endpoint id, and the streams
+/// sit under that endpoint's `call`. `endpointDetails[]` — which the web client's own types
+/// describe — is its normalized form and never travels, so both are read: one pointer each,
+/// and the one that finds nothing costs nothing.
+fn streams_of(person: &Value) -> Vec<RosterStream> {
+    let endpoints = match person.get("endpoints") {
+        Some(Value::Object(map)) => map.values().collect::<Vec<_>>(),
+        // The client's own shape, in case another tenant sends it.
+        Some(Value::Array(items)) => items.iter().collect(),
+        _ => return Vec::new(),
+    };
+    endpoints
+        .into_iter()
+        .flat_map(|endpoint| {
+            // `endpointDetails` is itself an array of endpoints in that other shape, so a
+            // single level of either is handled without a second walk.
+            let under_call = endpoint.pointer("/call/mediaStreams").and_then(Value::as_array);
+            let bare = endpoint.get("mediaStreams").and_then(Value::as_array);
+            under_call.or(bare).map(Vec::as_slice).unwrap_or_default().iter()
+        })
+        .filter_map(|stream| {
+            // A stream with no source id cannot be subscribed to, so it is not one this app
+            // has any use for.
+            let source_id = stream.get("sourceId").and_then(Value::as_i64)?;
+            let label = stream.get("label").and_then(Value::as_str).unwrap_or_default();
+            Some(RosterStream {
+                label: label.to_string(),
+                kind: stream
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or(label)
+                    .to_string(),
+                source_id,
+                direction: stream
+                    .get("direction")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                server_muted: stream.get("serverMuted").and_then(Value::as_bool).unwrap_or(false),
+            })
+        })
+        .collect()
 }
 
 /// A roster participant's name, from wherever that frame keeps it.
@@ -1721,7 +1998,7 @@ mod tests {
             &json!(["audio"])
         );
         let acceptance = acceptance_payload(&local(), &offer, &callbacks());
-        let answer = media_answer_payload(&local(), &offer, &callbacks());
+        let answer = media_answer_payload(&local(), &offer, &callbacks(), &[MODALITY_AUDIO]);
         assert_eq!(invitation.pointer("/callInvitation/callModalities").unwrap(), &json!(["audio"]));
         assert_eq!(
             acceptance.pointer("/callAcceptance/acceptedCallModalities").unwrap(),
@@ -1973,7 +2250,7 @@ mod tests {
             ("join", join_payload(&local(), &meeting, &callbacks(), None)),
             ("join with audio", join_payload(&local(), &meeting, &callbacks(), Some(&offer))),
             ("acceptance", acceptance_payload(&local(), &offer, &callbacks())),
-            ("media answer", media_answer_payload(&local(), &offer, &callbacks())),
+            ("media answer", media_answer_payload(&local(), &offer, &callbacks(), &[MODALITY_AUDIO])),
             ("hangup", hangup_payload(&local())),
             ("rejection", rejection_payload(&local())),
             ("mute", mute_payload(&local(), true)),
@@ -2172,6 +2449,134 @@ mod tests {
         assert_eq!(roster_in_frame(&json!({ "callEnd": {} })), None);
     }
 
+    /// A participant's published streams, in the nesting the tenant really sends: an
+    /// `endpoints` OBJECT keyed by endpoint id, and the streams under that endpoint's
+    /// `call`. The values are one real frame's, taken while the user shared their screen.
+    #[test]
+    fn a_roster_carries_the_source_ids_a_subscription_is_addressed_by() {
+        let roster = roster_in_frame(&json!({
+            "type": "Delta",
+            "participants": { "8:orgid:her": {
+                "details": { "displayName": "Her" },
+                "state": "active",
+                "endpoints": {
+                    "guid-phone": { "call": { "mediaStreams": [
+                        { "type": "audio", "label": "main-audio", "sourceId": 2677,
+                          "direction": "sendrecv", "serverMuted": false }
+                    ] } },
+                    "guid-laptop": { "call": { "mediaStreams": [
+                        { "type": "audio", "label": "main-audio", "sourceId": 2462,
+                          "direction": "sendrecv", "serverMuted": false },
+                        // Their camera is OFF: the section exists and points the other way.
+                        { "type": "video", "label": "main-video", "sourceId": 2463,
+                          "direction": "recvonly" },
+                        // And their screen is on. `type` follows the LABEL here, not the
+                        // m-line kind — it is not "video".
+                        { "type": "applicationsharing-video",
+                          "label": "applicationsharing-video", "sourceId": 2473,
+                          "direction": "sendonly", "ordinal": 1 },
+                        { "type": "data", "label": "data", "sourceId": 2474,
+                          "direction": "sendrecv" },
+                    ] } },
+                },
+            } }
+        }))
+        .expect("a roster");
+        let her = &roster.members[0];
+        // Every endpoint's streams, flattened: a subscription names a source id and nothing
+        // else, so which endpoint published it is not information this app keeps. The order
+        // is by endpoint id (the frame keys them, and a JSON object is read in key order),
+        // which is stable frame to frame without being meaningful — hence the sort.
+        let mut ids: Vec<i64> = her.streams.iter().map(|s| s.source_id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![2462, 2463, 2473, 2474, 2677]);
+        let sharing: Vec<i64> =
+            her.streams.iter().filter(|s| s.is_shared_screen()).map(|s| s.source_id).collect();
+        assert_eq!(sharing, vec![2473], "the shared screen is the sendonly sharing label");
+        assert!(
+            !her.streams.iter().any(RosterStream::is_camera),
+            "a camera nobody turned on is recvonly, and must not be offered as a tile"
+        );
+        // A stream with no source id cannot be asked for, so it is not kept.
+        let none = roster_in_frame(&json!({
+            "participants": { "8:orgid:him": { "endpoints": { "g": { "call": {
+                "mediaStreams": [{ "type": "video", "label": "main-video" }]
+            } } } } }
+        }))
+        .expect("a roster");
+        assert!(none.members[0].streams.is_empty());
+    }
+
+    /// The renegotiation the service makes ON ITS OWN, which is how a shared screen
+    /// arrives (NATIVE-CALLING.md § 10.3a). It is told from an answer by carrying a link to
+    /// answer ON, and reading it as an answer is what made a shared screen invisible.
+    #[test]
+    fn a_media_renegotiation_is_read_as_an_offer_and_never_as_an_answer() {
+        let frame = json!({
+            "mediaNegotiation": {
+                "callModalities": ["audio", "ScreenViewer"],
+                "mediaContent": { "blob": "v=0\r\nm=video 3481 RTP/SAVP 107\r\n",
+                                  "contentType": SDP_CONTENT_TYPE },
+                "links": { "mediaAnswer": "https://x/answer", "rejection": "https://x/no" },
+            },
+            "debugContent": {},
+        });
+        let offered = media_renegotiation_from_frame(&frame).expect("a renegotiation");
+        assert_eq!(offered.answer_link, "https://x/answer");
+        assert_eq!(offered.reject_link.as_deref(), Some("https://x/no"));
+        assert!(offered.offer.blob.contains("m=video"));
+        assert_eq!(offered.modalities, vec!["audio", "ScreenViewer"]);
+        // An ANSWER to something we offered names no link to answer on, so it is not one.
+        let answer = json!({
+            "mediaAnswer": { "mediaContent": { "blob": "v=0\r\n",
+                                               "contentType": SDP_CONTENT_TYPE } }
+        });
+        assert_eq!(media_renegotiation_from_frame(&answer), None);
+        assert!(media_answer_from_frame(&answer).is_some());
+    }
+
+    /// Both spellings of a source request. The newer one addresses the section by mid and
+    /// carries its parameter as a JSON STRING inside the JSON, which is the service's own
+    /// shape (`JSON.stringify` in the client's message generator) and not a mistake here.
+    #[test]
+    fn a_source_request_is_built_in_both_spellings() {
+        let request = SourceRequest {
+            mid: "3".into(),
+            source_id: 2473,
+            stream_msid: "stream-id".into(),
+            fmt_params: DEFAULT_VIDEO_FMTP.into(),
+        };
+        let modern = source_request_payload(&request, 7, true);
+        assert_eq!(modern.pointer("/applyChannelParameters/multiChannelParameter/mids"), Some(&json!(["3"])));
+        let parameter = modern
+            .pointer("/applyChannelParameters/multiChannelParameter/mediaParameter")
+            .and_then(Value::as_str)
+            .expect("a string, not an object");
+        let inner: Value = serde_json::from_str(parameter).expect("valid JSON inside the string");
+        assert_eq!(inner.pointer("/controlVideoStreaming/sequenceNumber"), Some(&json!(7)));
+        assert_eq!(inner.pointer("/controlVideoStreaming/controlInfo/sourceId"), Some(&json!(2473)));
+        assert_eq!(
+            inner.pointer("/controlVideoStreaming/controlInfo/streamMsid"),
+            Some(&json!("stream-id"))
+        );
+
+        let legacy = source_request_payload(&request, 7, false);
+        // The older shape's controlInfo is an ARRAY, and it names the control itself.
+        assert_eq!(
+            legacy.pointer("/controlVideoStreaming/controlInfo/0/control"),
+            Some(&json!("start"))
+        );
+        assert_eq!(
+            legacy.pointer("/controlVideoStreaming/controlInfo/0/sourceId"),
+            Some(&json!(2473))
+        );
+        // The fmtp is mandatory: the client's own builder throws without one, so neither
+        // spelling may go out empty.
+        for payload in [modern.to_string(), legacy.to_string()] {
+            assert!(payload.contains("profile-level-id"), "a source request needs an fmtp");
+        }
+    }
+
     /// The older spelling still reads, because it costs one pointer lookup and this tenant
     /// is one tenant.
     #[test]
@@ -2203,6 +2608,7 @@ mod tests {
                 display_name: mri.to_string(),
                 in_lobby: false,
                 present: state == "active",
+                streams: Vec::new(),
             }],
         };
         assert!(apply_roster_update(&mut held, arrives("8:orgid:her", "active")));
@@ -2221,6 +2627,7 @@ mod tests {
                 display_name: "Third".into(),
                 in_lobby: false,
                 present: true,
+                streams: Vec::new(),
             }],
         };
         assert!(apply_roster_update(&mut held, full));

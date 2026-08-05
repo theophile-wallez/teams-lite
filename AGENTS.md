@@ -904,12 +904,8 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
 The app takes and places one-to-one **audio** calls, by doing what the real Teams WEB
 client does: `src/calling.rs` is the signaling plane, the browser carries the media
 (`web/src/lib/call-media.ts`), and `NATIVE-CALLING.md` is the protocol map every line of
-both was written from — read it before touching either. Video is deliberately absent: its
-protocol is now mapped in NATIVE-CALLING.md § 10 — a camera and a shared screen are ordinary
-`m=video` sections, but a MEETING sends only the streams a client asks for, one source
-request per stream, addressed by a media source id that arrives in the roster — and none of
-it is built. Nothing here may offer a camera or a screen until that section's § 10.7
-measurements are taken: a control that summons nothing is worse than none.
+both was written from — read it before touching either. Video is RECEIVED and never sent:
+see § Seeing video below, and NATIVE-CALLING.md § 10 for the protocol it rests on.
 
 **The backend signals; the page carries the audio.** That split is not an implementation
 detail: the tokens must never reach a browser, and a microphone is only reachable from
@@ -982,6 +978,58 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   target: the sandbox chat is a group thread, and ringing it would ring real people. A
   live test is the user's own click, on their own machine, to somebody who agreed to it
   beforehand — see NATIVE-CALLING.md § 8 for what is still unverified against the tenant.
+
+## Seeing video (RECEIVED only — this app sends no camera and no screen)
+
+A meeting draws the pictures other people put into it: a colleague's shared SCREEN on a
+stage, their CAMERA as a tile beside it (`web/src/components/call-video.tsx`, over the
+`callVideo` state). **Nothing here sends.** There is no camera button, no share button, and
+no code that opens `getUserMedia({video})` or `getDisplayMedia` — sending is outward in a way
+receiving is not, and it is a separate feature with its own consent gate (NATIVE-CALLING.md
+§ 10.5).
+
+Everything about it follows from one measured fact: **the service renegotiates on its own,
+and its offer already carries the sections.** ~9 s into every join it POSTs a
+`mediaRenegotiation`, and a second after somebody shares their screen that offer grows
+`label:applicationsharing-video` at a fixed mid with its SSRC range declared. So there is
+nothing to ask for — the whole receive path is *answer it, then subscribe*. Six rules hold it
+together, and `web/e2e/calling.spec.ts` pins each:
+
+- **An offer is not an answer, and this app used to read it as one.** `media_answer_from_frame`
+  matched `mediaNegotiation` too, so the page was handed an offer where it expected an answer,
+  checked its signaling state and dropped it — silently, every time.
+  `calling::media_renegotiation_from_frame` runs FIRST and tells them apart by the frame's own
+  `mediaAnswer` LINK, not by a url or a body name.
+- **The MEDIA SOURCE ID comes from the roster and nowhere else.** A subscription names
+  `sourceId`, which lives in `endpoints[<id>].call.mediaStreams[]` — the part of the roster
+  the parser used to throw away. It is per meeting and it MOVES between joins, so it is never
+  cached across calls. `call_state.publishing` carries it to the page, ours excluded: drawing
+  the user's own camera as a colleague's tile is the one thing this surface must not do.
+- **A LABEL is what tells a screen from a camera**, because both are `m=video` sections. It
+  travels per section (`labels::SHARING` = `applicationsharing-video`), the service reads it,
+  and `web/src/lib/ms-sdp.ts` echoes the OFFER'S OWN label back on the answer rather than
+  deriving one from the m-line kind — a label chosen from the kind calls somebody's screen
+  `main-video` and describes the wrong stream on the section it was handed.
+- **The subscription is assembled from BOTH sides, which is why it lives in the store.** The
+  source ids are the backend's (the roster); the mids and stream ids are the page's (what the
+  browser reported on its `track` events, which exist only after the answer is applied).
+  Neither half can do it alone. A screen takes a section before a camera does: it is the
+  thing somebody deliberately put on screen to be read.
+- **A failure here NEVER ends the call.** Audio is already up and untouched, so a
+  renegotiation that cannot be answered or a subscription the service refuses costs one tile
+  — and the service offers again. Ending a working call because a screen could not be drawn
+  would be much the worse outcome.
+- **`call_answer_media` is an `OUTWARD_METHODS` entry and `call_subscribe` is a
+  `MACHINE_METHODS` one**, and the split is the point. Subscribing ASKS to receive and
+  publishes nothing about the user. Answering carries an SDP — and an SDP is what would offer
+  their camera — so it is gated as the widest thing it can do rather than as what it usually
+  does. `param_modalities` refuses a name outside the four the service knows, because a
+  modality is a claim about what this machine is sending.
+
+`web/mock/server.ts` reproduces the whole flow with no tenant and no camera: it renegotiates
+after the roster with the measured labels and mids, and `simulatedCallMedia` answers with
+streams captured from a blank canvas — so `cd web && bun run preview -- --out /tmp/call --call`
+shows the stage and the tiles with nothing leaving the machine.
 
 ## Joining a meeting (the calendar stays read-only)
 

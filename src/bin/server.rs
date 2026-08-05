@@ -244,7 +244,12 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// back: a write whose off switch cannot undo its on switch would not be here at all
 /// (see `forceavailability` in `teams_lite::teams_presence`). Reading the approval
 /// state (`gitlab_approvals`) stays open, like every other read.
-const OUTWARD_METHODS: [&str; 13] = [
+/// `call_answer_media` is here for what it CAN carry rather than for what it usually does.
+/// The service renegotiates on its own and an answer that only accepts a stream publishes
+/// nothing about the user — but the same method carries an SDP, and an SDP is what offers
+/// their camera or their screen. A gate that depended on reading the blob would be a gate
+/// nobody could check, so it is gated as the widest thing it can do.
+const OUTWARD_METHODS: [&str; 14] = [
     "send",
     "edit",
     "delete",
@@ -255,6 +260,7 @@ const OUTWARD_METHODS: [&str; 13] = [
     "call_place",
     "call_join",
     "call_accept",
+    "call_answer_media",
     "call_hangup",
     "call_mute",
     "gitlab_set_approval",
@@ -310,12 +316,16 @@ const OUTWARD_METHODS: [&str; 13] = [
 /// has and hands the page the relay credentials its `RTCPeerConnection` needs; the
 /// credentials are why it is gated rather than open, because a client that merely
 /// found this socket has no business holding them.
-const MACHINE_METHODS: [&str; 15] = [
+/// `call_subscribe` ASKS the meeting's media server for somebody's stream and publishes
+/// nothing at all about the user — so it is not outward, and it is not open either: it acts
+/// on the one call this machine holds.
+const MACHINE_METHODS: [&str; 16] = [
     "repair_broker",
     "update_download",
     "update_apply",
     "set_calling",
     "call_prepare",
+    "call_subscribe",
     "push_subscribe",
     "push_unsubscribe",
     "push_test",
@@ -365,6 +375,10 @@ fn machine_effect(method: &str) -> &'static str {
         }
         "call_prepare" => {
             "reserves this machine's one call and hands out the media credentials it holds"
+        }
+        "call_subscribe" => {
+            "asks the meeting's media server to send this machine somebody's camera or \
+             shared screen"
         }
         // Unreachable while the two lists agree; the test below pins that they do.
         _ => "changes this machine",
@@ -1191,6 +1205,15 @@ struct CallSession {
     connected_at_ms: Option<i64>,
     /// Why it ended, for the line the UI shows afterwards.
     end_reason: Option<String>,
+    /// Where to answer the media offer the service last made us, if it is still open.
+    ///
+    /// The service renegotiates unprompted and names the link on the frame itself, so this
+    /// is that frame's own link and never the merged set. It is cleared as soon as it is
+    /// used: answering the same negotiation twice is not something the service asked for.
+    renegotiation_answer_link: Option<String>,
+    /// The sequence number of the next source request, which the service reads to order
+    /// them. One counter per call, because it numbers this client's own requests.
+    source_request_sequence: u64,
 }
 
 impl CallSession {
@@ -1221,6 +1244,25 @@ impl CallSession {
             "others": self.others().iter().map(|m| m.display_name.clone()).collect::<Vec<_>>(),
             "other_mris": self.others().iter().map(|m| m.mri.clone()).collect::<Vec<_>>(),
             "waiting_in_lobby": self.others().iter().filter(|m| m.in_lobby).count(),
+            // What the other people in the meeting are PUBLISHING, so the page can ask for
+            // it. The source ids in here are the only addresses a subscription has, and the
+            // roster is the only place they exist (NATIVE-CALLING.md § 10.2).
+            //
+            // Ours are excluded with us: subscribing to our own camera would draw the
+            // user's own face as a colleague's tile, and the local preview never leaves the
+            // page anyway.
+            "publishing": self
+                .others()
+                .iter()
+                .map(|m| {
+                    json!({
+                        "mri": m.mri,
+                        "name": m.display_name,
+                        "streams": m.streams.iter().map(calling::RosterStream::json)
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect::<Vec<_>>(),
             // What the user may do next, decided HERE rather than in the page: the
             // links are what make an action possible, and only this side sees them.
             "can_accept": self.phase == CallPhase::Ringing && self.offer.is_some(),
@@ -3677,6 +3719,8 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     muted: false,
                     connected_at_ms: None,
                     end_reason: None,
+                    renegotiation_answer_link: None,
+                    source_request_sequence: 0,
                 };
                 {
                     let mut plane = ctx.calling.lock().unwrap();
@@ -3807,6 +3851,8 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         muted: false,
                         connected_at_ms: None,
                         end_reason: None,
+                        renegotiation_answer_link: None,
+                        source_request_sequence: 0,
                     };
                     {
                         let mut plane = ctx.calling.lock().unwrap();
@@ -3981,7 +4027,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let (url, payload) = match (accept, media_answer) {
                 (Some(url), _) => (url, calling::acceptance_payload(&local, &answer, &callbacks)),
                 (None, Some(url)) => {
-                    (url, calling::media_answer_payload(&local, &answer, &callbacks))
+                    (url, calling::media_answer_payload(&local, &answer, &callbacks, &[calling::MODALITY_AUDIO]))
                 }
                 (None, None) => {
                     ctx.end_call_locally("CallEndReasonNoAcceptLink").await;
@@ -4007,6 +4053,98 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     Err(e)
                 }
             }
+        }
+
+        // Answer a media offer the service made mid-call.
+        //
+        // This is the other half of `media_renegotiation_from_frame`: the service offers the
+        // sections it is willing to send — a colleague's shared screen, a camera — and this
+        // is where the page's answer to that offer goes back. Two things about it:
+        //
+        // * the link is the OFFER'S OWN, taken off the frame that carried it and cleared
+        //   here, because a negotiation is answered once and an older link answers nothing;
+        // * `modalities` is what the page says the answer really carries. It is checked
+        //   against a small list rather than passed through, so a client cannot declare the
+        //   user's camera on a body that does not offer it.
+        "call_answer_media" => {
+            let call_id = param_str(params, "call_id")?;
+            let sdp = param_str(params, "sdp")?;
+            let modalities = param_modalities(params)?;
+            let (local, callbacks, url) = {
+                let mut plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_mut()
+                    .filter(|c| c.id == call_id && c.phase != CallPhase::Ended)
+                    .context("call_answer_media: no such call")?;
+                let url = call
+                    .renegotiation_answer_link
+                    .take()
+                    .context("call_answer_media: no media offer is waiting for an answer")?;
+                (call.local.clone(), call.callbacks.clone(), url)
+            };
+            let answer = calling::MediaContent::sdp(sdp);
+            let names: Vec<&str> = modalities.iter().map(String::as_str).collect();
+            let payload = calling::media_answer_payload(&local, &answer, &callbacks, &names);
+            let response = ctx.post_call_signal(&url, &payload).await?;
+            {
+                let links = calling::Links::collect(&response);
+                let mut plane = ctx.calling.lock().unwrap();
+                if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                    call.links.merge(&links);
+                }
+            }
+            eprintln!("[calling] answered a media renegotiation: modalities={modalities:?}");
+            Ok(json!({ "call_id": call_id }))
+        }
+
+        // Ask the meeting's media server to put somebody's stream on one of our sections.
+        //
+        // It publishes NOTHING about the user — it is a request to receive — which is why it
+        // is a `MACHINE_METHODS` entry rather than an outward one. The two links it may go
+        // to both arrive on the `callAcceptance` frame, and the newer one is preferred
+        // because that is what the client's own configuration does on this tenant.
+        "call_subscribe" => {
+            let call_id = param_str(params, "call_id")?;
+            let mid = param_str(params, "mid")?;
+            let source_id = params
+                .get("source_id")
+                .and_then(Value::as_i64)
+                .context("call_subscribe: source_id is required")?;
+            let stream_msid = param_str(params, "stream_msid")?;
+            let fmt_params = params
+                .get("fmt_params")
+                .and_then(Value::as_str)
+                .unwrap_or(calling::DEFAULT_VIDEO_FMTP)
+                .to_string();
+            let (url, modern, sequence) = {
+                let mut plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_mut()
+                    .filter(|c| c.id == call_id && c.phase != CallPhase::Ended)
+                    .context("call_subscribe: no such call")?;
+                call.source_request_sequence += 1;
+                let sequence = call.source_request_sequence;
+                // The newer link first. Neither is in the join answer — both arrive on the
+                // acceptance — so a call that has not been accepted yet has nothing to ask.
+                match (
+                    call.links.apply_channel_parameters().map(str::to_string),
+                    call.links.control_video_streaming().map(str::to_string),
+                ) {
+                    (Some(url), _) => (url, true, sequence),
+                    (None, Some(url)) => (url, false, sequence),
+                    (None, None) => anyhow::bail!(
+                        "call_subscribe: this call has no link to subscribe on — the service \
+                         names them on the acceptance, so there is nothing to ask yet"
+                    ),
+                }
+            };
+            let request =
+                calling::SourceRequest { mid, source_id, stream_msid, fmt_params };
+            let payload = calling::source_request_payload(&request, sequence, modern);
+            ctx.post_call_signal(&url, &payload).await?;
+            Ok(json!({ "call_id": call_id, "source_id": source_id }))
         }
 
         // End the call — or decline it, when it is still ringing.
@@ -5142,6 +5280,32 @@ fn param_str(params: &Value, key: &str) -> Result<String> {
         .and_then(|v| v.as_str())
         .map(String::from)
         .with_context(|| format!("missing param: {key}"))
+}
+
+/// The modalities a media answer declares, checked against the four the service names.
+///
+/// It is a check rather than a pass-through because a modality is a CLAIM about what the
+/// user's machine is sending: `ScreenSharer` says their screen is on the wire. A client that
+/// could write anything here could make that claim on a body that does not carry it, and the
+/// service would believe the words. `audio` is the floor — an answer that declares nothing
+/// declares the call's own modality, which is the one this app has always had.
+fn param_modalities(params: &Value) -> Result<Vec<String>> {
+    const KNOWN: [&str; 4] = [
+        calling::MODALITY_AUDIO,
+        calling::MODALITY_VIDEO,
+        calling::MODALITY_SCREEN_SHARER,
+        calling::MODALITY_SCREEN_VIEWER,
+    ];
+    let asked = param_str_list(params, "modalities");
+    if asked.is_empty() {
+        return Ok(vec![calling::MODALITY_AUDIO.to_string()]);
+    }
+    for name in &asked {
+        if !KNOWN.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+            anyhow::bail!("{name:?} is not a modality this app negotiates");
+        }
+    }
+    Ok(asked)
 }
 
 /// An optional array-of-strings parameter, empty when absent, not an array, or made
@@ -7307,6 +7471,42 @@ impl Ctx {
             }
         }
 
+        // A media offer the service made ON ITS OWN, which is how a shared screen and a
+        // colleague's camera arrive (NATIVE-CALLING.md § 10.3a). It has to be read BEFORE
+        // the answer path below, because an offer and an answer look alike from a distance
+        // and this app used to hand the page an offer where it expected an answer — the
+        // page checked its signaling state, dropped it, and nothing said so.
+        if let Some(renegotiation) = calling::media_renegotiation_from_frame(&frame.body) {
+            let id = {
+                let mut plane = self.calling.lock().unwrap();
+                match plane.call.as_mut().filter(|c| c.phase != CallPhase::Ended) {
+                    Some(call) => {
+                        call.renegotiation_answer_link = Some(renegotiation.answer_link.clone());
+                        Some(call.id.clone())
+                    }
+                    None => None,
+                }
+            };
+            // No live call means there is nothing to renegotiate, and answering would put
+            // this machine back into a call it has left.
+            if let Some(id) = id {
+                eprintln!(
+                    "[calling] media renegotiation offered: modalities={:?}",
+                    renegotiation.modalities
+                );
+                self.emit(
+                    "call_media",
+                    json!({
+                        "call_id": id,
+                        "sdp": renegotiation.offer.blob,
+                        "kind": "offer",
+                    }),
+                );
+            }
+            // And nothing below applies: the same body would be read as an answer.
+            return;
+        }
+
         // Their SDP answer: the page needs it to finish the handshake, and it is the
         // one frame whose body a client is given.
         if let Some(answer) = calling::media_answer_from_frame(&frame.body) {
@@ -7416,6 +7616,8 @@ impl Ctx {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            renegotiation_answer_link: None,
+            source_request_sequence: 0,
         };
 
         {
@@ -8434,6 +8636,8 @@ mod tests {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            renegotiation_answer_link: None,
+            source_request_sequence: 0,
         };
         let json = call.json();
         assert_eq!(json["phase"], "ringing");
@@ -8480,6 +8684,8 @@ mod tests {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            renegotiation_answer_link: None,
+            source_request_sequence: 0,
         };
         assert_eq!(call.json()["can_accept"], false);
         // And a call that is over offers nothing at all.

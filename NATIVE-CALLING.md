@@ -415,11 +415,14 @@ consult-and-add, and an invented value is a `400 {}`. The lobby is a state of it
 the roster arrives as `rosterUpdate` frames. The one media difference is that a meeting sends several voices as
 several streams, so the page keeps one audio element per stream.
 
-What is deliberately NOT built: video, screen sharing, a group call the user assembles
+**Video is RECEIVED**: a colleague's shared screen and a colleague's camera are drawn (§ 10,
+and § Seeing video in AGENTS.md). Three RPCs carry it — `call_answer_media` answers the
+renegotiation the service makes on its own, `call_subscribe` asks for one person's stream, and
+`call_state.publishing` carries the source ids that make a subscription addressable.
+
+What is deliberately NOT built: SENDING a camera or a screen, a group call the user assembles
 themselves, transfer, hold, DTMF, admitting somebody from a lobby, and any call this app
-places without a click. Each is a product decision with its own surface, and audio has to
-be solid first. **Video and screen sharing are mapped out in § 10** — the protocol is
-readable, and the shape of the work is known — but nothing of it is implemented.
+places without a click. Each is a product decision with its own surface.
 
 ## 7. Consent — a call is at least as outward as a send
 
@@ -899,6 +902,17 @@ which is a fair thing to ask. `--tone` brings it back for the one question silen
 answer, because Opus sends comfort noise for a silent track and `packetsSent` then stops
 proving the path carries audio. The offer is identical either way, which is what the script
 is for.
+
+### 10.7a What is BUILT, as of this section
+
+The receiving half, and only that half. Read § Seeing video in AGENTS.md for the rules; the
+files are `calling::media_renegotiation_from_frame` / `source_request_payload` /
+`RosterStream`, the `call_answer_media` and `call_subscribe` RPCs, `web/src/lib/call-media.ts`
+(`answerRemoteOffer`, `RemoteVideoTracks`), the label pair in `web/src/lib/ms-sdp.ts`, and
+`web/src/components/call-video.tsx`. The mock renegotiates with the measured labels and mids,
+so the whole path is reviewable with no tenant.
+
+Sending is not built and no code names `getUserMedia({video})` or `getDisplayMedia`.
 
 ### 10.8 What is still open
 

@@ -3107,13 +3107,109 @@ type MockCall = {
   muted: boolean;
   connected_at_ms: number | null;
   end_reason: string | null;
+  /** What the others publish, and the source ids a subscription is addressed by — the
+   *  half of the roster the real backend reads out of `endpoints[…].call.mediaStreams`. */
+  publishing: MockPublishing[];
   can_accept: boolean;
   can_hangup: boolean;
+};
+
+/** One person in the meeting and what they are sending. */
+type MockPublishing = {
+  mri: string;
+  name: string;
+  streams: Array<{
+    label: string;
+    kind: string;
+    source_id: number;
+    direction: string;
+    server_muted: boolean;
+    shared_screen: boolean;
+    camera: boolean;
+  }>;
 };
 
 /** The people the mock puts in a meeting once the join is answered — a roster arriving
  *  after the fact, which is what the real service sends. */
 const MOCK_MEETING_ROSTER = ["Ava Thompson", "Liam Nguyen", "Priya Raman"];
+
+/** One audio stream per person, plus a CAMERA for the first and a SHARED SCREEN for the
+ *  second. The source ids are small integers like the real ones, and they are the addresses
+ *  `call_subscribe` names. */
+function mockPublishing(names: string[]): MockPublishing[] {
+  return names.map((name, index) => {
+    const mri = PEOPLE.find((p) => p.name === name)?.mri ?? `8:orgid:mock-${index}`;
+    const base = 2400 + index * 10;
+    const streams: MockPublishing["streams"] = [
+      {
+        label: "main-audio",
+        kind: "audio",
+        source_id: base,
+        direction: "sendrecv",
+        server_muted: false,
+        shared_screen: false,
+        camera: false,
+      },
+    ];
+    if (index === 0) {
+      streams.push({
+        label: "main-video",
+        kind: "video",
+        source_id: base + 1,
+        direction: "sendrecv",
+        server_muted: false,
+        shared_screen: false,
+        camera: true,
+      });
+    }
+    if (index === 1) {
+      streams.push({
+        label: "applicationsharing-video",
+        kind: "applicationsharing-video",
+        source_id: base + 2,
+        direction: "sendonly",
+        server_muted: false,
+        shared_screen: true,
+        camera: false,
+      });
+    }
+    return { mri, name, streams };
+  });
+}
+
+/**
+ * The offer the service makes ON ITS OWN, which is how video arrives (NATIVE-CALLING.md
+ * § 10.3a).
+ *
+ * The labels and the mids are the measured ones — audio at 0, a camera at 1, a shared screen
+ * at 3, data at 4 — because the page reads the label per mid to decide which section carries
+ * what, and a mock that made them up would exercise a mapping the tenant does not have.
+ */
+const MOCK_RENEGOTIATION_OFFER = [
+  "v=0",
+  "o=- 0 0 IN IP4 127.0.0.1",
+  "s=teams-lite-mock-renegotiation",
+  "t=0 0",
+  "m=audio 3478 RTP/SAVP 111",
+  "c=IN IP4 0.0.0.0",
+  "a=rtpmap:111 opus/48000/2",
+  "a=mid:0",
+  "a=label:main-audio",
+  "a=sendrecv",
+  "m=video 3481 RTP/SAVP 107",
+  "c=IN IP4 0.0.0.0",
+  "a=rtpmap:107 H264/90000",
+  "a=mid:1",
+  "a=label:main-video",
+  "a=sendonly",
+  "m=video 3481 RTP/SAVP 107",
+  "c=IN IP4 0.0.0.0",
+  "a=rtpmap:107 H264/90000",
+  "a=mid:3",
+  "a=label:applicationsharing-video",
+  "a=sendonly",
+  "",
+].join("\r\n");
 
 /** Off, exactly like a fresh Rust store: turning it on is the consent, so a spec has to
  *  perform that step rather than find it already done. */
@@ -3188,6 +3284,7 @@ function injectMockCallInvite(conversation: string): MockCall | null {
     muted: false,
     connected_at_ms: null,
     end_reason: null,
+    publishing: [],
     can_accept: true,
     can_hangup: true,
   };
@@ -5037,6 +5134,7 @@ function dispatch(method: string, params: unknown): unknown {
           muted: false,
           connected_at_ms: null,
           end_reason: null,
+          publishing: [],
           can_accept: false,
           can_hangup: true,
         };
@@ -5066,6 +5164,7 @@ function dispatch(method: string, params: unknown): unknown {
         muted: false,
         connected_at_ms: null,
         end_reason: null,
+        publishing: [],
         can_accept: false,
         can_hangup: true,
       };
@@ -5131,8 +5230,18 @@ function dispatch(method: string, params: unknown): unknown {
             other_mris: MOCK_MEETING_ROSTER.map(
               (name) => PEOPLE.find((p) => p.name === name)?.mri ?? "8:orgid:someone",
             ),
+            publishing: mockPublishing(MOCK_MEETING_ROSTER),
           };
           broadcastMockCall();
+          // And then the service renegotiates ON ITS OWN, offering the sections for what
+          // those people are publishing. The real one does this ~9 s in, unprompted; the
+          // mock does it right after the roster so the whole receive path — answer,
+          // subscribe, draw — runs in one pass of a spec.
+          broadcast("call_media", {
+            call_id: callId,
+            sdp: MOCK_RENEGOTIATION_OFFER,
+            kind: "offer",
+          });
         }, MOCK_CALL_CONNECT_MS),
       );
       return { call_id: callId };
@@ -5150,6 +5259,41 @@ function dispatch(method: string, params: unknown): unknown {
       };
       broadcastMockCall();
       return { call_id: callId };
+    }
+
+    // The answer to a renegotiation the service offered. It carries the page's own SDP and
+    // the modalities it declares, and the mock checks both the way the backend does: a name
+    // outside the four the service knows is refused, because a modality is a claim about
+    // what this machine is sending.
+    case "call_answer_media": {
+      const callId = requireString(params, "call_id");
+      requireString(params, "sdp");
+      const o = asObject(params);
+      const modalities = Array.isArray(o.modalities) ? o.modalities : [];
+      for (const name of modalities) {
+        if (!["audio", "Video", "ScreenSharer", "ScreenViewer"].some(
+          (known) => String(name).toLowerCase() === known.toLowerCase(),
+        )) {
+          throw new Error(`${JSON.stringify(name)} is not a modality this app negotiates`);
+        }
+      }
+      if (!mockCall || mockCall.id !== callId) {
+        throw new Error("call_answer_media: no such call");
+      }
+      return { call_id: callId };
+    }
+
+    // A subscription: put somebody's source on one of our sections. It publishes nothing
+    // about the user, so it is the one call method the mock can answer with no state at all
+    // — the picture itself comes from the page's own simulated media.
+    case "call_subscribe": {
+      const callId = requireString(params, "call_id");
+      requireString(params, "mid");
+      requireString(params, "stream_msid");
+      const o = asObject(params);
+      if (typeof o.source_id !== "number") throw new Error("call_subscribe: source_id is required");
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_subscribe: no such call");
+      return { call_id: callId, source_id: o.source_id };
     }
 
     case "call_hangup": {

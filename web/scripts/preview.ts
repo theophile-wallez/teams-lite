@@ -1393,13 +1393,26 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-meeting-card-dark.png`, '[data-testid="call-bar"]');
       await setTheme("light");
+
+      // 7. And the PICTURE. The mock's service renegotiates right after the roster, the
+      //    page answers and subscribes, and the tiles appear — a shared screen on the
+      //    stage and a camera under it. Nothing here opens a camera: the streams come
+      //    from a canvas (`simulatedCallMedia`).
+      await page.waitForSelector('[data-testid="call-video-frame"][data-sharing="true"]');
+      await page.waitForTimeout(400);
+      await shot(`${out}-video-light.png`, '[data-testid="call-video"]');
+      await shot(`${out}-video-page-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-video-dark.png`, '[data-testid="call-video"]');
+      await setTheme("light");
       await page.locator('[data-testid="call-hangup"]').click();
 
       console.log(
         `[preview] wrote ${out}-off-light.png, ${out}-settings-{light,on-light,on-dark}.png, ` +
           `${out}-button-light.png, ${out}-ringing-{light,card-light,card-dark}.png and ` +
           `${out}-{connected-card-light,muted-card-light,connected-card-dark}.png and ` +
-          `${out}-meeting-{actions-light,lobby-light,card-light,card-dark}.png`,
+          `${out}-meeting-{actions-light,lobby-light,card-light,card-dark}.png and ` +
+          `${out}-video-{light,page-light,dark}.png`,
       );
     });
     process.exit(0);

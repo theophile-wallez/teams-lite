@@ -58,9 +58,40 @@ export type ActiveCall = {
   connected_at_ms: number | null;
   /** Why it ended, on the one frame that says it did. */
   end_reason: string | null;
+  /** What everybody ELSE in the meeting is publishing, so this page can ask for it. Empty
+   *  for a one-to-one call and for a backend too old to say. */
+  publishing: PublishingParticipant[];
   /** Whether answering is possible — decided by the backend, which holds the links. */
   can_accept: boolean;
   can_hangup: boolean;
+};
+
+/** One person in the meeting and the streams they publish. */
+export type PublishingParticipant = {
+  mri: string;
+  name: string;
+  streams: PublishedStream[];
+};
+
+/**
+ * One stream somebody publishes into the meeting.
+ *
+ * **`source_id` is why this type exists.** It is the media source id a subscription is
+ * addressed by, and the roster is the only place it exists (NATIVE-CALLING.md § 10.2). It is
+ * per meeting and it moves between joins, so it is never cached across calls.
+ */
+export type PublishedStream = {
+  /** `main-audio` / `main-video` / `applicationsharing-video` / `data`. */
+  label: string;
+  kind: string;
+  source_id: number;
+  direction: string;
+  server_muted: boolean;
+  /** Whether this is somebody's screen being shared. Decided by the backend, so the label
+   *  vocabulary is known in one place rather than two. */
+  shared_screen: boolean;
+  /** Whether this is somebody's camera, actually being sent. */
+  camera: boolean;
 };
 
 /** Everything `call_status` reports, and the payload of every `call_state` event. */

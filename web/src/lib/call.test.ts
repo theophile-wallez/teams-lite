@@ -32,6 +32,7 @@ function call(overrides: Partial<ActiveCall> = {}): ActiveCall {
     other_mris: [],
     in_lobby: false,
     waiting_in_lobby: 0,
+    publishing: [],
     muted: false,
     connected_at_ms: null,
     end_reason: null,

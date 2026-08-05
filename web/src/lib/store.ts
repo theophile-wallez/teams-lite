@@ -95,6 +95,7 @@ import {
   simulatedCallMedia,
   startCallMedia,
   type CallMedia,
+  type RemoteVideo,
 } from "./call-media";
 import { coalesce } from "./singleflight";
 import {
@@ -323,6 +324,24 @@ export type AppState = {
    *  dropped the moment that frame is delivered: the backend hands out ONE frame with the
    *  ending in it and then frees the slot. Cleared on its own after a few seconds. */
   callNotice: string | null;
+  /**
+   * The video arriving on the call right now — a colleague's camera, a colleague's shared
+   * screen. Empty whenever there is nothing to draw, which is most calls.
+   *
+   * It holds live `MediaStream` objects, so it is deliberately NOT part of anything that is
+   * serialized or compared by value: a tile is attached to its element by identity, and
+   * replacing the stream restarts the picture.
+   */
+  callVideo: RemoteVideo[];
+  /**
+   * Whose picture is on each section, keyed by mid.
+   *
+   * A section says what it carries (a screen, a camera) and never WHOSE it is: the person is
+   * on the other side of the subscription, in the roster. So the name is recorded at the
+   * moment this page asks for that source, which is the one point where both halves are in
+   * one place — and it is what lets a tile say "Clément's screen" rather than "a screen".
+   */
+  callVideoNames: Record<string, string>;
   /** Read receipts ("seen by") for the OPEN conversation: every other member's
    *  read position, used to anchor their avatar to the last message they read.
    *  Refreshed on open and kept live by the `read_receipt` event. Empty for the
@@ -555,6 +574,8 @@ function initialState(): AppState {
     callStatus: UNKNOWN_CALL_STATUS,
     callError: null,
     callNotice: null,
+    callVideo: [],
+    callVideoNames: {},
     readReceipts: [],
     mentionCandidates: [],
     appearance: DEFAULT_APPEARANCE,
@@ -1440,10 +1461,15 @@ export class TeamsController {
     }, CALL_NOTICE_MS);
   }
 
-  /** The far side's SDP: the frame that turns a call that is ringing into audio. */
+  /** The far side's SDP. An ANSWER is what turns a ringing call into audio; an OFFER is
+   *  the service renegotiating on its own, which is how video arrives. */
   private async onCallMedia(signal: CallMediaSignal): Promise<void> {
     const media = this.callMedia;
-    if (!media || signal.kind !== "answer") return;
+    if (!media) return;
+    if (signal.kind === "offer") {
+      await this.answerRemoteOffer(signal);
+      return;
+    }
     try {
       await media.setRemoteAnswer(signal.sdp);
     } catch (error) {
@@ -1454,9 +1480,91 @@ export class TeamsController {
     }
   }
 
+  /**
+   * Answer a media offer the service made mid-call, then ask for what it can now send.
+   *
+   * The service renegotiates unprompted and its offer already carries the sections for a
+   * colleague's camera and a colleague's shared screen, so this is the whole receive path:
+   * answer, then subscribe (NATIVE-CALLING.md § 10.3a).
+   *
+   * **A failure here never ends the call.** Audio is already up and unaffected; losing this
+   * costs a tile, and the service offers again. Ending a working call because a screen could
+   * not be drawn would be much the worse outcome.
+   */
+  private async answerRemoteOffer(signal: CallMediaSignal): Promise<void> {
+    const media = this.callMedia;
+    if (!media) return;
+    try {
+      const answer = await media.answerRemoteOffer(signal.sdp);
+      if (!answer) return;
+      await this.backend.callAnswerMedia(signal.call_id, answer, ["audio", "ScreenViewer"]);
+      await this.subscribeToRemoteVideo();
+    } catch (error) {
+      console.error("[call] a media renegotiation could not be answered", error);
+    }
+  }
+
+  /**
+   * Ask the meeting's media server to put the people who are publishing onto the sections
+   * it just gave us.
+   *
+   * Two halves have to meet here, and they come from opposite directions: the SOURCE IDs are
+   * in the roster (the backend's `publishing`), and the SECTIONS are in the page (the mids
+   * and stream ids the browser reported). Neither side can do this alone, which is why it is
+   * here rather than in `call-media.ts` or the backend.
+   *
+   * A shared screen wins the sections it needs first: it is the thing somebody deliberately
+   * put on screen for others to read, and a text-heavy stream is the one that suffers most
+   * from being dropped.
+   */
+  private async subscribeToRemoteVideo(): Promise<void> {
+    const media = this.callMedia;
+    const call = this.get().callStatus.call;
+    if (!media || !call) return;
+    const sections = media.remoteVideo;
+    if (sections.length === 0) return;
+    // Everything the others publish that this app can draw, screens before cameras.
+    const wanted = call.publishing
+      .flatMap((person) => person.streams.map((stream) => ({ person, stream })))
+      .filter(({ stream }) => stream.shared_screen || stream.camera)
+      .sort((a, b) => Number(b.stream.shared_screen) - Number(a.stream.shared_screen));
+    const taken = new Set<string>();
+    for (const { person, stream } of wanted) {
+      // A screen goes on a section the service labelled for a screen, and a camera on one
+      // labelled for a camera: the label is the service's own statement about what that
+      // section carries, and putting a screen on a camera's section asks for a stream it
+      // said it would not send there.
+      const section = sections.find(
+        (candidate) =>
+          !taken.has(candidate.mid) && candidate.sharing === stream.shared_screen,
+      );
+      if (!section) continue;
+      taken.add(section.mid);
+      try {
+        await this.backend.callSubscribe({
+          callId: call.id,
+          mid: section.mid,
+          sourceId: stream.source_id,
+          streamMsid: section.streamMsid,
+        });
+        // Remember whose it is. The section itself never says, so this is the one moment
+        // the person and the mid are both in hand.
+        this.set({
+          callVideoNames: { ...this.get().callVideoNames, [section.mid]: person.name },
+        });
+      } catch (error) {
+        // One refused subscription is one missing tile, not a broken call.
+        console.error("[call] could not subscribe to a stream", error);
+      }
+    }
+  }
+
   private stopCallMedia(): void {
     this.callMedia?.stop();
     this.callMedia = null;
+    // The tiles go with the connection that fed them. A `<video>` left holding a stopped
+    // stream shows its last frame for good, which reads as a call that is still up.
+    if (this.get().callVideo.length > 0) this.set({ callVideo: [], callVideoNames: {} });
   }
 
   /** Open the microphone and negotiate, using the mock's inert stand-in when the
@@ -1469,8 +1577,12 @@ export class TeamsController {
     iceServers: RTCIceServer[];
     remoteOffer?: string;
   }): Promise<CallMedia> {
-    if (this.get().backendIsMock) return simulatedCallMedia();
-    return startCallMedia({
+    if (this.get().backendIsMock) {
+      const mock = simulatedCallMedia();
+      mock.onRemoteVideoChange = (videos) => this.set({ callVideo: videos });
+      return mock;
+    }
+    const media = await startCallMedia({
       iceServers: options.iceServers,
       remoteOffer: options.remoteOffer,
       onConnectionStateChange: (state) => {
@@ -1480,6 +1592,10 @@ export class TeamsController {
         }
       },
     });
+    // The tiles are reactive state; the connection behind them is not. This is the one
+    // bridge between the two, and it is set before anything can arrive on it.
+    media.onRemoteVideoChange = (videos) => this.set({ callVideo: videos });
+    return media;
   }
 
   /** Ask the backend what this machine can do about calls. Called on connect, and

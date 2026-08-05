@@ -703,6 +703,50 @@ export class Backend {
   callAccept(callId: string, sdp: string): Promise<{ call_id: string }> {
     return this.writeRequest<{ call_id: string }>("call_accept", { call_id: callId, sdp });
   }
+  /**
+   * Answer a media offer the service made mid-call.
+   *
+   * This is how a colleague's camera and a colleague's shared screen arrive: the service
+   * renegotiates on its own, its offer already carries the sections, and this posts the
+   * answer back (NATIVE-CALLING.md § 10.3a). Outward for what it CAN carry rather than what
+   * it usually does — the same method's SDP is what would offer the user's own camera.
+   *
+   * `modalities` says what the answer really carries; the backend refuses a name that is not
+   * one of the four the service knows.
+   */
+  callAnswerMedia(
+    callId: string,
+    sdp: string,
+    modalities: string[],
+  ): Promise<{ call_id: string }> {
+    return this.writeRequest<{ call_id: string }>("call_answer_media", {
+      call_id: callId,
+      sdp,
+      modalities,
+    });
+  }
+  /**
+   * Ask the meeting's media server to put one person's stream on one of our sections.
+   *
+   * It publishes nothing about the user — it is a request to RECEIVE — so it is not outward.
+   * `sourceId` comes from the roster and `mid` / `streamMsid` from this page's own peer
+   * connection, which is why nothing but the caller can assemble one.
+   */
+  callSubscribe(request: {
+    callId: string;
+    mid: string;
+    sourceId: number;
+    streamMsid: string;
+    fmtParams?: string;
+  }): Promise<{ call_id: string; source_id: number }> {
+    return this.writeRequest<{ call_id: string; source_id: number }>("call_subscribe", {
+      call_id: request.callId,
+      mid: request.mid,
+      source_id: request.sourceId,
+      stream_msid: request.streamMsid,
+      ...(request.fmtParams ? { fmt_params: request.fmtParams } : {}),
+    });
+  }
   /** End the call, or decline it while it is still ringing. Outward either way: the
    *  other side is told. */
   callHangup(callId: string): Promise<{ call_id: string; told_service: boolean }> {

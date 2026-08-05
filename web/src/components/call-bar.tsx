@@ -18,6 +18,7 @@ import {
 } from "~/lib/call";
 import { useAppState, useController } from "./controller-context";
 import { Avatar } from "./avatar";
+import { CallVideoStage } from "./call-video";
 import { Button } from "./ui/button";
 
 /**
@@ -50,6 +51,10 @@ export function CallBar() {
   // click that focuses it, and a call is not a reason to stop being able to type.
   return (
     <div className="pointer-events-none fixed inset-x-3 bottom-24 z-[95] flex flex-col items-stretch gap-2 pb-[env(safe-area-inset-bottom)] sm:inset-x-auto sm:right-4 sm:items-end">
+      {/* The picture, ABOVE the bar and outside its AnimatePresence: it comes and goes on
+          its own timing — a screen starts and stops several times in one call — and the
+          controls must not move when it does. */}
+      <CallVideoStage />
       <AnimatePresence>
         {call && isLive(call) && <CallCard key="call" call={call} />}
         {/* A failure the user did not cause, and an ending they did not ask for, each
