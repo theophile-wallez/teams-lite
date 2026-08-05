@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ImageUpload01Icon, Loading02Icon } from "@hugeicons/core-free-icons";
-import { loadComposerImage } from "~/lib/composer-image";
+import { COMPOSER_IMAGE_TYPES, loadComposerImage } from "~/lib/composer-image";
 import { customEmojiNameError } from "~/lib/custom-emoji";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
@@ -16,14 +16,13 @@ import {
 import { Input } from "./ui/input";
 import { Tabs, TabsPanel, TabsList, TabsTrigger } from "./ui/tabs";
 
+// Emoji caps are stricter than the composer's 10 MB: 128 KB and 512 px on a side.
+// The type list is shared to keep the accepted formats in sync.
 const EMOJI_MAX_BYTES = 128 * 1024;
 const EMOJI_MAX_DIMENSION = 512;
-const EMOJI_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
-
-type EmojiImageType = (typeof EMOJI_IMAGE_TYPES)[number];
 
 type EmojiImage = {
-  contentType: EmojiImageType;
+  contentType: (typeof COMPOSER_IMAGE_TYPES)[number];
   width: number;
   height: number;
   dataBase64: string;
@@ -31,7 +30,7 @@ type EmojiImage = {
 };
 
 function emojiImageError(file: Pick<File, "size" | "type">): string | null {
-  if (!EMOJI_IMAGE_TYPES.includes(file.type as EmojiImageType)) {
+  if (!COMPOSER_IMAGE_TYPES.includes(file.type as (typeof COMPOSER_IMAGE_TYPES)[number])) {
     return "Select a PNG, JPEG, GIF, or WebP image.";
   }
   if (file.size > EMOJI_MAX_BYTES) {
@@ -47,7 +46,7 @@ async function loadEmojiImage(file: File): Promise<EmojiImage> {
   const loaded = await loadComposerImage(file);
 
   if (loaded.width > EMOJI_MAX_DIMENSION || loaded.height > EMOJI_MAX_DIMENSION) {
-    throw new Error("Select an image that is 512 × 512 pixels or smaller.");
+    throw new Error("an emoji must be 512 pixels or smaller on a side");
   }
 
   return {
@@ -249,7 +248,7 @@ export function AddEmojiDialog(props: { open: boolean; onClose: () => void }) {
               <input
                 ref={fileInput}
                 type="file"
-                accept={EMOJI_IMAGE_TYPES.join(",")}
+                accept={COMPOSER_IMAGE_TYPES.join(",")}
                 className="hidden"
                 onChange={(e) => {
                   void pickFile(e.target.files?.[0]);

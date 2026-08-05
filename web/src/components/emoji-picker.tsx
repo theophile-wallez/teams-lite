@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import Picker from "@emoji-mart/react";
 import rawData from "@emoji-mart/data";
+import { renderToString } from "react-dom/server";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Add01Icon } from "@hugeicons/core-free-icons";
+import { Add01Icon, MessageSquareDashedIcon } from "@hugeicons/core-free-icons";
 import { appleEmojiUrlFromUnified, canReactWith, teamsReactionKey } from "~/lib/teams-emoji";
 import { useController } from "./controller-context";
 import { AddEmojiDialog } from "./add-emoji-dialog";
@@ -128,6 +129,13 @@ export default function EmojiPicker(props: {
     };
   }, [data, customEmoji]);
 
+  const categoryIcons = useMemo(
+    () => ({
+      custom: renderToString(<HugeiconsIcon icon={MessageSquareDashedIcon} />),
+    }),
+    [],
+  );
+
   return (
     <>
       <div
@@ -148,6 +156,7 @@ export default function EmojiPicker(props: {
           data={dataWithCustom}
           theme={props.theme}
           set="apple"
+          categoryIcons={categoryIcons}
           // Apple images, served locally — never from a CDN (see appleEmojiUrl).
           // Both hooks point home: `getImageURL` for the glyphs emoji-mart resolves
           // itself, `getSpritesheetURL` so a sheet request could only ever be a
