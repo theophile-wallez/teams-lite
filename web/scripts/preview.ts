@@ -1366,6 +1366,36 @@ if (import.meta.main) {
       await shot(`${out}-connected-card-dark.png`, '[data-testid="call-bar"]');
       await page.locator('[data-testid="call-hangup"]').click();
 
+      // 5b. A GROUP chat: the same button, and a label that says it rings everybody. Then
+      //     the bar, which names the CONVERSATION and fills in who picked up.
+      await openConversation(page, "Platform Team");
+      await shot(`${out}-group-button-light.png`, '[data-testid="message-pane"] header');
+      await page.locator('[data-testid="call-button"]').click();
+      await page.waitForSelector('[data-testid="call-bar"]');
+      await shot(`${out}-group-dialing-light.png`, '[data-testid="call-bar"]');
+      await page.waitForSelector('[data-testid="call-bar"][data-phase="connected"]');
+      await page.waitForSelector('[data-testid="call-phase"]:has-text("With")');
+      await shot(`${out}-group-card-light.png`, '[data-testid="call-bar"]');
+      await setTheme("dark");
+      await shot(`${out}-group-card-dark.png`, '[data-testid="call-bar"]');
+      await setTheme("light");
+      await page.locator('[data-testid="call-hangup"]').click();
+      await page.waitForSelector('[data-testid="call-bar"]', { state: "detached" });
+
+      // 5c. A MEETING chat, which is the other thing a chat header can offer: Join, from the
+      //     thread itself, with no calendar and no link. The meeting the thread was minted
+      //     for is the one action it gets.
+      await openConversation(page, "Design Sync");
+      await shot(`${out}-meeting-chat-light.png`, '[data-testid="message-pane"] header');
+      await setTheme("dark");
+      await shot(`${out}-meeting-chat-dark.png`, '[data-testid="message-pane"] header');
+      await setTheme("light");
+      await page.locator('[data-testid="meeting-join-here"]').click();
+      await page.waitForSelector('[data-testid="call-bar"][data-phase="connected"]');
+      await shot(`${out}-meeting-chat-card-light.png`, '[data-testid="call-bar"]');
+      await page.locator('[data-testid="call-hangup"]').click();
+      await page.waitForSelector('[data-testid="call-bar"]', { state: "detached" });
+
       // 6. A meeting: the Join button beside the link out, the lobby, then the roster.
       //
       // Back to the root first: the calendar pane only shows when no conversation is in
@@ -1427,6 +1457,8 @@ if (import.meta.main) {
         `[preview] wrote ${out}-off-light.png, ${out}-settings-{light,on-light,on-dark}.png, ` +
           `${out}-button-light.png, ${out}-ringing-{light,card-light,card-dark}.png and ` +
           `${out}-{connected-card-light,muted-card-light,connected-card-dark}.png and ` +
+          `${out}-group-{button-light,dialing-light,card-light,card-dark}.png and ` +
+          `${out}-meeting-chat-{light,dark,card-light}.png and ` +
           `${out}-meeting-{actions-light,lobby-light,card-light,card-dark}.png and ` +
           `${out}-video-{light,page-light,dark}.png and ` +
           `${out}-send-{off-light,on-light}.png and ${out}-sending-{light,dark}.png`,

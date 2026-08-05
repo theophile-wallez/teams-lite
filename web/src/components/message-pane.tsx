@@ -705,9 +705,10 @@ export function MessagePane(props: { onBack?: () => void }) {
             </p>
           ) : null}
         </div>
-        {/* The header's own controls, as one group on the right: call this person
-            (only in a one-to-one chat, and only where a call would really work — see
-            components/call-button.tsx), and whether this thread answers an `@claude`
+        {/* The header's own controls, as one group on the right: the call this
+            conversation offers — ring the person, ring the whole group, or JOIN the meeting
+            the thread was minted for, and only where it would really work (see
+            components/call-button.tsx) — and whether this thread answers an `@claude`
             message (per conversation on purpose — see components/agent-menu.tsx). */}
         {openId && (
           <div className="ml-auto flex shrink-0 items-center gap-1">

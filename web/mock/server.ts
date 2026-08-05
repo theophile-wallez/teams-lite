@@ -3094,12 +3094,12 @@ function agentStatusView(): {
 type MockCall = {
   id: string;
   direction: "incoming" | "outgoing";
-  kind: "call" | "meeting";
+  kind: "call" | "group" | "meeting";
   phase: "ringing" | "dialing" | "connecting" | "connected" | "ended";
   conversation_id: string | null;
   peer: string;
   peer_mri: string;
-  /** Everybody else in a meeting, the way a roster frame names them. */
+  /** Everybody else in a meeting or a group call, the way a roster frame names them. */
   others: string[];
   other_mris: string[];
   in_lobby: boolean;
@@ -3137,6 +3137,11 @@ type MockPublishing = {
 /** The people the mock puts in a meeting once the join is answered — a roster arriving
  *  after the fact, which is what the real service sends. */
 const MOCK_MEETING_ROSTER = ["Ava Thompson", "Liam Nguyen", "Priya Raman"];
+
+/** How many people one call may ring, mirroring `MAX_GROUP_CALL_PEOPLE` in
+ *  src/bin/server.rs: every one of them is a device buzzing in somebody's pocket, and a
+ *  mis-click on a 60-person thread cannot be taken back. */
+const MOCK_MAX_GROUP_CALL_PEOPLE = 20;
 
 /** One audio stream per person, plus a CAMERA for the first and a SHARED SCREEN for the
  *  second. The source ids are small integers like the real ones, and they are the addresses
@@ -5115,24 +5120,36 @@ function dispatch(method: string, params: unknown): unknown {
           ice_servers: [{ urls: ["stun:mock.invalid:3478"] }],
         };
       }
-      // Joining a meeting: reserve it from the link, exactly like the Rust one. The
-      // mock checks the link shape too, so a spec can prove the refusal.
-      if (typeof o.join_url === "string") {
-        if (!/\/meetup-join\/(19%3a|19:)/i.test(o.join_url)) {
+      // Joining a meeting: reserve it from the address the caller named, exactly like the
+      // Rust one — the link a calendar event carries, or the meeting's own thread out of
+      // the chat list. The mock checks both shapes, so a spec can prove either refusal.
+      if (typeof o.join_url === "string" || typeof o.meeting_thread === "string") {
+        const thread = typeof o.meeting_thread === "string" ? o.meeting_thread : null;
+        if (thread !== null && !thread.startsWith("19:meeting_")) {
+          throw new Error("call_prepare: that conversation is not a meeting");
+        }
+        if (thread === null && !/\/meetup-join\/(19%3a|19:)/i.test(String(o.join_url))) {
           throw new Error("call_prepare: that is not a Teams meeting link");
         }
         if (mockCall && mockCall.phase !== "ended") {
           throw new Error("call_prepare: this machine is already in a call — leave it first");
         }
         clearMockCallTimers();
+        // The title: from the caller when a calendar event supplied one, and otherwise
+        // from the thread's own name, which is what the Rust backend reads out of its
+        // store rather than minting a second spelling of it.
+        const subject =
+          typeof o.subject === "string" && o.subject.trim()
+            ? o.subject.trim()
+            : (thread && store.get(thread)?.conv.name) || "Meeting";
         mockCall = {
           id: `mock-meeting-${Date.now()}`,
           direction: "outgoing",
           kind: "meeting",
           // Joining, not ringing: nobody has to pick up.
           phase: "connecting",
-          conversation_id: null,
-          peer: typeof o.subject === "string" && o.subject.trim() ? o.subject.trim() : "Meeting",
+          conversation_id: thread,
+          peer: subject,
           peer_mri: "",
           others: [],
           other_mris: [],
@@ -5156,16 +5173,30 @@ function dispatch(method: string, params: unknown): unknown {
       if (mockCall && mockCall.phase !== "ended") {
         throw new Error("call_prepare: this machine is already in a call — hang up first");
       }
-      const person = thread.participants[0];
+      // One person is a 1:1 call; several is a GROUP call, which rings every one of them
+      // at once and names the CONVERSATION rather than a person — the same split the Rust
+      // backend makes from the roster it fetches, and the same cap.
+      const ring = thread.participants;
+      if (ring.length === 0) {
+        throw new Error(`call_prepare: nobody to ring in ${conversation}`);
+      }
+      if (ring.length > MOCK_MAX_GROUP_CALL_PEOPLE) {
+        throw new Error(
+          `call_prepare: ${conversation} has ${ring.length} other people — this app rings ` +
+            `at most ${MOCK_MAX_GROUP_CALL_PEOPLE} at once`,
+        );
+      }
+      const group = ring.length > 1;
+      const person = ring[0];
       clearMockCallTimers();
       mockCall = {
         id: `mock-call-${Date.now()}`,
         direction: "outgoing",
-        kind: "call",
+        kind: group ? "group" : "call",
         phase: "dialing",
         conversation_id: conversation,
-        peer: person?.name ?? "Someone",
-        peer_mri: person?.mri ?? "8:orgid:someone",
+        peer: group ? (store.get(conversation)?.conv.name ?? "Group call") : (person?.name ?? "Someone"),
+        peer_mri: group ? "" : (person?.mri ?? "8:orgid:someone"),
         others: [],
         other_mris: [],
         in_lobby: false,
@@ -5203,7 +5234,19 @@ function dispatch(method: string, params: unknown): unknown {
       mockCallTimers.push(
         setTimeout(() => {
           if (!mockCall || mockCall.id !== callId) return;
-          mockCall = { ...mockCall, phase: "connected", connected_at_ms: Date.now() };
+          // A GROUP call answers "who is in it" from the roster the service reports, the
+          // way a meeting does — so the people who picked up arrive here and not before.
+          const roster =
+            mockCall.kind === "group"
+              ? (store.get(mockCall.conversation_id ?? "")?.participants ?? [])
+              : [];
+          mockCall = {
+            ...mockCall,
+            phase: "connected",
+            connected_at_ms: Date.now(),
+            others: roster.map((p) => p.name),
+            other_mris: roster.map((p) => p.mri),
+          };
           broadcastMockCall();
         }, MOCK_CALL_CONNECT_MS),
       );
@@ -5213,7 +5256,12 @@ function dispatch(method: string, params: unknown): unknown {
     case "call_join": {
       const callId = requireString(params, "call_id");
       requireString(params, "sdp");
-      requireString(params, "join_url");
+      const address = asObject(params);
+      // The same address the reservation named, in whichever shape it came — and exactly
+      // one of the two, which is what the client sends (`meetingParams`).
+      if (typeof address.join_url !== "string" && typeof address.meeting_thread !== "string") {
+        throw new Error("call_join: no meeting named — pass join_url or meeting_thread");
+      }
       if (!mockCall || mockCall.id !== callId) throw new Error("call_join: no such meeting");
       // The lobby first, then somebody lets us in, then the roster arrives. Three
       // frames, in the order the real service sends them — which is what makes the

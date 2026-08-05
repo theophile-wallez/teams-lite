@@ -59,8 +59,9 @@
   which conversation a keystroke lands in.
 - **`cd web && bun run join-live` is its twin for the one outward action a chat cannot
   cover: JOINING a meeting.** Same shape and same rails — the meeting is a constant in the
-  file, no argument can aim it elsewhere, the button's own `data-join-url` is re-read
-  immediately before the click, and it hangs up on every path out. It exists because that
+  file, no argument can aim it elsewhere, the button's own address (`data-join-url`, or
+  `data-meeting-thread` under `--from-chat`) is re-read immediately before the click, and it
+  hangs up on every path out. It exists because that
   feature is untestable anywhere else (see § Joining a meeting), and it is what took the
   user out of a loop where every protocol fault cost them a click and a paste. A NEW live
   driver earns its place the same way: a constant target, proved from the app's own state
@@ -933,11 +934,40 @@ call does — this side never handles RTP, and the page never learns a Teams URL
 - **One call at a time.** A second simultaneous call needs a second microphone and a UI
   that can hold two. An invite that arrives while a call is up is left for the user's
   other devices to ring, which is what Teams does with a client that does not answer.
-- **A CALL is one-to-one; a MEETING is joined.** The call button is not drawn outside a
-  1:1 and the backend refuses a conversation with more than one other person — a group
-  call would need a roster the caller assembles and a UI that rings three people. A
-  meeting is the other shape and it IS supported (see § Joining a meeting): its roster
-  already exists, so joining one is a POST rather than a product.
+- **A CHAT is called; a MEETING is joined, and the conversation decides which**
+  (`conversationCallAction` in `web/src/lib/call.ts`, drawn by `call-button.tsx`). One
+  control per conversation, in its header:
+  - a **1:1** rings the person, and a **GROUP CHAT** rings every member at once. That is
+    the same POST — `calling::invitation_payload` takes a list, `participants.to` carries
+    all of them, and `enableGroupCallEventMessages` was already on, so the call line lands
+    in the thread everybody in it reads. The roster the service then reports is what
+    answers "who is in it", which is machinery a meeting already had (`CallSession::others`,
+    one `<audio>` per remote stream). `call_prepare` resolves the list ONCE and keeps it on
+    the session (`ring`), because `call_place` is a second round trip and a list rebuilt
+    there could disagree with the one the user was shown.
+  - a **MEETING chat** — a thread Teams minted FOR a meeting — offers **Join here**
+    instead, addressed by that thread (see § Joining a meeting). It offers no ring:
+    joining and ringing everybody invited answer the same question, and only one of them is
+    what the thread is for.
+  - **`MAX_GROUP_CALL_PEOPLE` (20) is the ceiling**, and it is a product rule rather than a
+    protocol one: every name in that list is a device buzzing in somebody's pocket, and a
+    mis-click on a 60-person thread cannot be taken back. Above it the user still has real
+    Teams. The mock mirrors the number, so the refusal is reviewable.
+  - **The label says what the click reaches** — "Call everybody in Design crew" — because
+    that is the fact the user needs before it and the one thing they cannot undo after. A
+    group call is NOT asked for twice: it is one click, exactly like a 1:1, and the words
+    carry the difference.
+  - **A group call names the CONVERSATION where a 1:1 names the person** (`CallKind::Group`,
+    empty `peer_mri`): five people have no one name, so the bar draws the group mark rather
+    than a face seeded from nothing, and says who is there from the roster once somebody
+    picks up. It has no lobby — that state is a meeting's, and reading one into a call would
+    show a state that cannot end.
+  - An INCOMING group call is still named after its CALLER: they are who the user decides
+    about, and everybody else arrives on the roster.
+  - **It is unverified against the tenant**, like the 1:1 call and for the same reason: a
+    call has no pre-authorized target, so ringing a real group chat is the user's own click.
+    What the mock proves is the whole surface; what the protocol rests on is that the body
+    is the join's own shape with a longer `participants.to`.
 - **The microphone is released on ONE path.** Every ending — our hangup, theirs, a
   dropped connection, calling switched off — arrives as the backend's `call_state` frame,
   and the store's handler is the only place that stops the media. A path that released it
@@ -1062,10 +1092,29 @@ shows the stage and the tiles with nothing leaving the machine.
 ## Joining a meeting (the calendar stays read-only)
 
 A calendar event with a Teams link offers **Join here** beside the link that opens real
-Teams (`web/src/components/meeting-join-button.tsx`). It joins with a microphone and
-nothing else, so both actions exist and neither replaces the other: a meeting whose point
-is a shared screen is still one to open in Teams.
+Teams (`web/src/components/meeting-join-button.tsx`) — and so does the HEADER of the
+meeting's own chat, which is where a meeting is usually noticed. It joins with a microphone
+and nothing else, so both actions exist and neither replaces the other: a meeting whose
+point is a shared screen is still one to open in Teams.
 
+**Two ADDRESSES, because the user reaches a meeting from two places, and neither covers
+the other** (`meeting_address` in `src/bin/server.rs`, `MeetingAddress` in
+`web/src/lib/call.ts`; exactly one of `join_url` / `meeting_thread` ever travels).
+
+- **A THREAD is a join address on its own** (`calling::MeetingJoin::from_thread_id`): Teams
+  mints one conversation per meeting and puts it in the chat list, and that
+  `19:meeting_…@thread.v2` id is what a long link carries in its own first segment. The
+  `meetingInfo` beside it is what the service PREFERS, not what it requires — a long link
+  with no context joins by its thread. So a meeting is joinable from the chat the user is
+  already looking at, with no link to find: measured on this tenant, 399 of its
+  conversations are meeting-backed and NOT ONE of them holds a join link anywhere in its
+  history, because the invitations use the short shape and that code lives in the calendar
+  event alone. Only a `19:meeting_` thread parses: a group chat has no meeting to join (it
+  is called instead), and a channel meeting hangs off a message id a thread cannot name, so
+  guessing `"0"` there would address the channel rather than the meeting inside it.
+- **The title comes from the store for a thread, and from the caller for a link.** Each is
+  read where it exists — a join link carries no subject, and a thread has a name of its own
+  — so no title is ever minted twice.
 - **The link IS the address, in either shape Teams writes one.**
   `calling::MeetingJoin::from_join_url` reads both: the long
   `…/l/meetup-join/{thread}/{message}?context={Tid,Oid}`, whose thread and context become
@@ -1130,13 +1179,21 @@ is a shared screen is still one to open in Teams.
   its callbacks sit on, so the acceptance, its answer and the acknowledgement the service
   waits 30 s for were all invisible. The script is the live twin of `sandbox-live.ts` and
   carries the same rails — the meeting is a CONSTANT, the caller gets no raw page, the
-  button's own `data-join-url` is re-read immediately before the click, and it hangs up on
+  button's own address is re-read immediately before the click, and it hangs up on
   every path out including a throw. Its microphone is a FAKE device, so the offer is real
   and no real microphone opens. Both live drivers are named in the automation guard's
   allowlist; a copy of either parked outside the repo is still blocked.
-- **The button states which meeting it joins** (`data-join-url`), for the same reason the
-  composer states its conversation: an outward action a driver cannot prove is one it must
-  not take.
+  **`--from-chat` drives the other surface**, the CHAT header's Join, and it earns its place
+  the same way rather than by being a flag on a script that already exists: the thread is the
+  same constant (`AUTHORIZED_MEETING_THREAD`), the conversation is opened BY THAT ID instead
+  of clicked for in the sidebar, and two things out of the app's own state are checked before
+  the click — the composer's `data-conversation-id` and the button's `data-meeting-thread`.
+  No argument can aim either mode at another meeting. **The thread-addressed join is NOT yet
+  verified against the tenant**: it needs the always-on service re-staged onto the commit
+  that added it, and then one run of that command.
+- **The button states which meeting it joins** — `data-join-url` for a link,
+  `data-meeting-thread` for a thread, never both — for the same reason the composer states
+  its conversation: an outward action a driver cannot prove is one it must not take.
 
 ## The user's own status (outward, and gated like one)
 

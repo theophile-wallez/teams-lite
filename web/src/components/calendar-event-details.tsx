@@ -186,7 +186,10 @@ export function CalendarEventDetails(props: {
           {/* Join with audio, HERE. Beside the link that opens real Teams rather than
               instead of it: this app carries a microphone and nothing else, so a meeting
               with a shared screen is still one to open there. */}
-          <MeetingJoinButton joinUrl={event.join_url} subject={event.subject} />
+          <MeetingJoinButton
+            meeting={{ kind: "link", joinUrl: event.join_url }}
+            subject={event.subject}
+          />
           {event.join_url && (
             <a
               data-testid="calendar-event-join"

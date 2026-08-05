@@ -749,6 +749,13 @@ pub fn call_accepted_in_frame(frame: &Value) -> bool {
 ///
 /// `to` is one mri per person to ring; `thread_id` is the chat the call belongs to,
 /// so the call shows up in that thread for everybody in it. Audio only.
+///
+/// **Several recipients is a GROUP call**, and it is the same POST: the service rings every
+/// mri in `to`, the thread they share is the conversation the call belongs to, and
+/// `properties.enableGroupCallEventMessages` — already here, because the capture carried it
+/// — is what posts the call line into that thread for all of them. So the shape a group
+/// chat's call button needs is the shape a 1:1 already sends; what a group adds is the
+/// roster the answer starts reporting, which [`CallSession::others`] already reads.
 pub fn invitation_payload(
     local: &LocalParticipant,
     to: &[String],
@@ -1050,6 +1057,41 @@ impl MeetingJoin {
             meeting_code: None,
             passcode: None,
             join_url: url.to_string(),
+        })
+    }
+
+    /// The address of a meeting reached from the CHAT it already has here, rather than
+    /// from a calendar link.
+    ///
+    /// Teams mints one thread per meeting and puts it in the chat list, so the meeting the
+    /// user is looking at is addressable without finding a link at all: the thread IS what
+    /// a long join link carries in its own first segment, and the `meetingInfo` beside it is
+    /// what the service PREFERS rather than what it requires (a long link with no context
+    /// joins by its thread — see `a_meeting_link_with_no_context_still_joins_by_its_thread`).
+    /// That matters on this tenant, whose own invitations carry the SHORT link shape: the
+    /// code lives in the calendar event and nowhere in the conversation, so a chat with no
+    /// matching event could otherwise offer nothing.
+    ///
+    /// `None` for anything but a meeting thread. A plain group chat has no meeting to join —
+    /// it is CALLED instead — and a channel meeting hangs off a message id a thread alone
+    /// cannot name, so guessing `"0"` there would address the channel and not the meeting
+    /// inside it.
+    pub fn from_thread_id(thread_id: &str) -> Option<Self> {
+        if !thread_id.starts_with("19:meeting_") {
+            return None;
+        }
+        Some(Self {
+            thread_id: Some(thread_id.to_string()),
+            // The same string the captured request sends for a meeting that hangs off no
+            // message, and a calendar meeting's own long link carries.
+            message_id: "0".into(),
+            tenant_id: None,
+            organizer_mri: None,
+            meeting_code: None,
+            passcode: None,
+            // No link was involved, and nothing may invent one: `meetingData.meetingUrl` is
+            // only ever the url the user's own invitation carried.
+            join_url: String::new(),
         })
     }
 
@@ -2023,6 +2065,37 @@ mod tests {
         );
     }
 
+    /// A GROUP call is the same POST with more people in it: every mri is rung, they share
+    /// one thread, and the group-call event messages that put the call line in that thread
+    /// are on. Nothing about the body is per-person.
+    #[test]
+    fn an_invitation_rings_every_person_it_names() {
+        let payload = invitation_payload(
+            &local(),
+            &["8:orgid:her".to_string(), "8:orgid:him".to_string(), "8:orgid:them".to_string()],
+            Some("19:group@thread.v2"),
+            &MediaContent::sdp("v=0 offer"),
+            &callbacks(),
+        );
+        let to = payload.pointer("/participants/to").unwrap().as_array().unwrap();
+        assert_eq!(to.len(), 3);
+        assert_eq!(to[2]["id"], "8:orgid:them");
+        assert_eq!(payload.pointer("/groupChat/threadId").unwrap(), "19:group@thread.v2");
+        // What posts the call line into the thread everybody in it reads.
+        assert_eq!(
+            payload.pointer("/conversationRequest/properties/enableGroupCallEventMessages").unwrap(),
+            &json!(true)
+        );
+        // And the roster subscription, which is the only way "who is in this call" is ever
+        // answered once there is more than one person to answer it for.
+        assert!(payload
+            .pointer("/conversationRequest/roster/rosterUpdate")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .ends_with("/conversation/rosterUpdate/"));
+    }
+
     /// Audio only, everywhere, in every direction. A video m-line would be
     /// negotiated for a camera this app never opens.
     #[test]
@@ -2131,6 +2204,51 @@ mod tests {
         assert_eq!(join.thread_id.as_deref(), Some("19:meeting_x@thread.v2"));
         assert_eq!(join.tenant_id, None);
         assert_eq!(join.meeting_info(), None);
+    }
+
+    /// A meeting reached from its own CHAT: the thread is the whole address, and the body
+    /// is the one a context-free long link builds — the same `groupChat` and the same
+    /// `"0"`, with nothing invented beside it.
+    #[test]
+    fn a_meeting_thread_is_a_join_address_on_its_own() {
+        let join = MeetingJoin::from_thread_id("19:meeting_abc@thread.v2").expect("a meeting");
+        assert_eq!(join.thread_id.as_deref(), Some("19:meeting_abc@thread.v2"));
+        assert_eq!(join.message_id, "0");
+        assert!(!join.is_channel_meeting());
+        // No link was involved, so neither of the two things a link carries is claimed.
+        assert_eq!(join.meeting_info(), None);
+        assert_eq!(join.meeting_data(), None);
+        assert_eq!(join.join_url, "");
+
+        let payload = join_payload(&local(), &join, &callbacks(), None);
+        assert_eq!(
+            payload.pointer("/groupChat/threadId").unwrap(),
+            "19:meeting_abc@thread.v2"
+        );
+        assert_eq!(payload.pointer("/groupChat/messageId").unwrap(), "0");
+        assert!(payload.pointer("/meetingData").is_none());
+        assert!(payload.pointer("/meetingInfo").is_none());
+        // A join rings nobody, whichever way it was addressed.
+        assert!(payload.pointer("/participants/to").is_none());
+    }
+
+    /// Only a MEETING thread is a join address. A plain group chat is called instead, and
+    /// a channel's thread would address the channel rather than the meeting inside it —
+    /// so both read as "nothing to join" rather than as a join to the wrong place.
+    #[test]
+    fn a_thread_that_is_not_a_meeting_is_no_join_address() {
+        for thread in [
+            "",
+            // An ordinary group chat: 32 hex digits, no `meeting_`.
+            "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2",
+            // A channel.
+            "19:abc@thread.tacv2",
+            // A one-to-one chat.
+            "19:oid1_oid2@unq.gbl.spaces",
+            "48:notes",
+        ] {
+            assert_eq!(MeetingJoin::from_thread_id(thread), None, "thread: {thread}");
+        }
     }
 
     /// The shape the user's OWN meetings have: a meeting code and a passcode, and no

@@ -1111,10 +1111,15 @@ struct CallingPlane {
     connection: Option<tokio::task::JoinHandle<()>>,
 }
 
-/// A one-to-one call, or a meeting.
+/// A one-to-one call, a call that rings a whole group chat, or a meeting.
+///
+/// All three are the same signaling; what differs is what the UI has to say. A 1:1 names
+/// the person, and the other two name the CONVERSATION and then answer "who" from the
+/// roster — because a group of five has no one person to put in a title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallKind {
     Call,
+    Group,
     Meeting,
 }
 
@@ -1122,6 +1127,7 @@ impl CallKind {
     fn as_str(self) -> &'static str {
         match self {
             CallKind::Call => "call",
+            CallKind::Group => "group",
             CallKind::Meeting => "meeting",
         }
     }
@@ -1185,10 +1191,18 @@ struct CallSession {
     phase: CallPhase,
     /// The chat, channel or meeting thread the call belongs to, when it has one.
     conversation_id: Option<String>,
-    /// Who is on the other end of a one-to-one call. A meeting names its subject here
-    /// instead, because "who" is the roster.
+    /// Who is on the other end of a one-to-one call. A meeting and a GROUP call name the
+    /// conversation here instead, because "who" is the roster.
     peer_mri: String,
     peer_name: String,
+    /// Every mri this outgoing call RINGS, resolved once when the call was reserved.
+    ///
+    /// It is the session's rather than the placing request's because `call_place` is a
+    /// second round trip: the page comes back with an SDP and nothing else, so a list
+    /// rebuilt there would be a second roster fetch that could disagree with the first —
+    /// and this list is who a device buzzes for. Empty for an incoming call and for a
+    /// meeting, neither of which rings anybody.
+    ring: Vec<String>,
     /// Everybody the meeting's roster names, us included, newest frame wins. Empty for
     /// a one-to-one call, where the peer above is the whole answer.
     roster: Vec<calling::RosterMember>,
@@ -3682,14 +3696,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // is ringing (and returns the caller's own offer). The ICE servers are why
         // this is gated: they carry the relay credentials this backend holds.
         "call_prepare" => {
-            // A meeting: reserve the call against the link the calendar already holds.
-            // Its own shape rather than a flag, because what comes back differs — a
-            // join has no offer to answer, and no person to name.
-            if let Some(join_url) = params.get("join_url").and_then(Value::as_str) {
-                let meeting = calling::MeetingJoin::from_join_url(join_url).context(
-                    "call_prepare: that is not a Teams meeting link — this app joins a \
-                     meeting from its own join link and nothing else",
-                )?;
+            // A meeting: reserve the call against the address the caller named — the link
+            // the calendar holds, or the meeting's own thread from the chat list. Its own
+            // shape rather than a flag, because what comes back differs — a join has no
+            // offer to answer, and no person to name.
+            if let Some(meeting) = meeting_address(params)? {
                 let (session, endpoint_id, surl) = {
                     let (endpoint_id, surl) = {
                         let plane = ctx.calling.lock().unwrap();
@@ -3701,16 +3712,23 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     };
                     (ctx.session().await?, endpoint_id, surl)
                 };
-                // The meeting's title, passed by whoever clicked Join, because that is
-                // where it exists: the join link carries no subject, and the caller is
-                // holding the calendar event it came from.
+                // The meeting's title. From the calendar it is passed by whoever clicked
+                // Join, because that is the only place it exists: a join link carries no
+                // subject, and the caller is holding the event it came from. From the CHAT
+                // LIST the thread has a name of its own, so the store answers and no title
+                // is minted twice — which is also what makes two open pages agree.
                 let subject = params
                     .get("subject")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|name| !name.is_empty())
-                    .unwrap_or("Meeting")
-                    .to_string();
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let thread = meeting.thread_id.as_deref()?;
+                        let title = ctx.store().ok()?.conversation_context(thread, "").ok()?;
+                        Some(title).filter(|title| !title.trim().is_empty())
+                    })
+                    .unwrap_or_else(|| "Meeting".to_string());
                 let call_id = uuid::Uuid::new_v4().to_string();
                 let call = CallSession {
                     id: call_id.clone(),
@@ -3724,6 +3742,8 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     conversation_id: meeting.thread_id.clone(),
                     peer_mri: String::new(),
                     peer_name: subject,
+                    // A join rings nobody.
+                    ring: Vec::new(),
                     roster: Vec::new(),
                     in_lobby: false,
                     links: calling::Links::default(),
@@ -3792,9 +3812,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             )?;
                         (ctx.session().await?, endpoint_id)
                     };
-                    // Who to ring: the roster, minus us. A group call is refused
-                    // rather than half-supported — it needs a roster UI, a mixer and
-                    // more than one audio element.
+                    // Who to ring: the roster, minus us. One person is a one-to-one call;
+                    // several is a GROUP call, which rings every one of them at once and
+                    // is the same POST (`calling::invitation_payload`). What a group needs
+                    // beyond that already exists: the service mixes the voices, the page
+                    // keeps one `<audio>` per remote stream, and "who is in it" is the
+                    // roster a meeting already answers from.
                     let http = ctx.http.clone();
                     let target = conversation.clone();
                     let roster = ctx
@@ -3808,37 +3831,49 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         })
                         .await
                         .unwrap_or_default();
-                    let others: Vec<String> = roster
+                    let ring: Vec<String> = roster
                         .iter()
                         .map(|p| p.mri.clone())
                         .filter(|mri| mri != &session.self_mri && mri.starts_with("8:"))
                         .collect();
-                    let peer_mri = match others.len() {
-                        1 => others[0].clone(),
-                        0 => anyhow::bail!(
-                            "call_prepare: nobody to ring in {conversation} — this app only \
-                             calls a one-to-one chat"
-                        ),
-                        n => anyhow::bail!(
-                            "call_prepare: {conversation} has {n} other people — this app only \
-                             calls a one-to-one chat"
-                        ),
-                    };
+                    if ring.is_empty() {
+                        anyhow::bail!(
+                            "call_prepare: nobody to ring in {conversation} — a call needs at \
+                             least one other person in the conversation"
+                        );
+                    }
+                    if ring.len() > MAX_GROUP_CALL_PEOPLE {
+                        anyhow::bail!(
+                            "call_prepare: {conversation} has {} other people — this app rings \
+                             at most {MAX_GROUP_CALL_PEOPLE} at once",
+                            ring.len()
+                        );
+                    }
+                    let kind =
+                        if ring.len() == 1 { CallKind::Call } else { CallKind::Group };
+                    // A 1:1 call names the person; a group names the CONVERSATION, because
+                    // five people have no one name and the roster is what answers "who".
+                    let peer_mri =
+                        if kind == CallKind::Call { ring[0].clone() } else { String::new() };
                     // The store first, because it is where the user's own nickname for
                     // that person lives (see `person_overrides`): a call has to name
                     // them the way every other surface does.
-                    let peer_name = ctx
-                        .store()?
-                        .display_name_for_mri(&peer_mri)?
-                        .into_iter()
-                        .chain(
-                            roster
-                                .iter()
-                                .find(|p| p.mri == peer_mri)
-                                .map(|p| p.display_name.clone()),
-                        )
-                        .find(|name| !name.trim().is_empty())
-                        .unwrap_or_default();
+                    let peer_name = if kind == CallKind::Call {
+                        ctx.store()?
+                            .display_name_for_mri(&peer_mri)?
+                            .into_iter()
+                            .chain(
+                                roster
+                                    .iter()
+                                    .find(|p| p.mri == peer_mri)
+                                    .map(|p| p.display_name.clone()),
+                            )
+                            .find(|name| !name.trim().is_empty())
+                            .unwrap_or_default()
+                    } else {
+                        let title = ctx.store()?.conversation_context(&conversation, "")?;
+                        if title.trim().is_empty() { "Group call".to_string() } else { title }
+                    };
                     let surl = ctx
                         .calling
                         .lock()
@@ -3852,11 +3887,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let call = CallSession {
                         id: call_id.clone(),
                         direction: CallDirection::Outgoing,
-                        kind: CallKind::Call,
+                        kind,
                         phase: CallPhase::Dialing,
                         conversation_id: Some(conversation.clone()),
                         peer_mri,
                         peer_name,
+                        ring,
                         links: calling::Links::default(),
                         local: ctx.local_participant(&session, &endpoint_id),
                         callbacks: calling::CallbackBase {
@@ -3912,10 +3948,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 (
                     call.local.clone(),
                     call.callbacks.clone(),
-                    vec![call.peer_mri.clone()],
+                    call.ring.clone(),
                     call.conversation_id.clone(),
                 )
             };
+            if to.is_empty() {
+                anyhow::bail!("call_place: that call rings nobody — call_prepare first");
+            }
             let session = ctx.session().await?;
             let ic3 = ctx.tokens.get(IC3_SCOPE).await?;
             let placed = calling::place_call(
@@ -3958,9 +3997,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         "call_join" => {
             let call_id = param_str(params, "call_id")?;
             let sdp = param_str(params, "sdp")?;
-            let join_url = param_str(params, "join_url")?;
-            let meeting = calling::MeetingJoin::from_join_url(&join_url)
-                .context("call_join: that is not a Teams meeting link")?;
+            // The same address the reservation named, in either shape (see
+            // `meeting_address`): a calendar link, or the meeting's own chat thread.
+            let meeting = meeting_address(params)
+                .context("call_join")?
+                .context("call_join: no meeting named — pass join_url or meeting_thread")?;
             let (local, callbacks) = {
                 let plane = ctx.calling.lock().unwrap();
                 let call = plane
@@ -5360,6 +5401,45 @@ fn param_str(params: &Value, key: &str) -> Result<String> {
         .map(String::from)
         .with_context(|| format!("missing param: {key}"))
 }
+
+/// WHICH meeting a `call_prepare` / `call_join` is about, in either way one can be named.
+///
+/// A meeting has two addresses and they come from two surfaces the user actually has:
+/// `join_url` is the link a CALENDAR event carries, and `meeting_thread` is the meeting's own
+/// conversation from the CHAT LIST — where a meeting the user was invited to already sits,
+/// with no link anywhere in it (this tenant's invitations carry the short `/meet/{code}`
+/// shape, and that code lives in the calendar event alone). Both parse to one
+/// [`calling::MeetingJoin`], so everything downstream knows one address type.
+///
+/// `Ok(None)` means the caller named neither, which is how the placing branch of
+/// `call_prepare` is told apart from the joining one. A value that IS named and does not
+/// parse is an error rather than a fallthrough: a join that quietly became a call would ring
+/// people instead of walking into a meeting.
+fn meeting_address(params: &Value) -> Result<Option<calling::MeetingJoin>> {
+    if let Some(join_url) = params.get("join_url").and_then(Value::as_str) {
+        return calling::MeetingJoin::from_join_url(join_url).map(Some).context(
+            "that is not a Teams meeting link — this app joins a meeting from its own join \
+             link and nothing else",
+        );
+    }
+    if let Some(thread) = params.get("meeting_thread").and_then(Value::as_str) {
+        return calling::MeetingJoin::from_thread_id(thread).map(Some).context(
+            "that conversation is not a meeting — only a meeting's own thread can be joined, \
+             and a group chat is called instead",
+        );
+    }
+    Ok(None)
+}
+
+/// How many people one call may ring at once.
+///
+/// A group call is the same POST as a 1:1 (`calling::invitation_payload`), so nothing in the
+/// protocol imposes this — what does is that every one of them is a device buzzing in
+/// somebody's pocket, and a mis-click on a 60-person thread cannot be taken back. Twenty is
+/// the size Teams itself stops tracking a thread's read receipts at, which is a fair line
+/// between a group and a broadcast. Above it the user still has real Teams, which is where a
+/// meeting for that many people belongs.
+const MAX_GROUP_CALL_PEOPLE: usize = 20;
 
 /// The modalities a media answer declares, checked against the four the service names.
 ///
@@ -7674,6 +7754,10 @@ impl Ctx {
             conversation_id: invite.thread_id.clone(),
             peer_mri: invite.caller_mri.clone(),
             peer_name,
+            // We are the one being rung, so this side rings nobody. An invite that reaches
+            // us from a GROUP call is still named after its CALLER: they are who the user
+            // decides about, and everybody else arrives on the roster.
+            ring: Vec::new(),
             links: invite.links.clone(),
             local: calling::LocalParticipant {
                 // The leg the service assigned us, when it did: answering under a
@@ -8682,6 +8766,52 @@ mod tests {
         }
     }
 
+    /// A meeting is named in one of two ways, because the user reaches one from two
+    /// places: the LINK a calendar event carries, and the THREAD it has in the chat list.
+    /// One parse for both, so nothing downstream knows two address types.
+    #[test]
+    fn a_meeting_is_addressed_by_its_link_or_by_its_own_thread() {
+        let by_link = meeting_address(&json!({
+            "join_url": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0"
+        }))
+        .unwrap()
+        .expect("a meeting");
+        assert_eq!(by_link.thread_id.as_deref(), Some("19:meeting_x@thread.v2"));
+
+        let by_thread = meeting_address(&json!({ "meeting_thread": "19:meeting_x@thread.v2" }))
+            .unwrap()
+            .expect("a meeting");
+        assert_eq!(by_thread.thread_id.as_deref(), Some("19:meeting_x@thread.v2"));
+        assert_eq!(by_thread.message_id, "0");
+
+        // Neither named: the placing branch of `call_prepare`, which rings people instead.
+        assert!(meeting_address(&json!({ "conversation": "19:chat@thread.v2" })).unwrap().is_none());
+
+        // Named and unusable is an ERROR, never a fallthrough — a join that quietly became
+        // a call would ring people instead of walking into a meeting. A plain group chat is
+        // the case that really happens: it is called, and it has no meeting to join.
+        let refused = meeting_address(&json!({
+            "meeting_thread": "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2"
+        }))
+        .expect_err("a group chat is not a meeting");
+        assert!(refused.to_string().contains("not a meeting"), "{refused}");
+        assert!(meeting_address(&json!({ "join_url": "https://zoom.us/j/1" })).is_err());
+    }
+
+    /// A group call rings every phone in the thread at once, and that cannot be taken
+    /// back — so there is a ceiling, and it is stated where both the refusal and the mock
+    /// can read it.
+    #[test]
+    fn a_group_call_rings_a_group_and_not_a_broadcast() {
+        assert_eq!(MAX_GROUP_CALL_PEOPLE, 20);
+        // The three kinds a client is shown, each spelled once. A group is its own name
+        // because the UI draws a conversation rather than a face for it, and a meeting's
+        // lobby is a state a group call does not have.
+        assert_eq!(CallKind::Call.as_str(), "call");
+        assert_eq!(CallKind::Group.as_str(), "group");
+        assert_eq!(CallKind::Meeting.as_str(), "meeting");
+    }
+
     /// The state every client is given must carry no SDP and no credentials: those
     /// leave only through a token-gated method.
     #[test]
@@ -8696,6 +8826,7 @@ mod tests {
             conversation_id: Some("19:thread@thread.v2".into()),
             peer_mri: "8:orgid:her".into(),
             peer_name: "Her".into(),
+            ring: Vec::new(),
             links: calling::Links::collect(&json!({
                 "links": { "accept": "https://x/accept", "hangup": "https://x/hangup" }
             })),
@@ -8747,6 +8878,7 @@ mod tests {
             conversation_id: None,
             peer_mri: "8:orgid:her".into(),
             peer_name: "Her".into(),
+            ring: Vec::new(),
             links: calling::Links::default(),
             local: calling::LocalParticipant {
                 id: "8:orgid:me".into(),

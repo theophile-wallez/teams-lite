@@ -9,7 +9,7 @@
 
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import { BACKEND_WS_ROUTE } from "./backend-route";
-import type { CallPreparation, CallStatus } from "./call";
+import type { CallPreparation, CallStatus, MeetingAddress } from "./call";
 import type { SendImage } from "./composer-image";
 import type { OutboundMention } from "./mentions";
 import type {
@@ -158,6 +158,18 @@ export function defaultWsUrl(): string {
 export function isWriteTokenRefusal(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? "");
   return message.includes("needs the write token");
+}
+
+/** How a meeting travels to `call_prepare` and `call_join` (`meeting_address` in
+ *  src/bin/server.rs): the link a calendar event carried, or the meeting's own thread.
+ *
+ *  Exactly ONE of the two names is ever sent. The backend reads the link first, so a body
+ *  carrying both would silently pick one — and the one it picked would not always be the
+ *  one the button the user pressed was drawn from. */
+function meetingParams(meeting: MeetingAddress): Record<string, string> {
+  return meeting.kind === "link"
+    ? { join_url: meeting.joinUrl }
+    : { meeting_thread: meeting.thread };
 }
 
 const RECONNECT_GIVE_UP_MS = 30_000;
@@ -673,13 +685,13 @@ export class Backend {
     target:
       | { conversation: string }
       | { callId: string }
-      | { joinUrl: string; subject?: string },
+      | { meeting: MeetingAddress; subject?: string },
   ): Promise<CallPreparation> {
     const params =
       "conversation" in target
         ? { conversation: target.conversation }
-        : "joinUrl" in target
-          ? { join_url: target.joinUrl, subject: target.subject }
+        : "meeting" in target
+          ? { ...meetingParams(target.meeting), subject: target.subject }
           : { call_id: target.callId };
     return this.writeRequest<CallPreparation>("call_prepare", params);
   }
@@ -690,11 +702,18 @@ export class Backend {
   }
   /** Join a meeting: the same one POST, with the meeting's own thread instead of
    *  somebody to ring. Outward, because everybody already in the meeting sees the user
-   *  arrive and their microphone is opened to all of them. */
-  callJoin(callId: string, joinUrl: string, sdp: string): Promise<{ call_id: string }> {
+   *  arrive and their microphone is opened to all of them.
+   *
+   *  The meeting travels in whichever shape the user reached it by — a calendar link, or the
+   *  thread out of the chat list — and the backend parses it again. */
+  callJoin(
+    callId: string,
+    meeting: MeetingAddress,
+    sdp: string,
+  ): Promise<{ call_id: string }> {
     return this.writeRequest<{ call_id: string }>("call_join", {
       call_id: callId,
-      join_url: joinUrl,
+      ...meetingParams(meeting),
       sdp,
     });
   }

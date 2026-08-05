@@ -90,6 +90,7 @@ import {
   modalityFor,
   type CallMediaSignal,
   type CallStatus,
+  type MeetingAddress,
 } from "./call";
 import {
   MicrophoneUnavailableError,
@@ -1732,23 +1733,24 @@ export class TeamsController {
   }
 
   /**
-   * Join a meeting from the link its calendar event carries.
+   * Join a meeting — from the link its calendar event carries, or from the meeting's own
+   * conversation in the chat list (see {@link MeetingAddress}).
    *
    * The same three steps as placing a call, and the same gate: the backend reserves the
    * call and hands back what a peer connection needs, the page opens the microphone,
    * and the SDP goes back. Nothing is joined without this click — the calendar's join
    * link is never followed on the user's behalf.
    */
-  async joinMeeting(joinUrl: string, subject?: string): Promise<void> {
+  async joinMeeting(meeting: MeetingAddress, subject?: string): Promise<void> {
     if (isLive(this.get().callStatus.call)) return;
     this.set({ callError: null });
     this.showCallNotice(null);
     let callId: string | null = null;
     try {
-      const prepared = await this.backend.callPrepare({ joinUrl, subject });
+      const prepared = await this.backend.callPrepare({ meeting, subject });
       callId = prepared.call_id;
       this.callMedia = await this.openCallMedia({ iceServers: prepared.ice_servers });
-      await this.backend.callJoin(prepared.call_id, joinUrl, this.callMedia.localSdp);
+      await this.backend.callJoin(prepared.call_id, meeting, this.callMedia.localSdp);
     } catch (error) {
       this.set({ callError: callErrorText(error) });
       this.stopCallMedia();

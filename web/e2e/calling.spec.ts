@@ -21,7 +21,8 @@ import {
 // rule that is ours to keep:
 //
 //   * calling is OFF until the user turns it on, and the button says so;
-//   * a call can only be placed in a one-to-one chat;
+//   * what a conversation offers is decided by the conversation: ring the person, ring the
+//     whole group, or JOIN the meeting the thread was minted for;
 //   * the ringing card can be answered, declined and muted;
 //   * one call at a time.
 //
@@ -62,13 +63,69 @@ test.describe("Audio calling", () => {
     await expect(button).toHaveAttribute("aria-label", /Call Ava Thompson/);
   });
 
-  /** One microphone, one audio element, no roster: a group call is not offered at all,
-   *  rather than offered and then refused. */
-  test("offers no call button outside a one-to-one chat", async ({ page }) => {
+  /** A group chat is CALLED, and the label says what that reaches: every member at once,
+   *  which is the fact the user needs before a click nothing takes back. */
+  test("rings the whole group from a group chat", async ({ page }) => {
     await gotoApp(page);
     await turnCallingOn(page);
     await openConversationNamed(page, "Platform Team");
+    const button = page.locator('[data-testid="call-button"]');
+    await expect(button).toBeEnabled();
+    await expect(button).toHaveAttribute("aria-label", /everybody in Platform Team/);
+
+    await button.click();
+    const bar = page.locator('[data-testid="call-bar"]');
+    await expect(bar).toBeVisible();
+    // The CONVERSATION is named, not a person: a group of five has no one name, and the
+    // roster is what answers "who" — once somebody picks up.
+    await expect(page.locator('[data-testid="call-peer"]')).toContainText("Platform Team");
+    await expect(page.locator('[data-testid="call-phase"]')).toContainText("Calling…");
+    await expect(bar).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    await expect(page.locator('[data-testid="call-phase"]')).toContainText(/With /);
+
+    await page.locator('[data-testid="call-hangup"]').click();
+    await expect(bar).toHaveCount(0);
+  });
+
+  /** The meeting in the chat list is JOINED, from the thread itself — no calendar, and no
+   *  link to find. It is the one control that thread gets: joining and ringing everybody
+   *  invited answer the same question, and only one of them is what the thread is for. */
+  test("joins the meeting a meeting chat was opened for", async ({ page }) => {
+    await gotoApp(page);
+    await turnCallingOn(page);
+    await openConversationNamed(page, "Design Sync");
+    // No ring here, and the Join button states WHICH meeting it joins — the thread — so a
+    // driver can prove its target before an outward click.
     await expect(page.locator('[data-testid="call-button"]')).toHaveCount(0);
+    const join = page.locator('[data-testid="meeting-join-here"]');
+    await expect(join).toBeEnabled();
+    const conversationId = await page
+      .locator('[data-testid="composer-shell"]')
+      .getAttribute("data-conversation-id");
+    expect(conversationId).toMatch(/^19:meeting_/);
+    await expect(join).toHaveAttribute("data-meeting-thread", conversationId!);
+    // And no link, because none exists here: an address is stated in one shape only.
+    await expect(join).not.toHaveAttribute("data-join-url", /./);
+
+    await join.click();
+    const bar = page.locator('[data-testid="call-bar"]');
+    await expect(bar).toBeVisible();
+    // The thread's own name is the meeting's title — the backend reads it from the store
+    // rather than the page minting a second spelling of it.
+    await expect(page.locator('[data-testid="call-peer"]')).toContainText("Design Sync");
+    await expect(bar).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+
+    await page.locator('[data-testid="call-hangup"]').click();
+    await expect(bar).toHaveCount(0);
+  });
+
+  /** Notes is the one chat with nobody in it, so it offers neither. */
+  test("offers nothing in the chat with oneself", async ({ page }) => {
+    await gotoApp(page);
+    await turnCallingOn(page);
+    await openConversationNamed(page, "Notes");
+    await expect(page.locator('[data-testid="call-button"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="meeting-join-here"]')).toHaveCount(0);
   });
 
   test("places a call, shows it connect, and hangs up", async ({ page }) => {
@@ -225,7 +282,13 @@ test.describe("Joining a meeting", () => {
     await openCalendarTab(page);
     await openCalendarView(page, "day");
     await calendarEvent(page, "ev-overlap-a").click();
-    await page.locator('[data-testid="meeting-join-here"]').click();
+    const join = page.locator('[data-testid="meeting-join-here"]');
+    // From the calendar the address is the LINK the event carries, and it is stated on the
+    // button for the same reason the chat's thread is: an outward click a driver cannot
+    // prove its target for is one it must not make. One shape at a time, never both.
+    await expect(join).toHaveAttribute("data-join-url", /meetup-join/);
+    await expect(join).not.toHaveAttribute("data-meeting-thread", /./);
+    await join.click();
 
     const bar = page.locator('[data-testid="call-bar"]');
     await expect(bar).toBeVisible();

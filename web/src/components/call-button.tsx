@@ -3,23 +3,31 @@ import { CallIcon } from "@hugeicons/core-free-icons";
 import {
   callUnavailableReason,
   canPlaceCall,
-  conversationIsCallable,
+  conversationCallAction,
+  meetingAddressOf,
 } from "~/lib/call";
+import { convLabel, isGroupChat } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
+import { MeetingJoinButton } from "./meeting-join-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 /**
- * The call button in a conversation's header.
+ * The call control in a conversation's header — one per conversation, and the conversation
+ * itself decides which one it is (`conversationCallAction`).
  *
- * It is drawn only where a call would really work — a one-to-one chat, on a machine the
- * user turned calling on, with the calling connection up and no call already in flight.
- * Everywhere else it is absent rather than disabled: a button that cannot do the thing
- * it names is worse than no button, and the reason it is missing belongs in Settings,
- * where the switch is.
+ * A chat with people in it is CALLED: one person in a 1:1, everybody at once in a group,
+ * which is the same POST and the same call. A thread Teams minted FOR a meeting is JOINED
+ * instead, addressed by that thread — so a meeting the user was invited to is reachable
+ * from the chat list, without going to the calendar for its link.
  *
- * The one exception is a one-to-one chat where calling is simply OFF. There the button
- * stays, disabled, with the reason in its tooltip — because that is the case the user
- * can fix, and a missing button would leave them looking for a feature the app has.
+ * It is drawn only where it would really work — on a machine the user turned calling on,
+ * with the calling connection up and no call already in flight. Everywhere else it is
+ * absent rather than disabled: a button that cannot do the thing it names is worse than no
+ * button, and the reason it is missing belongs in Settings, where the switch is.
+ *
+ * The one exception is a chat where calling is simply OFF. There the control stays,
+ * disabled, with the reason in its tooltip — because that is the case the user can fix, and
+ * a missing button would leave them looking for a feature the app has.
  */
 export function CallButton(props: { conversationId: string }) {
   const controller = useController();
@@ -28,17 +36,31 @@ export function CallButton(props: { conversationId: string }) {
     s.conversations.find((c) => c.id === props.conversationId),
   );
 
-  const callable = conversationIsCallable(conversation?.kind);
-  // A channel, a group chat, or a thread this app cannot call: no button at all.
-  if (!callable) return null;
+  const action = conversationCallAction(conversation);
+  // Notes — the chat with oneself — and anything this app cannot address: no control.
+  if (action === "none") return null;
+  // A meeting is joined rather than rung, and the Join button carries its own rails,
+  // including the address it states for a driver to prove before it clicks.
+  const meeting = meetingAddressOf(conversation);
+  if (action === "join" && meeting) return <MeetingJoinButton meeting={meeting} />;
 
   const ready = canPlaceCall(status);
-  const reason = callUnavailableReason(status, callable);
+  const reason = callUnavailableReason(status);
+  const group = !!conversation && isGroupChat(conversation);
   const button = (
     <button
       type="button"
       data-testid="call-button"
-      aria-label={ready ? `Call ${conversation?.name || "this person"}` : reason}
+      // A group call rings EVERY member at once, so the label says what it reaches rather
+      // than naming one person. That is the fact the user needs before the click, and the
+      // one thing they cannot take back after it.
+      aria-label={
+        ready
+          ? group
+            ? `Call everybody in ${convLabel(conversation)}`
+            : `Call ${conversation?.name || "this person"}`
+          : reason
+      }
       disabled={!ready}
       onClick={() => void controller.startCall(props.conversationId)}
       className="grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"

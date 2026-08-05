@@ -39,6 +39,7 @@
 // Usage:
 //
 //   cd web && bun run join-live            # join, watch, hang up, print the timeline
+//   cd web && bun run join-live -- --from-chat  # the same meeting, from its own chat header
 //   cd web && bun run join-live -- --local # the same meeting through this machine's front
 //   cd web && bun run join-live -- --hold 45   # stay 45s before hanging up
 //   cd web && bun run join-live -- --tone  # capture Chrome's beep instead of silence
@@ -299,7 +300,7 @@ export type MediaStats = {
  */
 export async function withJoinLive<T>(
   body: (session: JoinLiveSession) => Promise<T>,
-  opts: { front?: "tailnet" | "local"; tone?: boolean } = {},
+  opts: { front?: "tailnet" | "local"; tone?: boolean; from?: "calendar" | "chat" } = {},
 ): Promise<T> {
   const origin = opts.front === "local" ? LOCAL_ORIGIN : TAILNET_ORIGIN;
   const url = origin;
@@ -392,9 +393,18 @@ export async function withJoinLive<T>(
     const seen: CallBarState[] = [];
     await page.goto(url, { waitUntil: "domcontentloaded" });
 
-    const button = await findPinnedJoinButton(page);
+    // The two ways into the same meeting, and each proves the same target its own way:
+    // the CALENDAR event's button states the join link, the CHAT header's states the
+    // thread. Both are read off the page immediately before the click.
+    const button =
+      opts.from === "chat"
+        ? await findPinnedJoinButtonInChat(page, origin)
+        : await findPinnedJoinButton(page);
     await assertPinnedMeeting(button, page);
-    console.log(`  joining ${AUTHORIZED_MEETING_CODE} — the pinned meeting`);
+    console.log(
+      `  joining ${AUTHORIZED_MEETING_CODE} — the pinned meeting, from ` +
+        `${opts.from === "chat" ? "its own chat" : "the calendar"}`,
+    );
     await button.click();
 
     const session: JoinLiveSession = {
@@ -500,8 +510,37 @@ async function findInThisWindow(page: Page) {
 }
 
 /**
- * The gate. Reads the button's own `data-join-url` and throws unless it names the
- * pinned meeting.
+ * The Join button in the pinned meeting's own CHAT — the other half of the feature, and
+ * the only way to exercise it live.
+ *
+ * A meeting-backed thread is a join ADDRESS on its own (`MeetingJoin::from_thread_id`), so
+ * this path never involves a link at all: the calendar is not opened, and nothing is
+ * searched for. The conversation is opened by its own id — the pinned thread, a constant in
+ * this file — exactly as `sandbox-live.ts` opens the sandbox chat, because clicking through
+ * the sidebar of a live app cannot prove which thread was opened.
+ *
+ * Two proofs before the click, both out of the app's own state: the composer says which
+ * conversation is open, and the button says which meeting it joins.
+ */
+async function findPinnedJoinButtonInChat(page: Page, origin: string) {
+  await page.goto(`${origin}/c/${encodeURIComponent(AUTHORIZED_MEETING_THREAD)}`, {
+    waitUntil: "domcontentloaded",
+  });
+  const composer = page.locator('[data-testid="composer-shell"]');
+  await composer.waitFor({ timeout: APP_READY_TIMEOUT_MS });
+  const open = await composer.getAttribute("data-conversation-id");
+  if (open !== AUTHORIZED_MEETING_THREAD) {
+    throw new Error(
+      `REFUSING TO JOIN: the open conversation is ${open ?? "unknown"}, not the pinned ` +
+        `meeting's thread ${AUTHORIZED_MEETING_THREAD}.\n  now at: ${page.url()}`,
+    );
+  }
+  return page.locator('[data-testid="meeting-join-here"]').first();
+}
+
+/**
+ * The gate. Reads the button's OWN address — the join link, or the meeting thread — and
+ * throws unless it names the pinned meeting.
  *
  * Re-read immediately before the click for the same reason `sandbox-live.ts` re-reads
  * its conversation id: "it was the right event a moment ago" is not proof that the
@@ -511,14 +550,20 @@ async function assertPinnedMeeting(
   button: ReturnType<Page["locator"]>,
   page: Page,
 ): Promise<void> {
-  const link = await button.getAttribute("data-join-url", { timeout: JOIN_BUTTON_TIMEOUT_MS });
+  await button.waitFor({ timeout: JOIN_BUTTON_TIMEOUT_MS });
+  const link = await button.getAttribute("data-join-url");
+  const thread = await button.getAttribute("data-meeting-thread");
+  // A thread is compared WHOLE, and to one constant: it is an exact id, so there is no
+  // reason to match a fragment of it the way a percent-encoded url needs.
+  if (thread !== null && thread === AUTHORIZED_MEETING_THREAD) return;
   if (namesPinnedMeeting(link)) return;
   const shown =
-    link === null
-      ? "unknown: the button carries no `data-join-url`. If the app otherwise works, the " +
-        "service is probably serving a bundle staged before that attribute existed — " +
-        "check `bin/teams-lite-service.sh status` and re-stage with `update`"
-      : `"${link}"`;
+    link === null && thread === null
+      ? "unknown: the button states neither `data-join-url` nor `data-meeting-thread`. If " +
+        "the app otherwise works, the service is probably serving a bundle staged before " +
+        "that attribute existed — check `bin/teams-lite-service.sh status` and re-stage " +
+        "with `update`"
+      : `"${thread ?? link}"`;
   throw new Error(
     `REFUSING TO JOIN: this app is talking to the real Teams account, and the button on ` +
       `screen joins ${shown}, not the pinned meeting ${AUTHORIZED_MEETING_CODE}.\n` +
@@ -876,6 +921,9 @@ if (import.meta.main) {
   const argv = process.argv.slice(2);
   const front = argv.includes("--local") ? "local" : "tailnet";
   const tone = argv.includes("--tone");
+  // WHERE the join is started from. The same meeting either way — the flag chooses which
+  // surface's button is proved and pressed, never which meeting.
+  const from = argv.includes("--from-chat") ? "chat" : "calendar";
   const holdAt = argv.indexOf("--hold");
   const hold = holdAt >= 0 ? Number(argv[holdAt + 1]) : DEFAULT_HOLD_SECONDS;
 
@@ -940,6 +988,6 @@ if (import.meta.main) {
           "  The backend journal has the frames: journalctl --user -u teams-lite-backend -n 60\n",
       );
     },
-    { front, tone },
+    { front, tone, from },
   );
 }
