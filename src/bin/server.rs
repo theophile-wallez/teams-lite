@@ -3790,6 +3790,16 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
             }
             ctx.emit_call_state();
+            // What the answer really granted. `activeModalities.call` is the audio leg:
+            // the conversation joins whether or not the media was accepted, so a join
+            // that reads as a success and carries a null call is the one shape that
+            // looks fine here and goes silent a second later.
+            eprintln!(
+                "[calling] joined the meeting: audio={} lobby={} links={}",
+                joined.raw.pointer("/activeModalities/call").is_some_and(|c| !c.is_null()),
+                calling::lobby_state_in_frame(&joined.raw) == Some(calling::LobbyState::Waiting),
+                joined.links.names().len()
+            );
             Ok(json!({ "call_id": call_id, "links": joined.links.names() }))
         }
 
@@ -7056,7 +7066,6 @@ impl Ctx {
             } else {
                 ended.phrase
             };
-            eprintln!("[calling] the call ended: {reason}");
             self.end_call_locally(&reason).await;
             return;
         }
@@ -7253,6 +7262,11 @@ impl Ctx {
         if !had_call {
             return;
         }
+        // EVERY ending passes through here, so this is the one place that can state why.
+        // The page says "The call ended." and the reason was nowhere on this machine, so a
+        // call that stopped a second after it started could not be told from one the
+        // service refused — the same blind spot a refused write had before it said so.
+        eprintln!("[calling] the call is over: {reason}");
         // One emit with the ending in it, then the slot is free. The UI needs that
         // frame to stop holding the microphone, so the drop cannot be folded into it.
         self.emit_call_state();
