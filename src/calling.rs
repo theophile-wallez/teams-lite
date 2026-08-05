@@ -213,6 +213,26 @@ pub struct CallbackBase {
     pub cause_id: String,
 }
 
+/// A surl with its allocation id replaced by an ellipsis, for a journal line.
+///
+/// The links a join publishes live on this address, and a refusal that names nothing
+/// makes the address the first thing to compare with a working client's. Only its
+/// SHAPE is printed — the host and the path, never the id: that id is what routes a
+/// frame to this connection, so it is a key and the journal is not the place for it.
+pub fn surl_shape(surl: &str) -> String {
+    let Some((prefix, rest)) = surl.split_once("/v4/") else {
+        return surl.to_string();
+    };
+    // `/v4/f/{id}/` — the flavour letter says which allocate flow answered, and the
+    // segment after it is the id.
+    let mut parts = rest.splitn(2, '/');
+    let flavour = parts.next().unwrap_or_default();
+    match parts.next() {
+        Some(_) => format!("{prefix}/v4/{flavour}/…/"),
+        None => format!("{prefix}/v4/{flavour}"),
+    }
+}
+
 impl CallbackBase {
     /// Build one callback link: `{surl}callAgent/{sessionId}/{causeId}{path}`.
     pub fn link(&self, path: &str) -> String {
@@ -1758,6 +1778,27 @@ mod tests {
         );
         assert!(post_signal.contains("ms-teams-region"), "the service routes on the region");
         assert!(post_signal.contains("ms-teams-ring"), "and on the ring");
+    }
+
+    /// The journal names the address a call publishes its links on, because a refusal
+    /// that says nothing makes that address the first thing to compare. It names the
+    /// HOST and the flavour and never the allocation id, which routes frames to us.
+    #[test]
+    fn a_logged_surl_keeps_its_host_and_drops_its_id() {
+        let surl = "https://pub-ent-plce-03-f.trouter.teams.microsoft.com:3443/v4/f/SBjmODent0m1dNwsgcTbeQ/";
+        let shape = surl_shape(surl);
+        assert_eq!(
+            shape,
+            "https://pub-ent-plce-03-f.trouter.teams.microsoft.com:3443/v4/f/…/"
+        );
+        assert!(!shape.contains("SBjmODent0m1dNwsgcTbeQ"), "the id is a key: {shape}");
+        // An allocate endpoint carries no id at all, and stays whole.
+        assert_eq!(
+            surl_shape("https://go-eu.trouter.teams.microsoft.com/v4/a"),
+            "https://go-eu.trouter.teams.microsoft.com/v4/a"
+        );
+        // Anything that is not a trouter address is printed as it is.
+        assert_eq!(surl_shape("https://example.test/x"), "https://example.test/x");
     }
 
     #[test]

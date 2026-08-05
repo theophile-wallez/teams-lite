@@ -6909,6 +6909,11 @@ impl Ctx {
         let ctx_chan = self.clone();
         tokio::spawn(async move {
             while let Some(channel) = chan_rx.recv().await {
+                eprintln!(
+                    "[calling] callbacks on {} (epid {})",
+                    calling::surl_shape(&channel.surl),
+                    channel.endpoint_id
+                );
                 let changed = {
                     let mut plane = ctx_chan.calling.lock().unwrap();
                     let changed = plane
