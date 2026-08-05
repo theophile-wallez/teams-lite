@@ -791,10 +791,21 @@ Teams (`web/src/components/meeting-join-button.tsx`). It joins with a microphone
 nothing else, so both actions exist and neither replaces the other: a meeting whose point
 is a shared screen is still one to open in Teams.
 
-- **The link IS the address.** `calling::MeetingJoin::from_join_url` reads the thread, the
-  message id and the `{Tid, Oid}` context out of `onlineMeeting.joinUrl`, and that
-  context is exactly the `meetingInfo` the calling service asks for. So joining needs no
-  new service and no new token — the link the user could click is the whole address.
+- **The link IS the address, in either shape Teams writes one.**
+  `calling::MeetingJoin::from_join_url` reads both: the long
+  `…/l/meetup-join/{thread}/{message}?context={Tid,Oid}`, whose thread and context become
+  `groupChat` and the `meetingInfo` the service asks for; and the SHORT
+  `…/meet/{code}?p={passcode}`, which names no thread at all and travels as
+  `meetingData {meetingCode, passcode, meetingUrl}` instead — the service resolves the
+  thread from the code. This tenant's own meetings use the short one, so a parser that
+  knew only the long shape hid the button. Send only the half a link really carried:
+  inventing the other is how a join earns a `400` with an empty body.
+- **`conversationType` is NULL for a join, and for an ordinary call.** The web client
+  names one only for an emergency call, a cast, a huddle or a consult-and-add
+  (`getConversationType`). A plausible-looking `"conversation"` there is refused by the
+  service with no explanation, which cost one debugging round — and it is why
+  `calling::post_signal` now carries the service's own `x-microsoft-skype-*` and `ms-cv`
+  headers into the error, and logs the request body under `TEAMS_LITE_CALL_DEBUG=1`.
   `examples/meeting_join_recon.rs` checks the parse against the user's own real meetings,
   READ-ONLY, and prints shapes rather than values because a join URL is a key.
 - **A join rings nobody**, which is the only thing it does differently from a call: the

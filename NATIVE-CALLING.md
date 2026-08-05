@@ -263,10 +263,15 @@ The browser half is two files: `web/src/lib/call.ts` (pure state model) and
 UI is `call-bar.tsx` (ringing and in-call, one component), `call-button.tsx` (a 1:1
 header) and the Settings switch.
 
-A meeting is joined rather than placed, and it is the same plane: the join link carries
-the thread and the `{Tid, Oid}` the service wants as `meetingInfo`
-(`calling::MeetingJoin`), the lobby is a state of its own, and the roster arrives as
-`rosterUpdate` frames. The one media difference is that a meeting sends several voices as
+A meeting is joined rather than placed, and it is the same plane. The join link comes in
+two shapes and `calling::MeetingJoin` reads both: the long
+`…/l/meetup-join/{thread}/{message}?context={Tid,Oid}` (thread → `groupChat`, context →
+`meetingInfo`) and the short `…/meet/{code}?p={passcode}` (→ `meetingData
+{meetingCode, passcode, meetingUrl}`, with no thread — the service resolves it). This
+tenant's meetings use the short one. `conversationType` is **null** for a join and for an
+ordinary call; the client names one only for an emergency call, a cast, a huddle or a
+consult-and-add, and an invented value is a `400 {}`. The lobby is a state of its own, and
+the roster arrives as `rosterUpdate` frames. The one media difference is that a meeting sends several voices as
 several streams, so the page keeps one audio element per stream.
 
 What is deliberately NOT built: video, screen sharing, a group call the user assembles
@@ -316,6 +321,11 @@ own click (§ 7), so these are the questions that first call answers:
   (`calling::relay_config_in_frame`) — if it never does, that is the next thing to find.
 - **What the create-call POST returns.** `PlacedCall` keeps the whole response, and the
   links are collected from it wherever they sit.
+- **Whether a short-link join needs anything more than `meetingData`.** The first live
+  attempt was refused for an unrelated reason (an invented `conversationType`); the retry
+  is what says whether the code and the passcode are enough. A refusal now names its own
+  cause, because the error carries the service's headers and the request body is logged
+  under `TEAMS_LITE_CALL_DEBUG=1`.
 
 ## 9. Reproducing this recon
 

@@ -3264,7 +3264,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     kind: CallKind::Meeting,
                     // Joining, not ringing: nobody has to pick up.
                     phase: CallPhase::Connecting,
-                    conversation_id: Some(meeting.thread_id.clone()),
+                    // A short link names no thread; the service resolves it from the
+                    // meeting code, and the conversation this call belongs to is then
+                    // whatever the service says rather than something we guessed.
+                    conversation_id: meeting.thread_id.clone(),
                     peer_mri: String::new(),
                     peer_name: subject,
                     roster: Vec::new(),

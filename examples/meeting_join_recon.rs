@@ -53,11 +53,16 @@ async fn main() -> Result<()> {
             Some(join) => {
                 parsed += 1;
                 println!(
-                    "   ok   thread={} message={} tenant={} organizer={} channel={}",
-                    shape(&join.thread_id),
+                    "   ok   thread={} message={} tenant={} organizer={} code={} pass={} channel={}",
+                    shape(join.thread_id.as_deref().unwrap_or_default()),
                     shape(&join.message_id),
                     present(join.tenant_id.as_deref()),
                     present(join.organizer_mri.as_deref()),
+                    // The short shape names a meeting code instead of a thread, and it
+                    // is the shape this tenant's own meetings use — so which half a
+                    // link carried is the thing worth counting here.
+                    present(join.meeting_code.as_deref()),
+                    present(join.passcode.as_deref()),
                     join.is_channel_meeting(),
                 );
             }

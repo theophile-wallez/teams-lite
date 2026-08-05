@@ -223,10 +223,15 @@ export function callEndLabel(call: ActiveCall | null): string {
  */
 export function isMeetingJoinLink(url: string | undefined | null): boolean {
   if (!url) return false;
-  const after = url.split("?")[0]?.split("/meetup-join/")[1];
+  const base = url.split("?")[0] ?? "";
+  // The SHORT shape Teams' newer meetings use: `…/meet/{code}`. It names no thread —
+  // the service resolves one from the code — so the code is what makes it a join link.
+  const code = base.split("/meet/")[1]?.split("/")[0] ?? "";
+  if (code.length > 0 && /^[A-Za-z0-9]+$/.test(code)) return true;
+  // The long shape: `…/l/meetup-join/{thread}/{message}`.
+  const after = base.split("/meetup-join/")[1];
   if (!after) return false;
-  const thread = decodeURIComponentSafe(after.split("/")[0] ?? "");
-  return thread.startsWith("19:");
+  return decodeURIComponentSafe(after.split("/")[0] ?? "").startsWith("19:");
 }
 
 function decodeURIComponentSafe(value: string): string {

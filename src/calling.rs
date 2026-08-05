@@ -618,7 +618,8 @@ pub fn mute_payload(local: &LocalParticipant, muted: bool) -> Value {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeetingJoin {
     /// The meeting's thread (`19:meeting_…@thread.v2`, or a channel's own thread).
-    pub thread_id: String,
+    /// Absent on a SHORT link, which names a meeting code instead of a thread.
+    pub thread_id: Option<String>,
     /// The message the meeting hangs off. `"0"` for a calendar meeting.
     pub message_id: String,
     /// The tenant the meeting belongs to, from the link's context.
@@ -626,17 +627,47 @@ pub struct MeetingJoin {
     /// The organizer, as an mri. The link states a bare oid; this is `8:orgid:{oid}`,
     /// which is the form the service's `meetingInfo` wants.
     pub organizer_mri: Option<String>,
+    /// The meeting code, from a short link (`/meet/{code}`). Teams' newer meetings are
+    /// addressed this way, and the service takes it as `meetingData.meetingCode`.
+    pub meeting_code: Option<String>,
+    /// The passcode that goes with that code (`?p=…`).
+    pub passcode: Option<String>,
+    /// The link itself, which the service wants back as `meetingData.meetingUrl`.
+    pub join_url: String,
 }
 
 impl MeetingJoin {
-    /// Read a join link. `None` when it is not one — a link to something else, or a
-    /// shape this does not know, which is a thing to add rather than to guess at.
+    /// Read a join link, in either shape Teams writes one.
+    ///
+    /// `None` when it is neither — a link to something else, or a shape this does not
+    /// know, which is a thing to add rather than to guess at.
     pub fn from_join_url(url: &str) -> Option<Self> {
-        // The path, up to the query: `…/l/meetup-join/{thread}/{message}`.
         let (base, query) = match url.split_once('?') {
             Some((base, query)) => (base, Some(query)),
             None => (url, None),
         };
+        // The SHORT shape, which Teams' newer meetings use: `…/meet/{code}?p={passcode}`.
+        // It names no thread at all, so the service is given the code and the passcode
+        // instead (`meetingData`) — and this is the shape the user's own meetings have.
+        if let Some(after) = base.split("/meet/").nth(1) {
+            let code = decode(after.split('/').next().unwrap_or_default());
+            if code.is_empty() || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return None;
+            }
+            return Some(Self {
+                thread_id: None,
+                message_id: "0".into(),
+                tenant_id: None,
+                organizer_mri: None,
+                meeting_code: Some(code),
+                passcode: query
+                    .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("p=")))
+                    .map(decode)
+                    .filter(|p| !p.is_empty()),
+                join_url: url.to_string(),
+            });
+        }
+        // The long shape: `…/l/meetup-join/{thread}/{message}?context={…}`.
         let after = base.split("/meetup-join/").nth(1)?;
         let mut segments = after.split('/').filter(|s| !s.is_empty());
         let thread_id = decode(segments.next()?);
@@ -662,13 +693,16 @@ impl MeetingJoin {
                 .map(str::to_string)
         };
         Some(Self {
-            thread_id,
+            thread_id: Some(thread_id),
             message_id,
             tenant_id: field("Tid"),
             organizer_mri: field("Oid").map(|oid| {
                 // The link states a bare object id; the service speaks mris.
                 if oid.contains(':') { oid } else { format!("8:orgid:{oid}") }
             }),
+            meeting_code: None,
+            passcode: None,
+            join_url: url.to_string(),
         })
     }
 
@@ -677,7 +711,20 @@ impl MeetingJoin {
     /// off — so both have to travel, or the join addresses the channel instead of the
     /// meeting inside it.
     pub fn is_channel_meeting(&self) -> bool {
-        !self.thread_id.starts_with("19:meeting_") && self.message_id != "0"
+        self.thread_id.as_ref().is_some_and(|thread| !thread.starts_with("19:meeting_"))
+            && self.message_id != "0"
+    }
+
+    /// What the service is told about the meeting when the link named a code rather
+    /// than a thread (`meetingData` — `{meetingCode, passcode, meetingUrl}`, the shape
+    /// the client's own conversation query reads).
+    fn meeting_data(&self) -> Option<Value> {
+        let code = self.meeting_code.as_ref()?;
+        let mut data = json!({ "meetingCode": code, "meetingUrl": self.join_url });
+        if let Some(passcode) = &self.passcode {
+            data["passcode"] = json!(passcode);
+        }
+        Some(data)
     }
 
     /// The `meetingInfo` object the service wants, or `None` when the link named no
@@ -709,7 +756,11 @@ pub fn join_payload(
 ) -> Value {
     let mut payload = json!({
         "conversationRequest": {
-            "conversationType": "conversation",
+            // NULL, and that is the client's own answer: `getConversationType` returns a
+            // string only for an emergency call, a cast, a huddle or a consult-and-add,
+            // and null for everything else. An invented value here is a 400 from the
+            // conversation service with an empty body — which is exactly what it sent.
+            "conversationType": Value::Null,
             // "Delta" is what the web client asks for: send me roster CHANGES. A
             // meeting's roster is the one thing that moves all through it.
             "roster": {
@@ -730,10 +781,12 @@ pub fn join_payload(
                 "receiveMessage": callbacks.link(paths::CONVERSATION_RECEIVE_MESSAGE),
             },
         },
-        // The meeting's own thread, and the message it hangs off. A channel meeting
-        // needs both; a calendar meeting's message id is "0".
-        "groupChat": { "threadId": meeting.thread_id, "messageId": message_id_or_null(meeting) },
         "participants": { "from": local.json() },
+        // The client sends both, always: a capability set it computed, and a null it
+        // does not use. Omitting a field the service expects is the other way to earn a
+        // 400 with no explanation.
+        "capabilities": Value::Null,
+        "endpointCapabilities": 0,
         "callInvitation": {
             "callModalities": [MODALITY_AUDIO],
             "links": {
@@ -746,6 +799,17 @@ pub fn join_payload(
             "mediaContent": offer.json(),
         },
     });
+    // How the meeting is addressed, and it is one of two ways. A long link names the
+    // thread the meeting lives in; a short one names a meeting code and a passcode, and
+    // the service resolves the thread itself. Sending the half we do not have is what a
+    // guess looks like, so each is sent only when the link really carried it.
+    if let Some(thread) = &meeting.thread_id {
+        payload["groupChat"] =
+            json!({ "threadId": thread, "messageId": message_id_or_null(meeting) });
+    }
+    if let Some(data) = meeting.meeting_data() {
+        payload["meetingData"] = data;
+    }
     if let Some(info) = meeting.meeting_info() {
         payload["meetingInfo"] = info;
     }
@@ -896,6 +960,17 @@ pub async fn post_signal(
     correlation_id: &str,
     payload: &Value,
 ) -> Result<Value> {
+    // What we SENT, when the capture switch is on: a payload the service refuses is
+    // diagnosed by comparing it with the real client's, and it cannot be compared if it
+    // was never written down. Redacted of nothing, because it is the user's own machine
+    // and the SDP is theirs — see `record_call_frame` for where this must not be pointed.
+    if std::env::var("TEAMS_LITE_CALL_DEBUG").as_deref() == Ok("1") {
+        eprintln!(
+            "[calling] POST {}\n{}",
+            redact_url(url),
+            serde_json::to_string_pretty(payload).unwrap_or_default()
+        );
+    }
     let response = http
         .post(url)
         .header("content-type", "application/json")
@@ -910,15 +985,28 @@ pub async fn post_signal(
         .context("calling: signaling POST failed")?;
 
     let status = response.status();
+    // The service explains a refusal in HEADERS as often as in the body: a validation
+    // failure answers `{}` and names the field in `x-microsoft-skype-*`. A 400 with an
+    // empty body and no headers is an error nobody can act on, and this app got one.
+    let reasons: Vec<String> = response
+        .headers()
+        .iter()
+        .filter(|(name, _)| {
+            let name = name.as_str();
+            name.starts_with("x-microsoft-skype") || name.starts_with("x-ms-") || name == "ms-cv"
+        })
+        .filter_map(|(name, value)| value.to_str().ok().map(|v| format!("{name}: {v}")))
+        .collect();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
         // Keep the service's own words: its phrases name the real cause ("this user
         // has no calling licence", "conversation does not exist") and a generic
         // message here would hide them.
         return Err(anyhow!(
-            "calling: {status} from {}: {}",
+            "calling: {status} from {} — {} [{}]",
             redact_url(url),
-            text.chars().take(400).collect::<String>()
+            text.chars().take(400).collect::<String>(),
+            reasons.join("; ")
         ));
     }
     if text.trim().is_empty() {
@@ -1369,7 +1457,7 @@ mod tests {
                    ?context=%7b%22Tid%22%3a%22af1bbf3d-1111-2222-3333-444455556666%22%2c\
                    %22Oid%22%3a%2299887766-5544-3322-1100-aabbccddeeff%22%7d";
         let join = MeetingJoin::from_join_url(url).expect("a join link");
-        assert_eq!(join.thread_id, "19:meeting_NTk4YzY0MTQt@thread.v2");
+        assert_eq!(join.thread_id.as_deref(), Some("19:meeting_NTk4YzY0MTQt@thread.v2"));
         // A calendar meeting hangs off no message.
         assert_eq!(join.message_id, "0");
         assert!(!join.is_channel_meeting());
@@ -1389,7 +1477,7 @@ mod tests {
         let url = "https://teams.microsoft.com/l/meetup-join/\
                    19%3aabc123%40thread.tacv2/1719400000000?context=%7b%22Tid%22%3a%22t%22%7d";
         let join = MeetingJoin::from_join_url(url).expect("a join link");
-        assert_eq!(join.thread_id, "19:abc123@thread.tacv2");
+        assert_eq!(join.thread_id.as_deref(), Some("19:abc123@thread.tacv2"));
         assert_eq!(join.message_id, "1719400000000");
         assert!(join.is_channel_meeting());
         // A context with no organizer names no `meetingInfo` rather than half of one.
@@ -1419,9 +1507,67 @@ mod tests {
         let join =
             MeetingJoin::from_join_url("https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0")
                 .expect("a join link");
-        assert_eq!(join.thread_id, "19:meeting_x@thread.v2");
+        assert_eq!(join.thread_id.as_deref(), Some("19:meeting_x@thread.v2"));
         assert_eq!(join.tenant_id, None);
         assert_eq!(join.meeting_info(), None);
+    }
+
+    /// The shape the user's OWN meetings have: a meeting code and a passcode, and no
+    /// thread at all. The service resolves the thread from the code, so the link is
+    /// handed back to it as `meetingData` instead of `groupChat`.
+    #[test]
+    fn a_short_meeting_link_yields_its_code_and_passcode() {
+        let url = "https://teams.microsoft.com/meet/35017215452446?p=4QyEW2wHMvAevXsCVU";
+        let join = MeetingJoin::from_join_url(url).expect("a join link");
+        assert_eq!(join.thread_id, None);
+        assert_eq!(join.meeting_code.as_deref(), Some("35017215452446"));
+        assert_eq!(join.passcode.as_deref(), Some("4QyEW2wHMvAevXsCVU"));
+        assert_eq!(join.join_url, url);
+        assert!(!join.is_channel_meeting());
+
+        let payload =
+            join_payload(&local(), &join, &MediaContent::sdp("v=0"), &callbacks());
+        // No thread to name, so none is invented.
+        assert!(payload.pointer("/payload/groupChat").is_none());
+        assert_eq!(payload.pointer("/payload/meetingData/meetingCode").unwrap(), "35017215452446");
+        assert_eq!(payload.pointer("/payload/meetingData/passcode").unwrap(), "4QyEW2wHMvAevXsCVU");
+        assert_eq!(payload.pointer("/payload/meetingData/meetingUrl").unwrap(), url);
+    }
+
+    /// A short link with no passcode still names the meeting, and a code that is not one
+    /// is refused rather than sent.
+    #[test]
+    fn a_short_link_is_checked_before_it_is_trusted() {
+        let join = MeetingJoin::from_join_url("https://teams.microsoft.com/meet/12345")
+            .expect("a join link");
+        assert_eq!(join.meeting_code.as_deref(), Some("12345"));
+        assert_eq!(join.passcode, None);
+        assert!(join.meeting_data().unwrap().get("passcode").is_none());
+        for url in [
+            "https://teams.microsoft.com/meet/",
+            "https://teams.microsoft.com/meet/not a code",
+        ] {
+            assert_eq!(MeetingJoin::from_join_url(url), None, "url: {url}");
+        }
+    }
+
+    /// `conversationType` is NULL for an ordinary join. The client only ever names one
+    /// for an emergency call, a cast, a huddle or a consult-and-add — and an invented
+    /// value earned a `400 {}` from the conversation service with no explanation.
+    #[test]
+    fn a_join_never_invents_a_conversation_type() {
+        let meeting = MeetingJoin::from_join_url(
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0",
+        )
+        .unwrap();
+        let payload = join_payload(&local(), &meeting, &MediaContent::sdp("v=0"), &callbacks());
+        assert_eq!(
+            payload.pointer("/payload/conversationRequest/conversationType").unwrap(),
+            &Value::Null
+        );
+        // And the two fields the client always sends, which a missing field would 400 on.
+        assert_eq!(payload.pointer("/payload/capabilities").unwrap(), &Value::Null);
+        assert!(payload.pointer("/payload/endpointCapabilities").is_some());
     }
 
     #[test]

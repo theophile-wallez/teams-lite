@@ -163,10 +163,14 @@ describe("joining a meeting", () => {
         "https://teams.microsoft.com/l/meetup-join/19%3Ameeting_x%40thread.v2/0?context=%7B%7D",
       ),
     ).toBe(true);
-    // A channel meeting is the other real shape.
+    // A channel meeting is another real shape.
     expect(
       isMeetingJoinLink("https://teams.microsoft.com/l/meetup-join/19%3Aabc%40thread.tacv2/17194"),
     ).toBe(true);
+    // And the SHORT shape Teams' newer meetings use — a code and a passcode, no thread.
+    // It is the shape the user's own meetings have, and refusing it hid the button.
+    expect(isMeetingJoinLink("https://teams.microsoft.com/meet/35017215452446?p=4QyEW")).toBe(true);
+    expect(isMeetingJoinLink("https://teams.microsoft.com/meet/12345")).toBe(true);
     for (const url of [
       "",
       null,
@@ -175,6 +179,8 @@ describe("joining a meeting", () => {
       "https://zoom.us/j/123",
       // The path is right, the thread is not one.
       "https://teams.microsoft.com/l/meetup-join/quarterly-planning",
+      // And a short path with no code names no meeting.
+      "https://teams.microsoft.com/meet/",
     ]) {
       expect(isMeetingJoinLink(url)).toBe(false);
     }
