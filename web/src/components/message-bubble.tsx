@@ -68,6 +68,8 @@ import { PersonHoverCard } from "./person-card";
 import { Emoji } from "./emoji";
 import { useAppState, useController } from "./controller-context";
 import { useMessageGestures } from "./use-message-gestures";
+import { extractableCustomEmoji } from "~/lib/custom-emoji";
+import { AddEmojiDialog } from "./add-emoji-dialog";
 
 // emoji-mart and its dataset are ~1.5 MB and only needed once someone reaches
 // past the six quick reactions, so the full picker is a lazy chunk.
@@ -494,6 +496,10 @@ function MessageBubbleImpl(props: {
   // it survives the ⋯ menu it was opened from — that menu closes on select, and a
   // popover must outlive the surface that opened it.
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  const [addEmojiDialogOpen, setAddEmojiDialogOpen] = useState(false);
+  const [addEmojiInitial, setAddEmojiInitial] = useState<{ name: string; url: string } | null>(
+    null,
+  );
   const emojiTheme = useAppState((s) => s.resolvedTheme);
   const messageGestures = useMessageGestures({
     enabled: !inert && !props.editing,
@@ -536,6 +542,33 @@ function MessageBubbleImpl(props: {
   // the message takes the body back, and again on every pass of the virtualized history.
   const onTranscriptToggle = (open: boolean) =>
     props.onAgentTranscriptToggle?.(props.message.id, open);
+
+  // The custom emoji pack, for extractableCustomEmoji to check whether a code is taken.
+  const [customPack, setCustomPack] = useState<import("~/lib/protocol").CustomEmoji[]>([]);
+  const controller = useController();
+  useEffect(() => {
+    let alive = true;
+    controller.loadCustomEmoji().then((pack) => {
+      if (alive) setCustomPack(pack);
+    });
+    const unsubscribe = controller.onCustomEmojiChange(() => {
+      controller.loadCustomEmoji().then((pack) => {
+        if (alive) setCustomPack(pack);
+      });
+    });
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, [controller]);
+
+  // A custom emoji from this message that the pack does not already hold, for "Add to my
+  // emoji". Offered only when it would do something: the message carries a custom emoji,
+  // and the code is not already taken. Never silently overwrites an existing emoji.
+  const addableEmoji = useMemo(() => {
+    const allBody = [...(bodyParts[0] ?? []), ...(bodyParts[1] ?? [])];
+    return extractableCustomEmoji(allBody, customPack);
+  }, [bodyParts, customPack]);
 
   // The quoted message a reply carries. Its own variable because a streamed agent
   // answer needs it too: the answer is posted as a native reply to the message that
@@ -909,10 +942,22 @@ function MessageBubbleImpl(props: {
                 onReviewWith={(agent, mr) =>
                   inComposer(() => props.onReviewWith?.(props.message, agent, mr))
                 }
+                addableEmoji={addableEmoji}
+                onAddEmoji={(src, code) => {
+                  setAddEmojiInitial({ name: code, url: src });
+                  setAddEmojiDialogOpen(true);
+                }}
               />
             )}
           </>
         )}
+
+        <AddEmojiDialog
+          open={addEmojiDialogOpen}
+          onClose={() => setAddEmojiDialogOpen(false)}
+          initialName={addEmojiInitial?.name}
+          initialUrl={addEmojiInitial?.url}
+        />
       </motion.div>
     </div>
   );
@@ -978,6 +1023,9 @@ function MessageActionsMenu(props: {
   /** Whether it is still open, so an approval would mean anything. */
   mergeRequestApprovable: boolean;
   onReviewWith: (agent: AgentCandidate, mergeRequest: MergeRequestLink) => void;
+  /** A custom emoji this message carries that the pack does not already hold, or null. */
+  addableEmoji: { src: string; code: string } | null;
+  onAddEmoji: (src: string, code: string) => void;
 }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   // A closed menu is disarmed: the next open starts at "Delete", never at the
@@ -1035,6 +1083,15 @@ function MessageActionsMenu(props: {
           <HugeiconsIcon icon={CopyIcon} className="size-4" strokeWidth={1.6} />
           Copy
         </DropdownMenuItem>
+        {props.addableEmoji && (
+          <DropdownMenuItem
+            data-testid="action-add-emoji"
+            onSelect={() => props.onAddEmoji(props.addableEmoji!.src, props.addableEmoji!.code)}
+          >
+            <HugeiconsIcon icon={SmilePlusIcon} className="size-4" strokeWidth={1.6} />
+            Add to my emoji
+          </DropdownMenuItem>
+        )}
         {props.answerAgents.length > 0 && (
           <>
             {/* Its own group: the rows above act on the message, these start a program

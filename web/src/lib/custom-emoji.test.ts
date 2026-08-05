@@ -4,6 +4,7 @@ import {
   customEmojiNameError,
   emojiSuggestions,
   emojiQueryBefore,
+  extractableCustomEmoji,
   insertedEmojiName,
 } from "./custom-emoji";
 import { parseRichHtml } from "./rich-text";
@@ -157,5 +158,64 @@ describe("insertedEmojiName", () => {
 
   it("returns the suggestion name when the emoji is absent from the pack", () => {
     expect(insertedEmojiName({ name: "unknown" }, [])).toBe("unknown");
+  });
+});
+
+describe("extractableCustomEmoji", () => {
+  const EMOJI_URL = "https://eu-api.asm.skype.com/v1/objects/0-a/views/imgo";
+  const EMOJI_IMG = `<img itemtype="http://schema.skype.com/Emoji" itemid="shipit" alt=":shipit:" src="${EMOJI_URL}" width="20" height="20">`;
+
+  function emoji(name: string): import("./protocol").CustomEmoji {
+    return {
+      name,
+      alias_of: "",
+      content_type: "image/png",
+      width: 64,
+      height: 64,
+      source: "local",
+      added_ms: Date.now(),
+    };
+  }
+
+  it("returns the first custom emoji when the pack does not have it", () => {
+    const nodes = parseRichHtml(`<p>Check out ${EMOJI_IMG}</p>`);
+    const result = extractableCustomEmoji(nodes, []);
+    expect(result).toEqual({ src: EMOJI_URL, code: "shipit" });
+  });
+
+  it("returns null when the pack already has that code", () => {
+    const nodes = parseRichHtml(`<p>Check out ${EMOJI_IMG}</p>`);
+    const pack = [emoji("shipit")];
+    expect(extractableCustomEmoji(nodes, pack)).toBeNull();
+  });
+
+  it("returns null when the message has no custom emoji", () => {
+    const nodes = parseRichHtml("<p>Just plain text</p>");
+    expect(extractableCustomEmoji(nodes, [])).toBeNull();
+  });
+
+  it("returns the first emoji when there are multiple", () => {
+    const SECOND_EMOJI = EMOJI_IMG.replace("shipit", "rocket").replace(":shipit:", ":rocket:");
+    const nodes = parseRichHtml(`<p>${EMOJI_IMG} and ${SECOND_EMOJI}</p>`);
+    const result = extractableCustomEmoji(nodes, []);
+    expect(result).toEqual({ src: EMOJI_URL, code: "shipit" });
+  });
+
+  it("strips colons from the code", () => {
+    const nodes = parseRichHtml(`<p>${EMOJI_IMG}</p>`);
+    const result = extractableCustomEmoji(nodes, []);
+    expect(result?.code).toBe("shipit");
+  });
+
+  it("returns null when emoji has no src", () => {
+    const BROKEN_IMG = '<img itemtype="http://schema.skype.com/Emoji" itemid="shipit" alt=":shipit:">';
+    const nodes = parseRichHtml(`<p>${BROKEN_IMG}</p>`);
+    expect(extractableCustomEmoji(nodes, [])).toBeNull();
+  });
+
+  it("returns null when emoji has no code", () => {
+    const BROKEN_IMG = `<img itemtype="http://schema.skype.com/Emoji" itemid="shipit" src="${EMOJI_URL}">`;
+    const nodes = parseRichHtml(`<p>${BROKEN_IMG}</p>`);
+    expect(extractableCustomEmoji(nodes, [])).toBeNull();
   });
 });

@@ -162,3 +162,40 @@ export function emojiSuggestions(
     ...unicodeSubstring,
   ].slice(0, limit);
 }
+
+/**
+ * Custom emoji from a message body that the pack does not already hold.
+ *
+ * Teams delivers each custom emoji as real markup carrying its own art URL and code.
+ * This extracts those emojis — their `src` and `:code:` — for the "Add to my emoji"
+ * action menu row. Returns the FIRST one only: a message with three would turn one menu
+ * into a directory.
+ *
+ * Offered only when the pack does not already have that code. An existing emoji is never
+ * overwritten silently.
+ */
+export function extractableCustomEmoji(
+  body: RichNode[],
+  pack: readonly CustomEmoji[],
+): { src: string; code: string } | null {
+  const taken = new Set(pack.map((e) => e.name));
+  const emoji = firstCustomEmoji(body);
+  if (!emoji) return null;
+  const name = emoji.code.replace(/^:|:$/g, "");
+  if (taken.has(name)) return null;
+  return { src: emoji.src, code: name };
+}
+
+function firstCustomEmoji(nodes: RichNode[]): { src: string; code: string } | null {
+  for (const node of nodes) {
+    if (node.type === "element") {
+      if (node.tag === "customEmoji" && node.attrs.src && node.attrs.code) {
+        const code = node.attrs.code.replace(/^:|:$/g, "");
+        return { src: node.attrs.src, code };
+      }
+      const inChildren = firstCustomEmoji(node.children);
+      if (inChildren) return inChildren;
+    }
+  }
+  return null;
+}

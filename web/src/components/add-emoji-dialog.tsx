@@ -58,7 +58,12 @@ async function loadEmojiImage(file: File): Promise<EmojiImage> {
   };
 }
 
-export function AddEmojiDialog(props: { open: boolean; onClose: () => void }) {
+export function AddEmojiDialog(props: {
+  open: boolean;
+  onClose: () => void;
+  initialName?: string;
+  initialUrl?: string;
+}) {
   const controller = useController();
   const [activeTab, setActiveTab] = useState("upload");
   const [name, setName] = useState("");
@@ -78,9 +83,9 @@ export function AddEmojiDialog(props: { open: boolean; onClose: () => void }) {
     if (!props.open) return;
     let alive = true;
     setActiveTab("upload");
-    setName("");
+    setName(props.initialName ?? "");
     setImage(null);
-    setUrl("");
+    setUrl(props.initialUrl ?? "");
     setPackFile(null);
     setPackCount(null);
     setError(null);
@@ -96,7 +101,7 @@ export function AddEmojiDialog(props: { open: boolean; onClose: () => void }) {
     return () => {
       alive = false;
     };
-  }, [controller, props.open]);
+  }, [controller, props.open, props.initialName, props.initialUrl]);
 
   async function pickFile(file: File | undefined): Promise<void> {
     if (!file) return;
