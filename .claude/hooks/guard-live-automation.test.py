@@ -327,6 +327,29 @@ FIXTURES = {
         "// Fetches the write capability from the app's own server.\n"
         "const res = await fetch('http://127.0.0.1:19440/__write-token');\n"
     ),
+    # Tasks: saving a task attributes it to a colleague, deleting one removes their
+    # request, and scanning starts a program on this machine (MACHINE_METHODS in
+    # src/bin/server.rs).
+    "task-saver.ts": (
+        "// Saves a task attributed to a real colleague.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'task_save' }));\n"
+    ),
+    "task-deleter.ts": (
+        "// Deletes a task, removing a colleague's request.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19421');\n"
+        "ws.send(JSON.stringify({ method: 'task_delete' }));\n"
+    ),
+    "tasks-scanner.ts": (
+        "// Starts an agent CLI to scan messages and mail.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19422');\n"
+        "ws.send(JSON.stringify({ method: 'tasks_scan' }));\n"
+    ),
+    "tasks-reader.ts": (
+        "// Reads the user's own task list, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'tasks' }));\n"
+    ),
 }
 
 # Cargo examples, written into the repo's own examples/ directory by the test (an
@@ -461,6 +484,11 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/person-renamer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/person-refacer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/self-updater.ts"),
+        # Tasks: saving one attributes it to a colleague, deleting removes a request,
+        # and scanning starts an agent CLI on this machine.
+        ("BLOCK", PROJECT, f"bun run {tmp}/task-saver.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/task-deleter.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/tasks-scanner.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-backend-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-relay-writer.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/released-backend-reader.ts"),
@@ -631,6 +659,11 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/person-override-reader.ts"),
         # Reading the call state names no write and reaches nobody.
         ("ALLOW", PROJECT, f"bun run {tmp}/call-status-reader.ts"),
+        # Tasks: reading the user's own list is ordinary work, and searching for the
+        # method names runs nothing.
+        ("ALLOW", PROJECT, f"bun run {tmp}/tasks-reader.ts"),
+        ("ALLOW", PROJECT, "grep -rn task_save src web"),
+        ("ALLOW", PROJECT, "grep -rn tasks_scan src"),
         # An example pinned to the pre-authorized channel is the sanctioned shape,
         # and one that only reads needs no target at all.
         ("ALLOW", PROJECT, "cargo run --example guard-test-sandbox-send"),
