@@ -1,10 +1,15 @@
 # Native calling — audio only, the way the Teams web client does it
 
-Status: **implemented, and not yet exercised against the tenant.** One-to-one audio
-calling is built end to end — `src/calling.rs` signals, `web/src/lib/call-media.ts`
-carries the audio, and the whole flow is driven by the mock in `web/e2e/calling.spec.ts`.
-What has NOT happened is a real call: § 8 lists exactly what only a live ring can answer,
-and § 7 says why nothing here places one on its own.
+Status: **a meeting join WORKS against the tenant** (verified 2026-08-05: joined, audio
+negotiated, held, left cleanly — see § 8). A one-to-one call is built on the same plane and
+has never been rung: it has no sanctioned target, so the first one is the user's own click
+to somebody who agreed beforehand (§ 7).
+
+`src/calling.rs` signals, `web/src/lib/call-media.ts` carries the audio,
+`web/src/lib/ms-sdp.ts` is the one place an SDP is rewritten, and the whole flow is driven
+by the mock in `web/e2e/calling.spec.ts`. Against the real tenant there are two drivers and
+they answer different halves: `examples/meeting_join_probe.rs` for the POSTs, and
+`cd web && bun run join-live` for everything that arrives on the live socket afterwards.
 
 This file stays the protocol map. It records what the real Teams web client does, what
 this tenant answers, what the implementation does with it, and what is still unknown.
@@ -433,10 +438,50 @@ that hold `send` hold here, and one is stricter:
   from their own click and nothing else — but it publishes their microphone, so it is
   never automatic either.
 
-## 8. Still unknown — what only a live ring can answer
+## 8. What the tenant has now answered, and what is still open
 
-Everything below is written, and none of it has met the tenant. A live call is the user's
-own click (§ 7), so these are the questions that first call answers:
+**A meeting join works end to end, verified 2026-08-05.** One join, held 42 seconds,
+audio negotiated, left cleanly and the service confirmed with its own `callEnd`:
+
+```
+joined the meeting: audio=false lobby=false links=37
+frame …/call/acceptance/          <- accepted, and acknowledged within the second
+frame …/conversation/rosterUpdate/
+connected — In the meeting · 0:42
+the call is over: CallEndReasonHangup
+frame …/call/end/                 <- the service agreeing, not a timeout
+```
+
+Five faults stood between the first attempt and that, and every one of them was named by
+the thing that refused it rather than guessed:
+
+1. the SDK's `payload` envelope, which the client's transport strips (§ 2.3);
+2. two credentials where the client sends one, plus the three routing headers;
+3. `addModality`, which is not the second half of a join (§ 2.3a);
+4. the SDP: the transport profile, then the folded ICE-TCP transports, then the
+   backslash-encoded header-extension URIs (§ 2.5) — each one refused the whole
+   description, and each refusal named itself;
+5. the leave body, which is not a `callEnd`.
+
+`cd web && bun run join-live` is what closes that loop without the user: it drives the
+live app against the one authorized meeting, reports the call bar and the page's own
+console, and hangs up on every path out. Everything BEFORE the browser is still
+`examples/meeting_join_probe.rs`; everything after it needs that script.
+
+### Still open
+
+`audio=false` in the join answer's `activeModalities` is the one thing above that reads
+oddly against a call that then connected — the leg is created after the answer, so the
+field is a snapshot rather than a verdict. It is worth confirming against a meeting with
+somebody in it, which is also the only way to check that audio is AUDIBLE rather than
+merely negotiated: a fake device sends silence.
+
+A ONE-TO-ONE call has never been tried. It shares the whole media path with the join —
+so the five fixes above cover it — but it has its own POST, its own acceptance and no
+sanctioned target: ringing anybody is the user's own click, to somebody who agreed
+beforehand (§ 7).
+
+The rest of this section is unchanged, and is what a 1:1 answers:
 
 - **`/v3/c` against the `/v4/a` allocate flow.** `trouter::allocate_url_for` keeps the
   directory's regional host and speaks the allocate protocol this client already had. If

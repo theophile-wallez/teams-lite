@@ -57,6 +57,15 @@
   what `tailscale serve` proxies 8443 to. Never click through the sidebar of a live
   app, and never drive a live page with the browser MCP tools: neither can prove
   which conversation a keystroke lands in.
+- **`cd web && bun run join-live` is its twin for the one outward action a chat cannot
+  cover: JOINING a meeting.** Same shape and same rails — the meeting is a constant in the
+  file, no argument can aim it elsewhere, the button's own `data-join-url` is re-read
+  immediately before the click, and it hangs up on every path out. It exists because that
+  feature is untestable anywhere else (see § Joining a meeting), and it is what took the
+  user out of a loop where every protocol fault cost them a click and a paste. A NEW live
+  driver earns its place the same way: a constant target, proved from the app's own state
+  at the moment of the action, and then named in the guard's allowlist — never by being
+  tracked, and never by a name the allowlist happens to match.
 - Reading, searching, drafting, and showing a proposed message to the user for
   review are always fine. Only the actual send requires a green light.
 - **A send that FAILS says so at the composer**, in one sentence beside the words that
@@ -995,6 +1004,21 @@ is a shared screen is still one to open in Teams.
   the read-only rules of § The calendar hold exactly as before.
 - `cd web && bun run preview -- --out /tmp/call --call` captures the Join button, the
   lobby and the roster, and `web/e2e/calling.spec.ts` pins them.
+- **A join is EXERCISED against the tenant by `cd web && bun run join-live`, and nothing
+  else can.** It works (verified 2026-08-05: joined, audio negotiated, held, left cleanly),
+  and it took five refusals to get there — every one of them named by the thing that
+  refused it, and none visible without this script. That is the point of it: the mock has
+  no tenant, and `examples/meeting_join_probe.rs` has no browser and fabricates the surl
+  its callbacks sit on, so the acceptance, its answer and the acknowledgement the service
+  waits 30 s for were all invisible. The script is the live twin of `sandbox-live.ts` and
+  carries the same rails — the meeting is a CONSTANT, the caller gets no raw page, the
+  button's own `data-join-url` is re-read immediately before the click, and it hangs up on
+  every path out including a throw. Its microphone is a FAKE device, so the offer is real
+  and no real microphone opens. Both live drivers are named in the automation guard's
+  allowlist; a copy of either parked outside the repo is still blocked.
+- **The button states which meeting it joins** (`data-join-url`), for the same reason the
+  composer states its conversation: an outward action a driver cannot prove is one it must
+  not take.
 
 ## The user's own status (outward, and gated like one)
 
