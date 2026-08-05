@@ -9,7 +9,9 @@
 // non-button shapes, decided from three inputs by a pure function that the unit tests own.
 // This file draws that answer, and holds the one thing a screenshot cannot capture — that
 // the progress lives INSIDE the button, as a fill behind its own label, so the download
-// the user asked for is visible without a second control appearing beside it.
+// the user asked for is visible without a second control appearing beside it. The percent
+// takes the place of the words that were pressed, and the row keeps its height while it
+// does, so the one thing that moves between the two clicks is the fill.
 //
 // Blue, and deliberately: `variant="default"` is the app's own accent, the same one the
 // primary action of every dialog wears. An update is the one thing here the user gains
@@ -106,11 +108,27 @@ export function UpdateButton() {
       )}
 
       {/* The link carries its own detail as a title, because a second line under a
-          one-line notice is more room than it deserves. */}
-      {view.shape !== "link" && view.detail && (
-        <p data-testid="update-detail" className="text-[11px] leading-snug text-text-faint">
+          one-line notice is more room than it deserves.
+
+          A BUTTON keeps this line even when there is nothing to say in it, and that empty
+          line is the point: the control is anchored above the status bar and grows upward,
+          so a line that came and went would move the button under the pointer that just
+          pressed it. The download is the case — its progress replaces the button's own
+          label, and states its own cost, so there is no second line to draw. */}
+      {view.shape === "button" ? (
+        <p
+          data-testid="update-detail"
+          className="min-h-[15px] text-[11px] leading-snug text-text-faint"
+        >
           {view.detail}
         </p>
+      ) : (
+        view.shape === "note" &&
+        view.detail && (
+          <p data-testid="update-detail" className="text-[11px] leading-snug text-text-faint">
+            {view.detail}
+          </p>
+        )
       )}
     </div>
   );

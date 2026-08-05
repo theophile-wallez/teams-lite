@@ -1222,6 +1222,18 @@ download is ~130 MB (measured on the published release) and this machine may be 
 metered link, which is why the first
 button says what it costs before it is pressed.
 
+- **No state ever spells the build.** The control says `Update available`, never the commit
+  the release was compiled from: a sha reads as a fault code in the middle of a plain
+  sentence, and there is one release to take, so it names nothing the user can act on.
+  `latest` stays in the payload because the BACKEND compares it with its own build to
+  decide there is an update at all. A test in `web/src/lib/update.test.ts` scans every
+  phase for it.
+- **The progress takes the place of the label, and the button does not move.** The percent
+  is drawn where the pressed words were, over the fill, and the second line keeps its
+  height while there is nothing in it — the control is anchored above the status line and
+  grows upward, so a line that came and went would shift the button under the pointer that
+  just pressed it. `web/e2e/update.spec.ts` measures both halves.
+
 - **Both RPCs are `MACHINE_METHODS`** — the write token, refused read-only, and the
   automation hook blocks a script that names either against a live port. `update_apply`
   replaces the binary the user's whole Teams account runs through and then restarts it,

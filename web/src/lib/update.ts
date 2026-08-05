@@ -14,6 +14,12 @@
 //     a restart takes the backend AND the web server down, so "Restarting…" has to
 //     survive being disconnected or the app would go blank at the exact moment it is
 //     doing what the user asked.
+//
+// No state names the build. `info.latest` is the commit the release was compiled from, so
+// it reads as a fault code in the middle of a plain sentence — and a sha is not something
+// the user can act on: there is one release, `latest`, and pressing the button takes it.
+// The control says an update EXISTS; the detail says what it costs. The field stays in the
+// protocol because the BACKEND compares it with its own build to decide there is one.
 
 import type { LiveStatus, UpdateInfo, UpdateProgress } from "./protocol";
 
@@ -113,7 +119,7 @@ export function updateView(
     return {
       ...base,
       shape: "link",
-      label: `Update available (${info.latest})`,
+      label: "Update available",
       detail: "This build is updated where it was installed from, not from here.",
     };
   }
@@ -135,7 +141,7 @@ export function updateView(
         ...base,
         shape: "button",
         label: "Restart to update",
-        detail: `Installs ${info.latest} and restarts the app.`,
+        detail: "Installs the new build and restarts the app.",
         action: "apply",
         percent: 100,
       };
@@ -143,7 +149,7 @@ export function updateView(
       return {
         ...base,
         shape: "note",
-        label: `Update installed (${info.latest})`,
+        label: "Update installed",
         detail: "Nothing restarted the app — it runs the new build next time you start it.",
       };
     case "failed":
@@ -158,7 +164,7 @@ export function updateView(
       return {
         ...base,
         shape: "button",
-        label: `Update to ${info.latest}`,
+        label: "Update available",
         detail: sizeDetail(info.size),
         action: "download",
       };

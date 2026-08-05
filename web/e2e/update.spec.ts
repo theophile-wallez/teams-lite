@@ -33,20 +33,26 @@ test.describe("in-app update", () => {
     await expect(control).toBeVisible();
     await expect(control).toHaveAttribute("data-phase", "idle");
 
-    // FIRST CLICK. The button names the build it fetches and says what it costs, because
-    // this may be a phone on a metered connection — which is also why nothing downloads
-    // on its own.
+    // FIRST CLICK. The button says an update exists and what it costs — never which
+    // build, since a commit sha is a fault code to whoever reads it. The cost is stated
+    // because this may be a phone on a metered connection, which is also why nothing
+    // downloads on its own.
     const button = page.getByTestId("update-button");
-    await expect(button).toHaveText(/Update to def5678/);
+    await expect(button).toHaveText(/^\s*Update available\s*$/);
+    await expect(button).not.toContainText("def5678");
     await expect(page.getByTestId("update-detail")).toContainText("Downloads 133 MB.");
+    const before = await button.boundingBox();
     await button.click();
 
     // The progress is a fill inside the button, and the percent is on the button itself
-    // so it can be read without measuring pixels.
+    // so it can be read without measuring pixels. It takes the place of the words that
+    // were pressed, and the button stays where it was while it does.
     await expect(control).toHaveAttribute("data-phase", "downloading");
     await expect(button).toHaveText(/Downloading… \d+%/);
     await expect(button).toBeDisabled();
     await expect(page.getByTestId("update-progress-fill")).toBeVisible();
+    const during = await button.boundingBox();
+    expect(Math.abs((during?.y ?? 0) - (before?.y ?? 0))).toBeLessThan(2);
 
     // SECOND CLICK. Downloaded, and now it is a restart — a separate, deliberate press.
     await expect(control).toHaveAttribute("data-phase", "ready", { timeout: 10_000 });
@@ -79,7 +85,8 @@ test.describe("in-app update", () => {
     await expect(control).toBeVisible();
     await expect(control).toHaveAttribute("data-shape", "link");
     const link = page.getByTestId("update-link");
-    await expect(link).toHaveText(/Update available \(def5678\)/);
+    await expect(link).toHaveText(/Update available/);
+    await expect(link).not.toContainText("def5678");
     await expect(link).toHaveAttribute("href", /releases/);
     await expect(page.getByTestId("update-button")).toHaveCount(0);
   });
