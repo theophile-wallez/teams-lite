@@ -608,6 +608,21 @@ describe("parseRichHtml — custom emoji", () => {
     expect(nodeText(parseRichHtml(`<p>${teams}</p>`))).toBe("🙂");
   });
 
+  it("collapses to its code when the art is not on an authenticated Teams host", () => {
+    // A message is a foreign document. An emoji `<img>` the browser fetched itself would
+    // tell that server the message was read, and this app makes no such request — so a
+    // src the media proxy would not carry is not art, it is the words it stands for.
+    for (const src of [
+      "https://evil.example/pixel.png",
+      "data:image/png;base64,iVBORw0KGgo=",
+    ]) {
+      const html = `<p><img itemtype="http://schema.skype.com/Emoji" itemid="shipit" alt=":shipit:" src="${src}" width="20" height="20"></p>`;
+      const nodes = parseRichHtml(html);
+      expect(findNode(nodes, (n) => n.type === "element" && n.tag === "customEmoji")).toBeUndefined();
+      expect(nodeText(nodes)).toBe(":shipit:");
+    }
+  });
+
   it("is not a picture: never an img node, so it is never zoomable", () => {
     const nodes = parseRichHtml(`<p>${EMOJI_IMG}</p>`);
     expect(findNode(nodes, (n) => n.type === "element" && n.tag === "img")).toBeUndefined();

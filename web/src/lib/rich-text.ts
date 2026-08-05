@@ -14,7 +14,7 @@
 // it as HTML eats anything in angle brackets. `parseMessageBody` is the choke point
 // that reads each body the way its `BodyFormat` says it must be read.
 
-import type { BodyFormat } from "./protocol";
+import { mediaNeedsProxy, type BodyFormat } from "./protocol";
 
 /** A semantic element tag we know how to render. */
 export type RichTag =
@@ -418,9 +418,17 @@ export function parseRichHtml(html: string): RichNode[] {
         const src = attrs["src"] ?? "";
         const isCustomEmoji = !/\/personal-expressions\//i.test(decodeEntities(src));
         if (isCustomEmoji) {
+          // Only art the media PROXY would carry becomes a picture. A src on anything
+          // else — a stranger's host, an inline `data:` URI — collapses to its `alt`
+          // below, which is exactly what happened to every one of these images before
+          // this app drew custom emoji at all. An `<img>` a message asks the browser to
+          // fetch is a read receipt for whoever serves it, and displaying a message
+          // makes no request of a stranger (see § Mail is READ-ONLY for the same rule
+          // one surface over). The check lives here, in the parse, so no later view can
+          // reintroduce one.
           const safeSrcValue = safeSrc(src);
           const code = decodeEntities(attrs["alt"] ?? "").trim();
-          if (safeSrcValue && code) {
+          if (safeSrcValue && mediaNeedsProxy(safeSrcValue) && code) {
             pushChild({
               type: "element",
               tag: "customEmoji",
