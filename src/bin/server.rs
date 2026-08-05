@@ -7411,7 +7411,11 @@ fn record_task_scan(
                     (String::new(), String::new(), candidate.id.clone())
                 }
             };
-            store.save_task(
+            // Counted only when it LANDED: `tasks_one_per_source` refuses a source this
+            // store already holds a task for, which is what two scans reading one window
+            // legitimately produce (see `Store::insert_suggested_task`). So a window a
+            // sibling already wrote reports 0 rather than claiming its rows again.
+            written += usize::from(store.insert_suggested_task(
                 &store::TaskWrite {
                     // `suggested`: the panel offers it, and one click accepts or refuses.
                     // An extraction never asserts that the user owes something.
@@ -7425,8 +7429,7 @@ fn record_task_scan(
                     ..store::TaskWrite::default()
                 },
                 now_ms,
-            )?;
-            written += 1;
+            )?);
         }
         store.set_task_scan_watermark(found.newest_compose_time, &found.newest_received)?;
         Ok(written)
@@ -9808,6 +9811,13 @@ mod tests {
         assert_eq!(from_mail.source_mail_id, "AAMkAGI=");
         assert_eq!(from_mail.source_conversation_id, "");
         assert_eq!(from_mail.source_message_id, "");
+
+        // The SAME window recorded again — which is what a manual scan racing an automatic
+        // one really is, since the watermark only moves once a run has written. The count is
+        // what the panel is told it found, so it must be what LANDED and not what was asked
+        // for: the rows are one per source, so this window adds none.
+        assert_eq!(record_task_scan(&store, &found, answer, 43).unwrap(), 0);
+        assert_eq!(store.tasks().unwrap().len(), 2, "and the user is shown each ask once");
         assert_eq!(from_mail.asked_by_mri, "", "a mail names its sender by address, not by mri");
     }
 

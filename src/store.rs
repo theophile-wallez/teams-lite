@@ -437,6 +437,18 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 -- per candidate.
 CREATE INDEX IF NOT EXISTS idx_tasks_source_message ON tasks(source_message_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_source_mail ON tasks(source_mail_id);
+-- ONE suggestion per source, enforced by the table rather than promised by the callers.
+-- Two scans may legitimately read the same window: the watermark moves only once a run has
+-- WRITTEN, so a manual scan and an automatic one — or the two backends sharing this store —
+-- can both sweep it before either does, and the loser of that race would otherwise show the
+-- user the same ask twice. It is the argument that put the watermark's clamp in its setter:
+-- a rule every caller has to remember is one a caller added later will not.
+--
+-- PARTIAL, because every source column is `NOT NULL DEFAULT ''`: a plain unique index would
+-- read all the hand-typed tasks as one row and refuse every one after the first.
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_one_per_source
+    ON tasks (source_conversation_id, source_message_id, source_mail_id)
+    WHERE source_conversation_id <> '' OR source_message_id <> '' OR source_mail_id <> '';
 "#;
 
 /// Version of everything the file must physically contain: `SCHEMA`, [`migrate`]
@@ -502,7 +514,12 @@ CREATE INDEX IF NOT EXISTS idx_tasks_source_mail ON tasks(source_mail_id);
 /// v14 adds `tasks` — what the user owes — and its two source indexes. A whole new
 /// table rather than columns, and additive: an older binary never names it, and no
 /// existing table grows a column (see the `tasks` note in [`SCHEMA`]).
-const SCHEMA_VERSION: i64 = 14;
+///
+/// v15 adds `tasks_one_per_source`, the unique index that makes "one suggestion per
+/// message or mail" a property of the table. An INDEX rather than a column, so the
+/// fingerprint below is unchanged — but the bump is what makes an existing store create
+/// it, which is the whole point (`initialize` runs only when the version moves).
+const SCHEMA_VERSION: i64 = 15;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -4327,38 +4344,76 @@ impl Store {
                 anyhow::ensure!(changed == 1, "no such task: {id}");
                 id.clone()
             }
-            None => {
-                // Minted here, and a v4 UUID rather than anything derived from the
-                // source: a task typed by hand has no source, and two backends sharing
-                // this store must never mint the same id.
-                let id = uuid::Uuid::new_v4().to_string();
-                self.exec(
-                    "INSERT INTO tasks (
-                        id, title, body, state, due_date, source_conversation_id,
-                        source_message_id, source_mail_id, asked_by_mri, created_at, done_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![
-                        id,
-                        write.title.as_deref().unwrap_or(""),
-                        write.body.as_deref().unwrap_or(""),
-                        write.state.as_deref().unwrap_or("open"),
-                        write.due_date.as_deref().unwrap_or(""),
-                        write.source_conversation_id.as_deref().unwrap_or(""),
-                        write.source_message_id.as_deref().unwrap_or(""),
-                        write.source_mail_id.as_deref().unwrap_or(""),
-                        write.asked_by_mri.as_deref().unwrap_or(""),
-                        now_ms,
-                        done_at.unwrap_or(0),
-                    ],
-                )?;
-                id
-            }
+            // Only `None` when the caller named a source that already has a task, and for a
+            // write the USER made that is a mistake worth reporting: the panel types tasks,
+            // it never re-posts an extraction. The scan's own path
+            // ([`Store::insert_suggested_task`]) is the one that expects it.
+            None => match self.insert_task(write, now_ms, done_at)? {
+                Some(id) => id,
+                None => anyhow::bail!("a task already exists for that source"),
+            },
         };
 
         let sql = format!("SELECT {TASK_SELECT_COLS} FROM tasks WHERE tasks.id = ?1");
         let mut row = self.query_one(&sql, params![id], row_to_task)?;
         self.fill_asked_by(std::slice::from_mut(&mut row))?;
         Ok(row)
+    }
+
+    /// Insert one extracted suggestion, answering false because that source already has a
+    /// task — in any state, a `dismissed` one included.
+    ///
+    /// This is the write [`tasks_one_per_source`](INDEXES) exists for, and DO NOTHING rather
+    /// than a caught error for a reason the transaction makes sharp: a scan writes its whole
+    /// window and the watermark in one, so a constraint failure would roll the other rows
+    /// back and lose the window. "Already there" is not a failure — it is the answer.
+    ///
+    /// It returns no row because the only caller counts: what it reports is how many tasks a
+    /// scan really added, which is what the panel is told it found.
+    pub fn insert_suggested_task(&self, write: &TaskWrite, now_ms: i64) -> Result<bool> {
+        Ok(self.insert_task(write, now_ms, Some(0))?.is_some())
+    }
+
+    /// The one INSERT, shared so the column list has a single spelling: `None` when the row
+    /// was refused by `tasks_one_per_source`, else the id it minted.
+    ///
+    /// The conflict target NAMES that index rather than being bare, so the only duplicate
+    /// this tolerates is a source it already holds. A bare `DO NOTHING` would swallow a
+    /// primary-key collision too, and answer "already there" for a task that was lost.
+    ///
+    /// The id is a v4 UUID rather than anything derived from the source: a task typed by
+    /// hand has no source, and two backends sharing this store must never mint the same id.
+    fn insert_task(
+        &self,
+        write: &TaskWrite,
+        now_ms: i64,
+        done_at: Option<i64>,
+    ) -> Result<Option<String>> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let inserted = self.exec(
+            "INSERT INTO tasks (
+                id, title, body, state, due_date, source_conversation_id,
+                source_message_id, source_mail_id, asked_by_mri, created_at, done_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT (source_conversation_id, source_message_id, source_mail_id)
+                 WHERE source_conversation_id <> '' OR source_message_id <> ''
+                    OR source_mail_id <> ''
+             DO NOTHING",
+            params![
+                id,
+                write.title.as_deref().unwrap_or(""),
+                write.body.as_deref().unwrap_or(""),
+                write.state.as_deref().unwrap_or("open"),
+                write.due_date.as_deref().unwrap_or(""),
+                write.source_conversation_id.as_deref().unwrap_or(""),
+                write.source_message_id.as_deref().unwrap_or(""),
+                write.source_mail_id.as_deref().unwrap_or(""),
+                write.asked_by_mri.as_deref().unwrap_or(""),
+                now_ms,
+                done_at.unwrap_or(0),
+            ],
+        )?;
+        Ok((inserted > 0).then_some(id))
     }
 
     /// Delete a task. False when the id names none, which is not an error: two open
@@ -4980,7 +5035,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (14, 0xefe8_4b57_e73b_bfe7);
+        const PINNED: (i64, u64) = (15, 0xefe8_4b57_e73b_bfe7);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -7998,6 +8053,69 @@ mod tests {
         assert!(saved.source_mail_id.is_empty());
         assert!(saved.asked_by_mri.is_empty());
         assert!(saved.asked_by.is_empty());
+    }
+
+    /// TWO scans may legitimately read the same window — the watermark only moves once a
+    /// run has written, so a manual scan and an automatic one can both sweep it before
+    /// either does. What must never happen is the user being shown the same ask twice, and
+    /// that is a property of the TABLE rather than a promise about the callers: whichever
+    /// one arrives second finds the row already there and says so.
+    #[test]
+    fn a_suggestion_is_written_once_per_source_however_many_scans_read_it() {
+        let store = Store::open_in_memory().unwrap();
+        let from_message = TaskWrite {
+            title: Some("Review the deployment doc".into()),
+            state: Some("suggested".into()),
+            source_conversation_id: Some("19:c@thread.v2".into()),
+            source_message_id: Some("1754380000000".into()),
+            ..Default::default()
+        };
+        assert!(store.insert_suggested_task(&from_message, 1_000).unwrap());
+        assert!(
+            !store.insert_suggested_task(&from_message, 2_000).unwrap(),
+            "the second scan of one window must report the row rather than add one"
+        );
+        // A different TITLE for the same message is the same ask, and the model wording it
+        // differently on a second pass is exactly how this happens.
+        let reworded =
+            TaskWrite { title: Some("Read the deploy doc".into()), ..from_message.clone() };
+        assert!(!store.insert_suggested_task(&reworded, 3_000).unwrap());
+
+        let from_mail = TaskWrite {
+            title: Some("Answer the invoice".into()),
+            state: Some("suggested".into()),
+            source_mail_id: Some("AAMkAD…".into()),
+            ..Default::default()
+        };
+        assert!(store.insert_suggested_task(&from_mail, 4_000).unwrap());
+        assert!(!store.insert_suggested_task(&from_mail, 5_000).unwrap(), "a mail is one ask too");
+        assert_eq!(store.tasks().unwrap().len(), 2, "one row per source, and nothing else");
+
+        // The constraint is on THIS table, so deleting the row frees its source — which is
+        // right: the user threw the task away, and a later scan of that window may offer it
+        // again. (A `dismissed` row is KEPT, which is what stops that.)
+        let mail_row = store
+            .tasks()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.source_mail_id == "AAMkAD…")
+            .expect("the mail's task");
+        assert!(store.delete_task(&mail_row.id).unwrap());
+        assert!(store.insert_suggested_task(&from_mail, 6_000).unwrap());
+    }
+
+    /// The index is PARTIAL for this: every source column is `NOT NULL DEFAULT ''`, so a
+    /// plain unique index would read two hand-typed tasks as one row and refuse the second.
+    /// The user must be able to type "buy milk" twice.
+    #[test]
+    fn hand_typed_tasks_never_collide_with_each_other() {
+        let store = Store::open_in_memory().unwrap();
+        for at in [1_000, 2_000, 3_000] {
+            store
+                .save_task(&TaskWrite { title: Some("Buy milk".into()), ..Default::default() }, at)
+                .unwrap();
+        }
+        assert_eq!(store.tasks().unwrap().len(), 3, "a task with no source constrains nothing");
     }
 
     #[test]
