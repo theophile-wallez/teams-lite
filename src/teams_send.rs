@@ -442,6 +442,26 @@ pub async fn upload_ams_object(
     Ok(id.to_string())
 }
 
+/// Upload one object and return the URL its bytes are served from — the `views/imgo`
+/// view an inline emoji's `src` and a custom reaction's key both point at.
+pub async fn upload_ams_object_url(
+    http: &reqwest::Client,
+    session: &Session,
+    ic3: &str,
+    conversation_id: &str,
+    name: &str,
+    bytes: &[u8],
+) -> Result<String> {
+    let id = upload_ams_object(http, session, ic3, conversation_id, name, bytes).await?;
+    Ok(ams_object_url(ams_endpoint(session)?, &id))
+}
+
+/// The one spelling of an AMS object's view URL, so an emoji's `src`, an image
+/// attachment's and a custom reaction key can never disagree about it.
+fn ams_object_url(ams: &str, id: &str) -> String {
+    format!("{ams}/v1/objects/{}/views/imgo", urlencoding::encode(id))
+}
+
 async fn upload_image(
     http: &reqwest::Client,
     session: &Session,
@@ -450,8 +470,7 @@ async fn upload_image(
     image: &ImageUpload,
 ) -> Result<AmsImage> {
     let id = upload_ams_object(http, session, ic3, conversation_id, &image.name, &image.bytes).await?;
-    let ams = ams_endpoint(session)?;
-    let src = format!("{ams}/v1/objects/{}/views/imgo", urlencoding::encode(&id));
+    let src = ams_object_url(ams_endpoint(session)?, &id);
     Ok(AmsImage {
         id,
         src,
@@ -466,8 +485,10 @@ async fn upload_image(
 /// the uploaded object. Returns the rewritten HTML and the AMS object ids for
 /// `amsreferences`.
 ///
-/// This is the full upload path. The pure substitution half exists so the tests can
-/// exercise it with a stub art closure.
+/// The upload is injected rather than called here, so the loop below — the dedupe, the
+/// order the ids come out in, and the substitution that follows — is the one the tests
+/// drive too. A second copy of it written inside a test would stay green after the
+/// shipped one lost its dedupe.
 pub async fn resolve_custom_emoji(
     http: &reqwest::Client,
     session: &Session,
@@ -476,6 +497,25 @@ pub async fn resolve_custom_emoji(
     html: &str,
     art: &[EmojiArt],
 ) -> Result<(String, Vec<String>)> {
+    rewrite_custom_emoji(ams_endpoint(session)?, html, art, |name, bytes| async move {
+        upload_ams_object(http, session, ic3, conversation_id, &name, &bytes).await
+    })
+    .await
+}
+
+/// Substitute every code in `html` with the markup for the object its art was uploaded
+/// to, uploading each distinct code exactly once. `upload` takes the emoji's name and
+/// bytes and answers with the AMS object id.
+async fn rewrite_custom_emoji<F, Fut>(
+    ams: &str,
+    html: &str,
+    art: &[EmojiArt],
+    upload: F,
+) -> Result<(String, Vec<String>)>
+where
+    F: Fn(String, Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
     let codes = crate::custom_emoji::codes_in_body(html);
     let mut uploaded: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut ids = Vec::new();
@@ -485,18 +525,8 @@ pub async fn resolve_custom_emoji(
             continue;
         }
         if let Some(emoji) = art.iter().find(|e| e.name == code) {
-            let id = upload_ams_object(
-                http,
-                session,
-                ic3,
-                conversation_id,
-                &emoji.name,
-                &emoji.bytes,
-            )
-            .await?;
-            let ams = ams_endpoint(session)?;
-            let src = format!("{ams}/v1/objects/{}/views/imgo", urlencoding::encode(&id));
-            uploaded.insert(code.clone(), src);
+            let id = upload(emoji.name.clone(), emoji.bytes.clone()).await?;
+            uploaded.insert(code, ams_object_url(ams, &id));
             ids.push(id);
         }
     }
@@ -1474,50 +1504,50 @@ mod tests {
         }
     }
 
-    fn rewrite_for_test(html: &str, art: &[EmojiArt]) -> (String, Vec<String>) {
-        let codes = crate::custom_emoji::codes_in_body(html);
-        let mut uploaded: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut ids = Vec::new();
-
-        for code in codes {
-            if uploaded.contains_key(&code) {
-                continue;
-            }
-            if let Some(emoji) = art.iter().find(|e| e.name == code) {
-                let id = format!("0-{}", emoji.name);
-                let src = format!("https://ams.example/v1/objects/{}/views/imgo", id);
-                uploaded.insert(code.clone(), src);
-                ids.push(id);
-            }
-        }
-
-        let rewritten = crate::custom_emoji::substitute_codes(html, &|name| uploaded.get(name).cloned());
-        (rewritten, ids)
+    /// Drive the SHIPPED loop with a stub upload, and report every name it asked for.
+    /// The whole point is that no test re-implements `rewrite_custom_emoji`: a copy would
+    /// keep passing after the real one lost its `contains_key` guard and uploaded the
+    /// same art twice.
+    async fn rewrite_with_stub_upload(
+        html: &str,
+        art: &[EmojiArt],
+    ) -> (String, Vec<String>, Vec<String>) {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let (html, ids) = rewrite_custom_emoji("https://ams.example", html, art, |name, _bytes| {
+            asked.borrow_mut().push(name.clone());
+            async move { Ok(format!("0-{name}")) }
+        })
+        .await
+        .expect("the stub upload never fails");
+        (html, ids, asked.into_inner())
     }
 
     fn build_body_for_test_with_refs(refs: &[String]) -> Value {
         build_body("1", "", "Me", None, None, None, refs, &[]).unwrap()
     }
 
-    #[test]
-    fn a_body_with_no_code_is_untouched_and_references_nothing() {
-        let (html, refs) = rewrite_for_test("<p>hello</p>", &[]);
+    #[tokio::test]
+    async fn a_body_with_no_code_is_untouched_and_references_nothing() {
+        let (html, refs, uploads) = rewrite_with_stub_upload("<p>hello</p>", &[]).await;
         assert_eq!(html, "<p>hello</p>");
         assert!(refs.is_empty());
+        assert!(uploads.is_empty(), "nothing to upload, so nothing was uploaded");
     }
 
-    #[test]
-    fn each_distinct_code_uploads_once_and_lands_in_amsreferences() {
+    #[tokio::test]
+    async fn each_distinct_code_uploads_once_and_lands_in_amsreferences() {
         let art = [art_of("shipit"), art_of("party")];
-        let (html, refs) = rewrite_for_test("<p>:shipit: :party: :shipit:</p>", &art);
+        let (html, refs, uploads) =
+            rewrite_with_stub_upload("<p>:shipit: :party: :shipit:</p>", &art).await;
+        assert_eq!(uploads, vec!["shipit", "party"], "twice in one body is ONE upload");
         assert_eq!(refs.len(), 2, "twice in one body is one object");
         assert_eq!(html.matches("itemid=\"shipit\"").count(), 2, "both occurrences are drawn");
     }
 
-    #[test]
-    fn the_body_carries_every_reference_it_names() {
+    #[tokio::test]
+    async fn the_body_carries_every_reference_it_names() {
         let art = [art_of("shipit")];
-        let (html, refs) = rewrite_for_test("<p>:shipit:</p>", &art);
+        let (html, refs, _) = rewrite_with_stub_upload("<p>:shipit:</p>", &art).await;
         for id in &refs {
             assert!(html.contains(id.as_str()), "an amsreference no body names is a leak");
         }

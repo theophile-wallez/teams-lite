@@ -587,7 +587,7 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
         <CustomEmoji
           key={key}
           src={node.attrs.src ?? ""}
-          code={node.attrs.code ?? ""}
+          label={node.attrs.code ?? ""}
           jumbo={ctx.jumbo}
         />
       );

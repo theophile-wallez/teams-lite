@@ -60,23 +60,32 @@ pub fn is_valid_name(name: &str) -> bool {
 
 const CUSTOM_REACTION_PREFIX: &str = "tlcustom-";
 
-/// The custom emoji name from a reaction key, or `None` when the key is not one of
-/// ours. `tlcustom-<name>-<amsId>` -> `Some("<name>")`, otherwise `None`.
+/// The Teams emotion key for a custom emoji reaction: our prefix, then the URL of the
+/// AMS object the art was uploaded to. The key carries the ART and nothing else.
 ///
-/// Used by the `react` handler to decide whether to upload art before the reaction is
-/// set. The name is resolved, the art is fetched from the store, and the full key is
-/// built from the AMS id that comes back — exactly as a send does.
-pub fn custom_reaction_name(key: &str) -> Option<&str> {
-    let rest = key.strip_prefix(CUSTOM_REACTION_PREFIX)?;
-    let bytes = rest.as_bytes();
+/// The NAME deliberately does not travel. It cannot: a name may hold digits and hyphens
+/// (`blob-2` and `parrot-1` are legal), an AMS id starts with one, and no character in
+/// the name charset `[a-z0-9_+-]` can separate the two — so a key spelling both could
+/// not be split back apart. Carrying the URL instead also hands the reader something
+/// complete: a full URL for the media proxy rather than a bare id with no host, since
+/// Teams rewrites the AMS host it serves an object from. What a reader loses is the
+/// name, which only ever labelled the reaction — and a label is resolved locally or
+/// stated neutrally, while art must come from the message.
+///
+/// Length is not a concern: the service accepted a 289-character key when it was
+/// measured (`examples/custom_emoji_reaction_probe.rs`) and an object URL is ~100.
+pub fn custom_reaction_key(object_url: &str) -> String {
+    format!("{CUSTOM_REACTION_PREFIX}{object_url}")
+}
 
-    for i in 0..bytes.len().saturating_sub(1) {
-        if bytes[i] == b'-' && bytes[i + 1].is_ascii_digit() {
-            let name = &rest[..i];
-            return if name.is_empty() { None } else { Some(name) };
-        }
-    }
-    None
+/// The art URL a custom reaction key names, or `None` when the key is not one of ours —
+/// which is how Microsoft's own keys (`like`, `yes-tone2`) stay untouched.
+///
+/// The `https://` check is what makes the answer trustworthy rather than merely
+/// prefixed: it is also the shape of every key this app has ever minted.
+pub fn custom_reaction_art_url(key: &str) -> Option<&str> {
+    key.strip_prefix(CUSTOM_REACTION_PREFIX)
+        .filter(|url| url.starts_with("https://"))
 }
 
 /// Every distinct `:name:` code in `html`'s text runs, outside tags, outside
@@ -377,12 +386,27 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_reaction_key_names_the_emoji() {
-        assert_eq!(custom_reaction_name("tlcustom-shipit-0-weu-d1-abc"), Some("shipit"));
-        assert_eq!(custom_reaction_name("tlcustom-smirk-cat-0-frc-d4-xyz"), Some("smirk-cat"));
-        assert_eq!(custom_reaction_name("like"), None, "Microsoft's own key");
-        assert_eq!(custom_reaction_name("yes-tone2"), None, "toned reaction");
-        assert_eq!(custom_reaction_name("tlcustom-shipit"), None, "no AMS id");
-        assert_eq!(custom_reaction_name("tlcustom--0-abc"), None, "empty name");
+    fn a_custom_reaction_key_names_the_art_and_nothing_else() {
+        let url = "https://eu-api.asm.skype.com/v1/objects/0-weu-d1-abc/views/imgo";
+        let key = custom_reaction_key(url);
+        assert_eq!(key, format!("tlcustom-{url}"));
+        assert_eq!(custom_reaction_art_url(&key), Some(url), "the URL survives whole");
+
+        // A name that would have been unparseable in the old shape: it is simply not
+        // in the key, so `blob-2` and `parrot-1` cost nothing.
+        let key = custom_reaction_key("https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo");
+        assert_eq!(
+            custom_reaction_art_url(&key),
+            Some("https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo")
+        );
+
+        assert_eq!(custom_reaction_art_url("like"), None, "Microsoft's own key");
+        assert_eq!(custom_reaction_art_url("yes-tone2"), None, "toned reaction");
+        assert_eq!(
+            custom_reaction_art_url("tlcustom-shipit-0-weu-d1-abc"),
+            None,
+            "the old name-first shape names no art, so it resolves to none"
+        );
+        assert_eq!(custom_reaction_art_url("tlcustom-"), None, "no URL at all");
     }
 }

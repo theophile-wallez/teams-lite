@@ -205,44 +205,28 @@ export const REACTION_PICKER: ReadonlyArray<{ key: string; emoji: string }> = [
   "angry",
 ].map((key) => ({ key, emoji: reactionEmoji(key) }));
 
-/** What marks a reaction key as one of the user's own emoji rather than one of Microsoft's.
- *  Exported because the two surfaces that OFFER such a reaction — the quick row and the
- *  picker's Custom category — mint the key before the AMS id exists (the backend appends
- *  it), and one spelling of it is what keeps them the same action. */
-export const CUSTOM_REACTION_PREFIX = "tlcustom-";
+/** What marks a reaction key as one of the user's own emoji rather than one of
+ *  Microsoft's. A port of `custom_emoji::CUSTOM_REACTION_PREFIX`. */
+const CUSTOM_REACTION_PREFIX = "tlcustom-";
 
 /**
- * The Teams emotion key for a custom emoji: `tlcustom-<name>-<amsId>`, which is
- * what the probe verified Teams accepts. The name is first so a colleague's
- * `:shipit:` can be read back out of the key without parsing AMS ids. A key
- * names ONE object and costs one lookup against the media proxy — drawn from
- * the id, never from the reader's pack — so a colleague reacting with THEIR
- * `:shipit:` shows theirs.
- */
-export function customReactionKey(name: string, amsId: string): string {
-  return `${CUSTOM_REACTION_PREFIX}${name}-${amsId}`;
-}
-
-/**
- * Read a custom emoji key back into the art it names. Returns `{ name, src }`
- * when the key matches our prefix, otherwise `null` — which is how
- * Microsoft's own keys stay untouched. The src goes through the same
- * authenticated media proxy the inbound emoji renderer uses
- * (`web/src/components/custom-emoji.tsx`).
+ * The art a custom reaction key names — a full URL for the media proxy — or `null`
+ * when the key is not one of ours, which is how Microsoft's own keys stay untouched.
+ * A port of `custom_emoji::custom_reaction_art_url`.
  *
- * The parse finds where the AMS id starts: `tlcustom-<name>-<amsId>`. Both
- * the name and the id may contain hyphens (`smirk-cat`, `0-weu-d1-abc`), so
- * the delimiter is recognized by what follows it: an AMS id always starts with
- * a digit. The name is everything before that hyphen-digit boundary.
+ * The key is `tlcustom-<objectUrl>` and carries no NAME: a name may hold digits and
+ * hyphens, an AMS id starts with one, and nothing in the name charset could separate
+ * them (see the Rust side for the whole argument). So a reader gets the ART, which is
+ * the half that must never be resolved locally — two people's `:shipit:` are two
+ * different pictures. The label a reader shows is theirs to resolve: the quick row
+ * knows the name it offered, and a chip says so neutrally.
+ *
+ * There is no key MINTED here on purpose. The URL names an AMS object that does not
+ * exist until the backend has uploaded the art, so the page names the emoji and the
+ * backend mints the key (`react` takes `emoji` for that).
  */
-export function customReactionArt(key: string): { name: string; src: string } | null {
+export function customReactionArt(key: string): { src: string } | null {
   if (!key.startsWith(CUSTOM_REACTION_PREFIX)) return null;
-  const rest = key.slice(CUSTOM_REACTION_PREFIX.length);
-  const match = rest.match(/-(\d)/);
-  if (!match || match.index === undefined) return null;
-  const name = rest.slice(0, match.index);
-  const amsId = rest.slice(match.index + 1);
-  if (!name || !amsId) return null;
-  const src = `/api/media?amsObjectId=${encodeURIComponent(amsId)}`;
-  return { name, src };
+  const src = key.slice(CUSTOM_REACTION_PREFIX.length);
+  return src.startsWith("https://") ? { src } : null;
 }

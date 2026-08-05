@@ -4,12 +4,8 @@ import rawData from "@emoji-mart/data";
 import { renderToString } from "react-dom/server";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Add01Icon, MessageSquareDashedIcon } from "@hugeicons/core-free-icons";
-import {
-  CUSTOM_REACTION_PREFIX,
-  appleEmojiUrlFromUnified,
-  canReactWith,
-  teamsReactionKey,
-} from "~/lib/teams-emoji";
+import type { ReactionPick } from "~/lib/protocol";
+import { appleEmojiUrlFromUnified, canReactWith, teamsReactionKey } from "~/lib/teams-emoji";
 import { useController } from "./controller-context";
 import { AddEmojiDialog } from "./add-emoji-dialog";
 
@@ -74,11 +70,13 @@ type PickedEmoji = { id?: string; native?: string };
  * images from our own origin, and reporting picks as Teams reaction keys so the
  * caller never has to know the difference between an emoji and an emotion key.
  *
- * `onPick` receives a key like `fire` or `yes-tone2`; a pick with no key is
- * impossible here because the dataset is pre-filtered to reactable emoji.
+ * `onPick` receives an emotion key like `fire` or `yes-tone2` for a Unicode emoji, and
+ * one of the user's own emoji BY NAME for a custom one — the backend mints that key from
+ * the art it uploads, so nothing here guesses it (see {@link ReactionPick}). A pick with
+ * neither is impossible: the dataset is pre-filtered to reactable emoji.
  */
 export default function EmojiPicker(props: {
-  onPick: (key: string) => void;
+  onPick: (pick: ReactionPick) => void;
   theme: "light" | "dark";
 }) {
   const controller = useController();
@@ -169,15 +167,15 @@ export default function EmojiPicker(props: {
           getImageURL={(_set: string, unified: string) => appleEmojiUrlFromUnified(unified)}
           getSpritesheetURL={() => "/emoji/apple/64/spritesheet-unused.png"}
           onEmojiSelect={(emoji: PickedEmoji) => {
-            // One of the user's own: it reacts under the `tlcustom-<name>` key the quick
-            // row mints, so the picker's Custom category is not a row that summons nothing.
-            // The backend appends the AMS id once it has uploaded the art.
+            // One of the user's own: named, not keyed — the reaction's key is the URL of
+            // the AMS object its art becomes, which the backend mints on the way out. This
+            // is the same action the quick row's own custom buttons carry out.
             if (emoji.id && customNames.has(emoji.id)) {
-              props.onPick(`${CUSTOM_REACTION_PREFIX}${emoji.id}`);
+              props.onPick({ emoji: emoji.id });
               return;
             }
             const key = emoji.native ? teamsReactionKey(emoji.native) : undefined;
-            if (key) props.onPick(key);
+            if (key) props.onPick({ key });
           }}
           autoFocus
           previewPosition="none"

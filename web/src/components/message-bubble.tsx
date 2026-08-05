@@ -25,13 +25,9 @@ import {
   type LinkMetadata,
   type ParsedRichMessage,
   type Reaction,
+  type ReactionPick,
 } from "~/lib/protocol";
-import {
-  CUSTOM_REACTION_PREFIX,
-  customReactionArt,
-  reactionEmoji,
-  REACTION_PICKER,
-} from "~/lib/teams-emoji";
+import { customReactionArt, reactionEmoji, REACTION_PICKER } from "~/lib/teams-emoji";
 import { hasActivePipeline } from "~/lib/gitlab-pipeline";
 import { LINEAR_WEB_HOST } from "~/lib/linear";
 import { mergeRequestsIn, type MergeRequestLink } from "~/lib/merge-request";
@@ -53,7 +49,7 @@ import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
 import { AgentLogo } from "./agent-logo";
 import { GitLabLogo } from "./gitlab-logo";
-import { CustomEmoji } from "./custom-emoji";
+import { CustomEmoji, PackEmoji } from "./custom-emoji";
 import {
   AgentSignature,
   AgentStoredStatus,
@@ -267,7 +263,7 @@ function MessageBubbleImpl(props: {
   ) => void;
   onReply: (message: ChatMessage) => void;
   onCopy: (message: ChatMessage) => void;
-  onReact: (message: ChatMessage, key: string) => void;
+  onReact: (message: ChatMessage, pick: ReactionPick) => void;
   onStartEdit: (message: ChatMessage) => void;
   onSaveEdit: (message: ChatMessage, text: string) => void;
   onCancelEdit: () => void;
@@ -538,10 +534,10 @@ function MessageBubbleImpl(props: {
 
   // Apply a reaction from any surface (the menu bar, the emoji picker, or a chip),
   // then close every transient surface. The backend toggles server-side.
-  const react = (key: string) => {
+  const react = (pick: ReactionPick) => {
     setMenuOpen(false);
     setEmojiPickerOpen(false);
-    props.onReact(props.message, key);
+    props.onReact(props.message, pick);
   };
 
   // The reader's fold on the agent's transcript, reported with this message's id. The
@@ -937,6 +933,7 @@ function MessageBubbleImpl(props: {
                 activeReactionKey={myReactionKey}
                 onReact={react}
                 onMore={openEmojiPicker}
+                customEmoji={customPack}
                 onEdit={() => props.onStartEdit(props.message)}
                 onReply={() => inComposer(() => props.onReply(props.message))}
                 onCopy={() => props.onCopy(props.message)}
@@ -1016,9 +1013,11 @@ function MessageActionsMenu(props: {
   /** Called as the menu closes, before it restores focus to its trigger. */
   onCloseAutoFocus: (event: Event) => void;
   activeReactionKey?: string;
-  onReact: (key: string) => void;
+  onReact: (pick: ReactionPick) => void;
   /** Hand off to the full emoji picker — the quick row's "more" affordance. */
   onMore: () => void;
+  /** The user's own emoji, for the row above Teams' six. Empty draws no row. */
+  customEmoji: readonly CustomEmojiType[];
   onEdit: () => void;
   onReply: () => void;
   onCopy: () => void;
@@ -1074,6 +1073,7 @@ function MessageActionsMenu(props: {
           activeKey={props.activeReactionKey}
           onPick={props.onReact}
           onMore={props.onMore}
+          customEmoji={props.customEmoji}
           className="justify-between px-1 pb-1"
         />
         <DropdownMenuSeparator />
@@ -1498,14 +1498,17 @@ function DeletedContent(props: { mine: boolean; revealable: boolean; children: R
  * already say — no extra badge needed on top of the emoji.
  */
 function ReactionPicker(props: {
-  onPick: (key: string) => void;
+  onPick: (pick: ReactionPick) => void;
   onMore: () => void;
   activeKey?: string;
   className?: string;
   "data-testid"?: string;
   customEmoji?: readonly CustomEmojiType[];
 }) {
-  const customReactions = props.customEmoji?.slice(0, 6) ?? [];
+  // Art only, and six of it. An ALIAS points at art the row already draws, so offering
+  // it would spend one of six slots on a second copy of the same picture — and
+  // `alias_of` is EMPTY on a row that holds art, never null.
+  const customReactions = (props.customEmoji ?? []).filter((e) => !e.alias_of).slice(0, 6);
   const hasCustom = customReactions.length > 0;
 
   return (
@@ -1519,29 +1522,27 @@ function ReactionPicker(props: {
         </div>
       )}
       {hasCustom && (
-        <div role="group" aria-label="React with custom emoji" className="mb-2 flex items-center gap-0.5">
-          {customReactions.map((emoji) => {
-            const key = `${CUSTOM_REACTION_PREFIX}${emoji.name}`;
-            const active = props.activeKey?.startsWith(key);
-            const src = `/api/custom-emoji/${encodeURIComponent(emoji.name)}`;
-            return (
-              <button
-                key={emoji.name}
-                type="button"
-                aria-label={active ? `Remove ${emoji.name} reaction` : `React with ${emoji.name}`}
-                aria-pressed={active}
-                data-active={active ? "true" : undefined}
-                data-testid={`reaction-option-custom-${emoji.name}`}
-                onClick={() => props.onPick(key)}
-                className={cn(
-                  "grid size-7 place-items-center rounded-full leading-none transition-transform",
-                  active ? "bg-primary/20 ring-1 ring-inset ring-primary/50" : "hover:bg-accent",
-                )}
-              >
-                <CustomEmoji src={src} code={`:${emoji.name}:`} />
-              </button>
-            );
-          })}
+        <div
+          role="group"
+          aria-label="React with custom emoji"
+          className="mb-2 flex items-center gap-0.5"
+        >
+          {/* No highlight on these, unlike Teams' six: a custom reaction's key names the
+              AMS object its art went to, so the key on the message says nothing about
+              WHICH emoji made it. The row means "react with this one", and removing is
+              done from the chip, which hands its own key back. */}
+          {customReactions.map((emoji) => (
+            <button
+              key={emoji.name}
+              type="button"
+              aria-label={`React with ${emoji.name}`}
+              data-testid={`reaction-option-custom-${emoji.name}`}
+              onClick={() => props.onPick({ emoji: emoji.name })}
+              className="grid size-7 place-items-center rounded-full leading-none transition-transform hover:bg-accent"
+            >
+              <PackEmoji name={emoji.name} />
+            </button>
+          ))}
         </div>
       )}
       <div role="group" aria-label="React" className="flex items-center gap-0.5">
@@ -1555,7 +1556,7 @@ function ReactionPicker(props: {
               aria-pressed={active}
               data-active={active ? "true" : undefined}
               data-testid={`reaction-option-${key}`}
-              onClick={() => props.onPick(key)}
+              onClick={() => props.onPick({ key })}
               className={cn(
                 "grid size-7 place-items-center rounded-full leading-none transition-transform",
                 active ? "bg-primary/20 ring-1 ring-inset ring-primary/50" : "hover:bg-accent",
@@ -1603,7 +1604,7 @@ function ReactionPicker(props: {
 function ReactionChips(props: {
   reactions: Reaction[];
   mine: boolean;
-  onToggle: (key: string) => void;
+  onToggle: (pick: ReactionPick) => void;
 }) {
   return (
     <div
@@ -1625,8 +1626,13 @@ function ReactionChips(props: {
             data-testid={`reaction-chip-${r.key}`}
             data-mine={r.mine ? "true" : undefined}
             aria-pressed={r.mine}
-            aria-label={`${r.mine ? "Remove your" : "Add"} ${custom ? custom.name : r.key} reaction`}
-            onClick={() => props.onToggle(r.key)}
+            // A custom key names its ART and no name, so the label says what it is
+            // rather than naming somebody else's emoji from our own pack — two people's
+            // `:shipit:` are two different pictures, and the art on the chip is theirs.
+            aria-label={`${r.mine ? "Remove your" : "Add"} ${custom ? "custom emoji" : r.key} reaction`}
+            // Verbatim, and that is the whole toggle-off path: the key already names an
+            // uploaded object, so nothing is uploaded and nothing is re-minted.
+            onClick={() => props.onToggle({ key: r.key })}
             className={cn(
               "flex cursor-pointer items-center rounded-full border leading-none shadow-card backdrop-blur-md transition-colors",
               // One pill height either way (30px): a counted pill pads a 20px
@@ -1638,7 +1644,7 @@ function ReactionChips(props: {
             )}
           >
             {custom ? (
-              <CustomEmoji src={custom.src} code={`:${custom.name}:`} className="size-5" />
+              <CustomEmoji src={custom.src} label="custom emoji" className="size-5" />
             ) : (
               <Emoji emoji={reactionEmoji(r.key)} className="size-5" />
             )}

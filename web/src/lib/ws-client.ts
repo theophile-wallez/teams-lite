@@ -31,6 +31,7 @@ import type {
   PersonOverride,
   PersonProfile,
   PresenceResult,
+  ReactionPick,
   ReadReceiptsResult,
   ReplyTo,
   SettingsPatch,
@@ -521,14 +522,21 @@ export class Backend {
     });
   }
   /** React to a message with an emoji (Teams "emotion"), or toggle ours off.
-   *  `key` is the emotion (e.g. "like", "heart"). The backend toggles — clicking
-   *  our current reaction removes it — and re-broadcasts the message, so state
-   *  reconciles via the `message` event; `reacted` is the resulting on/off. */
-  react(conversation: string, messageId: string, key: string): Promise<{ reacted: boolean }> {
+   *  The pick is either an emotion key (e.g. "like", "heart", or an existing custom
+   *  reaction verbatim) or one of the user's own emoji by name, whose key the backend
+   *  mints once it has uploaded the art (see {@link ReactionPick}). The backend
+   *  toggles — clicking our current reaction removes it — and re-broadcasts the
+   *  message, so state reconciles via the `message` event; `reacted` is the resulting
+   *  on/off. */
+  react(
+    conversation: string,
+    messageId: string,
+    pick: ReactionPick,
+  ): Promise<{ reacted: boolean }> {
     return this.writeRequest<{ reacted: boolean }>("react", {
       conversation,
       message_id: messageId,
-      key,
+      ...pick,
     });
   }
   /** Mark a conversation or channel read up to its newest message — what the app

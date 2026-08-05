@@ -2553,6 +2553,13 @@ const customEmojiPack = new Map<string, CustomEmojiEntry>();
  *  are the only ones a bubble ever shows. */
 const EMOJI_OBJECT = "mock-emoji";
 
+/** The mock's AMS object URL for one emoji's art. ONE spelling, because a message's
+ *  inline `src` and a custom reaction's key have to name the same object — that is what
+ *  makes the chip and the glyph in the words above it the same picture. */
+function emojiObjectUrl(name: string): string {
+  return `https://eu-api.asm.skype.com/v1/objects/0-${EMOJI_OBJECT}-${name}/views/imgo`;
+}
+
 function seedCustomEmoji(): void {
   const now = Date.now();
   customEmojiPack.set("shipit", {
@@ -2663,6 +2670,17 @@ function mockMedia(url: string): { content_type: string; data_base64: string } {
   // the 320×200 picture below would draw it as a flat bar sized to the text, which says
   // nothing about the size a capture is meant to show. Square, and its own hue per code.
   if (url.includes(EMOJI_OBJECT)) {
+    // The object the URL names, when the pack holds it: an emoji uploaded FROM the pack
+    // (a send's inline art, a custom reaction's key) really is those bytes, so a chip and
+    // the glyph above it must be the same picture. Anything else — a colleague's own
+    // `:shipit:`, which is exactly what the inbound fixture carries — is its own art, and
+    // gets its own hue.
+    const object = url.split(`0-${EMOJI_OBJECT}-`)[1]?.split("/")[0] ?? "";
+    const asked = customEmojiPack.get(object);
+    const entry = asked?.alias_of ? customEmojiPack.get(asked.alias_of) : asked;
+    if (entry?.data_base64) {
+      return { content_type: entry.content_type, data_base64: entry.data_base64 };
+    }
     return {
       content_type: "image/png",
       data_base64: solidPng(20, 20, hslToRgb(hashString(url) % 360, 0.72, 0.52)).toString(
@@ -4785,11 +4803,22 @@ function dispatch(method: string, params: unknown): unknown {
       return { deleted: true };
     }
 
+    // React, mirroring the Rust `react` including the half that makes a custom emoji
+    // reaction work: `emoji` names one of the user's own, and the KEY is minted here from
+    // the object its art was uploaded to — a page can never mint it, because the object
+    // does not exist until the backend has made it. `key` carries an existing reaction
+    // verbatim, which is how one is toggled back off with no second upload.
     case "react": {
       const id = requireString(params, "conversation");
       const messageId = requireString(params, "message_id");
-      const key = requireString(params, "key");
-      const on = reactMessage(id, messageId, key);
+      const picked = asObject(params).emoji;
+      const key =
+        typeof picked === "string" && picked
+          ? `tlcustom-${emojiObjectUrl(picked)}`
+          : requireString(params, "key");
+      // A pick is always an ADD: its key names one upload, so it can never be the key
+      // already on the message.
+      const on = reactMessage(id, messageId, key, typeof picked === "string" && Boolean(picked));
       return { reacted: on };
     }
 
@@ -5563,7 +5592,12 @@ function deleteMessage(convId: string, messageId: string): void {
  *  backend's `react`: Teams keeps one reaction per user, so clicking our current
  *  emotion removes it and any other key replaces it. Returns the resulting on/off
  *  (whether we now react with `key`). */
-function reactMessage(convId: string, messageId: string, key: string): boolean {
+function reactMessage(
+  convId: string,
+  messageId: string,
+  key: string,
+  alwaysOn = false,
+): boolean {
   const t = threadFor(convId);
   if (!t) return false;
   const msg = t.messages.find((m) => m.id === messageId);
@@ -5575,7 +5609,10 @@ function reactMessage(convId: string, messageId: string, key: string): boolean {
     .map((r) => (r.mine ? { ...r, count: r.count - 1, mine: false } : r))
     .filter((r) => r.count > 0);
   const wasMineKey = list.find((r) => r.mine)?.key;
-  const on = wasMineKey !== key; // same key => toggle off
+  // Same key => toggle off. `alwaysOn` is what a PICK from the pack does: the real
+  // backend uploads the art and mints a key that names that one object, so a pick can
+  // never land on the key already there.
+  const on = alwaysOn || wasMineKey !== key;
 
   let next = withoutMine;
   if (on) {
@@ -5667,7 +5704,7 @@ function substituteInText(
         const target = aliases.get(name) || name;
         const emoji = names.get(target);
         if (emoji) {
-          out += `<img itemtype="http://schema.skype.com/Emoji" itemid="${name}" alt=":${name}:" src="https://eu-api.asm.skype.com/v1/objects/0-${EMOJI_OBJECT}-${name}/views/imgo" width="20" height="20">`;
+          out += `<img itemtype="http://schema.skype.com/Emoji" itemid="${name}" alt=":${name}:" src="${emojiObjectUrl(name)}" width="20" height="20">`;
         } else {
           out += text.slice(start, pos);
         }

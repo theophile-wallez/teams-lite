@@ -3511,10 +3511,26 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // reaction removes it; any other key replaces it. After the network PUT we
         // optimistically update the local row and broadcast it (both clients merge
         // by id), so the reaction shows immediately without waiting for the echo.
+        //
+        // One of the user's OWN emoji arrives as `emoji` — the name in their pack —
+        // rather than as a key, because a custom key names the AMS object the art was
+        // uploaded to and that object does not exist until this handler has made it. So
+        // the page never guesses a key: it names the emoji, and the key is minted here
+        // from what the upload answered. `key` still carries an EXISTING custom
+        // reaction verbatim, which is how one is toggled back off without a second
+        // upload of the same picture.
         "react" => {
             let conv = param_str(params, "conversation")?;
             let message_id = param_str(params, "message_id")?;
-            let key = param_str(params, "key")?;
+            let picked_emoji = params
+                .get("emoji")
+                .and_then(|v| v.as_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string);
+            let key = match picked_emoji {
+                Some(_) => String::new(),
+                None => param_str(params, "key")?,
+            };
 
             let (self_name, self_mri) = {
                 let session = ctx.session().await?;
@@ -3527,21 +3543,21 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .ok()
                 .and_then(|store| store.get_message(&conv, &message_id).ok().flatten())
                 .and_then(|m| teams_lite::store::my_reaction_key(&m.reactions, &self_mri));
-            let on = current_key.as_deref() != Some(key.as_str());
 
-            // A custom emoji reaction uploads the art first, exactly as a send does.
-            // The key names the emoji (`tlcustom-<name>-<amsId>`), so the uploader
-            // resolves the name, gets the art, and builds the key from what came back.
-            let reaction_key = if let Some(name) = teams_lite::custom_emoji::custom_reaction_name(&key) {
-                let store = ctx.store()?;
-                let (_content_type, bytes) = store
+            // A custom emoji reaction uploads the art first, exactly as a send does, and
+            // the key is the object's own URL. Picking from the pack is always an ADD:
+            // the key names one upload, so it can never be the key already on the
+            // message — removing is done from the chip, which hands its key back.
+            let (reaction_key, on) = if let Some(name) = picked_emoji.as_deref() {
+                let (_content_type, bytes) = ctx
+                    .store()?
                     .custom_emoji_art(name)?
                     .with_context(|| format!("custom emoji not found: {name}"))?;
                 let ic3 = ctx.tokens.get(IC3_SCOPE).await?;
                 let http = ctx.http.clone();
                 let conv_clone = conv.clone();
                 let name_clone = name.to_string();
-                let ams_id = ctx
+                let object_url = ctx
                     .retry_on_auth(move |session, _csa| {
                         let http = http.clone();
                         let conv = conv_clone.clone();
@@ -3549,14 +3565,16 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         let bytes = bytes.clone();
                         let ic3 = ic3.clone();
                         async move {
-                            teams_send::upload_ams_object(&http, &session, &ic3, &conv, &name, &bytes)
-                                .await
+                            teams_send::upload_ams_object_url(
+                                &http, &session, &ic3, &conv, &name, &bytes,
+                            )
+                            .await
                         }
                     })
                     .await?;
-                format!("tlcustom-{}-{}", name, ams_id)
+                (custom_emoji::custom_reaction_key(&object_url), true)
             } else {
-                key.clone()
+                (key.clone(), current_key.as_deref() != Some(key.as_str()))
             };
 
             let http = ctx.http.clone();

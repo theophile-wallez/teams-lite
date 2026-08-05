@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
+import { mediaNeedsProxy } from "./protocol";
 import {
   appleEmojiUrl,
   canReactWith,
   customReactionArt,
-  customReactionKey,
   emojiUnified,
   reactionEmoji,
   teamsReactionKey,
@@ -125,26 +125,29 @@ describe("Apple emoji images", () => {
   });
 });
 
-describe("customReactionKey", () => {
-  it("names the art in the key, and reads it back", () => {
-    const key = customReactionKey("shipit", "0-weu-d1-abc");
-    expect(customReactionArt(key)).toEqual({
-      name: "shipit",
-      src: expect.stringContaining("0-weu-d1-abc"),
-    });
+describe("customReactionArt", () => {
+  const OBJECT_URL = "https://eu-api.asm.skype.com/v1/objects/0-weu-d1-abc/views/imgo";
+
+  it("hands back the whole URL the key carries", () => {
+    expect(customReactionArt(`tlcustom-${OBJECT_URL}`)).toEqual({ src: OBJECT_URL });
   });
 
-  it("round-trips a name with hyphens", () => {
-    const key = customReactionKey("smirk-cat", "0-frc-d4-xyz123");
-    const parsed = customReactionArt(key);
-    expect(parsed).not.toBeNull();
-    expect(parsed!.name).toBe("smirk-cat");
-    expect(parsed!.src).toContain("0-frc-d4-xyz123");
+  it("is a URL the media proxy will carry, so the art needs no second rail", () => {
+    const art = customReactionArt(`tlcustom-${OBJECT_URL}`);
+    expect(art).not.toBeNull();
+    expect(mediaNeedsProxy(art!.src)).toBe(true);
   });
 
   it("leaves Microsoft's own keys alone", () => {
     expect(customReactionArt("like")).toBeNull();
     expect(customReactionArt("yes-tone2")).toBeNull();
     expect(reactionEmoji("like")).toBe("👍");
+  });
+
+  it("names no art for a key that carries no URL", () => {
+    // The shape this app used to mint: a NAME and an AMS id, with no host and no
+    // delimiter that a legal name could not contain (`blob-2`, `parrot-1`).
+    expect(customReactionArt("tlcustom-shipit-0-weu-d1-abc")).toBeNull();
+    expect(customReactionArt("tlcustom-")).toBeNull();
   });
 });

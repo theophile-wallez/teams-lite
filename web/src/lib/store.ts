@@ -60,6 +60,7 @@ import {
   type PersonPresence,
   type PersonOverride,
   type PersonProfile,
+  type ReactionPick,
   type ReadReceipt,
   type ReadReceiptSignal,
   type ReplyTo,
@@ -3600,11 +3601,11 @@ export class TeamsController {
    * by id (see `wireEvents`) — so we only fire the request and surface failures,
    * exactly like `editMessage`.
    */
-  async reactToMessage(messageId: string, key: string): Promise<boolean> {
+  async reactToMessage(messageId: string, pick: ReactionPick): Promise<boolean> {
     const id = this.get().openId;
     if (!id) return false;
     try {
-      await this.backend.react(id, messageId, key);
+      await this.backend.react(id, messageId, pick);
       return true;
     } catch (e) {
       this.set({ status: `reaction failed: ${errText(e)}` });
