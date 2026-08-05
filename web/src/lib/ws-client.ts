@@ -19,6 +19,7 @@ import type {
   CalendarViewResult,
   Channel,
   Conversation,
+  GitLabApprovalResult,
   LinkMetadataResult,
   MailBody as MailBodyResult,
   MailFolder,
@@ -977,6 +978,25 @@ export class Backend {
    *  is private); rejects only on a transient backend/network failure. */
   enrichLink(url: string): Promise<LinkMetadataResult> {
     return this.request<LinkMetadataResult>("enrich_link", { url });
+  }
+  /** Who has approved a merge request, and whether the user's own approval is among
+   *  them. A READ, so it is ungated like `enrichLink`: it is what lets a message's own
+   *  menu offer the right half of the toggle rather than guessing. Resolves with
+   *  `{ approval: null }` when the link is not a merge request on the configured host,
+   *  or the token cannot see it. */
+  gitlabApprovals(url: string): Promise<GitLabApprovalResult> {
+    return this.request<GitLabApprovalResult>("gitlab_approvals", { url });
+  }
+  /** Give the user's own approval to a merge request, or take it back.
+   *
+   *  THE one write this app makes to a tracker (see src/gitlab_approval.rs): it acts
+   *  under their GitLab account, everybody watching the merge request is told, and a
+   *  project rule may act on it. So it is gated like a send and a read-only backend
+   *  refuses it (OUTWARD_METHODS in src/bin/server.rs) — and it exists only because
+   *  `approved: false` is GitLab's own undo of `approved: true`. Returns the state
+   *  GitLab reports afterwards, so the menu shows what really happened. */
+  gitlabSetApproval(url: string, approved: boolean): Promise<GitLabApprovalResult> {
+    return this.writeRequest<GitLabApprovalResult>("gitlab_set_approval", { url, approved });
   }
 
   // ---- events -------------------------------------------------------------

@@ -50,6 +50,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
 //   bun run web/scripts/preview.ts --out /tmp/tag --agent-tag   # tagging an agent
 //   bun run web/scripts/preview.ts --out /tmp/ask --answer-with # "Answer with <agent>" on a message
+//   bun run web/scripts/preview.ts --out /tmp/mr --merge-request # review + approve a merge request
 //   bun run web/scripts/preview.ts --out /tmp/chat --chat-menu  # chat sections + the row's "…" menu
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
@@ -1166,6 +1167,76 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-menu-{light,dark}.png, ${out}-row-light.png and ` +
           `${out}-draft-{light,dark}.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // A MERGE REQUEST in a message: the two rows its ⋯ menu grows. "Review !44 with
+  // Claude", which drafts like "Answer with" does, and the approval — the one action in
+  // this app that writes to a tracker, so the capture walks its whole shape: the row, the
+  // confirmation it arms with the sentence saying what it costs, and the outcome it reports
+  // in the menu it was clicked in.
+  if (args.includes("--merge-request")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openConversation(page, "Merge Request Review");
+      await clearComposer(page);
+      const bubble = page.locator('[data-testid="message"]').first();
+      await bubble.hover();
+      await bubble.locator('[data-testid="message-actions"]').click();
+      const approve = page.locator('[data-testid="action-approve-mr"]');
+      await approve.waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-menu-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-menu-dark.png`);
+      await setTheme("light");
+      // The two rows up close: a vendor's 16px mark beside the words is where this is
+      // right or wrong.
+      await shot(`${out}-review-row-light.png`, '[data-testid="action-review-with"]');
+      await shot(`${out}-approve-row-light.png`, '[data-testid="action-approve-mr"]');
+
+      // Armed: what the second click costs, said before it is made.
+      await approve.click();
+      await page.waitForSelector('[data-testid="action-approve-mr-confirm"]');
+      await page.waitForTimeout(200);
+      await shot(`${out}-confirm-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-confirm-dark.png`);
+      await setTheme("light");
+
+      // Done: GitLab's answer, in the menu the user is still looking at.
+      await page.locator('[data-testid="action-approve-mr-confirm"]').click();
+      await page.waitForSelector('[data-testid="approval-outcome"]');
+      await page.waitForTimeout(200);
+      await shot(`${out}-approved-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-approved-dark.png`);
+      await setTheme("light");
+      // Out of the menu through the mouse: an open menu is modal, so it is the only layer
+      // taking pointer events, and the app reads Escape as "leave this conversation".
+      await page.mouse.click(5, 5);
+      // Written as a string, like the other waits here: this script is typechecked
+      // against the Node lib, which has no `document`.
+      await page.waitForFunction(
+        `getComputedStyle(document.body).pointerEvents !== "none"`,
+        undefined,
+        { timeout: 5_000 },
+      );
+
+      // And the review draft: a reply, tag first, the merge request named in the request.
+      await bubble.hover();
+      await bubble.locator('[data-testid="message-actions"]').click();
+      const review = page.locator('[data-testid="action-review-with"]').first();
+      await review.waitFor();
+      await review.click();
+      await page.waitForSelector('.tiptap-message [data-testid="agent-tag"]');
+      await page.waitForTimeout(200);
+      await shot(`${out}-draft-light.png`, '[data-testid="composer-shell"]');
+      console.log(
+        `[preview] wrote ${out}-menu-{light,dark}.png, ${out}-review-row-light.png, ` +
+          `${out}-approve-row-light.png, ${out}-confirm-{light,dark}.png, ` +
+          `${out}-approved-{light,dark}.png and ${out}-draft-light.png`,
       );
     });
     process.exit(0);

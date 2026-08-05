@@ -46,6 +46,7 @@ import {
   type ChatPrefs,
   type Conversation,
   type IncomingCall,
+  type GitLabApprovalResult,
   type LinkMetadata,
   type LiveStatus,
   type MailBody,
@@ -679,6 +680,13 @@ export class TeamsController {
   // with two shapes, never two caches.
   private linkResolved = new Map<string, LinkMetadata | null>();
 
+  // The approval state of a merge request, per URL, as last read or last written. Not a
+  // promise cache like the one above: this one is asked for when a ⋯ menu OPENS, which is
+  // a moment the reader chose, so every open re-reads GitLab and the stored answer is
+  // only what the menu draws while that request is in flight. A cached "you approved"
+  // that outlived a revoke made in GitLab's own UI would offer the wrong action.
+  private approvalResolved = new Map<string, GitLabApprovalResult>();
+
   // Person-card caches, both keyed by MRI. A directory card barely changes, so it
   // is cached for the whole session (a "not found" too — asking again would answer
   // the same). Presence is the opposite: it is only trusted for PRESENCE_TTL_MS,
@@ -888,6 +896,7 @@ export class TeamsController {
     this.avatarCache.clear();
     this.linkCache.clear();
     this.linkResolved.clear();
+    this.approvalResolved.clear();
     this.profileCache.clear();
     this.presenceCache.clear();
     if (this.addressBatchTimer) clearTimeout(this.addressBatchTimer);
@@ -2966,6 +2975,9 @@ export class TeamsController {
     this.set({ settings });
     this.linkCache.clear();
     this.linkResolved.clear();
+    // A new host or a new token changes who GitLab thinks we are, so what it said about
+    // an approval no longer holds either.
+    this.approvalResolved.clear();
     playCue("success");
     return settings;
   }
@@ -3345,6 +3357,55 @@ export class TeamsController {
     this.linkCache.set(url, pending);
     pending.catch(() => this.linkCache.delete(url));
     return pending;
+  }
+
+  /** The approval state of a merge request, freshly read from GitLab through the backend,
+   *  and remembered for the next menu open (see {@link cachedApproval}).
+   *
+   *  A READ: it names who has approved and whether the user's own approval is among them,
+   *  which is what decides whether the menu offers "Approve" or "Revoke approval". A
+   *  transient failure resolves to "no approval state", so the menu offers nothing rather
+   *  than an action it cannot stand behind. */
+  async mergeRequestApproval(url: string): Promise<GitLabApprovalResult | null> {
+    try {
+      const result = await this.backend.gitlabApprovals(url);
+      this.approvalResolved.set(url, result);
+      return result;
+    } catch {
+      return null;
+    }
+  }
+
+  /** What {@link mergeRequestApproval} last answered for this URL, without awaiting, so a
+   *  reopened menu draws the state it showed before rather than flickering through
+   *  "unknown". `undefined` when this session has never read it. */
+  cachedApproval(url: string): GitLabApprovalResult | undefined {
+    return this.approvalResolved.get(url);
+  }
+
+  /** Give the user's own approval to a merge request, or take it back, and answer with the
+   *  state GitLab reports afterwards.
+   *
+   *  THE one write this app makes to a tracker (see src/gitlab_approval.rs): it is
+   *  token-gated like a send, it carries out one click the user just made, and it is
+   *  offered only because the same call undoes it. The outcome is RETURNED rather than
+   *  swallowed into the status line — the menu the user clicked in reports it, the way the
+   *  composer reports a failed send — and the status line carries the raw sentence too,
+   *  for whoever reads a screenshot. */
+  async setMergeRequestApproval(url: string, approved: boolean): Promise<GitLabApprovalResult> {
+    try {
+      const result = await this.backend.gitlabSetApproval(url, approved);
+      this.approvalResolved.set(url, result);
+      const what = result.approval?.reference ?? "the merge request";
+      this.setStatus(approved ? `Approved ${what} on GitLab` : `Revoked your approval of ${what}`);
+      return result;
+    } catch (e) {
+      // The reason is GitLab's own sentence (see `refusal` in src/gitlab_approval.rs), so
+      // it is shown as it arrived rather than replaced by a cue.
+      const reason = e instanceof Error ? e.message : String(e);
+      this.setStatus(`error: ${reason}`);
+      throw e;
+    }
   }
 
   cancelReply(): void {

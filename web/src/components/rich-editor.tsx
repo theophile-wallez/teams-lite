@@ -150,8 +150,9 @@ export function RichEditor(props: {
   /** The agents this conversation can summon — empty unless one really would answer
    *  (see `agentCandidatesFor`). */
   agentCandidates?: readonly AgentCandidate[];
-  /** An "Answer with <agent>" picked from a message's own menu: the tag it asks for is
-   *  put at the front of the draft, once per token (see lib/agent-answer.ts). */
+  /** An "Answer with <agent>" — or a "Review with <agent>" — picked from a message's own
+   *  menu: the tag it asks for is put at the front of the draft, with that row's own
+   *  request behind it, once per token (see lib/agent-answer.ts). */
   agentAnswer?: AgentAnswer | null;
   /** Called the moment an "@…" starts, so the candidates can be fetched on demand. */
   onMentionQuery?: () => void;
@@ -321,7 +322,7 @@ export function RichEditor(props: {
     editor.commands.leadAgentTag({
       backend: answer.backend,
       prefix: answer.prefix,
-      request: answerRequest(editor.getText()),
+      request: answerRequest(editor.getText(), answer.request),
     });
     // `props.agentAnswer` is read through its own token.
     // eslint-disable-next-line react-hooks/exhaustive-deps

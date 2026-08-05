@@ -22,6 +22,7 @@ import type { AgentAnswer } from "~/lib/agent-answer";
 import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
 import { agentCandidatesFor, type AgentCandidate } from "~/lib/mentions";
+import { reviewRequest, type MergeRequestLink } from "~/lib/merge-request";
 import { useAppState, useController } from "./controller-context";
 import { AgentMenu } from "./agent-menu";
 import { CallButton } from "./call-button";
@@ -507,6 +508,24 @@ export function MessagePane(props: { onBack?: () => void }) {
     [controller, openId],
   );
 
+  // "Review <ref> with <agent>": the same draft, with the request already naming the merge
+  // request. It reaches the composer through the same state for the same reason — one
+  // pick, one tag at the front, one Enter that is the user's (see lib/merge-request.ts).
+  const doReviewWith = useCallback(
+    (m: ChatMessage, agent: AgentCandidate, mergeRequest: MergeRequestLink) => {
+      if (!openId) return;
+      controller.startReply(m);
+      setAgentAnswer((prev) => ({
+        token: (prev?.token ?? 0) + 1,
+        conversation: openId,
+        backend: agent.backend,
+        prefix: agent.prefix,
+        request: reviewRequest(mergeRequest),
+      }));
+    },
+    [controller, openId],
+  );
+
   const doCopy = useCallback(async (m: ChatMessage) => {
     const text = copyableMessageText(m);
     try {
@@ -588,6 +607,7 @@ export function MessagePane(props: { onBack?: () => void }) {
             onCopy={doCopy}
             answerAgents={answerAgents}
             onAnswerWith={doAnswerWith}
+            onReviewWith={doReviewWith}
             onReact={doReact}
             onStartEdit={doStartEdit}
             onSaveEdit={doSaveEdit}

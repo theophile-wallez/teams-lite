@@ -26,4 +26,14 @@ describe("answerRequest", () => {
     expect(answerRequest("what did they mean?")).toBe("");
     expect(summons("@claude what did they mean?", "@claude")).toBe(true);
   });
+
+  it("seeds the row's OWN request when it has one, under the same rule", () => {
+    // "Review with <agent>" names the merge request it is about; the composer applies it
+    // exactly where it applies "Answer this message.", and no further.
+    const review = "Review this merge request: !42 https://gitlab.com/a/b/-/merge_requests/42";
+    expect(answerRequest("", review)).toBe(review);
+    expect(summons(`@claude ${answerRequest("", review)}`, "@claude")).toBe(true);
+    // The user's own sentence still wins: whose words go out never depends on the row.
+    expect(answerRequest("does the migration run twice?", review)).toBe("");
+  });
 });

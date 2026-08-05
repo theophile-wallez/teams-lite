@@ -821,14 +821,28 @@ html[data-virtual-keyboard-open] .composer-shell {
    `logo-light.svg` filled white for a dark one — with identical geometry. So the
    two files become these two rules, and LinearLogo draws the path once with
    `currentColor`.
-   These are the only literal hexes outside theme.css, and deliberately: they are a
-   third party's brand colour, not a token of ours to theme. Linear asks that the
-   mark not be recoloured, so it must NOT follow --foreground. */
+   These and GitLab's tanuki below are the only literal hexes outside theme.css, and
+   deliberately: they are a third party's brand colour, not a token of ours to theme.
+   Linear asks that the mark not be recoloured, so it must NOT follow --foreground. */
 .linear-logo {
   color: #222326;
 }
 [data-theme="dark"] .linear-logo {
   color: #ffffff;
+}
+
+/* GitLab's logomark, in GitLab's own three fills (`GitLab_icon.svg`: the tanuki is
+   drawn as four paths sharing three colours, so `currentColor` cannot carry it the
+   way Linear's single path can). One spelling for both themes: the mark is legible
+   on either, and GitLab asks that it not be recoloured. */
+.gitlab-logo-1 {
+  fill: #e24329;
+}
+.gitlab-logo-2 {
+  fill: #fc6d26;
+}
+.gitlab-logo-3 {
+  fill: #fca326;
 }
 
 /* Calendar: the diagonal hatch every calendar uses for a TENTATIVE event, so

@@ -787,6 +787,37 @@ export type LinkMetadata =
  *  recognizes the link (or the resource is private/absent). */
 export type LinkMetadataResult = { metadata: LinkMetadata | null };
 
+/** The approval state of one merge request (mirrors the Rust `Approval` in
+ *  src/gitlab_approval.rs).
+ *
+ *  Every count is optional because GitLab's Community Edition carries none of the
+ *  approval-rule fields: a UI reading a missing count as zero would tell the user no
+ *  approval was needed on a merge request that wants one. */
+export type GitLabApproval = {
+  /** Short reference of the merge request, "!42", so a report names what changed. */
+  reference: string;
+  /** GitLab's own verdict, whose meaning differs by edition — which is why it is
+   *  surfaced rather than derived. */
+  approved?: boolean;
+  approvals_required?: number;
+  approvals_left?: number;
+  /** Who has approved, by display name, in GitLab's own order. */
+  approved_by?: string[];
+  /** Whether the user's OWN account is among them, matched on GitLab's user id. This
+   *  is what decides whether the menu offers "Approve" or "Revoke approval": the two
+   *  are opposite actions, and offering the wrong one is a mistake the reader cannot
+   *  see coming. */
+  mine: boolean;
+};
+
+/** Result of a `gitlab_approvals` read, or of the `gitlab_set_approval` write.
+ *
+ *  `approval` is `null` when the URL is not a merge request on the configured host, or
+ *  the token cannot see it — the UI then offers no approval at all. `token_set` says
+ *  whether a GitLab token is stored, so a public merge request that enriched for
+ *  nobody in particular does not offer an action GitLab would refuse. */
+export type GitLabApprovalResult = { approval: GitLabApproval | null; token_set: boolean };
+
 // ---- message content parsing ------------------------------------------------
 
 /** How a message body must be read: as the bounded Teams HTML subset, or verbatim

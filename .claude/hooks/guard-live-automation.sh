@@ -49,6 +49,11 @@
 #      or hides that chat in every Teams client they own. The gated
 #      `set_chat_pinned` / `set_chat_muted` / `set_chat_hidden` RPCs — the "…" menu on
 #      a chat row — are the only way that may happen;
+#   2g. a WRITE to one of the TRACKERS straight to GitLab or Linear
+#      (`POST …/merge_requests/<iid>/approve` | `/unapprove`, or a GraphQL mutation).
+#      Both are read-only here save one deliberate exception — the approval the user
+#      gives from a message and takes back the same way, through the gated
+#      `gitlab_set_approval` RPC — and there is no sandbox project to aim a test at;
 #   5. anything that would send MAIL. The mailbox is read-only here and has no
 #      sandbox equivalent (see AGENTS.md § Mail is READ-ONLY): the broker token
 #      already carries `Mail.Send`, so the only thing standing between this
@@ -325,10 +330,23 @@ writes_chat_settings() {
   grep -qiE 'name=(alerts|ispinned|historyHiddenTime)|set_chat_(pinned|muted|hidden)' "$1"
 }
 
+# Does this file WRITE to one of the trackers? Everything this app knows about GitLab
+# and Linear reads, with ONE exception — a merge request's approval, given and taken
+# back through src/gitlab_approval.rs behind the gated `gitlab_set_approval` RPC. A
+# GitLab token carries whatever scopes the user granted it and a Linear key has full
+# write access, so the endpoints and the mutation keyword are matched wherever a file
+# names them. Reading a tracker is the whole point of the preview cards and is not
+# matched: only the two approval endpoints, a GraphQL mutation, and this crate's own
+# write function are.
+writes_to_a_tracker() {
+  grep -qiE 'merge_requests/[^ "'\'']*/(un)?approve|/(un)?approve"|gitlab_approval::set|gitlab_set_approval|"mutation |mutation *\{' "$1"
+}
+
 # Cargo examples that would post to Teams somewhere other than the sandbox channel,
 # and (separately) those that would publish the user's own presence.
 examples_that_send=""
 examples_publishing_presence=""
+examples_writing_to_a_tracker=""
 while IFS= read -r source; do
   [ -z "$source" ] && continue
   path="$project_dir/$source"
@@ -338,6 +356,12 @@ while IFS= read -r source; do
   # and it is collected on its own.
   if publishes_presence "$path"; then
     examples_publishing_presence="$examples_publishing_presence $source"
+  fi
+  # A tracker write is the same shape of problem: there is no sandbox project and no
+  # pre-authorized merge request, so pinning a conversation says nothing about where an
+  # approval would land.
+  if writes_to_a_tracker "$path"; then
+    examples_writing_to_a_tracker="$examples_writing_to_a_tracker $source"
   fi
   # Does it act outward at all? Through this crate's send path, by naming the
   # chatService messages endpoint itself, by publishing our read position — a
@@ -362,6 +386,7 @@ scripts_sending_mail=""
 scripts_writing_the_read_state=""
 scripts_writing_chat_settings=""
 scripts_publishing_presence=""
+scripts_writing_to_a_tracker=""
 scripts_fetching_the_write_token=""
 if ! sanctioned_automation; then
   while IFS= read -r script; do
@@ -395,6 +420,14 @@ if ! sanctioned_automation; then
     # person card shows.
     if publishes_presence "$script"; then
       scripts_publishing_presence="$scripts_publishing_presence $script"
+    fi
+    # The trackers, straight to GitLab or Linear: an approval given with the user's own
+    # token is an act by their account that everybody watching the merge request is told
+    # about, and it bypasses the whole feature's consent gate (the write token, read-only
+    # mode, the message menu's own confirmation). Reading a tracker is what the preview
+    # cards are for and stays open.
+    if writes_to_a_tracker "$script"; then
+      scripts_writing_to_a_tracker="$scripts_writing_to_a_tracker $script"
     fi
     # READING the live backend is fine and often the point (inspecting real data
     # beats guessing). WRITING is not: `send`/`edit`/`delete`/`react` post as the user —
@@ -461,7 +494,7 @@ if ! sanctioned_automation; then
     # from another (MACHINE_METHODS in src/bin/server.rs). Reading them back is not a
     # write and is not listed.
     if grep -qE '(127\.0\.0\.1|localhost):(1942[0-2]|1944[0-2])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that
@@ -631,6 +664,42 @@ READING those properties is fine and is what the sidebar is built on — a GET o
 mock: cd web && bun run preview. Against the real account it goes through the app's own
 gated set_chat_pinned / set_chat_muted / set_chat_hidden RPCs, or through a cargo
 example that pins the sandbox chat."
+fi
+
+# --- 1d3. a tracker is written through the gated RPC, or not at all -------------
+# `gitlab_set_approval` is guarded as a backend write by rule 1, but GitLab can also be
+# addressed straight with the user's own token, which bypasses the backend entirely (the
+# write token, read-only mode, the message menu's own confirmation). So the two approval
+# endpoints are matched inside ad-hoc scripts and cargo examples, and on the command line
+# behind an HTTP client — the same restriction rule 1d puts on the horizon write, so
+# `grep -rn approve src` still reads the code that implements this.
+#
+# Unlike a send, this cannot be made safe by pinning a target: there is no sandbox
+# project and no pre-authorized merge request. An approval is an act by the user's GitLab
+# account, everybody watching the merge request is told, and a project rule may act on it.
+if printf '%s' "$command_line" |
+  grep -qiE '(curl|wget|xh|httpie|http)[^;&|]*merge_requests/[^ "'\'']*/(un)?approve' ||
+  [ -n "$scripts_writing_to_a_tracker" ] || [ -n "$examples_writing_to_a_tracker" ]; then
+  [ -n "$scripts_writing_to_a_tracker" ] &&
+    printf 'note: a tracker write was found inside%s\n' "$scripts_writing_to_a_tracker" >&2
+  [ -n "$examples_writing_to_a_tracker" ] &&
+    printf 'note: a tracker write was found inside%s\n' "$examples_writing_to_a_tracker" >&2
+  block "This command would WRITE to one of the user's trackers
+(POST …/merge_requests/<iid>/approve | /unapprove, or a Linear GraphQL mutation).
+
+The trackers are read-only here with ONE exception: a merge request's approval, which
+the user gives from the message that carries it and takes back the same way (AGENTS.md
+§ The trackers). Everything else — a comment, an assignment, a label, a merge — reaches
+everybody watching the issue under the user's name and has no undo at all.
+
+Going direct also bypasses every gate the one write has: the write token, read-only
+mode, and the menu that asks the user first. And pinning a target cannot make it safe
+the way it can for a send — there is no sandbox project.
+
+READING a tracker is fine and is what the preview cards are built on — a GET of an
+issue, a merge request or a project is untouched by this rule. To exercise the write,
+use the mock: cd web && bun run preview. Against the real account it goes through the
+app's own gated gitlab_set_approval RPC, from the user's own click."
 fi
 
 # --- 1e. our own presence is published by the gated RPC, or not at all ----------

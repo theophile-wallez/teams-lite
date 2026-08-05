@@ -12,6 +12,7 @@
 // Methods: conversations | open | backfill | set_draft | send | edit | react | notifications
 //          | fetch_media | fetch_avatar | sender_icon | profile | people_by_address | presence
 //          | get_settings | set_settings | set_always_available | enrich_link
+//          | gitlab_approvals | gitlab_set_approval
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | mail_mark_read
 //          | calendars | calendar_view
@@ -69,7 +70,14 @@
 // requests, issues and projects, `linear` for issues, projects and documents. Both
 // are READ-ONLY like mail and the calendar — a Linear API key can create and edit
 // issues as the user, so `linear` sends GraphQL queries only and `linear::tests`
-// enforce that on the source.
+// enforce that on the source, as `gitlab::tests` now do for the GET-only read path.
+//
+// `gitlab_set_approval` is the ONE exception, and the only write this app makes to a
+// tracker: it approves a merge request under the user's own GitLab account, or takes
+// that approval back (see `gitlab_approval`). It lives in a module of its own, it is an
+// {@link OUTWARD_METHODS} entry — the write token, refused read-only, blocked by the
+// automation hook — and it exists only because it is reversible from the same menu.
+// `gitlab_approvals` beside it is the READ that tells the menu which half to offer.
 //
 // No raw tokens are ever logged or sent.
 
@@ -91,7 +99,7 @@ use teams_lite::{
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
-use teams_lite::{gitlab, link_preview};
+use teams_lite::{gitlab, gitlab_approval, link_preview};
 
 /// The port the user's own backend owns: what the `teams` command and the web app
 /// dial by default.
@@ -226,7 +234,17 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// be taken back, and none is ever automatic: each one carries out a click the user
 /// just made. `call_prepare` is the one calling method that is NOT here — it posts
 /// nothing, and sits in {@link MACHINE_METHODS} with its own refusal text.
-const OUTWARD_METHODS: [&str; 12] = [
+///
+/// `gitlab_set_approval` is the one entry that reaches a place other than Teams: it
+/// approves — or takes back the approval of — a merge request under the user's own
+/// GitLab account (see [`teams_lite::gitlab_approval`]). Everybody watching the merge
+/// request is told, a project rule may act on it, and it is the ONLY write this app
+/// makes to a tracker; every other thing it knows about GitLab and Linear reads. So it
+/// is gated exactly like a send, and it is offered only because the same call takes it
+/// back: a write whose off switch cannot undo its on switch would not be here at all
+/// (see `forceavailability` in `teams_lite::teams_presence`). Reading the approval
+/// state (`gitlab_approvals`) stays open, like every other read.
+const OUTWARD_METHODS: [&str; 13] = [
     "send",
     "edit",
     "delete",
@@ -239,6 +257,7 @@ const OUTWARD_METHODS: [&str; 12] = [
     "call_accept",
     "call_hangup",
     "call_mute",
+    "gitlab_set_approval",
 ];
 
 /// The RPC methods that act on THIS MACHINE rather than on the user's Teams account.
@@ -3812,6 +3831,59 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             };
             let metadata = link_preview::enrich(&ctx.http, &settings, &url).await?;
             Ok(json!({ "metadata": metadata }))
+        }
+
+        // The approval state of one merge request: who has approved it, how many
+        // approvals it still wants, and whether the user's own is among them. A READ,
+        // so it is ungated like `enrich_link` — and it is what lets the message's own
+        // menu offer the right half of the toggle instead of guessing. `approval: null`
+        // when the URL is not a merge request on the configured host, or the token
+        // cannot see it (the UI then offers nothing).
+        "gitlab_approvals" => {
+            let url = param_str(params, "url")?;
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let approval = gitlab_approval::fetch(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &url,
+            )
+            .await?;
+            Ok(json!({ "approval": approval, "token_set": settings.gitlab_token.is_some() }))
+        }
+
+        // Give, or take back, the user's own approval of a merge request. THE one write
+        // this app makes to a tracker (see src/gitlab_approval.rs and AGENTS.md § The
+        // trackers): everything else about GitLab and Linear reads.
+        //
+        // It is an `OUTWARD_METHODS` entry because it acts under the user's GitLab
+        // account and everybody watching the merge request is told — a rule may even let
+        // it merge — so it needs the write token, a read-only backend refuses it, and the
+        // automation hook refuses a command line that names the endpoint. What makes it
+        // acceptable at all is that it is REVERSIBLE from the same menu: `approved:
+        // false` is GitLab's own `/unapprove`.
+        "gitlab_set_approval" => {
+            let url = param_str(params, "url")?;
+            let approved = params
+                .get("approved")
+                .and_then(Value::as_bool)
+                .context("`approved` must be true or false")?;
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let approval = gitlab_approval::set(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &url,
+                approved,
+            )
+            .await?;
+            Ok(json!({ "approval": approval, "token_set": true }))
         }
 
         // One person's directory card — name, job title, department, email, work
@@ -7597,6 +7669,63 @@ mod tests {
         for absent in ["set_chat_pinned", "set_chat_hidden"] {
             assert_eq!(write_class(absent), None, "{absent}");
         }
+    }
+
+    // Approving a merge request is the ONE write this app makes to a tracker. It acts
+    // under the user's own GitLab account, everybody watching the merge request is told,
+    // and a project rule may act on it — so it is outward and token-gated exactly like a
+    // send, while the READ beside it stays open like every other read.
+    #[test]
+    fn approving_a_merge_request_is_outward_facing_and_token_gated() {
+        assert!(OUTWARD_METHODS.contains(&"gitlab_set_approval"));
+        assert_eq!(write_class("gitlab_set_approval"), Some(WriteClass::Outward));
+        let params = json!({ "url": "https://gitlab.com/a/b/-/merge_requests/1", "approved": true });
+        let err = check_write_allowed("gitlab_set_approval", &params, Some("tok"))
+            .expect_err("must refuse a tokenless approval");
+        assert!(err.contains("write token"), "{err}");
+        assert!(
+            check_write_allowed(
+                "gitlab_set_approval",
+                &json!({
+                    "url": "https://gitlab.com/a/b/-/merge_requests/1",
+                    "approved": true,
+                    "write_token": "tok",
+                }),
+                Some("tok")
+            )
+            .is_ok()
+        );
+        // Taking the approval BACK is the same call, so it cannot end up ungated: an
+        // approval this app could give and not revoke is one it must not give.
+        assert_eq!(write_class("gitlab_unapprove"), None);
+        // And reading the state is a read: the menu asks it on every open, and a gate
+        // there would make the feature invisible on a read-only backend that can still
+        // show the user who approved.
+        for read in ["gitlab_approvals", "enrich_link"] {
+            assert!(check_write_allowed(read, &json!({}), None).is_ok(), "{read}");
+        }
+    }
+
+    /// The write reaches GitLab through the one module that may, and the read is the
+    /// only thing the ungated arm can do. A later edit that called `gitlab_approval::set`
+    /// from the read arm would hand a tracker write the read path's own openness.
+    #[test]
+    fn the_approval_read_arm_never_names_the_write() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let read = code
+            .split("\"gitlab_approvals\" =>")
+            .nth(1)
+            .expect("the gitlab_approvals handler")
+            .split("\"gitlab_set_approval\" =>")
+            .next()
+            .expect("the handler ends at the next arm");
+        assert!(read.contains("gitlab_approval::fetch"), "scanned the wrong text");
+        assert!(
+            !read.contains("gitlab_approval::set"),
+            "the gitlab_approvals arm names the approval WRITE. That arm is ungated, so a \
+             write called from it would reach the user's tracker with no consent gate at all."
+        );
     }
 
     /// The handler names the ONE property whose write round-trips, and no other. A

@@ -28,6 +28,8 @@ import {
 import { reactionEmoji, REACTION_PICKER } from "~/lib/teams-emoji";
 import { hasActivePipeline } from "~/lib/gitlab-pipeline";
 import { LINEAR_WEB_HOST } from "~/lib/linear";
+import { mergeRequestsIn, type MergeRequestLink } from "~/lib/merge-request";
+import type { GitLabApprovalResult } from "~/lib/protocol";
 import {
   containsImage,
   dropLinks,
@@ -44,6 +46,7 @@ import { CardAttachment } from "~/components/card-attachment";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
 import { AgentLogo } from "./agent-logo";
+import { GitLabLogo } from "./gitlab-logo";
 import {
   AgentSignature,
   AgentStoredStatus,
@@ -245,6 +248,14 @@ function MessageBubbleImpl(props: {
   /** Ask one of them about THIS message. It drafts the request; the send stays the
    *  user's (see lib/agent-answer.ts). */
   onAnswerWith?: (message: ChatMessage, agent: AgentCandidate) => void;
+  /** Point one of them at the MERGE REQUEST this message names. The same draft-only
+   *  action as `onAnswerWith`, with the request the row already knows (see
+   *  `reviewRequest` in lib/merge-request.ts). */
+  onReviewWith?: (
+    message: ChatMessage,
+    agent: AgentCandidate,
+    mergeRequest: MergeRequestLink,
+  ) => void;
   onReply: (message: ChatMessage) => void;
   onCopy: (message: ChatMessage) => void;
   onReact: (message: ChatMessage, key: string) => void;
@@ -298,6 +309,18 @@ function MessageBubbleImpl(props: {
     return extractLinks(body, format).filter((u) => hosts.has(urlHost(u) ?? ""));
   }, [parsed, format, gitlabHost]);
 
+  // The merge request this message asks about, if it asks about one. Read from the LINK
+   // rather than from the card the link resolved to: what the ⋯ menu offers is decided by
+  // the URL's own shape (see lib/merge-request.ts), so a merge request whose card never
+  // arrived — a missing token, a private project — is still something the reader can
+  // point an agent at. Only the FIRST one is offered: a message naming three would turn
+  // one menu into a directory of six rows, and the one being discussed is the one named
+  // first.
+  const mergeRequest = useMemo(
+    () => mergeRequestsIn(candidateLinks, gitlabHost)[0] ?? null,
+    [candidateLinks, gitlabHost],
+  );
+
   const enrichment = useEnrichedLinks(candidateLinks);
 
   // The links that resolved to an integration → shown as cards and hidden from
@@ -311,6 +334,22 @@ function MessageBubbleImpl(props: {
     return out;
   }, [candidateLinks, enrichment]);
   const hiddenHrefs = useMemo(() => new Set(cards.map((c) => c.url)), [cards]);
+
+  // Whether that merge request can still be approved. A merged or closed one cannot —
+  // GitLab refuses it — and an action that only ever earns a refusal reads as a bug. The
+  // state comes from the card the link resolved to; a link that resolved to NOTHING leaves
+  // the question open, so the row is offered and GitLab decides.
+  const mergeRequestApprovable = useMemo(() => {
+    if (!mergeRequest) return false;
+    const meta = enrichment.get(mergeRequest.url);
+    // Still resolving: nothing is offered YET, so a merged merge request never flashes an
+    // Approve row on its way to being told apart from an open one.
+    if (meta === undefined) return false;
+    // Resolved to no card at all — a private project, no token — so the state is unknown
+    // and GitLab is the one that decides.
+    if (meta === null || meta.provider !== "gitlab") return true;
+    return meta.state === undefined || meta.state === "opened";
+  }, [mergeRequest, enrichment]);
 
   // The rendered body, split into its before-quote and main parts, each parsed
   // to a node tree with carded links removed. Computed once so we can ask
@@ -865,6 +904,11 @@ function MessageBubbleImpl(props: {
                 onAnswerWith={(agent) =>
                   inComposer(() => props.onAnswerWith?.(props.message, agent))
                 }
+                mergeRequest={mergeRequest}
+                mergeRequestApprovable={mergeRequestApprovable}
+                onReviewWith={(agent, mr) =>
+                  inComposer(() => props.onReviewWith?.(props.message, agent, mr))
+                }
               />
             )}
           </>
@@ -887,6 +931,11 @@ function MessageBubbleImpl(props: {
  * glyph of ours, exactly as the composer's tag does, because the two are one feature
  * reached from two ends — and like the tag it only DRAFTS the request (see
  * lib/agent-answer.ts): a message posted under the user's name is theirs to send.
+ *
+ * A message that names a MERGE REQUEST carries two more (see lib/merge-request.ts):
+ * "Review <ref> with <agent>", which is that same draft with the request already naming
+ * what to look at, and {@link ApprovalAction} — the one thing in this app that writes to a
+ * tracker, which is why it asks twice and reports its own outcome.
  *
  * Delete asks twice. Every other action here is recoverable — an edit can be edited
  * again, a reaction toggled off — while a deletion removes the message from the
@@ -924,6 +973,11 @@ function MessageActionsMenu(props: {
   /** The agents this thread could summon; empty draws no row. */
   answerAgents: readonly AgentCandidate[];
   onAnswerWith: (agent: AgentCandidate) => void;
+  /** The merge request this message names, or null. */
+  mergeRequest: MergeRequestLink | null;
+  /** Whether it is still open, so an approval would mean anything. */
+  mergeRequestApprovable: boolean;
+  onReviewWith: (agent: AgentCandidate, mergeRequest: MergeRequestLink) => void;
 }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   // A closed menu is disarmed: the next open starts at "Delete", never at the
@@ -932,6 +986,7 @@ function MessageActionsMenu(props: {
   useEffect(() => {
     if (!props.open) setConfirmingDelete(false);
   }, [props.open]);
+  const mr = props.mergeRequest;
 
   return (
     <DropdownMenu open={props.open} onOpenChange={props.onOpenChange}>
@@ -996,7 +1051,26 @@ function MessageActionsMenu(props: {
                 Answer with {agent.name}
               </DropdownMenuItem>
             ))}
+            {/* A merge request is the one thing in a thread that is ASKED for, so it gets
+                a row of its own beside "Answer with": the same draft-only action, with
+                the request already naming what to look at. In the same group, because it
+                starts the same program. */}
+            {mr &&
+              props.answerAgents.map((agent) => (
+                <DropdownMenuItem
+                  key={`review-${agent.backend}`}
+                  data-testid="action-review-with"
+                  data-agent={agent.backend}
+                  onSelect={() => props.onReviewWith(agent, mr)}
+                >
+                  <AgentLogo backend={agent.backend} className="size-4 shrink-0" />
+                  Review {mr.reference} with {agent.name}
+                </DropdownMenuItem>
+              ))}
           </>
+        )}
+        {mr && props.mergeRequestApprovable && (
+          <ApprovalAction mergeRequest={mr} open={props.open} />
         )}
         {props.mine && (
           <>
@@ -1029,6 +1103,203 @@ function MessageActionsMenu(props: {
         )}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/** Where an approval has got to inside one open menu. `unknown` draws nothing at all:
+ *  until GitLab has answered, this app does not know that the user may approve, and a row
+ *  that turned out to do nothing would be worse than a row that arrived a moment late. */
+type ApprovalPhase = "unknown" | "idle" | "confirming" | "working" | "done" | "failed";
+
+/**
+ * **Approve this merge request** — the ONE action in this app that writes to a tracker,
+ * offered where the merge request was asked about: the message that carries it.
+ *
+ * Everything else about GitLab and Linear reads (AGENTS.md § The trackers). This row is
+ * the deliberate exception, and five things hold it up:
+ *
+ *   - **It wears GitLab's own mark**, because it acts on GitLab under the user's own
+ *     account. A glyph of ours would say this happens here.
+ *   - **It asks twice**, like Delete. The first select arms the second, which is the one
+ *     that calls — an approval is read by everybody watching the merge request, and a
+ *     project rule may act on it, so it is never one stray click away.
+ *   - **It is REVERSIBLE, and the row says so.** Once the user's approval is on, the row
+ *     becomes "Revoke approval" (GitLab's own `/unapprove`). That is why this write exists
+ *     at all: a write whose off switch cannot undo its on switch does not belong in this
+ *     app.
+ *   - **The outcome is reported HERE**, in the menu the user clicked in, and the menu is
+ *     held open for it. That is the same rule a failed send follows (see
+ *     lib/send-failure.ts): an outward action that fails must never be left looking like
+ *     it worked, and the status line alone is eleven pixels at the foot of a sidebar. The
+ *     raw sentence still goes to that line too, for whoever reads a screenshot.
+ *   - **It is offered only where GitLab said it would work.** The state is read on every
+ *     open (`gitlab_approvals`, an ordinary read), and no state means no row: not a
+ *     merge request on the configured host, no token, or a project this token cannot see.
+ */
+function ApprovalAction(props: { mergeRequest: MergeRequestLink; open: boolean }) {
+  const controller = useController();
+  const url = props.mergeRequest.url;
+  const [state, setState] = useState<GitLabApprovalResult | undefined>(() =>
+    controller.cachedApproval(url),
+  );
+  const [phase, setPhase] = useState<ApprovalPhase>("unknown");
+  const [error, setError] = useState<string | null>(null);
+
+  // Every OPEN re-reads GitLab. The user chose that moment, and the alternative is
+  // offering "Approve" on a merge request they approved in GitLab's own UI ten minutes
+  // ago — the one mistake this row must not make. Whatever the last read said is drawn
+  // meanwhile, so a reopened menu does not flicker through "no row at all".
+  useEffect(() => {
+    if (!props.open) {
+      setPhase("unknown");
+      setError(null);
+      return;
+    }
+    let alive = true;
+    const known = controller.cachedApproval(url);
+    setState(known);
+    setPhase(known?.approval && known.token_set ? "idle" : "unknown");
+    void controller.mergeRequestApproval(url).then((fresh) => {
+      if (!alive || !fresh) return;
+      setState(fresh);
+      // A write already in flight (or reported) owns the row from then on: a read that
+      // lands late must not throw the reader back to "Approve".
+      setPhase((current) =>
+        current === "unknown" || current === "idle"
+          ? fresh.approval && fresh.token_set
+            ? "idle"
+            : "unknown"
+          : current,
+      );
+    });
+    return () => {
+      alive = false;
+    };
+  }, [controller, url, props.open]);
+
+  const approval = state?.approval ?? null;
+  if (!approval || !state?.token_set || phase === "unknown") return null;
+
+  const mine = approval.mine;
+  const reference = approval.reference || props.mergeRequest.reference;
+  const apply = async () => {
+    setPhase("working");
+    setError(null);
+    try {
+      const result = await controller.setMergeRequestApproval(url, !mine);
+      setState(result);
+      setPhase("done");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setPhase("failed");
+    }
+  };
+
+  return (
+    <>
+      <DropdownMenuSeparator />
+      {phase === "idle" && (
+        <DropdownMenuItem
+          data-testid="action-approve-mr"
+          data-state="idle"
+          data-approved={mine}
+          onSelect={(event) => {
+            // Hold the menu open: this select arms the confirmation, it does not write.
+            event.preventDefault();
+            setPhase("confirming");
+          }}
+        >
+          <GitLabLogo className="size-4 shrink-0" />
+          {mine ? `Revoke approval of ${reference}` : `Approve ${reference}`}
+        </DropdownMenuItem>
+      )}
+      {phase === "confirming" && (
+        <>
+          <DropdownMenuItem
+            data-testid="action-approve-mr-confirm"
+            data-state="confirming"
+            onSelect={(event) => {
+              // Held open again, for the outcome: the row itself reports it.
+              event.preventDefault();
+              void apply();
+            }}
+          >
+            <GitLabLogo className="size-4 shrink-0" />
+            {mine ? "Revoke on GitLab" : "Approve on GitLab"}
+          </DropdownMenuItem>
+          <ApprovalNote>
+            {mine
+              ? `GitLab tells everybody watching ${reference} that your approval is gone.`
+              : `Everybody watching ${reference} is told. You can revoke it here.`}
+          </ApprovalNote>
+        </>
+      )}
+      {phase === "working" && (
+        <ApprovalStatus testid="approval-working" state="working">
+          {mine ? "Revoking…" : "Approving…"}
+        </ApprovalStatus>
+      )}
+      {phase === "done" && (
+        <>
+          <ApprovalStatus testid="approval-outcome" state="done">
+            {mine ? `You approved ${reference}` : `Your approval of ${reference} is gone`}
+          </ApprovalStatus>
+          {/* GitLab's own count, when its edition carries one: what the merge request
+              still wants is the next thing the reader wonders. */}
+          {approval.approvals_left !== undefined && (
+            <ApprovalNote>
+              {approval.approvals_left === 0
+                ? "It has every approval it needs."
+                : `${approval.approvals_left} more approval${
+                    approval.approvals_left === 1 ? "" : "s"
+                  } needed.`}
+            </ApprovalNote>
+          )}
+        </>
+      )}
+      {phase === "failed" && (
+        <ApprovalStatus testid="approval-error" state="failed">
+          {error ?? "GitLab refused the approval."}
+        </ApprovalStatus>
+      )}
+    </>
+  );
+}
+
+/** One line of GitLab's own answer, inside the menu: what is happening, what happened, or
+ *  why nothing did. Not a `DropdownMenuItem` — there is nothing to select — so it takes no
+ *  focus and cannot be pressed a second time. */
+function ApprovalStatus(props: {
+  testid: string;
+  state: "working" | "done" | "failed";
+  children: ReactNode;
+}) {
+  return (
+    <div
+      data-testid={props.testid}
+      data-state={props.state}
+      role="status"
+      className={cn(
+        "flex items-start gap-2.5 px-2.5 py-1.5 text-sm",
+        props.state === "failed" ? "text-destructive" : "text-foreground",
+      )}
+    >
+      <GitLabLogo className={cn("mt-0.5 size-4 shrink-0", props.state === "working" && "opacity-60")} />
+      <span className="max-w-[15rem]">{props.children}</span>
+    </div>
+  );
+}
+
+/** The sentence under an armed or a finished approval: what it costs, or what it left
+ *  behind. Muted and unselectable — it is context, not an action. */
+function ApprovalNote(props: { children: ReactNode }) {
+  return (
+    <p
+      data-testid="approval-note"
+      className="max-w-[15rem] px-2.5 pb-1.5 text-[11px] leading-snug text-text-faint"
+    >
+      {props.children}
+    </p>
   );
 }
 

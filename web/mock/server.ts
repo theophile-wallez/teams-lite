@@ -16,6 +16,7 @@
 //          | fetch_avatar
 //          | profile | people_by_address | presence | sender_icon
 //          | get_settings | set_settings | set_always_available | enrich_link
+//          | gitlab_approvals | gitlab_set_approval
 //          | push_status | push_subscribe | push_unsubscribe | push_test
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | mail_mark_read
@@ -2351,6 +2352,51 @@ function seedAgentSandbox(): void {
   addFixtureConversation(convId, "Agent Sandbox", messages);
 }
 
+/** A thread where a MERGE REQUEST is being asked about — the state the two rows a message
+ *  menu grows for one really live in.
+ *
+ *  It is opted in for the agent, which is what `agent_set_mode` leaves behind: a work
+ *  thread the user turned on, rather than the sandbox. So "Review !44 with Claude" is
+ *  exercised where a review is actually asked for, and the sandbox keeps its own job — the
+ *  thread a fresh backend answers in with nothing switched on first.
+ *
+ *  Two merge requests, because they are not the same offer: !44 is OPEN, so it can be
+ *  approved, and !42 is MERGED, where an approval would only earn a refusal from GitLab
+ *  (the review row stays — a merged branch is still worth reading). */
+function seedMergeRequestReview(): void {
+  const convId = MOCK_MERGE_REQUEST_THREAD;
+  const base = Date.now() - 21 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const other = PEOPLE[1]!;
+
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        "<p>Can you review " +
+        '<a href="https://gitlab.com/acme/webapp/-/merge_requests/44">this merge request</a>' +
+        " before the release?</p>",
+      is_self: false,
+    },
+    0,
+  );
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        "<p>The one from last week is in: " +
+        '<a href="https://gitlab.com/acme/webapp/-/merge_requests/42">!42</a></p>',
+      is_self: false,
+    },
+    60_000,
+  );
+
+  addFixtureConversation(convId, "Merge Request Review", messages);
+}
+
 // ---------------------------------------------------------------------------
 // Paging (operate on ascending-by-seq arrays, mirroring the Rust store).
 // ---------------------------------------------------------------------------
@@ -2864,9 +2910,19 @@ function pushStatusView(): {
  *  switched it on". */
 const MOCK_AGENT_SANDBOX = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
 
-/** Which conversations answer an `@claude` message, as the mock remembers it. Starts
- *  with the sandbox alone, exactly as the backend's own default does. */
-const mockAgentModes = new Map<string, "off" | "reply">([[MOCK_AGENT_SANDBOX, "reply"]]);
+/** The thread where a merge request is being asked about (`seedMergeRequestReview`). The
+ *  user opted it in, which is what `agent_set_mode` leaves behind — so the review row can
+ *  be exercised in a work thread rather than in the sandbox. */
+const MOCK_MERGE_REQUEST_THREAD = "19:merge-request-review@thread.v2";
+
+/** Which conversations answer an `@claude` message, as the mock remembers it: the sandbox,
+ *  exactly as the backend's own default does, plus the merge-request thread the user turned
+ *  on themselves. Every other conversation is off, which is the half that keeps a spec
+ *  honest about where an agent may post. */
+const mockAgentModes = new Map<string, "off" | "reply">([
+  [MOCK_AGENT_SANDBOX, "reply"],
+  [MOCK_MERGE_REQUEST_THREAD, "reply"],
+]);
 
 /** The groups of tools the mock offers, in the shape `agent::TOOL_GRANTS` publishes.
  *  The real catalogue lives in src/agent.rs and is the reviewed one; the mock carries a
@@ -3233,6 +3289,72 @@ function mockGitLabMetadata(url: string): Record<string, unknown> | null {
     project_path,
     reference: "",
     description: "A sample GitLab project used by the teams-lite mock backend.",
+  };
+}
+
+/** The approval state of one merge request, in memory (the real backend reads GitLab).
+ *  `others` are the colleagues who have approved; `mine` is the user's own approval, which
+ *  is what the menu's toggle moves. */
+type MockApproval = { mine: boolean; others: string[]; approvals_required?: number };
+
+/** Per merge-request URL, created on first ask so every seeded MR has one. */
+const mockApprovals = new Map<string, MockApproval>();
+
+/** When set, `gitlab_set_approval` fails with this sentence — the shape GitLab's own
+ *  refusal takes. Armed and cleared by the `{kind:"gitlab_approval"}` test hook. */
+let mockApprovalRefusal: string | null = null;
+
+/** When true, no merge request has an approval state at all: the shape of a machine with
+ *  no GitLab token, where the app must offer no approval row rather than an action the
+ *  backend would refuse. Same hook. */
+let mockApprovalsUnavailable = false;
+
+/** The stored state of a merge request URL, or null when the URL names no merge request on
+ *  the configured host — the same question `gitlab::parse_url` answers. */
+function mockApprovalFor(url: string): MockApproval | null {
+  const parsed = parseGitLabUrl(url, mockSettings.gitlab_host || "gitlab.com");
+  if (!parsed || parsed.kind !== "merge_request") return null;
+  const known = mockApprovals.get(url);
+  if (known) return known;
+  // Deterministic per iid, like the rest of the GitLab fixtures: !42 wants two approvals
+  // and already has a colleague's, !99 wants one and has none.
+  const iid = parsed.iid ?? 1;
+  const fresh: MockApproval = {
+    mine: false,
+    others: iid % 2 === 0 ? ["Ada Lovelace"] : [],
+    approvals_required: (iid % 3) + 1,
+  };
+  mockApprovals.set(url, fresh);
+  return fresh;
+}
+
+/** The `gitlab_approvals` / `gitlab_set_approval` result shape (mirrors the Rust
+ *  `Approval` plus `token_set`).
+ *
+ *  `token_set` is a FIXTURE here, deliberately not derived from `mockSettings.gitlab_token`:
+ *  this mock contacts no GitLab, so which project it can act on is something the fixture
+ *  decides — and gating it on that setting would let one spec's "remove the token" step
+ *  silently delete a whole surface from another spec's app. The app's own rail (no token →
+ *  no row) is armed by the test hook instead. */
+function mockApprovalResult(url: string): {
+  approval: Record<string, unknown> | null;
+  token_set: boolean;
+} {
+  if (mockApprovalsUnavailable) return { approval: null, token_set: false };
+  const state = mockApprovalFor(url);
+  if (!state) return { approval: null, token_set: true };
+  const parsed = parseGitLabUrl(url, mockSettings.gitlab_host || "gitlab.com");
+  const approved_by = [...state.others, ...(state.mine ? ["Théophile WALLEZ"] : [])];
+  return {
+    approval: {
+      reference: `!${parsed?.iid ?? 1}`,
+      approved: approved_by.length > 0,
+      approvals_required: state.approvals_required,
+      approvals_left: Math.max(0, (state.approvals_required ?? 1) - approved_by.length),
+      approved_by,
+      mine: state.mine,
+    },
+    token_set: true,
   };
 }
 
@@ -4951,6 +5073,33 @@ function dispatch(method: string, params: unknown): unknown {
       return { metadata: mockGitLabMetadata(url) ?? mockLinearMetadata(url) };
     }
 
+    // Who has approved a merge request. A read, ungated like `enrich_link`.
+    case "gitlab_approvals": {
+      const url = requireString(params, "url");
+      return mockApprovalResult(url);
+    }
+
+    // Give or take back the user's own approval — the one write this app makes to a
+    // tracker (`gitlab_set_approval`, an OUTWARD_METHODS entry). Nothing leaves this
+    // machine: the state lives in `mockApprovals`, so the whole surface — the two-step
+    // confirmation, the outcome in the menu, the revoke that follows — is reviewable with
+    // no GitLab and no token.
+    case "gitlab_set_approval": {
+      const url = requireString(params, "url");
+      const o = asObject(params);
+      if (typeof o.approved !== "boolean") throw new Error("`approved` must be true or false");
+      const state = mockApprovalFor(url);
+      if (!state) throw new Error("not a merge request on the configured GitLab host");
+      // The refusal the real backend reports when GitLab will not have it (see `refusal`
+      // in src/gitlab_approval.rs). Armed by the `{kind:"gitlab_approval"}` test hook, so
+      // a spec can hold the app to reporting a failed approval instead of swallowing it.
+      if (mockApprovalRefusal) throw new Error(mockApprovalRefusal);
+      // The user's own approval is the only thing this write moves; every count follows
+      // from it in `mockApprovalResult`, the way GitLab derives them.
+      state.mine = o.approved;
+      return mockApprovalResult(url);
+    }
+
     // ---- mail (read-only) --------------------------------------------------
 
     case "mail_folders":
@@ -5766,6 +5915,24 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // whole run, so a rename left behind would rename that person for the next spec
     // too — and a spec asserting a fixture's real name would fail for no visible
     // reason. Same job as the read_receipt reset below.
+    // Arm what GitLab says about an approval: a refusal sentence (`refuse`), a machine
+    // with no token at all (`unavailable`), or a clean slate. A spec MUST clear it
+    // afterwards — one mock process serves the whole run, and a left-behind refusal turns
+    // every later approval into an error nobody armed.
+    if (body.kind === "gitlab_approval") {
+      if (body.clear === true) {
+        mockApprovals.clear();
+        mockApprovalRefusal = null;
+        mockApprovalsUnavailable = false;
+        return Response.json({ ok: true, cleared: true }, { status: 200 });
+      }
+      mockApprovalRefusal = typeof body.refuse === "string" ? body.refuse : null;
+      mockApprovalsUnavailable = body.unavailable === true;
+      return Response.json(
+        { ok: true, refuse: mockApprovalRefusal, unavailable: mockApprovalsUnavailable },
+        { status: 200 },
+      );
+    }
     if (body.kind === "person_overrides" && body.clear === true) {
       const affected = [...personOverrides.keys()];
       personOverrides.clear();
@@ -6270,6 +6437,7 @@ seedThreadActivity();
 seedForwardedMessages();
 seedPlainTextSamples();
 seedAgentSandbox();
+seedMergeRequestReview();
 // Seed channels LAST so the chat seed's PRNG sequence (and thus the Chats list
 // the existing specs assert on) is left completely unchanged.
 seedChannels();

@@ -439,21 +439,23 @@ The app reads the user's Teams/Outlook calendar over Microsoft Graph
   `OUTWARD_METHODS`, its own write-lock coverage — never a quiet addition to the read
   path.
 
-## The trackers are READ-ONLY (MANDATORY)
+## The trackers are READ-ONLY, save ONE approval (MANDATORY)
 
 The app enriches a tracker link pasted into a chat into a rich preview card
 (`src/link_preview.rs`, over `src/gitlab.rs` and `src/linear.rs`). It reads those
-trackers. It must never write to them.
+trackers. It writes exactly one thing to them — a merge request's approval, described
+at the end of this section — and nothing else, ever.
 
-- **Never create, edit, comment on, assign, move or close an issue, a merge request
-  or a project** — in either tracker. A comment posted from here reaches everyone
+- **Never create, edit, comment on, assign, move, merge or close an issue, a merge
+  request or a project** — in either tracker. A comment posted from here reaches everyone
   watching the issue, under the user's name, and looks like they wrote it.
 - The credentials carry the consent: a Linear personal API key has **full write
   access**, and a GitLab token has whatever scopes the user granted it. So nothing
   at the API level stops a write. What stops it is that **no code names a write**:
-  `gitlab` issues GET requests only, `linear` sends GraphQL **queries** only, and a
+  `gitlab` issues GET requests only (`gitlab::tests::module_issues_only_get_requests`
+  scans its source for every other verb), `linear` sends GraphQL **queries** only, and a
   test in `linear::tests` scans that module's own source for `mutation`. Do not
-  weaken, skip, or work around it.
+  weaken, skip, or work around either.
 - **The Linear endpoint is a constant** (`linear::API_URL`), never derived from the
   link being enriched, so the key can only ever reach Linear. GitLab's host IS
   configurable, so it is *pinned* instead: a URL whose host is not the configured one
@@ -465,9 +467,55 @@ trackers. It must never write to them.
   is set. A token is **write-only from the UI's side** — never send a raw one back to
   a client, and never log one.
 - Reading, enriching and rendering a link are fine and are what the feature is for.
-  If writing to a tracker is ever wanted, it is a deliberate feature: its own consent
-  gate, its own entry in `OUTWARD_METHODS`, its own write-lock coverage — never a
-  quiet addition to the read path.
+  Any FURTHER write to a tracker is a deliberate feature: its own consent gate, its own
+  entry in `OUTWARD_METHODS`, its own write-lock coverage — never a quiet addition to
+  the read path, and never an edit to `src/gitlab.rs` or `src/linear.rs`.
+
+### The one write: approving a merge request
+
+A message that names a merge request offers **Approve !42** in its own "…" menu, wearing
+GitLab's own mark (`ApprovalAction` in `web/src/components/message-bubble.tsx`, over
+`src/gitlab_approval.rs`). It is the single exception to everything above, it was built
+as the deliberate feature the paragraph above demands, and six things hold it up:
+
+- **It is REVERSIBLE, and that is why it exists at all.** GitLab publishes `/approve` and
+  `/unapprove`, so the row the app leaves behind is **Revoke approval** — the same call
+  with `approved: false`. A write whose off switch cannot undo its on switch is refused
+  here on principle: it is the reason `forceavailability` is banned in
+  § The user's own status, and a comment, an assignment or a merge would each be exactly
+  that. Never add one.
+- **It is gated like a send.** `gitlab_set_approval` is an `OUTWARD_METHODS` entry — the
+  write token, refused read-only — and the automation hook refuses a command line, an
+  ad-hoc script or a cargo example that names the endpoint or a Linear `mutation`. There
+  is **no sandbox project** and no pre-authorized merge request, so pinning a target
+  cannot make a probe safe the way it can for a send: an approval against the real
+  tracker is the user's own click and nothing else.
+- **The write lives in its own module.** `src/gitlab.rs` stays GET-only and its own scan
+  test says so; `gitlab_approval` names the two approval endpoints and no other verb, and
+  a second test scans the whole crate to keep `/approve` out of every other file. The
+  host pinning is unchanged, because the parse is still `gitlab::parse_url` — the token
+  reaches one host, and one resource kind.
+- **The user asks twice, and the row says what it costs.** The first select arms the
+  second (the pattern Delete uses), and the sentence under it names the consequence:
+  everybody watching the merge request is told, and a project rule may act on it.
+- **The outcome is reported where the click was made.** The menu is HELD open for
+  GitLab's own answer — approved, revoked, or the refusal sentence — for the reason
+  § Sending messages gives for the composer: an outward action that failed must never be
+  left looking like it worked, and the status line is eleven pixels at the foot of a
+  sidebar. That line still carries the raw sentence too, for whoever reads a screenshot.
+- **It is offered only where it would work.** The state is read first
+  (`gitlab_approvals`, an ordinary read that also says whether the user's own approval is
+  already on, matched on GitLab's user id and never on a display name), and no state means
+  no row — not a merge request on the configured host, no token, or a project the token
+  cannot see. A MERGED or closed merge request offers nothing either, since GitLab would
+  only refuse.
+
+`web/mock/server.ts` reproduces the whole flow with no GitLab and no token
+(`mockApprovalResult`, plus the `{kind:"gitlab_approval"}` test hook for a refusal and for
+a machine with no token — a spec MUST clear it afterwards). `cd web && bun run preview --
+--out /tmp/mr --merge-request` captures the rows, the confirmation and the outcome, and
+`web/e2e/merge-request.spec.ts` pins every rule above. **It has never been run against a
+real GitLab project**: doing that is the user's own click, in their own app.
 
 ## Automation safety (MANDATORY — read before driving the UI)
 
@@ -521,7 +569,9 @@ user. Two independent mechanisms enforce that split:
   `127.0.0.1:19420` or `19421` (and the 19440 / 19441 relays in front of them), a
   consumption-horizon PUT straight to Teams (which bypasses the backend's gate
   entirely), a presence publish straight to the presence service (same reason — see
-  § The user's own status), dev servers with no declared backend, a production web server with no
+  § The user's own status), a merge-request approval straight to GitLab or a Linear
+  mutation (same reason again, and there is no sandbox project to aim one at — see
+  § The trackers), dev servers with no declared backend, a production web server with no
   declared backend, a send-capable backend started by tooling — including `systemctl
   --user start` on the always-on service's units, and including the `teams` command
   itself, which is that backend plus the real app on 19440 in one word — and
@@ -1132,6 +1182,30 @@ else wrote, three screens up, that the user wants an answer to.
   quote the way the backend does (`withoutQuotedBlocks`) so a reply-shaped trigger really
   answers there.
 
+### "Review !42 with <agent>" — the same row, for a merge request
+
+A message that names a MERGE REQUEST gets one more row per agent
+(`web/src/lib/merge-request.ts`). It is the row above with a different sentence, and that
+is the whole design: one pick, one tag at the front of the draft, one Enter that is the
+user's. What changes is only what is asked.
+
+- **The request names the merge request in FULL** — the reference and the URL
+  (`reviewRequest`). A reference alone means nothing outside its project, and the URL is
+  what the agent needs to go and read it. A half-written draft still wins, under the same
+  rule as "Answer with": `answerRequest` takes the row's own seed and applies it to an
+  EMPTY composer only, so whose words go out never depends on which row was picked.
+- **The row is read from the LINK, not from the card.** `mergeRequestFromUrl` is a port of
+  the merge-request half of `gitlab::parse_url` and keeps both of its rails: the host must
+  be the configured one, and only `/-/merge_requests/<iid>` counts. So a merge request
+  whose preview card never arrived — a missing token, a private project — can still be
+  handed to an agent, while an issue, a project or a commit offers nothing.
+- **One merge request, the first one.** A message naming three would turn one menu into a
+  directory, and the one being discussed is the one named first.
+- The approval row sits below it, in its own group, because it is a different kind of thing
+  altogether: a review starts a program on this machine, an approval writes to GitLab (see
+  § The trackers). `cd web && bun run preview -- --out /tmp/mr --merge-request` captures
+  both, and `web/e2e/merge-request.spec.ts` pins them.
+
 ## Language policy (MANDATORY)
 
 - **All artifacts are in English.** This includes: UI strings, labels, button text,
@@ -1157,7 +1231,9 @@ else wrote, three screens up, that the user wants an answer to.
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
   and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
-  `src/gitlab.rs` and `src/linear.rs`), the local agent that answers an `@claude`
+  `src/gitlab.rs` and `src/linear.rs`) plus the ONE write those trackers get — a merge
+  request's approval, and its undo (`src/gitlab_approval.rs`, see § The trackers) —,
+  the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
   § The local agent) and the app's own update — the check, the download and the swap
   (`src/update.rs`, see § Updating the app from inside it).

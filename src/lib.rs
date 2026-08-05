@@ -6,6 +6,7 @@ pub mod auth;
 pub mod calendar;
 pub mod calling;
 pub mod gitlab;
+pub mod gitlab_approval;
 pub mod graph_time;
 pub mod linear;
 pub mod link_preview;

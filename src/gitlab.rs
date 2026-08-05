@@ -192,8 +192,7 @@ pub async fn fetch_metadata(
         return Ok(None);
     };
 
-    let host = gitlab_host.trim();
-    let api_base = format!("https://{host}/api/v4");
+    let api_base = api_base(gitlab_host);
     let endpoint = match &resource {
         Resource::MergeRequest { project_path, iid } => {
             format!("{api_base}/projects/{}/merge_requests/{iid}", encode_path(project_path))
@@ -237,10 +236,19 @@ pub async fn fetch_metadata(
     Ok(Some(build_metadata(&resource, &body, url)))
 }
 
+/// The REST API root of one GitLab instance. Built from the configured host and
+/// nothing else, which is the host pinning: every request this crate makes to
+/// GitLab — the reads here and the one approval write in
+/// [`crate::gitlab_approval`] — goes through this function, so the token can only
+/// ever reach the host the user configured.
+pub(crate) fn api_base(gitlab_host: &str) -> String {
+    format!("https://{}/api/v4", gitlab_host.trim())
+}
+
 /// Percent-encode a project path for use as a single GitLab API path segment.
 /// GitLab accepts the URL-encoded `namespace/project` in place of a numeric id,
 /// so the slashes must become `%2F`.
-fn encode_path(project_path: &str) -> String {
+pub(crate) fn encode_path(project_path: &str) -> String {
     urlencoding::encode(project_path).into_owned()
 }
 
@@ -378,6 +386,51 @@ fn build_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Strip `//` line comments so the source-scanning guardrail inspects CODE, not
+    /// the prose that explains it. A `//` preceded by `:` is left alone so the
+    /// `https://` inside a string literal survives. Mirrors `mail.rs`.
+    fn strip_line_comments(source: &str) -> String {
+        source
+            .lines()
+            .map(|line| {
+                let bytes = line.as_bytes();
+                let mut cut = line.len();
+                for i in 0..bytes.len().saturating_sub(1) {
+                    if bytes[i] == b'/' && bytes[i + 1] == b'/' && (i == 0 || bytes[i - 1] != b':') {
+                        cut = i;
+                        break;
+                    }
+                }
+                &line[..cut]
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// THE no-write guarantee of the enrichment path, enforced on this module's own
+    /// source. A GitLab token carries whatever scopes the user granted it, so the
+    /// only thing between this file and a comment, an assignment or a merge under
+    /// their name is that no verb but GET appears in it.
+    ///
+    /// The ONE write this app makes to a tracker lives in
+    /// [`crate::gitlab_approval`] — an approval and its undo, behind the
+    /// `gitlab_set_approval` consent gate — and it stays there: a write added here
+    /// would ride the read path's own permissions, which no user was asked for.
+    #[test]
+    fn module_issues_only_get_requests() {
+        let source = include_str!("gitlab.rs");
+        let code = strip_line_comments(source.split("#[cfg(test)]").next().unwrap_or(source));
+        assert!(code.contains("pub async fn fetch_metadata"), "scanned the wrong text");
+        for verb in [".post(", ".put(", ".patch(", ".delete(", ".request("] {
+            assert!(
+                !code.contains(verb),
+                "src/gitlab.rs must issue GET requests only, found `{verb}`. Enrichment is a \
+                 read: a write to the user's tracker is a deliberate feature with its own \
+                 consent gate (see src/gitlab_approval.rs), not an edit to this module."
+            );
+        }
+    }
 
     #[test]
     fn parses_a_merge_request_url() {

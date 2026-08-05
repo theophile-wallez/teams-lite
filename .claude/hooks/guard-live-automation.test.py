@@ -101,6 +101,39 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'set_always_available' }));\n"
     ),
+    # A merge request approved straight through GitLab's own API: an act by the user's
+    # account that everybody watching the merge request is told about, past the backend's
+    # gate and past the menu that asks them first.
+    "mr-approve-writer.ts": (
+        "// POSTs an approval to GitLab.\n"
+        "await fetch('https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/approve',\n"
+        "  { method: 'POST', headers: { 'PRIVATE-TOKEN': token } });\n"
+    ),
+    # Taking it back is the same write, and refused for the same reason: neither half
+    # may run from tooling.
+    "mr-unapprove-writer.ts": (
+        "// POSTs an unapproval to GitLab.\n"
+        "await fetch('https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/unapprove',\n"
+        "  { method: 'POST', headers: { 'PRIVATE-TOKEN': token } });\n"
+    ),
+    # The same through the backend's gated RPC, which is still a write.
+    "mr-approval-rpc-writer.ts": (
+        "// Approves a real merge request through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_set_approval' }));\n"
+    ),
+    # Reading the approval state is a read, and the menu's own question.
+    "mr-approval-reader.ts": (
+        "// Reads who approved a merge request through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_approvals', params: { url } }));\n"
+    ),
+    # A Linear write is a mutation, and the key that reaches it has full write access.
+    "linear-mutation-writer.ts": (
+        "// Comments on a Linear issue.\n"
+        "await fetch('https://api.linear.app/graphql',\n"
+        "  { method: 'POST', body: JSON.stringify({ query: 'mutation { commentCreate }' }) });\n"
+    ),
     # Reading a colleague's presence is what the person card shows: ordinary recon.
     "presence-reader.ts": (
         "// Reads presence for a few people.\n"
@@ -363,6 +396,24 @@ EXAMPLE_FIXTURES = {
     "guard-test-presence-read.rs": (
         "fn main() { teams_presence::fetch_presence(&http, &session, &token, &mris); }\n"
     ),
+    # An approval, straight to GitLab. It cannot be pinned to a sandbox the way a send
+    # can — there is no sandbox project — so no shape of it is allowed from here.
+    "guard-test-mr-approve.rs": (
+        "fn main() {\n"
+        "    let mr = std::env::args().nth(1).unwrap();\n"
+        "    http.post(format!(\"{api}/projects/x%2Fy/merge_requests/{mr}/approve\"));\n"
+        "}\n"
+    ),
+    # The same through this crate's own write function, which is equally a write.
+    "guard-test-mr-approve-crate.rs": (
+        "fn main() { gitlab_approval::set(&http, &host, token, &url, true); }\n"
+    ),
+    # Reading a merge request — approvals included — is what the preview cards are for.
+    "guard-test-mr-read.rs": (
+        "fn main() {\n"
+        "    http.get(format!(\"{api}/projects/x%2Fy/merge_requests/42/approvals\"));\n"
+        "}\n"
+    ),
     # An example that only READS needs no target at all.
     "guard-test-read-only.rs": (
         "fn main() { teams_read::history(&http, &session, \"19:whatever@thread.v2\"); }\n"
@@ -455,6 +506,22 @@ def cases(tmp: Path):
             PROJECT,
             "curl -X PUT 'https://presence.teams.microsoft.com/v1/me/endpoints/'",
         ),
+        # Approving a merge request is the ONE write this app makes to a tracker, and it
+        # is the user's own click: every shape of it from tooling is refused — the gated
+        # RPC, GitLab's own endpoint, its undo, a cargo example, a curl. A Linear mutation
+        # is refused with them, since nothing here may write that tracker at all.
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-approval-rpc-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-approve-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-unapprove-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/linear-mutation-writer.ts"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-mr-approve"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-mr-approve-crate"),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X POST 'https://gitlab.com/api/v4/projects/x%2Fy/"
+            "merge_requests/42/approve'",
+        ),
         # The write token is the capability itself — never ours to fetch.
         ("BLOCK", PROJECT, f"bun run {tmp}/token-thief.ts"),
         ("BLOCK", PROJECT, "curl -s http://127.0.0.1:19440/__write-token"),
@@ -522,6 +589,12 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, "cargo run --example guard-test-sandbox-chat-setting"),
         ("ALLOW", PROJECT, 'grep -rn "name=alerts" src'),
         ("ALLOW", PROJECT, "grep -rn set_chat_muted src web"),
+        # The trackers: reading one is what the preview cards are built on, and asking who
+        # approved a merge request is the message menu's own question.
+        ("ALLOW", PROJECT, f"bun run {tmp}/mr-approval-reader.ts"),
+        ("ALLOW", PROJECT, "cargo run --example guard-test-mr-read"),
+        ("ALLOW", PROJECT, "grep -rn merge_requests src web"),
+        ("ALLOW", PROJECT, "grep -rn gitlab_set_approval src web"),
         # Reading presence is what the person card is built on, in every shape.
         ("ALLOW", PROJECT, f"bun run {tmp}/presence-reader.ts"),
         ("ALLOW", PROJECT, "cargo run --example guard-test-presence-read"),

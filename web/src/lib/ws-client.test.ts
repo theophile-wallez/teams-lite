@@ -308,6 +308,52 @@ describe("Backend request/response", () => {
     }
   });
 
+  // Approving a merge request is the ONE write this app makes to a tracker: it acts under
+  // the user's own GitLab account and everybody watching is told, so it travels as a WRITE
+  // in both directions — taking the approval back is the same outward call — while READING
+  // who approved stays an ordinary request.
+  it("frames gitlab_set_approval as a write and gitlab_approvals as a read", async () => {
+    const url = "https://gitlab.com/acme/webapp/-/merge_requests/44";
+    for (const approved of [true, false]) {
+      const { backend, socket } = await connected();
+      backend.setWriteToken("tok");
+
+      const promise = backend.gitlabSetApproval(url, approved);
+      const frame = JSON.parse(socket.sent[0]!) as {
+        id: number;
+        method: string;
+        params?: Record<string, unknown>;
+      };
+      expect(frame.method).toBe("gitlab_set_approval");
+      expect(frame.params).toEqual({ url, approved, write_token: "tok" });
+      socket.simulateMessage(
+        JSON.stringify({
+          id: frame.id,
+          result: { approval: { reference: "!44", mine: approved }, token_set: true },
+        }),
+      );
+      await expect(promise).resolves.toMatchObject({ approval: { mine: approved } });
+      backend.close();
+    }
+
+    // The read carries no token: the menu asks it on every open, and it changes nothing.
+    const { backend, socket } = await connected();
+    backend.setWriteToken("tok");
+    const promise = backend.gitlabApprovals(url);
+    const frame = JSON.parse(socket.sent[0]!) as {
+      id: number;
+      method: string;
+      params?: Record<string, unknown>;
+    };
+    expect(frame.method).toBe("gitlab_approvals");
+    expect(frame.params).toEqual({ url });
+    socket.simulateMessage(
+      JSON.stringify({ id: frame.id, result: { approval: null, token_set: false } }),
+    );
+    await expect(promise).resolves.toEqual({ approval: null, token_set: false });
+    backend.close();
+  });
+
   // Choosing a provider decides which program the backend's machine starts for a chat
   // message, and which model reads the thread, so it travels as a WRITE — the backend
   // refuses it without the capability token (MACHINE_METHODS in src/bin/server.rs).
