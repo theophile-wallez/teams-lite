@@ -216,6 +216,10 @@ export function ImageLightbox(props: {
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLDialogElement>) => {
+    // Nothing done in here is done to the message behind (see `stopLeak`). A press
+    // that reached it started its long-press timer, so holding the open picture
+    // still — to save it, say — opened the message's actions menu underneath.
+    e.stopPropagation();
     if (e.pointerType === "mouse" && e.button !== 0) return;
     // A picture on its way home takes no more gestures. One still arriving does:
     // a click during the travel is somebody who already changed their mind.
@@ -305,6 +309,20 @@ export function ImageLightbox(props: {
 
   // ---- render ------------------------------------------------------------
 
+  /**
+   * Keep an event inside the picture.
+   *
+   * The dialog is portaled to `<body>`, but React propagates along its OWN tree —
+   * where this component is still a child of the message that holds the thumbnail. So
+   * every handler on that bubble saw the input made in here, and the right-click was
+   * the one that showed: the bubble cancels `contextmenu` to open its actions menu, so
+   * the browser's "Save image" never appeared and the menu opened behind the picture
+   * instead. A modal in the top layer has nothing above it and nothing behind it to
+   * inform; stopping the events here rather than teaching the bubble about portals
+   * keeps that one fact in the one component that knows it.
+   */
+  const stopLeak = (e: React.SyntheticEvent) => e.stopPropagation();
+
   const travelling = phase !== "open";
   const transform =
     travelling && anchorRect !== null
@@ -330,6 +348,10 @@ export function ImageLightbox(props: {
         e.preventDefault();
         close();
       }}
+      // The picture's own context menu, which the message behind used to take: no
+      // preventDefault, so the browser offers "Save image as…" over the picture.
+      onContextMenu={stopLeak}
+      onClick={stopLeak}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={endGesture}
