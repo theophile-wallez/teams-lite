@@ -1094,6 +1094,10 @@ struct Ctx {
     /// call this machine is in. Empty and idle until the user turns calling on
     /// ({@link SETTING_CALLING}) — see [`CallingPlane`].
     calling: Arc<Mutex<CallingPlane>>,
+    /// The automatic task scan: when the next one is due, and what this process has
+    /// already spent. Armed by an arriving message and read by one loop — see
+    /// [`TaskScanSchedule`].
+    task_scan: Arc<Mutex<TaskScanSchedule>>,
 }
 
 /// Everything this machine knows about audio calling right now.
@@ -2248,6 +2252,7 @@ async fn main() -> Result<()> {
         calendar_watch: Arc::new(Mutex::new(None)),
         last_repair: Arc::new(Mutex::new(None)),
         calling: Arc::new(Mutex::new(CallingPlane::default())),
+        task_scan: Arc::new(Mutex::new(TaskScanSchedule::default())),
     };
 
     // Watch the broker, and react once per CHANGE of state (see `observe_broker`).
@@ -2321,6 +2326,10 @@ async fn main() -> Result<()> {
     // presence: keep the user's own status green, but ONLY while they asked for it
     // (off by default, and never in read-only mode — see `spawn_presence_heartbeat`).
     spawn_presence_heartbeat(ctx.clone());
+
+    // tasks: run the scan an arriving message armed, debounced and capped — and never at
+    // all in read-only mode (see `spawn_task_scan`).
+    spawn_task_scan(ctx.clone());
 
     // the local agent: a run does not survive this process, so anything left in flight
     // by the process before us is a message frozen mid-answer in a thread. Drop the
@@ -7308,19 +7317,29 @@ fn task_scan_sweep(store: &Store, now_ms: i64) -> Result<Option<store::TaskCandi
 /// guarantee true. `agent::enforces_empty_allowlist` is what "can" means here, and it is a
 /// question about THIS app's command line rather than about a vendor.
 ///
+/// A provider the user switched OFF is not started here either. That setting means the CLI
+/// ignores its own prefix everywhere, and the fallback is what puts it within reach: a
+/// default they turned off would be walked past to the next installed backend, which may be
+/// one they turned off as well.
+///
 /// Refusing beats falling back to a run this app cannot bound: a scan nobody can hold
-/// tool-less is the one Task 4 would let a colleague's message arm.
-fn task_scan_backend(stored_default: Option<&str>) -> Result<&'static agent_policy::Backend> {
+/// tool-less is the one an arriving message would otherwise arm.
+fn task_scan_backend(
+    stored_default: Option<&str>,
+    providers: &agent_policy::Providers,
+) -> Result<&'static agent_policy::Backend> {
     let usable = |backend: &'static agent_policy::Backend| {
-        agent::is_available(backend) && agent::enforces_empty_allowlist(backend)
+        providers.is_enabled(backend.name)
+            && agent::is_available(backend)
+            && agent::enforces_empty_allowlist(backend)
     };
     let preferred = agent_policy::default_backend(stored_default);
     if usable(preferred) {
         return Ok(preferred);
     }
     agent_policy::BACKENDS.iter().find(|backend| usable(backend)).with_context(|| {
-        "this machine holds no agent CLI that can be run with no tools at all, and a task \
-         scan reads a colleague's words — so none is started"
+        "this machine holds no enabled agent CLI that can be run with no tools at all, and \
+         a task scan reads a colleague's words — so none is started"
     })
 }
 
@@ -7337,22 +7356,19 @@ fn task_scan_backend(stored_default: Option<&str>) -> Result<&'static agent_poli
 /// It resumes no session either: a scan is one window of candidates, not a follow-up to
 /// anything.
 fn task_scan_request(
-    store: &Store,
     backend: &'static agent_policy::Backend,
+    providers: &agent_policy::Providers,
     candidates: &[tasks::Candidate],
-) -> Result<agent::Request> {
-    Ok(agent::Request {
+) -> agent::Request {
+    agent::Request {
         backend,
         prompt: tasks::build_prompt(candidates),
         system_prompt: tasks::SYSTEM.to_string(),
         resume_session: None,
         workspace: agent::default_workspace(),
         permissions: agent::Permissions::Granted(Vec::new()),
-        model: agent_policy::Providers::parse(
-            store.get_setting(agent_policy::SETTING_PROVIDERS)?.as_deref(),
-        )
-        .model(backend.name),
-    })
+        model: providers.model(backend.name),
+    }
 }
 
 /// Read one run's answer back into the store: the tasks it found, and then the window.
@@ -7435,10 +7451,16 @@ async fn run_task_scan(ctx: &Ctx) -> Result<usize> {
         return Ok(0);
     };
 
+    // Read once, and used for both halves of the decision: which CLI may run at all, and
+    // which model the user chose for it.
+    let providers = agent_policy::Providers::parse(
+        store.get_setting(agent_policy::SETTING_PROVIDERS)?.as_deref(),
+    );
     let backend = task_scan_backend(
         store.get_setting(agent_policy::SETTING_DEFAULT_PROVIDER)?.as_deref(),
+        &providers,
     )?;
-    let request = task_scan_request(&store, backend, &found.candidates)?;
+    let request = task_scan_request(backend, &providers, &found.candidates);
     // The progress channel is required by `agent::run` and nothing here reads it: a scan
     // is not drawn being written, unlike a reply in a thread.
     let (progress, _watch) = tokio::sync::watch::channel(agent::Progress::default());
@@ -7456,6 +7478,173 @@ async fn run_task_scan(ctx: &Ctx) -> Result<usize> {
         ctx.emit("tasks_changed", json!({}));
     }
     Ok(written)
+}
+
+// ---- the automatic scan ---------------------------------------------------------
+//
+// Everything above happens because the user pressed something. This is the half that
+// happens because a message ARRIVED, and it is the one place where somebody else's
+// words start a process on this machine.
+//
+// That is not remote code execution, and the reason is worth stating exactly: the
+// prompt is fixed, a candidate's text travels inside it as data, the child is handed an
+// empty tool allowlist, `task_scan_backend` refuses outright to run a CLI whose command
+// line cannot state that, and the write token is never in its environment. What is left
+// is a RESOURCE trigger the user does not control — a colleague can cause an agent run
+// to be spent — and the three numbers below are the whole of what bounds it: one run per
+// burst rather than per message ({@link TASK_SCAN_DEBOUNCE}), a ceiling per hour
+// ({@link TASK_SCAN_MAX_PER_HOUR}), and one of this machine's backends at a time
+// ({@link TASK_SCAN_LEASE}).
+
+/// How long the first ask waits before the scan it armed runs, so a conversation costs
+/// one run rather than one per message. It is measured from that FIRST hit and never
+/// pushed back by the ones after it: a window a busy thread keeps resetting is one that
+/// never elapses, and one somebody's typing could ratchet into the cap.
+const TASK_SCAN_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
+
+/// How often the scheduler looks at the deadline. A fixed tick rather than a timer
+/// rescheduled by every arrival — a handle the ingest path resets is a race, and the
+/// deadline is a fact the loop can simply read.
+const TASK_SCAN_TICK: Duration = Duration::from_secs(30);
+
+/// How many automatic scans this process will start inside one window. The button in the
+/// panel is deliberately not counted here: a run the user asked for is the user.
+const TASK_SCAN_MAX_PER_HOUR: usize = 4;
+
+/// The window {@link TASK_SCAN_MAX_PER_HOUR} is counted over, in milliseconds.
+const TASK_SCAN_WINDOW_MS: i64 = 3_600_000;
+
+/// How long the store-wide claim is held. Long enough that a slow run keeps the lease it
+/// took, short enough that a backend killed mid-scan does not hold it against its sibling
+/// for the rest of the day. Nothing releases it early, on purpose: a lease somebody has to
+/// remember to drop is worse than one that expires, and the sibling losing a few minutes of
+/// scanning costs nothing.
+const TASK_SCAN_LEASE: Duration = Duration::from_secs(10 * 60);
+
+/// What this PROCESS knows about the automatic scan: when the next one is due, and when it
+/// last started one.
+///
+/// In memory rather than in the store, deliberately. The cap is about this process's own
+/// spending, so a restart getting one extra run is a better failure than two backends
+/// fighting over a shared counter — and what stops the two of them scanning the same window
+/// is the store's lease, which is the thing that really has to be shared.
+#[derive(Default)]
+struct TaskScanSchedule {
+    /// When the armed scan becomes due, or `None` when nothing has armed one.
+    due: Option<Instant>,
+    /// When this process last STARTED a scan, trimmed to the window it is capped over.
+    recent_starts: Vec<i64>,
+}
+
+impl TaskScanSchedule {
+    /// Arm a scan when this message body reads like an ask, and leave an armed one exactly
+    /// where it is — so the cheap answer ("one is already coming") is reached before the
+    /// body is stripped at all.
+    fn arm(&mut self, now: Instant, content: &str) {
+        if self.due.is_some() {
+            return;
+        }
+        // The model reads words, not markup, and [`tasks::looks_actionable`] is the candidate
+        // sweep's own test over the same strip: one spelling, so a message that arms a scan
+        // is one the sweep would then accept.
+        if tasks::looks_actionable(&teams_read::plain_text_from_html(content)) {
+            self.due = Some(now + TASK_SCAN_DEBOUNCE);
+        }
+    }
+
+    /// Record a start, dropping the ones the window has slid past — so the ring measures
+    /// the window rather than growing for the life of the process.
+    fn record_start(&mut self, now_ms: i64) {
+        self.recent_starts.retain(|at| *at > now_ms - TASK_SCAN_WINDOW_MS);
+        self.recent_starts.push(now_ms);
+    }
+}
+
+/// May this process start another automatic scan? Pure, because it is the bound the
+/// security argument above rests on.
+fn task_scan_is_allowed(recent_starts: &[i64], now_ms: i64) -> bool {
+    let window = now_ms - TASK_SCAN_WINDOW_MS;
+    recent_starts.iter().filter(|at| **at > window).count() < TASK_SCAN_MAX_PER_HOUR
+}
+
+/// A live message has landed: arm a scan when it reads like somebody asked for something.
+///
+/// Called for every inbound frame, so it costs an uncontended lock and, at most, one strip
+/// of one body. Nothing here blocks and nothing here runs: what it sets is a deadline, and
+/// the run is the scheduler's.
+///
+/// It filters by nothing but the words — not the sender, not the conversation — because
+/// the candidate sweep already decides whose messages count and from where, and a second
+/// opinion here is exactly the drift that one spelling exists to prevent.
+fn arm_task_scan(ctx: &Ctx, message: &Message) {
+    // A read-only backend never arms and never scans: a screenshot backend must not spend
+    // an agent run on the user's behalf. `spawn_task_scan` and `run_task_scan` both refuse
+    // on their own account as well.
+    if read_only() {
+        return;
+    }
+    if let Ok(mut schedule) = ctx.task_scan.lock() {
+        schedule.arm(Instant::now(), &message.content);
+    }
+}
+
+/// Run the scan an arriving message armed, once its debounce window has elapsed.
+///
+/// One tick, one decision, one awaited run — so this process can never have two automatic
+/// scans in flight, however long a run takes.
+fn spawn_task_scan(ctx: Ctx) {
+    if read_only() {
+        return;
+    }
+    tokio::spawn(async move {
+        // Which of this machine's backends took the lease, for the journal and for the
+        // store's own row: the port is what tells them apart (see `endpoint_id_path`).
+        let holder = format!("backend-{}", own_port());
+        let lease = TASK_SCAN_LEASE.as_millis() as i64;
+        loop {
+            tokio::time::sleep(TASK_SCAN_TICK).await;
+            let now = now_ms();
+            {
+                let Ok(schedule) = ctx.task_scan.lock() else { continue };
+                // A cap that refuses leaves the deadline ARMED: those candidates are still
+                // unread, so the run happens when the window slides rather than waiting for
+                // somebody to write again.
+                if !schedule.due.is_some_and(|due| due <= Instant::now())
+                    || !task_scan_is_allowed(&schedule.recent_starts, now)
+                {
+                    continue;
+                }
+            }
+            // Both send-capable backends here receive every live frame, so both arm and
+            // both come due: without this claim they would spend two runs on one window and
+            // write every suggestion twice. A LOST claim disarms as well — the sibling is
+            // reading these same candidates and moves the watermark past them.
+            let claimed = match ctx.store().and_then(|s| s.claim_task_scan(&holder, now, lease)) {
+                Ok(taken) => taken,
+                Err(e) => {
+                    eprintln!("[tasks] the scan lease could not be read: {e:#}");
+                    false
+                }
+            };
+            if let Ok(mut schedule) = ctx.task_scan.lock() {
+                schedule.due = None;
+                if claimed {
+                    schedule.record_start(now);
+                }
+            }
+            if !claimed {
+                continue;
+            }
+            // Awaited, and the lock is not held across it: a message arriving during a run
+            // arms the NEXT one instead of being lost.
+            if let Err(e) = run_task_scan(&ctx).await {
+                // The watermark did not move, so these candidates are read again the next
+                // time a message arms a scan. Nothing retries here: a CLI that is failing
+                // would spend the whole window's cap on one window of candidates.
+                eprintln!("[tasks] the automatic scan failed: {e:#}");
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -8238,6 +8427,11 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
                         // that means "this message is new", and the trigger is claimed in
                         // the store so two backends answer it once.
                         agent_live_message(&ctx_msgs, store, &row, from_me, &self_mri);
+                        // …and arm a task scan, when this message reads like an ask. Same
+                        // place for the same reason: a fresh insert is what "this message
+                        // is new" means, and the scan itself is claimed in the store so
+                        // two backends spend one run rather than two.
+                        arm_task_scan(&ctx_msgs, &row);
                     }
                 }
                 if activity_changed {
@@ -9496,9 +9690,9 @@ mod tests {
     /// takes the backend check below, which is why the two are named apart.
     #[test]
     fn the_scan_request_grants_no_tool_and_resumes_no_session() {
-        let store = Store::open_in_memory().unwrap();
         let backend = &agent_policy::BACKENDS[0];
-        let request = task_scan_request(&store, backend, &[scan_candidate("m1")]).unwrap();
+        let providers = agent_policy::Providers::parse(None);
+        let request = task_scan_request(backend, &providers, &[scan_candidate("m1")]);
         assert_eq!(request.permissions, agent::Permissions::Granted(Vec::new()));
         assert_eq!(request.resume_session, None, "a scan is its own window, never a follow-up");
         assert!(request.system_prompt.contains("DATA"), "the candidates must be marked as data");
@@ -9516,15 +9710,16 @@ mod tests {
         // never the scan's backend however the machine is configured.
         assert_eq!(agent_policy::default_backend(Some("opencode")).name, "opencode");
         assert!(!agent::enforces_empty_allowlist(agent_policy::default_backend(Some("opencode"))));
+        let enabled = agent_policy::Providers::parse(None);
         assert_ne!(
-            task_scan_backend(Some("opencode")).map(|b| b.name).unwrap_or("refused"),
+            task_scan_backend(Some("opencode"), &enabled).map(|b| b.name).unwrap_or("refused"),
             "opencode",
             "a backend this app cannot bound must never run a scan"
         );
         // The invariant, whatever this machine holds: a backend that is returned satisfies
         // both halves, and a refusal says which requirement went unmet.
         for stored in [None, Some("claude"), Some("opencode"), Some("not-a-provider")] {
-            match task_scan_backend(stored) {
+            match task_scan_backend(stored, &enabled) {
                 Ok(backend) => {
                     assert!(agent::is_available(backend), "{stored:?}: {}", backend.name);
                     assert!(
@@ -9690,6 +9885,127 @@ mod tests {
         }
         let found = task_scan_sweep(&store, 1_000_000).unwrap().expect("candidates");
         assert_eq!(found.candidates.len(), tasks::MAX_CANDIDATES);
+    }
+
+    /// Somebody else's typing is what arms an automatic scan, so the number of runs it can
+    /// buy has to be bounded. It is not remote code execution — the prompt is fixed and the
+    /// child holds no tool — but it is a resource trigger the user does not control, and
+    /// this cap is the whole of what bounds it.
+    #[test]
+    fn the_automatic_scan_is_capped_per_hour() {
+        let hour_ms = 3_600_000;
+        let now = 10 * hour_ms;
+        let recent: Vec<i64> =
+            (0..TASK_SCAN_MAX_PER_HOUR as i64).map(|i| now - i * 1_000).collect();
+        assert!(
+            !task_scan_is_allowed(&recent, now),
+            "a colleague's words arm this run, so its rate must be bounded"
+        );
+        let stale: Vec<i64> =
+            (0..TASK_SCAN_MAX_PER_HOUR as i64).map(|i| now - hour_ms - i * 1_000).collect();
+        assert!(task_scan_is_allowed(&stale, now), "the window slides");
+        assert!(task_scan_is_allowed(&[], now));
+    }
+
+    /// The debounce is what makes a burst of messages one run instead of one run each.
+    #[test]
+    fn the_debounce_is_long_enough_to_batch_a_conversation() {
+        assert!(
+            TASK_SCAN_DEBOUNCE >= std::time::Duration::from_secs(60),
+            "one run per message is exactly what this must not do"
+        );
+        assert!(
+            TASK_SCAN_TICK < TASK_SCAN_DEBOUNCE,
+            "a tick coarser than the window it watches would sit on an armed scan"
+        );
+    }
+
+    /// Long enough that a slow run keeps the lease it took, short enough that a backend
+    /// killed mid-scan does not hold it against its sibling for the rest of the day.
+    /// Nothing releases it early, on purpose: a lease somebody must remember to drop is
+    /// worse than one that expires.
+    #[test]
+    fn the_lease_outlives_a_slow_run_but_not_a_dead_backend() {
+        assert!(TASK_SCAN_LEASE >= std::time::Duration::from_secs(300));
+        assert!(TASK_SCAN_LEASE <= std::time::Duration::from_secs(3_600));
+    }
+
+    /// The FIRST ask arms the window and the ones after it do not move it. A debounce
+    /// pushed back by every arrival is one a busy thread never lets elapse, and it would
+    /// also put the hourly cap within reach of somebody's typing.
+    #[test]
+    fn the_first_ask_arms_the_window_and_later_ones_never_push_it_back() {
+        let mut schedule = TaskScanSchedule::default();
+        let start = Instant::now();
+
+        schedule.arm(start, "<p>lunch at one?</p>");
+        assert!(schedule.due.is_none(), "small talk arms nothing");
+
+        // Markup and all: the arming reads the words, exactly as the sweep does.
+        schedule.arm(start, "<p>can you review the <b>deployment</b> doc before friday?</p>");
+        let due = schedule.due.expect("an ask arms the window");
+        assert!(due > start, "the run is debounced, never immediate");
+
+        schedule.arm(start + Duration::from_secs(60), "<p>please also check the changelog</p>");
+        assert_eq!(schedule.due, Some(due), "a chatty thread must not push the scan away");
+    }
+
+    /// The ring records this process's spending over the window the cap is counted over, so
+    /// a start older than that is dropped rather than kept for the life of the process.
+    #[test]
+    fn the_ring_of_starts_never_outgrows_the_window() {
+        let mut schedule = TaskScanSchedule::default();
+        for n in 0..TASK_SCAN_MAX_PER_HOUR as i64 * 3 {
+            schedule.record_start(n * TASK_SCAN_WINDOW_MS);
+        }
+        assert_eq!(
+            schedule.recent_starts.len(),
+            1,
+            "each start here is a whole window past the one before it"
+        );
+    }
+
+    /// The automatic scan is WIRED, and this is the only test that can say so: every other
+    /// one here checks a decision in isolation, so a loop nobody spawns and an arming
+    /// nobody calls would leave them all green with the feature doing nothing at all.
+    #[test]
+    fn the_automatic_scan_is_armed_at_ingest_and_its_loop_is_started() {
+        let code = include_str!("server.rs");
+        let code = code.split("#[cfg(test)]").next().unwrap_or(code);
+        let task = code
+            .split("// consume trouter messages: persist + broadcast.")
+            .nth(1)
+            .expect("the live-message task")
+            .split("// trouter status -> event")
+            .next()
+            .expect("the task ends before the status one");
+        assert!(task.contains("arm_task_scan("), "a live message must be able to arm a scan");
+        assert!(code.contains("spawn_task_scan(ctx.clone());"), "nothing starts the scheduler");
+    }
+
+    /// A provider the user switched off answers nowhere — a chat prefix is ignored with a
+    /// journal line — and a scan must not be the one place that starts it anyway. The
+    /// FALLBACK is what made this reachable: a default the user turned off would have been
+    /// walked past to the next installed CLI, which may be one they turned off too.
+    #[test]
+    fn the_scan_never_runs_a_provider_the_user_switched_off() {
+        let every = agent_policy::Providers::parse(None);
+        let off = agent_policy::Providers::parse(Some(
+            r#"{"claude":{"enabled":false},"opencode":{"enabled":false}}"#,
+        ));
+        for stored in [None, Some("claude"), Some("opencode")] {
+            let refusal = task_scan_backend(stored, &off)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| panic!("{stored:?}: a disabled provider ran a scan"));
+            assert!(refusal.contains("enabled"), "{stored:?}: the refusal must say why: {refusal}");
+            // The positive control, so the assertion above is never green merely because
+            // this machine holds no CLI: the SETTING is the only input that differs.
+            if let Ok(backend) = task_scan_backend(stored, &every) {
+                let name = backend.name;
+                assert!(!off.is_enabled(name), "{stored:?}: {name} stayed enabled");
+            }
+        }
     }
 
     /// One stored message the candidate sweep accepts, for the sweep tests above.
