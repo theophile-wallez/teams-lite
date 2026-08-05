@@ -37,7 +37,7 @@
 //   cd web && bun run join-live -- --hold 45   # stay 45s before hanging up
 
 import { chromium, type Browser, type Page } from "playwright-core";
-import { findChromium } from "./preview";
+import { findChromium, openCalendarView } from "./preview";
 import { LOCAL_ORIGIN, TAILNET_ORIGIN } from "./sandbox-live";
 
 /**
@@ -54,7 +54,42 @@ export const AUTHORIZED_MEETING_CODE = "35017215452446";
 export const AUTHORIZED_MEETING_THREAD =
   "19:meeting_MTVjNTZlMGQtYTY3My00MjU1LThkM2QtYWE3NDEzNjYzOGVi@thread.v2";
 
-const CALENDAR_PATH = "/calendar";
+/**
+ * The day it sits on — 2026-07-28, in the PAST. Noted because it is what makes the
+ * search below necessary: the calendar opens on today, and a meeting nobody can see is
+ * indistinguishable from one this script refuses to touch.
+ *
+ * A past meeting is still joinable: its thread outlives the slot in the calendar, which
+ * is why it can be tested at all without booking anything.
+ */
+export const AUTHORIZED_MEETING_DAY = "2026-07-28";
+
+/**
+ * What a link to that meeting is RECOGNISED by, in either spelling Teams writes one.
+ *
+ * The short `/meet/{code}` link in the invitation carries the code; the long
+ * `/l/meetup-join/{thread}` link Graph hands the app carries the thread and NOT the code
+ * — which is the shape the button really has, so a check on the code alone never matched.
+ * The thread's own middle is used rather than the whole id, because the button's url is
+ * percent-encoded (`19%3ameeting_…%40thread.v2`).
+ */
+const MEETING_MARKERS = [
+  AUTHORIZED_MEETING_CODE,
+  "meeting_MTVjNTZlMGQtYTY3My00MjU1LThkM2QtYWE3NDEzNjYzOGVi",
+];
+
+/** Whether a join url names the pinned meeting. The ONE test both halves of this file use. */
+function namesPinnedMeeting(link: string | null): boolean {
+  return !!link && MEETING_MARKERS.some((marker) => link.includes(marker));
+}
+
+/**
+ * How many agenda windows to look back through. The agenda spans 14 days and its
+ * `previous` steps by the same, so two windows cover a month — enough to reach a meeting
+ * from last week without ever wandering far enough to find a different one.
+ */
+const AGENDA_WINDOWS_BACK = 3;
+
 const APP_READY_TIMEOUT_MS = 60_000;
 const JOIN_BUTTON_TIMEOUT_MS = 30_000;
 /** How long to watch a joined call before hanging up, unless `--hold` says otherwise. */
@@ -93,7 +128,7 @@ export async function withJoinLive<T>(
   opts: { front?: "tailnet" | "local" } = {},
 ): Promise<T> {
   const origin = opts.front === "local" ? LOCAL_ORIGIN : TAILNET_ORIGIN;
-  const url = `${origin}${CALENDAR_PATH}`;
+  const url = origin;
   await assertFrontIsServing(origin);
 
   console.log(`\n  LIVE ACCOUNT — pinned to meeting ${AUTHORIZED_MEETING_CODE}\n  ${url}\n`);
@@ -117,6 +152,18 @@ export async function withJoinLive<T>(
       ignoreHTTPSErrors: true,
     });
     page = await context.newPage();
+    // The page's own voice. Everything that can go wrong in the MEDIA half is reported
+    // here and nowhere else: the backend sees a clean join, and the browser sees
+    // `setRemoteDescription` refuse an answer. Without this the whole failure is one
+    // second of "Joining…" followed by a hangup nobody ordered.
+    page.on("console", (message) => {
+      const text = message.text();
+      if (!/call|sdp|media|microphone|rtc/i.test(text)) return;
+      console.log(`  [page ${message.type()}] ${oneLine(text).slice(0, 400)}`);
+    });
+    page.on("pageerror", (error) => {
+      console.log(`  [page error] ${oneLine(String(error.message)).slice(0, 400)}`);
+    });
     const seen: CallBarState[] = [];
     await page.goto(url, { waitUntil: "domcontentloaded" });
 
@@ -147,6 +194,44 @@ export async function withJoinLive<T>(
 }
 
 /**
+ * Every event on screen, with what its own panel offers — the diagnostic half of this
+ * file, for when the pinned meeting is not where it was expected.
+ *
+ * It reads and never clicks Join, so it is safe to run at any time.
+ */
+async function listEvents(page: Page): Promise<string[]> {
+  await openCalendar(page);
+  const events = page.locator('[data-testid="calendar-event"]');
+  const out: string[] = [];
+  for (let i = 0; i < (await events.count()); i += 1) {
+    const event = events.nth(i);
+    const title = (await event.getAttribute("title")) ?? (await event.innerText());
+    await event.click().catch(() => {});
+    const join = page.locator('[data-testid="meeting-join-here"]').first();
+    const link = await join.getAttribute("data-join-url", { timeout: 1_500 }).catch(() => null);
+    const disabled = await join.isDisabled({ timeout: 500 }).catch(() => null);
+    out.push(
+      `${oneLine(title).slice(0, 70)}  join=${
+        link === null ? "none" : namesPinnedMeeting(link) ? "PINNED" : "other"
+      }${disabled === true ? " (disabled)" : ""}`,
+    );
+    await page.keyboard.press("Escape").catch(() => {});
+  }
+  return out;
+}
+
+/** Open the calendar tab and put it in the agenda view. */
+async function openCalendar(page: Page): Promise<void> {
+  await page.waitForSelector('[data-testid="tab-calendar"]', { timeout: APP_READY_TIMEOUT_MS });
+  await page.locator('[data-testid="tab-calendar"]').click();
+  await page.waitForSelector('[data-testid="calendar-pane"]', { timeout: APP_READY_TIMEOUT_MS });
+  // The AGENDA view, because it is a list: in the day grid two meetings at the same hour
+  // overlap, and each one intercepts the other's click — so a script walking the events
+  // there clicks whichever is drawn on top, which is the opposite of proving its target.
+  await openCalendarView(page, "agenda");
+}
+
+/**
  * The Join button of the pinned meeting, found by opening events until one of them
  * offers a join for that code.
  *
@@ -154,31 +239,37 @@ export async function withJoinLive<T>(
  * button whose link it has not read.
  */
 async function findPinnedJoinButton(page: Page) {
-  await page.waitForSelector('[data-testid="calendar-pane"], [data-testid="calendar-event"]', {
-    timeout: APP_READY_TIMEOUT_MS,
-  });
-  const direct = page.locator(`[data-testid="meeting-join-here"]`).first();
-  if (await direct.count()) {
-    const link = (await direct.getAttribute("data-join-url")) ?? "";
-    if (link.includes(AUTHORIZED_MEETING_CODE)) return direct;
+  await openCalendar(page);
+  for (let window = 0; window <= AGENDA_WINDOWS_BACK; window += 1) {
+    const found = await findInThisWindow(page);
+    if (found) return found;
+    if (window === AGENDA_WINDOWS_BACK) break;
+    // Back one agenda window. The meeting is in the past, and the calendar opens on
+    // today (see AUTHORIZED_MEETING_DAY).
+    await page.locator('[data-testid="calendar-prev"]').click();
+    await page.waitForTimeout(600);
   }
-  // Otherwise open events one at a time and look at what each offers.
+  throw new Error(
+    `No event in the last ${AGENDA_WINDOWS_BACK + 1} agenda windows offers a join for ` +
+      `meeting ${AUTHORIZED_MEETING_CODE} (${AUTHORIZED_MEETING_DAY}), which is the only ` +
+      `one this script may join. Either it is further back than that, or calling is off ` +
+      `in Settings — the button is disabled then, and this script will not click a ` +
+      `disabled one. It joins that meeting and no other; do not point it elsewhere.`,
+  );
+}
+
+/** Look through the events of the window on screen for the pinned meeting's Join button. */
+async function findInThisWindow(page: Page) {
   const events = page.locator('[data-testid="calendar-event"]');
   const count = await events.count();
   for (let i = 0; i < count; i += 1) {
-    await events.nth(i).click();
+    await events.nth(i).click().catch(() => {});
     const join = page.locator('[data-testid="meeting-join-here"]').first();
-    const link = await join
-      .getAttribute("data-join-url", { timeout: 2_000 })
-      .catch(() => null);
-    if (link && link.includes(AUTHORIZED_MEETING_CODE)) return join;
+    const link = await join.getAttribute("data-join-url", { timeout: 1_500 }).catch(() => null);
+    if (namesPinnedMeeting(link)) return join;
+    await page.keyboard.press("Escape").catch(() => {});
   }
-  throw new Error(
-    `No event in the calendar offers a join for meeting ${AUTHORIZED_MEETING_CODE}, which ` +
-      `is the only one this script may join. It may not be in the window on screen, or ` +
-      `calling may be off in Settings (the button is disabled then). This script joins ` +
-      `that meeting and no other — do not point it elsewhere.`,
-  );
+  return null;
 }
 
 /**
@@ -194,10 +285,7 @@ async function assertPinnedMeeting(
   page: Page,
 ): Promise<void> {
   const link = await button.getAttribute("data-join-url", { timeout: JOIN_BUTTON_TIMEOUT_MS });
-  const names = (value: string | null) =>
-    !!value &&
-    (value.includes(AUTHORIZED_MEETING_CODE) || value.includes(AUTHORIZED_MEETING_THREAD));
-  if (names(link)) return;
+  if (namesPinnedMeeting(link)) return;
   const shown =
     link === null
       ? "unknown: the button carries no `data-join-url`. If the app otherwise works, the " +

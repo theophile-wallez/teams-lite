@@ -37,6 +37,75 @@ const MEDIA_LABELS: Record<string, string> = {
   video: "main-video",
 };
 
+/**
+ * How the two sides spell an ICE-TCP candidate's role — the client's own
+ * `tcpTypeMapping`, verbatim.
+ *
+ * A browser writes the transport as `tcp` and states the role in a separate `tcptype`
+ * attribute; the service folds the role INTO the transport. Chrome does not merely ignore
+ * the folded spelling, it refuses the whole description:
+ *
+ *     Failed to parse SessionDescription.
+ *     a=candidate:3 1 tcp-pass 18087935 … typ relay …
+ *     Unsupported transport type
+ *
+ * One line out of forty, and the answer is thrown away whole — which looked exactly like
+ * a join that connected and then hung up on its own.
+ */
+const TCP_TYPES: ReadonlyArray<{ jsep: string; ms: string }> = [
+  { jsep: "active", ms: "tcp-act" },
+  { jsep: "passive", ms: "tcp-pass" },
+  { jsep: "so", ms: "tcp-so" },
+];
+
+/**
+ * Attributes a browser adds to its own candidates and the service is never sent.
+ *
+ * `transformCandidate` in the client's bundle deletes exactly these three before a
+ * candidate goes out.
+ */
+const CANDIDATE_EXTRAS = ["generation", "network-id", "network-cost"];
+
+/** Rewrite one `a=candidate:` line into the service's spelling. */
+function candidateToMs(line: string): string {
+  const fields = line.slice("a=candidate:".length).split(" ");
+  // `<foundation> <component> <transport> <priority> …` — the transport is the third.
+  const transport = fields[2]?.toLowerCase();
+  if (transport === "tcp") {
+    const at = fields.findIndex((f) => f === "tcptype");
+    const role = at >= 0 ? fields[at + 1] : undefined;
+    const folded = TCP_TYPES.find((t) => t.jsep === role);
+    if (folded) {
+      fields[2] = folded.ms;
+      fields.splice(at, 2);
+    }
+  }
+  return `a=candidate:${withoutExtras(fields).join(" ")}`;
+}
+
+/** Rewrite one `a=candidate:` line back into what a browser can parse. */
+function candidateFromMs(line: string): string {
+  const fields = line.slice("a=candidate:".length).split(" ");
+  const folded = TCP_TYPES.find((t) => t.ms === fields[2]?.toLowerCase());
+  if (!folded) return line;
+  fields[2] = "tcp";
+  fields.push("tcptype", folded.jsep);
+  return `a=candidate:${fields.join(" ")}`;
+}
+
+/** Drop the trailing `key value` pairs the service is never sent. */
+function withoutExtras(fields: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < fields.length; i += 1) {
+    if (CANDIDATE_EXTRAS.includes(fields[i] ?? "")) {
+      i += 1; // and its value
+      continue;
+    }
+    out.push(fields[i] as string);
+  }
+  return out;
+}
+
 /** One `m=` line, split into the pieces this module cares about. */
 type MediaLine = { kind: string; head: string; profile: string; tail: string };
 
@@ -103,7 +172,7 @@ export function toMsSdp(sdp: string): string {
       continue;
     }
     if (section && line.startsWith("a=label:")) section.hasLabel = true;
-    out.push(line);
+    out.push(line.startsWith("a=candidate:") ? candidateToMs(line) : line);
   }
   closeSection();
   return out.join(ending);
@@ -143,6 +212,19 @@ export function fromMsSdp(sdp: string): string {
   };
 
   lines.forEach((line, index) => {
+    if (line.startsWith("a=candidate:")) {
+      out.push(candidateFromMs(line));
+      return;
+    }
+    // The service lists IPv6 candidates under a name of its own; the client's
+    // `candidateTransform.fromMsSdp` merges them into `candidates` before the browser
+    // ever sees the description, so an answer that reaches a phone on IPv6 has somewhere
+    // to connect. Anything else it cannot parse would be an unknown attribute, which a
+    // browser ignores — this one has to become a candidate or it is simply lost.
+    if (line.startsWith("a=x-candidate-ipv6:")) {
+      out.push(candidateFromMs(`a=candidate:${line.slice("a=x-candidate-ipv6:".length)}`));
+      return;
+    }
     const media = readMediaLine(line);
     if (!media) {
       out.push(line);
