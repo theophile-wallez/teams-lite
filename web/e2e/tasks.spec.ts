@@ -5,6 +5,7 @@ import {
   composerField,
   fillComposer,
   gotoApp,
+  openCalendarTab,
   openConversationAt,
   realErrors,
   setTaskControl,
@@ -50,6 +51,26 @@ async function openTasksPanel(page: Page): Promise<void> {
   await page.locator('[data-testid="tasks-toggle"]').click();
   await expect(panel(page)).toBeVisible();
   await expect.poll(() => page.locator('[data-testid="task-row"]').count()).toBeGreaterThan(0);
+}
+
+/**
+ * The opacity a reader really sees: every ancestor's multiplied in.
+ *
+ * `opacity` is not inherited, so a button inside a transparent row computes its own `1` while
+ * nobody can see it — and a hover reveal is written on the ROW (`opacity-0
+ * group-hover:opacity-100`), never on the control. Asserting the element's own value therefore
+ * passes for exactly the regression the phone case exists to catch; measured that, with the
+ * reveal added on purpose. Playwright counts a transparent element as visible too, so neither
+ * `toBeVisible` nor `toHaveCSS` covers this on its own.
+ */
+async function paintedOpacity(target: Locator): Promise<number> {
+  return target.evaluate((element) => {
+    let opacity = 1;
+    for (let node: Element | null = element; node; node = node.parentElement) {
+      opacity *= Number(getComputedStyle(node).opacity || "1");
+    }
+    return opacity;
+  });
 }
 
 /** The box of a locator, which the layout cases compare across an interaction. */
@@ -205,11 +226,15 @@ test.describe("the task panel", () => {
     await openTasksPanel(page);
 
     // In DOM order, which is reading order: a decision to make first, then the day, then the
-    // rest, then what is already behind them.
-    const keys = await page
-      .locator('[data-testid="tasks-section"]')
-      .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-section")));
-    expect(keys).toEqual(["suggested", "today", "open", "done"]);
+    // rest, then what is already behind them. Polled rather than read once: the rows are up by
+    // the time `openTasksPanel` returns, and this must not quietly depend on that.
+    await expect
+      .poll(() =>
+        page
+          .locator('[data-testid="tasks-section"]')
+          .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-section"))),
+      )
+      .toEqual(["suggested", "today", "open", "done"]);
   });
 
   test("Accept moves a suggestion into Open", async ({ page }) => {
@@ -239,6 +264,9 @@ test.describe("the task panel", () => {
 
     const suggestion = section(page, "suggested").locator('[data-testid="task-row"]').first();
     const id = (await suggestion.getAttribute("data-task-id")) ?? "";
+    // Named, or the count below would be a count of nothing: `[data-task-id=""]` matches no row
+    // whether or not Dismiss did anything at all.
+    expect(id).not.toBe("");
     await suggestion.locator('[data-testid="task-dismiss"]').click();
 
     // `dismissed` is stored rather than deleted — so the same message is never suggested
@@ -293,7 +321,11 @@ test.describe("the task panel", () => {
     // where it is going.
     const link = panel(page).locator('[data-testid="task-source"][href^="/c/"]').first();
     const href = (await link.getAttribute("href")) ?? "";
-    expect(href).not.toBe("");
+    // Anchored on something the panel did NOT supply, or the case is circular: an href checked
+    // against an id read out of that same href passes for a well-formed link to the wrong
+    // conversation. The first `/c/` row is the seeded suggestion, which was asked in a 1:1 —
+    // the `/m/` twin is anchored the same way, on the mail pane really opening.
+    expect(href).toContain("1on1");
     await link.click();
 
     // The conversation named in the href is the one that opened — read from the composer's
@@ -372,17 +404,23 @@ test.describe("the task panel", () => {
     // Provider-neutral, like every string in this feature: WHICH CLI reads the messages is
     // the user's own setting, so naming one here would go stale the day they change it.
     await expect(error).toContainText("agent CLI");
-    await expect(page.locator('[data-testid="status-bar"]')).not.toContainText("agent CLI");
+    // The status line is on screen and does NOT carry it — asserted in that order, because
+    // "does not contain" against an element that is not there is true of nothing.
+    const statusBar = page.locator('[data-testid="status-bar"]');
+    await expect(statusBar).toBeVisible();
+    await expect(statusBar).not.toContainText("agent CLI");
     // A refused scan is not a count, and the two must never be on screen together.
     await expect(panel(page).locator('[data-testid="tasks-scan-found"]')).toHaveCount(0);
 
-    // It sits under the header the button is in, which is what "beside" means here.
+    // Under the header the button is in, and WITHIN ONE BUTTON of it: a sentence at the foot of
+    // the panel is not beside the control that was pressed, and a band wide enough to allow one
+    // would claim less than the paragraph above.
     const errorBox = await box(error);
     const buttonBox = await box(panel(page).locator('[data-testid="tasks-scan"]'));
     const aside = await box(panel(page));
     expect(errorBox.x).toBeGreaterThanOrEqual(aside.x - 1);
     expect(errorBox.y).toBeGreaterThanOrEqual(buttonBox.y);
-    expect(errorBox.y).toBeLessThan(buttonBox.y + buttonBox.height * 4);
+    expect(errorBox.y - (buttonBox.y + buttonBox.height)).toBeLessThan(buttonBox.height);
 
     // And the way forward is the same button: a control whose only offer cannot succeed is no
     // way forward at all.
@@ -501,6 +539,24 @@ test.describe("the task panel", () => {
     await page.keyboard.press("t");
     await expect(panel(page)).toBeVisible();
   });
+
+  // The ONE place the key is documented not to fire (`!onCalendar` in app.tsx): the calendar
+  // reads `t` as "today", and two handlers on one key would run both — a jump in the grid and a
+  // panel over it, from one press.
+  test("does not fire on the Calendar tab, whose own `t` is Today", async ({ page }) => {
+    await gotoApp(page);
+    // The precondition, proved rather than assumed: the calendar is really the surface on
+    // screen, with its events drawn (which is what `openCalendarTab` waits for).
+    await openCalendarTab(page);
+    await expect(page.locator('[data-testid="calendar-pane"]')).toBeVisible();
+
+    await page.keyboard.press("t");
+    await expect(panel(page)).toHaveCount(0);
+
+    // The exception is about the KEY and not about the tab: the button still opens the panel
+    // here, which is also what makes the press above a real negative.
+    await openTasksPanel(page);
+  });
 });
 
 // A phone, where the panel IS the screen: a 22rem column on a 390px device is the device.
@@ -536,11 +592,36 @@ test.describe("the task panel on a phone", () => {
     // a dispatched pointer pair, which produces no click at all) carries one out.
     const suggestion = section(page, "suggested").locator('[data-testid="task-row"]').first();
     const id = (await suggestion.getAttribute("data-task-id")) ?? "";
-    await expect(suggestion.locator('[data-testid="task-accept"]')).toBeVisible();
-    await expect(suggestion.locator('[data-testid="task-dismiss"]')).toBeVisible();
+    expect(id).not.toBe("");
+    for (const control of ["task-accept", "task-dismiss"]) {
+      const button = suggestion.locator(`[data-testid="${control}"]`);
+      await expect(button).toBeVisible();
+      // PAINTED, not merely visible: a reveal written the usual Tailwind way (`opacity-0
+      // group-hover:opacity-100` on the row) leaves both the button's own opacity and
+      // `toBeVisible` saying yes while the person holding the phone sees nothing there.
+      expect(await paintedOpacity(button)).toBe(1);
+    }
     await suggestion.locator('[data-testid="task-accept"]').tap();
     await expect(taskRow(page, id)).toHaveAttribute("data-task-state", "open");
     await expect(taskRow(page, id).locator('[data-testid="task-check"]')).toBeVisible();
+  });
+
+  test("is left through its own close button, which is the only way out here", async ({ page }) => {
+    await gotoApp(page);
+    await openTasksPanel(page);
+
+    // A phone has no Escape and no `t`, and the sheet covers the whole screen — so this button
+    // is the ONLY way out of it. A broken one leaves the reader shut inside the panel with
+    // their conversations behind it.
+    await panel(page).locator('[data-testid="tasks-close"]').tap();
+
+    await expect(panel(page)).toHaveCount(0);
+    await expect(page.locator('[data-testid="tasks-toggle"]')).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    // And what was behind it is back, rather than a blank screen.
+    await expect(page.locator('[data-testid="conversation-row"]').first()).toBeVisible();
   });
 
   test("closes itself when a task's source is followed", async ({ page }) => {
