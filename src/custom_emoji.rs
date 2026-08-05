@@ -13,16 +13,18 @@
 //! emoji inside code either), and reply quotes (which hold a colleague's own words —
 //! substituting our art into them would rewrite what they wrote).
 
-/// The largest custom emoji this app accepts, in bytes. Matches [`crate::teams_send::MAX_IMAGE_BYTES`]
-/// because the upload path and the storage are the same.
+/// The largest custom emoji this app accepts, in bytes. Slack's limit, copied
+/// deliberately. Nothing here re-encodes, so an image over the limit is refused
+/// rather than scaled — the cap is a contract, not a hint.
 pub const MAX_CUSTOM_EMOJI_BYTES: usize = 128 * 1024;
 
-/// The widest or tallest emoji accepted, in pixels. Smaller than image uploads
-/// because an emoji is a character substitute, not an attachment.
+/// The widest or tallest emoji accepted, in pixels. Slack's limit, copied
+/// deliberately. An image over the limit is refused rather than scaled.
 pub const MAX_CUSTOM_EMOJI_DIMENSION: u32 = 512;
 
-/// MIME types accepted for custom emoji. A subset of the raster types image uploads
-/// take; SVG is excluded because an emoji is bitmap content, not a document.
+/// MIME types accepted for custom emoji. Slack's set, copied deliberately. SVG is
+/// excluded because an emoji is a bitmap, not a document — these bytes come back out
+/// of this app inside an `<img>`.
 pub const CUSTOM_EMOJI_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// One custom emoji held in the pack.
@@ -37,18 +39,20 @@ pub struct CustomEmoji {
     pub added_ms: i64,
 }
 
-/// Whether `name` is a valid custom emoji name: 1..64 ASCII lowercase alphanumerics,
-/// hyphens, underscores or plus signs, starting with an alphanumeric. No uppercase,
-/// no spaces, no colons (which would end the code early).
+/// Whether `name` is a valid custom emoji name: 1..64 characters, first character must
+/// be a lowercase letter or digit, remaining characters may also be `-`, `_` or `+`.
+/// No uppercase, no spaces, no colons (which would end the code early).
 ///
-/// Slack's emoji name rule, measured.
+/// Slack's emoji name rule, copied deliberately. The first-character restriction exists
+/// because Slack's does — a name starting with punctuation would sort strangely and
+/// could collide with Slack's own syntax.
 pub fn is_valid_name(name: &str) -> bool {
     let len = name.len();
     if len == 0 || len > 64 {
         return false;
     }
     let bytes = name.as_bytes();
-    // ponytail: must start with lowercase alphanumeric
+    // ponytail: first character must be lowercase letter or digit
     if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
         return false;
     }
