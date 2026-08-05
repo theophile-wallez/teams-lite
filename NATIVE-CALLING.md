@@ -468,18 +468,35 @@ live app against the one authorized meeting, reports the call bar and the page's
 console, and hangs up on every path out. Everything BEFORE the browser is still
 `examples/meeting_join_probe.rs`; everything after it needs that script.
 
+**And the media really flows.** `bun run join-live` reports the peer connection's own
+`getStats()`, because "connected" on the call bar only means the answer was applied —
+DTLS can still fail and ICE can still find no path, and the bar would look identical:
+
+```
+media: connected/connected via prflx/udp -> relay/udp
+sent 63177B in 1025 packets, received 0B in 0
+```
+
+1025 RTP packets accepted by Teams' own relay over UDP. `received 0` is the correct
+answer for an empty meeting — nobody is talking — and it is also the limit of what can be
+checked alone: a fake capture device sends silence, so AUDIBILITY still needs a meeting
+with somebody in it. Everything up to and including "the far side accepts our audio" is
+now measured.
+
+`activeModalities.call` being null in the join RESPONSE turned out to be nothing: the leg
+is created after the answer, and the `conversationUpdate` frames a second later carry it as
+an object (measured). The backend's journal line says `audio_leg_in_answer=` for that
+reason — it is a record of the answer, not a verdict on the media.
+
 ### Still open
 
-`audio=false` in the join answer's `activeModalities` is the one thing above that reads
-oddly against a call that then connected — the leg is created after the answer, so the
-field is a snapshot rather than a verdict. It is worth confirming against a meeting with
-somebody in it, which is also the only way to check that audio is AUDIBLE rather than
-merely negotiated: a fake device sends silence.
-
-A ONE-TO-ONE call has never been tried. It shares the whole media path with the join —
-so the five fixes above cover it — but it has its own POST, its own acceptance and no
+A ONE-TO-ONE call has never been rung. It shares the whole media path with the join — so
+the five fixes above cover it — but it has its own POST, its own acceptance, and no
 sanctioned target: ringing anybody is the user's own click, to somebody who agreed
-beforehand (§ 7).
+beforehand (§ 7). `invitation_payload` now carries every field the join is known to be
+accepted with (the capability masks, `endpointState`, `endpointMetadata`, `debugContent`),
+because it goes to the same endpoint and that endpoint refuses what it does not recognise
+without naming it. That is the difference between one debugging round and five.
 
 The rest of this section is unchanged, and is what a 1:1 answers:
 

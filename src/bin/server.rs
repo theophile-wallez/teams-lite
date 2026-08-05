@@ -3790,12 +3790,14 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
             }
             ctx.emit_call_state();
-            // What the answer really granted. `activeModalities.call` is the audio leg:
-            // the conversation joins whether or not the media was accepted, so a join
-            // that reads as a success and carries a null call is the one shape that
-            // looks fine here and goes silent a second later.
+            // What the answer granted. `activeModalities.call` is the audio leg, and it
+            // is normally ABSENT here: the leg is created after the answer, and the
+            // `conversationUpdate` frames that follow a second later do carry it
+            // (measured). So this line is a record of the answer, not a verdict on the
+            // media — that is `getStats` in the browser, which `bun run join-live`
+            // reports.
             eprintln!(
-                "[calling] joined the meeting: audio={} lobby={} links={}",
+                "[calling] joined the meeting: audio_leg_in_answer={} lobby={} links={}",
                 joined.raw.pointer("/activeModalities/call").is_some_and(|c| !c.is_null()),
                 calling::lobby_state_in_frame(&joined.raw) == Some(calling::LobbyState::Waiting),
                 joined.links.names().len()

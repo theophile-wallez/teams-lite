@@ -116,6 +116,29 @@ export type JoinLiveSession = {
   timeline: () => CallBarState[];
   /** Screenshot the page or one element. */
   shot: (path: string, selector?: string) => Promise<void>;
+  /** What the MEDIA is actually doing — the half the call bar cannot show. */
+  mediaStats: () => Promise<MediaStats | null>;
+};
+
+/**
+ * The peer connection's own account of the call.
+ *
+ * "Connected" on the bar means the signaling completed and the answer was applied. It does
+ * NOT mean audio is flowing: DTLS can still fail, ICE can still find no path, and the bar
+ * would look identical. These numbers are the difference, and they come from
+ * `RTCPeerConnection.getStats()` rather than from anything this app renders.
+ */
+export type MediaStats = {
+  connectionState: string;
+  iceConnectionState: string;
+  /** The transport actually chosen, as `host|srflx|relay → …`, when ICE picked one. */
+  candidatePair: string | null;
+  /** Bytes we have SENT. Non-zero proves our own audio is leaving the machine. */
+  bytesSent: number;
+  /** Bytes we have RECEIVED. Zero in an empty meeting is expected — nobody is talking. */
+  bytesReceived: number;
+  packetsSent: number;
+  packetsReceived: number;
 };
 
 /**
@@ -151,6 +174,25 @@ export async function withJoinLive<T>(
       permissions: ["microphone"],
       ignoreHTTPSErrors: true,
     });
+    // Keep a handle on the app's own peer connection, from BEFORE its code runs.
+    //
+    // The alternative was a `data-media-state` attribute on the call bar, i.e. production
+    // code carrying a diagnostic. This is instrumentation, so it belongs to the driver:
+    // nothing the user runs is changed by it, and it cannot drift from what the app does
+    // because it wraps the browser's own constructor.
+    await context.addInitScript({
+      content: `(() => {
+        const Native = window.RTCPeerConnection;
+        if (!Native) return;
+        const Wrapped = function (...args) {
+          const pc = new Native(...args);
+          window.__tlPc = pc;
+          return pc;
+        };
+        Wrapped.prototype = Native.prototype;
+        window.RTCPeerConnection = Wrapped;
+      })()`,
+    });
     page = await context.newPage();
     // The page's own voice. Everything that can go wrong in the MEDIA half is reported
     // here and nowhere else: the backend sees a clean join, and the browser sees
@@ -183,6 +225,7 @@ export async function withJoinLive<T>(
         const target = selector ? (page as Page).locator(selector).first() : (page as Page);
         await target.screenshot({ path });
       },
+      mediaStats: () => readMediaStats(page as Page),
     };
     return await body(session);
   } finally {
@@ -347,6 +390,47 @@ async function waitForPhase(
   }
 }
 
+/** Ask the peer connection what the media is really doing. */
+async function readMediaStats(page: Page): Promise<MediaStats | null> {
+  // Source text rather than a closure, for the same reason as the init script above: this
+  // file is typed for node, and `RTCPeerConnection` does not exist here.
+  return page.evaluate(`(async () => {
+    const pc = window.__tlPc;
+    if (!pc) return null;
+    const stats = await pc.getStats();
+    let bytesSent = 0, bytesReceived = 0, packetsSent = 0, packetsReceived = 0;
+    let candidatePair = null;
+    const candidates = new Map();
+    stats.forEach((r) => {
+      if (r.type === "local-candidate" || r.type === "remote-candidate") {
+        candidates.set(r.id, { type: r.candidateType, protocol: r.protocol });
+      }
+    });
+    stats.forEach((r) => {
+      if (r.type === "outbound-rtp") {
+        bytesSent += r.bytesSent || 0;
+        packetsSent += r.packetsSent || 0;
+      }
+      if (r.type === "inbound-rtp") {
+        bytesReceived += r.bytesReceived || 0;
+        packetsReceived += r.packetsReceived || 0;
+      }
+      if (r.type === "candidate-pair" && r.state === "succeeded") {
+        const local = candidates.get(r.localCandidateId) || {};
+        const remote = candidates.get(r.remoteCandidateId) || {};
+        candidatePair =
+          (local.type || "?") + "/" + (local.protocol || "?") + " -> " +
+          (remote.type || "?") + "/" + (remote.protocol || "?");
+      }
+    });
+    return {
+      connectionState: pc.connectionState,
+      iceConnectionState: pc.iceConnectionState,
+      candidatePair, bytesSent, bytesReceived, packetsSent, packetsReceived,
+    };
+  })()`) as Promise<MediaStats | null>;
+}
+
 /** Leave the call, if one is up. Idempotent: nothing to do is not an error. */
 async function hangUp(page: Page): Promise<void> {
   const button = page.locator('[data-testid="call-hangup"]').first();
@@ -382,12 +466,24 @@ if (import.meta.main) {
   const hold = holdAt >= 0 ? Number(argv[holdAt + 1]) : DEFAULT_HOLD_SECONDS;
 
   await withJoinLive(
-    async ({ waitForPhase: wait, timeline }) => {
+    async ({ waitForPhase: wait, timeline, mediaStats: stats }) => {
       // First: does it get past "joining" at all? That is the acceptance and its answer.
       const state = await wait(["connected", "ended"], 45_000);
       if (state.phase === "connected") {
         console.log(`\n  CONNECTED. Holding ${hold}s to see whether it stays up.`);
         await wait(["ended"], hold * 1_000);
+      }
+      // What the MEDIA did, which is the half the bar cannot show. Bytes SENT prove our
+      // own audio left the machine; bytes RECEIVED are expected to be zero in an empty
+      // meeting, because nobody is talking.
+      const media = await stats();
+      if (media) {
+        console.log(
+          `\n  media: ${media.connectionState}/${media.iceConnectionState}` +
+            ` via ${media.candidatePair ?? "no pair"}\n` +
+            `  sent ${media.bytesSent}B in ${media.packetsSent} packets,` +
+            ` received ${media.bytesReceived}B in ${media.packetsReceived}`,
+        );
       }
       const end = timeline().at(-1);
       console.log(

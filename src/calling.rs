@@ -597,6 +597,25 @@ pub fn invitation_payload(
             },
         },
         "participants": { "from": local.json(), "to": recipients },
+        // Everything on the next few lines is here because the JOIN taught it, and a call
+        // goes to the same endpoint: the conversation service refuses a request it does
+        // not recognise with `400` and an empty body, naming no field, so the only values
+        // this app has ever seen accepted are a working client's. A 1:1 has never been
+        // rung (NATIVE-CALLING.md § 8) — sending it the shape that IS known to work is
+        // the difference between one round of debugging and five.
+        "subject": Value::Null,
+        "groupContext": Value::Null,
+        "capabilities": Value::Null,
+        "endpointCapabilities": CAPTURED_ENDPOINT_CAPABILITIES,
+        "clientEndpointCapabilities": CAPTURED_CLIENT_CAPABILITIES,
+        "endpointMetadata": { "holographicCapabilities": 3 },
+        "endpointState": {
+            "endpointStateSequenceNumber": 0,
+            "endpointProperties": {
+                "additionalEndpointProperties": { "infoShownInReportMode": "FullInformation" }
+            }
+        },
+        "debugContent": { "causeId": callbacks.cause_id },
         // The thread the call belongs to. Without it the call exists but belongs
         // to no conversation, and nobody in the thread sees that it happened.
         "groupChat": thread_id.map(|t| json!({ "threadId": t, "messageId": null })),
@@ -1580,6 +1599,13 @@ mod tests {
             .unwrap()
             .ends_with("/call/mediaAnswer/"));
         assert_eq!(payload.pointer("/participants/to/0/id").unwrap(), "8:orgid:her");
+        // A call carries the same capability masks a JOIN is known to be accepted with:
+        // same endpoint, same silent refusal, and the 1:1 path has never been rung.
+        assert_eq!(payload.pointer("/endpointCapabilities").unwrap(), 73463);
+        assert_eq!(payload.pointer("/clientEndpointCapabilities").unwrap(), 63928042);
+        assert_eq!(payload.pointer("/capabilities").unwrap(), &Value::Null);
+        assert!(payload.pointer("/endpointState").is_some());
+        assert!(payload.pointer("/endpointMetadata").is_some());
         assert_eq!(payload.pointer("/participants/from/id").unwrap(), "8:orgid:me");
         assert_eq!(
             payload.pointer("/groupChat/threadId").unwrap(),
