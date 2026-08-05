@@ -5444,6 +5444,7 @@ function dispatch(method: string, params: unknown): unknown {
     // ---- tasks (the local list) --------------------------------------------
 
     case "tasks":
+      if (mockTasksReadFails) throw new Error(MOCK_TASKS_READ_ERROR);
       return { tasks: mockTasks.slice().sort((a, b) => b.created_at - a.created_at) };
 
     // Insert, or change only the fields the call names — one method for both, exactly
@@ -6354,9 +6355,12 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // the next spec's scan into an error nobody armed.
     //
     // `empty: true` clears the list outright, which is the only way to look at the "no
-    // tasks at all" line the panel draws instead of its sections.
+    // tasks at all" line the panel draws instead of its sections — and `read_fails: true`
+    // is the opposite state, the one where the panel knows nothing and must say so instead
+    // of drawing that same line.
     if (body.kind === "tasks") {
       mockScanFailsOnce = body.fail_once === true;
+      mockTasksReadFails = body.read_fails === true;
       if (body.empty === true) {
         mockTasks.length = 0;
         mockTaskSeq = 0;
@@ -6365,7 +6369,12 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       }
       broadcast("tasks_changed", {});
       return Response.json(
-        { ok: true, tasks: mockTasks.length, fail_once: mockScanFailsOnce },
+        {
+          ok: true,
+          tasks: mockTasks.length,
+          fail_once: mockScanFailsOnce,
+          read_fails: mockTasksReadFails,
+        },
         { status: 200 },
       );
     }
@@ -6888,6 +6897,16 @@ const MOCK_SCAN_MS = Number(process.env.MOCK_SCAN_MS ?? 900);
  *  panel's error path is the half a page owns: a scan that could not run must say so
  *  beside the button that was pressed, not vanish into a cue. */
 let mockScanFailsOnce = false;
+
+/** Make every `tasks` READ fail — armed with `{kind: "tasks", read_fails: true}`, cleared
+ *  by any later hook call that does not ask for it. The first read is the one failure the
+ *  panel cannot draw as an empty plate: "no tasks" is a claim about a list, and a list this
+ *  page never managed to read is not one it may make (see `loadTasks` in lib/store.ts). */
+let mockTasksReadFails = false;
+
+/** What a refused read says. The RPC itself has no rails to trip — it takes no params — so
+ *  what really fails here is the socket or the store underneath it. */
+const MOCK_TASKS_READ_ERROR = "the task list could not be read";
 
 /** The refusal in the words the backend really uses when no CLI on the machine can be
  *  told to hold no tools (see `task_scan_backend` in src/bin/server.rs). Provider-neutral,

@@ -376,6 +376,26 @@ export async function setApprovalControl(
   expect(res.ok()).toBeTruthy();
 }
 
+/**
+ * Arm the task list in the mock, through its gated test hook: back to its seed (`reset`),
+ * emptied outright (`empty`), a scan that refuses once (`fail_once`), or a `tasks` read that
+ * refuses at all (`read_fails`).
+ *
+ * A spec that arms ANY of these MUST reset it afterwards. One mock process serves the whole
+ * run, so a task accepted or ticked off in one spec is still in that state for every later
+ * one — and an armed failure turns the next spec's scan, or its whole list, into an error
+ * nobody armed.
+ */
+export async function setTaskControl(
+  page: Page,
+  body: { reset?: boolean; empty?: boolean; fail_once?: boolean; read_fails?: boolean } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "tasks", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Set a reaction on an existing message through the mock's gated test hook
  *  (from someone else by default), then the mock re-broadcasts the message. */
 export async function emitReaction(
