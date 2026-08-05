@@ -727,6 +727,9 @@ export class TeamsController {
   private customEmojiCache = new Map<string, Promise<string | null>>();
   private customEmojiObjectUrls: string[] = [];
 
+  // The pack ITSELF, one promise for the whole page (see `loadCustomEmoji`).
+  private customEmojiList: Promise<CustomEmoji[]> | null = null;
+
   // Surfaces that read the custom emoji pack, so they can re-read when it changes.
   private customEmojiListeners = new Set<() => void>();
 
@@ -2964,10 +2967,21 @@ export class TeamsController {
   // ---- custom emoji --------------------------------------------------------
 
   /** The custom emoji pack, without the art bytes (those are fetched per name
-   *  through {@link customEmojiUrl}). */
-  async loadCustomEmoji(): Promise<CustomEmoji[]> {
-    const res = await this.backend.customEmoji();
-    return res.emoji ?? [];
+   *  through {@link customEmojiUrl}).
+   *
+   *  Held behind ONE promise, dropped on `custom_emoji_changed` like the art beside it.
+   *  Every message row asks for the pack — a code in a colleague's message may be one the
+   *  user could take, and the quick reaction row offers their own — so opening a thread of
+   *  forty bubbles used to be forty `custom_emoji` RPCs, and more as rows remount while
+   *  the history scrolls. A failed read is dropped so the next caller retries. */
+  loadCustomEmoji(): Promise<CustomEmoji[]> {
+    const pending = (this.customEmojiList ??= this.backend
+      .customEmoji()
+      .then((res) => res.emoji ?? []));
+    pending.catch(() => {
+      if (this.customEmojiList === pending) this.customEmojiList = null;
+    });
+    return pending;
   }
 
   /** Resolve one custom emoji's art to a local blob object URL, fetching the bytes
@@ -3072,6 +3086,7 @@ export class TeamsController {
    *  (`custom_emoji_changed`), so two open pages and the two backends sharing the
    *  store agree. Without this, a replaced emoji keeps its old art until a reload. */
   private forgetCustomEmoji(): void {
+    this.customEmojiList = null;
     for (const [name] of this.customEmojiCache) {
       this.customEmojiCache.delete(name);
     }
