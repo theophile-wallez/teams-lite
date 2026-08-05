@@ -84,7 +84,7 @@ Five pieces, each with one job.
 | The pack | `custom_emoji` table in the store (`src/store.rs`) | Hold names, aliases and bytes. One row per emoji. |
 | Sources | `custom_emoji_add` in `src/bin/server.rs`, over `src/sender_icon.rs`'s rails and `src/teams_media.rs` | Turn a file, a URL, a clipboard image, a colleague's emoji or a pack file into a row. |
 | Insertion | `web/src/lib/custom-emoji.ts`, a `:` suggestion plugin beside `mention-extension.ts`, emoji-mart's own `custom:` prop | Get an emoji into the composer. |
-| Outbound | one rewrite function in `src/teams_send.rs`, used by send **and** edit | Upload each emoji the body names, rewrite its `src`, fill `amsreferences`. |
+| Outbound | one rewrite function in `src/teams_send.rs`, used by send **and** edit | Substitute each `:code:` the pack holds with Teams' emoji markup, upload the art once per name, fill `amsreferences`. |
 | Inbound | one branch in `rich-text.ts::isEmojiImage` + a small renderer | Draw an emoji a message carries, at glyph size. |
 
 The seam that matters: **the page never handles the art on a send.** It serializes the
@@ -137,39 +137,45 @@ CREATE TABLE IF NOT EXISTS custom_emoji (
 
 ## 5. Outbound — the wire format
 
-### 5.1 What the page serializes
+### 5.1 The code IS the wire format, and the chip serializes to it
 
-A custom emoji is an inline tiptap node. `serializeTeamsMessage`
-(`web/src/lib/rich-text.ts`) writes it as Teams' own emoji markup, **with no `src`**:
+A custom emoji is an inline tiptap node in the composer — the art, drawn while the user
+types, which is what Slack shows. It serializes to the **bare `:shipit:` text**, exactly
+what the user would have typed by hand.
 
-```html
-<img itemtype="http://schema.skype.com/Emoji" itemid="shipit" alt=":shipit:">
-```
+This is the `agent-tag-extension.ts` pattern, adopted for its reasons: the chip is a
+composer affordance, the words are the contract, and the backend reads them back. It also
+matches Slack's real behaviour — a `:shipit:` typed literally, with no autocomplete,
+renders as the emoji there too. So the autocomplete is a convenience, never the mechanism.
 
-The page has no AMS endpoint and no skypetoken, so it cannot name a src — and it does
-not need to: the backend holds the bytes.
+And it is what makes an **edit** work at all: `edit` sends plain text only
+(`src/bin/server.rs:2988` passes `content_html: None`, and `MessageEditor` is a plain-text
+box), so an emoji that lived in markup would be destroyed by every edit. A code survives
+one, because it is text.
 
 ### 5.2 What the backend does
 
-One function, `resolve_custom_emoji`, called by `send_message` **and** the edit path
-(an edit that adds a code must upload it; an edit that keeps one must keep its src):
+One function, `resolve_custom_emoji(html, store, …) -> (String, Vec<String>)`, called by
+the send path **and** the edit path:
 
-1. Scan the outgoing HTML for Emoji-itemtype images carrying an `itemid`. This is the
-   same shape of scan `mention_span_itemids` already does, and it is a strict, tested
-   transform on the user's own HTML.
-2. For each **distinct** name that exists in the pack, upload the bytes through the
-   existing AMS path and rewrite that image in place:
+1. Walk the outgoing body's **text runs only** — never inside a tag, an attribute or an
+   entity — and find `:name:` occurrences the pack holds.
+2. Skip three regions, each for its own reason: `<code>` and `<pre>` (Slack does not
+   render an emoji inside code either), and a **quote block** (a reply carries a
+   colleague's words, and substituting our art into them would rewrite what they wrote —
+   the same reason `agent_policy` strips quoted blocks before reading a trigger).
+3. For each **distinct** name found, upload the bytes once through the existing AMS path
+   and replace each occurrence with Teams' own emoji markup:
 
 ```html
 <img itemtype="http://schema.skype.com/Emoji" itemid="shipit" alt=":shipit:"
      src="{ams}/v1/objects/{id}/views/imgo" width="20" height="20">
 ```
 
-3. Collect every object id into `amsreferences` (today an array of one; it becomes an
+4. Collect every object id into `amsreferences` (today an array of one; it becomes an
    array of N).
-4. A name the pack does not hold is **left alone as text** — a colleague's `:shipit:`
-   typed by hand names nothing here, and inventing art for it would misstate their
-   message.
+5. A code the pack does not hold is **left alone as text** — a colleague's `:shipit:`
+   is not ours to draw, and inventing art for it would misstate their message.
 
 `send_message`'s existing single trailing-`<p>` image (a photo attachment) is untouched:
 it is a different thing and stays where it is.
@@ -209,8 +215,12 @@ a Teams frame. It also means a teams-lite reader who holds no pack still sees th
 - Falls back to the literal `:shipit:` text if the image cannot be fetched.
 - **An emoji-only message renders jumbo** (Slack's behaviour): a body whose whole
   content is emoji draws them at ~2.5em.
-- Our own optimistic echo has no `src` yet, so the same node draws the local pack art —
-  no special case needed.
+
+There is **no client-side substitution of `:code:` into art**, and that absence is
+load-bearing. This app draws no optimistic echo — a sent message arrives from the
+backend's own broadcast, already carrying the rewritten body — so nothing needs it. And a
+reader who marked codes locally would draw *their* `:shipit:` over a colleague's words,
+which is the one thing § 6 exists to prevent.
 
 ---
 
