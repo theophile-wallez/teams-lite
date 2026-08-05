@@ -249,4 +249,135 @@ test.describe("Joining a meeting", () => {
     await page.locator('[data-testid="call-hangup"]').click();
     await expect(bar).toHaveCount(0);
   });
+
+  /**
+   * The picture. The service renegotiates on its own, the page answers it and subscribes,
+   * and a colleague's shared screen and camera appear — the whole receive path
+   * (NATIVE-CALLING.md § 10.3a), with no tenant and no camera behind it.
+   */
+  test("draws a colleague's shared screen and camera once the service offers them", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.locator('[data-testid="open-settings"]').click();
+    await page.locator('[data-testid="calling-toggle"]').click();
+    await expect(page.locator('[data-testid="calling-toggle"]')).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await page.goBack();
+    await expect(page.locator('[data-testid="settings-pane"]')).toHaveCount(0);
+
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+    await calendarEvent(page, "ev-overlap-a").click();
+    await page.locator('[data-testid="meeting-join-here"]').click();
+    await expect(page.locator('[data-testid="call-bar"]')).toHaveAttribute(
+      "data-phase",
+      "connected",
+      { timeout: 10_000 },
+    );
+
+    // Nothing is drawn until there is something to draw: the stage exists only when a
+    // stream does, which is the same rule the agent transcript follows.
+    const stage = page.locator('[data-testid="call-video"]');
+    await expect(stage).toBeVisible({ timeout: 10_000 });
+
+    // A SHARED SCREEN, named after the person the subscription asked for — the section
+    // itself never says whose picture it carries.
+    const shared = page.locator('[data-testid="call-video-frame"][data-sharing="true"]');
+    await expect(shared).toHaveCount(1);
+    await expect(shared).toHaveAttribute("data-label", "applicationsharing-video");
+    await expect(shared).toContainText("Liam Nguyen is sharing");
+
+    // And a CAMERA, which is a different label and a different size.
+    const camera = page.locator('[data-testid="call-video-frame"][data-sharing="false"]');
+    await expect(camera).toHaveCount(1);
+    await expect(camera).toHaveAttribute("data-label", "main-video");
+    await expect(camera).toContainText("Ava Thompson");
+    // The audio section is labelled too, and it must never become a tile: an empty
+    // rectangle for the call's own voices is worse than no rectangle.
+    await expect(page.locator('[data-testid="call-video-frame"]')).toHaveCount(2);
+
+    // Every frame really holds a stream. `srcObject` is the only way to attach one, so a
+    // tile drawn without it would look identical and show nothing for ever.
+    const attached = await page
+      .locator('[data-testid="call-video-frame"] video')
+      .evaluateAll((nodes) => nodes.map((node) => !!(node as HTMLVideoElement).srcObject));
+    expect(attached).toEqual([true, true]);
+    // And it is MUTED: the voices arrive on their own elements, and a video playing them
+    // again would double every one.
+    const muted = await page
+      .locator('[data-testid="call-video-frame"] video')
+      .evaluateAll((nodes) => nodes.every((node) => (node as HTMLVideoElement).muted));
+    expect(muted).toBe(true);
+
+    // Leaving takes the picture with it: a element left holding a stopped stream shows its
+    // last frame for good, which reads as a call that is still up.
+    await page.locator('[data-testid="call-hangup"]').click();
+    await expect(stage).toHaveCount(0);
+  });
+
+  /**
+   * Sending: the camera and the screen. Each is one click, each click is the consent for that
+   * one action, and the browser asks its own permission under it — against the mock the
+   * preview is a canvas, so nothing opens and no picker appears.
+   */
+  test("sends the camera and the screen, and says so to every client", async ({ page }) => {
+    await page.goto("/");
+    await page.locator('[data-testid="open-settings"]').click();
+    await page.locator('[data-testid="calling-toggle"]').click();
+    await page.goBack();
+    await expect(page.locator('[data-testid="settings-pane"]')).toHaveCount(0);
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+    await calendarEvent(page, "ev-overlap-a").click();
+    await page.locator('[data-testid="meeting-join-here"]').click();
+
+    // Nothing is offered while the call is still joining: the service refuses new media on a
+    // call that is not established, so a button there would report a refusal the user could
+    // do nothing about.
+    await expect(page.locator('[data-testid="call-camera"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="call-bar"]')).toHaveAttribute(
+      "data-phase",
+      "connected",
+      { timeout: 10_000 },
+    );
+    const camera = page.locator('[data-testid="call-camera"]');
+    const share = page.locator('[data-testid="call-share"]');
+    await expect(camera).toBeVisible();
+    await expect(share).toBeVisible();
+    // Off until asked. A camera that came on with the call would be the worst thing here.
+    await expect(camera).toHaveAttribute("aria-pressed", "false");
+    await expect(share).toHaveAttribute("aria-pressed", "false");
+
+    await camera.click();
+    await expect(camera).toHaveAttribute("aria-pressed", "true");
+    // The sender sees their own picture. A screen share shows whatever else is on that
+    // screen, so the only way to know what the meeting sees is to see it too.
+    const mine = page.locator('[data-testid="call-video-local"]');
+    await expect(mine).toHaveCount(1);
+    await expect(mine).toHaveAttribute("data-kind", "camera");
+
+    await share.click();
+    await expect(share).toHaveAttribute("aria-pressed", "true");
+    await expect(mine).toHaveCount(2);
+    await expect(page.locator('[data-testid="call-video-local"][data-kind="screen"]')).toBeVisible();
+
+    // Both buttons read the BACKEND's `call.sending`, not this page's own memory — which is
+    // what makes a second page, and a phone that reconnects mid-call, draw them the same way.
+    // That both are pressed after one round trip each is the observable half of it.
+    await expect(camera).toHaveAttribute("aria-pressed", "true");
+    await expect(share).toHaveAttribute("aria-pressed", "true");
+
+    // And off again, which is the same path in reverse.
+    await camera.click();
+    await expect(camera).toHaveAttribute("aria-pressed", "false");
+    await expect(mine).toHaveCount(1);
+    await expect(page.locator('[data-testid="call-video-local"][data-kind="screen"]')).toBeVisible();
+
+    // Leaving takes every preview with it, and releases every capture.
+    await page.locator('[data-testid="call-hangup"]').click();
+    await expect(page.locator('[data-testid="call-video-local"]')).toHaveCount(0);
+  });
 });

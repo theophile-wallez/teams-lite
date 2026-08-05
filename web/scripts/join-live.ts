@@ -30,13 +30,23 @@
 // produces a real offer with a real fingerprint and real candidates while nobody's actual
 // microphone is opened. That is the whole point: the SDP is what is under test.
 //
+// **And it captures SILENCE, not Chrome's tone.** The fake device's default is a loud
+// repeating beep, and this meeting has real people in it — the user asked for it to stop
+// after the third run, which is a fair thing to ask of a driver that joins a room they are
+// sitting in. `--tone` brings it back for the one question silence cannot answer: whether
+// the audio path carries anything at all (see {@link fakeAudioArgs}).
+//
 // Usage:
 //
 //   cd web && bun run join-live            # join, watch, hang up, print the timeline
 //   cd web && bun run join-live -- --local # the same meeting through this machine's front
 //   cd web && bun run join-live -- --hold 45   # stay 45s before hanging up
+//   cd web && bun run join-live -- --tone  # capture Chrome's beep instead of silence
 
 import { chromium, type Browser, type Page } from "playwright-core";
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import { findChromium, openCalendarView } from "./preview";
 import { LOCAL_ORIGIN, TAILNET_ORIGIN } from "./sandbox-live";
 
@@ -48,21 +58,21 @@ import { LOCAL_ORIGIN, TAILNET_ORIGIN } from "./sandbox-live";
  *
  * Never parameterise this, and never widen it to "the next meeting in the calendar".
  */
-export const AUTHORIZED_MEETING_CODE = "35017215452446";
+export const AUTHORIZED_MEETING_CODE = "380284954783239";
 
 /** The thread that code resolves to on this tenant, for the second half of the proof. */
 export const AUTHORIZED_MEETING_THREAD =
-  "19:meeting_MTVjNTZlMGQtYTY3My00MjU1LThkM2QtYWE3NDEzNjYzOGVi@thread.v2";
+  "19:meeting_OTY2MTc4ODQtMWQ5YS00NGY3LThiZjEtZThiOGI0Zjc4N2Ez@thread.v2";
 
 /**
- * The day it sits on — 2026-07-28, in the PAST. Noted because it is what makes the
- * search below necessary: the calendar opens on today, and a meeting nobody can see is
- * indistinguishable from one this script refuses to touch.
+ * The day it sits on — 2026-08-05, TODAY, which is the easy case: the calendar opens on
+ * today and the first agenda window holds it.
  *
- * A past meeting is still joinable: its thread outlives the slot in the calendar, which
- * is why it can be tested at all without booking anything.
+ * The search below still walks backwards, because the meeting authorized before this one
+ * was in the PAST and a past meeting stays joinable — its thread outlives its slot in the
+ * calendar, which is what lets this be tested without booking anything.
  */
-export const AUTHORIZED_MEETING_DAY = "2026-07-28";
+export const AUTHORIZED_MEETING_DAY = "2026-08-05";
 
 /**
  * What a link to that meeting is RECOGNISED by, in either spelling Teams writes one.
@@ -75,7 +85,7 @@ export const AUTHORIZED_MEETING_DAY = "2026-07-28";
  */
 const MEETING_MARKERS = [
   AUTHORIZED_MEETING_CODE,
-  "meeting_MTVjNTZlMGQtYTY3My00MjU1LThkM2QtYWE3NDEzNjYzOGVi",
+  "meeting_OTY2MTc4ODQtMWQ5YS00NGY3LThiZjEtZThiOGI0Zjc4N2Ez",
 ];
 
 /** Whether a join url names the pinned meeting. The ONE test both halves of this file use. */
@@ -94,6 +104,51 @@ const APP_READY_TIMEOUT_MS = 60_000;
 const JOIN_BUTTON_TIMEOUT_MS = 30_000;
 /** How long to watch a joined call before hanging up, unless `--hold` says otherwise. */
 const DEFAULT_HOLD_SECONDS = 25;
+
+/** How long the silent capture file lasts. Chrome loops it, so this only has to be long
+ *  enough that the loop point is not itself a click. */
+const SILENCE_SECONDS = 10;
+
+/**
+ * What to hand Chrome for its fake microphone.
+ *
+ * Silence by default. The fake device's own signal is a repeating beep at a healthy volume,
+ * and every run of this script puts it into a real meeting with real people — so the default
+ * has to be the one that costs them nothing. The offer is unchanged either way: same real
+ * fingerprint, same real candidates, same SDP, which is what this driver exists to test.
+ *
+ * `--tone` is for the one thing silence cannot prove. Opus sends comfort noise for a silent
+ * track, so `packetsSent` stays low and "the media path carries audio" is no longer visible
+ * in `getStats` — that is what the beep was for, and it is still there when that is the
+ * question being asked.
+ */
+function fakeAudioArgs(tone: boolean): string[] {
+  if (tone) return [];
+  const path = joinPath(tmpdir(), `teams-lite-silence-${SILENCE_SECONDS}s.wav`);
+  writeFileSync(path, silentWav(SILENCE_SECONDS));
+  return [`--use-file-for-fake-audio-capture=${path}`];
+}
+
+/** A WAV of nothing: 16-bit mono at 48 kHz, which is what Opus wants anyway. */
+function silentWav(seconds: number): Buffer {
+  const rate = 48_000;
+  const samples = rate * seconds;
+  const data = samples * 2;
+  const buffer = Buffer.alloc(44 + data); // the header, then zeros — silence needs no fill
+  buffer.write("RIFF", 0, "ascii");
+  buffer.writeUInt32LE(36 + data, 4);
+  buffer.write("WAVEfmt ", 8, "ascii");
+  buffer.writeUInt32LE(16, 16); // the size of the format chunk
+  buffer.writeUInt16LE(1, 20); // PCM
+  buffer.writeUInt16LE(1, 22); // one channel
+  buffer.writeUInt32LE(rate, 24);
+  buffer.writeUInt32LE(rate * 2, 28); // bytes per second
+  buffer.writeUInt16LE(2, 32); // bytes per frame
+  buffer.writeUInt16LE(16, 34); // bits per sample
+  buffer.write("data", 36, "ascii");
+  buffer.writeUInt32LE(data, 40);
+  return buffer;
+}
 
 /** One reading of the call bar, as the app itself renders it. */
 export type CallBarState = {
@@ -118,7 +173,103 @@ export type JoinLiveSession = {
   shot: (path: string, selector?: string) => Promise<void>;
   /** What the MEDIA is actually doing — the half the call bar cannot show. */
   mediaStats: () => Promise<MediaStats | null>;
+  /** What the SERVICE said, digested — the half neither the bar nor `getStats` shows. */
+  signals: () => Promise<SignalDigest>;
 };
+
+/**
+ * What the calling service told this machine, reduced to the facts a protocol question
+ * needs — and to nothing else.
+ *
+ * It exists for the video work (NATIVE-CALLING.md § 10.7): the roster is where a
+ * publishing stream's media source id comes from, and the link set is what says whether a
+ * source can be subscribed to over signaling at all. Both arrive on frames the page
+ * already receives (`call_signal`, forwarded whole) and neither is drawn anywhere, so
+ * without this the only way to read them was to add a log line to the always-on service.
+ *
+ * **It reports SHAPES, never keys.** A link's url carries a session id, so only its NAME
+ * travels; a person is named because the call bar names them anyway.
+ */
+export type SignalDigest = {
+  /** Every link name the join answer carried, sorted. Measurement 1 of § 10.7. */
+  joinLinks: string[];
+  /** The link names that would carry a source request, if the answer named any. */
+  sourceRequestLinks: string[];
+  /** Which callback paths the service actually POSTed to, and how often. */
+  framePaths: Record<string, number>;
+  /** One entry per person the roster published a stream for. Measurement 3 of § 10.7. */
+  publishers: Array<{
+    name: string;
+    state: string;
+    /** `endpoints.endpointDetails[].mediaStreams[]`, verbatim — the `sourceId` in here is
+     *  the msi a subscription is addressed by. */
+    mediaStreams: unknown[];
+    /** Whether the roster gave them a `contentSharing` object (they are sharing). */
+    sharing: boolean;
+  }>;
+  /** The keys a roster participant really carries, so this file's reading of the shape can
+   *  be checked against the tenant rather than against the client's bundle. */
+  participantKeys: string[];
+  /** How many `call_signal` frames were seen at all. Zero means the sniffer missed. */
+  frames: number;
+  /** The link names each callback path's own frame published. The media controller's two
+   *  links arrive HERE rather than in the join answer, which is why both are read. */
+  frameLinks: Record<string, string[]>;
+  /** The media sections of every SDP the service sent, per callback path — kind, profile,
+   *  mid, label and direction, and nothing else. What it is willing to negotiate. */
+  mediaLines: Record<string, string[]>;
+  /** ONE roster participant as a key tree — every key, every type, no value except the few
+   *  that are the measurement itself. It exists because this shape was guessed wrong twice:
+   *  a name is not `displayName` at the top, and the streams are not where the client's own
+   *  bundle reads them. A skeleton cannot be guessed wrong. */
+  participantShape: string[];
+  /** `participantCounts`, verbatim — numbers, so it says how many people were really there
+   *  rather than how many this reading managed to find. */
+  participantCounts: unknown;
+};
+
+/** The only values a skeleton prints. Each one IS the measurement — a stream's kind and its
+ *  media source id — and none of them names a person. */
+const SKELETON_VALUES = new Set([
+  "type",
+  "sourceId",
+  "state",
+  "mediaType",
+  "label",
+  "isSharing",
+  "capabilities",
+]);
+
+/**
+ * A value as a key tree: `key: type`, one line per key, arrays as their length and their
+ * first element's shape.
+ *
+ * Never a value, except {@link SKELETON_VALUES}. So this can be printed from a real
+ * meeting with real colleagues in it without printing anything about them.
+ */
+function skeleton(value: unknown, depth = 0, max = 5): string[] {
+  const pad = "  ".repeat(depth);
+  if (depth > max) return [`${pad}…`];
+  if (Array.isArray(value)) {
+    if (value.length === 0) return [`${pad}[] (empty)`];
+    return [`${pad}[${value.length} ×`, ...skeleton(value[0], depth + 1, max), `${pad}]`];
+  }
+  if (!value || typeof value !== "object") return [`${pad}${typeof value}`];
+  const out: string[] = [];
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (SKELETON_VALUES.has(key) && (typeof child !== "object" || child === null)) {
+      out.push(`${pad}${key} = ${JSON.stringify(child)}`);
+      continue;
+    }
+    if (child === null || typeof child !== "object") {
+      out.push(`${pad}${key}: ${child === null ? "null" : typeof child}`);
+      continue;
+    }
+    out.push(`${pad}${key}:`);
+    out.push(...skeleton(child, depth + 1, max));
+  }
+  return out;
+}
 
 /**
  * The peer connection's own account of the call.
@@ -148,13 +299,16 @@ export type MediaStats = {
  */
 export async function withJoinLive<T>(
   body: (session: JoinLiveSession) => Promise<T>,
-  opts: { front?: "tailnet" | "local" } = {},
+  opts: { front?: "tailnet" | "local"; tone?: boolean } = {},
 ): Promise<T> {
   const origin = opts.front === "local" ? LOCAL_ORIGIN : TAILNET_ORIGIN;
   const url = origin;
   await assertFrontIsServing(origin);
 
-  console.log(`\n  LIVE ACCOUNT — pinned to meeting ${AUTHORIZED_MEETING_CODE}\n  ${url}\n`);
+  console.log(
+    `\n  LIVE ACCOUNT — pinned to meeting ${AUTHORIZED_MEETING_CODE}\n  ${url}\n` +
+      `  microphone: fake, capturing ${opts.tone === true ? "Chrome's TONE" : "silence"}\n`,
+  );
 
   let browser: Browser | null = null;
   let page: Page | null = null;
@@ -167,6 +321,8 @@ export async function withJoinLive<T>(
         "--use-fake-device-for-media-stream",
         "--use-fake-ui-for-media-stream",
         "--autoplay-policy=no-user-gesture-required",
+        // Silence, unless the caller asked for the tone. See `fakeAudioArgs`.
+        ...fakeAudioArgs(opts.tone === true),
       ],
     });
     const context = await browser.newContext({
@@ -191,6 +347,33 @@ export async function withJoinLive<T>(
         };
         Wrapped.prototype = Native.prototype;
         window.RTCPeerConnection = Wrapped;
+      })()`,
+    });
+    // And a handle on what the BACKEND says, for the same reason and by the same means.
+    //
+    // `call_signal` carries every raw calling frame to every client, and the `call_join`
+    // reply names every link the answer held — so both are already on this socket and
+    // neither is rendered. Wrapping the socket keeps the reading in the driver, where a
+    // diagnostic belongs: the app the user runs is unchanged, and this cannot drift from
+    // what the app receives because it IS what the app receives.
+    await context.addInitScript({
+      content: `(() => {
+        const Native = window.WebSocket;
+        if (!Native) return;
+        window.__tlSignals = [];
+        window.WebSocket = class extends Native {
+          constructor(...args) {
+            super(...args);
+            this.addEventListener("message", (event) => {
+              if (typeof event.data !== "string") return;
+              if (!/"call_signal"|"links"/.test(event.data)) return;
+              // Bounded: a long meeting sends a roster frame every few seconds, and an
+              // unbounded array in a page under test is its own kind of failure.
+              if (window.__tlSignals.length > 600) window.__tlSignals.shift();
+              window.__tlSignals.push(event.data);
+            });
+          }
+        };
       })()`,
     });
     page = await context.newPage();
@@ -226,6 +409,7 @@ export async function withJoinLive<T>(
         await target.screenshot({ path });
       },
       mediaStats: () => readMediaStats(page as Page),
+      signals: () => readSignals(page as Page),
     };
     return await body(session);
   } finally {
@@ -431,6 +615,235 @@ async function readMediaStats(page: Page): Promise<MediaStats | null> {
   })()`) as Promise<MediaStats | null>;
 }
 
+/** The link names that would carry a source request — the two spellings the web client
+ *  sends, one per config flag (NATIVE-CALLING.md § 10.2). */
+const SOURCE_REQUEST_LINKS = ["controlVideoStreaming", "applyChannelParameters"];
+
+/**
+ * Digest what the service said. See {@link SignalDigest} for why this exists.
+ *
+ * The frames are parsed HERE rather than in the page: the page hands back the raw strings
+ * it received, so a reading that turns out to be wrong can be corrected without joining
+ * the meeting again.
+ */
+async function readSignals(page: Page): Promise<SignalDigest> {
+  const raw = (await page.evaluate("window.__tlSignals || []")) as string[];
+  const digest: SignalDigest = {
+    joinLinks: [],
+    sourceRequestLinks: [],
+    framePaths: {},
+    publishers: [],
+    participantKeys: [],
+    frames: 0,
+    frameLinks: {},
+    mediaLines: {},
+    participantShape: [],
+    participantCounts: null,
+  };
+  const publishers = new Map<string, SignalDigest["publishers"][number]>();
+  const participantKeys = new Set<string>();
+  const joinLinks = new Set<string>();
+  const frameLinks = new Map<string, Set<string>>();
+
+  for (const text of raw) {
+    let message: Record<string, unknown>;
+    try {
+      message = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    // The `call_join` reply. The backend answers `{call_id, links:[…names]}` — never a
+    // url — so this is measurement 1 with nothing to redact.
+    const result = (message.result ?? message.params) as Record<string, unknown> | undefined;
+    const links = result?.links;
+    if (Array.isArray(links) && links.every((name) => typeof name === "string")) {
+      for (const name of links as string[]) joinLinks.add(name);
+    }
+    if (message.method !== "call_signal" && message.event !== "call_signal") continue;
+    const params = (message.params ?? message.data) as Record<string, unknown> | undefined;
+    if (!params) continue;
+    digest.frames += 1;
+    // WHICH callback the service posted to, as its trailing path — the url's own tail,
+    // never the surl in front of it, which is a session key.
+    const url = typeof params.url === "string" ? params.url : "";
+    const path = url.match(/\/(?:call|conversation)\/[A-Za-z]+\/?$/)?.[0] ?? "other";
+    digest.framePaths[path] = (digest.framePaths[path] ?? 0) + 1;
+    // The links a FRAME publishes, which is where the media controller's own two arrive:
+    // the client reads `links.controlVideoStreaming` off a frame rather than off the join
+    // answer (`saveMediaControllerLinksIfAny`), so the answer's list is not the whole set.
+    const named = frameLinks.get(path) ?? new Set<string>();
+    for (const name of linkNamesIn(params.body)) named.add(name);
+    if (named.size > 0) frameLinks.set(path, named);
+    // Every SDP the frame carries, as m-lines only. This is what says which sections the
+    // service is willing to negotiate — measurement 2 read off ITS offer rather than
+    // guessed at in ours.
+    for (const blob of sdpBlobsIn(params.body)) {
+      digest.mediaLines[path] = summariseSdp(blob);
+    }
+    if (path.includes("rosterUpdate")) {
+      const counts = (params.body as Record<string, unknown> | null)?.participantCounts;
+      if (counts) digest.participantCounts = counts;
+    }
+    for (const person of rosterParticipants(params.body, path)) {
+      for (const key of Object.keys(person)) participantKeys.add(key);
+      const streams = publishedStreams(person);
+      const sharing = !!person.contentSharing;
+      const name = personName(person);
+      // The RICHEST participant seen wins the skeleton: a roster frame for somebody who
+      // just muted carries less than one for somebody publishing two streams, and the
+      // fuller tree is the one that answers the question.
+      const tree = skeleton(person);
+      if (tree.length > digest.participantShape.length) digest.participantShape = tree;
+      // Every participant is kept, streams or not: "the roster names three people and
+      // publishes nothing" and "the roster was not read at all" are different answers, and
+      // reporting the second as the first is how this reading was wrong the first time.
+      publishers.set(`${name}|${JSON.stringify(streams)}|${sharing}`, {
+        name,
+        state: typeof person.state === "string" ? person.state : "",
+        mediaStreams: streams,
+        sharing,
+      });
+    }
+  }
+  digest.joinLinks = [...joinLinks].sort();
+  const everyLink = new Set([...joinLinks, ...[...frameLinks.values()].flatMap((s) => [...s])]);
+  digest.sourceRequestLinks = SOURCE_REQUEST_LINKS.filter((name) => everyLink.has(name));
+  digest.publishers = [...publishers.values()];
+  digest.participantKeys = [...participantKeys].sort();
+  digest.frameLinks = Object.fromEntries(
+    [...frameLinks].map(([path, names]) => [path, [...names].sort()]),
+  );
+  return digest;
+}
+
+/**
+ * Every key of every `links` OBJECT at any depth — names only, never a url.
+ *
+ * A frame's links are a nested object rather than the flat array the RPC answers with, and
+ * `Links::collect` in the backend walks them the same way for the same reason: the service
+ * puts them wherever it likes.
+ */
+function linkNamesIn(value: unknown, out = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) {
+    for (const item of value) linkNamesIn(item, out);
+    return out;
+  }
+  if (!value || typeof value !== "object") return out;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "links" && child && typeof child === "object" && !Array.isArray(child)) {
+      for (const name of Object.keys(child as Record<string, unknown>)) out.add(name);
+    }
+    linkNamesIn(child, out);
+  }
+  return out;
+}
+
+/** Every SDP blob a frame carries, found by its own shape rather than by a path. */
+function sdpBlobsIn(value: unknown, out: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    for (const item of value) sdpBlobsIn(item, out);
+    return out;
+  }
+  if (!value || typeof value !== "object") return out;
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    if (typeof child === "string" && child.startsWith("v=0")) out.push(child);
+    else sdpBlobsIn(child, out);
+  }
+  return out;
+}
+
+/**
+ * One line per media section: its kind, its transport profile, its direction and its
+ * label. The whole point of this section of the file, and it prints no key, no candidate
+ * and no fingerprint — an m-line and four attributes.
+ */
+function summariseSdp(sdp: string): string[] {
+  const out: string[] = [];
+  let current: string[] | null = null;
+  for (const line of sdp.split(/\r?\n/)) {
+    if (line.startsWith("m=")) {
+      const [kind, port, profile] = line.slice(2).split(" ");
+      current = [`${kind} port=${port} ${profile}`];
+      out.push(current.join(" "));
+      continue;
+    }
+    if (!current) continue;
+    const at = out.length - 1;
+    for (const prefix of ["a=mid:", "a=label:", "a=x-ssrc-range:"]) {
+      if (line.startsWith(prefix)) out[at] += ` ${line.slice(2)}`;
+    }
+    if (/^a=(sendrecv|sendonly|recvonly|inactive)$/.test(line)) out[at] += ` ${line.slice(2)}`;
+  }
+  return out;
+}
+
+/**
+ * Every participant a roster frame names — and the shape here is the whole finding.
+ *
+ * On this tenant a `rosterUpdate` frame's BODY *is* the roster:
+ * `{type:"Delta", sequenceNumber, participantCounts, participants}`, with no `rosterUpdate`
+ * key wrapping it — the URL it was posted to is what names it. And `participants` is an
+ * OBJECT keyed by mri rather than the array the client's own types suggest. So both
+ * readings are tried, the outer one first, because a wrapped frame is what the backend's
+ * `roster_in_frame` was written against and one of the two has to be wrong.
+ */
+function rosterParticipants(body: unknown, path: string): Array<Record<string, unknown>> {
+  const outer = body as Record<string, any> | null;
+  const roster =
+    outer?.rosterUpdate ??
+    outer?._decoded?.rosterUpdate ??
+    // The body itself, when the path already said what it is.
+    (path.includes("rosterUpdate") ? outer : null);
+  const participants = roster?.participants;
+  if (Array.isArray(participants)) return participants as Array<Record<string, unknown>>;
+  if (participants && typeof participants === "object") {
+    return Object.entries(participants as Record<string, unknown>).map(([mri, person]) => ({
+      id: mri,
+      ...(person && typeof person === "object" ? (person as Record<string, unknown>) : {}),
+    }));
+  }
+  return [];
+}
+
+/** The streams one participant publishes: `endpoints.endpointDetails[].mediaStreams[]`,
+ *  each `{type, sourceId}` — and any `mediaStreams` at any depth, because that nesting is
+ *  the client's own reading and this roster is one level deeper than it. */
+function publishedStreams(person: Record<string, unknown>): unknown[] {
+  const named = (person.endpoints as Record<string, any> | undefined)?.endpointDetails;
+  if (Array.isArray(named)) {
+    const found = named.flatMap((endpoint: Record<string, unknown>) =>
+      Array.isArray(endpoint?.mediaStreams) ? (endpoint.mediaStreams as unknown[]) : [],
+    );
+    if (found.length > 0) return found;
+  }
+  return everyMediaStream(person);
+}
+
+/** Any `mediaStreams` array at any depth. The fallback that stops one wrong path from
+ *  reading a roster full of streams as an empty one. */
+function everyMediaStream(value: unknown, out: unknown[] = []): unknown[] {
+  if (Array.isArray(value)) {
+    for (const item of value) everyMediaStream(item, out);
+    return out;
+  }
+  if (!value || typeof value !== "object") return out;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "mediaStreams" && Array.isArray(child)) out.push(...child);
+    else everyMediaStream(child, out);
+  }
+  return out;
+}
+
+/** A participant's name, wherever this roster keeps it. `displayName` at the top is the
+ *  client's own reading; here it sits under `details`. */
+function personName(person: Record<string, unknown>): string {
+  const details = person.details as Record<string, unknown> | undefined;
+  for (const candidate of [person.displayName, details?.displayName, details?.name]) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) return candidate;
+  }
+  return "(unnamed)";
+}
+
 /** Leave the call, if one is up. Idempotent: nothing to do is not an error. */
 async function hangUp(page: Page): Promise<void> {
   const button = page.locator('[data-testid="call-hangup"]').first();
@@ -462,11 +875,12 @@ function oneLine(text: string): string {
 if (import.meta.main) {
   const argv = process.argv.slice(2);
   const front = argv.includes("--local") ? "local" : "tailnet";
+  const tone = argv.includes("--tone");
   const holdAt = argv.indexOf("--hold");
   const hold = holdAt >= 0 ? Number(argv[holdAt + 1]) : DEFAULT_HOLD_SECONDS;
 
   await withJoinLive(
-    async ({ waitForPhase: wait, timeline, mediaStats: stats }) => {
+    async ({ waitForPhase: wait, timeline, mediaStats: stats, signals }) => {
       // First: does it get past "joining" at all? That is the acceptance and its answer.
       const state = await wait(["connected", "ended"], 45_000);
       if (state.phase === "connected") {
@@ -485,12 +899,47 @@ if (import.meta.main) {
             ` received ${media.bytesReceived}B in ${media.packetsReceived}`,
         );
       }
+      // And what the SERVICE said — the half that decides whether video is reachable at
+      // all (NATIVE-CALLING.md § 10.7). Printed on every run, because it costs one
+      // `evaluate` and the frames are gone once the page closes.
+      const signal = await signals();
+      console.log(`\n  signals: ${signal.frames} frames, ${signal.joinLinks.length} links`);
+      console.log(
+        `  source-request links: ${
+          signal.sourceRequestLinks.length ? signal.sourceRequestLinks.join(", ") : "NONE"
+        }`,
+      );
+      console.log(`  frames by path: ${JSON.stringify(signal.framePaths)}`);
+      console.log(`  participant counts: ${JSON.stringify(signal.participantCounts)}`);
+      console.log(`  participant keys: ${signal.participantKeys.join(" ") || "(no roster)"}`);
+      if (signal.participantShape.length > 0) {
+        console.log("  one participant, as a key tree:");
+        for (const line of signal.participantShape) console.log(`    ${line}`);
+      }
+      if (signal.publishers.length === 0) {
+        console.log("  roster: nobody at all — the roster was empty or unread");
+      }
+      for (const person of signal.publishers) {
+        console.log(
+          `  roster ${person.name}${person.state ? ` (${person.state})` : ""}` +
+            `${person.sharing ? " SHARING" : ""}: ${JSON.stringify(person.mediaStreams)}`,
+        );
+      }
+      for (const [path, names] of Object.entries(signal.frameLinks)) {
+        console.log(`  links on ${path}: ${names.join(" ")}`);
+      }
+      for (const [path, lines] of Object.entries(signal.mediaLines)) {
+        console.log(`  sdp on ${path}:`);
+        for (const line of lines) console.log(`      ${line}`);
+      }
+      console.log(`  links in the join answer: ${signal.joinLinks.join(" ") || "(none seen)"}`);
+
       const end = timeline().at(-1);
       console.log(
         `\n  final: ${end?.phase ?? "-"} ${end?.detail || end?.notice || ""}\n` +
           "  The backend journal has the frames: journalctl --user -u teams-lite-backend -n 60\n",
       );
     },
-    { front },
+    { front, tone },
   );
 }

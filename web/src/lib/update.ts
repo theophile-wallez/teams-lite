@@ -27,7 +27,7 @@
 // thing left to do when nothing restarted the app. So the button never moves between the
 // two clicks, and the sidebar keeps its rows for the chats.
 
-import type { LiveStatus, UpdateInfo, UpdateProgress } from "./protocol";
+import type { LiveStatus, UpdateChanges, UpdateInfo, UpdateProgress } from "./protocol";
 
 /** What a click does, or that there is nothing to click. */
 export type UpdateAction = "download" | "apply" | "retry" | "none";
@@ -67,6 +67,16 @@ export type UpdateView = {
   busy: boolean;
   /** The release page, for the link shape (and for a failure's way out). */
   url: string;
+  /**
+   * What the update brings, for the disclosure the control opens on hover — null when
+   * there is nothing to disclose: the backend could not read the comparison, or the
+   * update is already taken.
+   *
+   * It is not part of any sentence above. A changelog is content the reader ASKS for, so
+   * it lives behind a hover (a long press on a touch screen) and never in the row: the row
+   * is the button, and a list that appeared under it would move the control mid-aim.
+   */
+  changes: UpdateChanges | null;
 };
 
 const HIDDEN: UpdateView = {
@@ -78,6 +88,7 @@ const HIDDEN: UpdateView = {
   percent: 0,
   busy: false,
   url: "",
+  changes: null,
 };
 
 /** A download's size in the words a person uses. Whole megabytes: the asset is ~130 MB,
@@ -109,7 +120,7 @@ export function updateView(
   live: LiveStatus,
 ): UpdateView {
   if (!info) return HIDDEN;
-  const base = { ...HIDDEN, url: info.url };
+  const base = { ...HIDDEN, url: info.url, changes: pendingChanges(info) };
   const phase = progress?.phase ?? "idle";
 
   // A restart is the one state that outlives the socket, and it must: this app is being
@@ -123,6 +134,9 @@ export function updateView(
       label: "Restarting…",
       hint: "It comes back on the new build.",
       busy: true,
+      // The list is what somebody decides WITH. This decision is made and the app is
+      // going down for a moment, so there is nothing left to disclose.
+      changes: null,
     };
   }
 
@@ -168,6 +182,9 @@ export function updateView(
         shape: "note",
         label: "Update installed",
         detail: "Nothing restarted the app — it runs the new build next time you start it.",
+        // Taken. What it brought is in the release notes from here on, not behind a control
+        // whose work is over.
+        changes: null,
       };
     case "failed":
       return {
@@ -186,6 +203,44 @@ export function updateView(
         action: "download",
       };
   }
+}
+
+/**
+ * The changes worth disclosing, or null.
+ *
+ * A comparison the backend could not read arrives absent, and one that came back empty
+ * arrives with no groups — both mean the same thing to a reader, so both are null here
+ * rather than an empty panel with a heading over it. The button is unaffected either way:
+ * that an update EXISTS is what it offers, and what it brings is the disclosure on top.
+ */
+function pendingChanges(info: UpdateInfo): UpdateChanges | null {
+  const changes = info.changes;
+  if (!changes || !changes.groups?.length) return null;
+  return changes;
+}
+
+/**
+ * The disclosure's own heading: how much this update is, in one line.
+ *
+ * A count, never a build: it answers "is this a typo fix or a fortnight of work?", which is
+ * the question somebody hovers to ask before spending 130 MB. `omitted` is stated in the
+ * same breath, because a list that stops without saying so reads as a complete one.
+ */
+export function changesSummary(changes: UpdateChanges | null): string {
+  if (!changes) return "";
+  const total = Math.max(changes.total, countChanges(changes));
+  const shown = countChanges(changes);
+  const word = total === 1 ? "change" : "changes";
+  if (changes.omitted > 0 && shown < total) {
+    return `${total} ${word} since your build — the newest ${shown} below`;
+  }
+  return `${total} ${word} since your build`;
+}
+
+/** How many entries the list really carries, across every group. */
+export function countChanges(changes: UpdateChanges | null): number {
+  if (!changes) return 0;
+  return changes.groups.reduce((n, group) => n + group.changes.length, 0);
 }
 
 /** The download's cost, stated before the click that spends it — this may be a phone on

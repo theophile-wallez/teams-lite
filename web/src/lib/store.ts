@@ -69,6 +69,8 @@ import {
   type TypingSignal,
   type UpdateInfo,
   type UpdateProgress,
+  type WriteLock,
+  UNKNOWN_WRITE_LOCK,
 } from "./protocol";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import {
@@ -87,6 +89,7 @@ import {
   callEndLabel,
   holdsMicrophone,
   isLive,
+  modalityFor,
   type CallMediaSignal,
   type CallStatus,
 } from "./call";
@@ -95,6 +98,9 @@ import {
   simulatedCallMedia,
   startCallMedia,
   type CallMedia,
+  type LocalVideo,
+  type RemoteVideo,
+  type SendKind,
 } from "./call-media";
 import { coalesce } from "./singleflight";
 import {
@@ -253,6 +259,15 @@ export type AppState = {
    *  the empty sidebar it replaces. Disjoint from `fatal`: that one means the socket
    *  is gone, this one means the socket works and the credentials do not. */
   brokerStatus: BrokerStatus | null;
+  /** Where this page stands with the backend's write lock, or null until it answers.
+   *
+   *  It is a state about the whole app rather than about one button: `foreign` means
+   *  every send, reaction, mark-as-read and update will be refused while every read keeps
+   *  working, which is the one failure this app cannot let itself look healthy through.
+   *  Null and `unknown` must stay silent — the mock and an older backend never answer —
+   *  and `read_only` is silent too, because there refusing is the feature. See
+   *  {@link writeLockNeedsAttention}. */
+  writeLock: WriteLock | null;
   ready: boolean;
   splashMessage: string;
   fatal: string | null;
@@ -314,6 +329,28 @@ export type AppState = {
    *  dropped the moment that frame is delivered: the backend hands out ONE frame with the
    *  ending in it and then frees the slot. Cleared on its own after a few seconds. */
   callNotice: string | null;
+  /**
+   * The video arriving on the call right now — a colleague's camera, a colleague's shared
+   * screen. Empty whenever there is nothing to draw, which is most calls.
+   *
+   * It holds live `MediaStream` objects, so it is deliberately NOT part of anything that is
+   * serialized or compared by value: a tile is attached to its element by identity, and
+   * replacing the stream restarts the picture.
+   */
+  callVideo: RemoteVideo[];
+  /** What THIS page is sending, for the preview only the sender sees. The MEETING's view of
+   *  it is `callStatus.call.sending`, which the backend publishes to every client so two open
+   *  pages agree and a reconnecting one is told rather than guessing. */
+  callLocalVideo: LocalVideo[];
+  /**
+   * Whose picture is on each section, keyed by mid.
+   *
+   * A section says what it carries (a screen, a camera) and never WHOSE it is: the person is
+   * on the other side of the subscription, in the roster. So the name is recorded at the
+   * moment this page asks for that source, which is the one point where both halves are in
+   * one place — and it is what lets a tile say "Clément's screen" rather than "a screen".
+   */
+  callVideoNames: Record<string, string>;
   /** Read receipts ("seen by") for the OPEN conversation: every other member's
    *  read position, used to anchor their avatar to the last message they read.
    *  Refreshed on open and kept live by the `read_receipt` event. Empty for the
@@ -528,6 +565,7 @@ function initialState(): AppState {
     live: "connecting",
     backendIsMock: false,
     brokerStatus: null,
+    writeLock: null,
     ready: false,
     splashMessage: "connecting",
     fatal: null,
@@ -545,6 +583,9 @@ function initialState(): AppState {
     callStatus: UNKNOWN_CALL_STATUS,
     callError: null,
     callNotice: null,
+    callVideo: [],
+    callLocalVideo: [],
+    callVideoNames: {},
     readReceipts: [],
     mentionCandidates: [],
     appearance: DEFAULT_APPEARANCE,
@@ -810,6 +851,10 @@ export class TeamsController {
     // back refused until something re-reads the file. This is what lets the refusal
     // itself heal it (see `retryWithAFreshToken` in lib/ws-client.ts).
     this.backend.setWriteTokenSource(() => this.loadWriteToken());
+    // And when even a fresh token is refused, this page cannot act at all — every send,
+    // reaction and update will come back refused while every read answers. That is worth
+    // a banner rather than one more failed button, so the refusal re-asks where we stand.
+    this.backend.setWriteRefusedHandler(() => void this.refreshWriteLock());
     await this.loadWriteToken();
 
     try {
@@ -838,6 +883,10 @@ export class TeamsController {
       // is already subscribed (a browser may have rotated the subscription while the
       // app was closed — see syncPush).
       void this.syncPush();
+      // And whether the token we just read is the one this backend accepts. Asked BEFORE
+      // anything is pressed, because the answer used to arrive as the refusal of whatever
+      // the user pressed first — see `refreshWriteLock`.
+      void this.refreshWriteLock();
     } catch (e) {
       const msg = errText(e);
       this.set({
@@ -882,6 +931,38 @@ export class TeamsController {
     } catch {
       /* offline or no endpoint: leave the client read-only */
       return null;
+    }
+  }
+
+  /**
+   * Ask the backend whether the token this page holds is the one it accepts, and keep
+   * the answer for the banner (see `WriteLockBanner`).
+   *
+   * WHY THE PAGE ASKS AT ALL. The pairing between a page and its backend can break with
+   * nothing visible: `teams` attaches to a backend another instance spawned — whose token
+   * is pinned, so it is in no file — or `TEAMS_LITE_WS_URL` points this page's socket at
+   * one backend while its token came from another. Reads keep answering in both, so the
+   * app looks healthy and every outward action is refused. It reached a user as
+   * "Update failed", and before this the state was stated nowhere but in the refusal text
+   * of whatever they had pressed.
+   *
+   * Best-effort and quiet on failure: an older backend answers `unknown method`, which
+   * must read as "nothing to say" rather than as a fault — exactly like a missing broker
+   * status.
+   */
+  /** Re-read the token and ask again — the banner's own button
+   *  (see `WriteLockBanner`). The user mends this outside the app, by stopping the other
+   *  instance, so the one action it can offer is to look again. */
+  async checkWriteLock(): Promise<void> {
+    await this.loadWriteToken();
+    await this.refreshWriteLock();
+  }
+
+  private async refreshWriteLock(): Promise<void> {
+    try {
+      this.set({ writeLock: await this.backend.writeLockStatus() });
+    } catch {
+      this.set({ writeLock: UNKNOWN_WRITE_LOCK });
     }
   }
 
@@ -1191,7 +1272,12 @@ export class TeamsController {
       // keep working, which is what makes it nasty: the tab looks healthy and every
       // send is refused until someone reloads the page. On a phone left open for
       // days that is the normal outcome of a restart, so recovery has to be here.
-      void this.loadWriteToken();
+      // And ask again where that leaves us, AFTER the re-read: the backend that answers
+      // now may be another process, or another INSTANCE — a restart is exactly how a page
+      // ends up holding a token nothing accepts, so the banner has to follow the socket.
+      // Chained rather than fired beside it, or the question would carry the old token and
+      // the answer would accuse a page that had already healed itself.
+      void this.loadWriteToken().then(() => this.refreshWriteLock());
       // Forget what we knew about an update, and let the backend that just answered say
       // it again. The socket coming back is precisely how a RESTART onto a new build ends
       // (see lib/update.ts): that backend is current, so it announces no update at all —
@@ -1404,10 +1490,15 @@ export class TeamsController {
     }, CALL_NOTICE_MS);
   }
 
-  /** The far side's SDP: the frame that turns a call that is ringing into audio. */
+  /** The far side's SDP. An ANSWER is what turns a ringing call into audio; an OFFER is
+   *  the service renegotiating on its own, which is how video arrives. */
   private async onCallMedia(signal: CallMediaSignal): Promise<void> {
     const media = this.callMedia;
-    if (!media || signal.kind !== "answer") return;
+    if (!media) return;
+    if (signal.kind === "offer") {
+      await this.answerRemoteOffer(signal);
+      return;
+    }
     try {
       await media.setRemoteAnswer(signal.sdp);
     } catch (error) {
@@ -1418,9 +1509,93 @@ export class TeamsController {
     }
   }
 
+  /**
+   * Answer a media offer the service made mid-call, then ask for what it can now send.
+   *
+   * The service renegotiates unprompted and its offer already carries the sections for a
+   * colleague's camera and a colleague's shared screen, so this is the whole receive path:
+   * answer, then subscribe (NATIVE-CALLING.md § 10.3a).
+   *
+   * **A failure here never ends the call.** Audio is already up and unaffected; losing this
+   * costs a tile, and the service offers again. Ending a working call because a screen could
+   * not be drawn would be much the worse outcome.
+   */
+  private async answerRemoteOffer(signal: CallMediaSignal): Promise<void> {
+    const media = this.callMedia;
+    if (!media) return;
+    try {
+      const answer = await media.answerRemoteOffer(signal.sdp);
+      if (!answer) return;
+      await this.backend.callAnswerMedia(signal.call_id, answer, ["audio", "ScreenViewer"]);
+      await this.subscribeToRemoteVideo();
+    } catch (error) {
+      console.error("[call] a media renegotiation could not be answered", error);
+    }
+  }
+
+  /**
+   * Ask the meeting's media server to put the people who are publishing onto the sections
+   * it just gave us.
+   *
+   * Two halves have to meet here, and they come from opposite directions: the SOURCE IDs are
+   * in the roster (the backend's `publishing`), and the SECTIONS are in the page (the mids
+   * and stream ids the browser reported). Neither side can do this alone, which is why it is
+   * here rather than in `call-media.ts` or the backend.
+   *
+   * A shared screen wins the sections it needs first: it is the thing somebody deliberately
+   * put on screen for others to read, and a text-heavy stream is the one that suffers most
+   * from being dropped.
+   */
+  private async subscribeToRemoteVideo(): Promise<void> {
+    const media = this.callMedia;
+    const call = this.get().callStatus.call;
+    if (!media || !call) return;
+    const sections = media.remoteVideo;
+    if (sections.length === 0) return;
+    // Everything the others publish that this app can draw, screens before cameras.
+    const wanted = call.publishing
+      .flatMap((person) => person.streams.map((stream) => ({ person, stream })))
+      .filter(({ stream }) => stream.shared_screen || stream.camera)
+      .sort((a, b) => Number(b.stream.shared_screen) - Number(a.stream.shared_screen));
+    const taken = new Set<string>();
+    for (const { person, stream } of wanted) {
+      // A screen goes on a section the service labelled for a screen, and a camera on one
+      // labelled for a camera: the label is the service's own statement about what that
+      // section carries, and putting a screen on a camera's section asks for a stream it
+      // said it would not send there.
+      const section = sections.find(
+        (candidate) =>
+          !taken.has(candidate.mid) && candidate.sharing === stream.shared_screen,
+      );
+      if (!section) continue;
+      taken.add(section.mid);
+      try {
+        await this.backend.callSubscribe({
+          callId: call.id,
+          mid: section.mid,
+          sourceId: stream.source_id,
+          streamMsid: section.streamMsid,
+        });
+        // Remember whose it is. The section itself never says, so this is the one moment
+        // the person and the mid are both in hand.
+        this.set({
+          callVideoNames: { ...this.get().callVideoNames, [section.mid]: person.name },
+        });
+      } catch (error) {
+        // One refused subscription is one missing tile, not a broken call.
+        console.error("[call] could not subscribe to a stream", error);
+      }
+    }
+  }
+
   private stopCallMedia(): void {
     this.callMedia?.stop();
     this.callMedia = null;
+    // The tiles go with the connection that fed them. A `<video>` left holding a stopped
+    // stream shows its last frame for good, which reads as a call that is still up.
+    if (this.get().callVideo.length > 0 || this.get().callLocalVideo.length > 0) {
+      this.set({ callVideo: [], callLocalVideo: [], callVideoNames: {} });
+    }
   }
 
   /** Open the microphone and negotiate, using the mock's inert stand-in when the
@@ -1433,8 +1608,13 @@ export class TeamsController {
     iceServers: RTCIceServer[];
     remoteOffer?: string;
   }): Promise<CallMedia> {
-    if (this.get().backendIsMock) return simulatedCallMedia();
-    return startCallMedia({
+    if (this.get().backendIsMock) {
+      const mock = simulatedCallMedia();
+      mock.onRemoteVideoChange = (videos) => this.set({ callVideo: videos });
+      mock.onLocalVideoChange = (videos) => this.set({ callLocalVideo: [...videos] });
+      return mock;
+    }
+    const media = await startCallMedia({
       iceServers: options.iceServers,
       remoteOffer: options.remoteOffer,
       onConnectionStateChange: (state) => {
@@ -1444,6 +1624,87 @@ export class TeamsController {
         }
       },
     });
+    // The tiles are reactive state; the connection behind them is not. This is the one
+    // bridge between the two, and it is set before anything can arrive on it.
+    media.onRemoteVideoChange = (videos) => this.set({ callVideo: videos });
+    media.onLocalVideoChange = (videos) => this.set({ callLocalVideo: [...videos] });
+    // The BROWSER's own "Stop sharing" bar. It ends the track and tells this app nothing
+    // else, so the service has to be told from here or the meeting keeps a section that
+    // carries no picture while the button still says on.
+    media.onSendingEnded = (kind, offer) => void this.publishSending(offer, `stop ${kind}`);
+    return media;
+  }
+
+  /**
+   * Turn the user's CAMERA on or off in the call they are in.
+   *
+   * The click is the consent, and the browser asks its own permission under it. Nothing here
+   * runs on its own: a machine that opened a camera by itself would be the worst thing in
+   * this app.
+   */
+  async setCameraOn(on: boolean): Promise<void> {
+    await this.setSending("camera", on);
+  }
+
+  /**
+   * Share the user's SCREEN, or stop.
+   *
+   * Sharper than the camera and treated the same way, because the difference is not in the
+   * mechanism: a face shows a face, and a screen shows whatever else is on it. The browser's
+   * own picker is what chooses WHAT is shared, and this app never pre-selects it.
+   */
+  async setScreenShareOn(on: boolean): Promise<void> {
+    await this.setSending("screen", on);
+  }
+
+  /**
+   * Start or stop one capture, and tell the service what changed.
+   *
+   * Both directions are one function because the failure handling has to be identical: an
+   * offer that does not go out must leave the page and the meeting agreeing, and the only way
+   * to guarantee that is one path.
+   */
+  private async setSending(kind: SendKind, on: boolean): Promise<void> {
+    const media = this.callMedia;
+    const call = this.get().callStatus.call;
+    if (!media || !call) return;
+    this.set({ callError: null });
+    try {
+      const offer = on ? await media.startSending(kind) : await media.stopSending(kind);
+      await this.publishSending(offer, `${on ? "start" : "stop"} ${kind}`);
+    } catch (error) {
+      // A refused camera is a decision, not a fault, so it is said in the user's words and
+      // the call carries on. Whatever happened, the capture is released: `startSending`
+      // stops its own tracks on the way out.
+      this.set({ callError: callErrorText(error) });
+      if (on) await media.stopSending(kind).catch(() => {});
+    }
+  }
+
+  /**
+   * POST the offer that says what this side now sends, and apply the answer.
+   *
+   * `sending` travels with it so the BACKEND can publish it to every client: a second page,
+   * or a phone that reconnects mid-call, has to be told the camera is on rather than draw its
+   * button from its own memory.
+   */
+  private async publishSending(offer: string | null, what: string): Promise<void> {
+    const media = this.callMedia;
+    const call = this.get().callStatus.call;
+    if (!media || !call || !offer) return;
+    const kinds = media.localVideo.map((video) => video.kind);
+    const modalities = ["audio", ...kinds.map(modalityFor)];
+    try {
+      const result = await this.backend.callOfferMedia(call.id, offer, modalities, kinds);
+      // The answer is in the response when the service put it there, and arrives as a
+      // `call_media` frame when it did not. Applying whichever came is what makes the
+      // section carry anything.
+      if (result.answer_sdp) await media.setRemoteAnswer(result.answer_sdp);
+    } catch (error) {
+      console.error(`[call] could not ${what}`, error);
+      this.set({ callError: callErrorText(error) });
+      throw error;
+    }
   }
 
   /** Ask the backend what this machine can do about calls. Called on connect, and

@@ -3,6 +3,29 @@ name: build
 # Build the single `teams` binary on every push to master and publish it as a
 # rolling "latest" GitHub release, so `install.sh` can always fetch the newest
 # build. Tests run first as a hard gate — a red suite blocks the release.
+#
+# TWO RELEASES COME OUT OF EVERY BUILD, and each answers something the other cannot:
+#
+#   • `build-<shortsha>` — immutable, one per commit, kept FOR EVER. It is the record of
+#     what shipped and when, and its body is the changelog of that build. Nothing ever
+#     rewrites it, so a release page linked from anywhere still says what it said.
+#   • `latest` — the rolling tag, recreated here every time. It is what install.sh
+#     downloads from and what a RUNNING build asks about (`src/update.rs` reads
+#     /releases/tags/latest), so it can never move to another name without leaving every
+#     installed copy unable to see an update again.
+#
+# The asset is therefore uploaded twice, deliberately: `latest` needs it because that URL
+# is the app's own, and the immutable release needs it so a build can be rolled BACK to.
+#
+# THE BINARY IS KEPT ON THE NEWEST `ASSET_WINDOW` BUILDS ONLY. It is 134 MB and this
+# project pushes about 19 times a day, so keeping every one would cost some 78 GB a month
+# to no purpose. Older releases keep their notes — the changelog history is the part worth
+# for ever, and it is a few KB.
+#
+# THE CHANGELOG IS NOT WRITTEN HERE. `src/changelog.rs` groups the commit subjects and
+# renders the markdown, and examples/changelog.rs is the one line of glue, because the
+# same module builds the list the update button shows on hover: an awk pipeline here
+# beside a grouper in Rust would be two spellings of one list.
 
 on:
   push:
@@ -16,11 +39,21 @@ concurrency:
   group: build-latest
   cancel-in-progress: true
 
+env:
+  # How many of the newest builds keep their 134 MB binary. Ten is about half a day of
+  # pushes here — enough to roll back to a build the user was actually running, and flat at
+  # some 1.3 GB. Older releases keep their changelog and lose the download.
+  ASSET_WINDOW: "10"
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history: the release notes are `git log` between the build the users
+          # are on and this one, and a shallow clone cannot answer that.
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -78,14 +111,82 @@ jobs:
           mkdir -p out
           cp launcher/dist/teams out/teams-linux-x64
 
+      # --- the release notes: what this build changes, for both releases ---
+      - name: Write the changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # WHERE THE READER IS COMING FROM is the commit `latest` currently names — that is
+          # the build every installed copy is running, so it is the only honest base for
+          # "what changed". Read BEFORE the tag is recreated, or it would name this commit.
+          base="$(gh release view latest --json targetCommitish --jq .targetCommitish 2>/dev/null || true)"
+          # A first run, a deleted release, or a commit this clone does not hold (a force
+          # push): fall back to the parent, so a build always states at least its own change.
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base="$(git rev-parse "${GITHUB_SHA}^" 2>/dev/null || echo "${GITHUB_SHA}")"
+          fi
+          echo "changelog base: $base"
+
+          mkdir -p out
+          # The FIRST line is the machine-readable one, and it must stay first: src/update.rs
+          # reads the commit back out of the notes when GitHub resolves `target_commitish` to
+          # a branch name, by taking the first 40-character hex run in the body.
+          {
+            echo "Rolling build from ${GITHUB_SHA} — $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+            echo
+            git log --no-merges --pretty=format:%s "${base}..${GITHUB_SHA}" \
+              | cargo run --quiet --example changelog
+          } > out/notes.md
+          cat out/notes.md
+
+      - name: Publish this build's own release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Immutable, and kept for ever: this is the record of what shipped. `--latest`
+          # marks it as the repository's current release, so the Releases page opens on a
+          # real build rather than on the rolling pointer.
+          tag="build-$(git rev-parse --short=7 "${GITHUB_SHA}")"
+          gh release create "$tag" out/teams-linux-x64 \
+            --title "teams-lite — $(date -u +'%Y-%m-%d %H:%M UTC')" \
+            --notes-file out/notes.md \
+            --target "${GITHUB_SHA}" \
+            --latest
+
       - name: Publish rolling "latest" release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Recreate the rolling tag so `latest` always points at this commit.
+          set -euo pipefail
+          # Recreate the rolling tag so `latest` always points at this commit. It carries the
+          # same asset and the same notes: every installed build asks this tag about updates,
+          # so it can never become a pointer to somewhere else.
           gh release delete latest --cleanup-tag --yes || true
           gh release create latest out/teams-linux-x64 \
             --title "teams-lite (latest)" \
-            --notes "Rolling build from ${GITHUB_SHA} — $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
+            --notes-file out/notes.md \
             --target "${GITHUB_SHA}" \
-            --latest
+            --latest=false
+
+      - name: Keep the binary on the newest builds only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The notes are kept for ever; the 134 MB download is kept on the newest
+          # ASSET_WINDOW builds. The API answers newest first, so everything past the window
+          # loses its assets and keeps its page. `--paginate`, because after a month there
+          # are more releases than one page holds and the older ones must still be reached.
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq '.[] | select(.tag_name | startswith("build-")) | .tag_name' \
+            | tail -n "+$((ASSET_WINDOW + 1))" \
+            | while read -r tag; do
+                gh release view "$tag" --json assets --jq '.assets[].name' \
+                  | while read -r asset; do
+                      echo "pruning $asset from $tag"
+                      gh release delete-asset "$tag" "$asset" --yes
+                    done
+              done

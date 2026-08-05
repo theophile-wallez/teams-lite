@@ -36,7 +36,9 @@ import type {
   ReplyTo,
   SettingsPatch,
   UpdateProgress,
+  WriteLock,
 } from "./protocol";
+import { parseWriteLock } from "./protocol";
 import type { PushStatus, SubscriptionPayload } from "./push";
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
@@ -190,6 +192,8 @@ export class Backend {
   // How to read that token again, when the backend says the one we hold is not its
   // own (see `retryWithAFreshToken`).
   private writeTokenSource: (() => Promise<string | null>) | null = null;
+  // Told once when a refusal survived a fresh token (see `setWriteRefusedHandler`).
+  private onWriteRefused: (() => void) | undefined;
   private firstFailureAt: number | null = null;
   private readonly giveUpMs: number;
   private readonly initialDelayMs: number;
@@ -388,7 +392,14 @@ export class Backend {
       return await this.request<T>(method, { ...params, write_token: presented ?? undefined });
     } catch (e) {
       const fresh = await this.retryWithAFreshToken(e, presented);
-      if (fresh === null) throw e;
+      if (fresh === null) {
+        // A refusal a fresh token could not heal is the proof that this page holds no
+        // token this backend accepts — which is a state about the whole app, not about
+        // the button that was pressed. Tell the caller once so it can say so where a
+        // person can read it, and never from here: this class knows no UI.
+        if (isWriteTokenRefusal(e)) this.onWriteRefused?.();
+        throw e;
+      }
       return await this.request<T>(method, { ...params, write_token: fresh });
     }
   }
@@ -452,6 +463,30 @@ export class Backend {
    */
   setWriteTokenSource(source: (() => Promise<string | null>) | null): void {
     this.writeTokenSource = source;
+  }
+
+  /**
+   * Be told when a write was refused for the token and a fresh one did not help — the
+   * moment the page learns it cannot act at all (see `refreshWriteLock` in lib/store.ts).
+   */
+  setWriteRefusedHandler(handler: (() => void) | null): void {
+    this.onWriteRefused = handler ?? undefined;
+  }
+
+  /**
+   * Where this page stands with the write lock, asked with the token it holds.
+   *
+   * A plain READ — the one question that must not be gated behind the very token it is
+   * about, so `write_lock_status` is open (see `write_lock_state` in src/bin/server.rs).
+   * The answer never carries a token, in either direction: this presents the one the page
+   * was handed, exactly as a write would, and gets back only where that leaves it.
+   */
+  async writeLockStatus(): Promise<WriteLock> {
+    return parseWriteLock(
+      await this.request<unknown>("write_lock_status", {
+        write_token: this.writeToken ?? undefined,
+      }),
+    );
   }
 
   // ---- typed API ----------------------------------------------------------
@@ -676,6 +711,71 @@ export class Backend {
    *  to whoever is on the other end. */
   callAccept(callId: string, sdp: string): Promise<{ call_id: string }> {
     return this.writeRequest<{ call_id: string }>("call_accept", { call_id: callId, sdp });
+  }
+  /**
+   * Answer a media offer the service made mid-call.
+   *
+   * This is how a colleague's camera and a colleague's shared screen arrive: the service
+   * renegotiates on its own, its offer already carries the sections, and this posts the
+   * answer back (NATIVE-CALLING.md § 10.3a). Outward for what it CAN carry rather than what
+   * it usually does — the same method's SDP is what would offer the user's own camera.
+   *
+   * `modalities` says what the answer really carries; the backend refuses a name that is not
+   * one of the four the service knows.
+   */
+  callAnswerMedia(
+    callId: string,
+    sdp: string,
+    modalities: string[],
+  ): Promise<{ call_id: string }> {
+    return this.writeRequest<{ call_id: string }>("call_answer_media", {
+      call_id: callId,
+      sdp,
+      modalities,
+    });
+  }
+  /**
+   * Ask the meeting's media server to put one person's stream on one of our sections.
+   *
+   * It publishes nothing about the user — it is a request to RECEIVE — so it is not outward.
+   * `sourceId` comes from the roster and `mid` / `streamMsid` from this page's own peer
+   * connection, which is why nothing but the caller can assemble one.
+   */
+  callSubscribe(request: {
+    callId: string;
+    mid: string;
+    sourceId: number;
+    streamMsid: string;
+    fmtParams?: string;
+  }): Promise<{ call_id: string; source_id: number }> {
+    return this.writeRequest<{ call_id: string; source_id: number }>("call_subscribe", {
+      call_id: request.callId,
+      mid: request.mid,
+      source_id: request.sourceId,
+      stream_msid: request.streamMsid,
+      ...(request.fmtParams ? { fmt_params: request.fmtParams } : {}),
+    });
+  }
+  /**
+   * OFFER new media on a call that is already up: the user's camera, or their screen.
+   *
+   * The sharpest calling method after placing a call — it puts their face, or whatever else
+   * is on their screen, in front of everybody in the meeting. `sending` says which captures
+   * are live so the backend can publish it to every client; `modalities` says what the SDP
+   * carries, and a name outside the four the service knows is refused.
+   */
+  callOfferMedia(
+    callId: string,
+    sdp: string,
+    modalities: string[],
+    sending: string[],
+  ): Promise<{ call_id: string; answer_sdp: string | null }> {
+    return this.writeRequest<{ call_id: string; answer_sdp: string | null }>("call_offer_media", {
+      call_id: callId,
+      sdp,
+      modalities,
+      sending,
+    });
   }
   /** End the call, or decline it while it is still ringing. Outward either way: the
    *  other side is told. */

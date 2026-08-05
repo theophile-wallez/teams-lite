@@ -244,7 +244,16 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// back: a write whose off switch cannot undo its on switch would not be here at all
 /// (see `forceavailability` in `teams_lite::teams_presence`). Reading the approval
 /// state (`gitlab_approvals`) stays open, like every other read.
-const OUTWARD_METHODS: [&str; 13] = [
+/// `call_answer_media` is here for what it CAN carry rather than for what it usually does.
+/// The service renegotiates on its own and an answer that only accepts a stream publishes
+/// nothing about the user — but the same method carries an SDP, and an SDP is what offers
+/// their camera or their screen. A gate that depended on reading the blob would be a gate
+/// nobody could check, so it is gated as the widest thing it can do.
+/// `call_offer_media` is the sharpest calling entry after `call_place`. It is what puts the
+/// user's CAMERA or their SCREEN in front of everybody in a meeting — a screen more so than a
+/// face, because a screen shows whatever else is on it. Nothing calls it but a click, and the
+/// browser asks its own permission on top.
+const OUTWARD_METHODS: [&str; 15] = [
     "send",
     "edit",
     "delete",
@@ -255,6 +264,8 @@ const OUTWARD_METHODS: [&str; 13] = [
     "call_place",
     "call_join",
     "call_accept",
+    "call_answer_media",
+    "call_offer_media",
     "call_hangup",
     "call_mute",
     "gitlab_set_approval",
@@ -317,12 +328,16 @@ const OUTWARD_METHODS: [&str; 13] = [
 /// has and hands the page the relay credentials its `RTCPeerConnection` needs; the
 /// credentials are why it is gated rather than open, because a client that merely
 /// found this socket has no business holding them.
-const MACHINE_METHODS: [&str; 18] = [
+/// `call_subscribe` ASKS the meeting's media server for somebody's stream and publishes
+/// nothing at all about the user — so it is not outward, and it is not open either: it acts
+/// on the one call this machine holds.
+const MACHINE_METHODS: [&str; 19] = [
     "repair_broker",
     "update_download",
     "update_apply",
     "set_calling",
     "call_prepare",
+    "call_subscribe",
     "push_subscribe",
     "push_unsubscribe",
     "push_test",
@@ -378,6 +393,10 @@ fn machine_effect(method: &str) -> &'static str {
         }
         "call_prepare" => {
             "reserves this machine's one call and hands out the media credentials it holds"
+        }
+        "call_subscribe" => {
+            "asks the meeting's media server to send this machine somebody's camera or \
+             shared screen"
         }
         // Unreachable while the two lists agree; the test below pins that they do.
         _ => "changes this machine",
@@ -727,6 +746,78 @@ fn check_write_allowed(method: &str, params: &Value, token: Option<&str>) -> Res
     }
 }
 
+/// Where a client stands with the write lock — the question every refusal above
+/// answers, one click too late.
+///
+/// WHY IT IS ASKABLE AT ALL. A frontend holds the token the server that serves it handed
+/// over (`/__write-token`, over `web/write-token.ts`), and that pairing breaks in two ways
+/// neither side can see. `teams` ATTACHES to a backend that is already listening
+/// (`ensureBackend` in launcher/src/backend.ts), and a backend another launcher spawned
+/// carries a PINNED token — which is in no file, on purpose — so the attached instance
+/// serves its page a token nothing accepts. And `TEAMS_LITE_WS_URL`, when it is already
+/// set, points the page's socket at one backend while its token comes from another. In
+/// both, reads answer normally and every outward and machine method is refused: the app
+/// looks healthy, the composer only chimes, and the state is stated nowhere but in the
+/// refusal text of whatever the user pressed. A user met it on the update button.
+///
+/// It leaks nothing. Any client that can ask this can present the same token to `send`
+/// and read the same answer out of the refusal it gets; the token itself never travels
+/// back (`the_write_lock_payload_never_carries_the_token` pins that).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteLockState {
+    /// This backend gates writes, and the client presented the token it gates them
+    /// with. Every method is open to it.
+    Held,
+    /// This backend gates writes and the client does not hold that token, so every
+    /// `OUTWARD_METHODS` and `MACHINE_METHODS` call it makes will be refused.
+    Foreign,
+    /// `TEAMS_LITE_READ_ONLY=1`: there is no token, and no client writes. Deliberately
+    /// its own state rather than `Foreign` — nothing is misconfigured, and no frontend
+    /// can mend it (see the refusal text `check_write_allowed` gives that case).
+    ReadOnly,
+}
+
+impl WriteLockState {
+    /// The wire name. Kept identical to the union in web/src/lib/protocol.ts.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Held => "held",
+            Self::Foreign => "foreign",
+            Self::ReadOnly => "read_only",
+        }
+    }
+}
+
+/// Resolve [`WriteLockState`] for one client. Pure (both tokens injected) so the
+/// policy is unit-testable without a live backend, exactly like
+/// [`check_write_allowed`], whose comparison it must keep matching.
+fn write_lock_state(presented: Option<&str>, token: Option<&str>) -> WriteLockState {
+    let Some(token) = token else {
+        return WriteLockState::ReadOnly;
+    };
+    match presented {
+        Some(presented) if presented == token => WriteLockState::Held,
+        _ => WriteLockState::Foreign,
+    }
+}
+
+/// The `write_lock_status` answer: where the client stands, and where this backend's
+/// token lives.
+///
+/// `pinned` is what makes the answer actionable rather than merely true: a pinned token
+/// was handed over by the launcher that spawned this process and was published nowhere,
+/// so a `foreign` client cannot go and read the right one — another instance owns this
+/// backend, and the way out is to stop it or to give this one a port of its own. An
+/// unpinned one sits in the file every frontend already reads, so a `foreign` client is
+/// simply holding a token from before a restart and re-reading it is the whole fix
+/// (which `retryWithAFreshToken` in web/src/lib/ws-client.ts does on its own).
+fn write_lock_payload(presented: Option<&str>, token: Option<&str>, pinned: bool) -> Value {
+    json!({
+        "state": write_lock_state(presented, token).tag(),
+        "pinned": pinned,
+    })
+}
+
 /// The `broker_status` event payload: what the backend thinks of the identity
 /// broker, and whether it can do anything about it.
 ///
@@ -942,6 +1033,14 @@ struct UpdateSlot {
     asset: Option<teams_lite::update::Asset>,
     /// The commit the release was built from, which names the downloaded file.
     latest: String,
+    /// What the update brings: the commits between this build and the release, grouped by
+    /// `teams_lite::changelog`. `None` until it has been read — and it stays `None` when
+    /// GitHub could not answer, which the button draws as no list rather than as no button.
+    changes: Option<teams_lite::changelog::Changelog>,
+    /// The release `changes` describes. The list is cached against it because
+    /// `refresh_release` runs on every download attempt, and a comparison between two
+    /// commits that have not moved is the same comparison.
+    changes_rev: String,
     /// The downloaded build, once complete and verified.
     file: Option<std::path::PathBuf>,
     phase: UpdatePhase,
@@ -1124,6 +1223,21 @@ struct CallSession {
     connected_at_ms: Option<i64>,
     /// Why it ended, for the line the UI shows afterwards.
     end_reason: Option<String>,
+    /// Where to answer the media offer the service last made us, if it is still open.
+    ///
+    /// The service renegotiates unprompted and names the link on the frame itself, so this
+    /// is that frame's own link and never the merged set. It is cleared as soon as it is
+    /// used: answering the same negotiation twice is not something the service asked for.
+    renegotiation_answer_link: Option<String>,
+    /// The sequence number of the next source request, which the service reads to order
+    /// them. One counter per call, because it numbers this client's own requests.
+    source_request_sequence: u64,
+    /// What this MACHINE is sending beyond audio: `"camera"`, `"screen"`, or neither.
+    ///
+    /// It is in the session rather than in the page because two open pages share one call:
+    /// a phone that reconnects mid-call has to be told the camera is on, and a button drawn
+    /// from a page's own memory would say off while the meeting sees a face.
+    sending: Vec<String>,
 }
 
 impl CallSession {
@@ -1154,10 +1268,36 @@ impl CallSession {
             "others": self.others().iter().map(|m| m.display_name.clone()).collect::<Vec<_>>(),
             "other_mris": self.others().iter().map(|m| m.mri.clone()).collect::<Vec<_>>(),
             "waiting_in_lobby": self.others().iter().filter(|m| m.in_lobby).count(),
+            // What the other people in the meeting are PUBLISHING, so the page can ask for
+            // it. The source ids in here are the only addresses a subscription has, and the
+            // roster is the only place they exist (NATIVE-CALLING.md § 10.2).
+            //
+            // Ours are excluded with us: subscribing to our own camera would draw the
+            // user's own face as a colleague's tile, and the local preview never leaves the
+            // page anyway.
+            "publishing": self
+                .others()
+                .iter()
+                .map(|m| {
+                    json!({
+                        "mri": m.mri,
+                        "name": m.display_name,
+                        "streams": m.streams.iter().map(calling::RosterStream::json)
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect::<Vec<_>>(),
             // What the user may do next, decided HERE rather than in the page: the
             // links are what make an action possible, and only this side sees them.
+            // What this MACHINE is sending beyond audio, so every page agrees and a
+            // reconnecting one is told rather than guessing from its own memory.
+            "sending": self.sending,
             "can_accept": self.phase == CallPhase::Ringing && self.offer.is_some(),
             "can_hangup": self.phase != CallPhase::Ended,
+            // New media is only accepted on an ESTABLISHED call, in the service's own words.
+            // Decided here because only this side knows whether the link exists.
+            "can_send_media": self.phase == CallPhase::Connected
+                && self.links.media_renegotiation().is_some(),
         })
     }
 }
@@ -1333,12 +1473,27 @@ impl Ctx {
         // itself at all — a staged service cannot, and it keeps the release link instead.
         let installable =
             info.asset.is_some() && !read_only() && teams_lite::update::self_install().is_some();
+        // What the update BRINGS, when it is already known: the commits between this build
+        // and the release, which the button shows on hover. Read from the slot rather than
+        // taken as an argument, so this stays the one place the payload is spelled — the
+        // fetch is `learn_release_changes`, and it is cached against the release it
+        // describes.
+        let changes = self
+            .with_update(|slot| {
+                if slot.changes_rev == info.latest {
+                    slot.changes.clone()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(None);
         let data = json!({
             "current": info.current,
             "latest": info.latest,
             "url": info.url,
             "size": info.asset.as_ref().map(|a| a.size).unwrap_or(0),
             "can_install": installable,
+            "changes": changes,
         });
         let _ = self.with_update(|slot| {
             slot.available = Some(data.clone());
@@ -1347,6 +1502,38 @@ impl Ctx {
         });
         self.emit("update_available", data);
         installable
+    }
+
+    /// Read what the update brings, once per release, and cache it for the payload.
+    ///
+    /// Called BEFORE `publish_release`, because that method is where the payload is spelled
+    /// and it must not be two. Cached against the release's own commit: `refresh_release`
+    /// runs on every download attempt, and the list between two builds does not change
+    /// while both ends stand still — so a retried download costs no extra request.
+    ///
+    /// Quiet on failure, and the reason is the difference between the two facts it carries:
+    /// that an update EXISTS is what the button is for, and WHAT it brings is a nicety on
+    /// top. A rate-limited or force-pushed comparison leaves the button with no list, never
+    /// the user with no button.
+    async fn learn_release_changes(&self, info: &teams_lite::update::UpdateInfo) {
+        let known = self
+            .with_update(|slot| slot.changes_rev == info.latest && slot.changes.is_some())
+            .unwrap_or(false);
+        if known {
+            return;
+        }
+        let Some(current) = teams_lite::update::build_rev() else {
+            return;
+        };
+        match teams_lite::update::changes(&self.http, current, &info.latest).await {
+            Ok(log) => {
+                let _ = self.with_update(|slot| {
+                    slot.changes_rev = info.latest.clone();
+                    slot.changes = Some(log);
+                });
+            }
+            Err(e) => eprintln!("[update] what it brings could not be read: {e}"),
+        }
     }
 
     /// Forget the release: this build IS the newest one.
@@ -1379,12 +1566,16 @@ impl Ctx {
         match teams_lite::update::check(&self.http, current).await {
             Ok(Some(info)) => match info.asset.clone() {
                 Some(asset) => {
+                    self.learn_release_changes(&info).await;
                     self.publish_release(&info);
                     ReleaseNow::Asset(asset, info.latest)
                 }
                 // A release with no binary for this machine is not something to download,
-                // and it is not a failure either — the row goes back to being a link.
+                // and it is not a failure either — the row goes back to being a link. The
+                // list still travels: a link the user follows is a release page they are
+                // about to read, so knowing what is in it beforehand is worth as much.
                 None => {
+                    self.learn_release_changes(&info).await;
                     self.publish_release(&info);
                     ReleaseNow::Unknown
                 }
@@ -2303,6 +2494,25 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
     }
     match method {
         "ping" => Ok(json!("pong")),
+
+        // Whether the client that asked holds this backend's write token (see
+        // `write_lock_state`). Open, and it must stay open: it is the one question whose
+        // answer a frontend otherwise learns only from an action it already took — and
+        // gating it behind the very token it asks about would answer nobody.
+        "write_lock_status" => {
+            let presented = params.get("write_token").and_then(Value::as_str);
+            let state = write_lock_state(presented, write_token());
+            // Say it here too, for the same reason a refusal is logged: the user reads a
+            // chat app, and "every send comes back refused" left no trace on the machine
+            // that could tell a broken instance from a broken account.
+            if state == WriteLockState::Foreign {
+                eprintln!(
+                    "[write-lock] a client asked with a token that is not mine — its writes \
+                     will be refused"
+                );
+            }
+            Ok(write_lock_payload(presented, write_token(), write_token_pinned()))
+        }
         // Restart the Intune container, through its own systemd unit, because the
         // container's login keyring re-locks and the broker then answers every token
         // call with NoReply. The only RPC with an effect outside the store and the
@@ -3948,6 +4158,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     muted: false,
                     connected_at_ms: None,
                     end_reason: None,
+                    renegotiation_answer_link: None,
+                    source_request_sequence: 0,
+                    sending: Vec::new(),
                 };
                 {
                     let mut plane = ctx.calling.lock().unwrap();
@@ -4078,6 +4291,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         muted: false,
                         connected_at_ms: None,
                         end_reason: None,
+                        renegotiation_answer_link: None,
+                        source_request_sequence: 0,
+                        sending: Vec::new(),
                     };
                     {
                         let mut plane = ctx.calling.lock().unwrap();
@@ -4252,7 +4468,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let (url, payload) = match (accept, media_answer) {
                 (Some(url), _) => (url, calling::acceptance_payload(&local, &answer, &callbacks)),
                 (None, Some(url)) => {
-                    (url, calling::media_answer_payload(&local, &answer, &callbacks))
+                    (url, calling::media_answer_payload(&local, &answer, &callbacks, &[calling::MODALITY_AUDIO]))
                 }
                 (None, None) => {
                     ctx.end_call_locally("CallEndReasonNoAcceptLink").await;
@@ -4278,6 +4494,157 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     Err(e)
                 }
             }
+        }
+
+        // Answer a media offer the service made mid-call.
+        //
+        // This is the other half of `media_renegotiation_from_frame`: the service offers the
+        // sections it is willing to send — a colleague's shared screen, a camera — and this
+        // is where the page's answer to that offer goes back. Two things about it:
+        //
+        // * the link is the OFFER'S OWN, taken off the frame that carried it and cleared
+        //   here, because a negotiation is answered once and an older link answers nothing;
+        // * `modalities` is what the page says the answer really carries. It is checked
+        //   against a small list rather than passed through, so a client cannot declare the
+        //   user's camera on a body that does not offer it.
+        "call_answer_media" => {
+            let call_id = param_str(params, "call_id")?;
+            let sdp = param_str(params, "sdp")?;
+            let modalities = param_modalities(params)?;
+            let (local, callbacks, url) = {
+                let mut plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_mut()
+                    .filter(|c| c.id == call_id && c.phase != CallPhase::Ended)
+                    .context("call_answer_media: no such call")?;
+                let url = call
+                    .renegotiation_answer_link
+                    .take()
+                    .context("call_answer_media: no media offer is waiting for an answer")?;
+                (call.local.clone(), call.callbacks.clone(), url)
+            };
+            let answer = calling::MediaContent::sdp(sdp);
+            let names: Vec<&str> = modalities.iter().map(String::as_str).collect();
+            let payload = calling::media_answer_payload(&local, &answer, &callbacks, &names);
+            let response = ctx.post_call_signal(&url, &payload).await?;
+            {
+                let links = calling::Links::collect(&response);
+                let mut plane = ctx.calling.lock().unwrap();
+                if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                    call.links.merge(&links);
+                }
+            }
+            eprintln!("[calling] answered a media renegotiation: modalities={modalities:?}");
+            Ok(json!({ "call_id": call_id }))
+        }
+
+        // OFFER new media on a call that is already up: the user's camera, or their screen.
+        //
+        // The call was negotiated with audio alone, so either one is a section that does not
+        // exist yet — which the service only accepts on an ESTABLISHED call, in its own words:
+        // "media renegotiation can only be performed on an established call". The link is the
+        // `mediaRenegotiation` one it handed us on the acceptance.
+        //
+        // `sending` is what the page says it is turning on, and it is recorded here so
+        // `call_state` can say so to every client: a second page must not draw a camera
+        // button as off while this machine is sending.
+        "call_offer_media" => {
+            let call_id = param_str(params, "call_id")?;
+            let sdp = param_str(params, "sdp")?;
+            let modalities = param_modalities(params)?;
+            let sending = param_str_list(params, "sending");
+            let (local, callbacks, url) = {
+                let plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_ref()
+                    .filter(|c| c.id == call_id)
+                    .context("call_offer_media: no such call")?;
+                if call.phase != CallPhase::Connected {
+                    anyhow::bail!(
+                        "call_offer_media: this call is not connected yet — the service \
+                         refuses new media on a call that is not established"
+                    );
+                }
+                let url = call
+                    .links
+                    .media_renegotiation()
+                    .map(str::to_string)
+                    .context(
+                        "call_offer_media: this call has no renegotiation link — the service \
+                         names it on the acceptance",
+                    )?;
+                (call.local.clone(), call.callbacks.clone(), url)
+            };
+            let offer = calling::MediaContent::sdp(sdp);
+            let names: Vec<&str> = modalities.iter().map(String::as_str).collect();
+            let payload = calling::media_offer_payload(&local, &offer, &callbacks, &names);
+            let response = ctx.post_call_signal(&url, &payload).await?;
+            {
+                let links = calling::Links::collect(&response);
+                let mut plane = ctx.calling.lock().unwrap();
+                if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                    call.links.merge(&links);
+                    call.sending = sending.clone();
+                }
+            }
+            ctx.emit_call_state();
+            eprintln!("[calling] offered media: modalities={modalities:?} sending={sending:?}");
+            // The ANSWER may be in this response or arrive on our `mediaAnswer` callback —
+            // the service has done both for other negotiations. Handing back whichever is
+            // here lets the page apply it without waiting for a frame that may not come.
+            let answer = calling::media_answer_from_frame(&response).map(|m| m.blob);
+            Ok(json!({ "call_id": call_id, "answer_sdp": answer }))
+        }
+
+        // Ask the meeting's media server to put somebody's stream on one of our sections.
+        //
+        // It publishes NOTHING about the user — it is a request to receive — which is why it
+        // is a `MACHINE_METHODS` entry rather than an outward one. The two links it may go
+        // to both arrive on the `callAcceptance` frame, and the newer one is preferred
+        // because that is what the client's own configuration does on this tenant.
+        "call_subscribe" => {
+            let call_id = param_str(params, "call_id")?;
+            let mid = param_str(params, "mid")?;
+            let source_id = params
+                .get("source_id")
+                .and_then(Value::as_i64)
+                .context("call_subscribe: source_id is required")?;
+            let stream_msid = param_str(params, "stream_msid")?;
+            let fmt_params = params
+                .get("fmt_params")
+                .and_then(Value::as_str)
+                .unwrap_or(calling::DEFAULT_VIDEO_FMTP)
+                .to_string();
+            let (url, modern, sequence) = {
+                let mut plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_mut()
+                    .filter(|c| c.id == call_id && c.phase != CallPhase::Ended)
+                    .context("call_subscribe: no such call")?;
+                call.source_request_sequence += 1;
+                let sequence = call.source_request_sequence;
+                // The newer link first. Neither is in the join answer — both arrive on the
+                // acceptance — so a call that has not been accepted yet has nothing to ask.
+                match (
+                    call.links.apply_channel_parameters().map(str::to_string),
+                    call.links.control_video_streaming().map(str::to_string),
+                ) {
+                    (Some(url), _) => (url, true, sequence),
+                    (None, Some(url)) => (url, false, sequence),
+                    (None, None) => anyhow::bail!(
+                        "call_subscribe: this call has no link to subscribe on — the service \
+                         names them on the acceptance, so there is nothing to ask yet"
+                    ),
+                }
+            };
+            let request =
+                calling::SourceRequest { mid, source_id, stream_msid, fmt_params };
+            let payload = calling::source_request_payload(&request, sequence, modern);
+            ctx.post_call_signal(&url, &payload).await?;
+            Ok(json!({ "call_id": call_id, "source_id": source_id }))
         }
 
         // End the call — or decline it, when it is still ringing.
@@ -5432,6 +5799,32 @@ fn import_order(entries: &[Value]) -> Vec<&Value> {
     art.into_iter().chain(aliases).collect()
 }
 
+/// The modalities a media answer declares, checked against the four the service names.
+///
+/// It is a check rather than a pass-through because a modality is a CLAIM about what the
+/// user's machine is sending: `ScreenSharer` says their screen is on the wire. A client that
+/// could write anything here could make that claim on a body that does not carry it, and the
+/// service would believe the words. `audio` is the floor — an answer that declares nothing
+/// declares the call's own modality, which is the one this app has always had.
+fn param_modalities(params: &Value) -> Result<Vec<String>> {
+    const KNOWN: [&str; 4] = [
+        calling::MODALITY_AUDIO,
+        calling::MODALITY_VIDEO,
+        calling::MODALITY_SCREEN_SHARER,
+        calling::MODALITY_SCREEN_VIEWER,
+    ];
+    let asked = param_str_list(params, "modalities");
+    if asked.is_empty() {
+        return Ok(vec![calling::MODALITY_AUDIO.to_string()]);
+    }
+    for name in &asked {
+        if !KNOWN.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+            anyhow::bail!("{name:?} is not a modality this app negotiates");
+        }
+    }
+    Ok(asked)
+}
+
 /// An optional array-of-strings parameter, empty when absent, not an array, or made
 /// only of blanks. Callers treat "empty" as "no filter", so a malformed value
 /// degrades to the unfiltered result rather than to an error.
@@ -6139,6 +6532,10 @@ fn spawn_update_check(ctx: Ctx) {
     tokio::spawn(async move {
         match teams_lite::update::check(&ctx.http, current).await {
             Ok(Some(info)) => {
+                // What it brings, before it is announced: the payload is spelled once, in
+                // `publish_release`, so the list has to be known by the time it runs or the
+                // first thing every client hears would carry no list.
+                ctx.learn_release_changes(&info).await;
                 let installable = ctx.publish_release(&info);
                 eprintln!(
                     "[update] a newer build is available ({} -> {}){}",
@@ -7515,18 +7912,17 @@ impl Ctx {
             return;
         }
 
-        // A meeting's roster: who is in it, and who is still in its lobby. Every frame
-        // replaces the list, because the service sends the whole roster it wants us to
-        // hold rather than a diff we would have to reconcile.
+        // A meeting's roster: who is in it, and who is still in its lobby. The service
+        // sends a DELTA — this app asks for one — so each frame is FOLDED into the list
+        // rather than replacing it (`calling::apply_roster_update`). Measured: consecutive
+        // frames of one meeting carried one participant, then two, then one, and a reader
+        // that replaced the list showed the meeting emptying and refilling.
         if let Some(roster) = calling::roster_in_frame(&frame.body) {
             let changed = {
                 let mut plane = self.calling.lock().unwrap();
                 match plane.call.as_mut() {
-                    Some(call) if call.roster != roster => {
-                        call.roster = roster;
-                        true
-                    }
-                    _ => false,
+                    Some(call) => calling::apply_roster_update(&mut call.roster, roster),
+                    None => false,
                 }
             };
             if changed {
@@ -7595,6 +7991,42 @@ impl Ctx {
             if changed {
                 self.emit_call_state();
             }
+        }
+
+        // A media offer the service made ON ITS OWN, which is how a shared screen and a
+        // colleague's camera arrive (NATIVE-CALLING.md § 10.3a). It has to be read BEFORE
+        // the answer path below, because an offer and an answer look alike from a distance
+        // and this app used to hand the page an offer where it expected an answer — the
+        // page checked its signaling state, dropped it, and nothing said so.
+        if let Some(renegotiation) = calling::media_renegotiation_from_frame(&frame.body) {
+            let id = {
+                let mut plane = self.calling.lock().unwrap();
+                match plane.call.as_mut().filter(|c| c.phase != CallPhase::Ended) {
+                    Some(call) => {
+                        call.renegotiation_answer_link = Some(renegotiation.answer_link.clone());
+                        Some(call.id.clone())
+                    }
+                    None => None,
+                }
+            };
+            // No live call means there is nothing to renegotiate, and answering would put
+            // this machine back into a call it has left.
+            if let Some(id) = id {
+                eprintln!(
+                    "[calling] media renegotiation offered: modalities={:?}",
+                    renegotiation.modalities
+                );
+                self.emit(
+                    "call_media",
+                    json!({
+                        "call_id": id,
+                        "sdp": renegotiation.offer.blob,
+                        "kind": "offer",
+                    }),
+                );
+            }
+            // And nothing below applies: the same body would be read as an answer.
+            return;
         }
 
         // Their SDP answer: the page needs it to finish the handshake, and it is the
@@ -7706,6 +8138,9 @@ impl Ctx {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            renegotiation_answer_link: None,
+            source_request_sequence: 0,
+            sending: Vec::new(),
         };
 
         {
@@ -8220,6 +8655,51 @@ mod tests {
         }
     }
 
+    /// The three states a client can be in, and the one the refusal above cannot state
+    /// in time (see `write_lock_state`). A missing token is `foreign` like a wrong one:
+    /// both mean the same thing to the user, which is that nothing they press will act.
+    #[test]
+    fn the_write_lock_states_are_the_three_a_client_can_be_in() {
+        assert_eq!(write_lock_state(Some("tok"), Some("tok")), WriteLockState::Held);
+        assert_eq!(write_lock_state(Some("stale"), Some("tok")), WriteLockState::Foreign);
+        assert_eq!(write_lock_state(None, Some("tok")), WriteLockState::Foreign);
+        // Read-only comes first, and outranks whatever was presented: there is no token
+        // to hold, so no frontend is at fault and none can mend it.
+        assert_eq!(write_lock_state(None, None), WriteLockState::ReadOnly);
+        assert_eq!(write_lock_state(Some("tok"), None), WriteLockState::ReadOnly);
+    }
+
+    /// Asking must never need the answer. `write_lock_status` is in neither list — a
+    /// client with no token is exactly the one that has to be told.
+    #[test]
+    fn asking_about_the_write_lock_is_not_itself_gated() {
+        assert!(write_class("write_lock_status").is_none());
+        for token in [Some("tok"), None] {
+            assert!(check_write_allowed("write_lock_status", &json!({}), token).is_ok());
+        }
+    }
+
+    /// The answer says WHERE the client stands and nothing about the secret it stands
+    /// against. An endpoint that echoed the token back would hand every local process
+    /// the one thing the write lock keeps from them.
+    #[test]
+    fn the_write_lock_payload_never_carries_the_token() {
+        for presented in [Some("tok"), Some("stale"), None] {
+            for pinned in [true, false] {
+                let payload = write_lock_payload(presented, Some("tok"), pinned);
+                let mut keys: Vec<&str> =
+                    payload.as_object().expect("an object").keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                assert_eq!(keys, ["pinned", "state"], "only the two fields: {payload}");
+                assert!(!payload.to_string().contains("tok\""), "{payload}");
+                assert_eq!(payload["pinned"], json!(pinned));
+            }
+        }
+        assert_eq!(write_lock_payload(Some("tok"), Some("tok"), true)["state"], json!("held"));
+        assert_eq!(write_lock_payload(None, Some("tok"), true)["state"], json!("foreign"));
+        assert_eq!(write_lock_payload(None, None, false)["state"], json!("read_only"));
+    }
+
     #[test]
     fn outward_methods_pass_with_the_published_token() {
         let params = json!({ "conversation": "c1", "write_token": "tok" });
@@ -8679,6 +9159,9 @@ mod tests {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            renegotiation_answer_link: None,
+            source_request_sequence: 0,
+            sending: Vec::new(),
         };
         let json = call.json();
         assert_eq!(json["phase"], "ringing");
@@ -8725,6 +9208,9 @@ mod tests {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            renegotiation_answer_link: None,
+            source_request_sequence: 0,
+            sending: Vec::new(),
         };
         assert_eq!(call.json()["can_accept"], false);
         // And a call that is over offers nothing at all.

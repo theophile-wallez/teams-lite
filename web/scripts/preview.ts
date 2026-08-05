@@ -958,6 +958,44 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // The write-lock banner: what the sidebar says when this page holds a token its backend
+  // does not accept — every read answers, every send is refused, and nothing else in the app
+  // shows it. Driven through the mock's own control plane, and reloaded after arming because
+  // the page asks the question once per connection.
+  if (args.includes("--write-lock")) {
+    await withPreview(async ({ page, shot, setTheme, emit }) => {
+      const banner = '[data-testid="write-lock-banner"]';
+      // A backend another instance owns: its token is pinned, so no file holds the right
+      // one and the way out is outside this app.
+      await emit({ kind: "write_lock", state: "foreign", pinned: true });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector('[data-testid="conversation-row"]');
+      await page.locator(banner).waitFor({ state: "visible" });
+      await shot(`${out}-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-dark.png`);
+      await shot(`${out}-banner-dark.png`, banner);
+
+      // The other cause: this app serving a token that is not that backend's, which a
+      // restart of the app re-reads. Same banner, a different sentence — and the sentence
+      // is the whole of what the reader gets, so both are captured.
+      await emit({ kind: "write_lock", state: "foreign", pinned: false });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector('[data-testid="conversation-row"]');
+      await page.locator(banner).waitFor({ state: "visible" });
+      await shot(`${out}-published-dark.png`, banner);
+
+      // Leave the shared mock accepting the page's token, or this banner sits above every
+      // later capture.
+      await emit({ kind: "write_lock", reset: true });
+      console.log(
+        `[preview] wrote ${out}-light.png, ${out}-dark.png, ${out}-banner-dark.png ` +
+          `and ${out}-published-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
   // The update: the blue button, its progress mid-download, the restart it offers next,
   // and the plain link an install that cannot replace itself keeps instead. Driven
   // through the mock's own control plane — the real thing needs a published release
@@ -970,6 +1008,28 @@ if (import.meta.main) {
       await shot(`${out}-offered-light.png`);
       await setTheme("dark");
       await shot(`${out}-offered-dark.png`);
+
+      // WHAT IT BRINGS, which is the one part of this row that is not in the row: the
+      // commits between this build and the release, disclosed by resting the pointer on the
+      // button. Captured in both themes because the panel is the app's floating surface and
+      // its own contrast is the thing a screenshot answers.
+      await page.locator('[data-testid="update-button"]').hover();
+      await page.locator('[data-testid="update-changes"]').waitFor({ state: "visible" });
+      await shot(`${out}-changes-dark.png`);
+      await setTheme("light");
+      await shot(`${out}-changes-light.png`);
+      await setTheme("dark");
+
+      // A build far behind: the list is capped and the panel says so, which is the only
+      // sentence in it that is ours rather than an author's.
+      await emit({ kind: "update", changes_omitted: 37 });
+      await page.locator('[data-testid="update-control"][data-phase="idle"]').waitFor();
+      await page.locator('[data-testid="update-button"]').hover();
+      await page.locator('[data-testid="update-changes"]').waitFor({ state: "visible" });
+      await shot(`${out}-changes-capped-dark.png`);
+      // Off the button, or the panel covers every state captured below it.
+      await page.mouse.move(700, 320);
+      await page.locator('[data-testid="update-changes"]').waitFor({ state: "hidden" });
 
       // Mid-download: the progress is a fill behind the button's own label, so this
       // capture is the only way to review it.
@@ -1004,8 +1064,9 @@ if (import.meta.main) {
       await emit({ kind: "update", available: false });
       console.log(
         `[preview] wrote ${out}-offered-light.png, ${out}-offered-dark.png, ` +
-          `${out}-downloading-dark.png, ${out}-ready-dark.png, ${out}-failed-dark.png ` +
-          `and ${out}-link-dark.png`,
+          `${out}-changes-dark.png, ${out}-changes-light.png, ` +
+          `${out}-changes-capped-dark.png, ${out}-downloading-dark.png, ` +
+          `${out}-ready-dark.png, ${out}-failed-dark.png and ${out}-link-dark.png`,
       );
     });
     process.exit(0);
@@ -1332,13 +1393,43 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-meeting-card-dark.png`, '[data-testid="call-bar"]');
       await setTheme("light");
+
+      // 7. And the PICTURE. The mock's service renegotiates right after the roster, the
+      //    page answers and subscribes, and the tiles appear — a shared screen on the
+      //    stage and a camera under it. Nothing here opens a camera: the streams come
+      //    from a canvas (`simulatedCallMedia`).
+      await page.waitForSelector('[data-testid="call-video-frame"][data-sharing="true"]');
+      await page.waitForTimeout(400);
+      await shot(`${out}-video-light.png`, '[data-testid="call-video"]');
+      await shot(`${out}-video-page-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-video-dark.png`, '[data-testid="call-video"]');
+      await setTheme("light");
+
+      // 8. SENDING. The camera and the screen, each one click, each one the consent for that
+      //    action. Nothing is opened here either: against the mock the preview is a canvas,
+      //    so no camera light comes on and no picker appears.
+      await shot(`${out}-send-off-light.png`, '[data-testid="call-bar"]');
+      await page.locator('[data-testid="call-camera"]').click();
+      await page.waitForSelector('[data-testid="call-video-local"][data-kind="camera"]');
+      await page.waitForSelector('[data-testid="call-camera"][aria-pressed="true"]');
+      await page.locator('[data-testid="call-share"]').click();
+      await page.waitForSelector('[data-testid="call-video-local"][data-kind="screen"]');
+      await page.waitForTimeout(400);
+      await shot(`${out}-send-on-light.png`, '[data-testid="call-bar"]');
+      await shot(`${out}-sending-light.png`, '[data-testid="call-video"]');
+      await setTheme("dark");
+      await shot(`${out}-sending-dark.png`, '[data-testid="call-video"]');
+      await setTheme("light");
       await page.locator('[data-testid="call-hangup"]').click();
 
       console.log(
         `[preview] wrote ${out}-off-light.png, ${out}-settings-{light,on-light,on-dark}.png, ` +
           `${out}-button-light.png, ${out}-ringing-{light,card-light,card-dark}.png and ` +
           `${out}-{connected-card-light,muted-card-light,connected-card-dark}.png and ` +
-          `${out}-meeting-{actions-light,lobby-light,card-light,card-dark}.png`,
+          `${out}-meeting-{actions-light,lobby-light,card-light,card-dark}.png and ` +
+          `${out}-video-{light,page-light,dark}.png and ` +
+          `${out}-send-{off-light,on-light}.png and ${out}-sending-{light,dark}.png`,
       );
     });
     process.exit(0);

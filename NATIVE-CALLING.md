@@ -415,10 +415,15 @@ consult-and-add, and an invented value is a `400 {}`. The lobby is a state of it
 the roster arrives as `rosterUpdate` frames. The one media difference is that a meeting sends several voices as
 several streams, so the page keeps one audio element per stream.
 
-What is deliberately NOT built: video, screen sharing, a group call the user assembles
-themselves, transfer, hold, DTMF, admitting somebody from a lobby, and any call this app
-places without a click. Each is a product decision with its own surface, and audio has to
-be solid first.
+**Video is received AND sent** (§ 10, and § Video in a meeting in AGENTS.md). Four RPCs carry
+it: `call_answer_media` answers the renegotiation the service makes on its own,
+`call_subscribe` asks for one person's stream, `call_offer_media` offers the user's own camera
+or screen, and `call_state.publishing` carries the source ids that make a subscription
+addressable.
+
+What is deliberately NOT built: a group call the user assembles themselves, transfer, hold,
+DTMF, admitting somebody from a lobby, and any call this app places without a click. Each is a
+product decision with its own surface.
 
 ## 7. Consent — a call is at least as outward as a send
 
@@ -537,9 +542,18 @@ The tenant half, read-only, one authz call:
 
 The client half needs no account at all — the bundles are public:
 
-    curl -sL https://teams.microsoft.com/v2/ -o shell.html
-    # the asset list and the chunk map are inside; the calling stack is
-    # calling-pluginless-<hash>.js under
+    UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+    Chrome/150.0.0.0 Safari/537.36'
+    curl -sL -H "User-Agent: $UA" https://teams.microsoft.com/v2/ -o shell.html
+    # A request with curl's own agent is answered by the "Unsupported Browser" page
+    # instead, which names no bundle at all — that is what a browser UA buys here.
+    #
+    # The shell lists the assets; runtime-<hash>.js holds the chunk map, in two halves:
+    # `<id>:"<name>"` for every lazy chunk, and `<id>:"<hash>"` beside it. So the
+    # calling stack is found by name rather than guessed:
+    #   grep -o '[0-9]*:"calling-pluginless"' runtime-<hash>.js   -> the id
+    #   grep -o '<id>:"[a-z0-9]*"'            runtime-<hash>.js   -> the hash
+    # then calling-pluginless-<hash>.js (~3 MB) under
     # https://teams.public.onecdn.static.microsoft/teams-modular-packages/hashed-assets/
 
 Hashes move with every Teams release, so read the shell for the current ones rather
@@ -551,3 +565,406 @@ And the surface itself, with no tenant, no registration and no microphone:
     cd web && bun run test                                  # the state model
     cd web && bun run test:e2e -- calling.spec.ts           # the whole flow, through the mock
     cargo test                                              # the payloads, the frames, the gates
+
+## 10. Video and screen sharing — the protocol, read but not implemented
+
+Read 2026-08-05 out of `calling-pluginless-779e39a54b8bcd49.js` by the § 9 recipe, and then
+MEASURED against the tenant the same day — four joins of one authorized meeting, with the
+user sharing their screen for the last one (§ 10.7). Nothing here is implemented. Every
+claim says which of the two it came from, because the two disagreed on the one thing that
+mattered most: **the roster's shape is not what the client's own bundle reads**, and the
+first draft of this section had it wrong (§ 10.2).
+
+**The headline is that the media plane does not change.** Video and a shared screen are
+ordinary WebRTC `m=video` sections on the SAME `RTCPeerConnection` this app already opens,
+carrying H.264 that Chrome already encodes. What is new is not media — it is a
+**subscription plane**: in a meeting the service does not simply send every camera, it
+sends what the client ASKS for, one request per stream. That plane is the whole of the
+work, and it does not exist here at all.
+
+### 10.1 Four modalities, and the words for them
+
+`I.MEDIA_TYPES` — the values that go in `callModalities` — is
+`{AUDIO:"Audio", VIDEO:"Video", SCREEN_SHARER:"ScreenSharer", SCREEN_VIEWER:"ScreenViewer"}`.
+Note the capitals, and note that SHARING IS TWO MODALITIES: sending a screen and watching
+one are asked for separately. This app sends `"audio"` lowercase and the join was accepted,
+which the bundle explains — its own comparison (`qm`) lowercases both sides — but the
+canonical spelling is the one above, and `calling::MODALITY_AUDIO` should be read as one
+member of a set rather than as the only string that exists.
+
+Three more name tables come with it, and they are separate from the modality list on
+purpose:
+
+    MEDIA_LABEL: {audio:"main-audio", video:"main-video",
+                  sharing:"applicationsharing-video", data:"data"}
+    MEDIA_TYPE:  {audio:"audio", video:"video", sharing:"sharing",
+                  data:"x-data", dataChannel:"application"}
+    MODALITY:    {audio:"audio", video:"video", sharing:"sharing", data:"data"}
+
+**`MEDIA_LABEL` is the one that reaches the wire, and it is why `ms-sdp.ts` is wrong for
+sharing today.** An `a=label:` is per media SECTION, and a shared screen is an `m=video`
+section — so `MEDIA_LABELS` in `web/src/lib/ms-sdp.ts`, which derives the label from the
+m-line's KIND, would label a share `main-video`. The label is how the service tells a
+camera from a screen (`N2` in the bundle is exactly
+`direction === "sendonly" && label === "applicationsharing-video"`), so that mapping has to
+become per-section state rather than a lookup on `m=`. It is a two-line change and it is the
+one place the existing SDP transform is not merely incomplete but incorrect for video.
+
+### 10.2 Receiving: a source request per stream, and the MSI comes from the roster
+
+This is the mechanism that has no counterpart in the audio build, and it is the reason
+"see others' cameras" is not just one more m-line.
+
+Every publishing endpoint in the roster carries its own stream ids. **MEASURED** — this is
+the frame as it really arrives on this tenant, and `endpoints.endpointDetails[]` (which the
+first draft of this section repeated from the bundle) is the client's own NORMALIZED form,
+not the wire:
+
+```
+// the frame BODY *is* the roster — there is no `rosterUpdate` key wrapping it,
+// the url it was posted to is what names it
+{ type: "Delta", sequenceNumber: 26, participantCounts: {…},
+  participants: {                                  // an OBJECT keyed by mri, not an array
+    "8:orgid:<oid>": {
+      details: { displayName, … },                 // the NAME lives here, not at the top
+      state: "active",                             // or "inactive" — not "Connected"
+      role, meetingRole, meetingRoles: […], version, enforceConsentToJoin,
+      endpoints: {                                 // an OBJECT keyed by endpoint id
+        "<guid>": {
+          participantId, clientVersion, languageId, modalityJoined, endpointJoinTime,
+          endpointCapabilities, clientEndpointCapabilities,
+          endpointMetadata: { holographicCapabilities },
+          endpointState: { endpointStateSequenceNumber, state: { isMuted } },
+          callLinks: { replacement },
+          call: {                                  // and the streams are under `call`
+            serverMuteVersion, negotiationTag, appliedInteractivityLevel,
+            mediaStreams: [ { type, label, sourceId, direction,
+                              serverMuted, subTypes: [], notInDefaultRoutingGroup,
+                              mdRequestId?, ordinal? } ] } } } } } }
+```
+
+Four things about `mediaStreams`, each of them measured on the run where the user shared
+their screen:
+
+- **`sourceId` is the MSI** — the number a subscription is addressed by. Real values from
+  one meeting: `2677`, `2260`, `2462` (three audio endpoints of one person), `2463`
+  (`main-video`), `2473` (`applicationsharing-video`), `2474` (`data`). They are small
+  integers, per meeting, and they MOVE between joins — so an MSI is never cached across
+  calls.
+- **`label` is the wire name and `type` follows it, not the m-line kind.** A shared screen
+  is `{type: "applicationsharing-video", label: "applicationsharing-video"}` — `type` is NOT
+  `"video"`. A camera is `{type: "video", label: "main-video"}`. So `Ff` in the bundle,
+  which maps the label to 0/1/2/3, is the right reading and the one to port.
+- **`direction` is that ENDPOINT's own direction**, which is what says who is doing what:
+  the sharer's section was `sendonly`, and the same person's `main-video` was `recvonly`
+  because their camera was off. So "somebody is sharing" is exactly the bundle's own test —
+  `direction === "sendonly" && label === "applicationsharing-video"` — read off the roster
+  rather than out of a `contentSharing` field. **No participant carried a `contentSharing`
+  object at all**, sharing or not, so § 10.4's mention of one is the client's shape and not
+  this tenant's.
+- **`type: "Delta"` means it IS a delta.** Measured: consecutive frames carried one
+  participant, then two, then one — never the whole meeting. So the list must be MERGED by
+  mri and a participant whose `state` turns `"inactive"` dropped. Replacing it wholesale, as
+  this app does today, makes the roster flicker between one person and another.
+
+**`calling::roster_in_frame` reads none of this and returns `None` on every real frame.** It
+looks for `/rosterUpdate/participants` as an ARRAY, and its test invented that shape — so a
+joined meeting has never named anybody, and the call bar has always said "In the meeting"
+where it should say who is in it. That is a shipped bug this recon found, it is fixed
+separately from any video work, and it is also step one of every feature below: the MSI has
+nowhere else to come from.
+
+To see that stream, the client picks one of ITS OWN receive video sections and asks the
+service to put that source on it. Two spellings, and the client sends both because the
+newer one is behind a config flag (`useApplyChannelParametersForSourceRequests`, true in
+this build):
+
+    // POST to the `applyChannelParameters` link
+    { applyChannelParameters: { multiChannelParameter: {
+        mids: ["<our recv section's mid>"],
+        mediaParameter: JSON.stringify({ controlVideoStreaming: {
+          sequenceNumber: <increasing>,
+          controlInfo: { sourceId: <their MSI>, streamMsid: "<our recv stream id>",
+                         fmtParams: "<an H.264 fmtp>", subStreamIndex: <n|undefined> } } }) } } }
+
+    // POST to the `controlVideoStreaming` link — the older shape, an ARRAY of controls
+    { controlVideoStreaming: { sequenceNumber: <increasing>,
+        globalTimeStamp: "<Date.toString()>",
+        controlInfo: [ { control: "start", sourceId: <their MSI>,
+                         streamMsid: "<our recv stream id>", fmtParams: "<fmtp>" } ] } }
+
+**Both links exist on this tenant, and neither is in the join answer.** MEASURED: the join
+answer names 41 links and not one of them is either — they arrive on the `callAcceptance`
+FRAME, which is exactly what `saveMediaControllerLinksIfAny` in the bundle reads
+(`links.controlVideoStreaming`, `links.applyChannelParameters`). The acceptance carries
+thirteen links of its own:
+
+    acknowledgement  applyChannelParameters  callControllerHttpTransport  callLeg
+    controlVideoStreaming  hold  mediaRenegotiation  monitor  replacement
+    startOutgoingNegotiation  transfer  updateCallState  updateMediaDescriptions
+
+So a link set is not one answer's property: it is accumulated from every frame, which is
+what `Links::merge` already does — the backend keeps them, and nothing has ever used these
+two. A reader who checks only the join response concludes video is unreachable here, which
+is what the first version of this section did.
+
+Three constants make the plane usable:
+
+- `MSI: {unsubscribe: -1, subscribeAny: -2}`. So `-2` says "give me whoever is worth
+  showing" — the service picks, which is how a gallery works without the client tracking
+  who is talking — and `-1` releases the section.
+- `streamMsid` is OUR OWN receive stream's id, not theirs: `requestSource` passes
+  `this.mediaStream.id`, the id of the `MediaStream` the `track` event handed the page. So
+  it is knowable only after the answer is applied, which puts the whole subscription plane
+  strictly AFTER `setRemoteDescription` — never in the offer.
+- `fmtParams` is an H.264 fmtp line and is MANDATORY (`getSourceRequestMessage` throws
+  without it). Its shape, from the client's own capability probe:
+  `max-fs=240;max-mbps=3600;max-br=208;max-fps=1500;profile-level-id=42C02A;packetization-mode=1`
+  — which is how a client asks for a small tile rather than a full-resolution stream.
+  `multiviewResolutionLimits {1:1080, 2:720, 3:540, 4:360, more:360}` is the client's own
+  table for that: the more tiles, the lower each one is asked for.
+
+There is a SECOND transport for the same messages — a media control plane over an SCTP data
+channel (`mediaControlPlaneConfig`, `sctpPort: 5000`, `{type:"sr", controlVideoStreaming:…}`)
+— with the HTTP link as the fallback (`signalingDeprecation.disableFallbackToSignaling` is
+false in this build). **Take the HTTP path.** It reuses `post_signal` and the links this app
+already collects; the data channel would be a new transport, a new m-line and a handshake,
+for a latency gain nobody in this app can perceive.
+
+### 10.3 Sending: reinviteless, or a renegotiation
+
+Two ways to turn a camera on, and the client does both depending on what the service allows.
+
+**Reinviteless** is the one to want. `IS_REINVITELESS: "IsReinviteless"` is an endpoint
+property, and `maxReinvitelessMediaForVideoForWeb` / `maxReinvitelessMediaForVBSSForWeb` cap
+how many sections it applies to. The shape is: create every transceiver up front —
+`createTransceiver` uses `{direction: "inactive"}` — negotiate them all in the FIRST offer,
+and then turning the camera on is `replaceTrack` plus a direction change with no new SDP at
+all (`removeSender` does `replaceTrack(null)` when the entity carries the `reinviteless`
+extension, and `peerConnection.removeTrack` when it does not). It also explains the capture
+in § 2.5: `a=group:BUNDLE 0 1 2 3 4 5 6 7 8 9 10 11 12` on an AUDIO-ONLY join is thirteen
+sections, of which twelve carry no audio.
+
+**A renegotiation** is the other way, and it is what screen sharing uses even in the
+reinviteless build: `mediaNegotiation` (`{callModalities, sender, mediaContent, links}`)
+POSTed to the `mediaRenegotiation` link, refused outright unless the call is established —
+`"media renegotiation can only be performed on an established call"` — with
+`ScreenSharer` in the modality list. The inbound direction is `newOffer` / `/call/newMediaOffer/`.
+
+Chrome's own rules push the same way: changing `transceiver.direction` raises
+`negotiationneeded`, so a build that pre-negotiates every section and only ever swaps tracks
+avoids the whole glare problem (`RENEGOTIATION_ERROR: {local, localFatal, glare, signaling,
+signalingFatal, media, escalation}` is the client's list of ways that goes wrong).
+
+### 10.3a The service RENEGOTIATES on its own, and that is the way in
+
+**This is the measurement that replaced the experiment**, and it makes receiving far cheaper
+than § 10.5 first ordered it. This app joins with ONE audio section and answers nothing
+afterwards — and the service still POSTs a `mediaRenegotiation` to us, unprompted, ~9 s in.
+Its offer grows as the meeting does. Audio only, nobody sharing:
+
+    audio port=3478 RTP/SAVP label:main-audio       mid:0
+    x-data port=3480 RTP/SAVP label:data            mid:4 x-ssrc-range:9313-9412
+
+and the same meeting one second after the user shared their screen:
+
+    audio port=3478 RTP/SAVP label:main-audio            mid:0
+    video  port=3481 RTP/SAVP label:applicationsharing-video mid:3 sendonly x-ssrc-range:8313-8412
+    x-data port=3480 RTP/SAVP label:data                 mid:4 x-ssrc-range:9313-9412
+
+Five things follow, and all five are measured rather than reasoned:
+
+- **We never have to ask.** The section for a shared screen is OFFERED to us, labelled, at a
+  fixed mid, with its SSRC range declared. There is no first-offer experiment to run and no
+  guess about whether an inactive video section is accepted: the service adds the section
+  when there is something to put on it.
+- **But it is not unconditional, and an earlier draft of this section said it was.** Measured
+  on five joins: four received a renegotiation ~9 s in, and every one of those had a SECOND
+  endpoint in the meeting. The fifth joined a meeting that was empty apart from us and got
+  none at all in 30 s. So the trigger is the meeting having something to offer, not the join —
+  and a receive path that waited for one in an empty meeting would wait for ever, correctly.
+  Nothing in this app depends on the difference (it answers what arrives and does nothing
+  otherwise), but a test that joins alone and expects an offer would be testing a state the
+  service does not produce.
+- **The mids are a fixed layout**, and the gaps say what is missing: `0` audio, `3`
+  application sharing, `4` data — so `1` and `2` are the `main-video` slots, which appear
+  when a camera does. `maxReinvitelessMediaForVideoForWeb` is the cap on that count.
+- **`sendonly` is from the SERVICE's side**: it sends, we receive. An answer to it is
+  `recvonly`.
+- **The frame carries its own two links and only those two — `mediaAnswer` and `rejection`.**
+  So answering is one POST to a link that arrives with the offer, and refusing is the other.
+  This app posts neither, which is why a shared screen is invisible here even though the
+  section for it is being offered every time.
+- **It is an `x-data` section, not `application`.** The media control plane's own transport
+  is on offer too (§ 10.2), at mid 4, with an SSRC range — so the data-channel path is
+  reachable on this tenant if the HTTP one ever disappoints.
+
+The honest reading of this is that **receiving a screen is a renegotiation this app already
+receives and drops**, plus one source request. That is a much smaller first step than
+"implement video".
+
+Two mercies in the config, both worth relying on:
+
+- **Simulcast is off.** `specCompliantSimulcastMultiparty` has `enableLocally: false` for
+  both `video` and `sharing`, so the simulcast envelope (`sendEncodings`, rids, `~` prefixes,
+  `a=simulcast`) can be skipped entirely. It is the largest single piece of SDP surgery in
+  the client and none of it is needed.
+- **H.264 is the codec.** `requiredVideoCodecs: ["h264"]`, `primaryVideoCodecs:
+  ["h264","vp8","vp9"]`. Chrome offers H.264 by default, so no codec munging is needed
+  either.
+
+### 10.4 A shared screen is a session, not a track
+
+Sending a screen is not just a modality: `contentSharing` is its own object with its own
+finite state machine and its own six links —
+`contentSharingController`, `contentSharingTakeControl`, `contentSharingUpdateSessionState`,
+`contentSharingUpdateParticipantState`, `contentSharingNotificationLinks`,
+`contentSharingLeave` — plus two conversation callbacks this app does not publish
+(`/conversation/contentSharingUpdate/`, `/conversation/contentSharingEnd/`). The `addModality`
+body for it carries
+`contentSharing {identifier, subject, sessionState, sequenceNumber, links {sessionUpdate, sessionEnd}}`.
+It exists because a screen has ONE presenter: the session is what says whose screen the
+meeting is looking at, and `takeControl` is how that changes hands.
+
+**Watching a screen needs none of it.** A viewer subscribes to the sharer's
+`applicationsharing-video` MSI through § 10.2 and draws it, and the roster's own
+`contentSharing` field says who is sharing. So the two halves are very unequal in cost, and
+they should ship apart.
+
+### 10.5 What the four asks cost, cheapest first
+
+The user's four asks, ordered by what each one really needs on top of the audio build:
+
+1. **See somebody's screen** — and it is cheaper than the rest by a wide margin, now that
+   § 10.3a is measured: answer the renegotiation the service already sends us (its offer
+   holds the section), read the sharer's MSI out of the roster (§ 10.2), post one source
+   request, draw the `<video>`. Nothing about our own offer changes, and no outward action is
+   added: the user is already in the meeting and a subscription publishes nothing about them.
+2. **See cameras** — § 10.2, plus the tile arithmetic: N sections, `fmtParams` scaled to the
+   count, `-2` for the ones the service should fill itself, `-1` on release. This is where a
+   gallery becomes a layout problem rather than a protocol one.
+3. **Send the camera** — § 10.3. `getUserMedia({video})`, one send section, and a `sendonly`
+   direction. Outward: everybody in the meeting sees the user's face, so it is an
+   `OUTWARD_METHODS` entry of its own and never on by default (§ 7 applies unchanged — a
+   camera is strictly MORE outward than a microphone, and `getDisplayMedia` more again).
+4. **Share the screen** — § 10.3 *and* § 10.4. The session, the presenter, `takeControl`, and
+   the label fix of § 10.1. It is the only one of the four with a control plane of its own,
+   and the only one where a mistake shows a colleague something the user did not mean to
+   show. It ships last.
+
+### 10.6 What the app is missing, by file
+
+- `src/calling.rs` — `MODALITY_AUDIO` becomes a set; `roster_in_frame` keeps
+  `endpoints.endpointDetails[].mediaStreams[] {type, sourceId}` and `contentSharing`; a
+  source-request payload builder (both spellings); `paths` grows
+  `/call/newMediaOffer/`, `/call/dominantSpeakerInfo/`, `/call/csrcInfo/`,
+  `/conversation/contentSharingUpdate/` and `/conversation/contentSharingEnd/`, since a link
+  we do not publish is a frame the service has nowhere to deliver (§ 2.2).
+- `src/bin/server.rs` — `CallSession` grows the subscription table and the video/sharing
+  state; new RPCs for "subscribe to this source", "camera on/off", "share on/off", each
+  gated as § 7 requires; `call_state` grows the per-participant video state the UI draws.
+- `web/src/lib/ms-sdp.ts` — the label becomes per-section rather than per-kind (§ 10.1).
+- `web/src/lib/call-media.ts` — today it is "the microphone, one peer connection, one audio
+  element per stream". It becomes a media controller that also owns receive video sections,
+  maps a `track` event's stream id to a subscription, and hands the UI a `MediaStream` per
+  tile. `RemoteAudio` is the pattern to follow, and it is already the right shape.
+- `web/src/lib/call.ts`, `call-bar.tsx` — a call bar becomes a call SURFACE: a tile grid, a
+  shared-screen stage, and per-tile state. This is the largest piece of the work by volume,
+  and it is entirely ours: no protocol in it.
+- `web/mock/server.ts` — a mock roster with MSIs, and synthesized video, so the whole
+  surface stays reviewable with nothing leaving the machine. Without this half the UI can
+  only be seen in a real meeting, which is the one place it must not be debugged.
+
+### 10.7 The three measurements, and what the tenant answered
+
+Taken 2026-08-05 against one meeting the user authorized out loud, over four joins — the
+last one with their screen shared. `cd web && bun run join-live` is what took them: it is the
+only sanctioned live driver for a join (§ 8), and none of this needed a line of UI. What it
+grew for this is a **signal digest** (`SignalDigest` in `web/scripts/join-live.ts`): it wraps
+the page's own WebSocket, reads the `call_signal` frames every client is already sent, and
+prints link NAMES, m-lines and a participant's key TREE — never a url, a key or a candidate.
+Instrumentation in the driver, so the app the user runs is unchanged.
+
+1. **Does the join answer name `controlVideoStreaming` or `applyChannelParameters`?**
+   **No — and both exist anyway.** They arrive on the `callAcceptance` frame (§ 10.2). The
+   question was the wrong one: a link set is accumulated across frames, not read off one
+   answer.
+2. **Does the service accept a first offer carrying inactive video sections?** **Never asked,
+   because it does the work itself.** It POSTs a `mediaRenegotiation` unprompted and its
+   offer already holds the sections — labelled, at fixed mids, with SSRC ranges (§ 10.3a).
+   The experiment this line called for is unnecessary.
+3. **What does a real `rosterUpdate` carry for a participant with a camera on?** **Measured,
+   and not where the bundle reads it** (§ 10.2): the frame body IS the roster, `participants`
+   is an object keyed by mri, the name is under `details`, the streams are under
+   `endpoints[<id>].call.mediaStreams`, and the frame is a DELTA. A shared screen is
+   `{type: "applicationsharing-video", label: "applicationsharing-video", direction: "sendonly",
+   sourceId: 2473}`.
+
+**Two of the three answers were corrections rather than confirmations**, and the pattern is
+§ 2.4's: the bundle says what the client BELIEVES after normalising, the tenant says what
+travels. Read the frame.
+
+One more thing the driver grew for this, and it is not a detail: **it captures SILENCE now.**
+Chrome's fake device plays a repeating beep, and every run of this script puts it into a
+real meeting with real people in it — the user asked for it to stop after the third join,
+which is a fair thing to ask. `--tone` brings it back for the one question silence cannot
+answer, because Opus sends comfort noise for a silent track and `packetsSent` then stops
+proving the path carries audio. The offer is identical either way, which is what the script
+is for.
+
+### 10.7a What is BUILT, as of this section
+
+The receiving half, and only that half. Read § Seeing video in AGENTS.md for the rules; the
+files are `calling::media_renegotiation_from_frame` / `source_request_payload` /
+`RosterStream`, the `call_answer_media` and `call_subscribe` RPCs, `web/src/lib/call-media.ts`
+(`answerRemoteOffer`, `RemoteVideoTracks`), the label pair in `web/src/lib/ms-sdp.ts`, and
+`web/src/components/call-video.tsx`. The mock renegotiates with the measured labels and mids,
+so the whole path is reviewable with no tenant.
+
+Sending is built too: `calling::media_offer_payload` and the `call_offer_media` RPC, over
+`LocalSenders` in `web/src/lib/call-media.ts` (one reused transceiver per kind, the labels
+restated on every offer) and the two toggles in `call-bar.tsx`. It POSTs a `mediaNegotiation`
+to the `mediaRenegotiation` link the acceptance named, declaring `Video` for a camera and
+`ScreenSharer` for a screen.
+
+**It has never been sent to the tenant.** Everything above is the client's own shape and the
+mock's reproduction of it; § 10.8 says what that leaves open.
+
+### 10.8 What is still open
+
+- **The roster fix is pinned but not SEEN.** The measured shape is in the tests and the
+  driver reads a real frame with it, but the call bar still says "In the meeting" rather than
+  a name — correctly, and for a reason worth writing down: the only other participant in the
+  test meeting is the USER'S OWN second device. One person, two endpoints, one mri, so
+  `CallSession::others` excludes them and an empty list is the honest answer.
+  `participantCounts` says `totalParticipants: 2` beside it, which is the count of endpoints
+  and not of people — never draw a "2 others" from it. Seeing a name needs a second person in
+  the meeting.
+
+- **A CAMERA has never been seen in a roster.** The measurement ran with a shared screen and
+  a camera that stayed off, so `main-video` was only ever `recvonly` with nobody behind it.
+  The two `main-video` mids of § 10.3a are inferred from the gap in the mid layout, not seen.
+- **No source request has ever been posted.** Both links are in hand and the payloads are
+  written out in § 10.2, but nothing has sent one, so the service has never had the chance to
+  refuse the shape. That is the next thing to measure, and it is safe to try: a subscription
+  asks for a stream, it publishes nothing about the user.
+- **No renegotiation has ever been ANSWERED.** The `mediaAnswer` and `rejection` links arrive
+  on every one of them and this app posts neither. Whether the service minds being ignored is
+  known — it does not, the call runs for its whole length — but what it does with an answer is
+  not.
+- **Sending is BUILT but untried against the tenant.** The outgoing renegotiation has never
+  been POSTed, so the service has never had the chance to refuse its shape — and it refuses
+  without explaining more often than not (§ 8). Three specific unknowns:
+  - **Whether a `contentSharing` session is needed at all.** § 10.4 says the client opens one,
+    with six links and a presenter. But no participant in the measured roster carried a
+    `contentSharing` object *even while sharing* — their share was a `mediaStreams` entry and
+    nothing else. So this app offers the section and the `ScreenSharer` modality and opens no
+    session, which is the smallest thing consistent with what was measured. If the meeting
+    shows nothing, that session is the first thing to add.
+  - **Whether an offer of ours is accepted on the `mediaRenegotiation` link.** That link is
+    the service's own, handed to us on the acceptance, and the client's own builder posts this
+    body to it — but `startOutgoingNegotiation` and `updateMediaDescriptions` arrive on the
+    same frame and one of those may be the real target.
+  - **Whether a bare H.264 send section is enough.** Simulcast is off in the client's config
+    so none of its envelope is sent, and `max-br` / `x-mediabw` are not stated either. A
+    refusal would name what it wants.

@@ -1,5 +1,12 @@
 import { devices, type Locator, type Page } from "@playwright/test";
-import { test, expect, composerField, gotoApp, openConversationAt } from "./helpers";
+import {
+  test,
+  expect,
+  composerField,
+  emitUpdate,
+  gotoApp,
+  openConversationAt,
+} from "./helpers";
 
 // The mobile, single-pane layout. Emulate an Android Chrome phone (narrow
 // viewport + touch, so the `md` breakpoint resolves to the mobile layout and
@@ -146,6 +153,46 @@ test.describe("mobile single-pane layout", () => {
       "data-open",
       "true",
     );
+  });
+
+  // What the update brings is disclosed on HOVER, which a phone does not have — and this
+  // app is used from one. So the hold is the way in here too, and a tap stays the update
+  // itself: the same split the chat row above makes.
+  test("a long press on the update button discloses what it brings", async ({ page }) => {
+    await gotoApp(page);
+    await emitUpdate(page, { latest: "def5678" });
+    const button = page.getByTestId("update-button");
+    await expect(button).toBeVisible();
+    const panel = page.getByTestId("update-changes");
+
+    await touchGesture(page, button, [], 550);
+    await expect(panel).toBeVisible();
+    await expect(panel).toContainText("never let a sender's own words name a file on disk");
+    // The hold opened the panel and nothing else: 130 MB did not start downloading.
+    await expect(page.locator('[data-testid="update-control"]')).toHaveAttribute(
+      "data-phase",
+      "idle",
+    );
+
+    await emitUpdate(page, { available: false });
+  });
+
+  test("a short tap on the update button is the update, not the disclosure", async ({ page }) => {
+    await gotoApp(page);
+    await emitUpdate(page, { latest: "def5678" });
+    const button = page.getByTestId("update-button");
+    await expect(button).toBeVisible();
+
+    // A real tap, not a dispatched pointer pair: the point of this one is that the CLICK
+    // still happens, and only the browser's own touch handling produces it.
+    await button.tap();
+    await expect(page.getByTestId("update-changes")).toHaveCount(0);
+    await expect(page.locator('[data-testid="update-control"]')).not.toHaveAttribute(
+      "data-phase",
+      "idle",
+    );
+
+    await emitUpdate(page, { available: false });
   });
 
   test("a short tap on a chat row opens the chat, not its menu", async ({ page }) => {

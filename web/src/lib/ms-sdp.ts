@@ -31,11 +31,48 @@ const WEBRTC_DTLS_PROFILE = "UDP/TLS/RTP/SAVPF";
 /** What a browser writes when it is not: SDES, or a profile with no transport. */
 const WEBRTC_PLAIN_PROFILE = "RTP/SAVPF";
 
-/** The label the client gives each kind of media line (`getLabel` in its own bundle). */
+/**
+ * The label the client gives each kind of media line (`getLabel` in its own bundle).
+ *
+ * **A kind is not enough to choose one, and that is why {@link toMsSdp} takes an override.**
+ * A shared screen and a camera are both `m=video`; only the label tells them apart, and the
+ * service reads it — its own test for an incoming share is
+ * `direction === "sendonly" && label === "applicationsharing-video"`. So this table is the
+ * DEFAULT for a section this app is offering itself, and an answer to the service's own
+ * offer echoes the label that offer stated (see {@link labelsByMid}).
+ */
 const MEDIA_LABELS: Record<string, string> = {
   audio: "main-audio",
   video: "main-video",
 };
+
+/** The label a shared screen's section carries, in both directions. */
+export const SHARING_LABEL = "applicationsharing-video";
+
+/**
+ * Read `a=label:` per `a=mid:` out of an SDP.
+ *
+ * Used on the service's own offer so an answer can put each label back where it came from:
+ * the service names mid 3 `applicationsharing-video`, and an answer that called it
+ * `main-video` would be describing a different stream on the section it was handed.
+ */
+export function labelsByMid(sdp: string): Map<string, string> {
+  const out = new Map<string, string>();
+  let label: string | null = null;
+  let mid: string | null = null;
+  const flush = () => {
+    if (mid && label) out.set(mid, label);
+    label = null;
+    mid = null;
+  };
+  for (const line of splitLines(sdp).lines) {
+    if (line.startsWith("m=")) flush();
+    else if (line.startsWith("a=label:")) label = line.slice("a=label:".length).trim();
+    else if (line.startsWith("a=mid:")) mid = line.slice("a=mid:".length).trim();
+  }
+  flush();
+  return out;
+}
 
 /**
  * How the two sides spell an ICE-TCP candidate's role — the client's own
@@ -170,20 +207,30 @@ function splitLines(sdp: string): { lines: string[]; ending: string } {
  * Rewrite a browser's offer or answer into what the calling service reads.
  *
  * Two changes, both of them the client's own: every media line's profile becomes
- * `RTP/SAVP`, and a media line with no `a=label:` gets the one for its kind. Everything
- * else — the codecs, the fingerprint, the candidates, the ICE credentials — travels
- * exactly as the browser wrote it.
+ * `RTP/SAVP`, and a media line with no `a=label:` gets one — from `labels` when the caller
+ * has an offer to echo, and from the section's kind otherwise. Everything else — the codecs,
+ * the fingerprint, the candidates, the ICE credentials — travels exactly as the browser
+ * wrote it.
+ *
+ * `labels` is what makes a shared screen possible at all: it and a camera are both
+ * `m=video`, so an answer built from kinds alone labels somebody's screen `main-video` and
+ * describes the wrong stream on the section it was handed.
  */
-export function toMsSdp(sdp: string): string {
+export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
   const { lines, ending } = splitLines(sdp);
   const out: string[] = [];
   // The section being read, so a label can be added at its end rather than guessed at
   // its start: `a=label` may already be there, and stating it twice is not the same SDP.
-  let section: { kind: string; hasLabel: boolean } | null = null;
+  // Its mid is read on the way through, because the override is keyed by mid and an
+  // `a=mid:` line comes after the `m=` line it belongs to.
+  let section: { kind: string; hasLabel: boolean; mid: string | null } | null = null;
 
   const closeSection = () => {
     if (!section) return;
-    const label = MEDIA_LABELS[section.kind];
+    // The override first: on an ANSWER the service has already said what each section is,
+    // and a shared screen is an `m=video` whose kind cannot tell us.
+    const label =
+      (section.mid ? labels?.get(section.mid) : undefined) ?? MEDIA_LABELS[section.kind];
     if (label && !section.hasLabel) out.push(`a=label:${label}`);
     section = null;
   };
@@ -192,7 +239,7 @@ export function toMsSdp(sdp: string): string {
     const media = readMediaLine(line);
     if (media) {
       closeSection();
-      section = { kind: media.kind, hasLabel: false };
+      section = { kind: media.kind, hasLabel: false, mid: null };
       out.push(withProfile(media, MS_PROFILE));
       continue;
     }
@@ -202,6 +249,7 @@ export function toMsSdp(sdp: string): string {
       out.push(line);
       continue;
     }
+    if (section && line.startsWith("a=mid:")) section.mid = line.slice("a=mid:".length).trim();
     if (section && line.startsWith("a=label:")) section.hasLabel = true;
     if (line.startsWith("a=candidate:")) {
       out.push(candidateToMs(line));

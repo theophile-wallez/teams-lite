@@ -16,6 +16,12 @@ import {
   WRITE_TOKEN_ENV,
 } from "./backend";
 import { handleBackendEvent, spawnDetached } from "./update";
+import { readWriteLock, serveWriteToken, writeLockWarning } from "./write-lock";
+
+/// The route our own web server answers the page's token on (`WRITE_TOKEN_ROUTE` in
+/// web/write-token.ts). Kept in step by name, like the environment variables above: the
+/// web app is a separate program we start, not a module we link.
+const WRITE_TOKEN_ROUTE = "/__write-token";
 
 export type LaunchOptions = {
   port: number;
@@ -140,6 +146,27 @@ function startKeepalive(url: string, onEvent?: (raw: unknown) => void): void {
   });
 }
 
+/// Say one line if the token our own page will present is not the one our backend
+/// accepts — the state in which every send comes back refused while every read works
+/// (see write-lock.ts for how an instance ends up in it).
+///
+/// Fire-and-forget, and silent unless there is something wrong: it waits for our own web
+/// server to bind, so it must never be awaited by the startup path, and a diagnostic must
+/// never be the reason the app does not come up.
+function reportWriteLock(options: LaunchOptions): void {
+  void readWriteLock({
+    tokenUrl: `http://${options.host}:${options.port}${WRITE_TOKEN_ROUTE}`,
+    wsUrl: backendUrl(),
+  })
+    .then((report) => {
+      const warning = writeLockWarning(report, backendUrl());
+      if (warning) console.error(`\n  ${warning}\n`);
+    })
+    .catch(() => {
+      /* a diagnostic that failed says nothing, and stops nothing */
+    });
+}
+
 /// Best-effort open the default browser at the given URL (Linux: xdg-open).
 function openBrowser(url: string): void {
   try {
@@ -194,14 +221,19 @@ export async function launch(options: LaunchOptions): Promise<void> {
   // Hand our own frontend the token we pinned for that backend. It has to be in the
   // environment before anything serves the write-token route (web/write-token.ts reads
   // the environment first, then the file), and it is what lets this instance run beside
-  // the always-on service: neither backend publishes over the other's token. Null means
-  // we attached to a backend that published its own, so the file is the right source.
-  if (backend.writeToken) process.env[WRITE_TOKEN_ENV] = backend.writeToken;
+  // the always-on service: neither backend publishes over the other's token.
+  //
+  // Null means we ATTACHED to a backend we did not spawn, and then the file is the only
+  // source we may serve — so any inherited value is REMOVED rather than left in place.
+  // We inherit our parent's environment, and for an in-app update that parent is the
+  // launcher this process replaced: its token died with its backend (see serveWriteToken).
+  serveWriteToken(process.env, WRITE_TOKEN_ENV, backend.writeToken);
 
   // 2. Dev mode: hand off to Vite (HMR) instead of the built SSR server. Never
   //    returns — it runs until the Vite process exits.
   if (options.dev) {
     startKeepalive(backendUrl());
+    reportWriteLock(options);
     await runViteDev(options);
   }
 
@@ -242,6 +274,11 @@ export async function launch(options: LaunchOptions): Promise<void> {
 
   const url = `http://${options.host}:${options.port}`;
   console.error(`\n  teams-lite ready at ${url}\n`);
+
+  // 3c. And check that the page we just started to serve can actually act: our token
+  //     has to be the one our backend gates writes on. The page says so too, in a banner
+  //     — this half is for whoever ran the command, and for the journal of a unit.
+  reportWriteLock(options);
 
   // 4. Open the browser (unless suppressed).
   if (options.open) openBrowser(url);

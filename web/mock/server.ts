@@ -3284,13 +3284,114 @@ type MockCall = {
   muted: boolean;
   connected_at_ms: number | null;
   end_reason: string | null;
+  /** What the others publish, and the source ids a subscription is addressed by — the
+   *  half of the roster the real backend reads out of `endpoints[…].call.mediaStreams`. */
+  publishing: MockPublishing[];
+  /** What THIS machine is sending beyond audio, published so every client agrees. */
+  sending: string[];
   can_accept: boolean;
   can_hangup: boolean;
+  /** New media is only accepted on an established call, so the buttons are only offered
+   *  there. */
+  can_send_media: boolean;
+};
+
+/** One person in the meeting and what they are sending. */
+type MockPublishing = {
+  mri: string;
+  name: string;
+  streams: Array<{
+    label: string;
+    kind: string;
+    source_id: number;
+    direction: string;
+    server_muted: boolean;
+    shared_screen: boolean;
+    camera: boolean;
+  }>;
 };
 
 /** The people the mock puts in a meeting once the join is answered — a roster arriving
  *  after the fact, which is what the real service sends. */
 const MOCK_MEETING_ROSTER = ["Ava Thompson", "Liam Nguyen", "Priya Raman"];
+
+/** One audio stream per person, plus a CAMERA for the first and a SHARED SCREEN for the
+ *  second. The source ids are small integers like the real ones, and they are the addresses
+ *  `call_subscribe` names. */
+function mockPublishing(names: string[]): MockPublishing[] {
+  return names.map((name, index) => {
+    const mri = PEOPLE.find((p) => p.name === name)?.mri ?? `8:orgid:mock-${index}`;
+    const base = 2400 + index * 10;
+    const streams: MockPublishing["streams"] = [
+      {
+        label: "main-audio",
+        kind: "audio",
+        source_id: base,
+        direction: "sendrecv",
+        server_muted: false,
+        shared_screen: false,
+        camera: false,
+      },
+    ];
+    if (index === 0) {
+      streams.push({
+        label: "main-video",
+        kind: "video",
+        source_id: base + 1,
+        direction: "sendrecv",
+        server_muted: false,
+        shared_screen: false,
+        camera: true,
+      });
+    }
+    if (index === 1) {
+      streams.push({
+        label: "applicationsharing-video",
+        kind: "applicationsharing-video",
+        source_id: base + 2,
+        direction: "sendonly",
+        server_muted: false,
+        shared_screen: true,
+        camera: false,
+      });
+    }
+    return { mri, name, streams };
+  });
+}
+
+/**
+ * The offer the service makes ON ITS OWN, which is how video arrives (NATIVE-CALLING.md
+ * § 10.3a).
+ *
+ * The labels and the mids are the measured ones — audio at 0, a camera at 1, a shared screen
+ * at 3, data at 4 — because the page reads the label per mid to decide which section carries
+ * what, and a mock that made them up would exercise a mapping the tenant does not have.
+ */
+const MOCK_RENEGOTIATION_OFFER = [
+  "v=0",
+  "o=- 0 0 IN IP4 127.0.0.1",
+  "s=teams-lite-mock-renegotiation",
+  "t=0 0",
+  "m=audio 3478 RTP/SAVP 111",
+  "c=IN IP4 0.0.0.0",
+  "a=rtpmap:111 opus/48000/2",
+  "a=mid:0",
+  "a=label:main-audio",
+  "a=sendrecv",
+  "m=video 3481 RTP/SAVP 107",
+  "c=IN IP4 0.0.0.0",
+  "a=rtpmap:107 H264/90000",
+  "a=mid:1",
+  "a=label:main-video",
+  "a=sendonly",
+  "m=video 3481 RTP/SAVP 107",
+  "c=IN IP4 0.0.0.0",
+  "a=rtpmap:107 H264/90000",
+  "a=mid:3",
+  "a=label:applicationsharing-video",
+  "a=sendonly",
+  "",
+].join("\r\n");
 
 /** Off, exactly like a fresh Rust store: turning it on is the consent, so a spec has to
  *  perform that step rather than find it already done. */
@@ -3365,8 +3466,11 @@ function injectMockCallInvite(conversation: string): MockCall | null {
     muted: false,
     connected_at_ms: null,
     end_reason: null,
+    publishing: [],
+    sending: [],
     can_accept: true,
     can_hangup: true,
+    can_send_media: false,
   };
   // Calling has to be on for a real invite to reach this machine at all, so an invite
   // implies it: a spec that rings without flipping the switch is testing a state the
@@ -3935,6 +4039,16 @@ const MOCK_UPDATE_SIZE = 133 * 1024 * 1024;
 const MOCK_DOWNLOAD_MS = 2000;
 const MOCK_DOWNLOAD_TICK_MS = 100;
 
+/** What this mock answers `write_lock_status` with.
+ *
+ *  `held` by default, which is the truth for a page driving the mock: this backend gates
+ *  nothing, so nothing it presses is refused. The other states are armed by
+ *  `{kind: "write_lock", state: …}` so the banner they draw can be looked at and pinned —
+ *  a spec MUST put it back (`{kind: "write_lock", reset: true}`), because one mock process
+ *  serves the whole run and a banner left armed sits in every later sidebar. */
+let mockWriteLockState: "held" | "foreign" | "read_only" = "held";
+let mockWriteLockPinned = true;
+
 /** The update the mock reports, or null for "this build is current" — the default, so
  *  every existing spec keeps seeing a sidebar with no update row. Armed through the test
  *  hook (`{kind: "update"}`), exactly like the broker status, and HELD rather than only
@@ -3945,7 +4059,40 @@ let mockUpdate: {
   url: string;
   size: number;
   can_install: boolean;
+  changes: typeof MOCK_UPDATE_CHANGES | null;
 } | null = null;
+
+/** What the mock update brings, in the shape `changelog::Changelog` serializes to.
+ *
+ *  Written in the project's own commit style, with a scope on most entries and one without,
+ *  because the panel draws those two differently. Every group the backend can produce is
+ *  NOT here on purpose — this is one ordinary update, and a spec that wants the truncation
+ *  line arms `changes_omitted`. */
+const MOCK_UPDATE_CHANGES = {
+  groups: [
+    {
+      title: "New",
+      changes: [
+        { scope: "calendar", summary: "join a meeting from the event it belongs to" },
+        { scope: "mail", summary: "draw a sender's own mark beside their name" },
+      ],
+    },
+    {
+      title: "Fixed",
+      changes: [
+        { scope: "media", summary: "never let a sender's own words name a file on disk" },
+        { scope: "history", summary: "keep the scroll still while a tall row measures" },
+        { summary: "stop a refused send from looking like it went out" },
+      ],
+    },
+    {
+      title: "Documented",
+      changes: [{ scope: "calling", summary: "map video and screen sharing" }],
+    },
+  ],
+  total: 6,
+  omitted: 0,
+};
 
 /** How far the mock update has got. Mirrors `UpdateSlot` in src/bin/server.rs, including
  *  that the phase is replayed on connect whenever it is not `idle`. */
@@ -4674,6 +4821,15 @@ function dispatch(method: string, params: unknown): unknown {
     case "ping":
       return "pong";
 
+    // Where the asking client stands with the write lock (`write_lock_status` in
+    // src/bin/server.rs). This backend gates nothing — it has no token and no account to
+    // protect — so the honest answer for a page driving the mock is `held`: nothing it
+    // presses will be refused. The `{kind: "write_lock"}` test hook arms the other states,
+    // because the banner they draw is the whole point of the feature and the mock is the
+    // only place it can be looked at.
+    case "write_lock_status":
+      return { state: mockWriteLockState, pinned: mockWriteLockPinned };
+
     case "conversations": {
       // Newest activity first, exactly like the sidebar expects. Channels live
       // in their own store, so they never appear here — matching the Rust
@@ -5266,8 +5422,11 @@ function dispatch(method: string, params: unknown): unknown {
           muted: false,
           connected_at_ms: null,
           end_reason: null,
+          publishing: [],
+          sending: [],
           can_accept: false,
           can_hangup: true,
+          can_send_media: false,
         };
         broadcastMockCall();
         return { call_id: mockCall.id, ice_servers: [{ urls: ["stun:mock.invalid:3478"] }] };
@@ -5295,8 +5454,11 @@ function dispatch(method: string, params: unknown): unknown {
         muted: false,
         connected_at_ms: null,
         end_reason: null,
+        publishing: [],
+        sending: [],
         can_accept: false,
         can_hangup: true,
+        can_send_media: false,
       };
       broadcastMockCall();
       return {
@@ -5347,6 +5509,9 @@ function dispatch(method: string, params: unknown): unknown {
             in_lobby: false,
             phase: "connected",
             connected_at_ms: Date.now(),
+            // The service refuses new media on a call that is not established, so the
+            // camera and share buttons appear exactly here and not before.
+            can_send_media: true,
           };
           broadcastMockCall();
         }, MOCK_CALL_ANSWER_MS),
@@ -5360,8 +5525,18 @@ function dispatch(method: string, params: unknown): unknown {
             other_mris: MOCK_MEETING_ROSTER.map(
               (name) => PEOPLE.find((p) => p.name === name)?.mri ?? "8:orgid:someone",
             ),
+            publishing: mockPublishing(MOCK_MEETING_ROSTER),
           };
           broadcastMockCall();
+          // And then the service renegotiates ON ITS OWN, offering the sections for what
+          // those people are publishing. The real one does this ~9 s in, unprompted; the
+          // mock does it right after the roster so the whole receive path — answer,
+          // subscribe, draw — runs in one pass of a spec.
+          broadcast("call_media", {
+            call_id: callId,
+            sdp: MOCK_RENEGOTIATION_OFFER,
+            kind: "offer",
+          });
         }, MOCK_CALL_CONNECT_MS),
       );
       return { call_id: callId };
@@ -5376,9 +5551,75 @@ function dispatch(method: string, params: unknown): unknown {
         phase: "connected",
         connected_at_ms: Date.now(),
         can_accept: false,
+        can_send_media: true,
       };
       broadcastMockCall();
       return { call_id: callId };
+    }
+
+    // The answer to a renegotiation the service offered. It carries the page's own SDP and
+    // the modalities it declares, and the mock checks both the way the backend does: a name
+    // outside the four the service knows is refused, because a modality is a claim about
+    // what this machine is sending.
+    case "call_answer_media": {
+      const callId = requireString(params, "call_id");
+      requireString(params, "sdp");
+      const o = asObject(params);
+      const modalities = Array.isArray(o.modalities) ? o.modalities : [];
+      for (const name of modalities) {
+        if (!["audio", "Video", "ScreenSharer", "ScreenViewer"].some(
+          (known) => String(name).toLowerCase() === known.toLowerCase(),
+        )) {
+          throw new Error(`${JSON.stringify(name)} is not a modality this app negotiates`);
+        }
+      }
+      if (!mockCall || mockCall.id !== callId) {
+        throw new Error("call_answer_media: no such call");
+      }
+      return { call_id: callId };
+    }
+
+    // OFFERING new media: the user's camera, or their screen. The mock records what the page
+    // says it is sending and publishes it, because that state belongs to the machine and not
+    // to one page — which is exactly the thing a second open page would get wrong.
+    case "call_offer_media": {
+      const callId = requireString(params, "call_id");
+      requireString(params, "sdp");
+      const o = asObject(params);
+      const modalities = Array.isArray(o.modalities) ? o.modalities : [];
+      for (const name of modalities) {
+        if (!["audio", "Video", "ScreenSharer", "ScreenViewer"].some(
+          (known) => String(name).toLowerCase() === known.toLowerCase(),
+        )) {
+          throw new Error(`${JSON.stringify(name)} is not a modality this app negotiates`);
+        }
+      }
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_offer_media: no such call");
+      if (mockCall.phase !== "connected") {
+        throw new Error(
+          "call_offer_media: this call is not connected yet — the service refuses new media " +
+            "on a call that is not established",
+        );
+      }
+      const sending = Array.isArray(o.sending) ? o.sending.map(String) : [];
+      mockCall = { ...mockCall, sending };
+      broadcastMockCall();
+      // The real service answers in the response for this negotiation, so the mock does too:
+      // a page that waited for a frame the backend never sends would never apply an answer.
+      return { call_id: callId, answer_sdp: MOCK_ANSWER_SDP };
+    }
+
+    // A subscription: put somebody's source on one of our sections. It publishes nothing
+    // about the user, so it is the one call method the mock can answer with no state at all
+    // — the picture itself comes from the page's own simulated media.
+    case "call_subscribe": {
+      const callId = requireString(params, "call_id");
+      requireString(params, "mid");
+      requireString(params, "stream_msid");
+      const o = asObject(params);
+      if (typeof o.source_id !== "number") throw new Error("call_subscribe: source_id is required");
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_subscribe: no such call");
+      return { call_id: callId, source_id: o.source_id };
     }
 
     case "call_hangup": {
@@ -6354,6 +6595,26 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         { status: 200 },
       );
     }
+    // Arm where this page stands with the write lock, so the banner that says "this window
+    // can read, but not send" can be driven (see write-lock-banner.tsx). A spec MUST reset
+    // it: one mock process serves the whole run, and a left-behind banner sits above every
+    // later sidebar.
+    if (body.kind === "write_lock") {
+      if (body.reset === true) {
+        mockWriteLockState = "held";
+        mockWriteLockPinned = true;
+        return Response.json({ ok: true, reset: true }, { status: 200 });
+      }
+      const state = body.state;
+      if (state === "held" || state === "foreign" || state === "read_only") {
+        mockWriteLockState = state;
+      }
+      if (typeof body.pinned === "boolean") mockWriteLockPinned = body.pinned;
+      return Response.json(
+        { ok: true, state: mockWriteLockState, pinned: mockWriteLockPinned },
+        { status: 200 },
+      );
+    }
     // Arm (or clear) a pending update, and say whether this pretend install can replace
     // itself — the difference between the button and the plain link (`can_install` in
     // src/update.rs). A spec MUST clear it afterwards: one mock process serves the whole
@@ -6389,6 +6650,21 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
             : "https://github.com/theophile-wallez/teams-lite/releases/tag/latest",
         size: typeof body.size === "number" ? body.size : MOCK_UPDATE_SIZE,
         can_install: body.can_install !== false,
+        // What it brings. `changes: false` is the backend that could not read the
+        // comparison — offline, rate-limited, a force-pushed history — which a spec needs,
+        // because the button must still be offered with nothing to disclose.
+        // `changes_omitted` arms the other end: a build so far behind that the list is
+        // capped, which is the one case the panel says something extra.
+        changes:
+          body.changes === false
+            ? null
+            : typeof body.changes_omitted === "number"
+              ? {
+                  ...MOCK_UPDATE_CHANGES,
+                  total: MOCK_UPDATE_CHANGES.total + body.changes_omitted,
+                  omitted: body.changes_omitted,
+                }
+              : MOCK_UPDATE_CHANGES,
       };
       resetMockUpdate();
       broadcast("update_available", { ...mockUpdate });

@@ -597,6 +597,38 @@ user. Two independent mechanisms enforce that split:
   - **A refused write says so in the journal** (`[write-lock] refused \`<method>\``), the
     method and never the token. A message that did not go out used to leave no trace on
     this machine at all.
+  - **A page can ASK where it stands, and it asks before it acts.** `write_lock_status` is
+    an OPEN method — the one question that must not be gated behind the token it is about
+    — and it answers `held`, `foreign` or `read_only` plus whether this backend's token was
+    pinned, never the token itself (`write_lock_state` in `src/bin/server.rs`). It exists
+    because the pairing between a page and a backend breaks in two ways nothing on either
+    side could see, and the retry above cannot heal either one: `teams` ATTACHES to a
+    backend that is already listening (`ensureBackend`), and a backend another launcher
+    spawned carries a PINNED token — which is in no file, on purpose — so the attached
+    instance serves its page a token nothing accepts; and `TEAMS_LITE_WS_URL`, when it is
+    already set, points the page's socket at one backend while its token comes from
+    another. In both, every read answers and every outward and machine method is refused.
+    It reached a real user as **Update failed — try again**, and the refusal text of the
+    button they had pressed was the only place this app ever said so. Three things follow,
+    and each is pinned by a test:
+    - **The page says it, once, in the sidebar** (`write-lock-banner.tsx`, over the pure
+      `web/src/lib/write-lock.ts`): "This window can read, but not send", the cause, and
+      the one thing that mends it — which is never something the page can do, so the only
+      action offered is **Check again**. It is drawn for `foreign` alone. `read_only` is
+      silent because refusing is that backend's whole purpose, and an unanswered status is
+      silent because a banner that appears by default is worse than the bug it guesses at.
+      A REFUSED write that a fresh token could not heal re-asks the question
+      (`setWriteRefusedHandler`), because that refusal is proof about the whole app rather
+      than about one button.
+    - **The launcher says it at startup**, in one line, for whoever ran the command and for
+      a unit's journal (`launcher/src/write-lock.ts`). It asks with the token its own
+      server hands the page — the chain the user's clicks travel down, not our idea of it.
+    - **An ATTACHED launcher serves the token FILE and nothing else.** `serveWriteToken`
+      REMOVES an inherited `TEAMS_LITE_WRITE_TOKEN` when we did not spawn the backend: this
+      process inherits its parent's environment, and for an in-app update that parent is
+      the launcher it replaced, whose token died with its backend. Left in place,
+      `web/write-token.ts` reads the environment first and would serve a dead token in
+      front of the file that holds the live one.
 - **The hook (harness).** Blocks, before execution, any command that would write:
   ad-hoc browser drivers, scripts calling `send`/`edit`/`delete`/`react`/`mark_read` against
   `127.0.0.1:19420` or `19421` (and the 19440 / 19441 relays in front of them), a
@@ -633,9 +665,11 @@ user. Two independent mechanisms enforce that split:
   (it honours `--dpr`, because the faces in it are 20px). For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
   file. For Settings › AI providers and its model picker, open and closed in both
-  themes: `bun run preview -- --out /tmp/prov --ai-providers`. For the update button, its
-  progress mid-download and the link the other install shape keeps:
-  `bun run preview -- --out /tmp/upd --update`. To review a detail too
+  themes: `bun run preview -- --out /tmp/prov --ai-providers`. For the update button, the
+  changelog it discloses on hover in both themes, its progress mid-download and the link the
+  other install shape keeps: `bun run preview -- --out /tmp/upd --update`. For the
+  write-lock banner, in both of its
+  causes: `bun run preview -- --out /tmp/wl --write-lock`. To review a detail too
   small to read in a
   1200px page — a 16px icon, a chip, a badge — crop to it and raise the pixel
   density: `bun run preview -- --out /tmp/chip --element
@@ -870,7 +904,8 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
 The app takes and places one-to-one **audio** calls, by doing what the real Teams WEB
 client does: `src/calling.rs` is the signaling plane, the browser carries the media
 (`web/src/lib/call-media.ts`), and `NATIVE-CALLING.md` is the protocol map every line of
-both was written from — read it before touching either. Video is deliberately absent.
+both was written from — read it before touching either. Video is RECEIVED and never sent:
+see § Seeing video below, and NATIVE-CALLING.md § 10 for the protocol it rests on.
 
 **The backend signals; the page carries the audio.** That split is not an implementation
 detail: the tokens must never reach a browser, and a microphone is only reachable from
@@ -943,6 +978,86 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   target: the sandbox chat is a group thread, and ringing it would ring real people. A
   live test is the user's own click, on their own machine, to somebody who agreed to it
   beforehand — see NATIVE-CALLING.md § 8 for what is still unverified against the tenant.
+
+## Video in a meeting — received, and sent
+
+A meeting draws the pictures other people put into it — a colleague's shared SCREEN on a
+stage, their CAMERA as a tile beside it — and it can put the user's own camera and screen
+into the meeting (`web/src/components/call-video.tsx` and the two toggles in `call-bar.tsx`,
+over `callVideo` / `callLocalVideo`).
+
+**Sending is the sharper half, and the split in the gates says so.** Receiving publishes
+nothing about the user; sending puts their face — or whatever else is on their screen — in
+front of everybody in the meeting. So `call_offer_media` is an `OUTWARD_METHODS` entry beside
+`call_place`, every capture starts from one click, the browser asks its own permission under
+it, and nothing in this app opens a camera on its own. Four more rules:
+
+- **Both are OFF until asked, every call.** There is no remembered preference, because a
+  camera that came on with the call is the worst thing this app could do.
+- **The toggles are drawn only where they would work** — `can_send_media`, which the backend
+  decides: the service refuses new media on a call that is not established (its own words),
+  so a button before that reports a refusal the user can do nothing about.
+- **The state is the BACKEND's** (`call.sending`), not the page's. Two open pages share one
+  call, and a phone that reconnects mid-call has to be TOLD the camera is on rather than draw
+  its button from its own memory.
+- **The sender sees their own picture, and the screen is never mirrored.** A preview is not
+  vanity: a screen share shows whatever else is on that screen, and the only way somebody can
+  tell what the meeting is seeing is to see it too. A camera IS mirrored, because that is what
+  a person expects of themselves.
+- **The BROWSER can stop a share without asking us** — its own "Stop sharing" bar ends the
+  track and nothing else. `onSendingEnded` catches that and takes the section down with the
+  service, or the meeting keeps a section carrying no picture while the button still says on.
+- **The track is stopped before anything that can fail.** A camera whose light stays on
+  because a POST was refused is the worst possible outcome of turning it off.
+- **The screen never carries system audio.** `getDisplayMedia` is asked with `audio: false`:
+  the user is already on the call with their microphone, and they asked to show a picture.
+
+Everything about it follows from one measured fact: **the service renegotiates on its own,
+and its offer already carries the sections.** ~9 s into a join it POSTs a
+`mediaRenegotiation`, and a second after somebody shares their screen that offer grows
+`label:applicationsharing-video` at a fixed mid with its SSRC range declared. So there is
+nothing to ask for — the whole receive path is *answer it, then subscribe*. It is not
+unconditional: measured on five joins, the four that got one all had a second endpoint in the
+meeting and the one that joined an empty meeting got none. Nothing here depends on the
+difference — it answers what arrives and does nothing otherwise — but do not write a test that
+joins alone and waits for an offer. Six rules hold it together, and
+`web/e2e/calling.spec.ts` pins each:
+
+- **An offer is not an answer, and this app used to read it as one.** `media_answer_from_frame`
+  matched `mediaNegotiation` too, so the page was handed an offer where it expected an answer,
+  checked its signaling state and dropped it — silently, every time.
+  `calling::media_renegotiation_from_frame` runs FIRST and tells them apart by the frame's own
+  `mediaAnswer` LINK, not by a url or a body name.
+- **The MEDIA SOURCE ID comes from the roster and nowhere else.** A subscription names
+  `sourceId`, which lives in `endpoints[<id>].call.mediaStreams[]` — the part of the roster
+  the parser used to throw away. It is per meeting and it MOVES between joins, so it is never
+  cached across calls. `call_state.publishing` carries it to the page, ours excluded: drawing
+  the user's own camera as a colleague's tile is the one thing this surface must not do.
+- **A LABEL is what tells a screen from a camera**, because both are `m=video` sections. It
+  travels per section (`labels::SHARING` = `applicationsharing-video`), the service reads it,
+  and `web/src/lib/ms-sdp.ts` echoes the OFFER'S OWN label back on the answer rather than
+  deriving one from the m-line kind — a label chosen from the kind calls somebody's screen
+  `main-video` and describes the wrong stream on the section it was handed.
+- **The subscription is assembled from BOTH sides, which is why it lives in the store.** The
+  source ids are the backend's (the roster); the mids and stream ids are the page's (what the
+  browser reported on its `track` events, which exist only after the answer is applied).
+  Neither half can do it alone. A screen takes a section before a camera does: it is the
+  thing somebody deliberately put on screen to be read.
+- **A failure here NEVER ends the call.** Audio is already up and untouched, so a
+  renegotiation that cannot be answered or a subscription the service refuses costs one tile
+  — and the service offers again. Ending a working call because a screen could not be drawn
+  would be much the worse outcome.
+- **`call_answer_media` is an `OUTWARD_METHODS` entry and `call_subscribe` is a
+  `MACHINE_METHODS` one**, and the split is the point. Subscribing ASKS to receive and
+  publishes nothing about the user. Answering carries an SDP — and an SDP is what would offer
+  their camera — so it is gated as the widest thing it can do rather than as what it usually
+  does. `param_modalities` refuses a name outside the four the service knows, because a
+  modality is a claim about what this machine is sending.
+
+`web/mock/server.ts` reproduces the whole flow with no tenant and no camera: it renegotiates
+after the roster with the measured labels and mids, and `simulatedCallMedia` answers with
+streams captured from a blank canvas — so `cd web && bun run preview -- --out /tmp/call --call`
+shows the stage and the tiles with nothing leaving the machine.
 
 ## Joining a meeting (the calendar stays read-only)
 
@@ -1471,6 +1586,27 @@ backend checks once at startup whether `latest` names a different commit and, if
 the sidebar offers the update as a blue button above the status line
 (`web/src/components/update-button.tsx`, over the pure `web/src/lib/update.ts`).
 
+**Every build publishes TWO releases, and each answers what the other cannot**
+(`.github/workflows/build.yml`). `build-<shortsha>` is immutable, one per commit, and kept
+FOR EVER: it is the record of what shipped, and its body is that build's changelog. `latest`
+is the rolling tag, recreated every time — and it can never move to another name, because
+`update::check` asks `/releases/tags/latest` and install.sh downloads
+`/releases/download/latest/…`, so every copy already installed depends on that spelling.
+The asset is therefore uploaded twice on purpose. **The BINARY is kept on the newest
+`ASSET_WINDOW` (10) builds only**: it is 134 MB and this project pushes about 19 times a
+day, so keeping every one would cost some 78 GB a month — older releases keep their notes,
+which is the part worth for ever and a few KB. `update::tests::the_release_workflow_…` pins
+the tag, the notes' machine-readable line, the history the changelog needs and the fact that
+pruning selects `build-` releases and never `latest`.
+
+**The changelog is written ONCE, in Rust** (`src/changelog.rs`), and read by two surfaces:
+CI renders its markdown into every release body through `examples/changelog.rs`, and the
+backend publishes the same structure to the app. A grouper in the workflow beside one in the
+crate would be two spellings of one list, drifting apart at the first commit type nobody
+thought of. It reads conventional commits — the type becomes the heading, the scope is kept
+apart from the summary, a `!` is lifted to a **Breaking** group above everything — and a
+subject written outside the convention keeps its own words rather than being dropped.
+
 **It is two clicks, and each one is the user's.** `update_download` streams the release
 asset into `~/.cache/teams-lite/updates` and reports progress as a fill inside the button;
 `update_apply` puts it in place and restarts onto it. Nothing happens on its own: the
@@ -1483,7 +1619,29 @@ button says what it costs before it is pressed.
   sentence, and there is one release to take, so it names nothing the user can act on.
   `latest` stays in the payload because the BACKEND compares it with its own build to
   decide there is an update at all. A test in `web/src/lib/update.test.ts` scans every
-  phase for it.
+  phase for it — the disclosure below included, which counts changes and names no commit.
+- **What the update BRINGS is a disclosure on the control itself.** Resting the pointer on
+  the button opens the commits between this build and the release, beside it
+  (`UpdateChangesPanel`, a hover card — the person card's own primitive and delays, so one
+  hover means one thing across the app). The backend reads them from GitHub's compare API in
+  one request (`update::changes`), which is why the list is right even for a build a hundred
+  releases back, and caches them against the release so a retried download costs no request.
+  Five rules hold it, each pinned by `web/e2e/update.spec.ts`:
+  - **It is a floating panel, never a section in the row.** The row is the button (below), so
+    a list that unfolded under it would move the control the user is aiming at. The spec
+    measures the button's own box across the hover.
+  - **A phone gets it from a LONG PRESS**, because there is no hover there and this app is
+    used from one — the chat row's "…" makes the same split, and a TAP stays the update
+    itself (`web/e2e/mobile.spec.ts` pins both halves).
+  - **It is bounded and scrolls itself**, and what it leaves out it COUNTS: GitHub's compare
+    stops at 250 commits and `changelog::MAX_CHANGES` caps the payload, so the heading says
+    "43 changes since your build — the newest 6 below". A list that stops without saying so
+    reads as a complete one.
+  - **A comparison that could not be read costs the DISCLOSURE, never the button.** Offline,
+    rate-limited, a force-pushed history: `changes` arrives null and the update is still
+    offered. That an update EXISTS is what the row is for; what it brings is the nicety.
+  - **It goes once the decision is made.** `restarting` and `installed` carry no list: it is
+    what somebody decides WITH, and from there the release notes hold it.
 - **The progress takes the place of the label, and the button does not move.** The percent
   is drawn where the pressed words were, over the fill. `web/e2e/update.spec.ts` measures
   the button's own position across the click.
@@ -1573,9 +1731,12 @@ button says what it costs before it is pressed.
 the `{kind: "update"}` test hook, which a spec MUST clear afterwards — one mock process
 serves the whole run, and a left-behind update moves every later sidebar). `fail_once` on
 that hook arms the replaced-asset failure, because the half a PAGE owns is that a failure it
-shows is one the button really recovers from. `cd web && bun run preview -- --out /tmp/upd
---update` captures the button, the download mid-transfer, the restart it offers next, the
-failure and its reason, and the link the other install shape keeps.
+shows is one the button really recovers from; `changes: false` arms the comparison the
+backend could not read, and `changes_omitted` the build so far behind that the list is
+capped. `cd web && bun run preview -- --out /tmp/upd
+--update` captures the button, the changelog it discloses in both themes, the capped list,
+the download mid-transfer, the restart it offers next, the failure and its reason, and the
+link the other install shape keeps.
 
 ## The always-on service
 

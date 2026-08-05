@@ -266,6 +266,12 @@ export async function emitUpdate(
     /** Make the next download fail, once — the replaced-asset failure the user really
      *  hit. What follows it is the retry, which has to work. */
     fail_once?: boolean;
+    /** `false` is the backend that could NOT read what the update brings (offline,
+     *  rate-limited, a force-pushed history). The button must still be offered. */
+    changes?: false;
+    /** A build so far behind that the list is capped: the panel then states how many
+     *  changes it is not showing. */
+    changes_omitted?: number;
     /** Simulate the restart an apply ends in: the backend drops every socket, and the
      *  one that answers next is the new build, with no update to announce. */
     restarted?: boolean;
@@ -273,6 +279,23 @@ export async function emitUpdate(
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "update", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Arm where the page stands with the write lock in the mock, through its gated test
+ *  hook. `foreign` is the state in which every read answers and every outward action is
+ *  refused — the one the banner exists for.
+ *
+ *  ALWAYS reset it with `{ reset: true }` before the spec ends. The mock is a shared
+ *  process and `reuseExistingServer` adopts it across runs, so a banner left armed would
+ *  sit above every later sidebar. */
+export async function emitWriteLock(
+  page: Page,
+  body: { state?: "held" | "foreign" | "read_only"; pinned?: boolean; reset?: boolean } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "write_lock", ...body },
   });
   expect(res.ok()).toBeTruthy();
 }

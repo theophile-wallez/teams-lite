@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { fromMsSdp, toMsSdp } from "./ms-sdp";
+import { fromMsSdp, labelsByMid, SHARING_LABEL, toMsSdp } from "./ms-sdp";
 
 /** What Chrome writes for one audio track over DTLS-SRTP, trimmed to the lines that
  *  matter here. The real thing is longer; nothing else in it is touched. */
@@ -195,5 +195,77 @@ describe("fromMsSdp", () => {
   it("undoes what toMsSdp did to the profile", () => {
     const round = fromMsSdp(toMsSdp(CHROME_OFFER));
     expect(round).toContain("m=audio 51234 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126");
+  });
+});
+
+/**
+ * The service's own renegotiation offer, trimmed to the lines this reads — measured against
+ * the tenant on 2026-08-05 while a colleague shared their screen (NATIVE-CALLING.md
+ * § 10.3a). The mids are its own: audio at 0, the shared screen at 3, data at 4.
+ */
+const SERVICE_OFFER = [
+  "v=0",
+  "o=- 0 0 IN IP4 127.0.0.1",
+  "t=0 0",
+  "m=audio 3478 RTP/SAVP 111",
+  "a=rtpmap:111 opus/48000/2",
+  "a=label:main-audio",
+  "a=mid:0",
+  "m=video 3481 RTP/SAVP 107",
+  "a=rtpmap:107 H264/90000",
+  "a=label:applicationsharing-video",
+  "a=mid:3",
+  "a=sendonly",
+  "a=x-ssrc-range:8313-8412",
+  "m=x-data 3480 RTP/SAVP 127",
+  "a=label:data",
+  "a=mid:4",
+  "",
+].join("\r\n");
+
+describe("the labels a section carries", () => {
+  it("reads one per mid out of the service's own offer", () => {
+    const labels = labelsByMid(SERVICE_OFFER);
+    expect(labels.get("0")).toBe("main-audio");
+    expect(labels.get("3")).toBe(SHARING_LABEL);
+    expect(labels.get("4")).toBe("data");
+    expect(labels.size).toBe(3);
+  });
+
+  it("finds nothing in an SDP that labels nothing, rather than guessing", () => {
+    expect(labelsByMid(CHROME_OFFER).size).toBe(0);
+  });
+
+  /**
+   * The bug this parameter exists for: a shared screen and a camera are both `m=video`, so a
+   * label chosen from the KIND calls somebody's screen `main-video` — and that label is what
+   * the service reads to tell the two apart.
+   */
+  it("puts the offer's own label back on an answer, not the one its kind implies", () => {
+    const answer = [
+      "v=0",
+      "o=- 0 0 IN IP4 127.0.0.1",
+      "t=0 0",
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+      "a=mid:0",
+      "m=video 9 UDP/TLS/RTP/SAVPF 107",
+      "a=mid:3",
+      "a=recvonly",
+      "",
+    ].join("\r\n");
+    const out = toMsSdp(answer, labelsByMid(SERVICE_OFFER));
+    expect(out).toContain("a=label:applicationsharing-video");
+    expect(out).not.toContain("a=label:main-video");
+    // And with no override the kind decides, which is right for a section we offer.
+    expect(toMsSdp(answer)).toContain("a=label:main-video");
+  });
+
+  it("never states a label twice, whichever way it was chosen", () => {
+    const already = ["m=video 9 UDP/TLS/RTP/SAVPF 107", "a=mid:3", "a=label:main-video", ""].join(
+      "\r\n",
+    );
+    const labels = new Map([["3", SHARING_LABEL]]);
+    const out = toMsSdp(already, labels);
+    expect(out.match(/a=label:/g)).toHaveLength(1);
   });
 });

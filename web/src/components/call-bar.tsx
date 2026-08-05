@@ -4,10 +4,14 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
   CallEnd01Icon,
   CallIcon,
+  ComputerScreenShareIcon,
   Mic01Icon,
   MicOff01Icon,
   UserGroupIcon,
+  Video01Icon,
+  VideoOffIcon,
 } from "@hugeicons/core-free-icons";
+import type { IconSvgElement } from "@hugeicons/react";
 import {
   callDurationLabel,
   callPhaseLabel,
@@ -18,6 +22,7 @@ import {
 } from "~/lib/call";
 import { useAppState, useController } from "./controller-context";
 import { Avatar } from "./avatar";
+import { CallVideoStage } from "./call-video";
 import { Button } from "./ui/button";
 
 /**
@@ -50,6 +55,10 @@ export function CallBar() {
   // click that focuses it, and a call is not a reason to stop being able to type.
   return (
     <div className="pointer-events-none fixed inset-x-3 bottom-24 z-[95] flex flex-col items-stretch gap-2 pb-[env(safe-area-inset-bottom)] sm:inset-x-auto sm:right-4 sm:items-end">
+      {/* The picture, ABOVE the bar and outside its AnimatePresence: it comes and goes on
+          its own timing — a screen starts and stops several times in one call — and the
+          controls must not move when it does. */}
+      <CallVideoStage />
       <AnimatePresence>
         {call && isLive(call) && <CallCard key="call" call={call} />}
         {/* A failure the user did not cause, and an ending they did not ask for, each
@@ -79,7 +88,14 @@ function CallCard(props: { call: ActiveCall }) {
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: reduce ? 0 : -8 }}
       transition={{ duration: 0.2, ease: "easeOut" }}
-      className="pointer-events-auto flex w-full items-center gap-3 rounded-2xl border border-border bg-card p-3 shadow-pop sm:w-80"
+      // Wider once the camera and the share buttons are there: four round controls beside a
+      // name do not fit 20rem, and what gives way is the name — a meeting called
+      // "Architecture guild" was drawn "Archit…", which is the one thing on this card the
+      // user cannot work out from context. The width changes at the same moment the buttons
+      // do, which is a transition the card already makes (Answer becomes mute and hang up).
+      className={`pointer-events-auto flex w-full items-center gap-3 rounded-2xl border border-border bg-card p-3 shadow-pop ${
+        call.can_send_media ? "sm:w-[26rem]" : "sm:w-80"
+      }`}
     >
       <span className="relative shrink-0">
         {/* A meeting is not a person, so it gets its own mark rather than a face
@@ -127,6 +143,30 @@ function CallCard(props: { call: ActiveCall }) {
             Answer
           </Button>
         )}
+        {/* The camera and the screen, and only where they would work: the service refuses
+            new media on a call that is not established, so a button drawn before then would
+            report a refusal the user could do nothing about. Each click is the consent for
+            that one action, and the browser asks its own permission under it. */}
+        {!ringing && call.can_send_media && (
+          <>
+            <SendToggle
+              testId="call-camera"
+              on={call.sending.includes("camera")}
+              onLabel="Turn the camera off"
+              offLabel="Turn the camera on"
+              icon={call.sending.includes("camera") ? VideoOffIcon : Video01Icon}
+              onToggle={(on) => void controller.setCameraOn(on)}
+            />
+            <SendToggle
+              testId="call-share"
+              on={call.sending.includes("screen")}
+              onLabel="Stop sharing the screen"
+              offLabel="Share the screen"
+              icon={ComputerScreenShareIcon}
+              onToggle={(on) => void controller.setScreenShareOn(on)}
+            />
+          </>
+        )}
         {!ringing && (
           <button
             type="button"
@@ -158,6 +198,41 @@ function CallCard(props: { call: ActiveCall }) {
         </button>
       </div>
     </motion.div>
+  );
+}
+
+/**
+ * One thing this machine can send, and whether it is sending it.
+ *
+ * The two share a component because they are one kind of control and one kind of promise: a
+ * click turns a capture on, the browser then asks its own permission, and the state comes
+ * back from the BACKEND rather than from this button — so two open pages, and a phone that
+ * reconnects mid-call, all draw the same thing.
+ */
+function SendToggle(props: {
+  testId: string;
+  on: boolean;
+  onLabel: string;
+  offLabel: string;
+  icon: IconSvgElement;
+  onToggle: (on: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={props.testId}
+      aria-label={props.on ? props.onLabel : props.offLabel}
+      aria-pressed={props.on}
+      title={props.on ? props.onLabel : props.offLabel}
+      onClick={() => props.onToggle(!props.on)}
+      className={`grid size-9 place-items-center rounded-full transition-colors ${
+        props.on
+          ? "bg-primary/15 text-primary hover:bg-primary/25"
+          : "bg-element text-text-dim hover:bg-accent hover:text-foreground"
+      }`}
+    >
+      <HugeiconsIcon icon={props.icon} className="size-4" strokeWidth={1.8} />
+    </button>
   );
 }
 
