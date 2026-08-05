@@ -33,4 +33,5 @@ pub mod teams_unfurl;
 pub mod trouter;
 pub mod trouter_events;
 pub mod store;
+pub mod tasks;
 pub mod update;
