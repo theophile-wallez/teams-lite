@@ -63,15 +63,15 @@ per-send or cached (§ 5.3).
 
 **Probe 2 — `examples/custom_emoji_reaction_probe.rs`.** `PUT
 …/messages/{id}/properties?name=emotions` with an arbitrary key naming an AMS object
-(`tlcustom-shipit-0-weu-d1-…`) on a message we posted in the sandbox, read the emotions
-snapshot back, then clear it with `value: 0`.
+(`tlcustom-https://…/v1/objects/…/views/imgo`) on a message we posted in the sandbox, read
+the emotions snapshot back, then clear it with `value: 0`.
 
-What it decides: whether § 7 exists at all, the accepted key length and character set,
-and what stock Teams draws for a key it does not know.
+What it decides: whether § 7 exists at all, the accepted key length and character set, and
+whether the key survives the round trip unchanged.
 
-**Neither probe can see the last thing:** what the user's own phone renders. After each
-run the user looks at the sandbox thread in stock Teams and reports it; the finding is
-written into the spec before the dependent code is built.
+**Neither probe can see the last thing:** what the user's own phone renders. That would
+take the user looking at the sandbox thread in stock Teams while a reaction is set. It has
+not happened, so the appearance is recorded below as unobserved rather than guessed at.
 
 ---
 
@@ -228,8 +228,13 @@ which is the one thing § 6 exists to prevent.
 
 If the emotions property accepts an arbitrary key:
 
-- The key names the art: `tlcustom-<name>-<amsId>`, or `tlcustom-<amsId>` if probe 2
-  finds a length cap. Reacting uploads the emoji first, the same way a send does.
+- The key names the art, and only the art: `tlcustom-<objectUrl>`. Reacting uploads the
+  emoji first, the same way a send does, and the key is minted from the object URL that
+  comes back — so a page can never mint one, and a toggle-off passes the existing key
+  back verbatim. The NAME cannot travel in the key: a name may hold digits and hyphens
+  (`blob-2`), an AMS id starts with one, and no character in the name charset could
+  separate them. Carrying the whole URL also hands a reader something complete to fetch,
+  since Teams rewrites the host it serves an object from.
 - `reactionEmoji` (`web/src/lib/teams-emoji.ts`) gains a branch for that prefix, and the
   chip draws the art through the same proxy as § 6. Every teams-lite reader sees the art
   in the reaction row.
@@ -335,6 +340,17 @@ Each of these is a deliberate difference, not an omission:
 6. **The Custom category wears teams-lite's mark**, there being no workspace icon.
 7. **Custom art in a stock Teams reaction row is impossible** (§ 2). Slack parity ends
    exactly there, and the UI says so rather than implying otherwise.
+8. **An alias to a Unicode emoji is not implemented.** Slack lets `:+1:` alias 🙂; here an
+   alias names another row of the pack and nothing else (`set_custom_emoji` refuses a
+   target the pack does not hold). A Unicode alias would need a second kind of row —
+   one holding a character rather than art — through the pack, the typeahead, the
+   substitution and the reaction key, to save typing an emoji the picker already offers.
+9. **A custom reaction is not offered with a highlight.** The key names the uploaded
+   object rather than the emoji, so the key on a message says nothing about WHICH of the
+   user's emoji made it: the quick row means "react with this one", and removing is done
+   from the chip, which hands its own key back. A chip's label is neutral for the same
+   reason — resolving a name from the reader's own pack would name their `:shipit:` over
+   somebody else's picture.
 
 ---
 
@@ -447,16 +463,17 @@ With `amsreferences: [id1, id2]`.
 
 ### Custom emoji reactions (probe 2)
 
-**Key acceptance:** An arbitrary emotion key shaped as `tlcustom-shipit-{ams_id}` was accepted (200 OK) and read back in `properties.emotions` as:
+**Key acceptance:** An arbitrary emotion key is accepted (200 OK) and read back in `properties.emotions`. Re-run on 2026-08-05 with the key the app really mints — `tlcustom-<the AMS object URL>`, 116 characters:
 ```json
-[{"key": "tlcustom-shipit-0-frc-d4-...", 
-  "users": [{"mri": "8:orgid:...", "time": ..., "value": "1785932382095"}]}]
+[{"key": "tlcustom-https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frc-d2-d37b…/views/imgo",
+  "users": [{"mri": "8:orgid:...", "time": ..., "value": "1785960295519"}]}]
 ```
+It comes back byte for byte, which the key shape depends on: the key IS the address of the art, so a key the service normalized or truncated would leave every reader with a URL that fetches nothing.
 
-**Length ceiling:** TO BE FILLED after probe 2 re-run.
+**Length ceiling:** none below **289 characters**, which was accepted and read back (`tlcustom-` + 280 characters). An object URL is about 100, so the shape has ~170 characters of headroom. No ceiling above that was looked for — there is nothing this feature would do with one.
 
-**Stock Teams appearance:** TO BE FILLED after probe 2 re-run — what the reaction row showed while the custom key was set.
+**Stock Teams appearance: not observed.** Nobody has looked at a stock Teams client while one of these keys was set, on any run of this probe. So what their reaction row draws in place of the art is unknown — likely the key as text, since their client renders a reaction from its own asset catalogue and has no fetch path, but that is a guess and is written here as one. The UI states only what is known: the art is drawn in teams-lite (§ 7).
 
-**Clear behavior:** `value: 0` leaves the entry in `properties.emotions` with our user's value set to `"0"`, which is the server-side shape of a cleared reaction.
+**Clear behavior:** `value: 0` leaves the entry in `properties.emotions` with our user's value set to `"0"`, which is the server-side shape of a cleared reaction. Re-confirmed on the same run.
 
-**Conclusion:** Custom emoji reactions are viable in teams-lite. Stock Teams clients will show the key as text (no art), which is acceptable degradation.
+**Conclusion:** Custom emoji reactions are viable in teams-lite. What a stock client shows instead is unmeasured, which is why the surface says what teams-lite does rather than what other clients do not.

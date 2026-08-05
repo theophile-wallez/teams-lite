@@ -34,7 +34,7 @@ function emojiImageError(file: Pick<File, "size" | "type">): string | null {
     return "Select a PNG, JPEG, GIF, or WebP image.";
   }
   if (file.size > EMOJI_MAX_BYTES) {
-    return "Select an image that is 128 KiB or smaller.";
+    return "Select an image that is 128 KB or smaller.";
   }
   return null;
 }

@@ -1940,7 +1940,8 @@ flag-jp 🇯🇵
 flag-kr 🇰🇷
 flag-ru 🇷🇺
 flag-us 🇺🇸`;
-/** Parsed shortcode pairs, lazy-evaluated on first access. */
+/** Parsed shortcode pairs. Split once when this module loads — the table is a few
+ *  hundred lines of two-word strings, so nothing is gained by deferring it. */
 export const unicodeShortcodes: ReadonlyArray<readonly [string, string]> = EMOJI_SHORTCODES.split(
   "\n",
 )

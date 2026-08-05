@@ -1125,10 +1125,11 @@ feature worth having: a local-only decoration would be a different, smaller feat
   may key on the upload host, but `teams_media::is_allowed_media_url` already covers that
   form. An AMS object can be re-referenced by a second message (200 OK), so the per-send
   upload is a choice rather than a necessity. Stock Teams draws them at text size, so
-  parity is real. `examples/custom_emoji_reaction_probe.rs` PUT an arbitrary emotion key
-  shaped as `tlcustom-shipit-{ams_id}` on a message in the sandbox thread — 200 OK, read
-  back in `properties.emotions`, and a 289-character key is accepted too. The probes are
-  pinned to the sandbox channel const, and the run commands are verbatim:
+  parity is real. `examples/custom_emoji_reaction_probe.rs` PUT the emotion key this app
+  really mints — `tlcustom-<the AMS object URL>`, 116 characters — on a message in the
+  sandbox thread: 200 OK, read back in `properties.emotions` BYTE FOR BYTE, cleared with
+  `value: 0`, and a 289-character key is accepted too. The probes are pinned to the sandbox
+  channel const, and the run commands are verbatim:
 
       . bin/broker-env.sh && teams_lite_export_broker_bus && \
         cargo run --example custom_emoji_send_probe
@@ -1162,11 +1163,24 @@ feature worth having: a local-only decoration would be a different, smaller feat
 - **Slack's limits, copied**: 128 KB, 512 px on a side, PNG/JPEG/GIF/WebP and never SVG,
   and **nothing re-encodes** — so an over-limit image is refused with a reason rather than
   scaled, because a GIF re-encode would kill the animation.
+- **A custom reaction's key IS the art's address**, and it carries nothing else:
+  `tlcustom-<objectUrl>`. The name cannot be in there — a name may hold digits and hyphens
+  (`blob-2`), an AMS id starts with one, and no character in the name charset could
+  separate the two, so a key spelling both could not be split back apart. Three things
+  follow, and each is pinned by `web/e2e/custom-emoji.spec.ts`: the PAGE never mints that
+  key (the object does not exist until the backend has uploaded the art, so `react` takes
+  `emoji` — the pack name — and mints the key from what the upload answered); a toggle-off
+  hands the EXISTING key back verbatim, with no upload and no re-mint; and a LABEL is
+  resolved locally or stated neutrally — the quick row knows the name it offered, a chip
+  says "custom emoji", because two people's `:shipit:` are two different pictures and the
+  art on the chip is theirs. Resolving a label from the reader's own pack is fine;
+  resolving ART locally never is.
 - **Custom art in a stock Teams REACTION row is impossible**, and this is the one place
   Slack parity ends: their client renders a reaction from its own asset catalogue and has
-  no fetch path. Say what teams-lite does instead (the emotion key names the AMS object,
-  and teams-lite readers see the art) and that the reaction surface tells the user other
-  Teams apps do not show the picture.
+  no fetch path. Both halves of the reaction surface say so — the quick row's custom band
+  and the picker's own footer. What a stock client draws INSTEAD has never been observed,
+  on any run of the probe, so neither the UI nor the spec claims it: they say the art is
+  drawn in teams-lite and stop there.
 - One sentence worth including because it will save the next reader an hour: `alias_of` is
   a plain string whose EMPTY value means "not an alias", so `??` is the wrong operator
   against it. That mistake shipped a broken typeahead once in this build.

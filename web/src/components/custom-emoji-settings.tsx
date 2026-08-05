@@ -17,12 +17,12 @@ import { Input } from "./ui/input";
 /**
  * The custom emoji pack, and the one place to remove an emoji or an alias.
  *
- * The rename itself is offered inline — the add-emoji dialog — which is right: it is
- * the surface that already lets the user add one. But emoji have to be FOUND again months
- * later, and the thing that was named is exactly what makes them hard to find — the user
- * would be searching for `:name:` Teams never had. So the list belongs in Settings, where
- * a decision made months ago can still be undone or replaced without hunting through
- * conversations for an emoji nobody remembers typing.
+ * ADDING one is a dialog, reached from the emoji picker and from the button here
+ * ({@link AddEmojiDialog}) — the picker being right because it is the surface that already
+ * offers the user their emoji. But emoji have to be FOUND again months later, and the name
+ * is exactly what makes one hard to find — the user would be searching for a `:name:` Teams
+ * never had. So the LIST belongs in Settings, where a decision made months ago can still be
+ * undone without hunting through conversations for an emoji nobody remembers typing.
  *
  * The art travels inside the message, so everybody in the thread sees it whatever client
  * they use — but the pack itself never leaves this machine, and that is load-bearing.
