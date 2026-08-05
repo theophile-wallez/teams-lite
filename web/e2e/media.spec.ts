@@ -171,6 +171,45 @@ test.describe("media (images + attachments)", () => {
     await expect(lightbox).toBeVisible();
   });
 
+  test("leaves the browser's own menu to the open picture", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    const thumb = await loadedThumb(page);
+    await thumb.click();
+    const lightbox = page.locator('dialog[data-testid="image-lightbox"][open]');
+    await expect(lightbox).toHaveAttribute("data-phase", "open");
+    const picture = lightbox.locator('[data-testid="image-lightbox-image"]');
+
+    // Watched in the CAPTURE phase, and its `defaultPrevented` read afterwards: the
+    // lightbox stops this event from travelling at all (that is the fix), so a
+    // bubble-phase listener would never see it — and the flag is live, so reading it
+    // once the dispatch is over is what says whether anything cancelled the menu.
+    await page.evaluate(() => {
+      const w = window as unknown as { ctx: Event | null };
+      w.ctx = null;
+      document.addEventListener("contextmenu", (e) => (w.ctx = e), true);
+    });
+    const box = (await picture.boundingBox())!;
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" });
+
+    // The picture keeps its own context menu — "Save image as…" is the whole point.
+    // The lightbox is portaled out of the message, but React propagates along its own
+    // tree, so without a stop the bubble's handler cancelled this and opened the
+    // message's actions menu behind the picture instead.
+    expect(
+      await page.evaluate(() => {
+        const seen = (window as unknown as { ctx: Event | null }).ctx;
+        return seen && {
+          tag: (seen.target as HTMLElement).tagName,
+          prevented: seen.defaultPrevented,
+        };
+      }),
+    ).toEqual({ tag: "IMG", prevented: false });
+    await expect(page.locator('[data-testid="action-reply"]')).toHaveCount(0);
+    await expect(lightbox).toBeVisible();
+  });
+
   test("zooms the open picture in and out with the wheel", async ({ page }) => {
     await gotoApp(page);
     await openByPalette(page, "Media Gallery");
