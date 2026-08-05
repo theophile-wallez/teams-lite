@@ -65,7 +65,8 @@ describe("taskDueLabel", () => {
     expect(taskDueLabel("2026-08-04", "2026-08-05")).toBe("Yesterday");
   });
   test("a far date is a date, and an absent one is nothing", () => {
-    expect(taskDueLabel("2026-12-24", "2026-08-05")).toContain("24");
+    expect(taskDueLabel("2026-12-24", "2026-08-05")).toBe("Dec 24");
+    expect(taskDueLabel("2026-10-15", "2026-08-05")).toBe("Oct 15");
     expect(taskDueLabel("", "2026-08-05")).toBe("");
   });
 });

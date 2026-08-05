@@ -107,11 +107,12 @@ export function taskDueLabel(dueDate: string, today: string): string {
   if (dueDate === tomorrowStr) return "Tomorrow";
   if (dueDate === yesterdayStr) return "Yesterday";
 
-  // Far date: format it with Intl so it reads in the user's locale. We construct the Date
-  // from the YYYY-MM-DD string at midnight UTC, which keeps the day number stable across
-  // timezones (the label cannot shift a day).
+  // Far date: format it with Intl so it reads in the user's locale. A due_date is a
+  // calendar day with no time component, so we parse as UTC and format in UTC — both
+  // ends speak the same zone, and the label renders identically everywhere on earth.
+  // Parsing UTC + formatting local would shift the day west of UTC.
   const date = new Date(dueDate + "T00:00:00Z");
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
 /** The href this task jumps to when clicked: the conversation or the mail it came from,
