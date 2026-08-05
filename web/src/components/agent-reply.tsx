@@ -56,11 +56,15 @@ import { RichContent } from "./rich-content";
  * sentence the model wrote and every file it read went past and was gone, which made the
  * most interesting part of a run the part nobody could read.
  *
- * **And it FOLDS when the answer starts.** The reasoning is how the answer was reached;
- * once the answer itself is arriving it is the answer that a reader wants the room for,
- * so the panel becomes one row naming what it holds — and opens again on a click. The
- * fold is automatic and the reader's own click wins over it from then on, because a panel
- * that folded under somebody who had just opened it would be fighting them.
+ * **And it FOLDS when the run ENDS, never while it is going.** The panel is open for as
+ * long as there is something arriving into it — the reasoning, the calls, and the answer
+ * being written beside them — because that whole stretch is the run a reader is watching.
+ * It used to fold the moment the first word of the answer arrived, which took the work
+ * away at the one moment it explained what was being written. Once the run is over the
+ * answer is all there is to make room for, so the panel becomes one row naming what it
+ * holds — and opens again on a click. The fold is automatic and the reader's own click
+ * wins over it from then on, because a panel that folded under somebody who had just
+ * opened it would be fighting them.
  *
  * The panel is an overlay like everything else here: the Teams message holds the answer
  * and never the reasoning, so the transcript goes when the run does. That is why it is
@@ -89,6 +93,20 @@ const TRANSCRIPT_MAX_HEIGHT = 168;
 /** How close to the bottom counts as "still following the run", in pixels. Anything
  *  above that is a reader who scrolled back, and the panel stops dragging them down. */
 const TRANSCRIPT_PIN_SLACK = 24;
+
+/**
+ * The curve the transcript opens and closes on: a strong ease-out.
+ *
+ * It moves fast first and settles, which is what makes a fold feel answered rather than
+ * played back — the built-in curves are too weak to read as either. The same curve
+ * carries the chevron, so the arrow and the rows are one movement and not two.
+ */
+const TRANSCRIPT_EASE = [0.23, 1, 0.32, 1] as const;
+
+/** How long the panel takes to open, and to close. Both stay well under the 300 ms a
+ *  movement in a UI has to finish inside to read as an answer rather than as a replay. */
+const TRANSCRIPT_OPEN_SECONDS = 0.26;
+const TRANSCRIPT_CLOSE_SECONDS = 0.18;
 
 /**
  * How long a finished run stays on screen after its last word is revealed.
@@ -317,9 +335,12 @@ export function AgentStoredTranscript(props: {
  * - **The header names the newest call only while the rows are folded.** Open, the rows
  *   say it better than a label can, and stating it twice makes the panel look like it is
  *   reporting two things.
- * - **The fold is automatic, once, and then the reader owns it.** Nothing re-folds a panel
- *   somebody opened — which is why the choice is the CALLER's to hold: this component is
- *   remounted when the run is let go, and again on every pass of the virtualized history.
+ * - **The fold is automatic ONCE — at the end of the run — and then the reader owns it.**
+ *   The panel stays open for as long as anything is arriving into it, because that is the
+ *   stretch a reader is watching; it closes when the run does, on the curve
+ *   {@link TRANSCRIPT_EASE} names. Nothing re-folds a panel somebody opened — which is why
+ *   the choice is the CALLER's to hold: this component is remounted when the run is let go,
+ *   and again on every pass of the virtualized history.
  * - **It outlives the run.** The same rows are drawn from the kept transcript once the
  *   overlay is gone (see {@link AgentStoredTranscript}), so a reply keeps its disclosure
  *   for as long as the page is open.
@@ -345,10 +366,10 @@ function TranscriptPanel(props: {
   const live = !!run && agentRunIsLive(run);
   const has = props.steps.length > 0;
   const waiting = live && run?.phase !== "writing";
-  // Folded from the moment the answer starts arriving, and folded on a run that is over —
-  // the answer is then all there is to make room for. The reader's own choice wins over
-  // both, which is what `open === null` leaves room for.
-  const open = has && (props.open ?? (live && run.text.trim() === ""));
+  // Open for the whole run, and folded once it is over — the answer is then all there is
+  // to make room for, and nothing is arriving into the panel any more. The reader's own
+  // choice wins over that, which is what `open === null` leaves room for.
+  const open = has && (props.open ?? live);
 
   const box = useRef<HTMLDivElement | null>(null);
   const following = useRef(true);
@@ -369,15 +390,25 @@ function TranscriptPanel(props: {
   // reveal runs in that component and never re-renders this one.
   useEffect(follow, [follow, props.steps.length]);
 
+  // The rows that were already there when the panel opened ride the panel's own animation;
+  // only a row that ARRIVES while it is open animates in of its own accord. Both at once
+  // is two animations for one event, which reads as a stutter — and on a fold re-opened
+  // over a long run it is a dozen of them.
+  const ridden = useRef(props.steps.length);
+  useEffect(() => {
+    if (!open) ridden.current = props.steps.length;
+  }, [open, props.steps.length]);
+
   if (!live && !has) return null;
 
   // What the header says, in the three cases that each answer a different question:
-  //   - open and live: what the run is doing, since the rows below say what it has done;
-  //   - folded but still thinking or working: the same, because those rows are out of
-  //     sight and a tool call the reader cannot see is a wait with no stated cause;
-  //   - folded while the answer arrives, or after it: what the fold HOLDS, which is what
-  //     a reader clicks it for. The caret at the end of the answer already says it is
-  //     being written, so the header does not spend its line saying it again.
+  //   - live, and open: what the run is doing, since the rows below say what it has done;
+  //   - live, folded by the reader, and still thinking or working: the same, because those
+  //     rows are out of sight and a tool call the reader cannot see is a wait with no
+  //     stated cause;
+  //   - folded by the reader while the answer arrives, or after the run: what the fold
+  //     HOLDS, which is what a reader clicks it for. The caret at the end of the answer
+  //     already says it is being written, so the header does not spend its line on that.
   const label =
     run && live && (open || waiting)
       ? open && run.phase === "working"
@@ -387,6 +418,39 @@ function TranscriptPanel(props: {
   // The last thought is the only one that can still be growing, so it is the only one
   // whose text is revealed rather than simply shown.
   const growing = lastThoughtIndex(props.steps);
+
+  // The collapse: the box's own height, and the words fading with it. Four things about
+  // that pair, and not one of them is Motion's to choose for us.
+  //
+  // The height carries the movement, because that IS the movement — a rail of text sliding
+  // out from under a chevron — and it is animated rather than transitioned because only
+  // Motion knows what `auto` measures to. The close is SHORTER than the open: opening is
+  // the reader asking to read something, closing is the app getting out of their way. The
+  // exit states its own timing inside `exit` rather than reading `open`, since an exiting
+  // child keeps the props of the last render it was in and would otherwise close on the
+  // opening curve. And the opacity is quicker than the height and led by it on the way in,
+  // so the rows are only legible inside a box with room for them: a cross-fade at full
+  // height is what makes one panel look like two.
+  const opening = reduce
+    ? { opacity: 1, transition: { duration: 0 } }
+    : {
+        opacity: 1,
+        height: "auto",
+        transition: {
+          height: { duration: TRANSCRIPT_OPEN_SECONDS, ease: TRANSCRIPT_EASE },
+          opacity: { duration: 0.16, ease: "linear", delay: 0.05 },
+        },
+      };
+  const closing = reduce
+    ? { opacity: 0, transition: { duration: 0 } }
+    : {
+        opacity: 0,
+        height: 0,
+        transition: {
+          height: { duration: TRANSCRIPT_CLOSE_SECONDS, ease: TRANSCRIPT_EASE },
+          opacity: { duration: 0.12, ease: "linear" },
+        },
+      };
 
   return (
     <div
@@ -422,7 +486,12 @@ function TranscriptPanel(props: {
               animate={{ rotate: open ? 90 : 0 }}
               initial={false}
               transition={
-                reduce ? { duration: 0 } : { duration: 0.18, ease: [0.2, 0.65, 0.3, 0.9] }
+                reduce
+                  ? { duration: 0 }
+                  : {
+                      duration: open ? TRANSCRIPT_OPEN_SECONDS : TRANSCRIPT_CLOSE_SECONDS,
+                      ease: TRANSCRIPT_EASE,
+                    }
               }
             >
               <HugeiconsIcon
@@ -455,9 +524,8 @@ function TranscriptPanel(props: {
           <motion.div
             key="steps"
             initial={reduce ? { opacity: 0 } : { opacity: 0, height: 0 }}
-            animate={reduce ? { opacity: 1 } : { opacity: 1, height: "auto" }}
-            exit={reduce ? { opacity: 0 } : { opacity: 0, height: 0 }}
-            transition={{ duration: 0.22, ease: [0.2, 0.65, 0.3, 0.9] }}
+            animate={opening}
+            exit={closing}
             className="overflow-hidden"
           >
             <div
@@ -490,7 +558,12 @@ function TranscriptPanel(props: {
                     onGrow={follow}
                   />
                 ) : (
-                  <AgentToolRow key={index} step={step} reduce={!!reduce} />
+                  <AgentToolRow
+                    key={index}
+                    step={step}
+                    reduce={!!reduce}
+                    entering={index >= ridden.current}
+                  />
                 ),
               )}
             </div>
@@ -540,16 +613,24 @@ function AgentThought(props: { text: string; live: boolean; onGrow: () => void }
  * A finished call keeps its row — the whole point of a transcript — and says so with a
  * tick, while the one in flight spins. The two states are what tells a reader whether the
  * wait they are in is this call's fault.
+ *
+ * `entering` is false for a row the panel opened WITH: it is then already where it belongs
+ * and the panel's own collapse is the animation (see {@link TranscriptPanel}).
  */
-function AgentToolRow(props: { step: Extract<AgentStep, { kind: "tool" }>; reduce: boolean }) {
+function AgentToolRow(props: {
+  step: Extract<AgentStep, { kind: "tool" }>;
+  reduce: boolean;
+  entering: boolean;
+}) {
   const { step } = props;
   return (
     <motion.span
       data-testid="agent-activity"
       data-done={step.done}
-      initial={props.reduce ? { opacity: 0 } : { opacity: 0, y: -3 }}
-      animate={props.reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
-      transition={{ duration: 0.18, ease: [0.2, 0.65, 0.3, 0.9] }}
+      // `false`: straight to where it belongs, with no animation of its own.
+      initial={!props.entering ? false : props.reduce ? { opacity: 0 } : { opacity: 0, y: -3 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={props.entering ? { duration: 0.18, ease: TRANSCRIPT_EASE } : { duration: 0 }}
       // `max-w-full` is load-bearing next to `self-start`: a flex item aligned to the
       // start is sized by its content, so a chip naming a long path would grow straight
       // through the bubble's edge instead of ellipsising inside it.

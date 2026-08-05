@@ -119,19 +119,27 @@ that surface together:
   through their account and a colleague sees their name on it — but they did not write
   it, and putting it beside the things they did write is the one place this app would be
   lying to the person it belongs to.
-- **The work is a transcript: it is KEPT while the run goes, and folded once the answer
-  arrives.** The reasoning streams into a panel above the answer, at the pace the answer
-  is revealed at, with a row per tool call in place — so a reader watches the run being
-  worked out. It used to be one 160-character line of reasoning and one tool chip, each
-  replaced by the next: every sentence the model wrote and every file it read went past
-  and was gone, which made the most interesting part of a run the part nobody could read.
-  Four things hold the panel up, and `web/e2e/agent.spec.ts` pins each: it is BOUNDED and
-  scrolls itself (it sits in a virtualized history, and an unbounded bubble would push the
-  conversation around a frame at a time), it follows the newest line only while the reader
-  has not scrolled back inside it, the fold is automatic ONCE and the reader's own click
-  wins from then on, and the header names the tool in flight only while the rows are folded
-  — open, the rows say it better. The reasoning is drawn as data, never through the Markdown
+- **The work is a transcript: it is OPEN for the whole run, and folded once the run ENDS.**
+  The reasoning streams into a panel above the answer, at the pace the answer is revealed
+  at, with a row per tool call in place — so a reader watches the run being worked out. It
+  used to be one 160-character line of reasoning and one tool chip, each replaced by the
+  next: every sentence the model wrote and every file it read went past and was gone, which
+  made the most interesting part of a run the part nobody could read. And it used to fold
+  itself the moment the first word of the answer arrived, which took the work away at the
+  one moment it explained what was being written — the panel now holds its room for as long
+  as anything is arriving into it, and closes when nothing is. Four things hold it up, and
+  `web/e2e/agent.spec.ts` pins each: it is BOUNDED and scrolls itself (it sits in a
+  virtualized history, and an unbounded bubble would push the conversation around a frame
+  at a time), it follows the newest line only while the reader has not scrolled back inside
+  it, the fold is automatic ONCE — at the END of the run — and the reader's own click wins
+  from then on, and the header names the tool in flight only while the rows are folded —
+  open, the rows say it better. The reasoning is drawn as data, never through the Markdown
   renderer: it is what the model said to itself, not this app's voice.
+  **The collapse itself is motion, and it is ONE movement**: the height on a strong
+  ease-out (`TRANSCRIPT_EASE`), the opacity quicker than the height and led by it, a close
+  shorter than the open, the chevron on the same curve, and a row already on screen when the
+  panel opens rides that animation instead of running its own — two animations for one event
+  read as a stutter.
 - **The transcript OUTLIVES the run, without ever becoming part of the message.** The
   overlay goes when the run ends and the Teams message takes its body back — but the
   reasoning exists nowhere else, so what this app watched is kept in the page

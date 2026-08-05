@@ -254,7 +254,9 @@ test.describe("The local agent's answer", () => {
     await expect(bubble).not.toContainText("via teams-lite");
   });
 
-  test("streams the whole transcript, then folds it under the answer", async ({ page }) => {
+  test("streams the whole transcript, holds it open for the run, then folds it", async ({
+    page,
+  }) => {
     await gotoApp(page);
     // Its own thread, named, for the same reason as the test above: this one counts the
     // rows of THE run on screen.
@@ -279,18 +281,35 @@ test.describe("The local agent's answer", () => {
       .toBeGreaterThanOrEqual(1);
     await expect(steps.first()).toContainText("Grep");
 
-    // The answer starts arriving and the panel folds itself into one row naming what it
-    // holds — the answer is what the reader wants the room for from here on.
+    // THE ANSWER STARTS ARRIVING AND THE PANEL STAYS OPEN. The work is what explains the
+    // words being written, so it keeps its room for as long as the run has anything to add
+    // to it. It used to fold on this exact frame, which took the reasoning away at the one
+    // moment it was worth reading.
+    const toggle = page.locator('[data-testid="agent-transcript-toggle"]');
     await expect(page.locator('[data-testid="agent-stream"][data-phase="writing"]')).toBeVisible({
       timeout: 20_000,
     });
+    await expect(transcript).toHaveAttribute("data-open", "true");
+    // Both calls are still on screen, with the reasoning around them, while the words of
+    // the answer arrive under it. Asserted here and counted in full further down: the run
+    // is a clock, and the last thought of this fixture is still being revealed at this
+    // frame.
+    await expect(steps).toHaveCount(2);
+    await expect(thoughts.first()).toContainText("CLAUDE.md");
+
+    // THE RUN ENDS, AND THE PANEL FOLDS ITSELF — once, into one row naming what it holds.
+    // Nothing is arriving into it any more, so the answer is what the reader wants the room
+    // for from here on. The overlay goes with it: the Teams message is the record again.
+    await expect(page.locator('[data-testid="agent-stream"]')).toHaveCount(0, { timeout: 20_000 });
     await expect(transcript).toHaveAttribute("data-open", "false");
-    const toggle = page.locator('[data-testid="agent-transcript-toggle"]');
     await expect(toggle).toContainText("Reasoning and 2 tool calls");
     await expect(steps).toHaveCount(0);
 
-    // It opens again on a click. The automatic fold never takes that back: a panel that
-    // re-folded under the reader who opened it would be fighting them.
+    // THE RUN IS OVER AND THE WORK IS NOT. It opens again on a click, and it is the whole
+    // run: the transcript is kept beside the message, in the same place, so nothing moved at
+    // the swap — the panel is remounted there, which is why the reader's fold is held per
+    // message rather than inside it. It is the only place the reasoning exists at all; the
+    // message carries the answer alone, which is why a reload leaves no panel.
     await toggle.click();
     await expect(transcript).toHaveAttribute("data-open", "true");
 
@@ -308,7 +327,7 @@ test.describe("The local agent's answer", () => {
 
     // The panel is BOUNDED and scrolls itself. It sits in a virtualized history, so a
     // transcript that grew without a ceiling would push the whole conversation around one
-    // frame at a time — and a reader following the run has to be left on its newest line.
+    // frame at a time — and a reader who opened it is left on its newest line.
     const box = page.locator('[data-testid="agent-transcript-steps"]');
     await expect(box).toHaveCSS("max-height", "168px");
     await expect(box).toHaveCSS("overflow-y", "auto");
@@ -327,24 +346,10 @@ test.describe("The local agent's answer", () => {
     // fixture rather than the behaviour.
     if (scroll?.scrolls) expect(scroll.gap).toBeLessThanOrEqual(24);
 
-    // THE RUN ENDS, AND THE WORK DOES NOT. The overlay goes — the Teams message is the
-    // record again — and the transcript is kept beside it, in the same place, with the fold
-    // the reader chose: the panel is remounted here, so a fold held inside it would have
-    // reset. It is the only place the reasoning exists at all; the message carries the
-    // answer alone, which is why a reload leaves no panel.
-    await expect(page.locator('[data-testid="agent-stream"]')).toHaveCount(0, { timeout: 20_000 });
+    // And the automatic fold never takes that click back: nothing re-folds a panel the
+    // reader opened.
+    await page.waitForTimeout(900);
     await expect(transcript).toHaveAttribute("data-open", "true");
-    await expect(steps).toHaveCount(2);
-    await expect(thoughts).toHaveCount(3);
-    await expect(thoughts.first()).toContainText("CLAUDE.md");
-
-    // And it folds again on a click, on the finished reply.
-    await page.locator('[data-testid="agent-transcript-toggle"]').click();
-    await expect(transcript).toHaveAttribute("data-open", "false");
-    await expect(page.locator('[data-testid="agent-transcript-toggle"]')).toContainText(
-      "Reasoning and 2 tool calls",
-    );
-    await expect(steps).toHaveCount(0);
   });
 
   test("answers nothing in a conversation nobody opted in", async ({ page }) => {
