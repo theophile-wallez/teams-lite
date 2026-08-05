@@ -10,6 +10,7 @@ import type { Locator, Page } from "@playwright/test";
  *  2. an inbound custom emoji is drawn from the message's OWN art, never from the pack;
  *  3. a code inside `<code>` and a code inside a reply quote both stay text;
  *  4. an emoji-only message renders jumbo;
+ *  4b. the reaction row offers the pack's own art, and the chip that lands IS that art;
  *  5. the `:` list offers custom emoji above the Unicode ones, and Enter inserts the chip;
  *  6. a taken name is refused with Slack's own sentence;
  *  7. delete asks twice, and the confirming label is "Delete Emoji";
@@ -225,6 +226,51 @@ test.describe("custom emoji", () => {
     expect(inlineBox).not.toBeNull();
     expect(jumboBox).not.toBeNull();
     expect(jumboBox!.height).toBeGreaterThan(inlineBox!.height * 2);
+  });
+
+  test("the reaction row offers the pack's art, and the chip that lands is that art", async ({
+    page,
+  }) => {
+    await openEmojiThread(page);
+
+    // A message of our own, so this test's reaction lands nowhere another one looks.
+    await page.keyboard.type(`react to me ${Date.now()}`);
+    const bubble = await sendAndAwaitEcho(page);
+
+    await bubble.hover();
+    await bubble.locator('[data-testid="message-actions"]').click();
+    const row = page.locator('[data-testid="menu-reaction-picker"]');
+    const option = row.locator('[data-testid="reaction-option-custom-shipit"]');
+
+    // The row draws the PACK's own art. It used to point an `<img>` at
+    // `/api/custom-emoji/<name>`, a route no server in this repo serves, so what a reader
+    // got was the literal `:shipit:` text inside a 28 px button.
+    await expect(option.locator("img")).toHaveAttribute("alt", ":shipit:");
+    // Once per picture: `ship` is an alias of `shipit`, and one of six slots spent on a
+    // second copy of the same art is a slot wasted.
+    await expect(row.locator('[data-testid="reaction-option-custom-ship"]')).toHaveCount(0);
+    await option.click();
+
+    // The chip's KEY names the AMS object the art was uploaded to. It used to name the
+    // emoji instead (`tlcustom-shipit`), which no reader could resolve — so everybody,
+    // the user included, was shown the fallback 👍 while the art was never uploaded at all.
+    const chip = bubble.locator('[data-testid^="reaction-chip-tlcustom-"]');
+    await expect(chip).toBeVisible();
+    expect(await chip.getAttribute("data-testid")).toContain("tlcustom-https://");
+    await expect(bubble.locator('[data-testid="reaction-chip-like"]')).toHaveCount(0);
+
+    // And the chip IS art, fetched through the media proxy: proxied bytes reach the DOM as
+    // a blob and never as their own URL, so a blob src is the proof that the key's URL went
+    // to `loadMedia` rather than into an `<img>` the browser fetched itself.
+    const art = chip.locator("img");
+    await expect(art).toHaveAttribute("src", /^blob:/);
+    await expect(art).not.toHaveAttribute("alt", "👍");
+
+    // The chip hands its own key back, verbatim — no second upload, no re-mint — and the
+    // reaction goes. It used to mint a DIFFERENT key here and clear one nobody had set,
+    // which left Teams holding the reaction while the local row dropped it.
+    await chip.click();
+    await expect(bubble.locator('[data-testid^="reaction-chip-tlcustom-"]')).toHaveCount(0);
   });
 
   test("the : list offers custom emoji above the Unicode ones, and Enter inserts the chip", async ({

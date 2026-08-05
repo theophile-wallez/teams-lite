@@ -194,6 +194,18 @@ export default function EmojiPicker(props: {
           <HugeiconsIcon icon={Add01Icon} strokeWidth={1.8} />
           Add Emoji
         </button>
+        {/* The same thing the quick row says above its own custom band, because this is
+            the other half of the same surface: the art is uploaded with the reaction, and
+            no other Teams client has a path to fetch it. Drawn only when the user HAS a
+            pack — with none there is no Custom category for the sentence to be about. */}
+        {customEmoji.length > 0 && (
+          <p
+            data-testid="custom-emoji-notice"
+            className="bg-bg-primary px-3 pb-2 text-center text-[11px] leading-tight text-text-dim"
+          >
+            Custom emoji are drawn in teams-lite only
+          </p>
+        )}
       </div>
       <AddEmojiDialog open={addDialogOpen} onClose={() => setAddDialogOpen(false)} />
     </>

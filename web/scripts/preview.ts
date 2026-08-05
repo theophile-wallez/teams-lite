@@ -1917,7 +1917,29 @@ if (import.meta.main) {
         await shot(`${out}-bubbles-dark.png`, '[data-testid="message-pane"]');
         await setTheme("light");
 
-        // The emoji picker with custom emoji, reached through a message's reaction menu.
+        // The reaction row, whose top band is the user's own emoji — the one reaction
+        // surface where the art is the pack's rather than a message's, and the one that
+        // says out loud that no other Teams client draws it.
+        await openMessageActions(page);
+        const reactionRow = '[data-testid="menu-reaction-picker"]';
+        await page.waitForSelector(`${reactionRow} [data-testid="reaction-option-custom-shipit"] img`);
+        await shot(`${out}-reactions-light.png`, reactionRow);
+        await setTheme("dark");
+        await shot(`${out}-reactions-dark.png`, reactionRow);
+        await setTheme("light");
+
+        // The chip that row leaves on the message: the art the KEY names, fetched back
+        // through the media proxy — what every reader of the thread sees.
+        await page
+          .locator(`${reactionRow} [data-testid="reaction-option-custom-shipit"]`)
+          .click();
+        await page.waitForSelector('[data-testid^="reaction-chip-tlcustom-"] img');
+        await shot(`${out}-reaction-chip-light.png`, '[data-testid="message-pane"]');
+        await setTheme("dark");
+        await shot(`${out}-reaction-chip-dark.png`, '[data-testid="message-pane"]');
+        await setTheme("light");
+
+        // The emoji picker with custom emoji, reached through the same menu.
         await openMessageActions(page);
         await openReactionPicker(page);
         // The pack's own category, which the picker only grows once the art has loaded — and
@@ -1935,7 +1957,7 @@ if (import.meta.main) {
         await shot(`${out}-picker-dark.png`, '[data-testid="emoji-picker"]');
         await setTheme("light");
 
-        // The Add Emoji row at the picker's foot.
+        // The Add Emoji row at the picker's foot, with the notice under it.
         await page.locator('[data-testid="add-emoji"]').click();
         await page.waitForSelector('[data-testid="add-emoji-dialog"]');
         await shot(`${out}-add-upload-light.png`, '[data-testid="add-emoji-dialog"]');
@@ -1963,7 +1985,8 @@ if (import.meta.main) {
 
         console.log(
           `[preview] wrote ` +
-            `${out}-{typeahead,bubbles,picker,add-upload,add-packs,settings}-{light,dark}.png`,
+            `${out}-{typeahead,bubbles,reactions,picker,add-upload,add-packs,` +
+            `reaction-chip,settings}-{light,dark}.png`,
         );
       },
       { deviceScaleFactor: dpr },
