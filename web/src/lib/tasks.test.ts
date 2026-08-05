@@ -14,8 +14,9 @@ describe("taskSections", () => {
       [task({ id: "a", state: "open" }), task({ id: "b", state: "suggested" })],
       "2026-08-05",
     );
-    expect(sections[0].key).toBe("suggested");
-    expect(sections[0].tasks.map((t) => t.id)).toEqual(["b"]);
+    const suggested = sections.find((s) => s.key === "suggested")!;
+    expect(sections.map((s) => s.key)[0]).toBe("suggested");
+    expect(suggested.tasks.map((t) => t.id)).toEqual(["b"]);
   });
 
   test("a task due today is in Today, and not repeated in Open", () => {
