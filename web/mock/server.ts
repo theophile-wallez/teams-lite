@@ -20,9 +20,10 @@
 //          | push_status | push_subscribe | push_unsubscribe | push_test
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | mail_mark_read
+//          | tasks | task_save | task_delete | tasks_scan
 // Events:  status | realtime_status | message | conversations_changed
 //          | channels_changed | typing | call | read_receipt
-//          | mail_folders_changed | mail_list_updated
+//          | mail_folders_changed | mail_list_updated | tasks_changed
 //
 // Run it (from the web/ directory):
 //   export PATH="$HOME/.bun/bin:$PATH"
@@ -5440,6 +5441,77 @@ function dispatch(method: string, params: unknown): unknown {
       return mockCalendarView(start, end, optionalStringList(params, "calendars"));
     }
 
+    // ---- tasks (the local list) --------------------------------------------
+
+    case "tasks":
+      return { tasks: mockTasks.slice().sort((a, b) => b.created_at - a.created_at) };
+
+    // Insert, or change only the fields the call names — one method for both, exactly
+    // like `Store::save_task`, so a client that ticks a task off restates nothing else
+    // and cannot overwrite a title with a stale copy. The refusals are the real ones:
+    // an unknown id, an insert with no title, a title patched to nothing, a state
+    // outside the four and a due date that is not a calendar day. They are what the
+    // panel's own error line has to be able to show.
+    case "task_save": {
+      const o = asObject(params);
+      const id = typeof o.id === "string" ? o.id : "";
+      const state = typeof o.state === "string" ? o.state : "";
+      if (state && !["suggested", "open", "done", "dismissed"].includes(state)) {
+        throw new Error(`unknown task state: ${state}`);
+      }
+      const dueDate = typeof o.due_date === "string" ? o.due_date : "";
+      if (dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+        throw new Error(`a due date is a calendar day (YYYY-MM-DD), not "${dueDate}"`);
+      }
+      const title = typeof o.title === "string" ? o.title.trim() : "";
+      if (id) {
+        const row = mockTasks.find((t) => t.id === id);
+        if (!row) throw new Error(`unknown task: ${id}`);
+        if (typeof o.title === "string" && title === "") {
+          throw new Error("a task needs a title");
+        }
+        if (title) row.title = title;
+        if (typeof o.body === "string") row.body = o.body;
+        if (typeof o.due_date === "string") row.due_date = dueDate;
+        if (state) {
+          row.state = state as MockTask["state"];
+          // `done_at` follows the state and is never set by a caller, so the two can
+          // never disagree.
+          row.done_at = state === "done" ? Date.now() : 0;
+        }
+        broadcast("tasks_changed", {});
+        return { task: row };
+      }
+      if (!title) throw new Error("a task needs a title");
+      const row = addMockTask({
+        title,
+        body: typeof o.body === "string" ? o.body : "",
+        state: (state || "open") as MockTask["state"],
+        due_date: dueDate,
+        source_conversation_id:
+          typeof o.source_conversation_id === "string" ? o.source_conversation_id : "",
+        source_message_id: typeof o.source_message_id === "string" ? o.source_message_id : "",
+        source_mail_id: typeof o.source_mail_id === "string" ? o.source_mail_id : "",
+        asked_by_mri: typeof o.asked_by_mri === "string" ? o.asked_by_mri : "",
+      });
+      broadcast("tasks_changed", {});
+      return { task: row };
+    }
+
+    // An id that names nothing is not an error — two open pages may delete the same row,
+    // and the second one is simply already done — so only a real deletion emits.
+    case "task_delete": {
+      const id = requireString(params, "id");
+      const index = mockTasks.findIndex((t) => t.id === id);
+      if (index < 0) return { deleted: false };
+      mockTasks.splice(index, 1);
+      broadcast("tasks_changed", {});
+      return { deleted: true };
+    }
+
+    case "tasks_scan":
+      return runMockTaskScan();
+
     default:
       throw new Error(`unknown method: ${method}`);
   }
@@ -6275,6 +6347,28 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         { status: 200 },
       );
     }
+    // Put the task list back to its seed, and arm the failure the panel's error line
+    // exists for. A spec MUST reset it afterwards (`{kind: "tasks", reset: true}`): one
+    // mock process serves the whole run, so a task accepted, ticked off or deleted in one
+    // spec is still in that state for every later one — and an armed `fail_once` turns
+    // the next spec's scan into an error nobody armed.
+    //
+    // `empty: true` clears the list outright, which is the only way to look at the "no
+    // tasks at all" line the panel draws instead of its sections.
+    if (body.kind === "tasks") {
+      mockScanFailsOnce = body.fail_once === true;
+      if (body.empty === true) {
+        mockTasks.length = 0;
+        mockTaskSeq = 0;
+      } else if (body.reset === true || body.fail_once !== true) {
+        seedTasks();
+      }
+      broadcast("tasks_changed", {});
+      return Response.json(
+        { ok: true, tasks: mockTasks.length, fail_once: mockScanFailsOnce },
+        { status: 200 },
+      );
+    }
     if (body.kind === "person_overrides" && body.clear === true) {
       const affected = [...personOverrides.keys()];
       personOverrides.clear();
@@ -6756,6 +6850,180 @@ function mockCalendarView(
   return { start, end, events };
 }
 
+// ---------------------------------------------------------------------------
+// Tasks — the local list, and a scan with no CLI behind it.
+// ---------------------------------------------------------------------------
+//
+// Mirrors `store::TaskRow` field for field, and the four RPCs in src/bin/server.rs. The
+// scan is the interesting half: the real one starts an agent CLI on the user's machine to
+// read what arrived since the last sweep, which is exactly what a mock must not do — so
+// this one waits a beat and writes two suggestions that cite seeded messages. That is
+// what makes the whole panel reviewable with no tenant, no CLI and nothing leaving the
+// machine.
+
+type MockTask = {
+  id: string;
+  title: string;
+  body: string;
+  state: "suggested" | "open" | "done" | "dismissed";
+  due_date: string;
+  source_conversation_id: string;
+  source_message_id: string;
+  source_mail_id: string;
+  asked_by_mri: string;
+  asked_by: string;
+  created_at: number;
+  done_at: number;
+};
+
+/** Newest first, exactly as `Store::tasks` orders them. */
+const mockTasks: MockTask[] = [];
+let mockTaskSeq = 0;
+
+/** How long a scan takes. Long enough that a capture (and a spec) can catch the button
+ *  mid-run, short enough that nothing waits on it. */
+const MOCK_SCAN_MS = Number(process.env.MOCK_SCAN_MS ?? 900);
+
+/** Make the NEXT scan fail, once — armed with `{kind: "tasks", fail_once: true}`. The
+ *  panel's error path is the half a page owns: a scan that could not run must say so
+ *  beside the button that was pressed, not vanish into a cue. */
+let mockScanFailsOnce = false;
+
+/** The refusal in the words the backend really uses when no CLI on the machine can be
+ *  told to hold no tools (see `task_scan_backend` in src/bin/server.rs). Provider-neutral,
+ *  like every other string in this feature. */
+const MOCK_SCAN_ERROR =
+  "no agent CLI on this machine can be started with an empty tool allowlist, so nothing was read";
+
+/** `YYYY-MM-DD`, `days` from today — the shape a due date is stored in. */
+function mockDueDate(days: number): string {
+  const day = new Date(mockToday().getFullYear(), mockToday().getMonth(), mockToday().getDate() + days);
+  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+}
+
+function addMockTask(task: Partial<MockTask> & { title: string }): MockTask {
+  mockTaskSeq += 1;
+  const row: MockTask = {
+    id: task.id ?? `task-${String(mockTaskSeq).padStart(3, "0")}`,
+    title: task.title,
+    body: task.body ?? "",
+    state: task.state ?? "open",
+    due_date: task.due_date ?? "",
+    source_conversation_id: task.source_conversation_id ?? "",
+    source_message_id: task.source_message_id ?? "",
+    source_mail_id: task.source_mail_id ?? "",
+    asked_by_mri: task.asked_by_mri ?? "",
+    asked_by: task.asked_by ?? "",
+    // Newest first is the list's own order, so a later seed is a newer task.
+    created_at: Date.now() - (20 - mockTaskSeq) * 60_000,
+    done_at: task.state === "done" ? Date.now() - 30 * 60_000 : 0,
+  };
+  mockTasks.push(row);
+  return row;
+}
+
+/** A handful of tasks in every state, each citing a fixture that really exists — so the
+ *  Source control on a row opens a thread the app can actually draw. */
+function seedTasks(): void {
+  mockTasks.length = 0;
+  mockTaskSeq = 0;
+  const ava = personFrom("Ava Thompson");
+  const liam = personFrom("Liam Nguyen");
+  const mia = personFrom("Mia Chen");
+  const noah = personFrom("Noah Kim");
+
+  addMockTask({
+    title: "Send the Q3 capacity numbers to finance",
+    body: "Asked in the 1:1 — they need them before the planning review.",
+    state: "open",
+    due_date: mockDueDate(-1), // overdue, which is what tints the chip
+    source_conversation_id: `19:1on1-${ava.mri.split(":").pop()}@unq.gbl.spaces`,
+    source_message_id: `19:1on1-${ava.mri.split(":").pop()}@unq.gbl.spaces#118`,
+    asked_by_mri: ava.mri,
+    asked_by: ava.name,
+  });
+  addMockTask({
+    title: "Review the deploy checklist before Thursday",
+    state: "open",
+    due_date: mockDueDate(0), // today
+    source_conversation_id: "19:platform-team-mock@thread.v2",
+    source_message_id: "19:platform-team-mock@thread.v2#119",
+    asked_by_mri: liam.mri,
+    asked_by: liam.name,
+  });
+  addMockTask({
+    title: "Reply to the vendor about the renewal quote",
+    state: "open",
+    due_date: mockDueDate(4),
+    source_mail_id: mailId("mf-inbox", 2),
+    asked_by: "Platform Digest",
+  });
+  addMockTask({
+    title: "Book a room for the design review",
+    state: "open",
+    source_conversation_id: "19:design-sync-mock@thread.v2",
+    asked_by_mri: mia.mri,
+    asked_by: mia.name,
+  });
+  addMockTask({
+    title: "Write up yesterday's incident timeline",
+    state: "done",
+    source_conversation_id: "19:incident-response-mock@thread.v2",
+    asked_by_mri: noah.mri,
+    asked_by: noah.name,
+  });
+  // One suggestion out of the box, so the panel shows the decision half without a scan.
+  addMockTask({
+    title: "Confirm the migration window with the datacentre",
+    body: "“Can you confirm the window on your side?”",
+    state: "suggested",
+    source_conversation_id: `19:1on1-${liam.mri.split(":").pop()}@unq.gbl.spaces`,
+    source_message_id: `19:1on1-${liam.mri.split(":").pop()}@unq.gbl.spaces#120`,
+    asked_by_mri: liam.mri,
+    asked_by: liam.name,
+  });
+}
+
+/** Sweep, the way the real one answers: how many suggestions it wrote. Two rows, both
+ *  citing seeded messages, and `tasks_changed` — which is what repaints every open page,
+ *  the one that pressed the button included. */
+function runMockTaskScan(): Promise<{ found: number }> {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      if (mockScanFailsOnce) {
+        // Disarmed by the attempt it fails, so what the user presses next is a retry that
+        // works — a button whose only offer cannot succeed is no way forward at all.
+        mockScanFailsOnce = false;
+        reject(new Error(MOCK_SCAN_ERROR));
+        return;
+      }
+      const emma = personFrom("Emma Rossi");
+      const mason = personFrom("Mason Lee");
+      addMockTask({
+        title: "Send Emma the migration runbook",
+        body: "“Could you send me the runbook when you get a minute?”",
+        state: "suggested",
+        due_date: mockDueDate(2),
+        source_conversation_id: `19:1on1-${emma.mri.split(":").pop()}@unq.gbl.spaces`,
+        source_message_id: `19:1on1-${emma.mri.split(":").pop()}@unq.gbl.spaces#120`,
+        asked_by_mri: emma.mri,
+        asked_by: emma.name,
+      });
+      addMockTask({
+        title: "Approve the on-call swap for next week",
+        body: "“Can you approve the swap before Friday?”",
+        state: "suggested",
+        source_conversation_id: "19:release-crew-mock@thread.v2",
+        source_message_id: "19:release-crew-mock@thread.v2#117",
+        asked_by_mri: mason.mri,
+        asked_by: mason.name,
+      });
+      broadcast("tasks_changed", {});
+      resolve({ found: 2 });
+    }, MOCK_SCAN_MS);
+  });
+}
+
 /** An optional array-of-strings param, empty when absent — mirrors the backend's
  *  `param_str_list`. */
 function optionalStringList(params: unknown, key: string): string[] {
@@ -6793,6 +7061,8 @@ seedMail();
 // Same for the calendar: fully deterministic given today's date, and it draws no
 // random numbers, so it cannot disturb any existing spec either.
 seedCalendar();
+// And the tasks, which cite the fixtures seeded above and draw no random numbers.
+seedTasks();
 
 const server = Bun.serve({
   port: PORT,

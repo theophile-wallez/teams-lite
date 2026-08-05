@@ -52,6 +52,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/ask --answer-with # "Answer with <agent>" on a message
 //   bun run web/scripts/preview.ts --out /tmp/mr --merge-request # review + approve a merge request
 //   bun run web/scripts/preview.ts --out /tmp/chat --chat-menu  # chat sections + the row's "…" menu
+//   bun run web/scripts/preview.ts --out /tmp/tasks --tasks     # the task panel, its scan and its failure
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -444,6 +445,23 @@ export async function openCalendarTab(page: Page): Promise<void> {
   await page.locator('[data-testid="tab-calendar"]').click();
   await page.waitForSelector('[data-testid="calendar-pane"]', { timeout: APP_READY_TIMEOUT_MS });
   await page.waitForSelector('[data-testid="calendar-event"]', { timeout: APP_READY_TIMEOUT_MS });
+}
+
+/**
+ * Open the task panel through its own control, and wait for the panel.
+ *
+ * Through the button rather than through a key, because that is the one way in a phone
+ * has — and it is the control the panel's whole layout claim hangs off: opening it must
+ * narrow the message pane rather than cover it.
+ *
+ * Idempotent, so a caller may ask twice: the toggle states whether it is open
+ * (`data-open`), which is read here rather than assumed.
+ */
+export async function openTasksPanel(page: Page): Promise<void> {
+  const panel = page.locator('[data-testid="tasks-panel"]');
+  if (await panel.isVisible()) return;
+  await page.locator('[data-testid="tasks-toggle"]').click();
+  await panel.waitFor({ state: "visible", timeout: APP_READY_TIMEOUT_MS });
 }
 
 /**
@@ -1814,6 +1832,100 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-{week,week-all,details,month,day,agenda,weekends,mobile,` +
           `mobile-details}-light.png and ${out}-{month,week}-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // The task panel: its sections beside an open thread, a suggestion's Accept/Dismiss, a
+  // scan mid-run, the failure a scan reports beside the button, the empty list and the
+  // full-screen sheet a phone gets. Nothing here starts an agent CLI — the mock waits a
+  // beat and writes two suggestions (see `runMockTaskScan`), which is what makes the whole
+  // surface reviewable with nothing leaving the machine.
+  if (args.includes("--tasks")) {
+    await withPreview(async ({ page, shot, setTheme, emit }) => {
+      // The calendar first, and only so its events are in state: the Today section reads
+      // the events this app has ALREADY synced and asks for none of its own, so a session
+      // that never opened that tab has an honestly empty half.
+      await openCalendarTab(page);
+      await page.locator('[data-testid="tab-chats"]').click();
+      // A thread under it, because the panel's layout claim is about this pair: on a wide
+      // screen it narrows the message pane instead of covering it.
+      await openFirstConversation(page);
+      await openTasksPanel(page);
+      await page.waitForSelector('[data-testid="task-row"]');
+      await shot(`${out}-light.png`);
+      await shot(`${out}-panel-light.png`, '[data-testid="tasks-panel"]');
+      await setTheme("dark");
+      await shot(`${out}-panel-dark.png`, '[data-testid="tasks-panel"]');
+      await setTheme("light");
+
+      // A SUGGESTION on its own: Accept, Dismiss and no checkbox, because it is a decision
+      // rather than a task yet.
+      const suggested = '[data-testid="task-row"][data-task-state="suggested"]';
+      await shot(`${out}-suggested-light.png`, suggested);
+
+      // Accepted, and ticked off — the two writes the panel makes, each drawn only once the
+      // backend has answered with the row. Waiting on the state the row reports is what
+      // makes this a check rather than a screenshot: a write that never landed would time
+      // out here instead of being captured as if it had worked.
+      const firstOpen = page.locator('[data-testid="task-row"][data-task-state="open"]').first();
+      const ticked = await firstOpen.getAttribute("data-task-id");
+      await page.locator(`${suggested} [data-testid="task-accept"]`).first().click();
+      await page.waitForSelector(suggested, { state: "detached" });
+      await page.locator(`[data-task-id="${ticked}"] [data-testid="task-check"]`).click();
+      await page.waitForSelector(`[data-task-id="${ticked}"][data-task-state="done"]`);
+      await shot(`${out}-accepted-light.png`, '[data-testid="tasks-panel"]');
+      // Back to the seeded list, so the scan below writes into a known state.
+      await emit({ kind: "tasks", reset: true });
+      await page.waitForSelector(suggested);
+
+      // Mid-scan: the button says it is working and is the only thing that moves.
+      await page.locator('[data-testid="tasks-scan"]').click();
+      await page.waitForSelector('[data-testid="tasks-scan"][data-running="true"]');
+      await shot(`${out}-scanning-light.png`, '[data-testid="tasks-panel"]');
+      // And what it answered: the count, plus the suggestions it wrote.
+      await page.waitForSelector('[data-testid="tasks-scan-found"]');
+      await shot(`${out}-scanned-light.png`, '[data-testid="tasks-panel"]');
+
+      // A phone: the same panel as a full-screen sheet, over the conversation rather than
+      // beside it, since a 22rem column on a 390px screen is the screen.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(400);
+      await shot(`${out}-mobile-light.png`);
+      await page.setViewportSize(VIEWPORT);
+      await page.waitForTimeout(400);
+
+      // Nothing on the plate at all — the one line the panel draws instead of its
+      // sections. Today's meetings stay under it, because "no tasks" and "you are in three
+      // meetings" are both true.
+      await emit({ kind: "tasks", empty: true });
+      await page.waitForSelector('[data-testid="tasks-empty"]');
+      await shot(`${out}-empty-light.png`, '[data-testid="tasks-panel"]');
+      await emit({ kind: "tasks", reset: true });
+      await page.waitForSelector('[data-testid="task-row"]');
+
+      // A scan that could NOT run, captured LAST because the sentence stays on screen
+      // until the next scan answers. This is what the panel's error line exists for: it
+      // sits beside the button that was pressed, because the status line at the foot of
+      // the sidebar is eleven pixels a phone never shows.
+      await emit({ kind: "tasks", fail_once: true });
+      await page.locator('[data-testid="tasks-scan"]').click();
+      await page.waitForSelector('[data-testid="tasks-scan-error"]');
+      await shot(`${out}-error-light.png`, '[data-testid="tasks-panel"]');
+      await setTheme("dark");
+      await shot(`${out}-error-dark.png`, '[data-testid="tasks-panel"]');
+      await setTheme("light");
+
+      // Leave the shared mock as it was found: one process serves the whole run, and a
+      // list left mid-scan (or an armed failure) would sit in every later capture.
+      await emit({ kind: "tasks", reset: true });
+      console.log(
+        `[preview] wrote ${out}-light.png, ${out}-panel-{light,dark}.png, ` +
+          `${out}-suggested-light.png, ${out}-accepted-light.png, ` +
+          `${out}-{scanning,scanned}-light.png, ` +
+          `${out}-mobile-light.png, ${out}-empty-light.png and ` +
+          `${out}-error-{light,dark}.png`,
       );
     });
     process.exit(0);

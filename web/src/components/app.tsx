@@ -6,6 +6,7 @@ import { ConversationList } from "./conversation-list";
 import { MailPane } from "./mail-pane";
 import { MessagePane } from "./message-pane";
 import { SettingsPane } from "./settings-pane";
+import { TasksPanel } from "./tasks-panel";
 import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
 import { CallBar } from "./call-bar";
@@ -41,6 +42,7 @@ function AppInner() {
   const replyingTo = useAppState((s) => s.replyingTo);
   const mailMessages = useAppState((s) => s.mailMessages);
   const openMailId = useAppState((s) => s.openMailId);
+  const tasksPanelOpen = useAppState((s) => s.tasksPanelOpen);
   const { chats: visibleChats } = useChatSections();
 
   // The URL is the source of truth for what is open. `/` means nothing; `/c/<id>` a
@@ -162,10 +164,42 @@ function AppInner() {
           controller.cancelReply();
           return;
         }
+        // The panel is the thing on top — literally so on a phone, where it covers the
+        // conversation — so Escape puts it away before it walks back to the list.
+        if (tasksPanelOpen) {
+          controller.closeTasksPanel();
+          return;
+        }
         if (routeConversationId || routeMailId || onSettings) {
           goToList();
           return;
         }
+      }
+
+      // From here down every shortcut is a BARE key, so two things disqualify the event
+      // first, and one guard does it for all of them. Focus in a field means the user is
+      // writing — `isContentEditable` is what covers the composer, which is a TipTap
+      // contenteditable rather than a <textarea>, and which the list keys below only
+      // avoided because a composer exists on the routes they already skip. And a held
+      // modifier means a shortcut: Cmd+K must never also move the selection up.
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      ) {
+        return;
+      }
+      if (hasModifier(e) || e.altKey) return;
+
+      // The task panel. Bare, because every modifier pair worth having is taken —
+      // Cmd+K/Cmd+P are this app's, Cmd+T/Cmd+Shift+T/Cmd+J the browser's, Cmd+B bold in
+      // the composer — and above the list keys, because the panel is meant to be read
+      // BESIDE an open thread. The one exception is the calendar, whose pane binds `t` to
+      // "today" on its own listener: two handlers on one key would fire both.
+      if ((e.key === "t" || e.key === "T") && sidebarTab !== "calendar") {
+        e.preventDefault();
+        controller.toggleTasksPanel();
+        return;
       }
 
       // List navigation is only active when nothing is open and we're not on
@@ -174,11 +208,6 @@ function AppInner() {
       // the Channels tab is a tree and uses click/Tab focus.
       if (routeConversationId || routeMailId || onSettings) return;
       if (sidebarTab === "channels" || sidebarTab === "calendar") return;
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
-      // A held modifier means a shortcut, not list navigation: Cmd+K must never also
-      // move the selection up.
-      if (hasModifier(e) || e.altKey) return;
 
       if (e.key === "ArrowDown" || e.key === "j") {
         e.preventDefault();
@@ -197,6 +226,7 @@ function AppInner() {
       paletteOpen,
       settingsOpen,
       replyingTo,
+      tasksPanelOpen,
       routeConversationId,
       routeMailId,
       onSettings,
@@ -256,6 +286,11 @@ function AppInner() {
             <MessagePane onBack={goToList} />
           )}
         </div>
+
+        {/* After the detail pane and inside the same flex row, which is what makes the
+            wide shape narrow the message pane rather than cover it. Below `md` it is a
+            full-screen sheet of its own (z-40, over the pane's z-20). */}
+        {tasksPanelOpen && <TasksPanel />}
       </div>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
