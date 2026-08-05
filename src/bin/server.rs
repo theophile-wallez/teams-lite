@@ -94,8 +94,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_models, agent_policy, auth, calendar, calling, mail, push, push_policy, retry,
-    sender_icon, store, teams,
+    agent, agent_models, agent_policy, auth, calendar, calling, graph_time, mail, push,
+    push_policy, retry, sender_icon, store, tasks, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
@@ -319,7 +319,15 @@ const OUTWARD_METHODS: [&str; 14] = [
 /// `call_subscribe` ASKS the meeting's media server for somebody's stream and publishes
 /// nothing at all about the user — so it is not outward, and it is not open either: it acts
 /// on the one call this machine holds.
-const MACHINE_METHODS: [&str; 16] = [
+///
+/// The three `task*` writes are here for the `set_person_name` reason and not because they
+/// write to the store: it is WHAT they write. A client that could set `asked_by_mri` could
+/// make one colleague appear to have asked for something another colleague never mentioned
+/// — in the panel, and in the notification a phone draws from it. `tasks_scan` is gated for
+/// a reason of its own: it starts an agent CLI on this machine, and that run costs money.
+/// Reading the list back stays open, like every other read: it holds the user's own rows
+/// and no secret.
+const MACHINE_METHODS: [&str; 19] = [
     "repair_broker",
     "update_download",
     "update_apply",
@@ -336,6 +344,9 @@ const MACHINE_METHODS: [&str; 16] = [
     "agent_set_unrestricted",
     "set_person_name",
     "set_person_avatar",
+    "task_save",
+    "task_delete",
+    "tasks_scan",
 ];
 
 /// What a {@link MACHINE_METHODS} entry actually does to the machine, for its
@@ -379,6 +390,13 @@ fn machine_effect(method: &str) -> &'static str {
         "call_subscribe" => {
             "asks the meeting's media server to send this machine somebody's camera or \
              shared screen"
+        }
+        "task_save" | "task_delete" => {
+            "changes the user's own task list on this machine, and who it says asked them"
+        }
+        "tasks_scan" => {
+            "starts an agent CLI on this machine to read the user's messages and mail for \
+             what they were asked to do"
         }
         // Unreachable while the two lists agree; the test below pins that they do.
         _ => "changes this machine",
@@ -4754,6 +4772,45 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(calendar_view_json(&events, &start, &end))
         }
 
+        // ---- tasks (LOCAL: nothing here reaches Teams, see src/tasks.rs) ----
+        //
+        // What the user owes, extracted from the messages and mail this store already
+        // holds. None of the four is in `OUTWARD_METHODS`, and that is the honest
+        // classification rather than a convenience: nothing here posts, publishes a read
+        // state, notifies a person or writes to a tracker. The three WRITES are
+        // `MACHINE_METHODS` entries all the same — two of them decide who this app says
+        // asked the user for something, and the third starts a program here.
+
+        // The whole list, newest first. Open like every other read: it returns the user's
+        // own rows and no secret.
+        "tasks" => Ok(json!({ "tasks": ctx.store()?.tasks()? })),
+
+        // Insert a task, or change the fields this call names on one that exists (see
+        // `Store::save_task`). One method for both, so a client that ticks a task off
+        // restates nothing else and cannot overwrite a title with a stale copy.
+        "task_save" => {
+            let write = task_write_from_params(params)?;
+            let row = ctx.store()?.save_task(&write, now_ms())?;
+            ctx.emit("tasks_changed", json!({}));
+            Ok(json!({ "task": row }))
+        }
+
+        // Drop a task for good. An id that names none is not an error — two open pages may
+        // delete the same row, and the second one is simply already done — so only a real
+        // deletion emits.
+        "task_delete" => {
+            let id = param_str(params, "id")?;
+            let deleted = ctx.store()?.delete_task(&id)?;
+            if deleted {
+                ctx.emit("tasks_changed", json!({}));
+            }
+            Ok(json!({ "deleted": deleted }))
+        }
+
+        // Sweep once, now, because the user asked. It runs an agent that holds no tools
+        // at all (see `task_scan_request`) and answers how many suggestions it wrote.
+        "tasks_scan" => Ok(json!({ "found": run_task_scan(ctx).await? })),
+
         other => anyhow::bail!("unknown method: {other}"),
     }
 }
@@ -7141,6 +7198,215 @@ fn agent_status_json(store: &Store) -> Result<Value> {
 }
 
 // ---------------------------------------------------------------------------
+// The task scan (see `teams_lite::tasks` and the `tasks` note in src/store.rs)
+//
+// One sweep of the messages and mail that arrived since the last one, read by an agent
+// that holds NO tools, and written back as `suggested` rows the user accepts or refuses.
+// Nothing here reaches Teams: the whole feature is local, and the only thing it spends
+// is one agent run.
+// ---------------------------------------------------------------------------
+
+/// The four states a task moves through. Checked here rather than in the store, whose
+/// column is plain text: an RPC is the one door a state comes in by.
+const TASK_STATES: [&str; 4] = ["suggested", "open", "done", "dismissed"];
+
+/// The `TaskWrite` a `task_save` call names, with the two values a client can spell
+/// wrong checked first.
+///
+/// Every field is optional and an absent one stays `None`, which is what tells
+/// [`Store::save_task`] to leave that column alone — a client that ticks a task off
+/// restates nothing else. The state and the day are checked in the shape
+/// [`tasks::parse_extraction`] checks them, because a client is no more trusted than a
+/// model: a state outside the four would sit in the store as a row the panel cannot
+/// group, and a due date that is not a day would mis-sort against every other one.
+fn task_write_from_params(params: &Value) -> Result<store::TaskWrite> {
+    let field = |key: &str| params.get(key).and_then(Value::as_str).map(String::from);
+    let state = field("state");
+    let due_date = field("due_date");
+
+    if let Some(state) = state.as_deref() {
+        anyhow::ensure!(
+            TASK_STATES.contains(&state),
+            "{state:?} is not a task state ({})",
+            TASK_STATES.join(", ")
+        );
+    }
+    if let Some(due_date) = due_date.as_deref() {
+        // Empty is how the column spells "no day", so clearing one is legitimate.
+        anyhow::ensure!(
+            due_date.is_empty() || tasks::is_iso_date(due_date),
+            "{due_date:?} is not a day (YYYY-MM-DD, or empty for none)"
+        );
+    }
+
+    Ok(store::TaskWrite {
+        id: field("id"),
+        title: field("title"),
+        body: field("body"),
+        state,
+        due_date,
+        source_conversation_id: field("source_conversation_id"),
+        source_message_id: field("source_message_id"),
+        source_mail_id: field("source_mail_id"),
+        asked_by_mri: field("asked_by_mri"),
+    })
+}
+
+/// What this scan should ask a model about, or `None` when the answer is nothing.
+///
+/// Two outcomes need no run at all, and BOTH record where the scan now stands — the
+/// watermark is the only thing that stops a window being read again:
+///
+/// - A store that has never scanned answers `(0, "")`: "nothing has been looked at",
+///   which on a real store is years and 11 739 messages back. Walking that backlog would
+///   cost one agent run per 60 candidates on history nobody asked about, so the watermark
+///   is PLANTED at `now` and the first scan covers what arrives from here. Whether to skip
+///   a backlog is a decision about WHEN to scan, which is why the store deliberately
+///   leaves it to this caller.
+/// - A sweep that accepted no candidate still reports how far it READ, and that is not
+///   always nothing: a window whose rows all pass the SQL cut and are all refused by
+///   [`tasks::looks_actionable`] yields no candidate and a real end (see
+///   [`store::TaskCandidates`]), so a scan that left the watermark alone would read that
+///   same barren window for ever with everything past it unreachable. A sweep that truly
+///   read no rows reports `0` / `""`, which the setter keeps as they are.
+fn task_scan_sweep(store: &Store, now_ms: i64) -> Result<Option<store::TaskCandidates>> {
+    let (compose_time, received) = store.task_scan_watermark()?;
+    if compose_time == 0 && received.is_empty() {
+        store.set_task_scan_watermark(now_ms, &graph_time::from_epoch_ms(now_ms))?;
+        return Ok(None);
+    }
+    let found = store.task_candidates(compose_time, &received, tasks::MAX_CANDIDATES)?;
+    if found.candidates.is_empty() {
+        store.set_task_scan_watermark(found.newest_compose_time, &found.newest_received)?;
+        return Ok(None);
+    }
+    Ok(Some(found))
+}
+
+/// Everything a scan run needs: the candidates as its prompt, and no tools at all.
+///
+/// The permissions are an EMPTY allowlist rather than the user's stored one
+/// ([`agent::permissions_from_settings`]): no files, no MCP servers, no shell. `agent.rs`
+/// documents that as a legitimate choice — an agent that only talks — and it is the whole
+/// security story for a run whose prompt is a colleague's words. It resumes no session
+/// either: a scan is one window of candidates, not a follow-up to anything.
+///
+/// The provider is the machine's default one, so this run uses whichever CLI the user
+/// chose for a surface with room for one, and the model they picked for it.
+fn task_scan_request(store: &Store, candidates: &[tasks::Candidate]) -> Result<agent::Request> {
+    let backend = agent_policy::default_backend(
+        store.get_setting(agent_policy::SETTING_DEFAULT_PROVIDER)?.as_deref(),
+    );
+    Ok(agent::Request {
+        backend,
+        prompt: tasks::build_prompt(candidates),
+        system_prompt: tasks::SYSTEM.to_string(),
+        resume_session: None,
+        workspace: agent::default_workspace(),
+        permissions: agent::Permissions::Granted(Vec::new()),
+        model: agent_policy::Providers::parse(
+            store.get_setting(agent_policy::SETTING_PROVIDERS)?.as_deref(),
+        )
+        .model(backend.name),
+    })
+}
+
+/// Read one run's answer back into the store: the tasks it found, and then the window.
+///
+/// The ORDER is the rule. A parse failure propagates before anything is written, so a
+/// run whose answer was prose leaves both the table and the watermark exactly as they
+/// were and the next scan reads those candidates again — advancing on a failure would
+/// lose that window for good (see the [`tasks`] module doc). An empty list is not a
+/// failure: "nothing was asked of the user here" is an answer, and it advances the
+/// watermark, or a window the model correctly found nothing in would be re-read for ever.
+///
+/// The watermark comes from what the SWEEP examined rather than from what was accepted:
+/// a candidate the model passed over was still read.
+fn record_task_scan(
+    store: &Store,
+    found: &store::TaskCandidates,
+    answer: &str,
+    now_ms: i64,
+) -> Result<usize> {
+    let extracted = tasks::parse_extraction(answer, &found.candidates)?;
+
+    let mut written = 0;
+    for task in &extracted {
+        // `parse_extraction` drops a source the model invented, so this always names one.
+        let Some(candidate) = found.candidates.iter().find(|c| c.id == task.source_id) else {
+            continue;
+        };
+        let (conversation_id, message_id, mail_id) = match &candidate.kind {
+            tasks::CandidateKind::Message { conversation_id } => {
+                (conversation_id.clone(), candidate.id.clone(), String::new())
+            }
+            // A mail names its sender by SMTP address and not by an mri, so there is no
+            // mri to record — `asked_by` then falls back to the name the mail carried.
+            tasks::CandidateKind::Mail => (String::new(), String::new(), candidate.id.clone()),
+        };
+        let write = store::TaskWrite {
+            // `suggested`: the panel offers it, and one click accepts or refuses. An
+            // extraction never asserts that the user owes something.
+            state: Some("suggested".to_string()),
+            title: Some(task.title.clone()),
+            due_date: Some(task.due_date.clone().unwrap_or_default()),
+            source_conversation_id: Some(conversation_id),
+            source_message_id: Some(message_id),
+            source_mail_id: Some(mail_id),
+            asked_by_mri: Some(candidate.author_mri.clone()),
+            ..store::TaskWrite::default()
+        };
+        // A row that would not insert stops the whole record, watermark included, exactly
+        // as a bad answer does: the window is then swept again, and the rows already
+        // written are not offered twice because `task_candidates` skips a source that has
+        // already produced a task.
+        store.save_task(&write, now_ms)?;
+        written += 1;
+    }
+
+    store.set_task_scan_watermark(found.newest_compose_time, &found.newest_received)?;
+    Ok(written)
+}
+
+/// Sweep once: the candidates since the watermark, one agent run, the tasks it found.
+///
+/// Returns how many were written, which is what the button that asked for it reports.
+/// Nothing schedules this — a scan happens because the user pressed something.
+///
+/// Read-only is refused HERE and not only at the dispatch gate, for the reason
+/// [`publish_presence`] and `deliver_push` refuse before the network: a scan spends an
+/// agent run and inserts rows into the list the user's own app draws, and a screenshot
+/// backend must do neither — however it came to be called.
+async fn run_task_scan(ctx: &Ctx) -> Result<usize> {
+    anyhow::ensure!(!read_only(), "read-only mode: this backend never scans for tasks");
+    let store = ctx.store()?;
+    // Nothing that looks like an ask has arrived: no run, and the sweep has already
+    // recorded how far it read.
+    let Some(found) = task_scan_sweep(&store, now_ms())? else {
+        return Ok(0);
+    };
+
+    let request = task_scan_request(&store, &found.candidates)?;
+    // The progress channel is required by `agent::run` and nothing here reads it: a scan
+    // is not drawn being written, unlike a reply in a thread.
+    let (progress, _watch) = tokio::sync::watch::channel(agent::Progress::default());
+    let outcome = agent::run(&request, &progress).await?;
+
+    let written = record_task_scan(&store, &found, &outcome.text, now_ms())?;
+    eprintln!(
+        "[tasks] {} scanned {} candidates, found {written}",
+        request.backend.name,
+        found.candidates.len()
+    );
+    // Only a real change emits, so a scan that found nothing does not spin every open
+    // page's refresh.
+    if written > 0 {
+        ctx.emit("tasks_changed", json!({}));
+    }
+    Ok(written)
+}
+
+// ---------------------------------------------------------------------------
 // Audio calling (see `teams_lite::calling` and NATIVE-CALLING.md)
 //
 // The backend signals and the browser carries the audio. That split is not an
@@ -9030,6 +9296,284 @@ mod tests {
         // a user reading a refusal about the wrong subject.
         for method in MACHINE_METHODS {
             assert_ne!(machine_effect(method), "changes this machine", "{method} has no phrase");
+        }
+    }
+
+    // ---- tasks (nothing here reaches Teams; see src/tasks.rs) --------------------
+
+    /// Reading the user's own list needs no token; changing it does. The two writes are
+    /// gated for the reason `set_person_name` is — a client that could set
+    /// `asked_by_mri` could make one colleague appear to have asked what another never
+    /// mentioned — and the scan for a reason of its own: it starts a program here.
+    #[test]
+    fn the_task_writes_are_machine_methods_and_the_read_is_open() {
+        assert_eq!(write_class("tasks"), None, "reading the user's own list needs no token");
+        for method in ["task_save", "task_delete", "tasks_scan"] {
+            assert_eq!(
+                write_class(method),
+                Some(WriteClass::Machine),
+                "{method} must be gated: it attributes a task to a colleague, or starts a \
+                 process here"
+            );
+            assert!(machine_effect(method).len() > "changes this machine".len(), "{method}");
+        }
+    }
+
+    /// A read-only backend refuses all three at the gate — and the scan refuses on its
+    /// own account too, because a scan started from anything other than a click would not
+    /// pass that gate. It spends an agent run and inserts rows the user's own app draws:
+    /// the reason [`publish_presence`] and `deliver_push` also check before the network.
+    #[test]
+    fn a_read_only_backend_refuses_to_change_the_task_list() {
+        for method in ["task_save", "task_delete", "tasks_scan"] {
+            let err = check_write_allowed(method, &json!({ "write_token": "tok" }), None)
+                .expect_err("read-only must refuse");
+            assert!(err.contains("read-only"), "{method}: {err}");
+        }
+        let code = include_str!("server.rs");
+        let code = code.split("#[cfg(test)]").next().unwrap_or(code);
+        let body = code
+            .split("async fn run_task_scan")
+            .nth(1)
+            .expect("run_task_scan")
+            .split("\n}")
+            .next()
+            .expect("the body ends");
+        assert!(
+            body.contains("read_only()"),
+            "run_task_scan no longer refuses read-only itself, so a caller that does not \
+             pass the dispatch gate would spend a run and write rows"
+        );
+    }
+
+    /// The whole feature is local. `OUTWARD_METHODS` means "posts as the user", and a
+    /// task list posts nothing, publishes no read state and notifies nobody.
+    #[test]
+    fn no_task_method_is_outward_facing() {
+        for method in ["tasks", "task_save", "task_delete", "tasks_scan"] {
+            assert!(
+                !OUTWARD_METHODS.contains(&method),
+                "{method} posts nothing to Teams and must not claim to"
+            );
+        }
+    }
+
+    /// A client is no more trusted than a model: the two values the panel can spell
+    /// wrong are checked at the RPC, in the shape `tasks::parse_extraction` checks them.
+    #[test]
+    fn a_task_write_refuses_a_state_and_a_day_it_does_not_know() {
+        for state in ["suggested", "open", "done", "dismissed"] {
+            let write = task_write_from_params(&json!({ "state": state })).expect(state);
+            assert_eq!(write.state.as_deref(), Some(state));
+        }
+        for refused in ["Done", "archived", "", "open "] {
+            assert!(
+                task_write_from_params(&json!({ "state": refused })).is_err(),
+                "{refused:?} is not one of the four states"
+            );
+        }
+        // A cleared due date is the empty string, because that is how the column spells
+        // "no day" — every other shape is refused rather than stored and mis-sorted.
+        for day in ["2026-08-12", ""] {
+            assert!(task_write_from_params(&json!({ "due_date": day })).is_ok(), "{day:?}");
+        }
+        for refused in ["next friday", "2026-8-1", "2026-08-12T00:00:00Z", "12/08/2026"] {
+            assert!(
+                task_write_from_params(&json!({ "due_date": refused })).is_err(),
+                "{refused:?} is not a day"
+            );
+        }
+    }
+
+    /// Every field the panel sends, and nothing invented: an absent field stays `None`,
+    /// which is what tells `Store::save_task` to leave that column alone.
+    #[test]
+    fn a_task_write_names_only_the_fields_it_was_given() {
+        let empty = task_write_from_params(&json!({})).unwrap();
+        assert_eq!(empty.id, None);
+        assert_eq!(empty.title, None);
+        assert_eq!(empty.state, None);
+        assert_eq!(empty.asked_by_mri, None);
+
+        let full = task_write_from_params(&json!({
+            "id": "t1",
+            "title": "Review the deployment doc",
+            "body": "from Lucas",
+            "state": "open",
+            "due_date": "2026-08-12",
+            "source_conversation_id": "19:c@thread.v2",
+            "source_message_id": "m1",
+            "source_mail_id": "",
+            "asked_by_mri": "8:orgid:abc",
+        }))
+        .unwrap();
+        assert_eq!(full.id.as_deref(), Some("t1"));
+        assert_eq!(full.title.as_deref(), Some("Review the deployment doc"));
+        assert_eq!(full.body.as_deref(), Some("from Lucas"));
+        assert_eq!(full.due_date.as_deref(), Some("2026-08-12"));
+        assert_eq!(full.source_conversation_id.as_deref(), Some("19:c@thread.v2"));
+        assert_eq!(full.source_message_id.as_deref(), Some("m1"));
+        assert_eq!(full.asked_by_mri.as_deref(), Some("8:orgid:abc"));
+    }
+
+    /// The scan's agent holds NO tools — no files, no MCP servers, no shell. That empty
+    /// allowlist is the whole security story for a run whose prompt is a colleague's
+    /// words, so it is pinned rather than left to a settings lookup.
+    #[test]
+    fn the_scan_agent_holds_no_tools_and_resumes_no_session() {
+        let store = Store::open_in_memory().unwrap();
+        let request = task_scan_request(&store, &[scan_candidate("m1")]).unwrap();
+        assert_eq!(request.permissions, agent::Permissions::Granted(Vec::new()));
+        assert_eq!(request.resume_session, None, "a scan is its own window, never a follow-up");
+        assert!(request.system_prompt.contains("DATA"), "the candidates must be marked as data");
+        assert!(request.prompt.contains("m1"), "the model must be able to cite the source");
+    }
+
+    /// An answer that could not be read costs the window nothing: no task is written and
+    /// the watermark stays where it was, so the next scan reads those candidates again.
+    /// Advancing on a failure would lose them for good.
+    #[test]
+    fn a_scan_that_could_not_be_read_writes_nothing_and_leaves_the_watermark() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_task_scan_watermark(1000, "2026-08-01T00:00:00Z").unwrap();
+        let found = store::TaskCandidates {
+            candidates: vec![scan_candidate("m1")],
+            newest_compose_time: 9000,
+            newest_received: "2026-08-05T00:00:00Z".into(),
+        };
+        assert!(record_task_scan(&store, &found, "sorry, I found nothing", 42).is_err());
+        assert!(store.tasks().unwrap().is_empty(), "a failed run must write no task");
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (1000, "2026-08-01T00:00:00Z".to_string()),
+            "a failed run must leave the window unscanned"
+        );
+    }
+
+    /// An empty list is a legitimate answer — nothing was asked of the user in that
+    /// window — so it DOES advance the watermark. Without that, a window the model
+    /// correctly found nothing in would be re-read for ever.
+    #[test]
+    fn a_scan_that_found_nothing_still_advances_the_watermark() {
+        let store = Store::open_in_memory().unwrap();
+        let found = store::TaskCandidates {
+            candidates: vec![scan_candidate("m1")],
+            newest_compose_time: 9000,
+            newest_received: "2026-08-05T00:00:00Z".into(),
+        };
+        assert_eq!(record_task_scan(&store, &found, r#"{"tasks":[]}"#, 42).unwrap(), 0);
+        assert!(store.tasks().unwrap().is_empty());
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (9000, "2026-08-05T00:00:00Z".to_string()),
+            "the window was read, so it must never be read again"
+        );
+    }
+
+    /// What a found task carries: `suggested`, so the panel offers it rather than
+    /// asserting it, the source it was cited from, and who asked. A mail names its
+    /// sender by SMTP address, so it fills the mail id and no mri.
+    #[test]
+    fn a_found_task_is_suggested_and_cites_the_source_it_came_from() {
+        let store = Store::open_in_memory().unwrap();
+        let mut mail = scan_candidate("AAMkAGI=");
+        mail.kind = tasks::CandidateKind::Mail;
+        mail.author_mri = String::new();
+        let found = store::TaskCandidates {
+            candidates: vec![scan_candidate("m1"), mail],
+            newest_compose_time: 9000,
+            newest_received: "2026-08-05T00:00:00Z".into(),
+        };
+        let answer = r#"{"tasks":[
+            {"source_id":"m1","title":"Review the doc","due_date":"2026-08-12"},
+            {"source_id":"AAMkAGI=","title":"Answer the audit mail"}
+        ]}"#;
+        assert_eq!(record_task_scan(&store, &found, answer, 42).unwrap(), 2);
+
+        let rows = store.tasks().unwrap();
+        assert_eq!(rows.len(), 2);
+        let from_message = rows.iter().find(|r| r.title == "Review the doc").expect("the message");
+        assert_eq!(from_message.state, "suggested");
+        assert_eq!(from_message.due_date, "2026-08-12");
+        assert_eq!(from_message.source_conversation_id, "19:c@thread.v2");
+        assert_eq!(from_message.source_message_id, "m1");
+        assert_eq!(from_message.source_mail_id, "");
+        assert_eq!(from_message.asked_by_mri, "8:orgid:abc");
+
+        let from_mail = rows.iter().find(|r| r.title == "Answer the audit mail").expect("the mail");
+        assert_eq!(from_mail.source_mail_id, "AAMkAGI=");
+        assert_eq!(from_mail.source_conversation_id, "");
+        assert_eq!(from_mail.source_message_id, "");
+        assert_eq!(from_mail.asked_by_mri, "", "a mail names its sender by address, not by mri");
+    }
+
+    /// A store that has never scanned is one whose backlog is years deep — 11 739
+    /// messages on this tenant. The first press covers what arrives from NOW, so the
+    /// watermark is planted and no run is spent walking history 60 candidates at a time.
+    #[test]
+    fn a_fresh_store_plants_the_watermark_rather_than_reading_the_backlog() {
+        let store = Store::open_in_memory().unwrap();
+        let now = 1_785_000_000_000;
+        assert!(task_scan_sweep(&store, now).unwrap().is_none(), "a fresh store scans nothing");
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (now, "2026-07-25T17:20:00Z".to_string()),
+            "both halves are planted, or the mail backlog is read anyway"
+        );
+    }
+
+    /// A window can be read whole and yield NO candidate: the SQL cut is coarser than
+    /// `looks_actionable` on purpose, and a run of replies quoting one message that says
+    /// "please" is exactly that (the quote is stripped before the authority reads it). The
+    /// sweep still reports how far it read, and recording that is what carries the scan
+    /// past the window — otherwise it is re-read for ever, with everything newer than it
+    /// unreachable and no symptom to see.
+    #[test]
+    fn a_window_that_yields_no_candidate_is_still_marked_as_read() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_task_scan_watermark(1000, "2026-08-01T00:00:00Z").unwrap();
+        let quoting = Message {
+            id: "m1".into(),
+            conversation_id: "19:c@thread.v2".into(),
+            seq: 1,
+            compose_time: 9000,
+            sender: "Lucas Silva".into(),
+            sender_mri: "8:orgid:abc".into(),
+            // The ask is only in the QUOTE, so the SQL cut admits the row and
+            // `plain_text_from_html` leaves the authority nothing to accept.
+            content: "<blockquote itemtype=\"http://schema.skype.com/Reply\">please review the \
+                      doc</blockquote><p>done, thanks</p>"
+                .into(),
+            attachments: "[]".into(),
+            reactions: "[]".into(),
+            message_type: String::new(),
+            system_event: String::new(),
+            thread_root_id: String::new(),
+            thread_subject: String::new(),
+            deleted: false,
+            mentions: "[]".into(),
+        };
+        store.insert_message(&quoting).unwrap();
+
+        assert!(task_scan_sweep(&store, 20_000).unwrap().is_none(), "nothing to ask a model");
+        assert_eq!(
+            store.task_scan_watermark().unwrap().0,
+            9000,
+            "the row was read, so the window must never be swept again"
+        );
+    }
+
+    /// One candidate, message-shaped, for the scan tests above.
+    fn scan_candidate(id: &str) -> tasks::Candidate {
+        tasks::Candidate {
+            id: id.to_string(),
+            kind: tasks::CandidateKind::Message {
+                conversation_id: "19:c@thread.v2".to_string(),
+            },
+            author: "Lucas Silva".to_string(),
+            author_mri: "8:orgid:abc".to_string(),
+            when: "2026-08-05T09:00:00Z".to_string(),
+            text: "can you review the deployment doc before friday".to_string(),
         }
     }
 

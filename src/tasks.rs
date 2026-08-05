@@ -283,7 +283,11 @@ fn extract_fenced_json(text: &str) -> Option<&str> {
 }
 
 /// Check if a string is exactly YYYY-MM-DD (10 chars).
-fn is_iso_date(s: &str) -> bool {
+///
+/// Public because a CLIENT is no more trusted than a model: the `task_save` RPC checks a
+/// due date the panel sends with this same function, so the column can hold only one
+/// shape however a row got there.
+pub fn is_iso_date(s: &str) -> bool {
     if s.len() != 10 {
         return false;
     }
