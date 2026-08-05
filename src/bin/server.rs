@@ -7161,7 +7161,7 @@ impl Ctx {
             );
             // Acknowledge it, or the service re-sends the answer until it gives up.
             if let Some(url) = acknowledgement
-                && let Err(e) = self.post_call_signal(&url, &json!({ "payload": {} })).await
+                && let Err(e) = self.post_call_signal(&url, &json!({})).await
             {
                 eprintln!("[calling] could not acknowledge the answer: {e:#}");
             }
@@ -7306,7 +7306,7 @@ impl Ctx {
                 .and_then(|call| call.links.keep_alive().map(str::to_string))
         };
         let Some(url) = url else { return };
-        if let Err(e) = self.post_call_signal(&url, &json!({ "payload": {} })).await {
+        if let Err(e) = self.post_call_signal(&url, &json!({})).await {
             eprintln!("[calling] the keep-alive did not reach the service: {e:#}");
         }
     }

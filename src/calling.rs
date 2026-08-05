@@ -512,50 +512,48 @@ pub fn invitation_payload(
 ) -> Value {
     let recipients: Vec<Value> = to.iter().map(|id| json!({ "id": id })).collect();
     json!({
-        "payload": {
-            "conversationRequest": {
-                // "Delta" is what the web client sends: send me roster changes, not
-                // the whole roster every time.
-                "roster": {
-                    "type": "Delta",
-                    "rosterUpdate": callbacks.link(paths::CONVERSATION_ROSTER_UPDATE),
-                },
-                "properties": {
-                    "enableGroupCallEventMessages": true,
-                },
-                "links": {
-                    "conversationEnd": callbacks.link(paths::CONVERSATION_END),
-                    "conversationUpdate": callbacks.link(paths::CONVERSATION_UPDATE),
-                    "localParticipantUpdate":
-                        callbacks.link(paths::CONVERSATION_LOCAL_PARTICIPANT_UPDATE),
-                    "addParticipantSuccess":
-                        callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_SUCCESS),
-                    "addParticipantFailure":
-                        callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_FAILURE),
-                    "addModalitySuccess":
-                        callbacks.link(paths::CONVERSATION_ADD_MODALITY_SUCCESS),
-                    "addModalityFailure":
-                        callbacks.link(paths::CONVERSATION_ADD_MODALITY_FAILURE),
-                    "confirmUnmute": callbacks.link(paths::CONVERSATION_CONFIRM_UNMUTE),
-                    "receiveMessage": callbacks.link(paths::CONVERSATION_RECEIVE_MESSAGE),
-                },
+        "conversationRequest": {
+            // "Delta" is what the web client sends: send me roster changes, not
+            // the whole roster every time.
+            "roster": {
+                "type": "Delta",
+                "rosterUpdate": callbacks.link(paths::CONVERSATION_ROSTER_UPDATE),
             },
-            "participants": { "from": local.json(), "to": recipients },
-            // The thread the call belongs to. Without it the call exists but belongs
-            // to no conversation, and nobody in the thread sees that it happened.
-            "groupChat": thread_id.map(|t| json!({ "threadId": t, "messageId": null })),
-            "callInvitation": {
-                "callModalities": [MODALITY_AUDIO],
-                "links": {
-                    "progress": callbacks.link(paths::CALL_PROGRESS),
-                    "mediaAnswer": callbacks.link(paths::CALL_MEDIA_ANSWER),
-                    "acceptance": callbacks.link(paths::CALL_ACCEPTANCE),
-                    "redirection": callbacks.link(paths::CALL_REDIRECTION),
-                    "end": callbacks.link(paths::CALL_END),
-                },
-                "mediaContent": offer.json(),
+            "properties": {
+                "enableGroupCallEventMessages": true,
             },
-        }
+            "links": {
+                "conversationEnd": callbacks.link(paths::CONVERSATION_END),
+                "conversationUpdate": callbacks.link(paths::CONVERSATION_UPDATE),
+                "localParticipantUpdate":
+                    callbacks.link(paths::CONVERSATION_LOCAL_PARTICIPANT_UPDATE),
+                "addParticipantSuccess":
+                    callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_SUCCESS),
+                "addParticipantFailure":
+                    callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_FAILURE),
+                "addModalitySuccess":
+                    callbacks.link(paths::CONVERSATION_ADD_MODALITY_SUCCESS),
+                "addModalityFailure":
+                    callbacks.link(paths::CONVERSATION_ADD_MODALITY_FAILURE),
+                "confirmUnmute": callbacks.link(paths::CONVERSATION_CONFIRM_UNMUTE),
+                "receiveMessage": callbacks.link(paths::CONVERSATION_RECEIVE_MESSAGE),
+            },
+        },
+        "participants": { "from": local.json(), "to": recipients },
+        // The thread the call belongs to. Without it the call exists but belongs
+        // to no conversation, and nobody in the thread sees that it happened.
+        "groupChat": thread_id.map(|t| json!({ "threadId": t, "messageId": null })),
+        "callInvitation": {
+            "callModalities": [MODALITY_AUDIO],
+            "links": {
+                "progress": callbacks.link(paths::CALL_PROGRESS),
+                "mediaAnswer": callbacks.link(paths::CALL_MEDIA_ANSWER),
+                "acceptance": callbacks.link(paths::CALL_ACCEPTANCE),
+                "redirection": callbacks.link(paths::CALL_REDIRECTION),
+                "end": callbacks.link(paths::CALL_END),
+            },
+            "mediaContent": offer.json(),
+        },
     })
 }
 
@@ -567,18 +565,16 @@ pub fn acceptance_payload(
     callbacks: &CallbackBase,
 ) -> Value {
     json!({
-        "payload": {
-            "callAcceptance": {
-                "sender": local.json(),
-                "acceptedCallModalities": [MODALITY_AUDIO],
-                "links": {
-                    "mediaRenegotiation": callbacks.link(paths::CALL_MEDIA_RENEGOTIATION),
-                    "transfer": callbacks.link(paths::CALL_TRANSFER),
-                    "replacement": callbacks.link(paths::CALL_REPLACEMENT),
-                    "end": callbacks.link(paths::CALL_END),
-                },
-                "mediaContent": answer.json(),
-            }
+        "callAcceptance": {
+            "sender": local.json(),
+            "acceptedCallModalities": [MODALITY_AUDIO],
+            "links": {
+                "mediaRenegotiation": callbacks.link(paths::CALL_MEDIA_RENEGOTIATION),
+                "transfer": callbacks.link(paths::CALL_TRANSFER),
+                "replacement": callbacks.link(paths::CALL_REPLACEMENT),
+                "end": callbacks.link(paths::CALL_END),
+            },
+            "mediaContent": answer.json(),
         }
     })
 }
@@ -591,15 +587,13 @@ pub fn media_answer_payload(
     callbacks: &CallbackBase,
 ) -> Value {
     json!({
-        "payload": {
-            "mediaAnswer": {
-                "sender": local.json(),
-                "callModalities": [MODALITY_AUDIO],
-                "links": {
-                    "mediaAcknowledgement": callbacks.link(paths::CALL_MEDIA_ACKNOWLEDGEMENT),
-                },
-                "mediaContent": answer.json(),
-            }
+        "mediaAnswer": {
+            "sender": local.json(),
+            "callModalities": [MODALITY_AUDIO],
+            "links": {
+                "mediaAcknowledgement": callbacks.link(paths::CALL_MEDIA_ACKNOWLEDGEMENT),
+            },
+            "mediaContent": answer.json(),
         }
     })
 }
@@ -607,14 +601,12 @@ pub fn media_answer_payload(
 /// Build the body that ends our leg of a call.
 pub fn hangup_payload(local: &LocalParticipant) -> Value {
     json!({
-        "payload": {
-            "callEnd": {
-                "sender": local.json(),
-                // 0 is "the user hung up" — the ordinary ending, and the only one
-                // this app ever reports about itself.
-                "code": 0,
-                "phrase": "CallEndReasonHangup",
-            }
+        "callEnd": {
+            "sender": local.json(),
+            // 0 is "the user hung up" — the ordinary ending, and the only one
+            // this app ever reports about itself.
+            "code": 0,
+            "phrase": "CallEndReasonHangup",
         }
     })
 }
@@ -622,12 +614,10 @@ pub fn hangup_payload(local: &LocalParticipant) -> Value {
 /// Build the body that refuses an incoming call.
 pub fn rejection_payload(local: &LocalParticipant) -> Value {
     json!({
-        "payload": {
-            "callRejection": {
-                "sender": local.json(),
-                "code": 603,
-                "phrase": "Decline",
-            }
+        "callRejection": {
+            "sender": local.json(),
+            "code": 603,
+            "phrase": "Decline",
         }
     })
 }
@@ -639,12 +629,10 @@ pub fn rejection_payload(local: &LocalParticipant) -> Value {
 /// what draws the crossed-out microphone next to our name in their client.
 pub fn mute_payload(local: &LocalParticipant, muted: bool) -> Value {
     json!({
-        "payload": {
-            "muteUnmute": {
-                "sender": local.json(),
-                "muted": muted,
-                "scope": "Myself",
-            }
+        "muteUnmute": {
+            "sender": local.json(),
+            "muted": muted,
+            "scope": "Myself",
         }
     })
 }
@@ -876,7 +864,7 @@ pub fn join_payload(
     if let Some(info) = meeting.meeting_info() {
         payload["meetingInfo"] = info;
     }
-    json!({ "payload": payload })
+    payload
 }
 
 /// The conversation a join landed in: where it lives, and what may be done to it.
@@ -940,27 +928,25 @@ pub fn add_audio_payload(
     callbacks: &CallbackBase,
 ) -> Value {
     json!({
-        "payload": {
-            "participants": { "from": local.json() },
-            "capabilities": Value::Null,
-            "endpointCapabilities": 0,
-            "callInvitation": {
-                "callModalities": [MODALITY_AUDIO],
-                "links": {
-                    "progress": callbacks.link(paths::CALL_PROGRESS),
-                    "mediaAnswer": callbacks.link(paths::CALL_MEDIA_ANSWER),
-                    "acceptance": callbacks.link(paths::CALL_ACCEPTANCE),
-                    "redirection": callbacks.link(paths::CALL_REDIRECTION),
-                    "end": callbacks.link(paths::CALL_END),
-                },
-                "mediaContent": offer.json(),
-            },
+        "participants": { "from": local.json() },
+        "capabilities": Value::Null,
+        "endpointCapabilities": 0,
+        "callInvitation": {
+            "callModalities": [MODALITY_AUDIO],
             "links": {
-                "addModalitySuccess": callbacks.link(paths::CONVERSATION_ADD_MODALITY_SUCCESS),
-                "addModalityFailure": callbacks.link(paths::CONVERSATION_ADD_MODALITY_FAILURE),
+                "progress": callbacks.link(paths::CALL_PROGRESS),
+                "mediaAnswer": callbacks.link(paths::CALL_MEDIA_ANSWER),
+                "acceptance": callbacks.link(paths::CALL_ACCEPTANCE),
+                "redirection": callbacks.link(paths::CALL_REDIRECTION),
+                "end": callbacks.link(paths::CALL_END),
             },
-            "debugContent": { "causeId": callbacks.cause_id },
-        }
+            "mediaContent": offer.json(),
+        },
+        "links": {
+            "addModalitySuccess": callbacks.link(paths::CONVERSATION_ADD_MODALITY_SUCCESS),
+            "addModalityFailure": callbacks.link(paths::CONVERSATION_ADD_MODALITY_FAILURE),
+        },
+        "debugContent": { "causeId": callbacks.cause_id },
     })
 }
 
@@ -1147,6 +1133,16 @@ pub async fn post_signal(
         .collect();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
+        // A refusal says so in the journal, exactly as a refused write does. It used to
+        // reach the page and nowhere else, so the only record of a call this machine
+        // could not place was the sentence the user read out by hand. The url is
+        // redacted and the credentials are never named.
+        eprintln!(
+            "[calling] refused: {status} from {} — {} [{}]",
+            redact_url(url),
+            text.chars().take(200).collect::<String>(),
+            reasons.join("; ")
+        );
         // Keep the service's own words: its phrases name the real cause ("this user
         // has no calling licence", "conversation does not exist") and a generic
         // message here would hide them.
@@ -1549,7 +1545,7 @@ mod tests {
             &MediaContent::sdp("v=0 offer"),
             &callbacks(),
         );
-        let invitation = payload.pointer("/payload/callInvitation").expect("an invitation");
+        let invitation = payload.pointer("/callInvitation").expect("an invitation");
         assert_eq!(invitation["callModalities"], json!(["audio"]));
         assert_eq!(invitation["mediaContent"]["blob"], "v=0 offer");
         assert_eq!(invitation["mediaContent"]["contentType"], SDP_CONTENT_TYPE);
@@ -1557,10 +1553,10 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("/call/mediaAnswer/"));
-        assert_eq!(payload.pointer("/payload/participants/to/0/id").unwrap(), "8:orgid:her");
-        assert_eq!(payload.pointer("/payload/participants/from/id").unwrap(), "8:orgid:me");
+        assert_eq!(payload.pointer("/participants/to/0/id").unwrap(), "8:orgid:her");
+        assert_eq!(payload.pointer("/participants/from/id").unwrap(), "8:orgid:me");
         assert_eq!(
-            payload.pointer("/payload/groupChat/threadId").unwrap(),
+            payload.pointer("/groupChat/threadId").unwrap(),
             "19:thread@thread.v2"
         );
     }
@@ -1574,29 +1570,29 @@ mod tests {
             invitation_payload(&local(), &["8:orgid:her".into()], None, &offer, &callbacks());
         let joined_audio = add_audio_payload(&local(), &offer, &callbacks());
         assert_eq!(
-            joined_audio.pointer("/payload/callInvitation/callModalities").unwrap(),
+            joined_audio.pointer("/callInvitation/callModalities").unwrap(),
             &json!(["audio"])
         );
         let acceptance = acceptance_payload(&local(), &offer, &callbacks());
         let answer = media_answer_payload(&local(), &offer, &callbacks());
-        assert_eq!(invitation.pointer("/payload/callInvitation/callModalities").unwrap(), &json!(["audio"]));
+        assert_eq!(invitation.pointer("/callInvitation/callModalities").unwrap(), &json!(["audio"]));
         assert_eq!(
-            acceptance.pointer("/payload/callAcceptance/acceptedCallModalities").unwrap(),
+            acceptance.pointer("/callAcceptance/acceptedCallModalities").unwrap(),
             &json!(["audio"])
         );
-        assert_eq!(answer.pointer("/payload/mediaAnswer/callModalities").unwrap(), &json!(["audio"]));
+        assert_eq!(answer.pointer("/mediaAnswer/callModalities").unwrap(), &json!(["audio"]));
         let whole = format!("{invitation}{acceptance}{answer}");
         assert!(!whole.contains("video"), "no payload may ever offer video: {whole}");
     }
 
     #[test]
     fn a_hangup_and_a_rejection_name_who_sent_them() {
-        assert_eq!(hangup_payload(&local()).pointer("/payload/callEnd/sender/id").unwrap(), "8:orgid:me");
+        assert_eq!(hangup_payload(&local()).pointer("/callEnd/sender/id").unwrap(), "8:orgid:me");
         assert_eq!(
-            rejection_payload(&local()).pointer("/payload/callRejection/sender/id").unwrap(),
+            rejection_payload(&local()).pointer("/callRejection/sender/id").unwrap(),
             "8:orgid:me"
         );
-        assert_eq!(mute_payload(&local(), true).pointer("/payload/muteUnmute/muted").unwrap(), true);
+        assert_eq!(mute_payload(&local(), true).pointer("/muteUnmute/muted").unwrap(), true);
     }
 
     // ---- joining a meeting -------------------------------------------------
@@ -1680,10 +1676,10 @@ mod tests {
 
         let payload = join_payload(&local(), &join, &callbacks());
         // No thread to name, so none is invented.
-        assert!(payload.pointer("/payload/groupChat").is_none());
-        assert_eq!(payload.pointer("/payload/meetingData/meetingCode").unwrap(), "35017215452446");
-        assert_eq!(payload.pointer("/payload/meetingData/passcode").unwrap(), "4QyEW2wHMvAevXsCVU");
-        assert_eq!(payload.pointer("/payload/meetingData/meetingUrl").unwrap(), url);
+        assert!(payload.pointer("/groupChat").is_none());
+        assert_eq!(payload.pointer("/meetingData/meetingCode").unwrap(), "35017215452446");
+        assert_eq!(payload.pointer("/meetingData/passcode").unwrap(), "4QyEW2wHMvAevXsCVU");
+        assert_eq!(payload.pointer("/meetingData/meetingUrl").unwrap(), url);
     }
 
     /// A short link with no passcode still names the meeting, and a code that is not one
@@ -1714,12 +1710,12 @@ mod tests {
         .unwrap();
         let payload = join_payload(&local(), &meeting, &callbacks());
         // The captured request names NO conversationType at all, so neither does this.
-        assert!(payload.pointer("/payload/conversationRequest/conversationType").is_none());
+        assert!(payload.pointer("/conversationRequest/conversationType").is_none());
         // And the fields it does always carry, each of which a strict service may demand.
-        assert_eq!(payload.pointer("/payload/capabilities").unwrap(), &Value::Null);
-        assert!(payload.pointer("/payload/endpointCapabilities").is_some());
-        assert!(payload.pointer("/payload/endpointState").is_some());
-        assert!(payload.pointer("/payload/endpointMetadata").is_some());
+        assert_eq!(payload.pointer("/capabilities").unwrap(), &Value::Null);
+        assert!(payload.pointer("/endpointCapabilities").is_some());
+        assert!(payload.pointer("/endpointState").is_some());
+        assert!(payload.pointer("/endpointMetadata").is_some());
     }
 
     #[test]
@@ -1732,23 +1728,23 @@ mod tests {
         let payload = join_payload(&local(), &meeting, &callbacks());
 
         // A join has no `to`: the meeting is already there, and nobody is rung.
-        assert!(payload.pointer("/payload/participants/to").is_none());
-        assert_eq!(payload.pointer("/payload/participants/from/id").unwrap(), "8:orgid:me");
+        assert!(payload.pointer("/participants/to").is_none());
+        assert_eq!(payload.pointer("/participants/from/id").unwrap(), "8:orgid:me");
         assert_eq!(
-            payload.pointer("/payload/groupChat/threadId").unwrap(),
+            payload.pointer("/groupChat/threadId").unwrap(),
             "19:meeting_x@thread.v2"
         );
         // The STRING "0", exactly as the captured request sends it — not null.
-        assert_eq!(payload.pointer("/payload/groupChat/messageId").unwrap(), "0");
-        assert_eq!(payload.pointer("/payload/meetingInfo/tenantId").unwrap(), "tenant");
-        assert_eq!(payload.pointer("/payload/meetingInfo/organizerId").unwrap(), "organizer");
+        assert_eq!(payload.pointer("/groupChat/messageId").unwrap(), "0");
+        assert_eq!(payload.pointer("/meetingInfo/tenantId").unwrap(), "tenant");
+        assert_eq!(payload.pointer("/meetingInfo/organizerId").unwrap(), "organizer");
         // And NO media: the join joins the conversation, and audio is a second request
         // (see `add_audio_payload`). A `callInvitation` here is a 400 with no body.
-        assert!(payload.pointer("/payload/callInvitation").is_none());
+        assert!(payload.pointer("/callInvitation").is_none());
         assert!(!payload.to_string().contains("mediaContent"));
         // The roster is asked to be kept up to date, because that is what "who" means.
         assert!(payload
-            .pointer("/payload/conversationRequest/roster/rosterUpdate")
+            .pointer("/conversationRequest/roster/rosterUpdate")
             .unwrap()
             .as_str()
             .unwrap()
@@ -1801,6 +1797,47 @@ mod tests {
         assert_eq!(surl_shape("https://example.test/x"), "https://example.test/x");
     }
 
+    /// NO body carries a `payload` envelope, and this is the test that keeps it that way.
+    ///
+    /// The web client's own builders DO produce `{payload: {…}}`, so a reader of that
+    /// bundle copies the envelope in good faith — this app did, in every one of its eight
+    /// bodies. But the envelope belongs to the SDK's request OBJECT, not to the protocol:
+    /// its transport serialises `s.payload`, so what reaches the wire is the contents. A
+    /// wrapped body is refused with `400` and an empty response, which cost several
+    /// rounds of guessing to find.
+    #[test]
+    fn no_body_carries_the_sdk_request_envelope() {
+        let meeting = MeetingJoin::from_join_url(
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0",
+        )
+        .unwrap();
+        let offer = MediaContent::sdp("v=0\r\n");
+        let bodies = [
+            (
+                "invitation",
+                invitation_payload(&local(), &["8:orgid:her".into()], None, &offer, &callbacks()),
+            ),
+            ("join", join_payload(&local(), &meeting, &callbacks())),
+            ("add audio", add_audio_payload(&local(), &offer, &callbacks())),
+            ("acceptance", acceptance_payload(&local(), &offer, &callbacks())),
+            ("media answer", media_answer_payload(&local(), &offer, &callbacks())),
+            ("hangup", hangup_payload(&local())),
+            ("rejection", rejection_payload(&local())),
+            ("mute", mute_payload(&local(), true)),
+        ];
+        for (what, body) in bodies {
+            assert!(
+                body.get("payload").is_none(),
+                "the {what} body wraps itself in the SDK's envelope"
+            );
+            // And it is a real body, not an empty object that trivially passes.
+            assert!(
+                body.as_object().is_some_and(|o| !o.is_empty()),
+                "the {what} body is empty"
+            );
+        }
+    }
+
     #[test]
     fn a_region_names_its_partition() {
         // The one observation this is built from: region `fr` lives in partition `fr01`.
@@ -1817,10 +1854,10 @@ mod tests {
         )
         .unwrap();
         let payload = join_payload(&local(), &meeting, &callbacks());
-        assert_eq!(payload.pointer("/payload/endpointCapabilities").unwrap(), 73463);
-        assert_eq!(payload.pointer("/payload/clientEndpointCapabilities").unwrap(), 63928042);
+        assert_eq!(payload.pointer("/endpointCapabilities").unwrap(), 73463);
+        assert_eq!(payload.pointer("/clientEndpointCapabilities").unwrap(), 63928042);
         assert_eq!(
-            payload.pointer("/payload/endpointMetadata/holographicCapabilities").unwrap(),
+            payload.pointer("/endpointMetadata/holographicCapabilities").unwrap(),
             3
         );
     }
@@ -1830,14 +1867,14 @@ mod tests {
     fn adding_audio_carries_the_offer_and_rings_nobody() {
         let payload =
             add_audio_payload(&local(), &MediaContent::sdp("v=0 offer"), &callbacks());
-        let invitation = payload.pointer("/payload/callInvitation").expect("an invitation");
+        let invitation = payload.pointer("/callInvitation").expect("an invitation");
         assert_eq!(invitation["callModalities"], json!(["audio"]));
         assert_eq!(invitation["mediaContent"]["blob"], "v=0 offer");
         assert_eq!(invitation["mediaContent"]["contentType"], SDP_CONTENT_TYPE);
         // Still nobody to ring, and the two links the service answers an add on.
-        assert!(payload.pointer("/payload/participants/to").is_none());
-        assert!(payload.pointer("/payload/links/addModalitySuccess").is_some());
-        assert!(payload.pointer("/payload/links/addModalityFailure").is_some());
+        assert!(payload.pointer("/participants/to").is_none());
+        assert!(payload.pointer("/links/addModalitySuccess").is_some());
+        assert!(payload.pointer("/links/addModalityFailure").is_some());
         assert!(!payload.to_string().contains("video"));
     }
 
@@ -1848,7 +1885,7 @@ mod tests {
         )
         .expect("a join link");
         let payload = join_payload(&local(), &meeting, &callbacks());
-        assert_eq!(payload.pointer("/payload/groupChat/messageId").unwrap(), "1719400000000");
+        assert_eq!(payload.pointer("/groupChat/messageId").unwrap(), "1719400000000");
     }
 
     /// The lobby is a state of its own, not a failure and not a connection: the user is

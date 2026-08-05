@@ -183,10 +183,10 @@ async fn main() -> Result<()> {
             &session,
             &ic3,
             &correlation,
-            &json!({ "payload": { "participants": { "from": {
+            &json!({ "participants": { "from": {
                 "id": local.id, "displayName": local.display_name,
                 "endpointId": local.endpoint_id, "participantId": local.participant_id,
-                "languageId": "en-us" } } } }),
+                "languageId": "en-us" } } }),
         )
         .await
         {

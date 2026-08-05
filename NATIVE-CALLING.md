@@ -88,35 +88,50 @@ setup: each response names the URLs for the next step.
 
 ### 2.3 Placing a call: one POST
 
-`startOrJoinCall` sends **one POST to `conversationServiceUrl`**, and the payload is:
+`startOrJoinCall` sends **one POST to `conversationServiceUrl`**, and the body is:
 
 ```
-{ payload: {
-    conversationRequest: { conversationType, subject, suppressDialout, applicationType,
-                           roster: {type:"Delta", rosterUpdate:<link>},
-                           properties: {...},
-                           links: { conversationEnd, conversationUpdate,
-                                    localParticipantUpdate, addParticipantSuccess,
-                                    addParticipantFailure, addModalitySuccess,
-                                    addModalityFailure, confirmUnmute, receiveMessage } },
-    participants: { from: {id, displayName, endpointId, participantId, languageId},
-                    to:   [ {id, displayName?, participantId?} ] },
-    groupChat: { threadId, messageId },      // the chat the call belongs to
-    endpointCapabilities, endpointMetadata, endpointState, meetingInfo,
-    callInvitation: {
-      callModalities: ["audio"],
-      links: { progress, mediaAnswer, acceptance, redirection, end },
-      mediaContent: { blob: "<SDP>", contentType: "application/sdp-ngc-1.0" },
-      clientContentForMediaController, ... } } }
+{ conversationRequest: { conversationType, subject, suppressDialout, applicationType,
+                         roster: {type:"Delta", rosterUpdate:<link>},
+                         properties: {...},
+                         links: { conversationEnd, conversationUpdate,
+                                  localParticipantUpdate, addParticipantSuccess,
+                                  addParticipantFailure, addModalitySuccess,
+                                  addModalityFailure, confirmUnmute, receiveMessage } },
+  participants: { from: {id, displayName, endpointId, participantId, languageId},
+                  to:   [ {id, displayName?, participantId?} ] },
+  groupChat: { threadId, messageId },      // the chat the call belongs to
+  endpointCapabilities, endpointMetadata, endpointState, meetingInfo,
+  callInvitation: {
+    callModalities: ["audio"],
+    links: { progress, mediaAnswer, acceptance, redirection, end },
+    mediaContent: { blob: "<SDP>", contentType: "application/sdp-ngc-1.0" },
+    clientContentForMediaController, ... } }
 ```
 
-Headers (the `HEADERS` table plus `buildHeaders`): `X-Skypetoken` **or**
-`Authorization: Bearer …`, `X-Microsoft-Skype-Chain-ID` (the correlation id),
-`X-MS-Migration: True`, `api-version: 2`, `Content-Type`, and the
-`MS-Teams-Ring` / `MS-Teams-Region` / `MS-Teams-Partition` trio. Which token the
-service wants is not guessed: it answers `www-authenticate` with
-`token_types="skype aad cae"`, and the client picks from that list. teams-lite already
-mints both halves.
+#### There is NO `payload` envelope on the wire, and the bundle reads as if there were
+
+Every builder in the client's own bundle returns `{payload: {…}}` — `HW` for a call, `FW`
+for an attach-join, and the acceptance, hangup and mute builders beside them. That
+envelope belongs to the SDK's request OBJECT, not to the protocol. Its own transport
+strips it:
+
+```js
+const P = s?.payload ? JSON.stringify(s.payload) : null   // RequestBuilder
+```
+
+So the HTTP body is the CONTENTS of `payload`, which the captured request confirms field
+for field. This app copied the envelope in good faith into all eight of its bodies and was
+refused `400` with an empty response every time, for days. Nothing about the refusal named
+it. `calling::tests::no_body_carries_the_sdk_request_envelope` is the guard.
+
+The same function settles the credentials, in the same few lines: the token-type switch
+sets `Authorization` and **deletes** `X-Skypetoken`, or sets the skypetoken and deletes the
+authorization. Exactly one credential travels, never both — and `api-version` is not sent
+to this service at all. The `MS-Teams-Ring` / `-Region` / `-Partition` trio comes off the
+local participant, and `X-Microsoft-Skype-Client` takes the calling format
+(`SkypeSpaces/{build}/{platform}/TsCallingVersion=…`), not the Skype-era one the messaging
+services want.
 
 ### 2.3a Joining a meeting: TWO POSTs, and the first carries no media
 
@@ -139,7 +154,8 @@ amount of reading had explained. A join is not a call:
    `mediaAnswer` and `mediaNegotiation`.
 
 Sending step 2's media inside step 1 is refused with `400` and an empty body, which is
-what this app did at first. The proxy names the upstream in
+what this app did at first — and so is a body that keeps the SDK's `payload` envelope
+(§ 2.3), which is what it did for days after that. The proxy names the upstream in
 `x-microsoft-skype-proxy-cluster-context` (`cc/v1/calls`), and that header is the only
 thing the service says about a refusal.
 
