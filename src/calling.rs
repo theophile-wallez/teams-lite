@@ -32,6 +32,15 @@ use crate::teams::Session;
 /// `setRemoteDescription`. `…-0.5` is the older spelling the service still accepts.
 pub const SDP_CONTENT_TYPE: &str = "application/sdp-ngc-1.0";
 
+/// The capability masks a working client sent, and this app repeats.
+///
+/// Not computed: the conversation service refuses a request with `400` and an empty body
+/// and never names the field it disliked, so a value nobody has seen accepted is a guess
+/// with no feedback. These two came off a real request from this tenant (see
+/// NATIVE-CALLING.md § 2.3a). Revisit them together with the join payload, never alone.
+const CAPTURED_ENDPOINT_CAPABILITIES: u32 = 73463;
+const CAPTURED_CLIENT_CAPABILITIES: u32 = 63928042;
+
 /// The one modality this app negotiates. Video is deliberately absent: it is one
 /// more m-line and one more renderer, and audio has to be solid first.
 pub const MODALITY_AUDIO: &str = "audio";
@@ -798,9 +807,17 @@ pub fn join_payload(
         "groupContext": Value::Null,
         "participants": { "from": local.json() },
         "capabilities": Value::Null,
-        "endpointCapabilities": 0,
-        "clientEndpointCapabilities": Value::Null,
-        "endpointMetadata": {},
+        // The capability masks the captured request carries, copied rather than computed.
+        //
+        // They are DECLARATIONS of client features, and the service refuses a request it
+        // does not recognise without saying which field it disliked — so the only values
+        // this app has ever seen accepted are the ones a working client sent. The bits
+        // this crate can name (`getEndpointCapabilities` in the web client's own bundle)
+        // are all ones it can honour: joining a group call, a hostless conference, and a
+        // compressed service payload, which `trouter_events` already inflates.
+        "endpointCapabilities": CAPTURED_ENDPOINT_CAPABILITIES,
+        "clientEndpointCapabilities": CAPTURED_CLIENT_CAPABILITIES,
+        "endpointMetadata": { "holographicCapabilities": 3 },
         // The client states how much of itself it shows in a report; the captured value
         // is the only one this app has seen a service accept.
         "endpointState": {
@@ -1063,6 +1080,11 @@ pub async fn post_signal(
         .header("X-Skypetoken", &session.skypetoken)
         .header("authorization", format!("Bearer {ic3}"))
         .header("X-Microsoft-Skype-Chain-ID", correlation_id)
+        // One id per REQUEST, beside the chain id that spans the call. The service's own
+        // header table names it (`MESSAGE_ID`), it answers with one, and a request that
+        // sends none is a shape the real client never produces.
+        .header("X-Microsoft-Skype-Message-ID", uuid::Uuid::new_v4().to_string())
+        .header("accept", "application/json, text/javascript")
         .header("X-MS-Migration", "True")
         .header("api-version", "2")
         .json(payload)
@@ -1691,6 +1713,24 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("/conversation/rosterUpdate/"));
+    }
+
+    /// The capability masks are COPIED from a request the service accepted, not computed.
+    /// A reader who replaces them with a clean 0 gets a `400` with an empty body and no
+    /// way to tell why — which is exactly the round this cost.
+    #[test]
+    fn the_join_repeats_the_capability_masks_a_working_client_sent() {
+        let meeting = MeetingJoin::from_join_url(
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0",
+        )
+        .unwrap();
+        let payload = join_payload(&local(), &meeting, &callbacks());
+        assert_eq!(payload.pointer("/payload/endpointCapabilities").unwrap(), 73463);
+        assert_eq!(payload.pointer("/payload/clientEndpointCapabilities").unwrap(), 63928042);
+        assert_eq!(
+            payload.pointer("/payload/endpointMetadata/holographicCapabilities").unwrap(),
+            3
+        );
     }
 
     /// Audio is the SECOND request, and it is where the SDP rides.
