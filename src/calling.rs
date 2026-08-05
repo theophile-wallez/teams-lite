@@ -41,8 +41,15 @@ pub const SDP_CONTENT_TYPE: &str = "application/sdp-ngc-1.0";
 const CAPTURED_ENDPOINT_CAPABILITIES: u32 = 73463;
 const CAPTURED_CLIENT_CAPABILITIES: u32 = 63928042;
 
-/// The one modality this app negotiates. Video is deliberately absent: it is one
-/// more m-line and one more renderer, and audio has to be solid first.
+/// The one modality this app negotiates, and one of FOUR the service names —
+/// `Audio`, `Video`, `ScreenSharer`, `ScreenViewer` (the client's own `MEDIA_TYPES`; its
+/// comparison lowercases both sides, which is why this spelling is accepted).
+///
+/// Video is deliberately absent, and the reason is bigger than an m-line: in a meeting the
+/// service sends the cameras a client ASKS for, one source request per stream, addressed by
+/// a media source id that arrives in the roster. That subscription plane does not exist
+/// here at all. NATIVE-CALLING.md § 10 is the map of it, and § 10.7 names the three
+/// measurements to take before any of it is written.
 pub const MODALITY_AUDIO: &str = "audio";
 
 /// The trouter path segment every callback link is built under (`URL_BASE.CALLAGENT`

@@ -870,7 +870,12 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
 The app takes and places one-to-one **audio** calls, by doing what the real Teams WEB
 client does: `src/calling.rs` is the signaling plane, the browser carries the media
 (`web/src/lib/call-media.ts`), and `NATIVE-CALLING.md` is the protocol map every line of
-both was written from — read it before touching either. Video is deliberately absent.
+both was written from — read it before touching either. Video is deliberately absent: its
+protocol is now mapped in NATIVE-CALLING.md § 10 — a camera and a shared screen are ordinary
+`m=video` sections, but a MEETING sends only the streams a client asks for, one source
+request per stream, addressed by a media source id that arrives in the roster — and none of
+it is built. Nothing here may offer a camera or a screen until that section's § 10.7
+measurements are taken: a control that summons nothing is worse than none.
 
 **The backend signals; the page carries the audio.** That split is not an implementation
 detail: the tokens must never reach a browser, and a microphone is only reachable from
