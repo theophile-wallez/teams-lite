@@ -15,9 +15,10 @@ import type { Locator, Page } from "@playwright/test";
  *  7. delete asks twice, and the confirming label is "Delete Emoji";
  *  8. one Backspace removes a whole chip.
  *
- * Everything happens in the "Agent Sandbox" thread, because that is the one the mock seeds
- * a colleague's real emoji markup into (`seedAgentSandbox` in web/mock/server.ts) — rules
- * 2 and 3 have no fixture anywhere else.
+ * Everything happens in the "Custom Emoji" thread, which the mock seeds for this feature
+ * alone (`seedCustomEmojiThread` in web/mock/server.ts): it carries the colleague's message
+ * with real inline emoji markup that rules 2 and 3 need, and it is the one thread no other
+ * spec asserts on — so the six messages these tests send perturb nothing.
  *
  * `afterEach` puts the pack back to what a fresh mock seeds: one mock process serves the
  * whole run, so a pack left changed would move every later spec's picker and composer.
@@ -49,15 +50,15 @@ async function resetCustomEmoji(page: Page): Promise<void> {
 }
 
 /**
- * Open the sandbox thread and empty the composer.
+ * Open this feature's own thread and empty the composer.
  *
  * The field is cleared on purpose: one mock process serves the whole run and it persists
  * drafts, so whatever an earlier test left here is still in front of the caret — and a ":"
  * that does not follow whitespace is not an emoji code at all (`emojiQueryBefore`).
  */
-async function openSandbox(page: Page): Promise<Locator> {
+async function openEmojiThread(page: Page): Promise<Locator> {
   await gotoApp(page);
-  await openConversationNamed(page, "Agent Sandbox");
+  await openConversationNamed(page, "Custom Emoji");
   const field = composerField(page);
   await field.click();
   await page.keyboard.press("ControlOrMeta+a");
@@ -107,7 +108,7 @@ test.describe("custom emoji", () => {
   test("a code the pack holds becomes art; one it does not hold stays text", async ({
     page,
   }) => {
-    const field = await openSandbox(page);
+    const field = await openEmojiThread(page);
 
     await page.keyboard.type("shipping it :shipit:");
     const art = await sendAndAwaitEcho(page);
@@ -127,7 +128,7 @@ test.describe("custom emoji", () => {
   test("an inbound custom emoji is drawn from the message's own art, not from the pack", async ({
     page,
   }) => {
-    const field = await openSandbox(page);
+    const field = await openEmojiThread(page);
 
     // The seeded colleague message carries real Teams emoji markup, with its own `src`.
     const inbound = messages(page).filter({ hasText: "thanks!" }).last();
@@ -160,7 +161,7 @@ test.describe("custom emoji", () => {
   });
 
   test("a code inside <code> and a code inside a reply quote stay text", async ({ page }) => {
-    const field = await openSandbox(page);
+    const field = await openEmojiThread(page);
 
     // Inside code: Slack does not draw an emoji there either, so the backend skips the
     // region (`custom_emoji::SKIPPED_TAGS`). The mark comes from the composer's own format
@@ -206,7 +207,7 @@ test.describe("custom emoji", () => {
   });
 
   test("an emoji-only message renders jumbo", async ({ page }) => {
-    const field = await openSandbox(page);
+    const field = await openEmojiThread(page);
 
     // A mixed message first: its glyph is the inline size to measure against, so the test
     // pins the RATIO rather than a pixel count that a font change would move.
@@ -229,7 +230,7 @@ test.describe("custom emoji", () => {
   test("the : list offers custom emoji above the Unicode ones, and Enter inserts the chip", async ({
     page,
   }) => {
-    const field = await openSandbox(page);
+    const field = await openEmojiThread(page);
 
     // `:ship` matches both bands, and matches them under the same NAME: the pack holds
     // `ship` as an alias of `shipit`, and Unicode has a `:ship:` of its own. So the order
@@ -299,7 +300,7 @@ test.describe("custom emoji", () => {
   });
 
   test("one Backspace removes a whole chip", async ({ page }) => {
-    const field = await openSandbox(page);
+    const field = await openEmojiThread(page);
 
     await page.keyboard.type(":shipit");
     await expect(page.locator('[data-testid="emoji-suggestion-shipit"]')).toBeVisible();

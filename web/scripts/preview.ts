@@ -1891,9 +1891,10 @@ if (import.meta.main) {
   if (args.includes("--custom-emoji")) {
     await withPreview(
       async ({ page, shot, setTheme }) => {
-        // The sandbox thread, because it is the one the mock seeds a colleague's own emoji
-        // markup into — the inbound half of this feature has no fixture anywhere else.
-        await openConversation(page, "Agent Sandbox");
+        // This feature's own thread, which carries the colleague's message with real inline
+        // emoji markup — and which no other capture or spec asserts on, so the two messages
+        // sent below perturb nothing (`seedCustomEmojiThread` in web/mock/server.ts).
+        await openConversation(page, "Custom Emoji");
         await clearComposer(page);
 
         // The `:` list mid-type: the pack's own emoji above the Unicode ones, which is the

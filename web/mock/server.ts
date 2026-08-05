@@ -2348,7 +2348,30 @@ function seedAgentSandbox(): void {
     },
     121_000,
   );
-  // A message with custom emoji markup, so Task 6's render path is exercised in the mock.
+  addFixtureConversation(convId, "Agent Sandbox", messages);
+}
+
+/** A thread of its own for CUSTOM EMOJI: a colleague's message carrying real inline emoji
+ *  markup, with its own art URL.
+ *
+ *  Its own thread on purpose. This fixture used to be the newest message of the agent
+ *  sandbox, which is a conversation three other spec files already assert on — and the emoji
+ *  feature has no business changing what those see, nor what a deep link into a seeded
+ *  thread has to scroll past. `custom-emoji.spec.ts` sends here too, so the six messages it
+ *  posts land where nothing else looks. */
+function seedCustomEmojiThread(): void {
+  const convId = "19:custom-emoji-demo@thread.v2";
+  const base = Date.now() - 21 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const other = PEOPLE[1]!;
+
+  push(
+    { sender: other.name, sender_mri: other.mri, content: "Shipping the emoji pack today.", is_self: false },
+    0,
+  );
+  // The inbound half of the feature: the art travels inside the message, so it is drawn
+  // from THIS `src` and never from the reader's own pack.
   push(
     {
       sender: other.name,
@@ -2359,10 +2382,10 @@ function seedAgentSandbox(): void {
         'width="20" height="20"> — thanks!</p>',
       is_self: false,
     },
-    130_000,
+    60_000,
   );
 
-  addFixtureConversation(convId, "Agent Sandbox", messages);
+  addFixtureConversation(convId, "Custom Emoji", messages);
 }
 
 /** A thread where a MERGE REQUEST is being asked about — the state the two rows a message
@@ -6878,6 +6901,7 @@ seedForwardedMessages();
 seedPlainTextSamples();
 seedAgentSandbox();
 seedMergeRequestReview();
+seedCustomEmojiThread();
 seedCustomEmoji();
 // Seed channels LAST so the chat seed's PRNG sequence (and thus the Chats list
 // the existing specs assert on) is left completely unchanged.
