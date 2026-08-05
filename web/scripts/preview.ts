@@ -985,6 +985,15 @@ if (import.meta.main) {
       await page.locator('[data-testid="update-control"][data-phase="ready"]').waitFor();
       await shot(`${out}-ready-dark.png`);
 
+      // A FAILED download, which is the one state that draws a line of its own: the
+      // reason. It is captured because the row is 240 px wide and the message has to fit
+      // in it — the one the user was shown opened with two nine-digit numbers.
+      await emit({ kind: "update", fail_once: true });
+      await page.locator('[data-testid="update-control"][data-phase="idle"]').waitFor();
+      await page.locator('[data-testid="update-button"]').click();
+      await page.locator('[data-testid="update-control"][data-phase="failed"]').waitFor();
+      await shot(`${out}-failed-dark.png`);
+
       // The other install shape: a staged service is updated where it was installed
       // from, so it keeps a link and never a button that would lie.
       await emit({ kind: "update", can_install: false });
@@ -995,7 +1004,8 @@ if (import.meta.main) {
       await emit({ kind: "update", available: false });
       console.log(
         `[preview] wrote ${out}-offered-light.png, ${out}-offered-dark.png, ` +
-          `${out}-downloading-dark.png, ${out}-ready-dark.png and ${out}-link-dark.png`,
+          `${out}-downloading-dark.png, ${out}-ready-dark.png, ${out}-failed-dark.png ` +
+          `and ${out}-link-dark.png`,
       );
     });
     process.exit(0);

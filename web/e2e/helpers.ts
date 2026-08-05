@@ -263,6 +263,9 @@ export async function emitUpdate(
     url?: string;
     size?: number;
     can_install?: boolean;
+    /** Make the next download fail, once — the replaced-asset failure the user really
+     *  hit. What follows it is the retry, which has to work. */
+    fail_once?: boolean;
     /** Simulate the restart an apply ends in: the backend drops every socket, and the
      *  one that answers next is the new build, with no update to announce. */
     restarted?: boolean;

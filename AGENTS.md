@@ -1355,6 +1355,26 @@ button says what it costs before it is pressed.
   alone is enough — a captive portal's login page is the wrong shape, and a cut-off
   transfer of the real asset is the right one — and a file that fails is deleted rather
   than kept, because the next click would install it.
+- **`latest` IS A ROLLING TAG, so a size is only true at the moment it was read.** CI
+  republishes that tag on every push, and this app stays up for weeks: the asset the startup
+  check measured is replaced without anything here noticing. A transfer verified against that
+  remembered number then failed *forever* — and the only thing the button offered was to try
+  the same stale number again, which left the user with no way forward at all. It happened,
+  on a difference of one 4 096-byte page. Three things follow, and each is pinned by a test:
+  - **Every download re-reads the release first** (`Ctx::refresh_release`, over
+    `Ctx::fetch_release_asset`), and fetches what THAT answer names — never what the
+    greeting carried. `Ctx::publish_release` is the one spelling of the availability
+    payload, so a size the button draws its bar against is corrected in the same breath.
+  - **It attempts twice, and no more.** The asset can also be replaced *during* a transfer,
+    and the second attempt — which reads the release again — is what heals that. Bounded at
+    `DOWNLOAD_ATTEMPTS`, because a download that retried forever would hide a broken
+    release. A re-read that finds this build CURRENT is not a failure: the row empties
+    itself (`Ctx::forget_release`).
+  - **A mismatch says which mismatch it is, meaning first.** Fewer bytes than published is a
+    transfer that stopped; MORE is a different build, and calling that "cut short" sent its
+    reader hunting a network fault that was never there. The response's own `Content-Length`
+    is checked before the bytes, so a replaced asset costs a page rather than 130 MB — but it
+    is never taken as the expected size, since a captive portal states a length too.
 - **The RESTART is the launcher's, and only the launcher's** (`launcher/src/update.ts`).
   The web server runs inside that process and the backend is its child, so it is the one
   process that can free both ports and bring both back: the backend asks with an
@@ -1390,9 +1410,11 @@ button says what it costs before it is pressed.
 
 `web/mock/server.ts` reproduces the whole flow with no GitHub and no binary (armed with
 the `{kind: "update"}` test hook, which a spec MUST clear afterwards — one mock process
-serves the whole run, and a left-behind update moves every later sidebar). `cd web && bun
-run preview -- --out /tmp/upd --update` captures the button, the download mid-transfer, the
-restart it offers next, and the link the other install shape keeps.
+serves the whole run, and a left-behind update moves every later sidebar). `fail_once` on
+that hook arms the replaced-asset failure, because the half a PAGE owns is that a failure it
+shows is one the button really recovers from. `cd web && bun run preview -- --out /tmp/upd
+--update` captures the button, the download mid-transfer, the restart it offers next, the
+failure and its reason, and the link the other install shape keeps.
 
 ## The always-on service
 

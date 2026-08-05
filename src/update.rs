@@ -90,6 +90,11 @@ pub struct UpdateInfo {
 /// The size comes from the GitHub API rather than from the transfer's own
 /// `Content-Length`, so the progress bar has a total before the first byte arrives
 /// and so a truncated download can be told from a complete one afterwards.
+///
+/// It describes the release AT THE MOMENT IT WAS READ, and nothing longer: `latest` is a
+/// rolling tag that CI republishes on every push, so this size stops matching the file
+/// behind that URL the next time the project ships. Read it again before a download —
+/// never compare a transfer against a number an earlier check remembered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asset {
     pub url: String,
@@ -304,6 +309,15 @@ where
         resp.status()
     );
 
+    // The transfer's own statement of its length, checked BEFORE the bytes: `latest` is a
+    // rolling tag, so the asset the metadata described may already have been replaced by a
+    // newer build, and finding that out after 130 MB costs the user the whole transfer for
+    // nothing. It is never taken as the expected size — a captive portal states a length
+    // for its login page too, so what the RELEASE published stays the authority.
+    if let Some(stated) = resp.content_length() {
+        anyhow::ensure!(stated == asset.size, "{}", size_mismatch(stated, asset.size));
+    }
+
     let mut file = std::fs::File::create(&part)
         .with_context(|| format!("create {}", part.display()))?;
     let mut received: u64 = 0;
@@ -348,16 +362,35 @@ where
 ///
 /// Pure, so both halves are unit-tested without a network.
 pub fn verify(head: &[u8], received: u64, expected: u64) -> Result<()> {
-    anyhow::ensure!(
-        received == expected,
-        "the download is {received} bytes but the release says {expected} — it was cut short"
-    );
+    anyhow::ensure!(received == expected, "{}", size_mismatch(received, expected));
     anyhow::ensure!(
         head.starts_with(&[0x7f, b'E', b'L', b'F']),
         "the download is not a Linux binary (no ELF header) — the release may be broken, \
          or something answered for it"
     );
     Ok(())
+}
+
+/// What a size that does not match means, in the words of what actually happened.
+///
+/// Fewer bytes than the release published is a transfer that stopped. MORE is not a
+/// truncation at all — it is a DIFFERENT build: `latest` is a rolling tag whose asset is
+/// replaced on every push, so a size measured when the check ran describes a file that no
+/// longer exists. Calling that "cut short" sent its reader looking for a network fault
+/// that was never there, and it hid the one thing they needed to know — that trying again
+/// is the fix, because the next attempt re-reads the release.
+/// The MEANING comes first and the bytes come after it, in a parenthesis. What the user was
+/// shown began with two nine-digit numbers and ended in a conclusion that was wrong, so the
+/// one sentence they had said nothing they could act on.
+fn size_mismatch(received: u64, expected: u64) -> String {
+    if received < expected {
+        format!("the transfer was cut short ({received} of {expected} bytes)")
+    } else {
+        format!(
+            "the release was replaced while it was being fetched \
+             ({received} bytes, not {expected})"
+        )
+    }
 }
 
 /// Put a downloaded build in place of the running one, atomically.
@@ -596,6 +629,19 @@ mod tests {
     fn verify_refuses_a_truncated_download() {
         let e = verify(&[0x7f, b'E', b'L', b'F'], 99, 100).unwrap_err().to_string();
         assert!(e.contains("cut short"), "{e}");
+    }
+
+    /// The failure the user was actually shown: 134 092 928 bytes against a release that
+    /// said 134 088 832 — MORE than expected, reported as a truncation. `latest` is a
+    /// rolling tag, so the extra page was a newer build, and the words sent their reader
+    /// hunting a network fault while the fix was to read the release again.
+    #[test]
+    fn verify_calls_a_bigger_download_a_replaced_release_and_never_a_truncation() {
+        let e = verify(&[0x7f, b'E', b'L', b'F'], 134_092_928, 134_088_832)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("replaced"), "{e}");
+        assert!(!e.contains("cut short"), "{e}");
     }
 
     #[test]

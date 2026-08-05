@@ -96,6 +96,34 @@ test.describe("in-app update", () => {
     await expect(page.getByTestId("update-button")).toHaveCount(0);
   });
 
+  // A FAILURE IS ALWAYS A WAY FORWARD, never a dead end. The real one: `latest` is a
+  // rolling tag, CI replaced its asset while the app was up, and the transfer was checked
+  // against the size measured at startup — so it could never match again and the only thing
+  // the button offered was to try the same stale number once more. The backend now re-reads
+  // the release before every attempt (`fetch_release_asset` in src/bin/server.rs); this is
+  // the half the page owns — the failure says what happened, and the retry really succeeds.
+  test("says what a failed download hit, and the retry gets there", async ({ page }) => {
+    await gotoApp(page);
+    const control = page.locator('[data-testid="update-control"]');
+    await emitUpdate(page, { latest: "def5678", fail_once: true });
+
+    await page.getByTestId("update-button").click();
+    await expect(control).toHaveAttribute("data-phase", "failed");
+    const button = page.getByTestId("update-button");
+    await expect(button).toHaveText(/Update failed — try again/);
+    await expect(button).toBeEnabled();
+    // The reason gets a line of its own — a report nobody can hover is a report a phone
+    // does not have — and it names what happened rather than blaming the network.
+    const detail = page.getByTestId("update-detail");
+    await expect(detail).toContainText("the release was replaced");
+    await expect(detail).not.toContainText("cut short");
+
+    await button.click();
+    await expect(control).toHaveAttribute("data-phase", /downloading|ready/);
+    await expect(control).toHaveAttribute("data-phase", "ready", { timeout: 10_000 });
+    await expect(page.getByTestId("update-button")).toHaveText(/Restart to update/);
+  });
+
   // A phone that opens the app in the middle of a download has to draw the bar it is
   // already in: the backend replays both the release and the phase on every connection,
   // and this is the half of that contract the page has to keep.

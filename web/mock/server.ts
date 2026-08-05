@@ -3749,6 +3749,23 @@ let mockUpdateProgress = {
 };
 let mockDownloadTimer: ReturnType<typeof setInterval> | null = null;
 
+/**
+ * Make the NEXT download fail, once (armed with `{kind: "update", fail_once: true}`).
+ *
+ * The state the user was really stuck in: `latest` is a rolling tag, its asset was replaced
+ * while the app was up, and the transfer was checked against the size measured at startup —
+ * so every attempt failed on a number that could never match again. The backend heals that
+ * by re-reading the release before every attempt (`fetch_release_asset` in
+ * src/bin/server.rs); this is the other half, and the half a page owns: a failure the user
+ * is shown must be one the button can really recover from.
+ */
+let mockUpdateFailsOnce = false;
+
+/** The failure the user was shown, word for word from `size_mismatch` in src/update.rs, so
+ *  the mock exercises the message the app really has to fit in that row. */
+const MOCK_REPLACED_RELEASE_ERROR =
+  "the release was replaced while it was being fetched (134092928 bytes, not 134088832)";
+
 /** Put the update back to "nothing has been asked of it", timers included. One mock
  *  process serves a whole E2E run, so a download left in flight would report progress
  *  into the next spec. */
@@ -4643,6 +4660,21 @@ function dispatch(method: string, params: unknown): unknown {
     case "update_download": {
       if (!mockUpdate) throw new Error("there is no new build to download");
       if (mockUpdateProgress.phase === "downloading") return { ...mockUpdateProgress };
+      // Armed to fail ONCE, and disarmed by the attempt it fails: what the spec then
+      // presses is a retry that has to work, because a button whose only offer cannot
+      // succeed is the state that left the user with no way forward.
+      if (mockUpdateFailsOnce) {
+        mockUpdateFailsOnce = false;
+        resetMockUpdate();
+        mockUpdateProgress = {
+          phase: "failed",
+          received: 0,
+          total: mockUpdate.size,
+          error: MOCK_REPLACED_RELEASE_ERROR,
+        };
+        broadcastUpdateProgress();
+        return { ...mockUpdateProgress };
+      }
       resetMockUpdate();
       mockUpdateProgress = {
         phase: "downloading",
@@ -5882,16 +5914,21 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       // is what has to end up with an empty update row rather than a stuck "Restarting…".
       if (body.restarted === true) {
         mockUpdate = null;
+        mockUpdateFailsOnce = false;
         resetMockUpdate();
         for (const ws of sockets) ws.close();
         return Response.json({ ok: true, restarted: true }, { status: 200 });
       }
       if (body.available === false) {
         mockUpdate = null;
+        mockUpdateFailsOnce = false;
         resetMockUpdate();
         broadcast("update_available", null);
         return Response.json({ ok: true, update: null }, { status: 200 });
       }
+      // A download that fails once, so a spec can press the retry the user was left
+      // pressing. Armed per release, and never left behind: the clear above disarms it.
+      mockUpdateFailsOnce = body.fail_once === true;
       mockUpdate = {
         current: typeof body.current === "string" ? body.current : "abc1234",
         latest: typeof body.latest === "string" ? body.latest : "def5678",
@@ -5904,6 +5941,10 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       };
       resetMockUpdate();
       broadcast("update_available", { ...mockUpdate });
+      // And say the flow is back at the start. Arming a release resets the phase here, so
+      // a page that is not told keeps drawing the one it had — a "Restart to update" whose
+      // click then applies a build this backend no longer holds.
+      broadcastUpdateProgress();
       return Response.json({ ok: true, update: mockUpdate }, { status: 200 });
     }
     // Move a member's read position ("seen by") and broadcast it, exactly like

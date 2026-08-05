@@ -894,6 +894,25 @@ impl UpdatePhase {
     }
 }
 
+/// How many times a download reads the release and fetches it before it gives up.
+///
+/// Two, and bounded on purpose. One is not enough: the rolling `latest` asset can be
+/// replaced while it is being fetched, and the second attempt — which re-reads the release
+/// — is what makes that heal itself. More would hide a broken release behind a button that
+/// never stops trying.
+const DOWNLOAD_ATTEMPTS: usize = 2;
+
+/// What GitHub says about the release right now — the answer a download starts from.
+enum ReleaseNow {
+    /// The asset to fetch, and the commit it was built from.
+    Asset(teams_lite::update::Asset, String),
+    /// This build IS the release. There is nothing to download.
+    Current,
+    /// GitHub could not be read, or it published no binary for this machine. Whatever the
+    /// last check found stands.
+    Unknown,
+}
+
 /// Everything known about a newer release, in one lock.
 ///
 /// The availability half (`available`) is what the check found; the rest is the state
@@ -1288,6 +1307,85 @@ impl Ctx {
         }
     }
 
+    /// Record a release the check found, tell every UI about it, and answer whether this
+    /// install can replace itself.
+    ///
+    /// The one place the `update_available` payload is spelled, because it is published
+    /// from two: the check at startup, and every download — which re-reads the release
+    /// first, and must correct the size the button draws its bar against when the answer
+    /// moved (see `refresh_release`).
+    fn publish_release(&self, info: &teams_lite::update::UpdateInfo) -> bool {
+        // What the button needs beyond the two commits: how big the download is (so the
+        // bar has a total from the first frame), and whether THIS install can replace
+        // itself at all — a staged service cannot, and it keeps the release link instead.
+        let installable =
+            info.asset.is_some() && !read_only() && teams_lite::update::self_install().is_some();
+        let data = json!({
+            "current": info.current,
+            "latest": info.latest,
+            "url": info.url,
+            "size": info.asset.as_ref().map(|a| a.size).unwrap_or(0),
+            "can_install": installable,
+        });
+        let _ = self.with_update(|slot| {
+            slot.available = Some(data.clone());
+            slot.asset = info.asset.clone();
+            slot.latest = info.latest.clone();
+        });
+        self.emit("update_available", data);
+        installable
+    }
+
+    /// Forget the release: this build IS the newest one.
+    ///
+    /// Reached from a download that re-read the release and found nothing newer — the user
+    /// updated on another install, or CI moved the tag back onto this commit. It empties
+    /// the row rather than reporting a failure, because nothing failed, and it drops the
+    /// cached build for the same reason the check does: being current is what makes a
+    /// downloaded one worthless.
+    fn forget_release(&self) {
+        let _ = self.with_update(|slot| {
+            *slot = UpdateSlot::default();
+        });
+        teams_lite::update::discard_downloads();
+        self.emit("update_available", Value::Null);
+    }
+
+    /// Re-read the release, and publish what changed.
+    ///
+    /// **A download must always start from this, never from what the greeting carried.**
+    /// `latest` is a rolling tag: CI republishes it on every push, so the asset the startup
+    /// check measured is silently replaced — and this app stays up for weeks. A transfer
+    /// verified against that remembered size then failed forever, with a message that
+    /// blamed the network and a button whose only offer was to try the same stale number
+    /// again. That is the bug this exists to make impossible.
+    async fn refresh_release(&self) -> ReleaseNow {
+        let Some(current) = teams_lite::update::build_rev() else {
+            return ReleaseNow::Unknown;
+        };
+        match teams_lite::update::check(&self.http, current).await {
+            Ok(Some(info)) => match info.asset.clone() {
+                Some(asset) => {
+                    self.publish_release(&info);
+                    ReleaseNow::Asset(asset, info.latest)
+                }
+                // A release with no binary for this machine is not something to download,
+                // and it is not a failure either — the row goes back to being a link.
+                None => {
+                    self.publish_release(&info);
+                    ReleaseNow::Unknown
+                }
+            },
+            Ok(None) => ReleaseNow::Current,
+            // Offline, rate-limited, a 5xx: keep whatever the last check found. A GitHub
+            // outage must not stop a download that would otherwise work.
+            Err(e) => {
+                eprintln!("[update] re-reading the release failed: {e} — using the last check");
+                ReleaseNow::Unknown
+            }
+        }
+    }
+
     /// Start downloading the release asset, and answer with the phase the caller is now
     /// in.
     ///
@@ -1336,14 +1434,75 @@ impl Ctx {
 
         let ctx = self.clone();
         tokio::spawn(async move {
-            let result = async {
-                let dest = teams_lite::update::download_path(&latest)?;
-                // Throttled to whole percent: the download is answered chunk by chunk,
-                // and a frame per chunk would put thousands of events on a socket that
-                // also carries the user's messages.
-                let mut last_percent = u64::MAX;
-                let ctx_progress = ctx.clone();
-                teams_lite::update::download(&ctx.http, &asset, &dest, move |received, total| {
+            match ctx.fetch_release_asset(asset, latest).await {
+                Ok(Some(dest)) => {
+                    let _ = ctx.with_update(|slot| {
+                        slot.phase = UpdatePhase::Ready;
+                        slot.received = slot.asset.as_ref().map(|a| a.size).unwrap_or(0);
+                        slot.file = Some(dest.clone());
+                    });
+                    eprintln!("[update] downloaded {} — waiting for the user", dest.display());
+                    ctx.emit_update_progress();
+                }
+                // Nothing left to download: the re-read found this build current. The row
+                // empties itself, and `forget_release` has already said so.
+                Ok(None) => {
+                    eprintln!("[update] the release is no longer newer than this build");
+                    ctx.forget_release();
+                }
+                Err(e) => {
+                    eprintln!("[update] download failed: {e:#}");
+                    let _ = ctx.with_update(|slot| {
+                        slot.phase = UpdatePhase::Failed;
+                        slot.error = format!("{e:#}");
+                    });
+                    ctx.emit_update_progress();
+                }
+            }
+        });
+
+        self.with_update(|slot| slot.progress_json())
+    }
+
+    /// Fetch the release binary, re-reading the release before every attempt.
+    ///
+    /// `Ok(None)` means there is nothing to fetch any more, which is not a failure.
+    ///
+    /// Two attempts, and the second is the whole point: the asset behind the rolling
+    /// `latest` tag can be replaced between the check and the click, and between the click
+    /// and the last byte. Attempt one therefore starts from a FRESH read of the release
+    /// rather than from what the greeting carried, and a failed attempt reads it again — so
+    /// a release that moved under a transfer heals itself instead of wedging the button on a
+    /// size that can never match. It stays bounded at two: a failure that retried forever
+    /// would hide a genuinely broken release, which is the other half of § Updating the app.
+    async fn fetch_release_asset(
+        &self,
+        asset: teams_lite::update::Asset,
+        latest: String,
+    ) -> Result<Option<std::path::PathBuf>> {
+        let mut asset = asset;
+        let mut latest = latest;
+        for attempt in 1..=DOWNLOAD_ATTEMPTS {
+            match self.refresh_release().await {
+                ReleaseNow::Asset(fresh, rev) => {
+                    asset = fresh;
+                    latest = rev;
+                }
+                ReleaseNow::Current => return Ok(None),
+                ReleaseNow::Unknown => {}
+            }
+            let dest = teams_lite::update::download_path(&latest)?;
+            // Throttled to whole percent: the download is answered chunk by chunk, and a
+            // frame per chunk would put thousands of events on a socket that also carries
+            // the user's messages. Rebuilt per attempt, because it holds the last percent
+            // it published and a second attempt starts from zero again.
+            let mut last_percent = u64::MAX;
+            let ctx_progress = self.clone();
+            let result = teams_lite::update::download(
+                &self.http,
+                &asset,
+                &dest,
+                move |received, total| {
                     let percent = if total > 0 { received * 100 / total } else { 0 };
                     if percent == last_percent {
                         return;
@@ -1362,33 +1521,24 @@ impl Ctx {
                     if let Some(payload) = published {
                         ctx_progress.emit("update_progress", payload);
                     }
-                })
-                .await?;
-                anyhow::Ok(dest)
-            }
+                },
+            )
             .await;
 
             match result {
-                Ok(dest) => {
-                    let _ = ctx.with_update(|slot| {
-                        slot.phase = UpdatePhase::Ready;
-                        slot.received = slot.asset.as_ref().map(|a| a.size).unwrap_or(0);
-                        slot.file = Some(dest.clone());
-                    });
-                    eprintln!("[update] downloaded {} — waiting for the user", dest.display());
+                Ok(()) => return Ok(Some(dest)),
+                Err(e) if attempt < DOWNLOAD_ATTEMPTS => {
+                    eprintln!(
+                        "[update] attempt {attempt} failed: {e:#} — re-reading the release and \
+                         fetching it once more"
+                    );
                 }
-                Err(e) => {
-                    eprintln!("[update] download failed: {e:#}");
-                    let _ = ctx.with_update(|slot| {
-                        slot.phase = UpdatePhase::Failed;
-                        slot.error = format!("{e:#}");
-                    });
-                }
+                Err(e) => return Err(e),
             }
-            ctx.emit_update_progress();
-        });
-
-        self.with_update(|slot| slot.progress_json())
+        }
+        // Unreachable: the loop either returns or exhausts its attempts through the `Err`
+        // arm above. Spelled rather than `unwrap`ed so a change to the bound cannot panic.
+        anyhow::bail!("the release could not be downloaded in {DOWNLOAD_ATTEMPTS} attempts")
     }
 
     /// Install the downloaded build and ask the launcher to restart onto it.
@@ -5562,25 +5712,7 @@ fn spawn_update_check(ctx: Ctx) {
     tokio::spawn(async move {
         match teams_lite::update::check(&ctx.http, current).await {
             Ok(Some(info)) => {
-                // What the button needs beyond the two commits: how big the download
-                // is (so the bar has a total from the first frame), and whether THIS
-                // install can replace itself at all — a staged service cannot, and it
-                // keeps the release link instead (see `update`).
-                let installable =
-                    info.asset.is_some() && !read_only() && teams_lite::update::self_install().is_some();
-                let data = json!({
-                    "current": info.current,
-                    "latest": info.latest,
-                    "url": info.url,
-                    "size": info.asset.as_ref().map(|a| a.size).unwrap_or(0),
-                    "can_install": installable,
-                });
-                if let Ok(mut slot) = ctx.update.lock() {
-                    slot.available = Some(data.clone());
-                    slot.asset = info.asset.clone();
-                    slot.latest = info.latest.clone();
-                }
-                ctx.emit("update_available", data);
+                let installable = ctx.publish_release(&info);
                 eprintln!(
                     "[update] a newer build is available ({} -> {}){}",
                     info.current,
@@ -8503,6 +8635,42 @@ mod tests {
         assert_eq!(payload["received"], 250);
         assert_eq!(payload["total"], 1000);
         assert_eq!(payload["error"], "");
+    }
+
+    /// A DOWNLOAD RE-READS THE RELEASE, and never trusts the size the greeting carried.
+    ///
+    /// The bug this pins cost the user their only way forward: `latest` is a rolling tag,
+    /// CI replaced its asset while the app was up, and the transfer was then verified
+    /// against the size measured at startup. It could never match again, so the button
+    /// failed every time — and the only thing it offered was to try the same stale number
+    /// once more. The fetch therefore reads the release before every attempt, and it makes
+    /// more than one.
+    #[test]
+    fn a_download_re_reads_the_release_before_every_attempt() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let fetch = code
+            .split("async fn fetch_release_asset(")
+            .nth(1)
+            .expect("the fetch that a download runs")
+            .split("\n    /// Install the downloaded build")
+            .next()
+            .expect("the method ends before the next one");
+        assert!(
+            fetch.contains("refresh_release().await"),
+            "the fetch does not re-read the release. A size remembered from the startup \
+             check describes an asset the rolling `latest` tag has already replaced, and a \
+             transfer verified against it fails forever."
+        );
+        assert!(
+            fetch.contains("for attempt in 1..=DOWNLOAD_ATTEMPTS"),
+            "the fetch makes one attempt. The asset can be replaced mid-transfer, and the \
+             second attempt — which re-reads the release — is what heals that."
+        );
+        assert!(DOWNLOAD_ATTEMPTS >= 2, "one attempt cannot recover a replaced asset");
+        // And bounded: a download that retried forever would hide a broken release behind
+        // a button that never stops trying.
+        assert!(DOWNLOAD_ATTEMPTS <= 3, "a download must not retry indefinitely");
     }
 
     #[test]
