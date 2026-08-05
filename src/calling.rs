@@ -49,12 +49,24 @@ pub const MODALITY_AUDIO: &str = "audio";
 /// in the web client's own calling bundle).
 const CALL_AGENT: &str = "callAgent";
 
-/// Who this client says it is, in the format the Skype-era services take. It matches the
-/// web client's shape — `deviceType=Web`, `clientName=skypeteams` — because that is the
-/// client this app mimics, and the calling service routes and validates by it.
-const CLIENT_IDENTITY: &str =
-    "os=Linux; osVer=6; proc=x86; lcid=en-us; deviceType=Web; country=FR; \
-     clientName=skypeteams; clientVer=1415/26061118216";
+/// Who this client says it is, in the format the CALLING service takes.
+///
+/// Not the Skype-era `os=…; clientName=…` shape the messaging services want: the captured
+/// calling request sends `SkypeSpaces/{build}/{platform}/TsCallingVersion=…`, and this
+/// mirrors it. `TsCallingVersion` is the version of the calling stack the real client
+/// runs, which is what the service reads to decide what a client understands.
+const CLIENT_IDENTITY: &str = "SkypeSpaces/1415/26061118216/os=linux; osVer=undefined; \
+     deviceType=computer; browser=chrome; browserVer=150.0.0.0/TsCallingVersion=2026.24.01.6";
+
+/// The partition a region's users live in, as the captured request states it (`fr` →
+/// `fr01`).
+///
+/// Derived from ONE observation, so it is a function rather than a constant: if the
+/// service ever refuses it, this is the one line to correct, and the region it is built
+/// from comes from the user's own authz answer.
+fn teams_partition(region: &str) -> String {
+    format!("{region}01")
+}
 
 /// Trailing paths of the callback links we publish. The service POSTs to these on
 /// our trouter socket, so the set we publish IS the set of frames we can be sent.
@@ -1069,24 +1081,32 @@ pub async fn post_signal(
             serde_json::to_string_pretty(payload).unwrap_or_default()
         );
     }
+    // Every header below was copied off a request this service ACCEPTED (captured from
+    // the real client, 2026-08-05). Two of them are absences, and they are the point:
+    //
+    //   * NO `X-Skypetoken`. The captured request authenticates with the ic3 bearer
+    //     ALONE. This app sent both, and a calling request carrying two credentials is a
+    //     shape the real client never produces — the likeliest reading of a `400` that
+    //     names nothing.
+    //   * NO `api-version`. The conversation service is not versioned that way; the
+    //     header belongs to the relay-token GET, which is a different service.
     let response = http
         .post(url)
         .header("content-type", "application/json")
-        // The service's own header table calls this `CLIENT_USER_AGENT`
-        // (`X-Microsoft-Skype-Client`), and every request the real client makes carries
-        // it. A calling request with no client identity is a shape the service has never
-        // seen from a browser.
-        .header("X-Microsoft-Skype-Client", CLIENT_IDENTITY)
-        .header("X-Skypetoken", &session.skypetoken)
+        .header("accept", "*/*")
         .header("authorization", format!("Bearer {ic3}"))
+        // Who this client is, in the format the CALLING service takes — which is not the
+        // Skype-era one: `SkypeSpaces/{version}/{platform}/TsCallingVersion=…`.
+        .header("X-Microsoft-Skype-Client", CLIENT_IDENTITY)
         .header("X-Microsoft-Skype-Chain-ID", correlation_id)
-        // One id per REQUEST, beside the chain id that spans the call. The service's own
-        // header table names it (`MESSAGE_ID`), it answers with one, and a request that
-        // sends none is a shape the real client never produces.
+        // One id per REQUEST, beside the chain id that spans the call.
         .header("X-Microsoft-Skype-Message-ID", uuid::Uuid::new_v4().to_string())
-        .header("accept", "application/json, text/javascript")
         .header("X-MS-Migration", "True")
-        .header("api-version", "2")
+        // Where this user lives. The service routes on all three, and the captured
+        // request carries them on every call.
+        .header("ms-teams-region", &session.region)
+        .header("ms-teams-partition", teams_partition(&session.region))
+        .header("ms-teams-ring", "general")
         .json(payload)
         .send()
         .await
@@ -1713,6 +1733,37 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("/conversation/rosterUpdate/"));
+    }
+
+    /// The credentials a calling request carries, and the ones it must NOT. The captured
+    /// request authenticates with the ic3 bearer ALONE — sending a skypetoken beside it is
+    /// a shape the real client never produces, and it cost three rounds of a `400` that
+    /// named nothing.
+    #[test]
+    fn a_calling_request_carries_one_credential_and_no_api_version() {
+        let source = include_str!("calling.rs");
+        // `post_signal` alone. The relay-token GET below it legitimately sends a
+        // skypetoken and an api-version — that is a different service, and the web
+        // client's own legacy token fetcher sends exactly those two.
+        let start = source.find("pub async fn post_signal").expect("post_signal");
+        let end = source[start..].find("\n/// ").map(|at| start + at).unwrap_or(source.len());
+        let post_signal = &source[start..end];
+        assert!(
+            !post_signal.contains(".header(\"X-Skypetoken\""),
+            "the calling service takes the ic3 bearer alone; a second credential is refused"
+        );
+        assert!(
+            !post_signal.contains(".header(\"api-version\""),
+            "the conversation service is not versioned by that header"
+        );
+        assert!(post_signal.contains("ms-teams-region"), "the service routes on the region");
+        assert!(post_signal.contains("ms-teams-ring"), "and on the ring");
+    }
+
+    #[test]
+    fn a_region_names_its_partition() {
+        // The one observation this is built from: region `fr` lives in partition `fr01`.
+        assert_eq!(teams_partition("fr"), "fr01");
     }
 
     /// The capability masks are COPIED from a request the service accepted, not computed.
