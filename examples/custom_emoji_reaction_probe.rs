@@ -87,14 +87,13 @@ async fn main() -> Result<()> {
     println!("\nproperties.emotions after setting:");
     println!("{}", serde_json::to_string_pretty(&emotions_after_set).unwrap_or_default());
 
-    // Check whether the custom key appears in the snapshot.
-    let custom_key_present = emotions_after_set
-        .as_object()
-        .and_then(|obj| obj.get(&session.self_mri))
-        .and_then(Value::as_object)
-        .map(|user_emotions| user_emotions.contains_key(&custom_key))
-        .unwrap_or(false);
-    println!("custom key present in emotions: {}", if custom_key_present { "yes" } else { "no" });
+    let key_accepted = set_result.is_ok();
+    let key_present = emotion_entry_exists(&emotions_after_set, &custom_key);
+    println!("key accepted (2xx): {}", if key_accepted { "yes" } else { "no" });
+    println!("key present in snapshot: {}", if key_present { "yes" } else { "no" });
+
+    println!("\n>>> LOOK AT THE SANDBOX THREAD IN TEAMS NOW — clearing in 90 seconds");
+    std::thread::sleep(std::time::Duration::from_secs(90));
 
     // 5. Clear the reaction with value: 0.
     println!("\nclearing reaction with value: 0...");
@@ -112,13 +111,28 @@ async fn main() -> Result<()> {
     println!("\nproperties.emotions after clearing:");
     println!("{}", serde_json::to_string_pretty(&emotions_after_clear).unwrap_or_default());
 
-    let custom_key_after_clear = emotions_after_clear
-        .as_object()
-        .and_then(|obj| obj.get(&session.self_mri))
-        .and_then(Value::as_object)
-        .map(|user_emotions| user_emotions.contains_key(&custom_key))
-        .unwrap_or(false);
-    println!("custom key still present after clear: {}", if custom_key_after_clear { "yes" } else { "no" });
+    let key_present_after = emotion_entry_exists(&emotions_after_clear, &custom_key);
+    let our_value_after = emotion_value_for(&emotions_after_clear, &custom_key, &session.self_mri);
+    println!("key present in snapshot: {}", if key_present_after { "yes" } else { "no" });
+    println!("our value after clear: {}", our_value_after);
+
+    // 7. Test a deliberately long key to find the length ceiling.
+    let long_key = format!("tlcustom-{}", "a".repeat(280));
+    println!("\nsetting long key ({} chars)...", long_key.len());
+    let long_result = set_reaction_raw(&http, &session, SANDBOX, &sent.id, &long_key, true).await;
+    let long_accepted = long_result.is_ok();
+    println!("long key ({} chars) accepted: {}", long_key.len(), if long_accepted { "yes" } else { "no" });
+
+    if long_accepted {
+        let emotions_long = read_emotions(&http, &session, &sent.id).await?;
+        let long_present = emotion_entry_exists(&emotions_long, &long_key);
+        println!("long key present in snapshot: {}", if long_present { "yes" } else { "no" });
+
+        println!("\n>>> LOOK AT THE SANDBOX THREAD IN TEAMS NOW — clearing in 90 seconds");
+        std::thread::sleep(std::time::Duration::from_secs(90));
+
+        let _ = set_reaction_raw(&http, &session, SANDBOX, &sent.id, &long_key, false).await;
+    }
 
     println!("\nOK — custom emoji reaction probe complete");
     Ok(())
@@ -319,4 +333,37 @@ async fn read_emotions(
     };
 
     Ok(emotions)
+}
+
+/// Check whether an emotion entry with the given key exists in the emotions array.
+/// The array shape is: `[{"key": "...", "users": [...]}]`.
+fn emotion_entry_exists(emotions: &Value, key: &str) -> bool {
+    emotions
+        .as_array()
+        .map(|arr| arr.iter().any(|entry| {
+            entry.get("key").and_then(Value::as_str) == Some(key)
+        }))
+        .unwrap_or(false)
+}
+
+/// Extract our own emotion value for a given key. Returns the value as a string,
+/// or "not found" if the key or our user entry does not exist.
+/// The array shape is: `[{"key": "...", "users": [{"mri": "...", "value": "..."}]}]`.
+fn emotion_value_for(emotions: &Value, key: &str, mri: &str) -> String {
+    emotions
+        .as_array()
+        .and_then(|arr| {
+            arr.iter()
+                .find(|entry| entry.get("key").and_then(Value::as_str) == Some(key))
+                .and_then(|entry| entry.get("users"))
+                .and_then(Value::as_array)
+                .and_then(|users| {
+                    users.iter()
+                        .find(|user| user.get("mri").and_then(Value::as_str) == Some(mri))
+                        .and_then(|user| user.get("value"))
+                        .and_then(Value::as_str)
+                })
+        })
+        .unwrap_or("not found")
+        .to_string()
 }
