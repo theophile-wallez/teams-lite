@@ -94,7 +94,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_models, agent_policy, auth, calendar, calling, mail, push, push_policy, retry,
+    agent, agent_models, agent_policy, auth, calendar, calling, custom_emoji, mail, push, push_policy, retry,
     sender_icon, store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
@@ -302,6 +302,15 @@ const OUTWARD_METHODS: [&str; 13] = [
 /// misstates (see the local agent's signature line in AGENTS.md), so relabelling it is
 /// the user's own act and nothing that merely found this socket gets to perform it.
 /// Reading the overrides back stays open: it returns what the user themselves chose.
+///
+/// `custom_emoji_add`, `custom_emoji_remove` and `custom_emoji_import` are the three
+/// entries that write the custom emoji pack. Like the person overrides, they write only
+/// to the store — but they are gated because the pack decides what art this machine can
+/// post as emoji under the user's name on the next send. A client that merely found this
+/// socket could add a picture whose content the user never chose, and that picture would
+/// leave this machine in the next message they send that names it. Reading the pack back
+/// stays open: it returns what the user themselves put in.
+///
 /// `set_calling` and `call_prepare` are the two calling entries that post nothing.
 /// `set_calling` registers (or unregisters) a calling endpoint with Teams, which
 /// decides whether the user's real incoming calls are offered on this machine at all
@@ -310,7 +319,7 @@ const OUTWARD_METHODS: [&str; 13] = [
 /// has and hands the page the relay credentials its `RTCPeerConnection` needs; the
 /// credentials are why it is gated rather than open, because a client that merely
 /// found this socket has no business holding them.
-const MACHINE_METHODS: [&str; 15] = [
+const MACHINE_METHODS: [&str; 18] = [
     "repair_broker",
     "update_download",
     "update_apply",
@@ -326,6 +335,9 @@ const MACHINE_METHODS: [&str; 15] = [
     "agent_set_unrestricted",
     "set_person_name",
     "set_person_avatar",
+    "custom_emoji_add",
+    "custom_emoji_remove",
+    "custom_emoji_import",
 ];
 
 /// What a {@link MACHINE_METHODS} entry actually does to the machine, for its
@@ -359,6 +371,9 @@ fn machine_effect(method: &str) -> &'static str {
         }
         "set_person_name" | "set_person_avatar" => {
             "decides the name and the face this machine puts on a colleague's messages"
+        }
+        "custom_emoji_add" | "custom_emoji_remove" | "custom_emoji_import" => {
+            "decides which pictures this machine can post as emoji under the user's name"
         }
         "set_calling" => {
             "registers this machine with Teams as a device the user's calls ring on"
@@ -2907,6 +2922,289 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }
             ctx.emit("person_override_changed", json!({ "mri": mri }));
             Ok(json!({ "saved": true }))
+        }
+
+        // The custom emoji pack this machine holds. Returns the list without the art
+        // itself, so a picker can show what is available before asking for the bytes.
+        "custom_emoji" => {
+            let store = ctx.store()?;
+            let emoji = store.custom_emoji()?;
+            let list: Vec<Value> = emoji
+                .into_iter()
+                .map(|e| {
+                    json!({
+                        "name": e.name,
+                        "alias_of": e.alias_of,
+                        "content_type": e.content_type,
+                        "width": e.width,
+                        "height": e.height,
+                        "source": e.source,
+                        "added_ms": e.added_ms,
+                    })
+                })
+                .collect();
+            Ok(json!({ "emoji": list }))
+        }
+
+        // The art for one custom emoji, or empty strings when there is none.
+        "custom_emoji_image" => {
+            let name = param_str(params, "name")?;
+            let store = ctx.store()?;
+            let art = store.custom_emoji_art(&name)?;
+            match art {
+                Some((content_type, bytes)) => {
+                    let data_base64 =
+                        base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    Ok(json!({
+                        "content_type": content_type,
+                        "data_base64": data_base64,
+                    }))
+                }
+                None => Ok(json!({
+                    "content_type": "",
+                    "data_base64": "",
+                })),
+            }
+        }
+
+        // The full pack, with the art base64-encoded. This is what another machine
+        // imports, so a pack travels with its pictures.
+        "custom_emoji_export" => {
+            let store = ctx.store()?;
+            let emoji = store.custom_emoji()?;
+            let list: Vec<Value> = emoji
+                .into_iter()
+                .map(|e| {
+                    let data_base64 = if e.alias_of.is_empty() {
+                        store
+                            .custom_emoji_art(&e.name)
+                            .ok()
+                            .flatten()
+                            .map(|(_, bytes)| {
+                                base64::engine::general_purpose::STANDARD.encode(&bytes)
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    json!({
+                        "name": e.name,
+                        "alias_of": e.alias_of,
+                        "content_type": e.content_type,
+                        "data_base64": data_base64,
+                        "width": e.width,
+                        "height": e.height,
+                    })
+                })
+                .collect();
+            Ok(json!({ "emoji": list }))
+        }
+
+        // Add one custom emoji to the pack, or fail with a reason. The name must be
+        // free, the art must pass the type and size checks, and exactly one source
+        // must be present.
+        "custom_emoji_add" => {
+            let name = param_str(params, "name")?;
+            let source = param_str(params, "source")?;
+            anyhow::ensure!(
+                custom_emoji::is_valid_name(&name),
+                "an emoji name may hold lowercase letters, numbers, dashes and underscores"
+            );
+
+            let store = ctx.store()?;
+            let existing = store.custom_emoji()?;
+            let name_taken = existing.iter().any(|e| e.name == name || e.alias_of == name);
+            anyhow::ensure!(!name_taken, "If your emoji name is taken, choose another.");
+
+            let alias_of = params.get("alias_of").and_then(|v| v.as_str()).map(str::to_string);
+            let url = params.get("url").and_then(|v| v.as_str());
+            let media_url = params.get("media_url").and_then(|v| v.as_str());
+            let data_base64 = params.get("data_base64").and_then(|v| v.as_str());
+
+            let sources = [
+                alias_of.is_some(),
+                url.is_some(),
+                media_url.is_some(),
+                data_base64.is_some(),
+            ]
+            .iter()
+            .filter(|&&b| b)
+            .count();
+            anyhow::ensure!(sources == 1, "exactly one source must be present");
+
+            if let Some(alias) = alias_of.as_deref() {
+                store.set_custom_emoji(&name, None, Some(alias), &source, now_ms())?;
+            } else if url.is_some() {
+                anyhow::bail!("not implemented");
+            } else if media_url.is_some() {
+                anyhow::bail!("not implemented");
+            } else if let Some(data) = data_base64 {
+                let content_type = param_str(params, "content_type")?;
+                anyhow::ensure!(
+                    custom_emoji::CUSTOM_EMOJI_TYPES.contains(&content_type.as_str()),
+                    "an emoji must be a PNG, JPEG, GIF or WebP image"
+                );
+
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .context("emoji data is not valid base64")?;
+                anyhow::ensure!(
+                    bytes.len() <= custom_emoji::MAX_CUSTOM_EMOJI_BYTES,
+                    "an emoji must be 128 KB or smaller"
+                );
+
+                let width: u32 = params
+                    .get("width")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| anyhow::anyhow!("width is required"))?
+                    .try_into()?;
+                let height: u32 = params
+                    .get("height")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| anyhow::anyhow!("height is required"))?
+                    .try_into()?;
+
+                anyhow::ensure!(
+                    width <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
+                        && height <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION,
+                    "an emoji must be 512 pixels or smaller on a side"
+                );
+
+                store.set_custom_emoji(
+                    &name,
+                    Some((&content_type, &bytes, width, height)),
+                    None,
+                    &source,
+                    now_ms(),
+                )?;
+            }
+
+            ctx.emit("custom_emoji_changed", json!({}));
+            Ok(json!({ "added": true }))
+        }
+
+        // Remove one custom emoji from the pack. Returns whether it existed.
+        "custom_emoji_remove" => {
+            let name = param_str(params, "name")?;
+            let store = ctx.store()?;
+            let removed = store.remove_custom_emoji(&name)?;
+            ctx.emit("custom_emoji_changed", json!({}));
+            Ok(json!({ "removed": removed }))
+        }
+
+        // Import a pack exported from another machine. Each entry is validated like
+        // `custom_emoji_add`; entries that fail are skipped, and the count of what was
+        // added is returned. A pack with one bad row still imports the rest.
+        "custom_emoji_import" => {
+            let emoji_list = params
+                .get("emoji")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow::anyhow!("emoji array is required"))?;
+
+            let store = ctx.store()?;
+            let mut added = 0;
+            let mut errors = Vec::new();
+
+            for entry in emoji_list {
+                let name = entry
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("name is required"))?;
+
+                if !custom_emoji::is_valid_name(name) {
+                    errors.push(format!("{}: invalid name", name));
+                    continue;
+                }
+
+                let existing = store.custom_emoji()?;
+                if existing.iter().any(|e| e.name == name || e.alias_of == name) {
+                    errors.push(format!("{}: name taken", name));
+                    continue;
+                }
+
+                let alias_of = entry.get("alias_of").and_then(|v| v.as_str());
+                let data_base64 = entry.get("data_base64").and_then(|v| v.as_str());
+
+                if let Some(alias) = alias_of {
+                    if alias.is_empty() {
+                        match store.set_custom_emoji(name, None, None, "import", now_ms()) {
+                            Ok(_) => added += 1,
+                            Err(e) => errors.push(format!("{}: {}", name, e)),
+                        }
+                    } else {
+                        match store.set_custom_emoji(name, None, Some(alias), "import", now_ms())
+                        {
+                            Ok(_) => added += 1,
+                            Err(e) => errors.push(format!("{}: {}", name, e)),
+                        }
+                    }
+                } else if let Some(data) = data_base64 {
+                    if data.is_empty() {
+                        continue;
+                    }
+
+                    let content_type = entry
+                        .get("content_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !custom_emoji::CUSTOM_EMOJI_TYPES.contains(&content_type) {
+                        errors.push(format!("{}: invalid content type", name));
+                        continue;
+                    }
+
+                    let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+                        Ok(b) => b,
+                        Err(_) => {
+                            errors.push(format!("{}: invalid base64", name));
+                            continue;
+                        }
+                    };
+
+                    if bytes.len() > custom_emoji::MAX_CUSTOM_EMOJI_BYTES {
+                        errors.push(format!("{}: too large", name));
+                        continue;
+                    }
+
+                    let width: u32 = entry
+                        .get("width")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        .try_into()
+                        .unwrap_or(0);
+                    let height: u32 = entry
+                        .get("height")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        .try_into()
+                        .unwrap_or(0);
+
+                    if width > custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
+                        || height > custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
+                    {
+                        errors.push(format!("{}: dimensions too large", name));
+                        continue;
+                    }
+
+                    match store.set_custom_emoji(
+                        name,
+                        Some((content_type, &bytes, width, height)),
+                        None,
+                        "import",
+                        now_ms(),
+                    ) {
+                        Ok(_) => added += 1,
+                        Err(e) => errors.push(format!("{}: {}", name, e)),
+                    }
+                }
+            }
+
+            ctx.emit("custom_emoji_changed", json!({}));
+
+            if added == 0 && !errors.is_empty() {
+                anyhow::bail!("failed to import: {}", errors.join(", "));
+            }
+
+            Ok(json!({ "added": added }))
         }
 
         // send a message
@@ -8752,6 +9050,17 @@ mod tests {
         }
         for bad in ["image/svg+xml", "text/html", "application/pdf", "image/PNG", ""] {
             assert!(!PERSON_AVATAR_TYPES.contains(&bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn writing_the_emoji_pack_is_gated_and_reading_it_is_not() {
+        for method in ["custom_emoji_add", "custom_emoji_remove", "custom_emoji_import"] {
+            assert_eq!(write_class(method), Some(WriteClass::Machine), "{method} must need the write token");
+            assert_ne!(machine_effect(method), "changes this machine", "{method} needs its own refusal text");
+        }
+        for method in ["custom_emoji", "custom_emoji_image", "custom_emoji_export"] {
+            assert_eq!(write_class(method), None, "{method} returns what the user themselves put in");
         }
     }
 
