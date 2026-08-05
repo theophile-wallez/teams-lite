@@ -52,7 +52,12 @@ export type RichTag =
    *  recognises the prefix in the words the way the backend does. Its children are that
    *  prefix, verbatim, so anything that does not know the tag (the outbound serializer
    *  below, a renderer without the case) still sees exactly the text the user typed. */
-  | "agent";
+  | "agent"
+  /** A custom emoji uploaded to Teams as AMS-hosted art: `:shipit:` drawn from the
+   *  bytes the message itself carries, never from the reader's own pack. Distinguished
+   *  from Teams' own emoji by the fact that theirs points at the personal-expressions
+   *  CDN. A glyph, not a picture: sized to the text, never zoomable. */
+  | "customEmoji";
 
 export type RichAttrs = {
   href?: string;
@@ -78,6 +83,8 @@ export type RichAttrs = {
    *  browser for a million columns. */
   colspan?: number;
   rowspan?: number;
+  /** Custom emoji only: the code (`:shipit:`) the emoji was sent with. */
+  code?: string;
 };
 
 export type RichNode =
@@ -404,9 +411,27 @@ export function parseRichHtml(html: string): RichNode[] {
     }
 
     if (mapped === "img") {
-      // A Teams emoji is a glyph wearing an <img>'s clothes: emit the character
-      // it carries as inline text instead of a picture (see isEmojiImage).
+      // A Teams emoji is a glyph wearing an <img>'s clothes. Distinguish custom
+      // emoji (AMS-hosted art uploaded by a user) from Teams' own emoji (the
+      // personal-expressions CDN): ours is kept as art, theirs collapses to text.
       if (isEmojiImage(attrs)) {
+        const src = attrs["src"] ?? "";
+        const isCustomEmoji = !/\/personal-expressions\//i.test(decodeEntities(src));
+        if (isCustomEmoji) {
+          const safeSrcValue = safeSrc(src);
+          const code = decodeEntities(attrs["alt"] ?? "").trim();
+          if (safeSrcValue && code) {
+            pushChild({
+              type: "element",
+              tag: "customEmoji",
+              attrs: { src: safeSrcValue, code },
+              children: [],
+            });
+            continue;
+          }
+        }
+        // Teams' own emoji (or a custom emoji with no alt): emit the character
+        // it carries as inline text.
         const glyph = decodeEntities(attrs["alt"] ?? attrs["title"] ?? "").trim();
         if (glyph) pushChild({ type: "text", text: glyph });
         continue;
@@ -743,6 +768,7 @@ export function hasVisibleContent(nodes: RichNode[]): boolean {
     if (node.type === "text") return node.text.trim().length > 0;
     if (node.tag === "br" || node.tag === "hr") return false;
     if (node.tag === "img") return true;
+    if (node.tag === "customEmoji") return true;
     // An app card always renders something, even when the payload never made it
     // into the HTML (the renderer says so explicitly).
     if (node.tag === "card") return true;
@@ -753,12 +779,14 @@ export function hasVisibleContent(nodes: RichNode[]): boolean {
 /**
  * Like {@link hasVisibleContent}, but images do NOT count as content. Used to
  * tell an image-only message (text-free, just a picture) apart from one that
- * also carries real text: the former drops its chat bubble.
+ * also carries real text: the former drops its chat bubble. Custom emoji DO
+ * count, because they are glyphs rather than pictures.
  */
 export function hasNonImageContent(nodes: RichNode[]): boolean {
   return nodes.some((node) => {
     if (node.type === "text") return node.text.trim().length > 0;
     if (node.tag === "br" || node.tag === "hr" || node.tag === "img") return false;
+    if (node.tag === "customEmoji") return true;
     if (node.tag === "card") return true;
     return hasNonImageContent(node.children);
   });
@@ -809,6 +837,7 @@ export function nodeText(nodes: RichNode[]): string {
   for (const node of nodes) {
     if (node.type === "text") out += node.text;
     else if (node.tag === "br") out += " ";
+    else if (node.tag === "customEmoji") out += node.attrs.code ?? "";
     else out += nodeText(node.children);
   }
   return out;
@@ -1075,6 +1104,15 @@ function serializeNodes(nodes: RichNode[], sink?: MentionSink): string {
       }
       continue;
     }
+    if (node.tag === "customEmoji") {
+      if (node.attrs.src && node.attrs.code) {
+        out +=
+          `<img itemtype="http://schema.skype.com/Emoji" ` +
+          `alt="${escapeAttr(node.attrs.code)}" ` +
+          `src="${escapeAttr(node.attrs.src)}">`;
+      }
+      continue;
+    }
     if (node.tag === "a") {
       const inner = serializeNodes(node.children, sink);
       out += node.attrs.href
@@ -1125,7 +1163,7 @@ type Edge = "start" | "end";
 // Tags whose own whitespace is content, so an edge trim stops at them: a code
 // block keeps the indentation of its first line, and an image or a card IS the
 // edge of the message.
-const UNTRIMMED_EDGE_TAGS = new Set<RichTag>(["pre", "code", "img", "card"]);
+const UNTRIMMED_EDGE_TAGS = new Set<RichTag>(["pre", "code", "img", "card", "customEmoji"]);
 
 /**
  * Trim one edge of a message body, in place of the text `trim()` a plain send

@@ -12,11 +12,13 @@ import {
   type RichNode,
   type RichTag,
 } from "~/lib/rich-text";
+import { bodyIsOnlyEmoji } from "~/lib/custom-emoji";
 import { markAgentTag } from "~/lib/agent-tag";
 import type { AgentCandidate } from "~/lib/mentions";
 import type { BodyFormat, MessageMention } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { AgentTagChip } from "./agent-tag";
+import { CustomEmoji } from "./custom-emoji";
 import { EmailSummaryCard } from "./email-summary";
 import { MediaImage } from "./media-image";
 import { PersonHoverCard } from "./person-card";
@@ -119,6 +121,7 @@ export function RichNodes(props: {
     () => mergeMentionRuns(props.nodes, props.mentions),
     [props.nodes, props.mentions],
   );
+  const jumbo = useMemo(() => bodyIsOnlyEmoji(nodes), [nodes]);
   if (!hasVisibleContent(nodes)) return null;
   return (
     <div className={cn("break-words", props.className)}>
@@ -127,6 +130,7 @@ export function RichNodes(props: {
           mentions: props.mentions,
           cardShownSeparately: props.cardShownSeparately,
           tokens: props.tokens,
+          jumbo,
         }),
       )}
     </div>
@@ -296,6 +300,7 @@ type RenderContext = {
   inPre?: boolean;
   cardShownSeparately?: boolean;
   tokens?: boolean;
+  jumbo?: boolean;
 };
 
 function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode {
@@ -573,6 +578,15 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
       // and the name say it in the vendor's own voice, which is what was on screen when
       // the message was written.
       return <AgentTagChip key={key} backend={node.attrs.backend ?? ""} />;
+    case "customEmoji":
+      return (
+        <CustomEmoji
+          key={key}
+          src={node.attrs.src ?? ""}
+          code={node.attrs.code ?? ""}
+          jumbo={ctx.jumbo}
+        />
+      );
     default:
       return <span key={key}>{children}</span>;
   }
