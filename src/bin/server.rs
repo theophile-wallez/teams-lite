@@ -7163,18 +7163,17 @@ impl Ctx {
             return;
         }
 
-        // A meeting's roster: who is in it, and who is still in its lobby. Every frame
-        // replaces the list, because the service sends the whole roster it wants us to
-        // hold rather than a diff we would have to reconcile.
+        // A meeting's roster: who is in it, and who is still in its lobby. The service
+        // sends a DELTA — this app asks for one — so each frame is FOLDED into the list
+        // rather than replacing it (`calling::apply_roster_update`). Measured: consecutive
+        // frames of one meeting carried one participant, then two, then one, and a reader
+        // that replaced the list showed the meeting emptying and refilling.
         if let Some(roster) = calling::roster_in_frame(&frame.body) {
             let changed = {
                 let mut plane = self.calling.lock().unwrap();
                 match plane.call.as_mut() {
-                    Some(call) if call.roster != roster => {
-                        call.roster = roster;
-                        true
-                    }
-                    _ => false,
+                    Some(call) => calling::apply_roster_update(&mut call.roster, roster),
+                    None => false,
                 }
             };
             if changed {

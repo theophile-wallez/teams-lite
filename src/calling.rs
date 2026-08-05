@@ -1071,37 +1071,121 @@ pub struct RosterMember {
     pub display_name: String,
     /// True while they are only in the lobby, so a count of who can hear us is honest.
     pub in_lobby: bool,
+    /// False when the roster says this person is no longer in the meeting. A delta frame
+    /// announces a departure by turning their state, not by omitting them, so a reader
+    /// that ignored this would keep naming somebody who left.
+    pub present: bool,
+}
+
+/// A roster frame's contents: who it names, and whether that is the WHOLE meeting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterUpdate {
+    pub members: Vec<RosterMember>,
+    /// True when the frame carries only the participants that CHANGED (`type: "Delta"`),
+    /// which is what this app asks for in every join and call payload
+    /// (`roster: {type: "Delta"}`). Measured: consecutive frames from one meeting carried
+    /// one participant, then two, then one — never the roster whole. So a delta must be
+    /// MERGED, and replacing the list with it makes the meeting flicker between the people
+    /// in it.
+    pub delta: bool,
 }
 
 /// Read the roster out of a `rosterUpdate` frame, or `None` when the frame is not one.
 ///
 /// Everybody the frame names, us included: the caller knows its own mri and drops it,
 /// and doing that here would make an empty roster and "only me" the same answer.
-pub fn roster_in_frame(frame: &Value) -> Option<Vec<RosterMember>> {
-    let participants = ["/_decoded/rosterUpdate/participants", "/rosterUpdate/participants"]
+///
+/// **The shape here is measured, and it is not the one the web client's own types
+/// describe** (NATIVE-CALLING.md § 10.2). The earlier version of this function read
+/// `/rosterUpdate/participants` as an ARRAY, which no real frame has ever been: it returned
+/// `None` every time, so a joined meeting named nobody and the call bar said "In the
+/// meeting" where it should have said who was in it. Three differences, and every one of
+/// them alone was enough to lose the whole roster:
+///
+/// * the frame BODY *is* the roster — `{type, sequenceNumber, participantCounts,
+///   participants}` — because the callback url it arrived on is what names it;
+/// * `participants` is an OBJECT keyed by mri, not an array of people carrying an `id`;
+/// * the display name is under `details`, and `state` is `"active"` / `"inactive"` rather
+///   than the `"Connected"` / `"Lobby"` spellings a call leg uses.
+///
+/// Every older spelling is still tried first, because they cost one pointer lookup each and
+/// this tenant is one tenant.
+pub fn roster_in_frame(frame: &Value) -> Option<RosterUpdate> {
+    let roster = ["/_decoded/rosterUpdate", "/rosterUpdate"]
         .iter()
         .find_map(|p| frame.pointer(p))
-        .and_then(Value::as_array)?;
-    let members: Vec<RosterMember> = participants
-        .iter()
-        .filter_map(|person| {
-            let mri = person
-                .get("id")
-                .and_then(Value::as_str)
+        // The body itself, which is the shape this tenant really sends. It is recognised by
+        // holding a `participants` map rather than by its `type`, so a frame that names one
+        // is never mistaken for a roster.
+        .or_else(|| frame.get("participants").map(|_| frame))?;
+    let participants = roster.get("participants")?;
+    // Either shape: the object this tenant sends, keyed by mri, or the array the client's
+    // own types describe.
+    let people: Vec<(Option<&str>, &Value)> = match participants {
+        Value::Object(map) => map.iter().map(|(mri, person)| (Some(mri.as_str()), person)).collect(),
+        Value::Array(items) => items.iter().map(|person| (None, person)).collect(),
+        _ => return None,
+    };
+    let members: Vec<RosterMember> = people
+        .into_iter()
+        .filter_map(|(key, person)| {
+            let mri = key
+                .or_else(|| person.get("id").and_then(Value::as_str))
                 .filter(|id| id.starts_with('8') || id.starts_with('4'))?;
             let state = person.get("state").and_then(Value::as_str).unwrap_or_default();
             Some(RosterMember {
                 mri: mri.to_string(),
-                display_name: person
-                    .get("displayName")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                display_name: display_name_in_roster(person),
                 in_lobby: matches!(state, "Lobby" | "InLobby" | "ConnectedForRosterOnly"),
+                // An unstated state is presence: the array shape never carried one, and a
+                // person the roster names is in the meeting until it says otherwise.
+                present: !matches!(state, "inactive" | "Inactive" | "Disconnected"),
             })
         })
         .collect();
-    Some(members)
+    Some(RosterUpdate {
+        members,
+        delta: roster.get("type").and_then(Value::as_str) == Some("Delta"),
+    })
+}
+
+/// A roster participant's name, from wherever that frame keeps it.
+///
+/// `details.displayName` is what this tenant sends; the bare `displayName` is the client's
+/// own normalized form and what the older test invented.
+fn display_name_in_roster(person: &Value) -> String {
+    ["/details/displayName", "/displayName", "/details/name"]
+        .iter()
+        .find_map(|p| person.pointer(p))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Fold a roster frame into the list a call holds, and return whether anything moved.
+///
+/// A delta names only what changed, so it is merged by mri and a departure removes its
+/// person; a full frame replaces the list. Either way the order is the order people were
+/// first seen, because a roster that re-sorts itself under the reader moves the name they
+/// were reading.
+pub fn apply_roster_update(current: &mut Vec<RosterMember>, update: RosterUpdate) -> bool {
+    let before = current.clone();
+    if !update.delta {
+        current.clear();
+    }
+    for member in update.members {
+        let at = current.iter().position(|held| held.mri == member.mri);
+        match (at, member.present) {
+            (Some(at), false) => {
+                current.remove(at);
+            }
+            (Some(at), true) => current[at] = member,
+            (None, true) => current.push(member),
+            // Somebody who left and was never here needs no room made for them.
+            (None, false) => {}
+        }
+    }
+    *current != before
 }
 
 /// A call the service accepted: the links it answered with.
@@ -2050,23 +2134,98 @@ mod tests {
         assert_eq!(lobby_state_in_frame(&json!({ "callEnd": { "code": 0 } })), None);
     }
 
+    /// The shape the TENANT sends, measured (NATIVE-CALLING.md § 10.2): the body is the
+    /// roster, `participants` is keyed by mri, the name is under `details`, and the state is
+    /// `active` / `inactive`.
+    ///
+    /// This test used to assert an invented shape — an array of people under a
+    /// `rosterUpdate` key, each carrying `id` and `displayName` — and it passed for weeks
+    /// while `roster_in_frame` returned `None` on every real frame. A fixture nobody
+    /// measured is a test of the fixture.
     #[test]
-    fn a_roster_frame_names_everybody_and_who_is_still_in_the_lobby() {
+    fn a_roster_frame_is_read_in_the_shape_the_tenant_really_sends() {
+        let roster = roster_in_frame(&json!({
+            "type": "Delta",
+            "sequenceNumber": 26,
+            "participantCounts": { "active": 2 },
+            "participants": {
+                "8:orgid:her": {
+                    "details": { "displayName": "Her" },
+                    "state": "active",
+                    "endpoints": { "guid-1": { "call": { "mediaStreams": [
+                        { "type": "audio", "label": "main-audio", "sourceId": 2677,
+                          "direction": "sendrecv" }
+                    ] } } },
+                },
+                "8:orgid:him": { "details": { "displayName": "Him" }, "state": "inactive" },
+                // A resource that is not a person keeps out of the list.
+                "19:meeting_x@thread.v2": { "details": { "displayName": "the meeting" } },
+            }
+        }))
+        .expect("a roster");
+        assert!(roster.delta, "the frame said Delta, and that decides whether it merges");
+        assert_eq!(roster.members.len(), 2);
+        assert_eq!(roster.members[0].display_name, "Her");
+        assert!(roster.members[0].present);
+        assert!(!roster.members[1].present, "an inactive person has left the meeting");
+        // Not a roster frame at all.
+        assert_eq!(roster_in_frame(&json!({ "callEnd": {} })), None);
+    }
+
+    /// The older spelling still reads, because it costs one pointer lookup and this tenant
+    /// is one tenant.
+    #[test]
+    fn a_wrapped_roster_of_an_array_still_reads() {
         let roster = roster_in_frame(&json!({
             "_decoded": { "rosterUpdate": { "participants": [
                 { "id": "8:orgid:her", "displayName": "Her", "state": "Connected" },
                 { "id": "8:orgid:him", "displayName": "Him", "state": "Lobby" },
-                // A resource that is not a person keeps out of the list.
-                { "id": "19:meeting_x@thread.v2", "displayName": "the meeting" },
             ] } }
         }))
         .expect("a roster");
-        assert_eq!(roster.len(), 2);
-        assert_eq!(roster[0].display_name, "Her");
-        assert!(!roster[0].in_lobby);
-        assert!(roster[1].in_lobby);
-        // Not a roster frame at all.
-        assert_eq!(roster_in_frame(&json!({ "callEnd": {} })), None);
+        assert!(!roster.delta, "no `type` means the frame is the whole roster");
+        assert_eq!(roster.members.len(), 2);
+        assert_eq!(roster.members[0].display_name, "Her");
+        assert!(!roster.members[0].in_lobby);
+        assert!(roster.members[1].in_lobby);
+        assert!(roster.members[1].present, "the lobby is not an absence");
+    }
+
+    /// A delta is FOLDED in. Every one of these three moves was seen in one 40-second
+    /// meeting, and replacing the list on each frame showed it emptying between them.
+    #[test]
+    fn a_delta_roster_merges_and_a_departure_removes_its_person() {
+        let mut held = Vec::new();
+        let arrives = |mri: &str, state: &str| RosterUpdate {
+            delta: true,
+            members: vec![RosterMember {
+                mri: mri.to_string(),
+                display_name: mri.to_string(),
+                in_lobby: false,
+                present: state == "active",
+            }],
+        };
+        assert!(apply_roster_update(&mut held, arrives("8:orgid:her", "active")));
+        assert!(apply_roster_update(&mut held, arrives("8:orgid:him", "active")));
+        assert_eq!(held.len(), 2, "a delta adds to the list rather than replacing it");
+        // The same frame twice changes nothing, so no state is emitted for it.
+        assert!(!apply_roster_update(&mut held, arrives("8:orgid:him", "active")));
+        assert!(apply_roster_update(&mut held, arrives("8:orgid:him", "inactive")));
+        assert_eq!(held.len(), 1, "somebody who left is dropped, not kept as a name");
+        assert_eq!(held[0].mri, "8:orgid:her");
+        // A FULL frame replaces the list, which is the other half of the same function.
+        let full = RosterUpdate {
+            delta: false,
+            members: vec![RosterMember {
+                mri: "8:orgid:third".into(),
+                display_name: "Third".into(),
+                in_lobby: false,
+                present: true,
+            }],
+        };
+        assert!(apply_roster_update(&mut held, full));
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].mri, "8:orgid:third");
     }
 
     #[test]

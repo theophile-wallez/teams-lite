@@ -564,10 +564,12 @@ And the surface itself, with no tenant, no registration and no microphone:
 
 ## 10. Video and screen sharing — the protocol, read but not implemented
 
-Read 2026-08-05 out of `calling-pluginless-779e39a54b8bcd49.js` by the § 9 recipe. Nothing
-in this section has been sent to the tenant, and nothing in this app implements any of it:
-it is the map, and every claim below cites the client's own code rather than a measurement.
-Where a fact is a guess it says so.
+Read 2026-08-05 out of `calling-pluginless-779e39a54b8bcd49.js` by the § 9 recipe, and then
+MEASURED against the tenant the same day — four joins of one authorized meeting, with the
+user sharing their screen for the last one (§ 10.7). Nothing here is implemented. Every
+claim says which of the two it came from, because the two disagreed on the one thing that
+mattered most: **the roster's shape is not what the client's own bundle reads**, and the
+first draft of this section had it wrong (§ 10.2).
 
 **The headline is that the media plane does not change.** Video and a shared screen are
 ordinary WebRTC `m=video` sections on the SAME `RTCPeerConnection` this app already opens,
@@ -609,16 +611,64 @@ one place the existing SDP transform is not merely incomplete but incorrect for 
 This is the mechanism that has no counterpart in the audio build, and it is the reason
 "see others' cameras" is not just one more m-line.
 
-Every publishing endpoint in the roster carries its own stream ids. A roster participant is
+Every publishing endpoint in the roster carries its own stream ids. **MEASURED** — this is
+the frame as it really arrives on this tenant, and `endpoints.endpointDetails[]` (which the
+first draft of this section repeated from the bundle) is the client's own NORMALIZED form,
+not the wire:
 
-    participant.endpoints.endpointDetails[] = [
-      { participantId, mediaStreams: [ { type, sourceId, … } ], contentSharing, … } ]
+```
+// the frame BODY *is* the roster — there is no `rosterUpdate` key wrapping it,
+// the url it was posted to is what names it
+{ type: "Delta", sequenceNumber: 26, participantCounts: {…},
+  participants: {                                  // an OBJECT keyed by mri, not an array
+    "8:orgid:<oid>": {
+      details: { displayName, … },                 // the NAME lives here, not at the top
+      state: "active",                             // or "inactive" — not "Connected"
+      role, meetingRole, meetingRoles: […], version, enforceConsentToJoin,
+      endpoints: {                                 // an OBJECT keyed by endpoint id
+        "<guid>": {
+          participantId, clientVersion, languageId, modalityJoined, endpointJoinTime,
+          endpointCapabilities, clientEndpointCapabilities,
+          endpointMetadata: { holographicCapabilities },
+          endpointState: { endpointStateSequenceNumber, state: { isMuted } },
+          callLinks: { replacement },
+          call: {                                  // and the streams are under `call`
+            serverMuteVersion, negotiationTag, appliedInteractivityLevel,
+            mediaStreams: [ { type, label, sourceId, direction,
+                              serverMuted, subTypes: [], notInDefaultRoutingGroup,
+                              mdRequestId?, ordinal? } ] } } } } } }
+```
 
-where `type` is the LABEL (`"audio"`, `"video"`, `"applicationsharing-video"` — and
-`"xapplicationsharing-video"`, which the client folds into the same case) and **`sourceId`
-is the MSI**: the media source id that names one person's one stream inside the meeting.
-`calling::roster_in_frame` reads `id`, `displayName` and `state` and drops all of this, so
-the first piece of work is to keep it.
+Four things about `mediaStreams`, each of them measured on the run where the user shared
+their screen:
+
+- **`sourceId` is the MSI** — the number a subscription is addressed by. Real values from
+  one meeting: `2677`, `2260`, `2462` (three audio endpoints of one person), `2463`
+  (`main-video`), `2473` (`applicationsharing-video`), `2474` (`data`). They are small
+  integers, per meeting, and they MOVE between joins — so an MSI is never cached across
+  calls.
+- **`label` is the wire name and `type` follows it, not the m-line kind.** A shared screen
+  is `{type: "applicationsharing-video", label: "applicationsharing-video"}` — `type` is NOT
+  `"video"`. A camera is `{type: "video", label: "main-video"}`. So `Ff` in the bundle,
+  which maps the label to 0/1/2/3, is the right reading and the one to port.
+- **`direction` is that ENDPOINT's own direction**, which is what says who is doing what:
+  the sharer's section was `sendonly`, and the same person's `main-video` was `recvonly`
+  because their camera was off. So "somebody is sharing" is exactly the bundle's own test —
+  `direction === "sendonly" && label === "applicationsharing-video"` — read off the roster
+  rather than out of a `contentSharing` field. **No participant carried a `contentSharing`
+  object at all**, sharing or not, so § 10.4's mention of one is the client's shape and not
+  this tenant's.
+- **`type: "Delta"` means it IS a delta.** Measured: consecutive frames carried one
+  participant, then two, then one — never the whole meeting. So the list must be MERGED by
+  mri and a participant whose `state` turns `"inactive"` dropped. Replacing it wholesale, as
+  this app does today, makes the roster flicker between one person and another.
+
+**`calling::roster_in_frame` reads none of this and returns `None` on every real frame.** It
+looks for `/rosterUpdate/participants` as an ARRAY, and its test invented that shape — so a
+joined meeting has never named anybody, and the call bar has always said "In the meeting"
+where it should say who is in it. That is a shipped bug this recon found, it is fixed
+separately from any video work, and it is also step one of every feature below: the MSI has
+nowhere else to come from.
 
 To see that stream, the client picks one of ITS OWN receive video sections and asks the
 service to put that source on it. Two spellings, and the client sends both because the
@@ -639,12 +689,20 @@ this build):
         controlInfo: [ { control: "start", sourceId: <their MSI>,
                          streamMsid: "<our recv stream id>", fmtParams: "<fmtp>" } ] } }
 
-Both links arrive with the call, and are refreshed by any frame that carries them
-(`saveMediaControllerLinksIfAny` reads `links.controlVideoStreaming` and
-`links.applyChannelParameters`). Whether this tenant's join response names either is
-**unmeasured** — `Links::collect` already keeps every link in the answer, so one journal
-line from an existing join settles it, and that is the cheapest next measurement in this
-whole section.
+**Both links exist on this tenant, and neither is in the join answer.** MEASURED: the join
+answer names 41 links and not one of them is either — they arrive on the `callAcceptance`
+FRAME, which is exactly what `saveMediaControllerLinksIfAny` in the bundle reads
+(`links.controlVideoStreaming`, `links.applyChannelParameters`). The acceptance carries
+thirteen links of its own:
+
+    acknowledgement  applyChannelParameters  callControllerHttpTransport  callLeg
+    controlVideoStreaming  hold  mediaRenegotiation  monitor  replacement
+    startOutgoingNegotiation  transfer  updateCallState  updateMediaDescriptions
+
+So a link set is not one answer's property: it is accumulated from every frame, which is
+what `Links::merge` already does — the backend keeps them, and nothing has ever used these
+two. A reader who checks only the join response concludes video is unreachable here, which
+is what the first version of this section did.
 
 Three constants make the plane usable:
 
@@ -692,11 +750,46 @@ POSTed to the `mediaRenegotiation` link, refused outright unless the call is est
 Chrome's own rules push the same way: changing `transceiver.direction` raises
 `negotiationneeded`, so a build that pre-negotiates every section and only ever swaps tracks
 avoids the whole glare problem (`RENEGOTIATION_ERROR: {local, localFatal, glare, signaling,
-signalingFatal, media, escalation}` is the client's list of ways that goes wrong). Whether
-THIS service accepts a first offer carrying inactive video sections is **unmeasured**, and it
-is the single fact the whole plan hangs on: if it does, video is additive and audio is
-untouched; if it does not, every camera toggle is a renegotiation and the state machine grows
-a great deal.
+signalingFatal, media, escalation}` is the client's list of ways that goes wrong).
+
+### 10.3a The service RENEGOTIATES on its own, and that is the way in
+
+**This is the measurement that replaced the experiment**, and it makes receiving far cheaper
+than § 10.5 first ordered it. This app joins with ONE audio section and answers nothing
+afterwards — and the service still POSTs a `mediaRenegotiation` to us, unprompted, ~9 s into
+every join. Its offer grows as the meeting does. Audio only, nobody sharing:
+
+    audio port=3478 RTP/SAVP label:main-audio       mid:0
+    x-data port=3480 RTP/SAVP label:data            mid:4 x-ssrc-range:9313-9412
+
+and the same meeting one second after the user shared their screen:
+
+    audio port=3478 RTP/SAVP label:main-audio            mid:0
+    video  port=3481 RTP/SAVP label:applicationsharing-video mid:3 sendonly x-ssrc-range:8313-8412
+    x-data port=3480 RTP/SAVP label:data                 mid:4 x-ssrc-range:9313-9412
+
+Five things follow, and all five are measured rather than reasoned:
+
+- **We never have to ask.** The section for a shared screen is OFFERED to us, labelled, at a
+  fixed mid, with its SSRC range declared. There is no first-offer experiment to run and no
+  guess about whether an inactive video section is accepted: the service adds the section
+  when there is something to put on it.
+- **The mids are a fixed layout**, and the gaps say what is missing: `0` audio, `3`
+  application sharing, `4` data — so `1` and `2` are the `main-video` slots, which appear
+  when a camera does. `maxReinvitelessMediaForVideoForWeb` is the cap on that count.
+- **`sendonly` is from the SERVICE's side**: it sends, we receive. An answer to it is
+  `recvonly`.
+- **The frame carries its own two links and only those two — `mediaAnswer` and `rejection`.**
+  So answering is one POST to a link that arrives with the offer, and refusing is the other.
+  This app posts neither, which is why a shared screen is invisible here even though the
+  section for it is being offered every time.
+- **It is an `x-data` section, not `application`.** The media control plane's own transport
+  is on offer too (§ 10.2), at mid 4, with an SSRC range — so the data-channel path is
+  reachable on this tenant if the HTTP one ever disappoints.
+
+The honest reading of this is that **receiving a screen is a renegotiation this app already
+receives and drops**, plus one source request. That is a much smaller first step than
+"implement video".
 
 Two mercies in the config, both worth relying on:
 
@@ -730,9 +823,11 @@ they should ship apart.
 
 The user's four asks, ordered by what each one really needs on top of the audio build:
 
-1. **See somebody's screen** — § 10.2 only. The roster gives the MSI, one POST subscribes, a
-   `<video>` element draws it. No new outward action beyond what a join already did, and
-   nothing about the offer changes if § 10.3's reinviteless question answers yes.
+1. **See somebody's screen** — and it is cheaper than the rest by a wide margin, now that
+   § 10.3a is measured: answer the renegotiation the service already sends us (its offer
+   holds the section), read the sharer's MSI out of the roster (§ 10.2), post one source
+   request, draw the `<video>`. Nothing about our own offer changes, and no outward action is
+   added: the user is already in the meeting and a subscription publishes nothing about them.
 2. **See cameras** — § 10.2, plus the tile arithmetic: N sections, `fmtParams` scaled to the
    count, `-2` for the ones the service should fill itself, `-1` on release. This is where a
    gallery becomes a layout problem rather than a protocol one.
@@ -768,22 +863,48 @@ The user's four asks, ordered by what each one really needs on top of the audio 
   surface stays reviewable with nothing leaving the machine. Without this half the UI can
   only be seen in a real meeting, which is the one place it must not be debugged.
 
-### 10.7 The three measurements to take before writing any of it
+### 10.7 The three measurements, and what the tenant answered
 
-Each is cheap, each kills a branch of the plan, and none of them is a guess:
+Taken 2026-08-05 against one meeting the user authorized out loud, over four joins — the
+last one with their screen shared. `cd web && bun run join-live` is what took them: it is the
+only sanctioned live driver for a join (§ 8), and none of this needed a line of UI. What it
+grew for this is a **signal digest** (`SignalDigest` in `web/scripts/join-live.ts`): it wraps
+the page's own WebSocket, reads the `call_signal` frames every client is already sent, and
+prints link NAMES, m-lines and a participant's key TREE — never a url, a key or a candidate.
+Instrumentation in the driver, so the app the user runs is unchanged.
 
 1. **Does the join answer name `controlVideoStreaming` or `applyChannelParameters`?**
-   `Links::collect` already keeps them. One join, one journal line. If neither appears, the
-   data-channel plane is not optional after all and the cost of § 10.2 changes completely.
-2. **Does the service accept a first offer carrying inactive video sections?** Send the join
-   of § 2.3a with two extra `m=video` sections and read what comes back. A refusal names
-   itself (§ 8), and the answer decides whether § 10.3 is `replaceTrack` or a renegotiation
-   state machine.
-3. **What does a real `rosterUpdate` carry for a participant with a camera on?** The bundle
-   says `endpoints.endpointDetails[].mediaStreams[]`. `call_signal` already forwards every
-   raw frame, so joining one meeting where somebody has video on prints the real shape —
-   and § 2.4's lesson applies: read the shape rather than the field names in this file.
+   **No — and both exist anyway.** They arrive on the `callAcceptance` frame (§ 10.2). The
+   question was the wrong one: a link set is accumulated across frames, not read off one
+   answer.
+2. **Does the service accept a first offer carrying inactive video sections?** **Never asked,
+   because it does the work itself.** It POSTs a `mediaRenegotiation` unprompted and its
+   offer already holds the sections — labelled, at fixed mids, with SSRC ranges (§ 10.3a).
+   The experiment this line called for is unnecessary.
+3. **What does a real `rosterUpdate` carry for a participant with a camera on?** **Measured,
+   and not where the bundle reads it** (§ 10.2): the frame body IS the roster, `participants`
+   is an object keyed by mri, the name is under `details`, the streams are under
+   `endpoints[<id>].call.mediaStreams`, and the frame is a DELTA. A shared screen is
+   `{type: "applicationsharing-video", label: "applicationsharing-video", direction: "sendonly",
+   sourceId: 2473}`.
 
-All three are answered inside `cd web && bun run join-live` against the one authorized
-meeting, which is the only sanctioned live driver for a join (§ 8). None of them needs a
-line of UI.
+**Two of the three answers were corrections rather than confirmations**, and the pattern is
+§ 2.4's: the bundle says what the client BELIEVES after normalising, the tenant says what
+travels. Read the frame.
+
+### 10.8 What is still open
+
+- **A CAMERA has never been seen in a roster.** The measurement ran with a shared screen and
+  a camera that stayed off, so `main-video` was only ever `recvonly` with nobody behind it.
+  The two `main-video` mids of § 10.3a are inferred from the gap in the mid layout, not seen.
+- **No source request has ever been posted.** Both links are in hand and the payloads are
+  written out in § 10.2, but nothing has sent one, so the service has never had the chance to
+  refuse the shape. That is the next thing to measure, and it is safe to try: a subscription
+  asks for a stream, it publishes nothing about the user.
+- **No renegotiation has ever been ANSWERED.** The `mediaAnswer` and `rejection` links arrive
+  on every one of them and this app posts neither. Whether the service minds being ignored is
+  known — it does not, the call runs for its whole length — but what it does with an answer is
+  not.
+- **Sending is entirely untried**: no camera, no screen, no `contentSharing` session. And the
+  one thing § 10.4 asserts about that session is already suspect, because no participant in
+  the measured roster carried a `contentSharing` object at all.
