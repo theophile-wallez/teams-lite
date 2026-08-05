@@ -149,14 +149,16 @@ export function AddEmojiDialog(props: {
     setSaving(true);
     setError(null);
     try {
+      const isFromMessage = props.initialUrl && url === props.initialUrl;
       await controller.addCustomEmoji({
         name: trimmedName,
         content_type: image?.contentType,
         data_base64: image?.dataBase64,
         width: image?.width,
         height: image?.height,
-        url: url || undefined,
-        source: url || "upload",
+        url: isFromMessage ? undefined : url || undefined,
+        media_url: isFromMessage ? url : undefined,
+        source: isFromMessage ? "message" : url ? "url" : "upload",
       });
       props.onClose();
     } catch (e) {

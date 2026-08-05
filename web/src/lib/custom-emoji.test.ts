@@ -218,4 +218,16 @@ describe("extractableCustomEmoji", () => {
     const nodes = parseRichHtml(`<p>${BROKEN_IMG}</p>`);
     expect(extractableCustomEmoji(nodes, [])).toBeNull();
   });
+
+  it("finds emoji nested in formatting elements", () => {
+    const nodes = parseRichHtml(`<p><strong>Check ${EMOJI_IMG} this</strong></p>`);
+    const result = extractableCustomEmoji(nodes, []);
+    expect(result).toEqual({ src: EMOJI_URL, code: "shipit" });
+  });
+
+  it("finds emoji in list items", () => {
+    const nodes = parseRichHtml(`<ul><li>${EMOJI_IMG}</li></ul>`);
+    const result = extractableCustomEmoji(nodes, []);
+    expect(result).toEqual({ src: EMOJI_URL, code: "shipit" });
+  });
 });
