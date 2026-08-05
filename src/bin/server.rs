@@ -10004,11 +10004,19 @@ mod lifecycle_tests {
         }
     }
 
-    // The custom emoji URL source must reuse sender_icon's rails rather than writing a
-    // second fetch path. A second copy is a second thing to forget to fix when the next
-    // SSRF vector is discovered.
+    // The two ways bytes reach the pack from the network must never cross, and the check
+    // has to be able to TELL them apart: read whole, the handler names both fetches and
+    // says nothing about which branch calls which — so sending a pasted `url` into
+    // `teams_media::fetch_media`, the exact mistake made once during this build, would
+    // still pass. So each branch is scanned on its own.
+    //
+    // A STRANGER's URL goes through `sender_icon::fetch_raster`, which carries every rail
+    // the sender-icon fetch does — public-IP-only resolution, a raster sniff on the bytes,
+    // a byte cap, no cookie or referrer. A TEAMS URL goes through the authenticated
+    // `teams_media::fetch_media`, which is host-allowlisted. Crossed over, a Teams URL
+    // simply fails, and a stranger's URL takes the user's token off-tenant.
     #[test]
-    fn adding_an_emoji_from_a_url_never_names_a_second_fetch_path() {
+    fn each_emoji_fetch_branch_names_its_own_path_and_not_the_other() {
         let source = include_str!("server.rs");
         let code = source.split("#[cfg(test)]").next().unwrap_or(source);
         let handler = code
@@ -10018,14 +10026,60 @@ mod lifecycle_tests {
             .split("\"custom_emoji_remove\" =>")
             .next()
             .expect("the handler ends at the next arm");
+
+        // The branches, in the order the handler writes them: an alias, a stranger's URL,
+        // a Teams media URL, then raw bytes.
+        let url_branch = handler
+            .split("} else if let Some(url) = url {")
+            .nth(1)
+            .expect("the url branch")
+            .split("} else if let Some(media_url) = media_url {")
+            .next()
+            .expect("the url branch ends at the media_url one");
+        let media_branch = handler
+            .split("} else if let Some(media_url) = media_url {")
+            .nth(1)
+            .expect("the media_url branch")
+            .split("} else if let Some(data) = data_base64 {")
+            .next()
+            .expect("the media_url branch ends at the data one");
+
         assert!(
-            handler.contains("fetch_raster"),
-            "the URL source must reuse sender_icon's rails"
+            url_branch.contains("fetch_raster"),
+            "a stranger's URL must reuse sender_icon's rails"
         );
         assert!(
-            !handler.contains("reqwest::get"),
-            "no second, unrailed fetch"
+            !url_branch.contains("fetch_media") && !url_branch.contains("skypetoken"),
+            "a stranger's URL must never reach the authenticated path — that sends the \
+             user's token off-tenant"
         );
+        assert!(
+            media_branch.contains("is_allowed_media_url") && media_branch.contains("fetch_media"),
+            "a Teams URL must be host-checked and fetched with the session credentials"
+        );
+        assert!(
+            !media_branch.contains("fetch_raster"),
+            "a Teams URL on the unauthenticated path simply fails"
+        );
+        assert!(!handler.contains("reqwest::get"), "no second, unrailed fetch");
+
+        // And whatever the bytes came from, they are measured rather than believed. The
+        // raw-bytes branch is in here because it is the one the dialog uses, and the one
+        // that read its width and height straight out of the params.
+        let data_branch = handler
+            .split("} else if let Some(data) = data_base64 {")
+            .nth(1)
+            .expect("the data_base64 branch");
+        assert!(
+            !data_branch.contains("\"width\"") && !data_branch.contains("\"height\""),
+            "the size of an emoji is read from its bytes, never from what a client said"
+        );
+        for (branch, name) in [(url_branch, "url"), (media_branch, "media_url"), (data_branch, "data_base64")] {
+            assert!(
+                branch.contains("measure_art"),
+                "the {name} branch must measure the bytes it fetched"
+            );
+        }
     }
 
     // Everything this app shows is local, so a backend must SERVE while sign-in is
