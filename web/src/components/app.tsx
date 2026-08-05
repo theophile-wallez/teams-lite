@@ -304,8 +304,9 @@ function AppInner() {
         </div>
 
         {/* After the detail pane and inside the same flex row, which is what makes the
-            wide shape narrow the message pane rather than cover it. Below `md` it is a
-            full-screen sheet of its own (z-40, over the pane's z-20). */}
+            wide shape narrow the message pane rather than cover it. Below `lg` — the width
+            at which a thread still fits beside it, see `WIDE_QUERY` in tasks-panel.tsx — it
+            is a full-screen sheet of its own (z-40, over the pane's z-20). */}
         {tasksPanelOpen && <TasksPanel />}
       </div>
 

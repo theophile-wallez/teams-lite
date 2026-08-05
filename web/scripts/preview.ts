@@ -1863,8 +1863,21 @@ if (import.meta.main) {
       if (await page.locator('[data-testid="tasks-panel"]').isVisible()) {
         throw new Error("`t` opened the task panel while a menu had the keyboard");
       }
-      await page.keyboard.press("Escape");
+      // Dismissed with a CLICK, never with Escape. Radix's dismiss layer preventDefaults
+      // the key but does not stop it propagating, and this app's own Escape branch sits
+      // above the guard that would have caught it — so Escape here LEAVES THE CONVERSATION,
+      // and every capture below would be of an empty pane. Silently, because the panel and
+      // its rows exist on the list route too. e2e/delete-message.spec.ts dismisses this
+      // exact menu the same way and says the same thing; an open menu is modal, so it is
+      // the only layer taking pointer events and (5, 5) lands on nothing.
+      await page.mouse.click(5, 5);
+      await page.locator('[data-testid="menu-reaction-picker"]').waitFor({ state: "hidden" });
+      // Let the menu's exit animation finish, or the body still refuses pointer events.
       await page.waitForTimeout(300);
+      // And the thread is STILL open, which is precisely what the wide capture below has to
+      // show: a panel that narrows the message pane can only be proved against a pane with
+      // messages in it.
+      await page.locator('[data-testid="message"]').first().waitFor({ state: "visible" });
 
       await openTasksPanel(page);
       await page.waitForSelector('[data-testid="task-row"]');

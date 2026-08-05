@@ -2572,13 +2572,23 @@ export class TeamsController {
   async scanTasks(): Promise<void> {
     if (this.get().taskScan.running) return;
     this.set({ taskScan: { running: true, error: null, found: null } });
+    let report: { error: string | null; found: number | null };
     try {
-      const res = await this.backend.tasksScan();
-      this.set({ taskScan: { running: false, error: null, found: res.found ?? 0 } });
+      report = { error: null, found: (await this.backend.tasksScan()).found ?? 0 };
     } catch (e) {
-      playCue("error");
-      this.set({ taskScan: { running: false, error: errText(e), found: null } });
+      report = { error: errText(e), found: null };
     }
+    // The panel may have been closed while the sweep ran — it deliberately keeps running —
+    // and a report belongs to the click it describes, so it is DROPPED rather than kept:
+    // reopening the panel must not draw an answer to a question nobody asked there. The
+    // failure cue goes with it, for a surface that is not on screen to chime about.
+    const open = this.get().tasksPanelOpen;
+    this.set({
+      taskScan: open
+        ? { running: false, ...report }
+        : { running: false, error: null, found: null },
+    });
+    if (open && report.error) playCue("error");
   }
 
   // ---- notifications (activity feed) --------------------------------------
