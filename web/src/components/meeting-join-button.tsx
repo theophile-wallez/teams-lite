@@ -30,6 +30,14 @@ export function MeetingJoinButton(props: { joinUrl: string; subject?: string }) 
     <button
       type="button"
       data-testid="meeting-join-here"
+      // WHICH meeting this button joins, in the page's own state.
+      //
+      // Joining is outward — everybody in the meeting sees the user arrive — so a driver
+      // must be able to prove its target before it clicks, exactly as it re-reads
+      // `[data-testid="composer-shell"]`'s `data-conversation-id` before every keystroke.
+      // Without this, a script could only assume, and an assumption is what put three
+      // messages in real colleagues' chats (AGENTS.md § Automation safety).
+      data-join-url={props.joinUrl}
       disabled={!ready}
       aria-label={ready ? "Join this meeting with audio" : reason}
       onClick={() => void controller.joinMeeting(props.joinUrl, props.subject)}

@@ -32,6 +32,15 @@ FIXTURES = {
         "const page = await (await chromium.launch()).newPage();\n"
         "await page.keyboard.press('Enter');\n"
     ),
+    # A copy of the sanctioned live driver, parked outside the repo. Its name is one the
+    # allowlist knows; its contents are a browser driver like any other. The exemption is
+    # for running THOSE files, never for a name.
+    "join-live-copy.ts": (
+        "// A copy of web/scripts/join-live.ts, moved somewhere nobody reviews.\n"
+        "import { chromium } from 'playwright-core';\n"
+        "const page = await (await chromium.launch()).newPage();\n"
+        "await page.click('[data-testid=\"meeting-join-here\"]');\n"
+    ),
     "backend-writer.ts": (
         "// Calls a write method on the real backend.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
@@ -637,6 +646,17 @@ def cases(tmp: Path):
         ("ALLOW", WEB, "bun run sandbox"),
         ("ALLOW", WEB, 'bun run sandbox -- --type "hello" --send'),
         ("ALLOW", WEB, "bun run scripts/sandbox-live.ts --local"),
+        # The other sanctioned live driver: it JOINS the one meeting the user authorized
+        # for testing, and re-reads the button's own `data-join-url` before it clicks. A
+        # meeting join cannot be exercised on the mock or from a cargo example — the
+        # answer and its acknowledgement arrive on the backend's real trouter socket — so
+        # blocking this would leave hand-rolling as the only way to test the feature.
+        ("ALLOW", WEB, "bun run join-live"),
+        ("ALLOW", WEB, "bun run join-live -- --local --hold 45"),
+        ("ALLOW", WEB, "bun run scripts/join-live.ts"),
+        # Neither exemption is a licence for a driver that merely mentions them: what is
+        # allowed is running THOSE files, not borrowing their names.
+        ("BLOCK", WEB, f"bun run {tmp}/join-live-copy.ts"),
         ("ALLOW", WEB, "bun run dev:mock"),
         ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 cargo run --bin server"),
         ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 target/release/server"),

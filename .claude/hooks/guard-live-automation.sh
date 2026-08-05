@@ -194,9 +194,22 @@ printing_usage() {
 at_command_start='(^|[;&|])[[:space:]]*(([A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|]*|nohup|exec|env|sudo)[[:space:]]+)*'
 
 # Commands that ARE the sanctioned automation paths (or plain browser installs).
+# The drivers that are allowed to touch a browser, named one at a time.
+#
+# The two LIVE ones are here deliberately rather than by accident. `bun run sandbox` used
+# to pass only because the alias spells no path and no browser word, so nothing matched it
+# — an allowance nobody declared is an allowance nobody can review, and the next alias
+# would have inherited it silently. Both are listed under both spellings (the alias and
+# the script), so the exemption is the file rather than the phrasing.
+#
+# What earns a live driver its place is not that it is tracked: it is that its target is a
+# CONSTANT in it and re-read from the app's own state immediately before the outward
+# action. `sandbox-live.ts` does that with the sandbox chat's conversation id;
+# `join-live.ts` does it with the authorized meeting's `data-join-url`. A new one must do
+# the same before it is added here.
 sanctioned_automation() {
   printf '%s' "$command_line" |
-    grep -qE 'scripts/preview\.ts|bun run preview|test:e2e|playwright test|playwright install'
+    grep -qE 'scripts/preview\.ts|bun run preview|test:e2e|playwright test|playwright install|scripts/sandbox-live\.ts|bun run sandbox|scripts/join-live\.ts|bun run join-live'
 }
 
 # A script file the command RUNS counts as part of the command. The incident's

@@ -9,6 +9,7 @@
     "dev:server": "../bin/teams-dev-server.sh",
     "preview": "bun run sync:emoji && bun run scripts/preview.ts",
     "sandbox": "bun run scripts/sandbox-live.ts",
+    "join-live": "bun run scripts/join-live.ts",
     "build": "bun run sync:emoji && vite build",
     "sync:emoji": "bun run scripts/sync-emoji-assets.ts",
     "generate:emoji": "bun run scripts/generate-teams-emoji.ts",
