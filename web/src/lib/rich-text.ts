@@ -1106,10 +1106,16 @@ function serializeNodes(nodes: RichNode[], sink?: MentionSink): string {
     }
     if (node.tag === "customEmoji") {
       if (node.attrs.src && node.attrs.code) {
+        // The parser reads `alt` for the code but never `itemid`, because `alt` is what
+        // the user sees and `itemid` is Teams' internal naming. On serialize we derive
+        // `itemid` from the code, which is the shape the backend emits.
+        const itemid = node.attrs.code.replace(/^:|:$/g, "");
         out +=
           `<img itemtype="http://schema.skype.com/Emoji" ` +
+          `itemid="${escapeAttr(itemid)}" ` +
           `alt="${escapeAttr(node.attrs.code)}" ` +
-          `src="${escapeAttr(node.attrs.src)}">`;
+          `src="${escapeAttr(node.attrs.src)}" ` +
+          `width="20" height="20">`;
       }
       continue;
     }

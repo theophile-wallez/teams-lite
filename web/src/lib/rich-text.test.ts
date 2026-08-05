@@ -616,6 +616,15 @@ describe("parseRichHtml — custom emoji", () => {
   it("reads as its code in copyable text", () => {
     expect(nodeText(parseRichHtml(`<p>a ${EMOJI_IMG}</p>`))).toBe("a :shipit:");
   });
+
+  it("parse-then-serialize round trip keeps itemtype, width and height", () => {
+    const html = `<p>${EMOJI_IMG}</p>`;
+    const serialized = serializeTeamsHtml(html);
+    expect(serialized).toContain('itemtype="http://schema.skype.com/Emoji"');
+    expect(serialized).toContain('width="20"');
+    expect(serialized).toContain('height="20"');
+    expect(serialized).toContain('itemid="shipit"');
+  });
 });
 
 describe("emoji-only messages keep their bubble chrome", () => {
