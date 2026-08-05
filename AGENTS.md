@@ -852,6 +852,14 @@ is a shared screen is still one to open in Teams.
   headers into the error, and logs the request body under `TEAMS_LITE_CALL_DEBUG=1`.
   `examples/meeting_join_recon.rs` checks the parse against the user's own real meetings,
   READ-ONLY, and prints shapes rather than values because a join URL is a key.
+- **A join is TWO POSTs, and the first carries no media.** Step 1 joins the CONVERSATION
+  (`conversationRequest` + `groupChat` + `meetingInfo`, no `callInvitation` at all) and the
+  answer names every link the meeting offers; step 2 adds audio on `links.addModality`,
+  which is where the SDP rides. Putting the media in step 1 is refused with `400` and an
+  empty body — measured, twice, and the reason no amount of reading found it is that the
+  service says nothing. See NATIVE-CALLING.md § 2.3a for the captured shape, field for
+  field: `messageId` is the string `"0"`, `meetingInfo.organizerId` is a bare oid, and
+  there is no `conversationType`.
 - **A join rings nobody**, which is the only thing it does differently from a call: the
   payload carries no `participants.to`. `call_join` is still an `OUTWARD_METHODS` entry,
   because everybody already in the meeting sees the user arrive and their microphone is

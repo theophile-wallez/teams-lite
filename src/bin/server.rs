@@ -3520,8 +3520,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }
         }
 
-        // Join a meeting: the same one POST, carrying our offer and the meeting's own
-        // thread instead of somebody to ring (NATIVE-CALLING.md § 2.3).
+        // Join a meeting: TWO POSTs, because that is what a meeting is
+        // (NATIVE-CALLING.md § 2.3a, captured from the real client).
+        //
+        //   1. join the conversation — no media at all — and the answer names every link
+        //      the meeting offers: leave, mute, admit, and where to add audio;
+        //   2. add audio on that link, which is where the SDP rides.
         //
         // Outward, like placing a call: everybody already in the meeting sees the user
         // arrive, and their microphone is opened to all of them. A join rings nobody,
@@ -3543,35 +3547,70 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             };
             let session = ctx.session().await?;
             let ic3 = ctx.tokens.get(IC3_SCOPE).await?;
-            let joined = calling::join_meeting(
+
+            let joined = match calling::join_meeting(
                 &ctx.http,
                 &session,
                 &ic3,
                 &local,
                 &meeting,
+                &callbacks,
+                &call_id,
+            )
+            .await
+            {
+                Ok(joined) => joined,
+                Err(e) => {
+                    ctx.end_call_locally("CallEndReasonJoinFailed").await;
+                    return Err(e);
+                }
+            };
+            // The conversation is joined; hold its links before adding audio, so a
+            // failure in the second step can still be left properly.
+            {
+                let mut plane = ctx.calling.lock().unwrap();
+                if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                    call.links.merge(&joined.links);
+                    if calling::lobby_state_in_frame(&joined.raw)
+                        == Some(calling::LobbyState::Waiting)
+                    {
+                        call.in_lobby = true;
+                    }
+                }
+            }
+            ctx.emit_call_state();
+
+            match calling::add_audio(
+                &ctx.http,
+                &session,
+                &ic3,
+                &local,
+                &joined,
                 &calling::MediaContent::sdp(sdp),
                 &callbacks,
                 &call_id,
             )
-            .await;
-            match joined {
-                Ok(joined) => {
+            .await
+            {
+                Ok(answer) => {
+                    let links = calling::Links::collect(&answer);
                     {
                         let mut plane = ctx.calling.lock().unwrap();
                         if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
-                            call.links.merge(&joined.links);
-                            // The service's answer may already say we are in the lobby.
-                            if calling::lobby_state_in_frame(&joined.raw)
-                                == Some(calling::LobbyState::Waiting)
-                            {
-                                call.in_lobby = true;
-                            }
+                            call.links.merge(&links);
                         }
                     }
                     ctx.emit_call_state();
-                    Ok(json!({ "call_id": call_id, "links": joined.links.names() }))
+                    Ok(json!({ "call_id": call_id, "links": links.names() }))
                 }
+                // The conversation was joined and the audio was not: leave rather than
+                // sit in a meeting nobody can hear us in.
                 Err(e) => {
+                    eprintln!("[calling] joined the meeting but could not add audio: {e:#}");
+                    if let Some(leave) = joined.links.get(&["leave", "hangup"]) {
+                        let payload = calling::hangup_payload(&local);
+                        let _ = ctx.post_call_signal(leave, &payload).await;
+                    }
                     ctx.end_call_locally("CallEndReasonJoinFailed").await;
                     Err(e)
                 }

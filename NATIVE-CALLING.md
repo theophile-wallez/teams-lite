@@ -118,6 +118,31 @@ service wants is not guessed: it answers `www-authenticate` with
 `token_types="skype aad cae"`, and the client picks from that list. teams-lite already
 mints both halves.
 
+### 2.3a Joining a meeting: TWO POSTs, and the first carries no media
+
+Captured from the real client on this tenant (2026-08-05), which settled a `400` no
+amount of reading had explained. A join is not a call:
+
+1. **Join the conversation.** POST to `conversationServiceUrl` with
+   `conversationRequest` (subject, `roster {type:"Delta", rosterUpdate}`, four
+   `properties`, six `links`), `groupChat {threadId, messageId:"0"}` — a STRING, not null
+   — `participants.from` alone, `capabilities:null`, `endpointCapabilities`,
+   `clientEndpointCapabilities`, `endpointMetadata`, `meetingInfo {tenantId, organizerId}`
+   with the organizer as a BARE oid, `endpointState`, and `debugContent {causeId}`.
+   **No `callInvitation`, no SDP.** There is no `conversationType` field at all.
+   The answer is the meeting: `conversationController`, `state
+   {conversationType:"scheduledMeeting", isHostless, isMultiParty}`, `meetingDetails`,
+   `callLimits`, and `links` — `leave`, `addModality`, `mute`, `unmute`, `admit`,
+   `admitAll`, `subscribe`, `sendMessage`, and twenty more.
+2. **Add audio.** POST to `links.addModality`, and THAT is where the SDP rides: the only
+   envelopes the client ever puts one in are `callInvitation`, `callAcceptance`,
+   `mediaAnswer` and `mediaNegotiation`.
+
+Sending step 2's media inside step 1 is refused with `400` and an empty body, which is
+what this app did at first. The proxy names the upstream in
+`x-microsoft-skype-proxy-cluster-context` (`cc/v1/calls`), and that header is the only
+thing the service says about a refusal.
+
 ### 2.4 Taking a call
 
 The incoming notification arrives as a trouter push whose body carries `gp` (base64
