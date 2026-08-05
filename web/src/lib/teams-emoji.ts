@@ -204,3 +204,41 @@ export const REACTION_PICKER: ReadonlyArray<{ key: string; emoji: string }> = [
   "sad",
   "angry",
 ].map((key) => ({ key, emoji: reactionEmoji(key) }));
+
+const CUSTOM_REACTION_PREFIX = "tlcustom-";
+
+/**
+ * The Teams emotion key for a custom emoji: `tlcustom-<name>-<amsId>`, which is
+ * what the probe verified Teams accepts. The name is first so a colleague's
+ * `:shipit:` can be read back out of the key without parsing AMS ids. A key
+ * names ONE object and costs one lookup against the media proxy — drawn from
+ * the id, never from the reader's pack — so a colleague reacting with THEIR
+ * `:shipit:` shows theirs.
+ */
+export function customReactionKey(name: string, amsId: string): string {
+  return `${CUSTOM_REACTION_PREFIX}${name}-${amsId}`;
+}
+
+/**
+ * Read a custom emoji key back into the art it names. Returns `{ name, src }`
+ * when the key matches our prefix, otherwise `null` — which is how
+ * Microsoft's own keys stay untouched. The src goes through the same
+ * authenticated media proxy the inbound emoji renderer uses
+ * (`web/src/components/custom-emoji.tsx`).
+ *
+ * The parse finds where the AMS id starts: `tlcustom-<name>-<amsId>`. Both
+ * the name and the id may contain hyphens (`smirk-cat`, `0-weu-d1-abc`), so
+ * the delimiter is recognized by what follows it: an AMS id always starts with
+ * a digit. The name is everything before that hyphen-digit boundary.
+ */
+export function customReactionArt(key: string): { name: string; src: string } | null {
+  if (!key.startsWith(CUSTOM_REACTION_PREFIX)) return null;
+  const rest = key.slice(CUSTOM_REACTION_PREFIX.length);
+  const match = rest.match(/-(\d)/);
+  if (!match || match.index === undefined) return null;
+  const name = rest.slice(0, match.index);
+  const amsId = rest.slice(match.index + 1);
+  if (!name || !amsId) return null;
+  const src = `/api/media?amsObjectId=${encodeURIComponent(amsId)}`;
+  return { name, src };
+}

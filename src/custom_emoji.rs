@@ -44,7 +44,7 @@ pub struct CustomEmoji {
 /// No uppercase, no spaces, no colons (which would end the code early).
 ///
 /// Slack's emoji name rule, copied deliberately. The first-character restriction exists
-/// because Slack's does — a name starting with punctuation would sort strangely and
+/// because Slack's does — a name starting with punctuation would sort strangly and
 /// could collide with Slack's own syntax.
 pub fn is_valid_name(name: &str) -> bool {
     let len = name.len();
@@ -56,6 +56,25 @@ pub fn is_valid_name(name: &str) -> bool {
         return false;
     }
     bytes.iter().all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_' || b == b'+')
+}
+
+const CUSTOM_REACTION_PREFIX: &str = "tlcustom-";
+
+/// The custom emoji name from a reaction key, or `None` when the key is not one of
+/// ours. `tlcustom-<name>-<amsId>` -> `Some("<name>")`, otherwise `None`.
+///
+/// Used by the `react` handler to decide whether to upload art before the reaction is
+/// set. The name is resolved, the art is fetched from the store, and the full key is
+/// built from the AMS id that comes back — exactly as a send does.
+pub fn custom_reaction_name(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix(CUSTOM_REACTION_PREFIX)?;
+    let hyphen_digit = rest.find(|c: char| c == '-')
+        .and_then(|pos| {
+            rest.as_bytes().get(pos + 1)
+                .filter(|b| b.is_ascii_digit())
+                .map(|_| pos)
+        })?;
+    Some(&rest[..hyphen_digit])
 }
 
 /// Every distinct `:name:` code in `html`'s text runs, outside tags, outside
@@ -353,5 +372,15 @@ mod tests {
     fn everything_around_a_code_is_byte_identical() {
         let body = "<p>a &amp; b <strong>c</strong> :nope: <a href=\"http://x/:shipit:\">l</a></p>";
         assert_eq!(substitute_codes(body, &art), body, "no code the pack holds, no change");
+    }
+
+    #[test]
+    fn a_custom_reaction_key_names_the_emoji() {
+        assert_eq!(custom_reaction_name("tlcustom-shipit-0-weu-d1-abc"), Some("shipit"));
+        assert_eq!(custom_reaction_name("tlcustom-smirk-cat-0-frc-d4-xyz"), Some("smirk-cat"));
+        assert_eq!(custom_reaction_name("like"), None, "Microsoft's own key");
+        assert_eq!(custom_reaction_name("yes-tone2"), None, "toned reaction");
+        assert_eq!(custom_reaction_name("tlcustom-shipit"), None, "no AMS id");
+        assert_eq!(custom_reaction_name("tlcustom--0-abc"), None, "empty name");
     }
 }

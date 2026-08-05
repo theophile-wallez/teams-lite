@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   appleEmojiUrl,
   canReactWith,
+  customReactionArt,
+  customReactionKey,
   emojiUnified,
   reactionEmoji,
   teamsReactionKey,
@@ -120,5 +122,29 @@ describe("Apple emoji images", () => {
 
   it("serves them from our own origin, never a CDN", () => {
     expect(appleEmojiUrl("🔥")).toBe("/emoji/apple/64/1f525.png");
+  });
+});
+
+describe("customReactionKey", () => {
+  it("names the art in the key, and reads it back", () => {
+    const key = customReactionKey("shipit", "0-weu-d1-abc");
+    expect(customReactionArt(key)).toEqual({
+      name: "shipit",
+      src: expect.stringContaining("0-weu-d1-abc"),
+    });
+  });
+
+  it("round-trips a name with hyphens", () => {
+    const key = customReactionKey("smirk-cat", "0-frc-d4-xyz123");
+    const parsed = customReactionArt(key);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.name).toBe("smirk-cat");
+    expect(parsed!.src).toContain("0-frc-d4-xyz123");
+  });
+
+  it("leaves Microsoft's own keys alone", () => {
+    expect(customReactionArt("like")).toBeNull();
+    expect(customReactionArt("yes-tone2")).toBeNull();
+    expect(reactionEmoji("like")).toBe("👍");
   });
 });

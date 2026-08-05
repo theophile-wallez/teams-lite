@@ -3529,15 +3529,44 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .and_then(|m| teams_lite::store::my_reaction_key(&m.reactions, &self_mri));
             let on = current_key.as_deref() != Some(key.as_str());
 
+            // A custom emoji reaction uploads the art first, exactly as a send does.
+            // The key names the emoji (`tlcustom-<name>-<amsId>`), so the uploader
+            // resolves the name, gets the art, and builds the key from what came back.
+            let reaction_key = if let Some(name) = teams_lite::custom_emoji::custom_reaction_name(&key) {
+                let store = ctx.store()?;
+                let (content_type, bytes) = store
+                    .custom_emoji_art(name)?
+                    .with_context(|| format!("custom emoji not found: {name}"))?;
+                let ic3 = ctx.ic3_token().await?;
+                let session = ctx.session().await?;
+                let http = ctx.http.clone();
+                let conv_clone = conv.clone();
+                let name_clone = name.to_string();
+                let ams_id = ctx
+                    .retry_on_auth(move |session, _csa| {
+                        let http = http.clone();
+                        let conv = conv_clone.clone();
+                        let name = name_clone.clone();
+                        let bytes = bytes.clone();
+                        async move {
+                            teams_send::upload_ams_object(&http, &session, &ic3, &conv, &name, &bytes)
+                                .await
+                        }
+                    })
+                    .await?;
+                format!("tlcustom-{}-{}", name, ams_id)
+            } else {
+                key.clone()
+            };
+
             let http = ctx.http.clone();
             let react_conv = conv.clone();
             let react_id = message_id.clone();
-            let react_key = key.clone();
             ctx.retry_on_auth(move |session, _csa| {
                 let http = http.clone();
                 let conv = react_conv.clone();
                 let message_id = react_id.clone();
-                let key = react_key.clone();
+                let key = reaction_key.clone();
                 async move {
                     teams_send::set_reaction(&http, &session, &conv, &message_id, &key, on).await
                 }
@@ -3550,7 +3579,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             if let Ok(store) = ctx.store() {
-                let key_arg = if on { Some(key.as_str()) } else { None };
+                let key_arg = if on { Some(reaction_key.as_str()) } else { None };
                 if let Some(updated) =
                     store.set_my_reaction(&conv, &message_id, &self_mri, key_arg, now_ms)?
                 {

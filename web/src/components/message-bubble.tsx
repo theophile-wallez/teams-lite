@@ -21,11 +21,12 @@ import {
   parseRichMessage,
   urlHost,
   type ChatMessage,
+  type CustomEmoji as CustomEmojiType,
   type LinkMetadata,
   type ParsedRichMessage,
   type Reaction,
 } from "~/lib/protocol";
-import { reactionEmoji, REACTION_PICKER } from "~/lib/teams-emoji";
+import { customReactionArt, reactionEmoji, REACTION_PICKER } from "~/lib/teams-emoji";
 import { hasActivePipeline } from "~/lib/gitlab-pipeline";
 import { LINEAR_WEB_HOST } from "~/lib/linear";
 import { mergeRequestsIn, type MergeRequestLink } from "~/lib/merge-request";
@@ -47,6 +48,7 @@ import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
 import { AgentLogo } from "./agent-logo";
 import { GitLabLogo } from "./gitlab-logo";
+import { CustomEmoji } from "./custom-emoji";
 import {
   AgentSignature,
   AgentStoredStatus,
@@ -1495,45 +1497,80 @@ function ReactionPicker(props: {
   activeKey?: string;
   className?: string;
   "data-testid"?: string;
+  customEmoji?: readonly CustomEmojiType[];
 }) {
+  const customReactions = props.customEmoji?.slice(0, 6) ?? [];
+  const hasCustom = customReactions.length > 0;
+
   return (
-    <div
-      role="group"
-      aria-label="React"
-      data-testid={props["data-testid"]}
-      className={cn("flex items-center gap-0.5", props.className)}
-    >
-      {REACTION_PICKER.map(({ key, emoji }) => {
-        const active = props.activeKey === key;
-        return (
-          <button
-            key={key}
-            type="button"
-            aria-label={active ? `Remove ${key} reaction` : `React with ${key}`}
-            aria-pressed={active}
-            data-active={active ? "true" : undefined}
-            data-testid={`reaction-option-${key}`}
-            onClick={() => props.onPick(key)}
-            className={cn(
-              "grid size-7 place-items-center rounded-full leading-none transition-transform",
-              active ? "bg-primary/20 ring-1 ring-inset ring-primary/50" : "hover:bg-accent",
-            )}
-          >
-            <Emoji emoji={emoji} className="size-[18px]" />
-          </button>
-        );
-      })}
-      {/* The six above are the shortcuts; the other ~1500 reactions Teams accepts
-          are one click away in the full picker. */}
-      <button
-        type="button"
-        aria-label="More reactions"
-        data-testid="reaction-more"
-        onClick={props.onMore}
-        className="grid size-7 place-items-center rounded-full text-text-dim transition-transform hover:bg-accent hover:text-foreground"
-      >
-        <HugeiconsIcon icon={SmilePlusIcon} className="size-[18px]" strokeWidth={1.6} />
-      </button>
+    <div data-testid={props["data-testid"]} className={cn("flex flex-col", props.className)}>
+      {hasCustom && (
+        <div className="mb-1.5 px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          Custom
+          <span className="ml-1.5 font-normal normal-case tracking-normal opacity-75">
+            (teams-lite only)
+          </span>
+        </div>
+      )}
+      {hasCustom && (
+        <div role="group" aria-label="React with custom emoji" className="mb-2 flex items-center gap-0.5">
+          {customReactions.map((emoji) => {
+            const key = `tlcustom-${emoji.name}`;
+            const active = props.activeKey?.startsWith(key);
+            const src = `/api/custom-emoji/${encodeURIComponent(emoji.name)}`;
+            return (
+              <button
+                key={emoji.name}
+                type="button"
+                aria-label={active ? `Remove ${emoji.name} reaction` : `React with ${emoji.name}`}
+                aria-pressed={active}
+                data-active={active ? "true" : undefined}
+                data-testid={`reaction-option-custom-${emoji.name}`}
+                onClick={() => props.onPick(key)}
+                className={cn(
+                  "grid size-7 place-items-center rounded-full leading-none transition-transform",
+                  active ? "bg-primary/20 ring-1 ring-inset ring-primary/50" : "hover:bg-accent",
+                )}
+              >
+                <CustomEmoji src={src} code={`:${emoji.name}:`} className="size-[18px]" />
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <div role="group" aria-label="React" className="flex items-center gap-0.5">
+        {REACTION_PICKER.map(({ key, emoji }) => {
+          const active = props.activeKey === key;
+          return (
+            <button
+              key={key}
+              type="button"
+              aria-label={active ? `Remove ${key} reaction` : `React with ${key}`}
+              aria-pressed={active}
+              data-active={active ? "true" : undefined}
+              data-testid={`reaction-option-${key}`}
+              onClick={() => props.onPick(key)}
+              className={cn(
+                "grid size-7 place-items-center rounded-full leading-none transition-transform",
+                active ? "bg-primary/20 ring-1 ring-inset ring-primary/50" : "hover:bg-accent",
+              )}
+            >
+              <Emoji emoji={emoji} className="size-[18px]" />
+            </button>
+          );
+        })}
+        {/* The six above are the shortcuts; the other ~1500 reactions Teams accepts
+            are one click away in the full picker. */}
+        <button
+          type="button"
+          aria-label="More reactions"
+          data-testid="reaction-more"
+          onClick={props.onMore}
+          className="grid size-7 place-items-center rounded-full text-text-dim transition-transform hover:bg-accent hover:text-foreground"
+        >
+          <HugeiconsIcon icon={SmilePlusIcon} className="size-[18px]" strokeWidth={1.6} />
+        </button>
+      </div>
     </div>
   );
 }
@@ -1573,35 +1610,40 @@ function ReactionChips(props: {
         props.mine ? "right-2" : "left-2",
       )}
     >
-      {props.reactions.map((r) => (
-        <button
-          key={r.key}
-          type="button"
-          data-testid={`reaction-chip-${r.key}`}
-          data-mine={r.mine ? "true" : undefined}
-          aria-pressed={r.mine}
-          aria-label={`${r.mine ? "Remove your" : "Add"} ${r.key} reaction`}
-          onClick={() => props.onToggle(r.key)}
-          className={cn(
-            "flex cursor-pointer items-center rounded-full border leading-none shadow-card backdrop-blur-md transition-colors",
-            // One pill height either way (30px): a counted pill pads a 20px
-            // emoji, a lone one is a circle of the same size around it.
-            r.count > 1 ? "gap-1 px-2 py-1" : "size-[30px] justify-center",
-            r.mine
-              ? "border-primary/40 bg-reaction-chip-mine text-foreground"
-              : "border-reaction-chip-border bg-reaction-chip text-muted-foreground hover:bg-accent hover:text-foreground",
-          )}
-        >
-          {/* The emoji is the reaction; it reads above message-text size so the
-              eye lands on it rather than on the count beside it. */}
-          <Emoji emoji={reactionEmoji(r.key)} className="size-5" />
-          {r.count > 1 && (
-            <span data-testid="reaction-count" className="text-[11px] font-medium tabular-nums">
-              {r.count}
-            </span>
-          )}
-        </button>
-      ))}
+      {props.reactions.map((r) => {
+        const custom = customReactionArt(r.key);
+        return (
+          <button
+            key={r.key}
+            type="button"
+            data-testid={`reaction-chip-${r.key}`}
+            data-mine={r.mine ? "true" : undefined}
+            aria-pressed={r.mine}
+            aria-label={`${r.mine ? "Remove your" : "Add"} ${custom ? custom.name : r.key} reaction`}
+            onClick={() => props.onToggle(r.key)}
+            className={cn(
+              "flex cursor-pointer items-center rounded-full border leading-none shadow-card backdrop-blur-md transition-colors",
+              // One pill height either way (30px): a counted pill pads a 20px
+              // emoji, a lone one is a circle of the same size around it.
+              r.count > 1 ? "gap-1 px-2 py-1" : "size-[30px] justify-center",
+              r.mine
+                ? "border-primary/40 bg-reaction-chip-mine text-foreground"
+                : "border-reaction-chip-border bg-reaction-chip text-muted-foreground hover:bg-accent hover:text-foreground",
+            )}
+          >
+            {custom ? (
+              <CustomEmoji src={custom.src} name={custom.name} className="size-5" />
+            ) : (
+              <Emoji emoji={reactionEmoji(r.key)} className="size-5" />
+            )}
+            {r.count > 1 && (
+              <span data-testid="reaction-count" className="text-[11px] font-medium tabular-nums">
+                {r.count}
+              </span>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }

@@ -382,7 +382,7 @@ fn sent_message_id(body: &str) -> String {
 
 /// Upload one object to Teams' AMS service: the two-request dance every emoji and every
 /// attachment photo uses. Returns the object id.
-async fn upload_ams_object(
+pub async fn upload_ams_object(
     http: &reqwest::Client,
     session: &Session,
     ic3: &str,
