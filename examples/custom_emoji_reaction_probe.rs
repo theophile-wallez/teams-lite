@@ -1,10 +1,17 @@
-// Manual live check for CUSTOM EMOJI REACTIONS: post one message, react to it with
-// an arbitrary emotion key shaped as `tlcustom-<shortcode>-<ams_id>`, read the
+// Manual live check for CUSTOM EMOJI REACTIONS: post one message, react to it with the
+// key this app really mints — `tlcustom-<the AMS object URL>` — read the
 // properties.emotions snapshot back, then clear with `value: 0` and read again.
 //
-// It exercises what Task 13 (custom emoji reactions) rests on: whether Teams accepts
-// an arbitrary emotion key, what its length ceiling is if one exists, and whether the
-// `value: 0` clear works as expected.
+// It exercises what custom emoji reactions rest on: whether Teams accepts an arbitrary
+// emotion key, whether it survives the round trip unchanged (the key IS the art's
+// address, so a key the service rewrote would leave every reader with nothing to fetch),
+// what its length ceiling is, and whether the `value: 0` clear works as expected.
+//
+// The key is built by `custom_emoji::custom_reaction_key` and the upload by
+// `teams_send::upload_ams_object_url`, both shipped: a probe that spelled either itself
+// would measure a shape the app does not send. It used to spell the key — name first,
+// then the id — and that shape could not be read back at all, since a legal emoji name
+// may hold digits and hyphens and so can the id.
 //
 // It is NOT a unit test: it posts to real Teams and sets a reaction. The conversation
 // is therefore a CONST, not an argument — the sandbox channel from CLAUDE.md, the one
@@ -18,7 +25,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use teams_lite::{teams, teams_send};
+use teams_lite::{custom_emoji, teams, teams_send};
 
 /// The sandbox channel (CLAUDE.md § Sending messages). The only pre-authorized
 /// target, and the only conversation this file may ever name.
@@ -38,20 +45,15 @@ async fn main() -> Result<()> {
         .await
         .context("acquire IC3 token")?;
 
-    // 1. Upload a small PNG to get an AMS id for the custom emoji reaction key.
+    // 1. Upload a small PNG and keep the URL its art is served from — the whole of what
+    //    the reaction key carries.
     let green_png = build_1x1_green_png();
     println!("uploading green.png ({} bytes)...", green_png.len());
-    let image = teams_send::ImageUpload {
-        name: "green.png".to_string(),
-        content_type: "image/png".to_string(),
-        bytes: green_png,
-        width: Some(1),
-        height: Some(1),
-    };
-    let ams_id = upload_and_get_id(&http, &session, &ic3, &image)
-        .await
-        .context("upload green.png")?;
-    println!("green.png -> AMS id = {}", ams_id);
+    let object_url =
+        teams_send::upload_ams_object_url(&http, &session, &ic3, SANDBOX, "green.png", &green_png)
+            .await
+            .context("upload green.png")?;
+    println!("green.png -> {}", object_url);
 
     // 2. POST one message to react to.
     let sent = teams_send::send_message(
@@ -71,9 +73,10 @@ async fn main() -> Result<()> {
     anyhow::ensure!(!sent.id.is_empty(), "the send returned no message id");
     println!("posted message, id = {}", sent.id);
 
-    // 3. Set a custom emoji reaction: arbitrary key shaped as `tlcustom-shipit-<ams_id>`.
-    let custom_key = format!("tlcustom-shipit-{}", ams_id);
+    // 3. Set a custom emoji reaction with the key the app mints: `tlcustom-<objectUrl>`.
+    let custom_key = custom_emoji::custom_reaction_key(&object_url);
     println!("\nsetting custom emoji reaction with key = {}", custom_key);
+    println!("  ({} characters)", custom_key.len());
     let set_result = set_reaction_raw(&http, &session, &sent.id, &custom_key, true).await;
     match &set_result {
         Ok(()) => println!("reaction PUT succeeded (2xx)"),
@@ -92,9 +95,17 @@ async fn main() -> Result<()> {
     let key_present = emotion_entry_exists(&emotions_after_set, &custom_key);
     println!("key accepted (2xx): {}", if key_accepted { "yes" } else { "no" });
     println!("key present in snapshot: {}", if key_present { "yes" } else { "no" });
+    // The key IS the address of the art, so a key the service normalized — lowercased, or
+    // truncated — would leave every reader with a URL that fetches nothing.
+    println!(
+        "key round-tripped byte for byte: {}",
+        if emotion_key_verbatim(&emotions_after_set, &custom_key) { "yes" } else { "no" }
+    );
 
-    println!("\n>>> LOOK AT THE SANDBOX THREAD IN TEAMS NOW — clearing in 90 seconds");
-    std::thread::sleep(std::time::Duration::from_secs(90));
+    // Cleared straight away rather than left up for a human to look at: nobody has ever
+    // observed what a stock Teams client draws for one of these, and the pause used to be
+    // for exactly that. A reaction on a real thread is left there as briefly as possible.
+    std::thread::sleep(std::time::Duration::from_secs(3));
 
     // 5. Clear the reaction with value: 0.
     println!("\nclearing reaction with value: 0...");
@@ -117,7 +128,8 @@ async fn main() -> Result<()> {
     println!("key present in snapshot: {}", if key_present_after { "yes" } else { "no" });
     println!("our value after clear: {}", our_value_after);
 
-    // 7. Test a deliberately long key to find the length ceiling.
+    // 7. Test a deliberately long key to find the length ceiling. An object URL is about
+    //    100 characters, so this is the headroom the key shape has.
     let long_key = format!("tlcustom-{}", "a".repeat(280));
     println!("\nsetting long key ({} chars)...", long_key.len());
     let long_result = set_reaction_raw(&http, &session, &sent.id, &long_key, true).await;
@@ -129,10 +141,9 @@ async fn main() -> Result<()> {
         let long_present = emotion_entry_exists(&emotions_long, &long_key);
         println!("long key present in snapshot: {}", if long_present { "yes" } else { "no" });
 
-        println!("\n>>> LOOK AT THE SANDBOX THREAD IN TEAMS NOW — clearing in 90 seconds");
-        std::thread::sleep(std::time::Duration::from_secs(90));
-
-        let _ = set_reaction_raw(&http, &session, &sent.id, &long_key, false).await;
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let cleared = set_reaction_raw(&http, &session, &sent.id, &long_key, false).await;
+        println!("long key cleared: {}", if cleared.is_ok() { "yes" } else { "no" });
     }
 
     println!("\nOK — custom emoji reaction probe complete");
@@ -152,84 +163,6 @@ fn build_1x1_green_png() -> Vec<u8> {
         0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, // IEND chunk
         0xae, 0x42, 0x60, 0x82,
     ]
-}
-
-/// Upload one image to AMS and return only its id. Duplicates the two-request AMS
-/// dance from teams_send::upload_image (which is private) so the probe can construct
-/// a custom reaction key from the id.
-async fn upload_and_get_id(
-    http: &reqwest::Client,
-    session: &teams::Session,
-    ic3: &str,
-    image: &teams_send::ImageUpload,
-) -> Result<String> {
-    anyhow::ensure!(!ic3.is_empty(), "missing IC3 token");
-    let ams = ams_endpoint(session)?;
-
-    // Step 1: POST to /v1/objects/ to create the object.
-    let create_url = format!("{ams}/v1/objects/");
-    let create_body = serde_json::json!({
-        "type": "pish/image",
-        "permissions": { (SANDBOX): ["read"] },
-        "sharingMode": "Inline",
-        "filename": image.name,
-    });
-    let response = http
-        .post(&create_url)
-        .bearer_auth(ic3)
-        .header("x-ms-migration", "True")
-        .header("x-ms-client-version", "1415/26061118216")
-        .json(&create_body)
-        .send()
-        .await
-        .context("create AMS image object")?;
-    let status = response.status();
-    if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "create AMS image object -> {status}: {}",
-            text.chars().take(160).collect::<String>()
-        );
-    }
-    let response: Value = response.json().await.context("parse AMS image object")?;
-    let id = response
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .context("AMS image object response had no id")?
-        .to_string();
-
-    // Step 2: PUT to /v1/objects/{id}/content/imgpsh to upload the bytes.
-    let upload_url = format!("{ams}/v1/objects/{id}/content/imgpsh");
-    let response = http
-        .put(&upload_url)
-        .bearer_auth(ic3)
-        .header("x-ms-migration", "True")
-        .header("x-ms-client-version", "1415/26061118216")
-        .header("content-type", "application/octet-stream")
-        .body(image.bytes.clone())
-        .send()
-        .await
-        .context("upload AMS image content")?;
-    let status = response.status();
-    if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "upload AMS image content -> {status}: {}",
-            text.chars().take(160).collect::<String>()
-        );
-    }
-
-    Ok(id)
-}
-
-fn ams_endpoint(session: &teams::Session) -> Result<&str> {
-    session
-        .endpoint("amsV2")
-        .or_else(|| session.endpoint("ams"))
-        .map(|endpoint| endpoint.trim_end_matches('/'))
-        .filter(|endpoint| !endpoint.is_empty())
-        .context("no amsV2 or ams endpoint in regionGtms")
 }
 
 /// Set or clear a reaction with explicit HTTP handling so non-2xx responses are
@@ -333,6 +266,20 @@ async fn read_emotions(
     };
 
     Ok(emotions)
+}
+
+/// Whether the snapshot carries the key EXACTLY as it was sent. `emotion_entry_exists`
+/// answers the same question, so this is really an assertion about the comparison itself
+/// being byte-for-byte — spelled out because the key is a URL a reader has to fetch.
+fn emotion_key_verbatim(emotions: &Value, key: &str) -> bool {
+    emotions
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| entry.get("key").and_then(Value::as_str))
+                .any(|found| found == key)
+        })
+        .unwrap_or(false)
 }
 
 /// Check whether an emotion entry with the given key exists in the emotions array.
