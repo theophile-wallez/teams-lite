@@ -1186,6 +1186,28 @@ pub struct TaskWrite {
     pub asked_by_mri: Option<String>,
 }
 
+/// What one sweep read: the candidates it accepted, and how far each source got.
+///
+/// The two watermarks are the whole reason this is a struct rather than a `Vec`. The `LIMIT`
+/// is spent on the PREFILTERED rows and only accepted candidates come back, so a window
+/// whose rows all pass the SQL cut and are all refused by
+/// [`crate::tasks::looks_actionable`] yields nothing — and a caller with nothing to advance
+/// to would read that same barren window for ever, with everything past it unreachable and
+/// no symptom to see. It is not a contrived case: `plain_text_from_html` strips quoted
+/// blocks, so a run of replies quoting one message that says "please" is exactly this.
+///
+/// One watermark per SOURCE, each taken from that source's own newest examined row, because
+/// the two are ordered by different columns and neither can speak for the other.
+#[derive(Debug, Clone)]
+pub struct TaskCandidates {
+    pub candidates: Vec<crate::tasks::Candidate>,
+    /// The newest message `compose_time` this sweep EXAMINED, accepted or not; 0 when it
+    /// read no message rows at all. Never past a candidate that was cut by the shared cap.
+    pub newest_compose_time: i64,
+    /// The same for mail, in the `received` ISO shape; empty when it read no mail.
+    pub newest_received: String,
+}
+
 /// One override without its avatar bytes, for listing them all. `has_avatar` is what
 /// the UI needs to say "a picture is set"; fetching it is a separate, per-person read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1376,7 +1398,8 @@ const TASK_SELECT_COLS: &str = concat!(
 
 /// The words the candidate sweep's SQL cut looks for — a SUPERSET of every phrase
 /// [`crate::tasks::looks_actionable`] accepts, and deliberately coarser than it: `forget`
-/// stands for both spellings of "don't forget", and none of these needs an escaped quote.
+/// stands for both spellings of "don't forget", none of these needs an escaped quote, and a
+/// space in a term matches any markup between the words (see [`candidate_prefilter`]).
 ///
 /// It exists only so the sweep's `LIMIT` bounds what is read (a `%term%` match uses no
 /// index, so the alternative is pulling every message body after the watermark into Rust
@@ -1403,13 +1426,19 @@ const CANDIDATE_DAY_GLOB: &str = "*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*";
 /// case-insensitive over ASCII in SQLite, which is what `looks_actionable` does by
 /// lowercasing first.
 ///
+/// **Every space in a term becomes a `%`**, because the cut reads a message's raw HTML while
+/// the authority reads it stripped: the Teams composer writes `can&nbsp;you` and
+/// `can <b>you</b>`, both of which the authority accepts as "can you" and neither of which
+/// `LIKE '%can you%'` matches. Those were silently lost. Widening the gap keeps the claim
+/// above true at the cost of admitting a few more rows, which is the cut's job anyway.
+///
 /// The expression it is given is a column, never anything a client supplied, and the terms
 /// are this file's own constants — so the literals are built here rather than bound as
 /// parameters, which keeps the statement one cacheable string.
 fn candidate_prefilter(text: &str) -> String {
     let mut sql = String::from("(");
     for term in CANDIDATE_TERMS {
-        sql.push_str(&format!("{text} LIKE '%{term}%' OR "));
+        sql.push_str(&format!("{text} LIKE '%{}%' OR ", term.replace(' ', "%")));
     }
     sql.push_str(&format!("{text} GLOB '{CANDIDATE_DAY_GLOB}')"));
     sql
@@ -4366,12 +4395,12 @@ impl Store {
     /// scan.
     ///
     /// Capped at `limit`, so one scan of a busy week cannot become an unbounded prompt —
-    /// and the cap is what makes the ordering load-bearing. The caller advances the
-    /// watermark to the newest row it was handed, so what comes back has to be a PREFIX of
-    /// each source's own watermark order: the oldest unscanned messages by `compose_time`,
-    /// the oldest unscanned mail by `received`, each cut at its own end. A window cut across
-    /// the two — by time, after merging — would drop rows the advanced watermark then
-    /// steps over, and those candidates would be lost for good.
+    /// and the cap is what makes the ordering load-bearing. The caller advances each source's
+    /// watermark to the end that source reports ([`TaskCandidates`]), so what comes back has
+    /// to be a PREFIX of that source's own order: the oldest unscanned messages by
+    /// `compose_time`, the oldest unscanned mail by `received`, each cut at its own end. A
+    /// window cut across the two — by time, after merging — would drop rows the advanced
+    /// watermark then steps over, and those candidates would be lost for good.
     ///
     /// Two filters, and only one of them is the authority. The SQL cut
     /// ([`candidate_prefilter`]) is a superset of [`crate::tasks::looks_actionable`], so
@@ -4392,19 +4421,33 @@ impl Store {
         after_compose_time: i64,
         after_received: &str,
         limit: usize,
-    ) -> Result<Vec<crate::tasks::Candidate>> {
-        let mut messages = self.message_candidates(after_compose_time, limit)?;
-        let mut mail = self.mail_candidates(after_received, limit)?;
+    ) -> Result<TaskCandidates> {
+        let (mut messages, mut newest_compose_time) =
+            self.message_candidates(after_compose_time, limit)?;
+        let (mut mail, mut newest_received) = self.mail_candidates(after_received, limit)?;
         // Each source is already its own oldest `limit`; the shared budget is spent by
-        // dropping the NEWEST of whichever side has more, so both halves stay a prefix.
+        // dropping the NEWEST of whichever side has more, so both halves stay a prefix. A
+        // dropped candidate takes the watermark back with it, to the last one KEPT —
+        // everything below that was either accepted or examined and refused, and a window
+        // reported past a candidate nobody read would skip it for good.
         while messages.len() + mail.len() > limit {
-            if messages.len() >= mail.len() { messages.pop() } else { mail.pop() };
+            if messages.len() >= mail.len() {
+                messages.pop();
+                // `when` is that row's own `compose_time` truncated to the second, so this
+                // is never ahead of it — behind is safe, ahead would skip a row.
+                newest_compose_time = messages
+                    .last()
+                    .map_or(0, |c| crate::teams_read::parse_iso_ms(&c.when));
+            } else {
+                mail.pop();
+                newest_received = mail.last().map(|c| c.when.clone()).unwrap_or_default();
+            }
         }
-        let mut found = messages;
-        found.extend(mail);
+        let mut candidates = messages;
+        candidates.extend(mail);
         // Read as one chronological window: the prompt is a transcript, oldest first.
-        found.sort_by(|a, b| a.when.cmp(&b.when));
-        Ok(found)
+        candidates.sort_by(|a, b| a.when.cmp(&b.when));
+        Ok(TaskCandidates { candidates, newest_compose_time, newest_received })
     }
 
     /// The message half of [`Store::task_candidates`].
@@ -4413,30 +4456,59 @@ impl Store {
     /// within ONE conversation, so a global floor on it hid every thread whose own counter
     /// sat below the busiest one's — the quieter the thread, the more certainly its asks
     /// were never read. A time is the same for every conversation.
+    ///
+    /// **What the USER wrote is not an ask of them — except in their notes to themselves.**
+    /// That exception is this feature's best source rather than a nicety: every message in
+    /// `48:notes` is theirs, and it is where somebody writes down what they have to do. So
+    /// the predicate is "not from us, OR in the notes thread". The identity is the store's
+    /// own ([`Store::remembered_self`]), matched on the canonical TAIL of the mri because
+    /// Teams spells one three ways ([`canonical_mri`]) and a raw equality silently missed
+    /// our own rows once already; and a store that does not know whose it is filters on
+    /// nothing at all, since dropping every message over a missing identity is much the
+    /// worse failure.
+    ///
+    /// Answers the candidates it accepted and the newest `compose_time` it EXAMINED — see
+    /// [`TaskCandidates`] for why the second half cannot be derived from the first.
     fn message_candidates(
         &self,
         after_compose_time: i64,
         limit: usize,
-    ) -> Result<Vec<crate::tasks::Candidate>> {
+    ) -> Result<(Vec<crate::tasks::Candidate>, i64)> {
+        // Empty when the store cannot say whose it is, which the predicate reads as
+        // "filter on nobody".
+        let self_tail = self
+            .remembered_self()?
+            .map(|me| canonical_mri(&me.mri))
+            .unwrap_or_default();
         let sql = format!(
             "SELECT messages.id, messages.conversation_id, {SENDER}, messages.sender_mri,
                     strftime('%Y-%m-%dT%H:%M:%SZ', messages.compose_time / 1000, 'unixepoch'),
-                    messages.content
+                    messages.content, messages.compose_time
                FROM messages
               WHERE messages.compose_time > ?1
                 AND messages.deleted = 0
+                AND (?3 = ''
+                     OR messages.sender_mri NOT LIKE ('%' || ?3)
+                     OR messages.conversation_id = ?4)
                 AND {PREFILTER}
                 AND NOT EXISTS (
                     SELECT 1 FROM tasks
                      WHERE tasks.source_message_id <> ''
-                       AND tasks.source_message_id = messages.id)
+                       AND tasks.source_message_id = messages.id
+                       AND tasks.source_conversation_id = messages.conversation_id)
               ORDER BY messages.compose_time ASC, messages.id ASC
               LIMIT ?2",
             SENDER = nicknamed!("messages.sender_mri", "messages.sender"),
             PREFILTER = candidate_prefilter("messages.content"),
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![after_compose_time, limit as i64], |r| {
+        let params = params![
+            after_compose_time,
+            limit as i64,
+            self_tail,
+            crate::teams_activity::NOTES_THREAD,
+        ];
+        let rows = stmt.query_map(params, |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -4444,11 +4516,16 @@ impl Store {
                 r.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 r.get::<_, String>(4)?,
                 r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                r.get::<_, i64>(6)?,
             ))
         })?;
         let mut found = Vec::new();
+        let mut newest = 0;
         for row in rows {
-            let (id, conversation_id, author, author_mri, when, content) = row?;
+            let (id, conversation_id, author, author_mri, when, content, compose_time) = row?;
+            // Every row the query returned counts as examined, whatever the authority then
+            // says about it: that is what carries the scan past a window it refuses whole.
+            newest = newest.max(compose_time);
             // The model reads words, not markup — and `looks_actionable` is asked about
             // the same text the model will see, never about the HTML around it.
             let text = crate::teams_read::plain_text_from_html(&content);
@@ -4464,16 +4541,29 @@ impl Store {
                 text,
             });
         }
-        Ok(found)
+        Ok((found, newest))
     }
 
     /// The mail half of [`Store::task_candidates`]. The subject and the preview are read
     /// as one piece of text, because half the asks a mailbox holds are in the subject —
     /// and the preview is all of a body this app keeps until the mail is opened.
     ///
+    /// **Only the INBOX and the ARCHIVE**, by `well_known` (the labels
+    /// `mail::WELL_KNOWN_FOLDERS` writes). Junk is where "please claim your prize before
+    /// friday" lives, Deleted Items is what the user already threw away, and Drafts, Outbox
+    /// and Sent Items hold what THEY asked of somebody else — every one of those becoming a
+    /// task the user owes is the same failure, pointing in one direction or the other.
+    ///
     /// `author_mri` is empty on purpose: a sender is an SMTP address, not an MRI, so
     /// putting one there would store a value no nickname lookup could ever match.
-    fn mail_candidates(&self, after_received: &str, limit: usize) -> Result<Vec<crate::tasks::Candidate>> {
+    ///
+    /// Answers the newest `received` it EXAMINED beside the candidates, for the reason
+    /// [`TaskCandidates`] gives.
+    fn mail_candidates(
+        &self,
+        after_received: &str,
+        limit: usize,
+    ) -> Result<(Vec<crate::tasks::Candidate>, String)> {
         let sql = format!(
             "SELECT mail_messages.id,
                     COALESCE(NULLIF(mail_messages.from_name, ''), mail_messages.from_address),
@@ -4481,6 +4571,10 @@ impl Store {
                     mail_messages.subject || ' ' || mail_messages.preview AS text
                FROM mail_messages
               WHERE mail_messages.received > ?1
+                AND EXISTS (
+                    SELECT 1 FROM mail_folders
+                     WHERE mail_folders.id = mail_messages.folder_id
+                       AND mail_folders.well_known IN ('Inbox', 'Archive'))
                 AND {PREFILTER}
                 AND NOT EXISTS (
                     SELECT 1 FROM tasks
@@ -4500,8 +4594,13 @@ impl Store {
             ))
         })?;
         let mut found = Vec::new();
+        let mut newest = String::new();
         for row in rows {
             let (id, author, when, text) = row?;
+            // Examined, whatever the authority says next — see `message_candidates`.
+            if when > newest {
+                newest = when.clone();
+            }
             if !crate::tasks::looks_actionable(&text) {
                 continue;
             }
@@ -4514,7 +4613,7 @@ impl Store {
                 text,
             });
         }
-        Ok(found)
+        Ok((found, newest))
     }
 
     /// How far the scan has read: the newest message `compose_time` (epoch ms) and the
@@ -4535,9 +4634,22 @@ impl Store {
     /// Move the scan watermark. Written only after an extraction SUCCEEDED: a run that
     /// failed to parse must leave the window unscanned, or those candidates are lost for
     /// good (see the [`crate::tasks`] module doc).
+    ///
+    /// It only ever moves FORWARD, per source: a value behind what is stored is clamped to
+    /// what is stored, and that is not an error. "Strictly forward" is a property of the
+    /// watermark rather than a promise about its callers — a caller that derives the message
+    /// half from a candidate's `when` works at whole-second resolution, so it can legitimately
+    /// hand back a value a few hundred milliseconds behind an exact-ms watermark, and two
+    /// backends sharing this store can each report their own window.
     pub fn set_task_scan_watermark(&self, compose_time: i64, received: &str) -> Result<()> {
-        self.set_setting(SETTING_TASK_SCAN_COMPOSE_TIME, &compose_time.to_string())?;
-        self.set_setting(SETTING_TASK_SCAN_RECEIVED, received)?;
+        let (stored_compose_time, stored_received) = self.task_scan_watermark()?;
+        self.set_setting(
+            SETTING_TASK_SCAN_COMPOSE_TIME,
+            &compose_time.max(stored_compose_time).to_string(),
+        )?;
+        if received > stored_received.as_str() {
+            self.set_setting(SETTING_TASK_SCAN_RECEIVED, received)?;
+        }
         Ok(())
     }
 
@@ -7813,6 +7925,18 @@ mod tests {
         assert!(store.delete_task(&saved.id).unwrap());
         assert!(!store.delete_task(&saved.id).unwrap(), "deleting twice is not an error");
         assert!(store.tasks().unwrap().is_empty());
+
+        // A patch names a row the caller believes exists, so an id nothing holds is an error
+        // rather than a quiet insert under an id somebody else minted.
+        assert!(
+            store
+                .save_task(
+                    &TaskWrite { id: Some(saved.id.clone()), state: Some("open".into()), ..Default::default() },
+                    1_754_400_005_000,
+                )
+                .is_err()
+        );
+        assert!(store.tasks().unwrap().is_empty(), "and it wrote nothing");
     }
 
     #[test]
@@ -7903,7 +8027,7 @@ mod tests {
         store.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
         store.upsert_mail_message(&mail("mail1", "f", "2026-07-01T09:00:00Z", true)).unwrap();
 
-        let found = store.task_candidates(0, "", 50).unwrap();
+        let found = store.task_candidates(0, "", 50).unwrap().candidates;
         assert_eq!(found.len(), 1, "small talk must not reach the model");
         assert!(found[0].text.contains("can you"));
         assert!(!found[0].text.contains("<b>"), "the model reads words, not markup");
@@ -7924,7 +8048,7 @@ mod tests {
         store
             .insert_message(&said("19:c@thread.v2", "m1", 1, "<p>can you send the numbers</p>"))
             .unwrap();
-        let found = store.task_candidates(0, "", 50).unwrap();
+        let found = store.task_candidates(0, "", 50).unwrap().candidates;
         assert_eq!(found[0].author, "Boss", "the sweep states a name, so the rename covers it");
     }
 
@@ -7937,7 +8061,7 @@ mod tests {
         asking.preview = "Please approve it before friday";
         store.upsert_mail_message(&asking).unwrap();
 
-        let found = store.task_candidates(0, "", 50).unwrap();
+        let found = store.task_candidates(0, "", 50).unwrap().candidates;
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "mail1");
         assert_eq!(found[0].kind, crate::tasks::CandidateKind::Mail);
@@ -7962,8 +8086,8 @@ mod tests {
             .unwrap();
         // `said` composes at 2026-08-05T09:00:00Z plus a second per seq.
         let first = 1_785_920_401_000;
-        assert_eq!(store.task_candidates(0, "", 50).unwrap().len(), 2);
-        let left = store.task_candidates(first, "", 50).unwrap();
+        assert_eq!(store.task_candidates(0, "", 50).unwrap().candidates.len(), 2);
+        let left = store.task_candidates(first, "", 50).unwrap().candidates;
         assert_eq!(left.len(), 1, "the first message is already scanned");
         assert_eq!(left[0].id, "m2", "and the one after it is not");
 
@@ -7973,12 +8097,12 @@ mod tests {
         store.upsert_mail_message(&asking).unwrap();
         let second = first + 1_000;
         assert_eq!(
-            store.task_candidates(second, "", 50).unwrap().len(),
+            store.task_candidates(second, "", 50).unwrap().candidates.len(),
             1,
             "the mail has a watermark of its own, and it is still unscanned"
         );
         assert!(
-            store.task_candidates(second, "2026-07-01T09:00:00Z", 50).unwrap().is_empty(),
+            store.task_candidates(second, "2026-07-01T09:00:00Z", 50).unwrap().candidates.is_empty(),
             "and that watermark covers it"
         );
     }
@@ -7997,7 +8121,7 @@ mod tests {
         quiet.compose_time = 1_785_920_460_000; // a minute LATER, at seq 1
         store.insert_message(&quiet).unwrap();
 
-        let found = store.task_candidates(1_785_920_400_000, "", 50).unwrap();
+        let found = store.task_candidates(1_785_920_400_000, "", 50).unwrap().candidates;
         assert_eq!(found.len(), 1, "the quiet thread's ask is not behind the busy one's counter");
         assert_eq!(found[0].id, "q1");
     }
@@ -8015,7 +8139,7 @@ mod tests {
                 ))
                 .unwrap();
         }
-        let found = store.task_candidates(0, "", 4).unwrap();
+        let found = store.task_candidates(0, "", 4).unwrap().candidates;
         assert_eq!(found.len(), 4, "a busy week must not become an unbounded prompt");
         // OLDEST first: the caller advances the watermark to the newest row it was handed,
         // so a window cut at its newest end would carry the watermark over what it dropped.
@@ -8049,7 +8173,7 @@ mod tests {
 
         // Two of the six, one from each source, and each the oldest its source holds:
         // the caller's watermark advance steps over exactly what it was handed.
-        let found = store.task_candidates(0, "", 2).unwrap();
+        let found = store.task_candidates(0, "", 2).unwrap().candidates;
         assert_eq!(found.len(), 2);
         let ids: Vec<&str> = found.iter().map(|c| c.id.as_str()).collect();
         assert!(ids.contains(&"mail1"), "the oldest mail, not the newest: {ids:?}");
@@ -8063,7 +8187,7 @@ mod tests {
         retracted.deleted = true;
         store.insert_message(&retracted).unwrap();
         assert!(
-            store.task_candidates(0, "", 50).unwrap().is_empty(),
+            store.task_candidates(0, "", 50).unwrap().candidates.is_empty(),
             "an ask its author took back is not an ask"
         );
     }
@@ -8087,7 +8211,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            store.task_candidates(0, "", 50).unwrap().is_empty(),
+            store.task_candidates(0, "", 50).unwrap().candidates.is_empty(),
             "a dismissed suggestion must not come back"
         );
     }
@@ -8110,7 +8234,7 @@ mod tests {
                 1_754_400_000_000,
             )
             .unwrap();
-        assert!(store.task_candidates(0, "", 50).unwrap().is_empty());
+        assert!(store.task_candidates(0, "", 50).unwrap().candidates.is_empty());
     }
 
     #[test]
@@ -8148,19 +8272,206 @@ mod tests {
             "saturday works",
             "sunday works",
             "the audit lands 2026-08-12",
+            // The cut reads raw HTML and the authority reads it stripped, so the two ways
+            // the Teams composer breaks a phrase up belong in this list: both of these were
+            // silently lost while every term was matched as one unbroken word.
+            "<p>can <b>you</b> review the deployment doc</p>",
+            "<p>can&nbsp;you send me the numbers</p>",
         ];
         for (i, phrase) in phrases.iter().enumerate() {
             let seq = i as i64 + 1;
             store
                 .insert_message(&said("19:c@thread.v2", &format!("m{seq}"), seq, phrase))
                 .unwrap();
+            // Asked exactly as the sweep asks it: the authority reads the STRIPPED text,
+            // which is the whole reason the cut has to tolerate markup.
             assert!(
-                crate::tasks::looks_actionable(phrase),
+                crate::tasks::looks_actionable(&crate::teams_read::plain_text_from_html(phrase)),
                 "the fixture must be one the authority accepts: {phrase}"
             );
         }
-        let found = store.task_candidates(0, "", phrases.len()).unwrap();
+        let found = store.task_candidates(0, "", phrases.len()).unwrap().candidates;
         assert_eq!(found.len(), phrases.len(), "the SQL cut dropped an actionable phrase");
+    }
+
+    #[test]
+    fn a_window_the_authority_refuses_whole_still_moves_the_scan_on() {
+        // THE STALL THIS EXISTS FOR: the cap is spent on the rows the SQL cut ADMITS, and
+        // only accepted candidates come back. A window whose every row passes the cut and is
+        // refused by the authority therefore yields nothing — and a caller with nothing to
+        // advance to reads that same window for ever, with everything past it unreachable.
+        let store = Store::open_in_memory().unwrap();
+        // "please" survives the cut and is stripped out of the text by the quote removal, so
+        // the authority sees a bare "ok" — exactly what a run of replies looks like.
+        for seq in 1..=3 {
+            store
+                .insert_message(&said(
+                    "19:c@thread.v2",
+                    &format!("r{seq}"),
+                    seq,
+                    "<blockquote itemtype=\"http://schema.skype.com/Reply\">please review it</blockquote><p>ok</p>",
+                ))
+                .unwrap();
+        }
+        store
+            .insert_message(&said("19:c@thread.v2", "m9", 9, "<p>can you review the doc</p>"))
+            .unwrap();
+
+        let barren = store.task_candidates(0, "", 3).unwrap();
+        assert!(barren.candidates.is_empty(), "the authority refused every row it was shown");
+        assert!(
+            barren.newest_compose_time > 0,
+            "but the window it read is reported, or the scan never gets past it"
+        );
+
+        let next = store.task_candidates(barren.newest_compose_time, "", 3).unwrap();
+        assert_eq!(next.candidates.len(), 1, "and the real ask beyond it is reached");
+        assert_eq!(next.candidates[0].id, "m9");
+    }
+
+    #[test]
+    fn the_reported_window_never_runs_past_a_candidate_the_shared_cap_dropped() {
+        // Two sources over one budget, so the cap really has to drop an ACCEPTED candidate.
+        // The window each source reports must then step back to the last one kept: a
+        // watermark past a candidate nobody was shown would skip it for good.
+        let store = Store::open_in_memory().unwrap();
+        for seq in 1..=2 {
+            store
+                .insert_message(&said(
+                    "19:c@thread.v2",
+                    &format!("m{seq}"),
+                    seq,
+                    "<p>can you review the doc</p>",
+                ))
+                .unwrap();
+        }
+        store.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
+        for day in 1..=2 {
+            let id = format!("mail{day}");
+            let received = format!("2026-07-0{day}T09:00:00Z");
+            let mut asking = mail("", "f", "", true);
+            asking.id = &id;
+            asking.received = &received;
+            asking.preview = "Please approve the invoice";
+            store.upsert_mail_message(&asking).unwrap();
+        }
+
+        let cut = store.task_candidates(0, "", 3).unwrap();
+        assert_eq!(cut.candidates.len(), 3, "four candidates, a budget of three");
+        let ids: Vec<&str> = cut.candidates.iter().map(|c| c.id.as_str()).collect();
+        assert!(!ids.contains(&"m2"), "the newest message was the one dropped: {ids:?}");
+        assert_eq!(
+            cut.newest_compose_time, 1_785_920_401_000,
+            "so the message window stops at m1, not at the m2 nobody read"
+        );
+        assert_eq!(cut.newest_received, "2026-07-02T09:00:00Z", "mail kept both, and says so");
+
+        let next = store
+            .task_candidates(cut.newest_compose_time, &cut.newest_received, 3)
+            .unwrap();
+        assert_eq!(next.candidates.len(), 1, "and the dropped ask is the next window");
+        assert_eq!(next.candidates[0].id, "m2");
+    }
+
+    #[test]
+    fn what_the_user_wrote_is_not_an_ask_of_them() {
+        let store = Store::open_in_memory().unwrap();
+        store.remember_self("Clément BOSLE", "8:orgid:me").unwrap();
+        let mut mine = said("19:c@thread.v2", "m1", 1, "<p>can you review the doc</p>");
+        mine.sender_mri = "8:orgid:me".into();
+        store.insert_message(&mine).unwrap();
+        assert!(
+            store.task_candidates(0, "", 50).unwrap().candidates.is_empty(),
+            "the user asking somebody else is not a task of the user's"
+        );
+
+        // The URL form of the same identity is still the same person.
+        let mut also_mine = said("19:c@thread.v2", "m2", 2, "<p>please send the numbers</p>");
+        also_mine.sender_mri = "https://teams.microsoft.com/api/mt/contacts/8:orgid:me".into();
+        store.insert_message(&also_mine).unwrap();
+        assert!(store.task_candidates(0, "", 50).unwrap().candidates.is_empty());
+    }
+
+    #[test]
+    fn a_note_to_self_is_the_one_place_the_user_asks_the_user() {
+        // Load-bearing exception: every message in the notes thread is theirs, and it is
+        // where somebody writes down what they have to do. A blanket from-me exclusion would
+        // delete this feature's best source.
+        let store = Store::open_in_memory().unwrap();
+        store.remember_self("Clément BOSLE", "8:orgid:me").unwrap();
+        let mut note = said("48:notes", "n1", 1, "<p>remember to renew the certificate</p>");
+        note.sender_mri = "8:orgid:me".into();
+        store.insert_message(&note).unwrap();
+
+        let found = store.task_candidates(0, "", 50).unwrap().candidates;
+        assert_eq!(found.len(), 1, "the user's own notes are candidates");
+        assert_eq!(
+            found[0].kind,
+            crate::tasks::CandidateKind::Message { conversation_id: "48:notes".into() }
+        );
+    }
+
+    #[test]
+    fn a_store_that_does_not_know_whose_it_is_filters_on_nobody() {
+        // A missing identity must cost a few of the user's own asks slipping through, never
+        // every message in the store.
+        let store = Store::open_in_memory().unwrap();
+        let mut mine = said("19:c@thread.v2", "m1", 1, "<p>can you review the doc</p>");
+        mine.sender_mri = "8:orgid:me".into();
+        store.insert_message(&mine).unwrap();
+        assert_eq!(store.task_candidates(0, "", 50).unwrap().candidates.len(), 1);
+    }
+
+    #[test]
+    fn only_the_inbox_and_the_archive_can_ask_anything_of_the_user() {
+        let store = Store::open_in_memory().unwrap();
+        for (id, label) in [
+            ("f-inbox", "Inbox"),
+            ("f-archive", "Archive"),
+            ("f-junk", "Junk"),
+            ("f-sent", "Sent"),
+            ("f-deleted", "Deleted"),
+            ("f-drafts", "Drafts"),
+            ("f-user", ""),
+        ] {
+            store.upsert_mail_folder(&folder(id, label, label, 0)).unwrap();
+            let mail_id = format!("mail-{id}");
+            let mut asking = mail("", "", "", true);
+            asking.id = &mail_id;
+            asking.folder_id = id;
+            asking.received = "2026-07-01T09:00:00Z";
+            asking.preview = "Please approve the invoice before friday";
+            store.upsert_mail_message(&asking).unwrap();
+        }
+
+        let ids: Vec<String> = store
+            .task_candidates(0, "", 50)
+            .unwrap()
+            .candidates
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids.len(), 2, "junk, sent, deleted, drafts and a user folder are all out: {ids:?}");
+        assert!(ids.contains(&"mail-f-inbox".to_string()));
+        assert!(ids.contains(&"mail-f-archive".to_string()));
+    }
+
+    #[test]
+    fn the_watermark_only_ever_moves_forward() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_task_scan_watermark(2_000, "2026-07-02T09:00:00Z").unwrap();
+        // A caller working at whole-second resolution can legitimately report a value just
+        // behind an exact-ms watermark; clamping is not an error.
+        store.set_task_scan_watermark(1_000, "2026-07-01T09:00:00Z").unwrap();
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (2_000, "2026-07-02T09:00:00Z".to_string())
+        );
+        store.set_task_scan_watermark(3_000, "2026-07-03T09:00:00Z").unwrap();
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (3_000, "2026-07-03T09:00:00Z".to_string())
+        );
     }
 
     #[test]
