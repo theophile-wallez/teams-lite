@@ -23,12 +23,13 @@ describe("updateView", () => {
     expect(updateView(null, null, "connected").shape).toBe("hidden");
   });
 
-  it("offers the download first, and says what it costs", () => {
+  it("offers the download first, and says what it costs in the control's own title", () => {
     const view = updateView(info, null, "connected");
     expect(view.shape).toBe("button");
     expect(view.action).toBe("download");
     expect(view.label).toBe("Update available");
-    expect(view.detail).toBe("Downloads 133 MB.");
+    expect(view.hint).toBe("Downloads 133 MB.");
+    expect(view.detail).toBe("");
     expect(view.busy).toBe(false);
   });
 
@@ -37,12 +38,28 @@ describe("updateView", () => {
   it("never states the build it would install", () => {
     for (const phase of ["idle", "downloading", "ready", "installed", "failed"] as const) {
       const view = updateView(info, progress({ phase }), "connected");
-      expect(view.label).not.toContain(info.latest);
-      expect(view.detail).not.toContain(info.latest);
+      for (const words of [view.label, view.detail, view.hint]) {
+        expect(words).not.toContain(info.latest);
+      }
     }
     const link = updateView({ ...info, can_install: false }, null, "connected");
-    expect(link.label).not.toContain(info.latest);
-    expect(link.detail).not.toContain(info.latest);
+    for (const words of [link.label, link.detail, link.hint]) {
+      expect(words).not.toContain(info.latest);
+    }
+  });
+
+  // The row is the button. A sentence that only EXPLAINS the control is its title, so the
+  // button never moves while the user is aiming at it; a line of its own is kept for what
+  // happened, which is a failure and the state nothing restarted.
+  it("keeps a line of its own for what happened, and nothing else", () => {
+    const withALine = ["failed", "installed"] as const;
+    for (const phase of ["idle", "downloading", "ready", "restarting"] as const) {
+      expect(updateView(info, progress({ phase }), "connected").detail).toBe("");
+    }
+    for (const phase of withALine) {
+      expect(updateView(info, progress({ phase }), "connected").detail).not.toBe("");
+    }
+    expect(updateView({ ...info, can_install: false }, null, "connected").detail).toBe("");
   });
 
   it("draws the progress while downloading, and lets nothing be clicked", () => {
@@ -56,7 +73,7 @@ describe("updateView", () => {
   it("asks for the second click once the build is downloaded", () => {
     const view = updateView(info, progress({ phase: "ready", received: info.size ?? 0 }), "connected");
     expect(view.label).toBe("Restart to update");
-    expect(view.detail).toBe("Installs the new build and restarts the app.");
+    expect(view.hint).toBe("Installs the new build and restarts the app.");
     expect(view.action).toBe("apply");
     expect(view.busy).toBe(false);
   });
@@ -100,6 +117,7 @@ describe("updateView", () => {
     expect(view.action).toBe("none");
     expect(view.url).toBe(info.url);
     expect(view.label).toBe("Update available");
+    expect(view.hint).toContain("where it was installed from");
   });
 
   it("treats a missing can_install as no", () => {

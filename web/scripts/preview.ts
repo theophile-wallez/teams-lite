@@ -168,10 +168,17 @@ export async function withPreview<T>(
         await page.locator(selector).first().screenshot({ path, animations: "disabled" });
       },
       setTheme: async (theme) => {
-        // Passed as source text, not a closure: this file type-checks under the
-        // node tsconfig (no DOM lib), and the body runs in the page.
-        await page.evaluate(
-          `document.documentElement.setAttribute("data-theme", ${JSON.stringify(theme)})`,
+        // Through the OS query, which is the app's OWN path into a theme: the default
+        // appearance is `system`, so the store hears the change, repaints `data-theme`
+        // and updates `resolvedTheme` with it. Writing the attribute from here instead
+        // left the two disagreeing — the palette was dark while the app still believed
+        // it was light — so anything drawn FROM the app's theme (the update button's orb,
+        // the emoji picker) was captured in the wrong one, and the capture said nothing.
+        // It has to be the query rather than a reload, because a capture mid-flow (a
+        // download in progress, a live agent run) would not survive one.
+        await page.emulateMedia({ colorScheme: theme });
+        await page.waitForFunction(
+          `document.documentElement.getAttribute("data-theme") === ${JSON.stringify(theme)}`,
         );
         await page.waitForTimeout(400);
       },

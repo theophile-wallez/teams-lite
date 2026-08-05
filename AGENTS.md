@@ -551,6 +551,14 @@ user. Two independent mechanisms enforce that split:
   `web/scripts/scroll-probe.ts` is what a diagnostic built on top of it looks like
   (it measures history scroll smoothness frame by frame): a tracked script that
   drives the app *through* `withPreview`, never around it.
+- **A capture switches the theme through the OS query, not by writing the attribute.**
+  `setTheme` calls `page.emulateMedia({colorScheme})`, and the app — whose appearance is
+  `system` by default — repaints `data-theme` and updates its own `resolvedTheme` with it.
+  Writing the attribute from the outside left the palette dark while the app still believed
+  it was light, so anything drawn FROM the app's theme (the update button's orb, the emoji
+  picker) was captured in the wrong one and the capture said nothing about it. It must not
+  become a reload either: a capture mid-flow (a download in progress, a live agent run)
+  would not survive one.
 - **Never type into the composer without proof the backend is fake.** The proof is
   `[data-testid="backend-badge"][data-backend="mock"]`, which comes from the
   backend's own `backend_info` sentinel (only `web/mock/server.ts` emits it). No
@@ -1231,10 +1239,22 @@ button says what it costs before it is pressed.
   decide there is an update at all. A test in `web/src/lib/update.test.ts` scans every
   phase for it.
 - **The progress takes the place of the label, and the button does not move.** The percent
-  is drawn where the pressed words were, over the fill, and the second line keeps its
-  height while there is nothing in it — the control is anchored above the status line and
-  grows upward, so a line that came and went would shift the button under the pointer that
-  just pressed it. `web/e2e/update.spec.ts` measures both halves.
+  is drawn where the pressed words were, over the fill. `web/e2e/update.spec.ts` measures
+  the button's own position across the click.
+- **The ROW IS THE BUTTON.** What a click costs or does is the button's own title
+  (`UpdateView.hint`) and never a line under it: this row sits at the foot of a sidebar
+  whose job is chat rows, and a sentence that comes and goes moves the control the user is
+  aiming at. A line of its own (`UpdateView.detail`) is kept for what HAPPENED — a
+  failure's reason, and the one thing left to do when nothing restarted the app — because a
+  report nobody can hover is a report a phone does not have.
+- **The work is drawn as an ORB, not as a turning glyph.** `thinking-orbs` (MIT, no
+  dependencies, a plain 2D canvas — no WebGL, no filters, still under
+  `prefers-reduced-motion`, paused off-screen and on a hidden tab) in its `solving` state at
+  its own 20 px inline preset. It is a loading indicator and not an icon set, so § Hugeicons
+  is untouched: every GLYPH still comes from one library. Its ink is monochrome, so the
+  theme is passed INVERTED — the orb sits on `bg-primary`, whose foreground runs the
+  opposite way from the page (white on the light theme, near-black on the dark one), and the
+  package's own `auto` reads the page's `data-theme` and would be wrong in both.
 
 - **Both RPCs are `MACHINE_METHODS`** — the write token, refused read-only, and the
   automation hook blocks a script that names either against a live port. `update_apply`

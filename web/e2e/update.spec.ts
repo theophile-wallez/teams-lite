@@ -33,24 +33,27 @@ test.describe("in-app update", () => {
     await expect(control).toBeVisible();
     await expect(control).toHaveAttribute("data-phase", "idle");
 
-    // FIRST CLICK. The button says an update exists and what it costs — never which
-    // build, since a commit sha is a fault code to whoever reads it. The cost is stated
-    // because this may be a phone on a metered connection, which is also why nothing
-    // downloads on its own.
+    // FIRST CLICK. The row is the button and nothing else: it says an update exists —
+    // never which build, since a commit sha is a fault code to whoever reads it — and it
+    // carries what the download costs in its own title, because this may be a phone on a
+    // metered connection, which is also why nothing downloads on its own.
     const button = page.getByTestId("update-button");
     await expect(button).toHaveText(/^\s*Update available\s*$/);
     await expect(button).not.toContainText("def5678");
-    await expect(page.getByTestId("update-detail")).toContainText("Downloads 133 MB.");
+    await expect(button).toHaveAttribute("title", "Downloads 133 MB.");
+    await expect(page.getByTestId("update-detail")).toHaveCount(0);
     const before = await button.boundingBox();
     await button.click();
 
     // The progress is a fill inside the button, and the percent is on the button itself
     // so it can be read without measuring pixels. It takes the place of the words that
-    // were pressed, and the button stays where it was while it does.
+    // were pressed, and the button stays where it was while it does. The work is drawn as
+    // an orb (thinking-orbs, on a 2D canvas) in place of the icon.
     await expect(control).toHaveAttribute("data-phase", "downloading");
     await expect(button).toHaveText(/Downloading… \d+%/);
     await expect(button).toBeDisabled();
     await expect(page.getByTestId("update-progress-fill")).toBeVisible();
+    await expect(page.getByTestId("update-orb")).toBeVisible();
     const during = await button.boundingBox();
     expect(Math.abs((during?.y ?? 0) - (before?.y ?? 0))).toBeLessThan(2);
 
@@ -59,6 +62,8 @@ test.describe("in-app update", () => {
     const restart = page.getByTestId("update-button");
     await expect(restart).toHaveText(/Restart to update/);
     await expect(restart).toBeEnabled();
+    await expect(restart).toHaveAttribute("title", /Installs the new build/);
+    await expect(page.getByTestId("update-detail")).toHaveCount(0);
     await restart.click();
 
     // Restarting, then — because nothing here restarts an app — the honest end state,

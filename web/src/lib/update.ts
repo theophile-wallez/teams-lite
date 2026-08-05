@@ -18,8 +18,14 @@
 // No state names the build. `info.latest` is the commit the release was compiled from, so
 // it reads as a fault code in the middle of a plain sentence — and a sha is not something
 // the user can act on: there is one release, `latest`, and pressing the button takes it.
-// The control says an update EXISTS; the detail says what it costs. The field stays in the
-// protocol because the BACKEND compares it with its own build to decide there is one.
+// The control says an update EXISTS, and nothing else. The field stays in the protocol
+// because the BACKEND compares it with its own build to decide there is one.
+//
+// The row is the BUTTON and nothing else, which is what splits `hint` from `detail`. What a
+// click costs or does explains a control the label already names, so it is that control's
+// own title; a line of its own is kept for what HAPPENED — a failure's reason, and the one
+// thing left to do when nothing restarted the app. So the button never moves between the
+// two clicks, and the sidebar keeps its rows for the chats.
 
 import type { LiveStatus, UpdateInfo, UpdateProgress } from "./protocol";
 
@@ -41,8 +47,19 @@ export type UpdateView = {
   shape: UpdateShape;
   /** The words on the control. */
   label: string;
-  /** The second line: what a click costs, or what happened. Empty when there is none. */
+  /**
+   * A line of its own under the control, for what HAPPENED: a failure's reason, and the
+   * one thing left to do once nothing restarted the app. Empty in every ordinary state,
+   * so the row is the button and nothing else.
+   */
   detail: string;
+  /**
+   * What a click costs or does, carried by the control's own title rather than by a line.
+   * The sidebar is 240 px of chat rows and this row grows upward from the status line, so
+   * a sentence that comes and goes moves the button — and it explains a control the label
+   * already names, which is what a title is for.
+   */
+  hint: string;
   action: UpdateAction;
   /** 0–100 while downloading; 0 otherwise. */
   percent: number;
@@ -56,6 +73,7 @@ const HIDDEN: UpdateView = {
   shape: "hidden",
   label: "",
   detail: "",
+  hint: "",
   action: "none",
   percent: 0,
   busy: false,
@@ -103,7 +121,7 @@ export function updateView(
       ...base,
       shape: "button",
       label: "Restarting…",
-      detail: "It comes back on the new build.",
+      hint: "It comes back on the new build.",
       busy: true,
     };
   }
@@ -120,7 +138,7 @@ export function updateView(
       ...base,
       shape: "link",
       label: "Update available",
-      detail: "This build is updated where it was installed from, not from here.",
+      hint: "This build is updated where it was installed from, not from here.",
     };
   }
 
@@ -131,7 +149,6 @@ export function updateView(
         ...base,
         shape: "button",
         label: `Downloading… ${percent}%`,
-        detail: "",
         percent,
         busy: true,
       };
@@ -141,7 +158,7 @@ export function updateView(
         ...base,
         shape: "button",
         label: "Restart to update",
-        detail: "Installs the new build and restarts the app.",
+        hint: "Installs the new build and restarts the app.",
         action: "apply",
         percent: 100,
       };
@@ -165,15 +182,16 @@ export function updateView(
         ...base,
         shape: "button",
         label: "Update available",
-        detail: sizeDetail(info.size),
+        hint: sizeHint(info.size),
         action: "download",
       };
   }
 }
 
 /** The download's cost, stated before the click that spends it — this may be a phone on
- *  a metered connection, which is the whole reason nothing downloads on its own. */
-function sizeDetail(size: number | undefined): string {
+ *  a metered connection, which is the whole reason nothing downloads on its own. It is a
+ *  hint rather than a line: the user asked for the button alone. */
+function sizeHint(size: number | undefined): string {
   const formatted = formatBytes(size ?? 0);
   return formatted ? `Downloads ${formatted}.` : "";
 }
