@@ -76,6 +76,24 @@ describe("toMsSdp", () => {
     expect(toMsSdp(offer)).toContain("a=candidate:1 1 udp 2113937151 192.0.2.10 51234 typ host");
   });
 
+  it("encodes the two header-extension URIs the service spells with backslashes", () => {
+    const offer = [
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+      "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+      "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+      "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+    ].join("\r\n");
+    const out = toMsSdp(offer);
+    expect(out).toContain(
+      "a=extmap:2 http:\\\\www.webrtc.org\\experiments\\rtp-hdrext\\abs-send-time",
+    );
+    expect(out).toContain(
+      "a=extmap:3 http:\\\\www.ietf.org\\id\\draft-holmer-rmcat-transport-wide-cc-extensions-01",
+    );
+    // Every other extension is left exactly alone: only those two are spelled this way.
+    expect(out).toContain("a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level");
+  });
+
   it("keeps the line ending it was given", () => {
     expect(toMsSdp("v=0\nm=audio 1 UDP/TLS/RTP/SAVPF 111")).toBe(
       "v=0\nm=audio 1 RTP/SAVP 111\na=label:main-audio",
@@ -154,6 +172,24 @@ describe("fromMsSdp", () => {
       "a=candidate:4 1 tcp 18087935 2603:1063:111::486 3478 typ relay tcptype passive",
     );
     expect(out).not.toContain("x-candidate-ipv6");
+  });
+
+  it("decodes them again, or Chrome sees two extensions claiming one id", () => {
+    // The exact refusal: "RTP extension ID reassignment not supported (collision on
+    // active MID 0, id=3 …)" — the encoded uri reads as a different extension.
+    const answer = [
+      "m=audio 3478 RTP/SAVP 111",
+      "a=extmap:3 http:\\\\www.ietf.org\\id\\draft-holmer-rmcat-transport-wide-cc-extensions-01",
+    ].join("\r\n");
+    expect(fromMsSdp(answer)).toContain(
+      "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+    );
+  });
+
+  it("makes an extmap round trip exactly", () => {
+    const line = "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
+    const sdp = `m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n${line}`;
+    expect(fromMsSdp(toMsSdp(sdp))).toContain(line);
   });
 
   it("undoes what toMsSdp did to the profile", () => {

@@ -93,6 +93,37 @@ function candidateFromMs(line: string): string {
   return `a=candidate:${fields.join(" ")}`;
 }
 
+/**
+ * The two RTP header-extension URIs the service spells with BACKSLASHES.
+ *
+ * `MSSDP_ENCODED_URI: uri.replace(/\//g, "\\")` in the client's own bundle — every slash,
+ * and only for these two. Chrome does not ignore the difference: it reads the encoded form
+ * as a DIFFERENT extension claiming an id it already gave the real one, and refuses the
+ * answer outright:
+ *
+ *     Failed to set remote answer sdp: RTP extension ID reassignment not supported
+ *     (collision on active MID 0, id=3, old_uri="http://www.ietf.org/id/draft-holmer-…",
+ *      new_uri="http:\\www.ietf.org\id\draft-holmer-…")
+ *
+ * The list is exactly the client's. A third extension spelled this way would have to be
+ * added here — a blanket "turn every backslash into a slash" would rewrite attributes
+ * this module has no business touching.
+ */
+const ENCODED_EXTENSIONS = [
+  "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+  "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+].map((uri) => ({ jsep: uri, ms: uri.replace(/\//g, "\\") }));
+
+/** Rewrite one `a=extmap:` line in either direction. */
+function extmap(line: string, to: "ms" | "jsep"): string {
+  for (const { jsep, ms } of ENCODED_EXTENSIONS) {
+    const from = to === "ms" ? jsep : ms;
+    const into = to === "ms" ? ms : jsep;
+    if (line.endsWith(` ${from}`)) return `${line.slice(0, -from.length)}${into}`;
+  }
+  return line;
+}
+
 /** Drop the trailing `key value` pairs the service is never sent. */
 function withoutExtras(fields: string[]): string[] {
   const out: string[] = [];
@@ -172,7 +203,15 @@ export function toMsSdp(sdp: string): string {
       continue;
     }
     if (section && line.startsWith("a=label:")) section.hasLabel = true;
-    out.push(line.startsWith("a=candidate:") ? candidateToMs(line) : line);
+    if (line.startsWith("a=candidate:")) {
+      out.push(candidateToMs(line));
+      continue;
+    }
+    if (line.startsWith("a=extmap:")) {
+      out.push(extmap(line, "ms"));
+      continue;
+    }
+    out.push(line);
   }
   closeSection();
   return out.join(ending);
@@ -223,6 +262,10 @@ export function fromMsSdp(sdp: string): string {
     // browser ignores — this one has to become a candidate or it is simply lost.
     if (line.startsWith("a=x-candidate-ipv6:")) {
       out.push(candidateFromMs(`a=candidate:${line.slice("a=x-candidate-ipv6:".length)}`));
+      return;
+    }
+    if (line.startsWith("a=extmap:")) {
+      out.push(extmap(line, "jsep"));
       return;
     }
     const media = readMediaLine(line);
