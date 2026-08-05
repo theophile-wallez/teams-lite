@@ -1,8 +1,10 @@
 # A task list the app fills in for you
 
-A right-hand panel holding the things the user owes somebody. It is filled two ways:
-by hand, and by an agent run over the messages and mail that are already on this
-machine. Nothing in it reaches Teams, a tracker, or a person.
+A right-hand panel holding the things the user owes somebody, filled by an agent run over
+the messages and mail that are already on this machine. Nothing in it reaches Teams, a
+tracker, or a person. (What SHIPPED is read-and-decide: the store and `task_save` write a
+hand-typed row too, but the panel offers no field for one — see AGENTS.md § A task list the
+app fills in.)
 
 ## Why this shape
 

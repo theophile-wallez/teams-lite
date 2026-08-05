@@ -387,6 +387,36 @@ test.describe("the task panel", () => {
     await expect(page.locator('[data-testid="tasks-scan-error"]')).toHaveCount(0);
   });
 
+  // The automatic scan is the one thing here a colleague can start, so it has to be
+  // declinable — and the switch has to state what is STORED rather than what was clicked:
+  // a control that reads "off" while runs keep happening misstates where money goes. The
+  // manual button is deliberately outside the switch's reach.
+  test("the automatic scan can be turned off, and the button still works", async ({ page }) => {
+    await gotoApp(page);
+    await openTasksPanel(page);
+
+    const auto = panel(page).locator('[data-testid="tasks-auto-toggle"]');
+    // On out of the box, because the user asked for the trigger — and enabled, which means
+    // the backend really answered where it stands rather than the page hoping.
+    await expect(auto).toHaveAttribute("aria-checked", "true");
+    await expect(auto).toBeEnabled();
+
+    await auto.click();
+    await expect(auto).toHaveAttribute("aria-checked", "false");
+    await expect(panel(page).locator('[data-testid="tasks-error"]')).toHaveCount(0);
+
+    // Re-read from the backend: a switch that only moved in this page would pass the
+    // assertion above while the machine kept scanning.
+    await page.locator('[data-testid="tasks-close"]').click();
+    await page.locator('[data-testid="tasks-toggle"]').click();
+    await expect(auto).toHaveAttribute("aria-checked", "false");
+
+    // And with it off, the button the user presses is untouched: a run they asked for is
+    // theirs.
+    await panel(page).locator('[data-testid="tasks-scan"]').click();
+    await expect(panel(page).locator('[data-testid="tasks-scan-found"]')).toContainText("Found");
+  });
+
   test("a scan that could not run says so beside the button", async ({ page }) => {
     await gotoApp(page);
     await openTasksPanel(page);
@@ -412,15 +442,17 @@ test.describe("the task panel", () => {
     // A refused scan is not a count, and the two must never be on screen together.
     await expect(panel(page).locator('[data-testid="tasks-scan-found"]')).toHaveCount(0);
 
-    // Under the header the button is in, and WITHIN ONE BUTTON of it: a sentence at the foot of
-    // the panel is not beside the control that was pressed, and a band wide enough to allow one
-    // would claim less than the paragraph above.
+    // Directly under the HEADER the button is in — measured against the header rather than
+    // against the button itself, because the header holds a second row (the automatic scan's
+    // switch) and a gap counted from the button would be measuring that row. What must hold is
+    // that the sentence is the first thing below the header and not something at the foot of
+    // the panel, which is not beside the control that was pressed.
     const errorBox = await box(error);
-    const buttonBox = await box(panel(page).locator('[data-testid="tasks-scan"]'));
+    const headerBox = await box(panel(page).locator("header"));
     const aside = await box(panel(page));
     expect(errorBox.x).toBeGreaterThanOrEqual(aside.x - 1);
-    expect(errorBox.y).toBeGreaterThanOrEqual(buttonBox.y);
-    expect(errorBox.y - (buttonBox.y + buttonBox.height)).toBeLessThan(buttonBox.height);
+    expect(errorBox.y).toBeGreaterThanOrEqual(headerBox.y);
+    expect(errorBox.y - (headerBox.y + headerBox.height)).toBeLessThan(4);
 
     // And the way forward is the same button: a control whose only offer cannot succeed is no
     // way forward at all.

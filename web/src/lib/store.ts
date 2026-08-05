@@ -460,6 +460,12 @@ export type AppState = {
    *  the backend answered — null until a scan has answered at all — and `error` is why
    *  one did not run, drawn beside that button rather than in the status line. */
   taskScan: { running: boolean; error: string | null; found: number | null };
+  /** Whether this machine scans on its own when a message arrives, or `null` while the
+   *  backend has not said. Never assumed either way: the real default is ON, so guessing
+   *  `false` would tell the user nothing is spent while runs happen, and guessing `true`
+   *  would claim a machine acts on its own when it may not. The switch is disabled until
+   *  this answers, exactly as the agent's own switches are. */
+  taskScanAuto: boolean | null;
 };
 
 const DRAFT_SAVE_DELAY_MS = 150;
@@ -653,6 +659,7 @@ function initialState(): AppState {
     // panel is first opened, so a user who never opens it pays nothing.
     tasksPanelOpen: false,
     taskScan: { running: false, error: null, found: null },
+    taskScanAuto: null,
   };
 }
 
@@ -2526,10 +2533,27 @@ export class TeamsController {
   async loadTasks(): Promise<void> {
     try {
       const res = await this.backend.tasks();
-      this.set({ tasks: res.tasks ?? [], tasksLoaded: true, tasksError: null });
+      this.set({
+        tasks: res.tasks ?? [],
+        tasksLoaded: true,
+        tasksError: null,
+        // A backend too old to state it leaves the switch unknown rather than guessing:
+        // the panel then shows it disabled instead of claiming where money goes.
+        taskScanAuto: typeof res.auto_scan === "boolean" ? res.auto_scan : null,
+      });
     } catch (e) {
       if (!this.get().tasksLoaded) this.set({ tasksError: errText(e) });
     }
+  }
+
+  /** Turn the AUTOMATIC scan on or off, and repaint from what the backend stored.
+   *
+   *  Non-optimistic like every other task write, and for the sharper reason: a switch that
+   *  moved on a refused write would tell the user this machine is not spending runs while
+   *  it is. Rejects so the panel can say why beside it. */
+  async setTaskScanAuto(enabled: boolean): Promise<void> {
+    const res = await this.backend.setTaskScan(enabled);
+    this.set({ taskScanAuto: res.auto_scan });
   }
 
   /** Create or patch one task, and repaint from the row the backend answered with.

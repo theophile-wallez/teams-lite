@@ -20,7 +20,7 @@
 //          | push_status | push_subscribe | push_unsubscribe | push_test
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | mail_mark_read
-//          | tasks | task_save | task_delete | tasks_scan
+//          | tasks | task_save | task_delete | tasks_scan | set_task_scan
 // Events:  status | realtime_status | message | conversations_changed
 //          | channels_changed | typing | call | read_receipt
 //          | mail_folders_changed | mail_list_updated | tasks_changed
@@ -5445,7 +5445,10 @@ function dispatch(method: string, params: unknown): unknown {
 
     case "tasks":
       if (mockTasksReadFails) throw new Error(MOCK_TASKS_READ_ERROR);
-      return { tasks: mockTasks.slice().sort((a, b) => b.created_at - a.created_at) };
+      return {
+        tasks: mockTasks.slice().sort((a, b) => b.created_at - a.created_at),
+        auto_scan: mockAutoScan,
+      };
 
     // Insert, or change only the fields the call names — one method for both, exactly
     // like `Store::save_task`, so a client that ticks a task off restates nothing else
@@ -5512,6 +5515,17 @@ function dispatch(method: string, params: unknown): unknown {
 
     case "tasks_scan":
       return runMockTaskScan();
+
+    // The automatic scan's switch — the one this app starts because a message arrived
+    // rather than because somebody pressed the button. Answers in the shape `tasks` does,
+    // so the panel repaints the switch from what was really stored and never from the
+    // click. ON in a fresh mock, exactly as it is in a fresh store.
+    case "set_task_scan": {
+      const o = asObject(params);
+      if (typeof o.enabled !== "boolean") throw new Error("`enabled` must be true or false");
+      mockAutoScan = o.enabled;
+      return { auto_scan: mockAutoScan };
+    }
 
     default:
       throw new Error(`unknown method: ${method}`);
@@ -6361,6 +6375,9 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     if (body.kind === "tasks") {
       mockScanFailsOnce = body.fail_once === true;
       mockTasksReadFails = body.read_fails === true;
+      // The switch is state like a task is: one mock process serves the whole run, so a
+      // spec that turned it off would leave every later panel with it off.
+      if (body.reset === true) mockAutoScan = true;
       if (body.empty === true) {
         mockTasks.length = 0;
         mockTaskSeq = 0;
@@ -6374,6 +6391,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           tasks: mockTasks.length,
           fail_once: mockScanFailsOnce,
           read_fails: mockTasksReadFails,
+          auto_scan: mockAutoScan,
         },
         { status: 200 },
       );
@@ -6888,6 +6906,11 @@ type MockTask = {
 /** Newest first, exactly as `Store::tasks` orders them. */
 const mockTasks: MockTask[] = [];
 let mockTaskSeq = 0;
+
+/** Whether this machine would scan on its own, as a fresh store answers it: ON. The panel
+ *  draws its switch from this and never from the click, so a mock that started it off would
+ *  make the default the one state a spec never sees. */
+let mockAutoScan = true;
 
 /** How long a scan takes. Long enough that a capture (and a spec) can catch the button
  *  mid-run, short enough that nothing waits on it. */

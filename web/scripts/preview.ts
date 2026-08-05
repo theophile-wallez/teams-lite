@@ -52,7 +52,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/ask --answer-with # "Answer with <agent>" on a message
 //   bun run web/scripts/preview.ts --out /tmp/mr --merge-request # review + approve a merge request
 //   bun run web/scripts/preview.ts --out /tmp/chat --chat-menu  # chat sections + the row's "…" menu
-//   bun run web/scripts/preview.ts --out /tmp/tasks --tasks     # the task panel, its scan and its failure
+//   bun run web/scripts/preview.ts --out /tmp/tasks --tasks     # the task panel, its switch, its scan and its failure
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -1887,6 +1887,16 @@ if (import.meta.main) {
       await shot(`${out}-panel-dark.png`, '[data-testid="tasks-panel"]');
       await setTheme("light");
 
+      // The switch that decides whether a colleague's message can start a run here, in
+      // both states — on out of the box, off once the user declines it. The header is where
+      // it lives, so every panel capture above already carries it on; this is the other one.
+      const autoScan = page.locator('[data-testid="tasks-auto-toggle"]');
+      await autoScan.click();
+      await page.waitForSelector('[data-testid="tasks-auto-toggle"][aria-checked="false"]');
+      await shot(`${out}-manual-light.png`, '[data-testid="tasks-panel"]');
+      await autoScan.click();
+      await page.waitForSelector('[data-testid="tasks-auto-toggle"][aria-checked="true"]');
+
       // A SUGGESTION on its own: Accept, Dismiss and no checkbox, because it is a decision
       // rather than a task yet.
       const suggested = '[data-testid="task-row"][data-task-state="suggested"]';
@@ -1956,6 +1966,7 @@ if (import.meta.main) {
       await emit({ kind: "tasks", reset: true });
       console.log(
         `[preview] wrote ${out}-light.png, ${out}-panel-{light,dark}.png, ` +
+          `${out}-manual-light.png, ` +
           `${out}-suggested-light.png, ${out}-accepted-light.png, ` +
           `${out}-{scanning,scanned}-light.png, ` +
           `${out}-{mobile,narrow}-light.png, ${out}-empty-light.png and ` +

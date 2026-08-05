@@ -328,7 +328,8 @@ FIXTURES = {
         "const res = await fetch('http://127.0.0.1:19440/__write-token');\n"
     ),
     # Tasks: saving a task attributes it to a colleague, deleting one removes their
-    # request, and scanning starts a program on this machine (MACHINE_METHODS in
+    # request, scanning starts a program on this machine, and setting the automatic scan
+    # decides whether that program starts on its own (MACHINE_METHODS in
     # src/bin/server.rs).
     "task-saver.ts": (
         "// Saves a task attributed to a real colleague.\n"
@@ -344,6 +345,11 @@ FIXTURES = {
         "// Starts an agent CLI to scan messages and mail.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19422');\n"
         "ws.send(JSON.stringify({ method: 'tasks_scan' }));\n"
+    ),
+    "task-auto-setter.ts": (
+        "// Turns the automatic scan on, so a colleague's message starts an agent CLI.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'set_task_scan', params: { enabled: true } }));\n"
     ),
     "tasks-reader.ts": (
         "// Reads the user's own task list, which is allowed.\n"
@@ -489,6 +495,7 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/task-saver.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/task-deleter.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/tasks-scanner.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/task-auto-setter.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-backend-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-relay-writer.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/released-backend-reader.ts"),
@@ -664,6 +671,7 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/tasks-reader.ts"),
         ("ALLOW", PROJECT, "grep -rn task_save src web"),
         ("ALLOW", PROJECT, "grep -rn tasks_scan src"),
+        ("ALLOW", PROJECT, "grep -rn set_task_scan src web .claude"),
         # An example pinned to the pre-authorized channel is the sanctioned shape,
         # and one that only reads needs no target at all.
         ("ALLOW", PROJECT, "cargo run --example guard-test-sandbox-send"),

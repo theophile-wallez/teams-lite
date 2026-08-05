@@ -1084,10 +1084,12 @@ export class Backend {
   // Local list of things asked for, filled by an agent scan over messages and mail
   // already in the app's store. Nothing here writes to Teams or reaches anybody.
 
-  /** The user's own task list. An ordinary read: it returns their rows and no secret,
-   *  which is why it needs no write token. */
-  tasks(): Promise<{ tasks: Task[] }> {
-    return this.request<{ tasks: Task[] }>("tasks", {});
+  /** The user's own task list, and where the automatic scan's switch stands. An ordinary
+   *  read: it returns their rows and no secret, which is why it needs no write token.
+   *  `auto_scan` is absent from a backend too old to state it, which reads as unknown —
+   *  never as off. */
+  tasks(): Promise<{ tasks: Task[]; auto_scan?: boolean }> {
+    return this.request<{ tasks: Task[]; auto_scan?: boolean }>("tasks", {});
   }
 
   /** Create or patch one task. Token-gated, and not because it writes the local store:
@@ -1108,6 +1110,14 @@ export class Backend {
    *  machine; `found` is how many suggestions it produced. */
   tasksScan(): Promise<{ found: number }> {
     return this.writeRequest<{ found: number }>("tasks_scan", {});
+  }
+
+  /** Turn the AUTOMATIC scan on or off — the one this app starts because a message
+   *  arrived rather than because the user pressed something. Token-gated for a reason of
+   *  its own: it decides whether this machine spends an agent run without being asked.
+   *  The button above is untouched by it. */
+  setTaskScan(enabled: boolean): Promise<{ auto_scan: boolean }> {
+    return this.writeRequest<{ auto_scan: boolean }>("set_task_scan", { enabled });
   }
 
   // ---- events -------------------------------------------------------------

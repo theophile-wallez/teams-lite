@@ -74,6 +74,7 @@ export function TasksPanel() {
   const tasksLoaded = useAppState((s) => s.tasksLoaded);
   const loadError = useAppState((s) => s.tasksError);
   const scan = useAppState((s) => s.taskScan);
+  const auto = useAppState((s) => s.taskScanAuto);
   const calendarEvents = useAppState((s) => s.calendarEvents);
   const showDeclined = useAppState((s) => s.calendarSettings.showDeclined);
   // Why a task did not move, for the person who clicked. Local to the panel: it is about
@@ -122,41 +123,89 @@ export function TasksPanel() {
       // step with WIDE_QUERY above.
       className="fixed inset-0 z-40 flex flex-col border-border bg-background lg:relative lg:inset-auto lg:z-auto lg:w-[22rem] lg:shrink-0 lg:border-l"
     >
-      <header className="flex min-h-16 shrink-0 items-center gap-2 border-b border-border-subtle px-4 pt-[env(safe-area-inset-top)]">
-        <h2 className="flex-1 truncate text-[15px] font-bold tracking-tight text-foreground">
-          Tasks
-        </h2>
-        {/* Provider-neutral on purpose: WHICH CLI reads the messages is the user's own
-            setting (Settings › AI providers), so naming one here would go stale the day
-            they change it. */}
-        <button
-          type="button"
-          data-testid="tasks-scan"
-          data-running={scan.running ? "true" : undefined}
-          data-cuelume-press=""
-          disabled={scan.running}
-          title="Read the messages and mail that arrived since the last scan, with an agent CLI on this machine"
-          onClick={() => void controller.scanTasks()}
-          className="flex shrink-0 items-center gap-1.5 rounded-lg bg-card px-2.5 py-1.5 text-[12px] font-medium text-text-dim shadow-chip transition-colors hover:text-foreground disabled:opacity-70"
-        >
-          <HugeiconsIcon
-            icon={scan.running ? Loading02Icon : SparklesIcon}
-            className={cn("size-3.5", scan.running && "animate-spin")}
-            strokeWidth={1.8}
-          />
-          {scan.running ? "Scanning…" : "Scan for tasks"}
-        </button>
-        <button
-          type="button"
-          aria-label="Close tasks"
-          title="Close (Esc)"
-          data-testid="tasks-close"
-          data-cuelume-press=""
-          onClick={() => controller.closeTasksPanel()}
-          className="grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground"
-        >
-          <HugeiconsIcon icon={Cancel01Icon} className="size-4" strokeWidth={1.8} />
-        </button>
+      <header className="flex shrink-0 flex-col gap-1.5 border-b border-border-subtle px-4 pb-2 pt-[env(safe-area-inset-top)]">
+        <div className="flex min-h-16 items-center gap-2">
+          <h2 className="flex-1 truncate text-[15px] font-bold tracking-tight text-foreground">
+            Tasks
+          </h2>
+          {/* Provider-neutral on purpose: WHICH CLI reads the messages is the user's own
+              setting (Settings › AI providers), so naming one here would go stale the day
+              they change it. */}
+          <button
+            type="button"
+            data-testid="tasks-scan"
+            data-running={scan.running ? "true" : undefined}
+            data-cuelume-press=""
+            disabled={scan.running}
+            title="Read the messages and mail that arrived since the last scan, with an agent CLI on this machine"
+            onClick={() => void controller.scanTasks()}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-card px-2.5 py-1.5 text-[12px] font-medium text-text-dim shadow-chip transition-colors hover:text-foreground disabled:opacity-70"
+          >
+            <HugeiconsIcon
+              icon={scan.running ? Loading02Icon : SparklesIcon}
+              className={cn("size-3.5", scan.running && "animate-spin")}
+              strokeWidth={1.8}
+            />
+            {scan.running ? "Scanning…" : "Scan for tasks"}
+          </button>
+          <button
+            type="button"
+            aria-label="Close tasks"
+            title="Close (Esc)"
+            data-testid="tasks-close"
+            data-cuelume-press=""
+            onClick={() => controller.closeTasksPanel()}
+            className="grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <HugeiconsIcon icon={Cancel01Icon} className="size-4" strokeWidth={1.8} />
+          </button>
+        </div>
+
+        {/* The automatic scan's own switch, in the panel rather than in Settings: this is
+            the surface that says what a scan produces, so it is where the user can decline
+            one. It is ON in a fresh store — they asked for the trigger — and the label says
+            what the switch really decides, which is that a colleague's message can start a
+            run here. The button above is untouched by it: a run somebody pressed for is
+            theirs. Disabled until the backend has stated where the setting stands, for the
+            reason the agent's own switches are: a hopeful switch misstates where a machine
+            acts. */}
+        <div className="flex items-center justify-between gap-3">
+          <label
+            htmlFor="tasks-auto-scan"
+            className="min-w-0 text-[11px] leading-snug text-text-faint"
+          >
+            Scan automatically when messages arrive
+          </label>
+          <button
+            type="button"
+            id="tasks-auto-scan"
+            role="switch"
+            aria-checked={auto === true}
+            aria-label="Scan automatically when messages arrive"
+            data-testid="tasks-auto-toggle"
+            data-cuelume-press=""
+            disabled={auto === null}
+            title={
+              auto
+                ? "On — a message that reads like an ask starts one scan, at most every few minutes"
+                : "Off — this app scans only when you press the button above"
+            }
+            onClick={() => write(controller.setTaskScanAuto(!auto))}
+            className={cn(
+              "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+              auto === null ? "cursor-not-allowed opacity-40" : "cursor-pointer",
+              auto ? "bg-primary" : "bg-element",
+            )}
+          >
+            <span
+              className={cn(
+                "inline-block size-4 transform rounded-full bg-white shadow-sm transition-transform",
+                auto ? "translate-x-[18px]" : "translate-x-0.5",
+              )}
+            />
+          </button>
+        </div>
       </header>
 
       {/* What happened, beside the control it happened to — never in the status line,

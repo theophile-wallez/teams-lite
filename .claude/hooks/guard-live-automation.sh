@@ -509,9 +509,11 @@ if ! sanctioned_automation; then
     #
     # `task_save` and `task_delete` write task rows attributed to a colleague, and
     # authorship is the one thing this app never misstates. `tasks_scan` starts an
-    # agent CLI on this machine (MACHINE_METHODS in src/bin/server.rs).
+    # agent CLI on this machine, and `set_task_scan` decides whether that CLI starts on
+    # its own every time somebody writes to the user (MACHINE_METHODS in
+    # src/bin/server.rs).
     if grep -qE '(127\.0\.0\.1|localhost):(1942[0-2]|1944[0-2])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval|task_save|task_delete|tasks_scan)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval|task_save|task_delete|tasks_scan)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval|task_save|task_delete|tasks_scan|set_task_scan)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval|task_save|task_delete|tasks_scan|set_task_scan)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that

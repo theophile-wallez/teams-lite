@@ -349,23 +349,32 @@ ms, which is what the edits address.
 ## A task list the app fills in
 
 The app keeps a short list of what the user owes and draws it beside the thread the ask was
-made in. A row is typed by hand, or extracted by an agent run over the messages and mail
-this store ALREADY holds — nothing is fetched for it: `src/tasks.rs` is the pure core (the
-candidate test, the prompt, the parse), the `tasks` table and the candidate sweep are in
-`src/store.rs`, the four RPCs and the scheduler in `src/bin/server.rs`, and the surface is
+made in. Every row on it is extracted by an agent run over the messages and mail this store
+ALREADY holds — nothing is fetched for it: `src/tasks.rs` is the pure core (the candidate
+test, the prompt, the parse), the `tasks` table and the candidate sweep are in
+`src/store.rs`, the five RPCs and the scheduler in `src/bin/server.rs`, and the surface is
 `web/src/components/tasks-panel.tsx` over the pure `web/src/lib/tasks.ts`.
+
+**A row typed BY HAND exists in the store and in `task_save`, and nowhere the user can
+reach**: the panel has no field and no add button, so it is read-and-decide — the scan
+writes, and the user accepts, ticks off or refuses. Say it that way round when describing
+this feature. A composer of its own is a deliberate addition (and a small one, since the
+write it needs is already gated and already tested), never a claim to make in prose about
+what ships.
 
 - **Nothing here reaches Teams, a tracker or a person, which is why `OUTWARD_METHODS` is
   untouched.** That is the honest classification and not a convenience: a task posts nothing,
   publishes no read state, notifies nobody and writes to no tracker. `tasks` is open like
-  every other read of the user's own rows. The three writes are `MACHINE_METHODS` entries all
+  every other read of the user's own rows. The four writes are `MACHINE_METHODS` entries all
   the same, and `task_save` / `task_delete` are there for the `set_person_name` reason rather
   than because they write the local store — it is WHAT they write. A client that could set
   `asked_by_mri` could make one colleague appear to have asked for something another
   colleague never mentioned, in the panel and in the notification a phone draws from it, and
   authorship is the one thing this app never misstates (§ Renaming a person). `tasks_scan` is
   gated for a reason of its own: it starts an agent CLI on this machine, and that run costs
-  money. The automation hook blocks all three against a live port.
+  money — and `set_task_scan` is that reason once removed, since it decides whether that run
+  happens again and again with nobody pressing anything. The automation hook blocks all four
+  against a live port.
 - **Two tiers, and only the second one reads.** A keyword test decides what is a CANDIDATE;
   the model reads the candidates and nothing else does. `tasks::looks_actionable` is that
   test and it has exactly ONE spelling, because the ingest trigger (a message just arrived)
@@ -391,7 +400,13 @@ candidate test, the prompt, the parse), the `tasks` table and the candidate swee
   provider on purpose — that preference decides which program answers a chat message, which is
   a choice about voice, while a fixed-prompt classification job over a colleague's words has a
   requirement, and a preference cannot make a guarantee true. A provider the user switched off
-  is not started here either.
+  is not started here either. And what the empty list states is that THIS APP grants nothing
+  and names no escalation — not that the child can reach nothing: `--permission-mode default`
+  denies what needs a PROMPT, and an allow rule is not a prompt, so a tool the user
+  allowlisted for themselves in `~/.claude/settings.json` is one this child holds too. That
+  is the repo's existing premise (§ The local agent's own `OwnConfig` is the other end of it)
+  inherited rather than a hole opened here, and the workspace is a directory of this app's
+  own, so no project settings of theirs are in scope.
 - **A colleague's words ARM a scan, which is the one thing in this app somebody else can
   trigger.** It is not remote code execution, and the reason is worth stating exactly: the
   prompt is fixed (`tasks::SYSTEM` and `build_prompt`), a candidate's text travels
@@ -411,6 +426,27 @@ candidate test, the prompt, the parse), the `tasks` table and the candidate swee
   with the released build running beside the staged one (§ Running the released build beside
   the staged one) each keeps its own count and the lease only holds their claims ten minutes
   apart, which works out at about **six an hour**. Price the cost off that number.
+- **And it has an OFF switch, in the panel's own header** (`SETTING_TASK_SCAN_AUTO`, set by
+  `set_task_scan`). It defaults **ON**, which is the opposite of every consent gate here and
+  deliberately so: the user asked for the automatic trigger, and this decides which installed
+  thing runs rather than whether a machine posts in their name — the shape
+  `agent_policy::Providers` already takes. What a feature that spends money on somebody
+  else's message may not be is undeclinable, which is the whole reason the switch exists. Four
+  things about it, each pinned by a test:
+  - **Both ends read it, at the moment of the decision.** `arm_task_scan` arms nothing while
+    it is off, and every tick of `spawn_task_scan` asks again — so turning it off stops the
+    next scan rather than the next restart, including one armed five minutes ago. An arming is
+    left where it is rather than cleared, so turning it back on spends nothing extra.
+  - **The panel's BUTTON is untouched by it.** A run the user pressed for is the user, exactly
+    as the hourly cap does not count it either.
+  - **The switch shows what is STORED, never what was clicked.** `auto_scan` travels with the
+    `tasks` read (one round trip answers both, since the panel is the only surface that reads
+    either), the write repaints from the backend's answer, and the control is DISABLED until
+    one arrives — `taskScanAuto` is `null` until then. A hopeful switch would tell the user
+    nothing is being spent while runs happen, which is the § The local agent rule about a
+    switch that misstates where a machine acts.
+  - **It is in the panel rather than in Settings**, because this is the surface that says what
+    a scan produced: the place to decline one is the place its results are read.
 - **A parse failure costs nothing, and never invents a task.** Prose, malformed JSON or a
   dead CLI is an `Err` from `tasks::parse_extraction`, and it propagates BEFORE anything is
   written: no row, and the watermark exactly where it was, so the next scan reads those
@@ -456,7 +492,13 @@ candidate test, the prompt, the parse), the `tasks` table and the candidate swee
   column on this table to fall back to, so `fill_asked_by` finishes the job from the stored
   history — one name, two halves, and no second column a rename could leave stale. It is
   empty for a hand-typed task and for one from mail, where the sender is an SMTP address
-  rather than a person Teams can name.
+  rather than a person Teams can name. **What the `source_id` membership test bounds is WHICH
+  messages can be cited, not which citation is true**: colleague A's words can ask the model
+  for a task citing colleague B's id from the same window, and `asked_by_mri` is then B's. The
+  residual is small and is why nothing cross-validates a title against its candidate's text (a
+  legitimate title shares no nouns with the message it came from, so that check refuses real
+  tasks): the row is `suggested` and asserts nothing, it carries a Source link to B's actual
+  words, and accepting it is a click.
 - **A suggestion is a DECISION, not a task yet.** An extraction inserts `suggested`, and the
   row carries Accept and Dismiss and no checkbox: ticking off something nobody agreed to is a
   list that fills itself. It appears as soon as it is written, cited to its source and
@@ -509,17 +551,19 @@ candidate test, the prompt, the parse), the `tasks` table and the candidate swee
   the guarantee the code gives, and no wider.
 
 `web/mock/server.ts` reproduces the whole flow with no CLI and no tenant, which is what makes
-the surface reviewable: it serves the four RPCs, seeds one suggestion so the decision half is
-there before any scan, and simulates a sweep that writes two rows and broadcasts
-`tasks_changed` — armed with the `{kind: "tasks"}` test hook (`fail_once`, `read_fails`,
-`empty`), which a spec MUST reset afterwards, since one mock process serves the whole run and
-a task left accepted is accepted for every later spec. `cd web && bun run preview -- --out
-/tmp/tasks --tasks` captures the panel in both themes, the two decisions, the scan mid-run and
-its report, the empty plate and the refusal. `web/e2e/tasks.spec.ts` pins the panel's half of
-the rules above — both ways in and the layers that swallow the key, the two decisions, the
-jump back to the ask, the refusal beside the button, and both shapes of the aside — and the
-Rust tests pin the other half: the prefilter's superset, the tool-less run and where it may be
-claimed, the watermark, the cap and the gating of all four methods.
+the surface reviewable: it serves the five RPCs, seeds one suggestion so the decision half is
+there before any scan, holds the automatic scan's switch as a fresh store holds it (ON), and
+simulates a sweep that writes two rows and broadcasts `tasks_changed` — armed with the
+`{kind: "tasks"}` test hook (`fail_once`, `read_fails`, `empty`), which a spec MUST reset
+afterwards, since one mock process serves the whole run and a task left accepted — or a switch
+left off — is that way for every later spec. `cd web && bun run preview -- --out
+/tmp/tasks --tasks` captures the panel in both themes, the switch in both states, the two
+decisions, the scan mid-run and its report, the empty plate and the refusal.
+`web/e2e/tasks.spec.ts` pins the panel's half of the rules above — both ways in and the layers
+that swallow the key, the two decisions, the jump back to the ask, the switch and the button
+that outlives it, the refusal beside the button, and both shapes of the aside — and the Rust
+tests pin the other half: the prefilter's superset, the tool-less run and where it may be
+claimed, the watermark, the cap, the switch's default and the gating of all five methods.
 
 ## Mail is READ-ONLY (MANDATORY — no exception, not even a sandbox)
 

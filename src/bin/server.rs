@@ -157,6 +157,18 @@ const SETTING_ALWAYS_AVAILABLE: &str = "always_available";
 /// stops every such request at the dispatch point, and a read-only backend never makes
 /// one whatever the setting says.
 const SETTING_SENDER_ICONS: &str = "sender_icons";
+/// The automatic task scan (`"0"` = off, anything else = on, and ON is the default): let an
+/// arriving message arm a scan of what has come in since the last one (see `arm_task_scan`
+/// and `spawn_task_scan`).
+///
+/// ON by default, and read the same way as {@link SETTING_SENDER_ICONS} for the same
+/// reason: the user asked for the automatic trigger, and what makes it defensible is the
+/// three numbers that bound it rather than a flag they would have to find first. It is a
+/// setting all the same, because a scan spends an agent run — the one thing in this app a
+/// colleague's message can cause this machine to spend — and a feature with no off switch is
+/// one the user cannot decline. Turning it off leaves the panel's own button untouched: a
+/// run the user pressed for is the user.
+const SETTING_TASK_SCAN_AUTO: &str = "task_scan_auto";
 /// The id of the presence endpoint this store's backends register, generated on first
 /// use and then kept. Stable ON PURPOSE, twice over: re-registering the same id is the
 /// same endpoint refreshed rather than a second one, so neither the heartbeat nor the
@@ -325,9 +337,11 @@ const OUTWARD_METHODS: [&str; 14] = [
 /// make one colleague appear to have asked for something another colleague never mentioned
 /// — in the panel, and in the notification a phone draws from it. `tasks_scan` is gated for
 /// a reason of its own: it starts an agent CLI on this machine, and that run costs money.
+/// `set_task_scan` is the same reason once removed — it decides whether that run happens
+/// again and again on its own, without anybody pressing anything.
 /// Reading the list back stays open, like every other read: it holds the user's own rows
 /// and no secret.
-const MACHINE_METHODS: [&str; 19] = [
+const MACHINE_METHODS: [&str; 20] = [
     "repair_broker",
     "update_download",
     "update_apply",
@@ -347,6 +361,7 @@ const MACHINE_METHODS: [&str; 19] = [
     "task_save",
     "task_delete",
     "tasks_scan",
+    "set_task_scan",
 ];
 
 /// What a {@link MACHINE_METHODS} entry actually does to the machine, for its
@@ -397,6 +412,10 @@ fn machine_effect(method: &str) -> &'static str {
         "tasks_scan" => {
             "starts an agent CLI on this machine to read the user's messages and mail for \
              what they were asked to do"
+        }
+        "set_task_scan" => {
+            "decides whether this machine starts that agent CLI on its own, every time \
+             somebody writes to the user"
         }
         // Unreachable while the two lists agree; the test below pins that they do.
         _ => "changes this machine",
@@ -4784,15 +4803,24 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // ---- tasks (LOCAL: nothing here reaches Teams, see src/tasks.rs) ----
         //
         // What the user owes, extracted from the messages and mail this store already
-        // holds. None of the four is in `OUTWARD_METHODS`, and that is the honest
+        // holds. None of the five is in `OUTWARD_METHODS`, and that is the honest
         // classification rather than a convenience: nothing here posts, publishes a read
-        // state, notifies a person or writes to a tracker. The three WRITES are
+        // state, notifies a person or writes to a tracker. The four WRITES are
         // `MACHINE_METHODS` entries all the same — two of them decide who this app says
-        // asked the user for something, and the third starts a program here.
+        // asked the user for something, and the other two start a program here or decide
+        // whether it starts on its own.
 
-        // The whole list, newest first. Open like every other read: it returns the user's
-        // own rows and no secret.
-        "tasks" => Ok(json!({ "tasks": ctx.store()?.tasks()? })),
+        // The whole list, newest first, and where the automatic scan's switch stands. Open
+        // like every other read: it returns the user's own rows and no secret.
+        //
+        // The switch travels with the list because the panel is the only surface that
+        // reads either, so one round trip answers both — and the switch must show the
+        // STORED state rather than a hopeful one: a control that claims a machine is not
+        // scanning on its own while it is misstates where money goes.
+        "tasks" => {
+            let store = ctx.store()?;
+            Ok(json!({ "tasks": store.tasks()?, "auto_scan": task_scan_auto(&store)? }))
+        }
 
         // Insert a task, or change the fields this call names on one that exists (see
         // `Store::save_task`). One method for both, so a client that ticks a task off
@@ -4818,8 +4846,24 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
 
         // Sweep once, now, because the user asked. It grants the run no tool and refuses
         // to start on a CLI where this app cannot say that (see `task_scan_backend`), and
-        // answers how many suggestions it wrote.
+        // answers how many suggestions it wrote. The setting below never reaches it: a run
+        // the user pressed for is the user.
         "tasks_scan" => Ok(json!({ "found": run_task_scan(ctx).await? })),
+
+        // Turn the AUTOMATIC scan on or off (see `SETTING_TASK_SCAN_AUTO`). Its own method
+        // rather than a key of `set_settings` for the reason `set_calling` is: what it
+        // stores is not a credential but whether this machine acts on its own — here, spends
+        // an agent run every time somebody writes to the user. It answers in the shape
+        // `tasks` does, so one round trip repaints the switch from what was really stored.
+        "set_task_scan" => {
+            let enabled = params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .context("`enabled` must be true or false")?;
+            let store = ctx.store()?;
+            store.set_setting(SETTING_TASK_SCAN_AUTO, if enabled { "1" } else { "0" })?;
+            Ok(json!({ "auto_scan": task_scan_auto(&store)? }))
+        }
 
         other => anyhow::bail!("unknown method: {other}"),
     }
@@ -7447,29 +7491,37 @@ fn record_task_scan(
 /// backend must do neither — however it came to be called.
 async fn run_task_scan(ctx: &Ctx) -> Result<usize> {
     anyhow::ensure!(!read_only(), "read-only mode: this backend never scans for tasks");
-    let store = ctx.store()?;
-    // Nothing that looks like an ask has arrived: no run, and the sweep has already
-    // recorded how far it read.
-    let Some(found) = task_scan_sweep(&store, now_ms())? else {
-        return Ok(0);
-    };
+    // The store is read, then DROPPED, and opened again once the run is over: `Ctx::store`
+    // is the short-lived per-request connection, and a run is bounded by silence rather
+    // than by a clock — up to `agent::RUN_MAX_DURATION`. Nothing locks either way (no
+    // transaction is open), so what this saves is an idle file descriptor for eight hours,
+    // and what it buys is that the connection's lifetime says what it is.
+    let (found, request) = {
+        let store = ctx.store()?;
+        // Nothing that looks like an ask has arrived: no run, and the sweep has already
+        // recorded how far it read.
+        let Some(found) = task_scan_sweep(&store, now_ms())? else {
+            return Ok(0);
+        };
 
-    // Read once, and used for both halves of the decision: which CLI may run at all, and
-    // which model the user chose for it.
-    let providers = agent_policy::Providers::parse(
-        store.get_setting(agent_policy::SETTING_PROVIDERS)?.as_deref(),
-    );
-    let backend = task_scan_backend(
-        store.get_setting(agent_policy::SETTING_DEFAULT_PROVIDER)?.as_deref(),
-        &providers,
-    )?;
-    let request = task_scan_request(backend, &providers, &found.candidates);
+        // Read once, and used for both halves of the decision: which CLI may run at all,
+        // and which model the user chose for it.
+        let providers = agent_policy::Providers::parse(
+            store.get_setting(agent_policy::SETTING_PROVIDERS)?.as_deref(),
+        );
+        let backend = task_scan_backend(
+            store.get_setting(agent_policy::SETTING_DEFAULT_PROVIDER)?.as_deref(),
+            &providers,
+        )?;
+        let request = task_scan_request(backend, &providers, &found.candidates);
+        (found, request)
+    };
     // The progress channel is required by `agent::run` and nothing here reads it: a scan
     // is not drawn being written, unlike a reply in a thread.
     let (progress, _watch) = tokio::sync::watch::channel(agent::Progress::default());
     let outcome = agent::run(&request, &progress).await?;
 
-    let written = record_task_scan(&store, &found, &outcome.text, now_ms())?;
+    let written = record_task_scan(&ctx.store()?, &found, &outcome.text, now_ms())?;
     eprintln!(
         "[tasks] {} scanned {} candidates, found {written}",
         request.backend.name,
@@ -7505,6 +7557,17 @@ async fn run_task_scan(ctx: &Ctx) -> Result<usize> {
 // works out at about 6 an hour between them, not 4 and not 8. Price the cost off that
 // number, and see {@link TASK_SCAN_LEASE} for why an overlap is harmless rather than
 // prevented.
+
+/// Is the automatic scan on? On unless the stored value is exactly `"0"`, the way
+/// [`sender_icons_enabled`] reads its own switch and for the same reason: the user asked for
+/// the trigger, so a store that has never been told reads as on.
+///
+/// Read at the moment of the decision — by [`arm_task_scan`] and by every tick of
+/// [`spawn_task_scan`] — and never cached at startup: turning it off has to stop the next
+/// scan rather than the next restart.
+fn task_scan_auto(store: &Store) -> Result<bool> {
+    Ok(store.get_setting(SETTING_TASK_SCAN_AUTO)?.as_deref() != Some("0"))
+}
 
 /// How long the first ask waits before the scan it armed runs, so a conversation costs
 /// one run rather than one per message. It is measured from that FIRST hit and never
@@ -7625,11 +7688,19 @@ fn task_scan_is_due(schedule: &TaskScanSchedule, now: Instant, now_ms: i64) -> b
 /// scan reads these candidates too. What is unbounded is only the LATENCY until one arrives,
 /// which is why nothing downstream may treat an arming as a promise that a window will be
 /// scanned.
-fn arm_task_scan(ctx: &Ctx, message: &Message) {
+fn arm_task_scan(ctx: &Ctx, store: &Store, message: &Message) {
     // A read-only backend never arms and never scans: a screenshot backend must not spend
     // an agent run on the user's behalf. `spawn_task_scan` and `run_task_scan` both refuse
     // on their own account as well.
     if read_only() {
+        return;
+    }
+    // The user's switch, off which nothing arms. It is read on the ingest path's own
+    // long-lived connection (the caller's), so this costs a cached statement rather than a
+    // store opened per frame — and a store that cannot be read arms nothing, since the run
+    // it would arm is the thing that spends. `spawn_task_scan` asks again at the moment of
+    // the run, which is what makes the switch take effect on an arming already set.
+    if !task_scan_auto(store).unwrap_or(false) {
         return;
     }
     if let Ok(mut schedule) = ctx.task_scan.lock() {
@@ -7666,6 +7737,19 @@ fn spawn_task_scan(ctx: Ctx) {
                     return;
                 };
                 if !task_scan_is_due(&schedule, Instant::now(), now) {
+                    continue;
+                }
+            }
+            // The user's switch, asked again HERE and not only where the scan was armed:
+            // this is the moment money is spent, and an arming set five minutes ago must
+            // not outlive the switch being turned off. It is left armed rather than
+            // cleared, so turning it back on spends nothing extra. A store that cannot be
+            // read scans nothing, for the same reason.
+            match ctx.store().and_then(|store| task_scan_auto(&store)) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    eprintln!("[tasks] the automatic-scan switch could not be read: {e:#}");
                     continue;
                 }
             }
@@ -8487,7 +8571,7 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
                         // place for the same reason: a fresh insert is what "this message
                         // is new" means, and the scan itself is claimed in the store so
                         // two backends spend one run rather than two.
-                        arm_task_scan(&ctx_msgs, &row);
+                        arm_task_scan(&ctx_msgs, store, &row);
                     }
                 }
                 if activity_changed {
@@ -9610,7 +9694,7 @@ mod tests {
     #[test]
     fn the_task_writes_are_machine_methods_and_the_read_is_open() {
         assert_eq!(write_class("tasks"), None, "reading the user's own list needs no token");
-        for method in ["task_save", "task_delete", "tasks_scan"] {
+        for method in ["task_save", "task_delete", "tasks_scan", "set_task_scan"] {
             assert_eq!(
                 write_class(method),
                 Some(WriteClass::Machine),
@@ -9627,7 +9711,7 @@ mod tests {
     /// the reason [`publish_presence`] and `deliver_push` also check before the network.
     #[test]
     fn a_read_only_backend_refuses_to_change_the_task_list() {
-        for method in ["task_save", "task_delete", "tasks_scan"] {
+        for method in ["task_save", "task_delete", "tasks_scan", "set_task_scan"] {
             let err = check_write_allowed(method, &json!({ "write_token": "tok" }), None)
                 .expect_err("read-only must refuse");
             assert!(err.contains("read-only"), "{method}: {err}");
@@ -9652,7 +9736,7 @@ mod tests {
     /// task list posts nothing, publishes no read state and notifies nobody.
     #[test]
     fn no_task_method_is_outward_facing() {
-        for method in ["tasks", "task_save", "task_delete", "tasks_scan"] {
+        for method in ["tasks", "task_save", "task_delete", "tasks_scan", "set_task_scan"] {
             assert!(
                 !OUTWARD_METHODS.contains(&method),
                 "{method} posts nothing to Teams and must not claim to"
@@ -9999,6 +10083,56 @@ mod tests {
             TASK_SCAN_LEASE < agent::RUN_IDLE_TIMEOUT && TASK_SCAN_LEASE < agent::RUN_MAX_DURATION,
             "a lease shorter than a run is the fact the doc rests on: if this ever inverts, \
              the prose about spacing rather than serialising is what has to change"
+        );
+    }
+
+    /// The automatic scan is ON in a fresh store and OFF only when the user said so. The
+    /// default runs the opposite way from a consent gate on purpose: they asked for the
+    /// trigger, and this switch is about which installed thing runs rather than about
+    /// posting in their name. What it must never be is absent — a scan spends an agent run
+    /// on somebody else's message, so there has to be a way to decline it.
+    #[test]
+    fn the_automatic_scan_is_on_until_the_user_turns_it_off() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(task_scan_auto(&store).unwrap(), "a fresh store scans on its own");
+
+        store.set_setting(SETTING_TASK_SCAN_AUTO, "0").unwrap();
+        assert!(!task_scan_auto(&store).unwrap(), "the user turned it off");
+
+        store.set_setting(SETTING_TASK_SCAN_AUTO, "1").unwrap();
+        assert!(task_scan_auto(&store).unwrap(), "and back on");
+    }
+
+    /// Both halves of the automatic scan read that switch, and the manual button reads it
+    /// nowhere: turning it off must stop what a colleague's message starts, and leave what
+    /// the user pressed alone.
+    #[test]
+    fn both_ends_of_the_automatic_scan_read_the_switch_and_the_button_does_not() {
+        let code = include_str!("server.rs");
+        let code = code.split("#[cfg(test)]").next().unwrap_or(code);
+        let body = |after: &str| {
+            code.split(after)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{after}"))
+                .split("\n}")
+                .next()
+                .expect("the body ends")
+                .to_string()
+        };
+        assert!(
+            body("fn arm_task_scan").contains("task_scan_auto"),
+            "a message arms a scan with the switch off, so the user cannot decline the \
+             trigger at all"
+        );
+        assert!(
+            body("fn spawn_task_scan").contains("task_scan_auto"),
+            "the scheduler no longer asks, so a scan armed before the switch was turned \
+             off still spends a run"
+        );
+        assert!(
+            !body("async fn run_task_scan").contains("task_scan_auto"),
+            "the switch reached the manual run: a scan the user pressed for is the user, \
+             and the panel's own button must keep working with the automatic one off"
         );
     }
 
