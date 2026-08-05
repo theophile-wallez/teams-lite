@@ -906,10 +906,24 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   routes a call to the endpoints it believes are running, so claiming to be a Windows
   client sends the user's calls to a client that is not there. A test scans this crate
   for those spellings — do not bring them back.
-- **The SDP is not rewritten.** `application/sdp-ngc-1.0` is a LABEL the service puts on
-  ordinary WebRTC SDP; what Chrome produced is what goes out. It travels whole, with its
-  candidates, because this protocol has no trickle channel — hence the bounded wait for
-  ICE gathering in `call-media.ts`.
+- **The SDP is rewritten in ONE respect, and the service named it.**
+  `application/sdp-ngc-1.0` is a LABEL on ordinary WebRTC SDP — the codecs, the
+  fingerprint, the candidates and the ICE credentials all travel as Chrome wrote them, and
+  the blob travels WHOLE with its candidates, because this protocol has no trickle channel
+  (hence the bounded wait for ICE gathering in `call-media.ts`). The exception is the
+  transport profile: a browser's `UDP/TLS/RTP/SAVPF` is answered `conversationEnd 410,
+  UnrecognizedTransportProfile` and the meeting drops a second after it was joined, so
+  every media line goes out as `RTP/SAVP` — the client's own `toMsSdp` does exactly that.
+  The answer comes back in the same spelling and Chrome refuses it, so the return direction
+  is undone too (`UDP/TLS/RTP/SAVPF` where the section carries a fingerprint, `RTP/SAVPF`
+  where it does not). Both live in `web/src/lib/ms-sdp.ts`, next to the only code in this
+  app that ever looks inside an SDP: the backend passes the blob through untouched, and a
+  rewrite there would be a second place that has to know this.
+- **Nothing else about the blob is guessed at.** The client's `toMsSdp` does more —
+  `x-ssrc-range` instead of `a=ssrc`, a per-section fingerprint, `a=rtcp` on an offer,
+  MS-encoded header-extension URIs — and none of it is here, because the service has not
+  refused what it would replace. A rewrite earns its place when a refusal names it. That
+  is how the profile was found, and it is the only reason it is in.
 - **`web/mock/server.ts` reproduces the whole flow with no tenant, no registration and no
   microphone**, and the page pairs it with `simulatedCallMedia` because that backend
   announces itself as a mock. That is what makes this surface reviewable with nothing

@@ -13,9 +13,15 @@
  *   done, or once {@link GATHER_TIMEOUT_MS} says it has waited long enough — a call that
  *   waits forever for one unreachable server is worse than a call that offers the
  *   candidates it already has.
- * - **The SDP is not rewritten.** `application/sdp-ngc-1.0` is a label the service puts
- *   on ordinary WebRTC SDP, so what Chrome produced is what goes out. Munging it here
- *   would be guessing at a service that already accepts it.
+ * - **The SDP is rewritten in exactly ONE respect, and the service named it.**
+ *   `application/sdp-ngc-1.0` is a label on ordinary WebRTC SDP — the codecs, the
+ *   fingerprint, the candidates and the ICE credentials all travel as Chrome wrote them —
+ *   but the transport profile does not: a browser's `UDP/TLS/RTP/SAVPF` is answered
+ *   `conversationEnd 410, UnrecognizedTransportProfile`, and the answer comes back in the
+ *   service's own spelling, which Chrome then refuses. Both directions go through
+ *   `./ms-sdp.ts`, which is where that difference is written down. Nothing else about the
+ *   blob is touched, and nothing about it is guessed: a rewrite belongs there only once
+ *   the service has refused what it replaces.
  * - **Every remote stream gets its own element.** A meeting sends one stream per voice,
  *   so the call plays as many as it is sent (see {@link RemoteAudio}).
  * - **Stopping releases the microphone.** The browser shows a recording indicator for as
@@ -27,6 +33,8 @@
  * itself as the mock. That is what makes the whole calling surface reviewable with
  * nothing leaving the machine.
  */
+
+import { fromMsSdp, toMsSdp } from "./ms-sdp";
 
 /** How long to wait for ICE gathering before sending what we have. Chrome finishes a
  *  host+srflx gather in well under a second; the wait only bites when a configured
@@ -97,7 +105,7 @@ export async function startCallMedia(options: CallMediaOptions): Promise<CallMed
     for (const track of stream.getAudioTracks()) pc.addTrack(track, stream);
 
     if (options.remoteOffer) {
-      await pc.setRemoteDescription({ type: "offer", sdp: options.remoteOffer });
+      await pc.setRemoteDescription({ type: "offer", sdp: fromMsSdp(options.remoteOffer) });
       await pc.setLocalDescription(await pc.createAnswer());
     } else {
       await pc.setLocalDescription(await pc.createOffer());
@@ -106,7 +114,9 @@ export async function startCallMedia(options: CallMediaOptions): Promise<CallMed
 
     const localSdp = pc.localDescription?.sdp;
     if (!localSdp) throw new Error("the browser produced no SDP");
-    return liveCallMedia(pc, stream, remoteAudio, localSdp);
+    // Out through the service's own spelling. The service refuses a browser's transport
+    // profile outright (`UnrecognizedTransportProfile`), so this is not a nicety.
+    return liveCallMedia(pc, stream, remoteAudio, toMsSdp(localSdp));
   } catch (error) {
     // Never leave the microphone open behind a failure: the browser would keep showing
     // the recording indicator for a call that does not exist.
@@ -223,7 +233,7 @@ function liveCallMedia(
       // `have-local-offer` is the only state an answer applies to. Anything else means
       // the answer arrived twice, and applying it again rolls the call back.
       if (pc.signalingState !== "have-local-offer") return;
-      await pc.setRemoteDescription({ type: "answer", sdp });
+      await pc.setRemoteDescription({ type: "answer", sdp: fromMsSdp(sdp) });
     },
     setMuted(muted: boolean): void {
       for (const track of stream.getAudioTracks()) track.enabled = !muted;

@@ -201,6 +201,20 @@ which is the half this app got right from prior art.
 - `contentType` is `application/sdp-ngc-1.0`, and `0.5` is still accepted. **It is a
   label on a WebRTC SDP, not a different language** — the earlier fear of an "NGC to
   WebRTC translator" does not apply to the browser stack.
+- **But the rewrite is not optional, and one line of it is mandatory.** Verified live: an
+  offer that keeps a browser's own transport profile joins the meeting, negotiates nothing,
+  and is ended a second later with `conversationEnd 410, InternalDiagCode:
+  UnrecognizedTransportProfile`. The client's own `toMsSdp` sets EVERY media line's
+  protocol to `RTP/SAVP` (`PROFILES.rtpSavp`), and its `fromMsSdp` restores
+  `UDP/TLS/RTP/SAVPF` on the way back when the section carries a fingerprint — so both
+  directions are needed, or `setRemoteDescription` refuses the answer and the call is
+  silent with every signaling step looking fine. `web/src/lib/ms-sdp.ts` is that pair.
+  What `toMsSdp` ALSO does, and this app does not: `a=label:main-audio` per section (this
+  app sends it, it is one token), `x-ssrc-range` in place of `a=ssrc`, the session
+  fingerprint copied onto each section, `a=rtcp:<port>` on an offer, `|2^31` appended to an
+  SDES key, and MS-encoded URIs for `abs-send-time` and `transport-cc`. None of the rest is
+  implemented, because the service has not refused what it would replace — and it explains
+  itself when it does.
 - Keying is **DTLS-SRTP** (`a=fingerprint`, `a=setup:actpass`, `RTP/SAVPF`). SDES is
   touched only when a legacy remote offers `a=crypto`, and then the client strips its
   own fingerprint — a compatibility path, not the normal one.
