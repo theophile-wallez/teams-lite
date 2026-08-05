@@ -1632,7 +1632,7 @@ function ReactionChips(props: {
             )}
           >
             {custom ? (
-              <CustomEmoji src={custom.src} code={`:${custom.name}:`} />
+              <CustomEmoji src={custom.src} code={`:${custom.name}:`} className="size-5" />
             ) : (
               <Emoji emoji={reactionEmoji(r.key)} className="size-5" />
             )}

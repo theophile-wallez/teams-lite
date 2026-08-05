@@ -1940,3 +1940,12 @@ flag-jp 🇯🇵
 flag-kr 🇰🇷
 flag-ru 🇷🇺
 flag-us 🇺🇸`;
+/** Parsed shortcode pairs, lazy-evaluated on first access. */
+export const unicodeShortcodes: ReadonlyArray<readonly [string, string]> = EMOJI_SHORTCODES.split(
+  "\n",
+)
+  .map((line) => {
+    const [name, native] = line.split(" ", 2);
+    return name && native ? ([name, native] as const) : null;
+  })
+  .filter((pair): pair is readonly [string, string] => pair !== null);

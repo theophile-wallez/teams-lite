@@ -11,7 +11,12 @@ import { useController } from "./controller-context";
  * no lightbox, no zoom, no download. Falls back to the literal code text
  * (`:shipit:`) when the image cannot be fetched.
  */
-export function CustomEmoji(props: { src: string; code: string; jumbo?: boolean }) {
+export function CustomEmoji(props: {
+  src: string;
+  code: string;
+  jumbo?: boolean;
+  className?: string;
+}) {
   const controller = useController();
   const proxied = mediaNeedsProxy(props.src);
   const [objectUrl, setObjectUrl] = useState<string | null>(proxied ? null : props.src);
@@ -62,7 +67,10 @@ export function CustomEmoji(props: { src: string; code: string; jumbo?: boolean 
       draggable={false}
       loading="lazy"
       onError={onError}
-      className={cn("inline-block select-none object-contain align-[-0.15em]", size)}
+      className={cn(
+        "inline-block select-none object-contain align-[-0.15em]",
+        props.className ?? size,
+      )}
     />
   );
 }

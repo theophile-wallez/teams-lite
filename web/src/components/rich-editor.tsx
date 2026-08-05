@@ -185,9 +185,9 @@ export function RichEditor(props: {
   /** Called the moment an "@…" starts, so the candidates can be fetched on demand. */
   onMentionQuery?: () => void;
   /** The custom emoji pack this machine holds. */
-  customEmojiPack?: readonly CustomEmoji[];
+  customEmojiPack: readonly CustomEmoji[];
   /** The Unicode emoji shortcodes (lazy-loaded). */
-  unicodeShortcodes?: ReadonlyArray<readonly [string, string]>;
+  unicodeShortcodes: ReadonlyArray<readonly [string, string]>;
 }) {
   // The mention list, mirrored into a ref because `handleKeyDown` is created once with
   // the editor and would otherwise read the state of the first render forever.
@@ -376,8 +376,8 @@ export function RichEditor(props: {
   const rankedEmoji = emoji
     ? emojiSuggestions(
         emoji.query,
-        props.customEmojiPack ?? [],
-        props.unicodeShortcodes ?? [],
+        props.customEmojiPack,
+        props.unicodeShortcodes,
       )
     : [];
   emojiRankedRef.current = rankedEmoji;
@@ -414,7 +414,7 @@ export function RichEditor(props: {
       editor.chain().insertContentAt({ from, to }, suggestion.native + " ").run();
       return;
     }
-    const target = insertedEmojiName(suggestion, props.customEmojiPack ?? []);
+    const target = insertedEmojiName(suggestion, props.customEmojiPack);
     editor
       .chain()
       .insertCustomEmoji({ name: suggestion.name, target, from, to })
