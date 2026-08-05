@@ -1884,6 +1884,57 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // Custom emoji: the picker, the Add Emoji dialog in both tabs, and the Settings section.
+  // Both themes, because each surface must be reviewable. The mock already seeds three
+  // emoji: :shipit: (PNG), :partyparrot: (animated GIF), and :ship: (an alias of shipit).
+  if (args.includes("--custom-emoji")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        await openFirstConversation(page);
+
+        // The emoji picker with custom emoji, reached through a message's reaction menu.
+        await openMessageActions(page);
+        await openReactionPicker(page);
+        await shot(`${out}-picker-light.png`, '[data-testid="emoji-picker"]');
+        await setTheme("dark");
+        await shot(`${out}-picker-dark.png`, '[data-testid="emoji-picker"]');
+        await setTheme("light");
+
+        // The Add Emoji row at the picker's foot.
+        await page.locator('[data-testid="add-emoji"]').click();
+        await page.waitForSelector('[data-testid="add-emoji-dialog"]');
+        await shot(`${out}-add-upload-light.png`, '[data-testid="add-emoji-dialog"]');
+        await setTheme("dark");
+        await shot(`${out}-add-upload-dark.png`, '[data-testid="add-emoji-dialog"]');
+        await setTheme("light");
+
+        // The packs tab.
+        await page.locator('[data-testid="add-emoji-tab-packs"]').click();
+        await page.waitForTimeout(200);
+        await shot(`${out}-add-packs-light.png`, '[data-testid="add-emoji-dialog"]');
+        await setTheme("dark");
+        await shot(`${out}-add-packs-dark.png`, '[data-testid="add-emoji-dialog"]');
+        await setTheme("light");
+        await page.keyboard.press("Escape");
+        await page.keyboard.press("Escape");
+
+        // Settings › Custom emoji.
+        await openSettings(page);
+        const section = '[data-testid="custom-emoji-settings"]';
+        await page.locator(section).scrollIntoViewIfNeeded();
+        await shot(`${out}-settings-light.png`, section);
+        await setTheme("dark");
+        await shot(`${out}-settings-dark.png`, section);
+
+        console.log(
+          `[preview] wrote ${out}-{picker,add-upload,add-packs,settings}-{light,dark}.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
   // The Settings surface: the integration sections at the top of the pane, in both
   // themes. Two of them are headed by a third party's own logo, which ships one file
   // per theme, so a capture of one theme proves only half of it.

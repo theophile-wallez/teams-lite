@@ -68,13 +68,15 @@ const CUSTOM_REACTION_PREFIX: &str = "tlcustom-";
 /// built from the AMS id that comes back — exactly as a send does.
 pub fn custom_reaction_name(key: &str) -> Option<&str> {
     let rest = key.strip_prefix(CUSTOM_REACTION_PREFIX)?;
-    let hyphen_digit = rest.find(|c: char| c == '-')
-        .and_then(|pos| {
-            rest.as_bytes().get(pos + 1)
-                .filter(|b| b.is_ascii_digit())
-                .map(|_| pos)
-        })?;
-    Some(&rest[..hyphen_digit])
+    let bytes = rest.as_bytes();
+
+    for i in 0..bytes.len().saturating_sub(1) {
+        if bytes[i] == b'-' && bytes[i + 1].is_ascii_digit() {
+            let name = &rest[..i];
+            return if name.is_empty() { None } else { Some(name) };
+        }
+    }
+    None
 }
 
 /// Every distinct `:name:` code in `html`'s text runs, outside tags, outside

@@ -1532,7 +1532,7 @@ function ReactionPicker(props: {
                   active ? "bg-primary/20 ring-1 ring-inset ring-primary/50" : "hover:bg-accent",
                 )}
               >
-                <CustomEmoji src={src} code={`:${emoji.name}:`} className="size-[18px]" />
+                <CustomEmoji src={src} code={`:${emoji.name}:`} />
               </button>
             );
           })}
@@ -1632,7 +1632,7 @@ function ReactionChips(props: {
             )}
           >
             {custom ? (
-              <CustomEmoji src={custom.src} name={custom.name} className="size-5" />
+              <CustomEmoji src={custom.src} code={`:${custom.name}:`} />
             ) : (
               <Emoji emoji={reactionEmoji(r.key)} className="size-5" />
             )}

@@ -3534,11 +3534,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // resolves the name, gets the art, and builds the key from what came back.
             let reaction_key = if let Some(name) = teams_lite::custom_emoji::custom_reaction_name(&key) {
                 let store = ctx.store()?;
-                let (content_type, bytes) = store
+                let (_content_type, bytes) = store
                     .custom_emoji_art(name)?
                     .with_context(|| format!("custom emoji not found: {name}"))?;
-                let ic3 = ctx.ic3_token().await?;
-                let session = ctx.session().await?;
+                let ic3 = ctx.tokens.get(IC3_SCOPE).await?;
                 let http = ctx.http.clone();
                 let conv_clone = conv.clone();
                 let name_clone = name.to_string();
@@ -3548,6 +3547,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         let conv = conv_clone.clone();
                         let name = name_clone.clone();
                         let bytes = bytes.clone();
+                        let ic3 = ic3.clone();
                         async move {
                             teams_send::upload_ams_object(&http, &session, &ic3, &conv, &name, &bytes)
                                 .await
@@ -3562,11 +3562,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let http = ctx.http.clone();
             let react_conv = conv.clone();
             let react_id = message_id.clone();
+            let react_key = reaction_key.clone();
             ctx.retry_on_auth(move |session, _csa| {
                 let http = http.clone();
                 let conv = react_conv.clone();
                 let message_id = react_id.clone();
-                let key = reaction_key.clone();
+                let key = react_key.clone();
                 async move {
                     teams_send::set_reaction(&http, &session, &conv, &message_id, &key, on).await
                 }
