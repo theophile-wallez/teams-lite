@@ -7115,6 +7115,23 @@ impl Ctx {
             }
         }
 
+        // An acceptance must be ACKNOWLEDGED, and that is not a nicety: the service waits
+        // for this one POST and ends the call without it — `Call Controller timed out
+        // while waiting for acknowledgement`, thirty seconds after a meeting that had
+        // joined cleanly. It goes first, before the phase and before the answer, because
+        // the clock is the service's.
+        if let Some(url) =
+            calling::acceptance_acknowledgement_link(&frame.body).map(str::to_string)
+        {
+            let callbacks = self.calling.lock().unwrap().call.as_ref().map(|c| c.callbacks.clone());
+            if let Some(callbacks) = callbacks {
+                let payload = calling::acceptance_acknowledgement_payload(&callbacks);
+                if let Err(e) = self.post_call_signal(&url, &payload).await {
+                    eprintln!("[calling] could not acknowledge the acceptance: {e:#}");
+                }
+            }
+        }
+
         // The far side picked up. Audio still waits for their SDP, so this only stops
         // the ringing tone.
         if calling::call_accepted_in_frame(&frame.body) {
@@ -7139,12 +7156,27 @@ impl Ctx {
         // one frame whose body a client is given.
         if let Some(answer) = calling::media_answer_from_frame(&frame.body) {
             let (id, acknowledgement) = {
-                let plane = self.calling.lock().unwrap();
-                match plane.call.as_ref() {
-                    Some(call) => (
-                        call.id.clone(),
-                        call.links.media_acknowledgement().map(str::to_string),
-                    ),
+                let mut plane = self.calling.lock().unwrap();
+                match plane.call.as_mut() {
+                    Some(call) => {
+                        // THE answer is what makes a call a call: from here audio can
+                        // flow, so this is the transition to `connected` — for a meeting
+                        // and for a one-to-one alike. Nothing else set it: a 1:1 waited
+                        // on a lobby state it can never have, and a meeting on one it
+                        // only gets when somebody admits it, so both sat at
+                        // "Joining…" / "Connecting…" through a working call.
+                        //
+                        // A call still held in a lobby is the exception: it is not
+                        // connected until it is let in, whatever its media says.
+                        if !call.in_lobby && call.phase != CallPhase::Ended {
+                            call.phase = CallPhase::Connected;
+                            call.connected_at_ms.get_or_insert(now_ms());
+                        }
+                        (
+                            call.id.clone(),
+                            call.links.media_acknowledgement().map(str::to_string),
+                        )
+                    }
                     None => return,
                 }
             };
@@ -7152,6 +7184,7 @@ impl Ctx {
                 "call_media",
                 json!({ "call_id": id, "sdp": answer.blob, "kind": "answer" }),
             );
+            self.emit_call_state();
             // Acknowledge it, or the service re-sends the answer until it gives up.
             if let Some(url) = acknowledgement
                 && let Err(e) = self.post_call_signal(&url, &json!({})).await

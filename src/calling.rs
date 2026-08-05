@@ -81,6 +81,14 @@ pub mod paths {
     pub const CALL_REDIRECTION: &str = "/call/redirection/";
     pub const CALL_TRANSFER: &str = "/call/transfer/";
     pub const CALL_REPLACEMENT: &str = "/call/replacement/";
+    // The four the acknowledgement of an acceptance publishes beside the three above.
+    // This app acts on none of them — it neither transfers a call nor sends video — but
+    // the client sends all seven, and a link we do not publish is a frame the service
+    // has nowhere to deliver.
+    pub const CALL_BALANCE_UPDATE: &str = "/call/balanceUpdate/";
+    pub const CALL_RETARGET_COMPLETION: &str = "/call/retargetCompletion/";
+    pub const CALL_CONTROL_VIDEO_STREAMING: &str = "/call/controlVideoStreaming/";
+    pub const CALL_UPDATE_MEDIA_DESCRIPTIONS: &str = "/call/updateMediaDescriptions/";
     pub const CONVERSATION_END: &str = "/conversation/conversationEnd/";
     pub const CONVERSATION_UPDATE: &str = "/conversation/conversationUpdate/";
     pub const CONVERSATION_ROSTER_UPDATE: &str = "/conversation/rosterUpdate/";
@@ -484,11 +492,60 @@ pub fn call_ended_from_frame(frame: &Value) -> Option<CallEnded> {
 /// Read the far side's SDP answer out of a `mediaAnswer` frame, or `None` when the
 /// frame is something else. This is what turns a ringing outgoing call into audio.
 pub fn media_answer_from_frame(frame: &Value) -> Option<MediaContent> {
-    ["/_decoded/mediaAnswer", "/mediaAnswer", "/_decoded/mediaNegotiation", "/mediaNegotiation"]
+    [
+        "/_decoded/mediaAnswer",
+        "/mediaAnswer",
+        "/_decoded/mediaNegotiation",
+        "/mediaNegotiation",
+        // A `callAcceptance` carries the answer TOO, and for a meeting join it is the
+        // only frame that ever does — the service accepts and answers in one. Reading
+        // only the two names above left the page holding an offer nothing ever answered,
+        // so the call sat at "Joining…" until the service gave up on it.
+        "/_decoded/callAcceptance",
+        "/callAcceptance",
+    ]
+    .iter()
+    .find_map(|p| frame.pointer(p))
+    .and_then(|answer| answer.get("mediaContent"))
+    .and_then(MediaContent::parse)
+}
+
+/// The url a `callAcceptance` must be acknowledged on, if it named one.
+///
+/// It is the acceptance's OWN link and never the merged set: the service waits for this
+/// one POST and ends the call without it —
+/// `Call Controller timed out while waiting for acknowledgement` after 30 seconds,
+/// which is what a joined meeting that never carried audio looked like.
+pub fn acceptance_acknowledgement_link(frame: &Value) -> Option<&str> {
+    ["/_decoded/callAcceptance/links", "/callAcceptance/links"]
         .iter()
         .find_map(|p| frame.pointer(p))
-        .and_then(|answer| answer.get("mediaContent"))
-        .and_then(MediaContent::parse)
+        .and_then(|links| {
+            ["acknowledgement", "acknowledgment"].iter().find_map(|name| links.get(name))
+        })
+        .and_then(Value::as_str)
+}
+
+/// The body of that acknowledgement: the links the rest of the call may use.
+///
+/// It carries no media and confirms nothing about the answer — it is the client's own
+/// `callAcceptanceAcknowledgement`, which publishes where the service may renegotiate,
+/// transfer or replace this call. Seven links, exactly the ones the real client sends.
+pub fn acceptance_acknowledgement_payload(callbacks: &CallbackBase) -> Value {
+    json!({
+        "callAcceptanceAcknowledgement": {
+            "links": {
+                "mediaRenegotiation": callbacks.link(paths::CALL_MEDIA_RENEGOTIATION),
+                "transfer": callbacks.link(paths::CALL_TRANSFER),
+                "replacement": callbacks.link(paths::CALL_REPLACEMENT),
+                "balanceUpdate": callbacks.link(paths::CALL_BALANCE_UPDATE),
+                "retargetCompletion": callbacks.link(paths::CALL_RETARGET_COMPLETION),
+                "controlVideoStreaming": callbacks.link(paths::CALL_CONTROL_VIDEO_STREAMING),
+                "updateMediaDescriptions":
+                    callbacks.link(paths::CALL_UPDATE_MEDIA_DESCRIPTIONS),
+            }
+        }
+    })
 }
 
 /// True when the frame says the far side accepted (they picked up). Audio still
@@ -1800,6 +1857,63 @@ mod tests {
                 "the {what} body is empty"
             );
         }
+    }
+
+    /// A `callAcceptance` carries the answer, and for a meeting join it is the ONLY frame
+    /// that does — the service accepts and answers in one. Reading only `mediaAnswer` left
+    /// the page holding an offer nothing replied to.
+    #[test]
+    fn an_acceptance_carries_the_answer_too() {
+        let frame = json!({
+            "callAcceptance": {
+                "acceptedBy": { "id": "8:orgid:her" },
+                "mediaContent": { "blob": "v=0 answer", "contentType": SDP_CONTENT_TYPE },
+            }
+        });
+        let answer = media_answer_from_frame(&frame).expect("the answer in the acceptance");
+        assert_eq!(answer.blob, "v=0 answer");
+        // And the older shape still reads, wrapped or not.
+        let wrapped = json!({ "_decoded": { "mediaAnswer": {
+            "mediaContent": { "blob": "v=0 plain", "contentType": SDP_CONTENT_TYPE } } } });
+        assert_eq!(media_answer_from_frame(&wrapped).unwrap().blob, "v=0 plain");
+    }
+
+    /// The service ends a call it accepted when nobody acknowledges the acceptance —
+    /// `Call Controller timed out while waiting for acknowledgement`, 30 s after a join
+    /// that looked perfect. So the link is read from the acceptance's OWN links, and the
+    /// body publishes the seven the real client publishes.
+    #[test]
+    fn an_acceptance_is_acknowledged_on_its_own_link() {
+        let frame = json!({
+            "callAcceptance": {
+                "links": {
+                    "acknowledgement": "https://cc/ack",
+                    "mediaRenegotiation": "https://cc/reneg",
+                }
+            }
+        });
+        assert_eq!(acceptance_acknowledgement_link(&frame), Some("https://cc/ack"));
+        // A frame that names none is not an error: nothing is owed to a service that
+        // asked for nothing.
+        assert_eq!(acceptance_acknowledgement_link(&json!({ "callAcceptance": {} })), None);
+
+        let body = acceptance_acknowledgement_payload(&callbacks());
+        let links = body.pointer("/callAcceptanceAcknowledgement/links").expect("the links");
+        for name in [
+            "mediaRenegotiation",
+            "transfer",
+            "replacement",
+            "balanceUpdate",
+            "retargetCompletion",
+            "controlVideoStreaming",
+            "updateMediaDescriptions",
+        ] {
+            let link = links.get(name).and_then(Value::as_str).unwrap_or_default();
+            assert!(link.contains("callAgent"), "{name} is not one of our callbacks: {link}");
+        }
+        // It carries no media and claims nothing about the answer.
+        assert!(!body.to_string().contains("mediaContent"));
+        assert!(body.get("payload").is_none(), "no SDK envelope on the wire");
     }
 
     #[test]
