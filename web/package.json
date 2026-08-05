@@ -13,6 +13,7 @@
     "build": "bun run sync:emoji && vite build",
     "sync:emoji": "bun run scripts/sync-emoji-assets.ts",
     "generate:emoji": "bun run scripts/generate-teams-emoji.ts",
+    "generate:emoji-shortcodes": "bun run scripts/generate-emoji-shortcodes.ts",
     "start": "bun run server.ts",
     "mock": "bun run mock/server.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",

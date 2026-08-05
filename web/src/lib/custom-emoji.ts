@@ -1,6 +1,41 @@
 import type { RichNode } from "./rich-text";
 
 export type { CustomEmoji } from "./protocol";
+import type { CustomEmoji } from "./protocol";
+
+export type EmojiSuggestion =
+  | { kind: "custom"; name: string }
+  | { kind: "unicode"; name: string; native: string };
+
+/** An active `:…` query in the text before the cursor. */
+export type EmojiQuery = {
+  /** What was typed after the ":" (may be empty for lone ":"). */
+  query: string;
+  /** Offset of the ":" itself, so the editor knows what to replace. */
+  at: number;
+};
+
+/** How long a half-typed emoji code may get before ":" stops meaning an emoji. */
+const MAX_EMOJI_QUERY_LENGTH = 64;
+
+/**
+ * The `:…` the cursor sits in, or `null` when it sits in ordinary text.
+ *
+ * `text` is the plain text of the current block up to the cursor. An emoji code starts
+ * at the beginning of a block or after whitespace — never inside a word — so "note: this"
+ * does not trigger. An empty query (lone ":") returns null, so a lone colon opens no menu.
+ */
+export function emojiQueryBefore(text: string): EmojiQuery | null {
+  const at = text.lastIndexOf(":");
+  if (at < 0) return null;
+  const before = text[at - 1];
+  if (before !== undefined && !/\s/.test(before)) return null;
+  const query = text.slice(at + 1);
+  if (query.length > MAX_EMOJI_QUERY_LENGTH) return null;
+  if (/[\n\r\s]/.test(query)) return null;
+  if (query.trim() === "") return null;
+  return { query, at };
+}
 
 /**
  * Port of `custom_emoji::is_valid_name` from the Rust backend. Must move with the
@@ -68,4 +103,49 @@ function hasAtLeastOneEmoji(nodes: RichNode[]): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Rank emoji suggestions for a typeahead query. Custom emoji come first,
+ * then Unicode shortcodes, prefix matches before substring matches within each band.
+ * An empty query returns nothing, so a lone ":" opens no menu.
+ */
+export function emojiSuggestions(
+  query: string,
+  pack: readonly CustomEmoji[],
+  unicode: ReadonlyArray<readonly [string, string]>,
+  limit = 10,
+): EmojiSuggestion[] {
+  if (query.trim() === "") return [];
+
+  const lower = query.toLowerCase();
+  const customPrefix: EmojiSuggestion[] = [];
+  const customSubstring: EmojiSuggestion[] = [];
+  const unicodePrefix: EmojiSuggestion[] = [];
+  const unicodeSubstring: EmojiSuggestion[] = [];
+
+  for (const emoji of pack) {
+    const name = emoji.name.toLowerCase();
+    if (name.startsWith(lower)) {
+      customPrefix.push({ kind: "custom", name: emoji.name });
+    } else if (name.includes(lower)) {
+      customSubstring.push({ kind: "custom", name: emoji.name });
+    }
+  }
+
+  for (const [name, native] of unicode) {
+    const lowerName = name.toLowerCase();
+    if (lowerName.startsWith(lower)) {
+      unicodePrefix.push({ kind: "unicode", name, native });
+    } else if (lowerName.includes(lower)) {
+      unicodeSubstring.push({ kind: "unicode", name, native });
+    }
+  }
+
+  return [
+    ...customPrefix,
+    ...customSubstring,
+    ...unicodePrefix,
+    ...unicodeSubstring,
+  ].slice(0, limit);
 }

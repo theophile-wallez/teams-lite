@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { bodyIsOnlyEmoji, customEmojiNameError } from "./custom-emoji";
+import { bodyIsOnlyEmoji, customEmojiNameError, emojiSuggestions } from "./custom-emoji";
 import { parseRichHtml } from "./rich-text";
 
 describe("bodyIsOnlyEmoji", () => {
@@ -60,5 +60,36 @@ describe("customEmojiNameError", () => {
     expect(customEmojiNameError("ship it", [])).toMatch(/lowercase/);
     expect(customEmojiNameError("ship:it", [])).toMatch(/lowercase/);
     expect(customEmojiNameError("a".repeat(65), [])).toMatch(/lowercase/);
+  });
+});
+
+describe("emojiSuggestions", () => {
+  function emoji(name: string): import("./protocol").CustomEmoji {
+    return {
+      name,
+      alias_of: "",
+      content_type: "image/png",
+      width: 64,
+      height: 64,
+      source: "local",
+      added_ms: Date.now(),
+    };
+  }
+
+  it("offers custom emoji before Unicode ones", () => {
+    const pack = [emoji("smirk-cat"), emoji("shipit")];
+    const unicode: [string, string][] = [["smile", "😄"], ["smiley", "😃"]];
+    const out = emojiSuggestions("sm", pack, unicode);
+    expect(out[0]).toEqual({ kind: "custom", name: "smirk-cat" });
+    expect(out.map((s) => s.name)).toContain("smile");
+  });
+
+  it("matches an alias by its own name", () => {
+    const pack = [{ ...emoji("ship"), alias_of: "shipit" }];
+    expect(emojiSuggestions("shi", pack, [])).toEqual([{ kind: "custom", name: "ship" }]);
+  });
+
+  it("offers nothing for an empty query, so a lone colon opens no menu", () => {
+    expect(emojiSuggestions("", [emoji("shipit")], [])).toEqual([]);
   });
 });
