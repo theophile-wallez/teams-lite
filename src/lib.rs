@@ -5,6 +5,7 @@ pub mod agent_policy;
 pub mod auth;
 pub mod calendar;
 pub mod calling;
+pub mod custom_emoji;
 pub mod gitlab;
 pub mod gitlab_approval;
 pub mod graph_time;
