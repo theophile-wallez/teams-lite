@@ -506,8 +506,12 @@ if ! sanctioned_automation; then
     # phone. A script that could set them could make one person's post appear to come
     # from another (MACHINE_METHODS in src/bin/server.rs). Reading them back is not a
     # write and is not listed.
+    #
+    # `custom_emoji_add`, `custom_emoji_remove` and `custom_emoji_import` write the emoji
+    # pack: a script that could plant art in the pack could post a picture under the
+    # user's name on the next send (MACHINE_METHODS in src/bin/server.rs).
     if grep -qE '(127\.0\.0\.1|localhost):(1942[0-2]|1944[0-2])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that

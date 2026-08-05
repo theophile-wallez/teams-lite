@@ -3034,10 +3034,78 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
 
             if let Some(alias) = alias_of.as_deref() {
                 store.set_custom_emoji(&name, None, Some(alias), &source, now_ms())?;
-            } else if url.is_some() {
-                anyhow::bail!("not implemented");
-            } else if media_url.is_some() {
-                anyhow::bail!("not implemented");
+            } else if let Some(url) = url {
+                let host = sender_icon::extract_host(url)
+                    .ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
+                let domain = sender_icon::registrable_domain(&host);
+                let media = sender_icon::fetch_raster(
+                    &ctx.http,
+                    url,
+                    custom_emoji::MAX_CUSTOM_EMOJI_BYTES,
+                )
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Could not fetch a raster image from that URL")
+                })?;
+
+                anyhow::ensure!(
+                    custom_emoji::CUSTOM_EMOJI_TYPES.contains(&media.content_type.as_str()),
+                    "an emoji must be a PNG, JPEG, GIF or WebP image"
+                );
+
+                let (width, height) = sender_icon::image_dimensions(&media.bytes)
+                    .ok_or_else(|| anyhow::anyhow!("Could not read image dimensions"))?;
+
+                anyhow::ensure!(
+                    width <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
+                        && height <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION,
+                    "an emoji must be 512 pixels or smaller on a side"
+                );
+
+                let source_with_domain = format!("url:{}", domain);
+                store.set_custom_emoji(
+                    &name,
+                    Some((&media.content_type, &media.bytes, width, height)),
+                    None,
+                    &source_with_domain,
+                    now_ms(),
+                )?;
+            } else if let Some(media_url) = media_url {
+                anyhow::ensure!(
+                    teams_media::is_allowed_media_url(media_url),
+                    "Only Teams-hosted media URLs are allowed"
+                );
+
+                let session = ctx.session().await?;
+                let media =
+                    teams_media::fetch_media(&ctx.http, &session, media_url).await?;
+
+                anyhow::ensure!(
+                    custom_emoji::CUSTOM_EMOJI_TYPES.contains(&media.content_type.as_str()),
+                    "an emoji must be a PNG, JPEG, GIF or WebP image"
+                );
+
+                anyhow::ensure!(
+                    media.bytes.len() <= custom_emoji::MAX_CUSTOM_EMOJI_BYTES,
+                    "an emoji must be 128 KB or smaller"
+                );
+
+                let (width, height) = sender_icon::image_dimensions(&media.bytes)
+                    .ok_or_else(|| anyhow::anyhow!("Could not read image dimensions"))?;
+
+                anyhow::ensure!(
+                    width <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
+                        && height <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION,
+                    "an emoji must be 512 pixels or smaller on a side"
+                );
+
+                store.set_custom_emoji(
+                    &name,
+                    Some((&media.content_type, &media.bytes, width, height)),
+                    None,
+                    "message",
+                    now_ms(),
+                )?;
             } else if let Some(data) = data_base64 {
                 let content_type = param_str(params, "content_type")?;
                 anyhow::ensure!(
@@ -9792,6 +9860,30 @@ mod lifecycle_tests {
                  organisation's domain and nothing else."
             );
         }
+    }
+
+    // The custom emoji URL source must reuse sender_icon's rails rather than writing a
+    // second fetch path. A second copy is a second thing to forget to fix when the next
+    // SSRF vector is discovered.
+    #[test]
+    fn adding_an_emoji_from_a_url_never_names_a_second_fetch_path() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code
+            .split("\"custom_emoji_add\" =>")
+            .nth(1)
+            .expect("the custom_emoji_add handler")
+            .split("\"custom_emoji_remove\" =>")
+            .next()
+            .expect("the handler ends at the next arm");
+        assert!(
+            handler.contains("fetch_raster"),
+            "the URL source must reuse sender_icon's rails"
+        );
+        assert!(
+            !handler.contains("reqwest::get"),
+            "no second, unrailed fetch"
+        );
     }
 
     // Everything this app shows is local, so a backend must SERVE while sign-in is

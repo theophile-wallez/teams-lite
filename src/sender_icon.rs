@@ -123,6 +123,20 @@ pub fn is_fetchable_domain(domain: &str) -> bool {
     tld.len() >= 2 && tld.bytes().all(|b| b.is_ascii_alphabetic())
 }
 
+/// Extract the host from a URL string, or `None` if the URL is malformed or has no
+/// host. This is a simple parser that covers the URLs this app fetches; it does not
+/// handle every RFC 3986 edge case.
+pub fn extract_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    let after_scheme = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let host_and_rest = after_scheme.split_once('/').map(|(h, _)| h).unwrap_or(after_scheme);
+    let host = host_and_rest.split_once(':').map(|(h, _)| h).unwrap_or(host_and_rest);
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_string())
+}
+
 /// The content type of `bytes`, read from its magic number — never from what the
 /// server said it was sending. `None` for anything that is not one of the raster
 /// formats a browser can draw in an `<img>`.
@@ -140,6 +154,120 @@ pub fn image_kind(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// Read the dimensions of a raster image from its bytes, or `None` if the format is not
+/// recognized or the header is malformed. This is a simple parser that covers the
+/// formats this app accepts; it reads only the header bytes needed to extract dimensions.
+pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    match bytes {
+        // PNG: width and height are at bytes 16-23 (big-endian)
+        [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..]
+            if bytes.len() >= 24 && &bytes[12..16] == b"IHDR" =>
+        {
+            let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+            let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+            Some((width, height))
+        }
+        // GIF: width and height are at bytes 6-9 (little-endian)
+        [b'G', b'I', b'F', b'8', ..] if bytes.len() >= 10 => {
+            let width = u32::from(u16::from_le_bytes([bytes[6], bytes[7]]));
+            let height = u32::from(u16::from_le_bytes([bytes[8], bytes[9]]));
+            Some((width, height))
+        }
+        // WebP: read the VP8/VP8L/VP8X chunk to get dimensions
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] if bytes.len() >= 30 => {
+            match &bytes[12..16] {
+                b"VP8 " if bytes.len() >= 30 => {
+                    let width = u32::from(u16::from_le_bytes([bytes[26], bytes[27]])) & 0x3FFF;
+                    let height = u32::from(u16::from_le_bytes([bytes[28], bytes[29]])) & 0x3FFF;
+                    Some((width, height))
+                }
+                b"VP8L" if bytes.len() >= 25 => {
+                    let bits = u32::from_le_bytes([bytes[21], bytes[22], bytes[23], bytes[24]]);
+                    let width = (bits & 0x3FFF) + 1;
+                    let height = ((bits >> 14) & 0x3FFF) + 1;
+                    Some((width, height))
+                }
+                b"VP8X" if bytes.len() >= 30 => {
+                    let width_minus_one =
+                        u32::from_le_bytes([bytes[24], bytes[25], bytes[26], 0]) & 0xFFFFFF;
+                    let height_minus_one =
+                        u32::from_le_bytes([bytes[27], bytes[28], bytes[29], 0]) & 0xFFFFFF;
+                    Some((width_minus_one + 1, height_minus_one + 1))
+                }
+                _ => None,
+            }
+        }
+        // JPEG: scan for SOF (Start of Frame) markers
+        [0xFF, 0xD8, 0xFF, ..] => {
+            let mut pos = 2;
+            while pos + 9 < bytes.len() {
+                if bytes[pos] != 0xFF {
+                    return None;
+                }
+                let marker = bytes[pos + 1];
+                pos += 2;
+                if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) {
+                    continue;
+                }
+                if pos + 2 > bytes.len() {
+                    return None;
+                }
+                let length = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+                if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 {
+                    if pos + 5 < bytes.len() {
+                        let height = u32::from(u16::from_be_bytes([bytes[pos + 3], bytes[pos + 4]]));
+                        let width = u32::from(u16::from_be_bytes([bytes[pos + 5], bytes[pos + 6]]));
+                        return Some((width, height));
+                    }
+                    return None;
+                }
+                pos += length;
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Fetch a raster image from a URL, checking every rail: public-IP-only resolution,
+/// byte cap on the claimed and actual lengths, raster sniff on the bytes rather than
+/// the claimed type, no cookie/referrer/query. Returns `Ok(None)` for a non-success
+/// status, a claimed or actual size over the cap, or bytes that are not a raster image.
+///
+/// This is the reusable core of `fetch_icon` and is shared by every caller that fetches
+/// an image from a URL a user supplied — the sender icon and the custom emoji URL
+/// source. Every rail here exists because of a specific attack or leak; read the module
+/// comment before weakening one.
+pub async fn fetch_raster(
+    http: &reqwest::Client,
+    url: &str,
+    max_bytes: usize,
+) -> Result<Option<Media>> {
+    let domain = extract_host(url).ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
+
+    anyhow::ensure!(is_fetchable_domain(&domain), "refusing to fetch from {domain:?}");
+    ensure_public_host(&domain).await?;
+
+    let resp = http.get(url).timeout(FETCH_TIMEOUT).send().await.context("request")?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    if resp.content_length().is_some_and(|len| len as usize > max_bytes) {
+        return Ok(None);
+    }
+    let bytes = resp.bytes().await.context("read body")?;
+    if bytes.len() > max_bytes {
+        return Ok(None);
+    }
+    let Some(content_type) = image_kind(&bytes) else {
+        return Ok(None);
+    };
+    Ok(Some(Media {
+        content_type: content_type.to_string(),
+        bytes: bytes.to_vec(),
+    }))
+}
+
 /// Fetch the icon of one domain, or `Ok(None)` when it serves none we can use — which
 /// is a normal answer for 7 senders in 18 and is cached like a found one.
 ///
@@ -147,11 +275,10 @@ pub fn image_kind(bytes: &[u8]) -> Option<&'static str> {
 /// future caller's mistake cannot turn the request into an SSRF vector.
 pub async fn fetch_icon(http: &reqwest::Client, domain: &str) -> Result<Option<Media>> {
     anyhow::ensure!(is_fetchable_domain(domain), "refusing to fetch an icon for {domain:?}");
-    ensure_public_host(domain).await?;
 
     for path in ICON_PATHS {
         let url = format!("https://{domain}{path}");
-        match fetch_image(http, &url).await {
+        match fetch_raster(http, &url, MAX_ICON_BYTES).await {
             Ok(Some(media)) => return Ok(Some(media)),
             // No icon at this path, or something the bytes say is not an image: try the
             // next one. A sender's server failing is not this app's error.
@@ -216,30 +343,6 @@ fn is_public(ip: IpAddr) -> bool {
     }
 }
 
-/// GET one URL and return it only if the bytes are an image within the cap. Sends no
-/// cookie, no referrer and nothing about the mail — the URL is the whole request.
-async fn fetch_image(http: &reqwest::Client, url: &str) -> Result<Option<Media>> {
-    let resp = http.get(url).timeout(FETCH_TIMEOUT).send().await.context("icon request")?;
-    if !resp.status().is_success() {
-        return Ok(None);
-    }
-    // Read with the cap in hand: `content-length` is the server's claim, so the body is
-    // also stopped by force.
-    if resp.content_length().is_some_and(|len| len as usize > MAX_ICON_BYTES) {
-        return Ok(None);
-    }
-    let bytes = resp.bytes().await.context("read icon body")?;
-    if bytes.len() > MAX_ICON_BYTES {
-        return Ok(None);
-    }
-    let Some(content_type) = image_kind(&bytes) else {
-        return Ok(None);
-    };
-    Ok(Some(Media {
-        content_type: content_type.to_string(),
-        bytes: bytes.to_vec(),
-    }))
-}
 
 #[cfg(test)]
 mod tests {
