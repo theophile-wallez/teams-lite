@@ -5192,15 +5192,39 @@ const MOCK_AGENT_ANSWER =
   "```rust\nconst DEFAULT_PORT: u16 = 19420;\n```\n\n" +
   "The table in CLAUDE.md is the authority, and the defaults live in `src/bin/server.rs`.";
 
-/** The reasoning the run reports before it starts answering. */
-const MOCK_AGENT_THINKING =
-  "The question is about the port. The table in CLAUDE.md lists them, and the defaults " +
-  "are constants in the server binary — I should read both rather than answer from memory.";
+/** One entry of the transcript on the wire — `agent_step_json` in src/bin/server.rs. */
+type MockAgentStep =
+  | { kind: "thought"; text: string }
+  | { kind: "tool"; tool: string; target: string; done: boolean };
 
-/** The tool calls it makes, in order. */
-const MOCK_AGENT_TOOLS: { tool: string; target: string }[] = [
-  { tool: "Grep", target: "DEFAULT_PORT" },
-  { tool: "Read", target: "src/bin/server.rs" },
+/**
+ * How the run works itself out, in the order a CLI reports it: what the model reasons,
+ * what it does about it, and what that leads it to reason next.
+ *
+ * Interleaved on purpose. The transcript's whole value is that order (see `agent::Step`),
+ * and a fixture that reasoned once and then called two tools would let a panel that lost
+ * the order look right.
+ */
+const MOCK_AGENT_SCRIPT: ({ kind: "thought"; text: string } | { kind: "tool"; tool: string; target: string })[] = [
+  {
+    kind: "thought",
+    text:
+      "The question is about the port. The table in CLAUDE.md lists them, and the " +
+      "defaults are constants in the server binary — I should read both rather than " +
+      "answer from memory.",
+  },
+  { kind: "tool", tool: "Grep", target: "DEFAULT_PORT" },
+  {
+    kind: "thought",
+    text:
+      "One hit, in src/bin/server.rs. The read-only port is declared beside it, so the " +
+      "answer should name both rather than leave the reader to find the second one.",
+  },
+  { kind: "tool", tool: "Read", target: "src/bin/server.rs" },
+  {
+    kind: "thought",
+    text: "19420 for the service, 19421 for the dev backend, 19430 read-only. That agrees with the table.",
+  },
 ];
 
 /** A reply/forward body with its QUOTE removed — `teams_read::strip_quoted_blocks`.
@@ -5287,53 +5311,76 @@ async function simulateMockAgentRun(
 
   const runId = `${convId}/${trigger.id}`;
   let toolsUsed = 0;
-  const frame = (over: Record<string, unknown>) =>
+  let written = "";
+  // The transcript the run has built so far. Every frame carries the WHOLE of it, the way
+  // the backend's do — a dropped frame must cost nothing (see web/src/lib/agent-run.ts).
+  const steps: MockAgentStep[] = [];
+  const lastCall = (): MockAgentStep | undefined =>
+    [...steps].reverse().find((entry) => entry.kind === "tool");
+  // Derived, never tracked, exactly as `Answer::progress` derives it: a call in flight
+  // beats everything, then an answer that has started arriving, then reasoning.
+  const phase = (): string => {
+    const call = lastCall();
+    if (call && call.kind === "tool" && !call.done) return "working";
+    return written ? "writing" : "thinking";
+  };
+  const frame = (over: Record<string, unknown> = {}) => {
+    const call = lastCall();
     broadcast("agent_stream", {
       run_id: runId,
       conversation: convId,
       message_id: reply.id,
       backend,
-      phase: "thinking",
-      text: "",
-      thinking: "",
-      activity: null,
+      phase: phase(),
+      text: written,
+      steps: steps.map((entry) => ({ ...entry })),
+      activity:
+        call && call.kind === "tool"
+          ? { tool: call.tool, target: call.target, done: call.done }
+          : null,
       tools_used: toolsUsed,
       error: null,
       at: Date.now(),
       ...over,
     });
+  };
 
-  // 2. Thinking: nothing at all for a beat (the model is being called), then the
-  // reasoning a clause at a time.
-  frame({});
+  // 2. The run works itself out: nothing at all for a beat (the model is being called),
+  // then the transcript, an entry at a time — reasoning a clause at a time, and a tool
+  // call held for as long as one takes.
+  frame();
   await step();
   await step();
-  const clauses = MOCK_AGENT_THINKING.split(". ");
-  for (let i = 0; i < clauses.length; i += 1) {
-    await step();
-    frame({ thinking: clauses.slice(0, i + 1).join(". ") });
-  }
-
-  // 3. Working: one frame per tool, held for as long as a tool call takes — which is
-  // several tokens' worth, and is why this phase has a label of its own.
-  for (const activity of MOCK_AGENT_TOOLS) {
+  for (const entry of MOCK_AGENT_SCRIPT) {
+    if (entry.kind === "thought") {
+      const clauses = entry.text.split(". ");
+      steps.push({ kind: "thought", text: "" });
+      for (let i = 0; i < clauses.length; i += 1) {
+        // The newest thought GROWS: reasoning is one text arriving, not a row per
+        // fragment, and a client that appended instead would draw a paragraph a line.
+        steps[steps.length - 1] = { kind: "thought", text: clauses.slice(0, i + 1).join(". ") };
+        await step();
+        frame();
+      }
+      continue;
+    }
     toolsUsed += 1;
+    steps.push({ kind: "tool", tool: entry.tool, target: entry.target, done: false });
     await step();
-    frame({ phase: "working", thinking: MOCK_AGENT_THINKING, activity: { ...activity, done: false } });
+    frame();
     await step();
     await step();
-    await step();
-    frame({ phase: "working", thinking: MOCK_AGENT_THINKING, activity: { ...activity, done: true } });
+    steps[steps.length - 1] = { kind: "tool", tool: entry.tool, target: entry.target, done: true };
+    frame();
   }
 
-  // 4. Writing: the answer in bursts of uneven size, which is how a model streams and
+  // 3. Writing: the answer in bursts of uneven size, which is how a model streams and
   // therefore what the client's reveal has to smooth out.
   const bursts = burstsOf(MOCK_AGENT_ANSWER);
-  let written = "";
   for (let b = 0; b < bursts.length; b += 1) {
     written += bursts[b];
     await step();
-    frame({ phase: "writing", text: written, tools_used: toolsUsed });
+    frame();
     // The Teams-visible half: the message itself is edited as the answer grows, far
     // more coarsely than the stream (see AGENT_EDIT_INTERVAL).
     if (b % 3 === 0) {
@@ -5341,10 +5388,13 @@ async function simulateMockAgentRun(
     }
   }
 
-  // 5. Done: the authoritative answer, signed, in the message and on the stream.
+  // 4. Done: the authoritative answer, signed, in the message and on the stream. The
+  // transcript rides the terminal frame too, because it is an overlay on the message and
+  // this is the last frame that can carry it.
   await step();
+  written = MOCK_AGENT_ANSWER;
   editAgentReply(convId, reply.id, body(MOCK_AGENT_ANSWER, false));
-  frame({ phase: "done", text: MOCK_AGENT_ANSWER, tools_used: toolsUsed });
+  frame({ phase: "done" });
 }
 
 /** Split an answer into uneven chunks, the way tokens actually arrive. Deterministic

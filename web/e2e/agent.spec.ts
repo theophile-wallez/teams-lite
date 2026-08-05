@@ -207,8 +207,8 @@ test.describe("The local agent's answer", () => {
     await expect(bubble).toHaveAttribute("data-mine", "false");
 
     // A tool call is named while it runs, which is the whole point of streaming the run
-    // rather than only the text. `.first()` because one call replaces the last through an
-    // exit animation, so both chips are briefly mounted.
+    // rather than only the text. `.first()` is the run's FIRST call: every call keeps its
+    // row (see the transcript test below), so the list only ever grows.
     await expect(page.locator('[data-testid="agent-activity"]').first()).toContainText("Grep");
 
     // It takes the gap the history puts between two AUTHORS, not the tight one it puts
@@ -252,6 +252,85 @@ test.describe("The local agent's answer", () => {
     // colleague reads in a real Teams client. Here the mark says it instead, so the words
     // are stripped from the body rather than shown under it.
     await expect(bubble).not.toContainText("via teams-lite");
+  });
+
+  test("streams the whole transcript, then folds it under the answer", async ({ page }) => {
+    await gotoApp(page);
+    // Its own thread, named, for the same reason as the test above: this one counts the
+    // rows of THE run on screen.
+    await openConversationNamed(page, "App Cards");
+    await optIn(page);
+    await fillComposer(page, "@claude which port does the backend listen on?");
+    await page.keyboard.press("Enter");
+
+    const transcript = page.locator('[data-testid="agent-transcript"]');
+    const steps = page.locator('[data-testid="agent-activity"]');
+    const thoughts = page.locator('[data-testid="agent-thinking"]');
+    // Open while the reasoning is what there is to show: this is the state the user
+    // watches, and it used to be one truncated line that the next line replaced.
+    await expect(transcript).toHaveAttribute("data-open", "true");
+    await expect(thoughts.first()).toContainText("CLAUDE.md", { timeout: 20_000 });
+
+    // A tool call is named while it runs, and the reasoning around it does not go with it.
+    // Polled rather than counted at an instant: the run is a clock, and the number of rows
+    // on screen at a given moment is the fixture's business, not this test's.
+    await expect
+      .poll(async () => await steps.count(), { timeout: 20_000 })
+      .toBeGreaterThanOrEqual(1);
+    await expect(steps.first()).toContainText("Grep");
+
+    // The answer starts arriving and the panel folds itself into one row naming what it
+    // holds — the answer is what the reader wants the room for from here on.
+    await expect(page.locator('[data-testid="agent-stream"][data-phase="writing"]')).toBeVisible({
+      timeout: 20_000,
+    });
+    await expect(transcript).toHaveAttribute("data-open", "false");
+    const toggle = page.locator('[data-testid="agent-transcript-toggle"]');
+    await expect(toggle).toContainText("Reasoning and 2 tool calls");
+    await expect(steps).toHaveCount(0);
+
+    // It opens again on a click. The automatic fold never takes that back: a panel that
+    // re-folded under the reader who opened it would be fighting them.
+    await toggle.click();
+    await expect(transcript).toHaveAttribute("data-open", "true");
+
+    // And what it holds is the WHOLE run, in the order it happened: nothing that went past
+    // was thrown away. This is the assertion the old surface could not have passed — it
+    // showed one truncated line of reasoning and one tool chip, each replaced by the next.
+    await expect(steps).toHaveCount(2);
+    await expect(steps.first()).toContainText("Grep");
+    await expect(steps.first()).toHaveAttribute("data-done", "true");
+    await expect(steps.nth(1)).toContainText("Read");
+    await expect(thoughts).toHaveCount(3);
+    await expect(thoughts.first()).toContainText("CLAUDE.md");
+    // The reasoning that came BETWEEN the two calls sits between them.
+    await expect(thoughts.nth(1)).toContainText("read-only port");
+
+    // The panel is BOUNDED and scrolls itself. It sits in a virtualized history, so a
+    // transcript that grew without a ceiling would push the whole conversation around one
+    // frame at a time — and a reader following the run has to be left on its newest line.
+    const box = page.locator('[data-testid="agent-transcript-steps"]');
+    await expect(box).toHaveCSS("max-height", "168px");
+    await expect(box).toHaveCSS("overflow-y", "auto");
+    const scroll = JSON.parse(
+      await page.evaluate(`(() => {
+        const el = document.querySelector('[data-testid="agent-transcript-steps"]');
+        if (!el) return "null";
+        return JSON.stringify({
+          scrolls: el.scrollHeight > el.clientHeight,
+          gap: el.scrollHeight - el.scrollTop - el.clientHeight,
+        });
+      })()`),
+    ) as { scrolls: boolean; gap: number } | null;
+    // Conditional on purpose: whether this fixture's reasoning overflows the ceiling
+    // depends on how it wraps at this viewport, and asserting that it does would pin the
+    // fixture rather than the behaviour.
+    if (scroll?.scrolls) expect(scroll.gap).toBeLessThanOrEqual(24);
+
+    // Everything since the click was asserted while the answer streamed in behind it, so
+    // the panel held its open state through several frames — which is the other half of
+    // "the reader owns the fold". Nothing is asserted past the end of the run: the
+    // transcript is an overlay, and it goes with the run it belongs to.
   });
 
   test("answers nothing in a conversation nobody opted in", async ({ page }) => {

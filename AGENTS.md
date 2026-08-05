@@ -91,10 +91,11 @@ and `agent_reply` in `src/bin/server.rs` posts and streams it.
 lowest common denominator — one HTML body, once a second, for clients we do not write.
 This app is on the same machine as the CLI, so `agent_reply` also broadcasts the whole
 run on the local `agent_stream` event (`agent_stream_local`, over `agent::Progress`):
-the answer so far, the model's reasoning, the tool that is running, the phase. The web
-UI renders it word by word under the CLI's own mark (`web/src/components/agent-reply.tsx`
+the answer so far, the phase, the tool in flight, and the TRANSCRIPT — the model's
+reasoning and every tool call, interleaved in the order they happened (`agent::Step`). The
+web UI renders it word by word under the CLI's own mark (`web/src/components/agent-reply.tsx`
 and `agent-logo.tsx`, over `web/src/lib/agent-run.ts` and `agent-markdown.ts` — a port
-of the Rust markdown subset, pinned to it case for case by its tests). Four rules hold
+of the Rust markdown subset, pinned to it case for case by its tests). Five rules hold
 that surface together:
 
 - **The stream is an overlay on the posted message, never a message of its own.** The
@@ -118,8 +119,25 @@ that surface together:
   through their account and a colleague sees their name on it — but they did not write
   it, and putting it beside the things they did write is the one place this app would be
   lying to the person it belongs to.
-- **The terminal frame goes out after the final edit.** A finished run stops being an
-  overlay, so the message it falls back to has to already hold the whole answer.
+- **The work is a transcript: it is KEPT while the run goes, and folded once the answer
+  arrives.** The reasoning streams into a panel above the answer, at the pace the answer
+  is revealed at, with a row per tool call in place — so a reader watches the run being
+  worked out. It used to be one 160-character line of reasoning and one tool chip, each
+  replaced by the next: every sentence the model wrote and every file it read went past
+  and was gone, which made the most interesting part of a run the part nobody could read.
+  Four things hold the panel up, and `web/e2e/agent.spec.ts` pins each: it is BOUNDED and
+  scrolls itself (it sits in a virtualized history, and an unbounded bubble would push the
+  conversation around a frame at a time), it follows the newest line only while the reader
+  has not scrolled back inside it, the fold is automatic ONCE and the reader's own click
+  wins from then on, and the header names the tool in flight only while the rows are folded
+  — open, the rows say it better. The reasoning is drawn as data, never through the Markdown
+  renderer: it is what the model said to itself, not this app's voice. And it is an overlay
+  like everything else here, so it goes with the run: the Teams message holds the answer and
+  never the reasoning, which is why there is no disclosure on a stored reply.
+- **The terminal frame goes out after the final edit, and it carries the transcript.** A
+  finished run stops being an overlay, so the message it falls back to has to already hold
+  the whole answer — and the last frame is the last chance to state the transcript, so a
+  `done` that dropped it would blank the panel a beat before the app lets the run go.
 
 `web/mock/server.ts` reproduces that flow (`simulateMockAgentRun`) with no CLI and no
 tenant, which is what makes the surface reviewable — `cd web && bun run preview --

@@ -28,6 +28,17 @@ export type AgentActivity = {
   done: boolean;
 };
 
+/**
+ * One entry of the run's transcript (`agent::Step`, over `agent_step_json`).
+ *
+ * The ORDER is what this carries that a pair of lists would not: the reasoning that led
+ * to a call sits above it, and the reasoning that followed it below. A kind this app does
+ * not know is dropped rather than guessed at, which is what lets the backend grow one.
+ */
+export type AgentStep =
+  | { kind: "thought"; text: string }
+  | { kind: "tool"; tool: string; target: string; done: boolean };
+
 /** One `agent_stream` frame, exactly as it arrives. */
 export type AgentStreamFrame = {
   /** The REQUEST this run answers — the trigger message's id, prefixed by the
@@ -42,8 +53,11 @@ export type AgentStreamFrame = {
   phase: AgentPhase;
   /** The answer so far, as Markdown. */
   text: string;
-  /** The tail of the model's reasoning, when it reports any. */
-  thinking: string;
+  /** How the answer was arrived at: the reasoning and the tool calls, in order. Empty
+   *  on a backend that reports no reasoning and has called nothing. */
+  steps: AgentStep[];
+  /** The call in flight, or the last one that ran — the newest tool step, carried apart
+   *  because it is what the run is doing NOW. */
   activity: AgentActivity | null;
   tools_used: number;
   error: string | null;
@@ -106,7 +120,7 @@ export function parseAgentFrame(raw: unknown): AgentRun | null {
     backend: typeof f.backend === "string" ? f.backend : "claude",
     phase,
     text: typeof f.text === "string" ? f.text : "",
-    thinking: typeof f.thinking === "string" ? f.thinking : "",
+    steps: parseSteps(f.steps),
     activity: parseActivity(f.activity),
     tools_used: typeof f.tools_used === "number" ? f.tools_used : 0,
     error: typeof f.error === "string" && f.error ? f.error : null,
@@ -115,6 +129,27 @@ export function parseAgentFrame(raw: unknown): AgentRun | null {
 }
 
 const PHASES = new Set<AgentPhase>(["thinking", "working", "writing", "done", "error"]);
+
+/** The transcript, entry by entry. An entry of a kind this app has no row for is
+ *  dropped: it is a step the backend grew and this build cannot draw. */
+function parseSteps(raw: unknown): AgentStep[] {
+  if (!Array.isArray(raw)) return [];
+  const steps: AgentStep[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const step = entry as Record<string, unknown>;
+    if (step.kind === "thought") {
+      const text = typeof step.text === "string" ? step.text : "";
+      if (text) steps.push({ kind: "thought", text });
+      continue;
+    }
+    if (step.kind === "tool") {
+      const tool = parseActivity(step);
+      if (tool) steps.push({ kind: "tool", ...tool });
+    }
+  }
+  return steps;
+}
 
 function parseActivity(raw: unknown): AgentActivity | null {
   if (!raw || typeof raw !== "object") return null;
@@ -159,14 +194,32 @@ function sameRun(a: AgentRun, b: AgentRun): boolean {
   return (
     a.phase === b.phase &&
     a.text === b.text &&
-    a.thinking === b.thinking &&
     a.tools_used === b.tools_used &&
     a.error === b.error &&
     a.message_id === b.message_id &&
     a.activity?.tool === b.activity?.tool &&
     a.activity?.target === b.activity?.target &&
-    a.activity?.done === b.activity?.done
+    a.activity?.done === b.activity?.done &&
+    sameSteps(a.steps, b.steps)
   );
+}
+
+/** Whether two transcripts hold the same entries in the same order. Compared entry by
+ *  entry rather than by a joined string: a thought that happens to spell a tool row
+ *  would collide, and the reveal keys off the shape. */
+function sameSteps(a: AgentStep[], b: AgentStep[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((step, i) => {
+    const other = b[i];
+    if (!other || step.kind !== other.kind) return false;
+    if (step.kind === "thought") return other.kind === "thought" && step.text === other.text;
+    return (
+      other.kind === "tool" &&
+      step.tool === other.tool &&
+      step.target === other.target &&
+      step.done === other.done
+    );
+  });
 }
 
 /** Forget one conversation's run — what the UI calls once a finished run's text is
@@ -182,6 +235,31 @@ export function withoutAgentRun(
   const next = { ...runs };
   delete next[conversation];
   return next;
+}
+
+/** Whether the run has a transcript worth a panel: reasoning, a tool call, or both. */
+export function agentHasTranscript(run: AgentRun): boolean {
+  return run.steps.length > 0;
+}
+
+/**
+ * What a FOLDED transcript says it holds — the label of the row that stands in for it
+ * once the answer has started arriving.
+ *
+ * The calls are counted from `tools_used` rather than from the rows, because the
+ * transcript keeps only its newest ones (`MAX_TOOL_CALLS` in src/agent.rs) while the
+ * count survives: a run that greped forty times says forty, and shows the last
+ * thirty-two.
+ */
+export function agentTranscriptLabel(run: AgentRun): string {
+  const tools = run.tools_used > 0 ? `${run.tools_used} tool call${plural(run.tools_used)}` : "";
+  const reasoned = run.steps.some((step) => step.kind === "thought");
+  if (reasoned) return tools ? `Reasoning and ${tools}` : "Reasoning";
+  return tools || "Reasoning";
+}
+
+function plural(count: number): string {
+  return count === 1 ? "" : "s";
 }
 
 /** The label for a phase, written for somebody watching a thread rather than a

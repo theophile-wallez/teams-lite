@@ -1,9 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Alert02Icon, Wrench01Icon } from "@hugeicons/core-free-icons";
+import { Alert02Icon, ArrowRight01Icon, CheckIcon, Loading02Icon } from "@hugeicons/core-free-icons";
 import { agentMarkdownToHtml } from "~/lib/agent-markdown";
-import { agentPhaseLabel, agentRunIsLive, type AgentRun } from "~/lib/agent-run";
+import {
+  agentHasTranscript,
+  agentPhaseLabel,
+  agentRunIsLive,
+  agentTranscriptLabel,
+  type AgentRun,
+  type AgentStep,
+} from "~/lib/agent-run";
 import { agentDisplayName, type AgentBackendName } from "~/lib/agent-message";
 import { cn } from "~/lib/utils";
 import { AgentCoin } from "./agent-logo";
@@ -40,6 +47,24 @@ import { RichContent } from "./rich-content";
  * new word fades in on mount (`.agent-token` in app.css). The effect is the answer
  * being written at a readable, even pace — while the underlying text stays exactly what
  * the CLI said.
+ *
+ * **The work is a TRANSCRIPT, and it is kept.** The reasoning and the tool calls stream
+ * into one scrolling panel above the answer, in the order they happened
+ * (`agent::Step`) — so a reader watches the run being worked out rather than watching one
+ * line replace the last. It used to be exactly that: a 160-character tail of the
+ * reasoning on one truncated line, and one tool chip that the next call pushed out. Every
+ * sentence the model wrote and every file it read went past and was gone, which made the
+ * most interesting part of a run the part nobody could read.
+ *
+ * **And it FOLDS when the answer starts.** The reasoning is how the answer was reached;
+ * once the answer itself is arriving it is the answer that a reader wants the room for,
+ * so the panel becomes one row naming what it holds — and opens again on a click. The
+ * fold is automatic and the reader's own click wins over it from then on, because a panel
+ * that folded under somebody who had just opened it would be fighting them.
+ *
+ * The panel is an overlay like everything else here: the Teams message holds the answer
+ * and never the reasoning, so the transcript goes when the run does. That is why it is
+ * not a disclosure on a stored message — there is nothing behind one to disclose.
  */
 
 /** The slowest the reveal ever runs, in characters per second. Fast enough to feel like
@@ -51,9 +76,19 @@ const MIN_CHARS_PER_SECOND = 65;
  *  is — which is what keeps the answer from ever falling behind the model. */
 const CATCHUP_SECONDS = 0.3;
 
-/** How much of the model's reasoning is shown: the tail, on one line. The whole thing is
- *  a paragraph nobody asked for, and the latest sentence is the informative part. */
-const THINKING_TAIL_CHARS = 160;
+/**
+ * How tall the transcript may grow before it scrolls itself, in pixels.
+ *
+ * A bound is required rather than nice: the panel sits in a virtualized history, and a
+ * run that reasons for an hour would otherwise push the whole conversation off screen one
+ * frame at a time. Deep enough for a few sentences and the call under them — which is
+ * the window that reads as "being written" — and the rest is a scroll away.
+ */
+const TRANSCRIPT_MAX_HEIGHT = 168;
+
+/** How close to the bottom counts as "still following the run", in pixels. Anything
+ *  above that is a reader who scrolled back, and the panel stops dragging them down. */
+const TRANSCRIPT_PIN_SLACK = 24;
 
 /**
  * How long a finished run stays on screen after its last word is revealed.
@@ -172,6 +207,8 @@ export function AgentStream(props: { run: AgentRun; onSettled: () => void }) {
   const html = revealed.trim() ? agentMarkdownToHtml(revealed) : "";
   return (
     <div data-testid="agent-stream" data-phase={run.phase}>
+      {/* Above the answer, because it is how the answer was reached. */}
+      <AgentTranscript run={run} />
       {html ? (
         <RichContent
           html={html}
@@ -181,140 +218,293 @@ export function AgentStream(props: { run: AgentRun; onSettled: () => void }) {
           className={cn(run.phase === "writing" && "agent-streaming")}
         />
       ) : null}
-      <AgentStatus run={run} />
+      <AgentFailure run={run} />
     </div>
   );
 }
 
 /**
- * The line under a live answer: what the agent is doing, and what it is doing it to.
+ * The failure of a run, under whatever it managed to write.
  *
- * It shimmers while the run has nothing else to show — that is the state a reader is
- * actually waiting through, and a static "thinking…" is indistinguishable from a
- * frozen app. Once words are arriving the shimmer stops: the words are the progress
- * indicator, and two competing animations is one too many.
+ * It sits below the answer rather than in the transcript above it: what went wrong is
+ * about the answer the reader was promised, not about the reasoning that led there.
  *
- * There is no spinner and no bouncing dots beside it. The shimmer already says the same
- * thing, in the words themselves, and a second animation next to it would say it twice.
- *
- * It always stands clear of whatever is above it — the quoted request, the answer as it
- * grows, or just the signature. Something is always above it, so the gap is
- * unconditional: a status line flush against the quote reads as part of the quote.
+ * There is deliberately no animation on it — nothing more is arriving.
  */
-function AgentStatus(props: { run: AgentRun }) {
+function AgentFailure(props: { run: AgentRun }) {
+  if (props.run.phase !== "error") return null;
+  return (
+    <div
+      data-testid="agent-error"
+      className="mt-2 flex items-start gap-1.5 text-xs text-destructive"
+    >
+      <HugeiconsIcon
+        icon={Alert02Icon}
+        className="mt-px size-3.5 shrink-0"
+        strokeWidth={1.8}
+        aria-hidden
+      />
+      <span>{agentPhaseLabel(props.run)}</span>
+    </div>
+  );
+}
+
+/**
+ * The run being worked out: what the agent is doing, and everything it has done.
+ *
+ * The header is the status line this component grew out of. It shimmers while the run has
+ * nothing else to show — that is the state a reader is actually waiting through, and a
+ * static "thinking…" is indistinguishable from a frozen app. Once words are arriving the
+ * shimmer stops: the words are the progress indicator, and two competing animations is one
+ * too many. There is no spinner beside it for the same reason.
+ *
+ * Under it, the transcript: the model's reasoning as it is written, and a row for every
+ * tool call, in the order they happened. Four things hold it together.
+ *
+ * - **It scrolls itself, and only while the reader is following it.** The panel has a
+ *   ceiling ({@link TRANSCRIPT_MAX_HEIGHT}) because it sits in a virtualized history that
+ *   an unbounded bubble would push around; a reader who scrolls back inside it is left
+ *   where they are, because dragging them to the newest line is how a transcript becomes
+ *   unreadable.
+ * - **The header names the newest call only while the rows are folded.** Open, the rows
+ *   say it better than a label can, and stating it twice makes the panel look like it is
+ *   reporting two things.
+ * - **The fold is automatic, once, and then the reader owns it.** Nothing re-folds a panel
+ *   somebody opened.
+ * - **The reasoning is data, not prose.** It is what the model said to itself, so it is
+ *   set small, dim and italic, and no Markdown is applied to it — a heading the model
+ *   happened to type is not a heading in this app's voice.
+ */
+function AgentTranscript(props: { run: AgentRun }) {
   const { run } = props;
   const reduce = useReducedMotion();
   const live = agentRunIsLive(run);
-  const activity = run.phase === "working" ? run.activity : null;
-  // The reasoning stays up while a tool runs, because it is why the tool is running.
-  // It goes the moment words start arriving: the answer replaces the account of it.
-  const thinking = run.phase === "writing" ? "" : tail(run.thinking, THINKING_TAIL_CHARS);
+  const has = agentHasTranscript(run);
   const waiting = live && run.phase !== "writing";
+  // Folded from the moment the answer starts arriving; the reader's own click wins from
+  // then on. `null` is "nobody has said", which is what makes the automatic fold a
+  // default rather than an override.
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const open = has && (chosen ?? run.text.trim() === "");
 
-  if (run.phase === "error") {
-    return (
-      <div
-        data-testid="agent-error"
-        className="mt-2 flex items-start gap-1.5 text-xs text-destructive"
-      >
-        <HugeiconsIcon
-          icon={Alert02Icon}
-          className="mt-px size-3.5 shrink-0"
-          strokeWidth={1.8}
-          aria-hidden
-        />
-        <span>{agentPhaseLabel(run)}</span>
-      </div>
-    );
-  }
-  if (!live) return null;
+  const box = useRef<HTMLDivElement | null>(null);
+  const following = useRef(true);
+  const follow = useCallback(() => {
+    const el = box.current;
+    if (!el || !following.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, []);
+  // A fold unmounts the rows, so re-opening starts at the top of them. The reader asked to
+  // see the run, which means its newest line: following resumes with the panel.
+  useEffect(() => {
+    if (!open) return;
+    following.current = true;
+    follow();
+  }, [follow, open]);
+  // A new row (a tool call, a thought opening after one) scrolls the panel down; a thought
+  // that is still growing does it through {@link AgentThought}'s own `onGrow`, since the
+  // reveal runs in that component and never re-renders this one.
+  useEffect(follow, [follow, run.steps.length]);
+
+  if (!live && !has) return null;
+
+  // What the header says, in the three cases that each answer a different question:
+  //   - open and live: what the run is doing, since the rows below say what it has done;
+  //   - folded but still thinking or working: the same, because those rows are out of
+  //     sight and a tool call the reader cannot see is a wait with no stated cause;
+  //   - folded while the answer arrives, or after it: what the fold HOLDS, which is what
+  //     a reader clicks it for. The caret at the end of the answer already says it is
+  //     being written, so the header does not spend its line saying it again.
+  const name = agentDisplayName(run.backend);
+  const label =
+    live && (open || waiting)
+      ? open && run.phase === "working"
+        ? `${name} is working`
+        : agentPhaseLabel(run)
+      : agentTranscriptLabel(run);
+  // The last thought is the only one that can still be growing, so it is the only one
+  // whose text is revealed rather than simply shown.
+  const growing = lastThoughtIndex(run.steps);
 
   return (
     <div
-      data-testid="agent-status"
-      role="status"
-      aria-live="polite"
-      className="mt-2 flex min-w-0 flex-col gap-1 text-xs"
+      data-testid="agent-transcript"
+      data-open={open}
+      className="mb-1.5 flex min-w-0 flex-col text-xs"
     >
-      <div className="flex min-w-0 items-center gap-1.5">
-        <span
-          data-testid="agent-phase"
-          // shadcn's `shimmer` (ui.shadcn.com/docs/utils/shimmer): it paints the text
-          // out of `currentColor` and sweeps a brighter copy of it across, so the colour
-          // class stays — it is what the highlight is derived from — and the dark theme
-          // needs nothing said about it. `prefers-reduced-motion` is handled by the
-          // utility itself, which is why only `waiting` gates it here.
+      {/* Announced while the run is going, and silent once it is not: the folded row of a
+          finished run is a label, not news. The testid says the same thing — it is the
+          live status, and a client that outlives it (see `onSettled`) has no status. */}
+      <div
+        data-testid={live ? "agent-status" : undefined}
+        role={live ? "status" : undefined}
+        aria-live={live ? "polite" : undefined}
+        className="flex min-w-0"
+      >
+        <button
+          type="button"
+          data-testid="agent-transcript-toggle"
+          // A header with nothing behind it is not a control: a run whose CLI reports no
+          // reasoning and has called nothing has only this line to show.
+          disabled={!has}
+          aria-expanded={has ? open : undefined}
+          onClick={() => setChosen(!open)}
           className={cn(
-            "min-w-0 truncate text-text-dim",
-            waiting && "shimmer shimmer-duration-2100",
+            "flex min-w-0 items-center gap-1 rounded text-left",
+            has && "hover:text-text",
           )}
         >
-          {run.phase === "working"
-            ? `${agentDisplayName(run.backend)} is working`
-            : agentPhaseLabel(run)}
-        </span>
+          {has ? (
+            <motion.span
+              className="flex shrink-0 items-center text-text-faint"
+              animate={{ rotate: open ? 90 : 0 }}
+              initial={false}
+              transition={
+                reduce ? { duration: 0 } : { duration: 0.18, ease: [0.2, 0.65, 0.3, 0.9] }
+              }
+            >
+              <HugeiconsIcon
+                icon={ArrowRight01Icon}
+                className="size-3.5"
+                strokeWidth={1.8}
+                aria-hidden
+              />
+            </motion.span>
+          ) : null}
+          <span
+            data-testid="agent-phase"
+            // shadcn's `shimmer` (ui.shadcn.com/docs/utils/shimmer): it paints the text
+            // out of `currentColor` and sweeps a brighter copy of it across, so the colour
+            // class stays — it is what the highlight is derived from — and the dark theme
+            // needs nothing said about it. `prefers-reduced-motion` is handled by the
+            // utility itself, which is why only `waiting` gates it here.
+            className={cn(
+              "min-w-0 truncate text-text-dim",
+              waiting && "shimmer shimmer-duration-2100",
+            )}
+          >
+            {label}
+          </span>
+        </button>
       </div>
 
-      {/* The tool that is running, named. `popLayout` so one call replaces the last
-          without the row jumping while both are mounted. */}
-      <AnimatePresence initial={false} mode="popLayout">
-        {activity ? (
-          <motion.span
-            key={`${activity.tool}:${activity.target}`}
-            data-testid="agent-activity"
-            initial={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
-            animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
-            exit={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
-            transition={{ duration: 0.18, ease: [0.2, 0.65, 0.3, 0.9] }}
-            // `max-w-full` is load-bearing next to `self-start`: a flex item aligned to
-            // the start is sized by its content, so a chip naming a long path would grow
-            // straight through the bubble's edge instead of ellipsising inside it.
-            className="flex min-w-0 max-w-full items-center gap-1.5 self-start rounded-md bg-black/5 px-1.5 py-0.5 text-[11px] text-text-dim dark:bg-white/10"
-          >
-            <HugeiconsIcon
-              icon={Wrench01Icon}
-              className="size-3 shrink-0"
-              strokeWidth={1.8}
-              aria-hidden
-            />
-            <span className="font-medium">{activity.tool}</span>
-            {activity.target ? (
-              <span className="min-w-0 truncate font-mono opacity-80">{activity.target}</span>
-            ) : null}
-          </motion.span>
-        ) : null}
-      </AnimatePresence>
-
-      {/* The tail of the model's reasoning, on one line, shimmering with the phase it
-          belongs to. Data, not prose: it is what the model said to itself. */}
       <AnimatePresence initial={false}>
-        {thinking ? (
-          <motion.p
-            data-testid="agent-thinking"
+        {open ? (
+          <motion.div
+            key="steps"
             initial={reduce ? { opacity: 0 } : { opacity: 0, height: 0 }}
             animate={reduce ? { opacity: 1 } : { opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.2, ease: [0.2, 0.65, 0.3, 0.9] }}
-            // Slower and wider than the phase line above it: this is a whole sentence,
-            // and a band sized for two words reads as a flicker crossing it.
-            className="shimmer shimmer-duration-2600 shimmer-spread-[6rem] min-w-0 overflow-hidden text-[11px] italic text-text-faint"
+            exit={reduce ? { opacity: 0 } : { opacity: 0, height: 0 }}
+            transition={{ duration: 0.22, ease: [0.2, 0.65, 0.3, 0.9] }}
+            className="overflow-hidden"
           >
-            {thinking}
-          </motion.p>
+            <div
+              ref={box}
+              data-testid="agent-transcript-steps"
+              // `overscroll-contain`: the panel is a scroller inside the history's own
+              // scroller, and without it reaching the end of the reasoning would carry on
+              // into the conversation.
+              onScroll={(event) => {
+                const el = event.currentTarget;
+                following.current =
+                  el.scrollHeight - el.scrollTop - el.clientHeight <= TRANSCRIPT_PIN_SLACK;
+              }}
+              style={{ maxHeight: TRANSCRIPT_MAX_HEIGHT }}
+              // A rail rather than a box: the transcript is an aside to the answer under
+              // it, and a second card inside a bubble reads as a second message. It hangs
+              // under the chevron, so the fold and what it holds line up.
+              className="ml-[7px] mt-1 flex min-w-0 flex-col gap-1 overflow-y-auto overscroll-contain border-l border-black/15 pl-2.5 dark:border-white/20"
+            >
+              {/* Keyed by position, because that is what a step IS: the transcript only
+                  ever grows at its end. The one exception is its own cap dropping the
+                  oldest rows (`MAX_TOOL_CALLS`), which shifts the rest — a re-mount, and
+                  the only thing it costs is a fade on rows already read. */}
+              {run.steps.map((step, index) =>
+                step.kind === "thought" ? (
+                  <AgentThought
+                    key={index}
+                    text={step.text}
+                    live={live && index === growing}
+                    onGrow={follow}
+                  />
+                ) : (
+                  <AgentToolRow key={index} step={step} reduce={!!reduce} />
+                ),
+              )}
+            </div>
+          </motion.div>
         ) : null}
       </AnimatePresence>
     </div>
   );
 }
 
-/** The last `max` characters of `text`, cut at a word so the line does not open
- *  mid-word. Empty in, empty out. */
-function tail(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  if (flat.length <= max) return flat;
-  const cut = flat.slice(flat.length - max);
-  const space = cut.indexOf(" ");
-  return `…${space > 0 && space < 40 ? cut.slice(space + 1) : cut}`;
+/** Where the last thought sits, or `-1`. Only that one can still be growing. */
+function lastThoughtIndex(steps: AgentStep[]): number {
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    if (steps[i]?.kind === "thought") return i;
+  }
+  return -1;
+}
+
+/**
+ * One stretch of the model's reasoning, revealed at the pace the answer is.
+ *
+ * The same easing as the answer ({@link useSmoothReveal}), because it is the same act: a
+ * text arriving in bursts of uneven size, read by somebody watching it appear. `onGrow`
+ * is how the panel above follows it — the reveal ticks in here, so this is the only place
+ * that knows a line was added.
+ */
+function AgentThought(props: { text: string; live: boolean; onGrow: () => void }) {
+  const { onGrow } = props;
+  const { revealed } = useSmoothReveal(props.text, props.live);
+  useEffect(() => {
+    onGrow();
+  }, [revealed, onGrow]);
+  if (!revealed.trim()) return null;
+  return (
+    <p
+      data-testid="agent-thinking"
+      className="min-w-0 whitespace-pre-wrap break-words text-[11px] italic leading-relaxed text-text-faint"
+    >
+      {revealed}
+    </p>
+  );
+}
+
+/**
+ * One tool call: what it was, what it was pointed at, and whether it is still running.
+ *
+ * A finished call keeps its row — the whole point of a transcript — and says so with a
+ * tick, while the one in flight spins. The two states are what tells a reader whether the
+ * wait they are in is this call's fault.
+ */
+function AgentToolRow(props: { step: Extract<AgentStep, { kind: "tool" }>; reduce: boolean }) {
+  const { step } = props;
+  return (
+    <motion.span
+      data-testid="agent-activity"
+      data-done={step.done}
+      initial={props.reduce ? { opacity: 0 } : { opacity: 0, y: -3 }}
+      animate={props.reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
+      transition={{ duration: 0.18, ease: [0.2, 0.65, 0.3, 0.9] }}
+      // `max-w-full` is load-bearing next to `self-start`: a flex item aligned to the
+      // start is sized by its content, so a chip naming a long path would grow straight
+      // through the bubble's edge instead of ellipsising inside it.
+      className="flex min-w-0 max-w-full items-center gap-1.5 self-start rounded-md bg-black/5 px-1.5 py-0.5 text-[11px] text-text-dim dark:bg-white/10"
+    >
+      <HugeiconsIcon
+        icon={step.done ? CheckIcon : Loading02Icon}
+        className={cn("size-3 shrink-0", !step.done && "animate-spin")}
+        strokeWidth={1.8}
+        aria-hidden
+      />
+      <span className="font-medium">{step.tool}</span>
+      {step.target ? (
+        <span className="min-w-0 truncate font-mono opacity-80">{step.target}</span>
+      ) : null}
+    </motion.span>
+  );
 }
 
 /**

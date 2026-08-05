@@ -6102,10 +6102,14 @@ async fn agent_run_to_completion(
     // still be the second-to-last edit — so the answer would visibly lose its last
     // sentence for as long as it takes Teams to echo the final one back.
     let edited = agent_edit(ctx, &command.conversation_id, message_id, &final_html).await;
+    // The run's own last state, with the authoritative answer over it. The transcript
+    // travels on the terminal frame too: it is an overlay on the message, so this is the
+    // last frame that can carry it, and a `done` that dropped it would blank the
+    // reasoning a beat before the app lets the run go.
     let final_progress = agent::Progress {
         phase: agent::Phase::Writing,
         text: outcome.as_ref().map(|o| o.text.clone()).unwrap_or_default(),
-        ..agent::Progress::default()
+        ..watch_local.borrow().clone()
     };
     // Sent whatever the edit did: a client that never hears the run ended would show a
     // bubble writing forever (until its own staleness guard fires, minutes later).
@@ -6380,7 +6384,7 @@ fn agent_run_frame(
         "backend": backend,
         "phase": phase,
         "text": progress.text,
-        "thinking": progress.thinking,
+        "steps": progress.steps.iter().map(agent_step_json).collect::<Vec<_>>(),
         "activity": progress.activity.as_ref().map(|activity| json!({
             "tool": activity.tool,
             "target": activity.target,
@@ -6390,6 +6394,22 @@ fn agent_run_frame(
         "error": error,
         "at": now_ms(),
     })
+}
+
+/// One entry of the run's transcript, on the wire.
+///
+/// Tagged by `kind` rather than by which field is present: a reader that does not know a
+/// kind we add later skips it, where a shape guessed from the keys would draw it wrong.
+fn agent_step_json(step: &agent::Step) -> Value {
+    match step {
+        agent::Step::Thought(text) => json!({ "kind": "thought", "text": text }),
+        agent::Step::Tool(activity) => json!({
+            "kind": "tool",
+            "tool": activity.tool,
+            "target": activity.target,
+            "done": activity.done,
+        }),
+    }
 }
 
 /// Post the agent's message as a native Teams reply to the message that summoned it.

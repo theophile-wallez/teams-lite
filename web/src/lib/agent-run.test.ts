@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   AGENT_RUN_STALE_MS,
+  agentHasTranscript,
   agentPhaseLabel,
   agentRunIsLive,
   agentRunIsStale,
+  agentTranscriptLabel,
   parseAgentFrame,
   withAgentFrame,
   withoutAgentRun,
@@ -19,7 +21,7 @@ function frame(over: Partial<Record<string, unknown>> = {}): Record<string, unkn
     backend: "claude",
     phase: "writing",
     text: "the port is 19420",
-    thinking: "",
+    steps: [],
     activity: null,
     tools_used: 0,
     error: null,
@@ -42,6 +44,45 @@ describe("parseAgentFrame", () => {
     expect(run!.activity).toEqual({ tool: "Read", target: "src/agent.rs", done: false });
     expect(run!.tools_used).toBe(3);
     expect(run!.message_id).toBe("1785773946200");
+  });
+
+  it("reads the transcript in the order the backend narrated it", () => {
+    const run = parseAgentFrame(
+      frame({
+        steps: [
+          { kind: "thought", text: "the port is a constant" },
+          { kind: "tool", tool: "Grep", target: "DEFAULT_PORT", done: true },
+          { kind: "thought", text: "that is 19420" },
+        ],
+      }),
+    );
+    expect(run!.steps).toEqual([
+      { kind: "thought", text: "the port is a constant" },
+      { kind: "tool", tool: "Grep", target: "DEFAULT_PORT", done: true },
+      { kind: "thought", text: "that is 19420" },
+    ]);
+    expect(agentHasTranscript(run!)).toBe(true);
+  });
+
+  it("drops a step it cannot draw rather than guessing at it", () => {
+    // A kind a later backend grew, an entry that is not an object, an empty thought (the
+    // frame that opens one, before its first token): none of them is a row.
+    const run = parseAgentFrame(
+      frame({
+        steps: [
+          { kind: "screenshot", path: "/tmp/a.png" },
+          "Grep",
+          { kind: "thought", text: "" },
+          { kind: "tool", tool: "", target: "x", done: false },
+          { kind: "tool", tool: "Read", target: 12, done: "yes" },
+        ],
+      }),
+    );
+    // The one survivor: a tool with a name. Its target and its state fall back rather
+    // than arriving as a number and a string.
+    expect(run!.steps).toEqual([{ kind: "tool", tool: "Read", target: "", done: false }]);
+    expect(parseAgentFrame(frame({ steps: "a transcript" }))!.steps).toEqual([]);
+    expect(agentHasTranscript(parseAgentFrame(frame())!)).toBe(false);
   });
 
   it("refuses anything that is not a frame", () => {
@@ -74,6 +115,28 @@ describe("withAgentFrame", () => {
     // The clock moved, nothing else did: not a change anybody can see.
     const again = withAgentFrame(runs, { ...first, at: first.at + 40 });
     expect(again).toBe(runs);
+  });
+
+  it("takes a frame whose transcript grew, and only then", () => {
+    const reasoned = parseAgentFrame(
+      frame({ steps: [{ kind: "thought", text: "the port" }] }),
+    )!;
+    const runs = withAgentFrame({}, reasoned);
+    // The keepalive repeats the latest frame every 15 s: a transcript that says the same
+    // thing must not re-render the panel under a reader.
+    expect(withAgentFrame(runs, { ...reasoned, at: reasoned.at + 15_000 })).toBe(runs);
+    const grown = parseAgentFrame(
+      frame({ steps: [{ kind: "thought", text: "the port is 19420" }], at: 1_000_100 }),
+    )!;
+    expect(withAgentFrame(runs, grown)[grown.conversation]!.steps).toEqual(grown.steps);
+    // And a call that FINISHED is news, even though the row's words did not change.
+    const running = parseAgentFrame(
+      frame({ steps: [{ kind: "tool", tool: "Grep", target: "PORT", done: false }] }),
+    )!;
+    const done = { ...running, steps: [{ ...running.steps[0], done: true }] } as typeof running;
+    expect(withAgentFrame(withAgentFrame({}, running), done)[running.conversation]!.steps).toEqual(
+      done.steps,
+    );
   });
 
   it("takes a newer run over the one on screen", () => {
@@ -150,6 +213,20 @@ describe("agentPhaseLabel", () => {
     expect(agentPhaseLabel(run({ backend: "opencode", phase: "thinking" }))).toBe(
       "opencode is thinking",
     );
+  });
+
+  it("says what a folded transcript holds, counted from the run and not from the rows", () => {
+    const thought = { kind: "thought", text: "the port is a constant" } as const;
+    const call = { kind: "tool", tool: "Grep", target: "PORT", done: true } as const;
+    expect(agentTranscriptLabel(run({ steps: [thought], tools_used: 0 }))).toBe("Reasoning");
+    expect(agentTranscriptLabel(run({ steps: [thought, call], tools_used: 1 }))).toBe(
+      "Reasoning and 1 tool call",
+    );
+    // A CLI that reports no reasoning (opencode) has only its calls to name.
+    expect(agentTranscriptLabel(run({ steps: [call], tools_used: 2 }))).toBe("2 tool calls");
+    // The rows are capped at 32 and the count is not, so a long run says what it did
+    // rather than what it kept.
+    expect(agentTranscriptLabel(run({ steps: [call], tools_used: 40 }))).toBe("40 tool calls");
   });
 
   it("says what went wrong when a run failed", () => {

@@ -229,13 +229,17 @@ pub const RUN_MAX_DURATION: Duration = Duration::from_secs(8 * 3600);
 /// truncated here rather than in the store.
 const MAX_ANSWER_BYTES: usize = 200 * 1024;
 
-/// How much of the reasoning is kept. Only the LATEST reasoning is worth showing —
-/// a UI shows the tail of it while the model has not started answering — so this
-/// keeps the end of the text and drops the beginning.
-const MAX_THINKING_BYTES: usize = 4 * 1024;
+/// How much of the reasoning is kept.
+///
+/// It is the whole transcript that a reader scrolls, not a sample of it (see
+/// [`Progress::steps`]), so this cap decides how far back they can look — which is why
+/// it is generous where a one-line label needed almost nothing. The tail is what
+/// survives: the beginning of an hour of reasoning is the part nobody reads.
+const MAX_THINKING_BYTES: usize = 16 * 1024;
 
-/// How many tool calls are remembered. The current one is what a UI shows; the rest
-/// are only counted, so a run with a hundred greps holds a bounded list.
+/// How many tool calls are remembered. They are all shown, oldest first, so this is
+/// what keeps a run with a hundred greps from carrying a hundred rows; the count
+/// ([`Progress::tools_used`]) survives the cap.
 const MAX_TOOL_CALLS: usize = 32;
 
 /// How long a tool's target may be before it is cut. It is a file path or a pattern
@@ -324,6 +328,19 @@ pub struct Activity {
     pub done: bool,
 }
 
+/// One entry of the run's transcript, in the order the CLI emitted it.
+///
+/// The order is the whole value of it: "I should read both rather than answer from
+/// memory", then `Read src/bin/server.rs`, then what reading it led to. A list of
+/// thoughts beside a list of calls says the same words and loses why each call happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// A stretch of the model's reasoning, as it emitted it.
+    Thought(String),
+    /// A tool call, in the state it was last reported in.
+    Tool(Activity),
+}
+
 /// The answer as it stands, and what the agent is doing to grow it.
 ///
 /// The whole state, not a delta: this rides a [`watch`] channel where only the latest
@@ -333,13 +350,33 @@ pub struct Progress {
     pub phase: Phase,
     /// The answer so far, as the Markdown the CLI emitted.
     pub text: String,
-    /// The tail of the model's reasoning, when it reports any (Claude Code does when
-    /// extended thinking is on; opencode does not).
-    pub thinking: String,
-    /// The tool call in flight, or the last one that ran.
+    /// How the answer was arrived at: the model's reasoning and the tool calls,
+    /// interleaved in the order they happened, bounded by [`MAX_THINKING_BYTES`] and
+    /// [`MAX_TOOL_CALLS`].
+    ///
+    /// Claude Code reports reasoning when extended thinking is on; opencode does not,
+    /// so on that backend the transcript is the tool calls alone.
+    pub steps: Vec<Step>,
+    /// The tool call in flight, or the last one that ran. It is the newest [`Step::Tool`]
+    /// of the transcript, kept apart because it is what the run is doing NOW: the phase
+    /// is derived from it, and a UI names it while the reader waits.
     pub activity: Option<Activity>,
     /// How many tool calls the run has made — the count survives [`MAX_TOOL_CALLS`].
     pub tools_used: usize,
+}
+
+impl Progress {
+    /// The model's reasoning, the thoughts of the transcript joined back together.
+    /// Derived rather than carried, so there is one record of what the model said.
+    pub fn thinking(&self) -> String {
+        self.steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Thought(text) => Some(text.as_str()),
+                Step::Tool(_) => None,
+            })
+            .collect()
+    }
 }
 
 /// What one run produced.
@@ -863,12 +900,21 @@ struct Answer {
     parts: Vec<(String, String)>,
     /// Whether the next [`Update::Append`] opens a new paragraph.
     pending_break: bool,
-    /// The model's reasoning, capped to its tail (see [`MAX_THINKING_BYTES`]).
-    thinking: String,
-    /// The tool calls, oldest first, capped to the newest [`MAX_TOOL_CALLS`].
-    calls: Vec<Call>,
+    /// The reasoning and the tool calls, in the order they happened — what
+    /// [`Progress::steps`] is built from. Bounded on both halves: the reasoning keeps
+    /// its tail ([`MAX_THINKING_BYTES`]), the calls their newest [`MAX_TOOL_CALLS`].
+    entries: Vec<Entry>,
     /// Every tool call ever made, including the ones the cap dropped.
     calls_seen: usize,
+}
+
+/// One entry of that transcript. The private half of [`Step`]: a call is tracked here
+/// while it runs, and only the part a reader needs is published.
+#[derive(Debug)]
+enum Entry {
+    /// A stretch of reasoning, appended to while it is the newest entry.
+    Thought(String),
+    Call(Call),
 }
 
 /// One tool call being tracked while it runs.
@@ -902,9 +948,16 @@ impl Answer {
                 Some((_, existing)) => *existing = text,
                 None => self.parts.push((key, text)),
             },
+            // Reasoning grows the newest thought when it is still the newest entry, and
+            // opens a new one after a tool call — which is what puts the reasoning that
+            // FOLLOWED a call after it in the transcript rather than back with the
+            // reasoning that led to it.
             Update::Thinking(text) => {
-                self.thinking.push_str(&text);
-                keep_tail(&mut self.thinking, MAX_THINKING_BYTES);
+                match self.entries.last_mut() {
+                    Some(Entry::Thought(thought)) => thought.push_str(&text),
+                    _ => self.entries.push(Entry::Thought(text)),
+                }
+                self.keep_thinking_tail();
             }
             // A call is upserted by id: it is announced when it starts (with no
             // target), described again when the whole turn arrives (with one), and a
@@ -919,15 +972,13 @@ impl Answer {
                     }
                 }
                 None => {
-                    self.calls.push(Call { id, name, target, ..Call::default() });
+                    self.entries.push(Entry::Call(Call { id, name, target, ..Call::default() }));
                     self.calls_seen += 1;
-                    if self.calls.len() > MAX_TOOL_CALLS {
-                        self.calls.remove(0);
-                    }
+                    self.keep_newest_calls();
                 }
             },
             Update::ToolArgs(json) => {
-                let Some(call) = self.calls.last_mut() else {
+                let Some(call) = self.last_call_mut() else {
                     return;
                 };
                 call.args.push_str(&json);
@@ -952,7 +1003,72 @@ impl Answer {
     }
 
     fn call_mut(&mut self, id: &str) -> Option<&mut Call> {
-        self.calls.iter_mut().find(|call| call.id == id)
+        self.calls_mut().find(|call| call.id == id)
+    }
+
+    /// The call the streamed arguments belong to: the newest one, since Claude Code
+    /// sends a call's arguments right after announcing it.
+    fn last_call_mut(&mut self) -> Option<&mut Call> {
+        self.calls_mut().next_back()
+    }
+
+    fn calls_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Call> {
+        self.entries.iter_mut().filter_map(|entry| match entry {
+            Entry::Call(call) => Some(call),
+            Entry::Thought(_) => None,
+        })
+    }
+
+    /// Drop the oldest reasoning until the transcript holds no more than
+    /// [`MAX_THINKING_BYTES`] of it. A thought emptied by the cut goes with it, so an
+    /// exhausted entry never draws a blank line.
+    fn keep_thinking_tail(&mut self) {
+        let mut over = self
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                Entry::Thought(text) => text.len(),
+                Entry::Call(_) => 0,
+            })
+            .sum::<usize>()
+            .saturating_sub(MAX_THINKING_BYTES);
+        if over == 0 {
+            return;
+        }
+        for entry in self.entries.iter_mut() {
+            if over == 0 {
+                break;
+            }
+            if let Entry::Thought(text) = entry {
+                let dropped = text.len().min(over);
+                keep_tail(text, text.len() - dropped);
+                over -= dropped;
+            }
+        }
+        self.entries
+            .retain(|entry| !matches!(entry, Entry::Thought(text) if text.is_empty()));
+    }
+
+    /// Drop the oldest tool calls until no more than [`MAX_TOOL_CALLS`] are left. The
+    /// reasoning around a dropped call stays: the two are capped apart, because a long
+    /// run is long for one reason or the other and losing both would be a double cut.
+    fn keep_newest_calls(&mut self) {
+        let mut over = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, Entry::Call(_)))
+            .count()
+            .saturating_sub(MAX_TOOL_CALLS);
+        if over == 0 {
+            return;
+        }
+        self.entries.retain(|entry| match entry {
+            Entry::Call(_) if over > 0 => {
+                over -= 1;
+                false
+            }
+            _ => true,
+        });
     }
 
     fn text(&self) -> String {
@@ -980,23 +1096,28 @@ impl Answer {
     /// is FOR), then an answer that has started arriving, then reasoning.
     fn progress(&self) -> Progress {
         let text = self.text();
-        let activity = self.calls.last().map(|call| Activity {
-            tool: call.name.clone(),
-            target: call.target.clone(),
-            done: call.done,
+        let steps = self
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                Entry::Thought(thought) => Step::Thought(thought.clone()),
+                Entry::Call(call) => Step::Tool(Activity {
+                    tool: call.name.clone(),
+                    target: call.target.clone(),
+                    done: call.done,
+                }),
+            })
+            .collect::<Vec<_>>();
+        let activity = steps.iter().rev().find_map(|step| match step {
+            Step::Tool(activity) => Some(activity.clone()),
+            Step::Thought(_) => None,
         });
         let phase = match &activity {
             Some(activity) if !activity.done => Phase::Working,
             _ if !text.is_empty() => Phase::Writing,
             _ => Phase::Thinking,
         };
-        Progress {
-            phase,
-            text,
-            thinking: self.thinking.clone(),
-            activity,
-            tools_used: self.calls_seen,
-        }
+        Progress { phase, text, steps, activity, tools_used: self.calls_seen }
     }
 }
 
@@ -1452,21 +1573,56 @@ mod tests {
             apply_line(CLAUDE, &line, &mut answer);
         }
         let progress = answer.progress();
-        assert_eq!(progress.thinking, "let me check the port");
+        // Two deltas, one thought: the reasoning is a text that grows, not a list of
+        // fragments — a UI that drew one row per delta would flicker a row a token.
+        assert_eq!(progress.steps, vec![Step::Thought("let me check the port".into())]);
+        assert_eq!(progress.thinking(), "let me check the port");
         // Reasoning is never part of the answer that goes to Teams.
         assert_eq!(progress.text, "");
         assert_eq!(progress.phase, Phase::Thinking);
+    }
+
+    /// The shape the whole streaming surface is built on: what the model said, then what
+    /// it did about it, then what it said next — in that order, in one list.
+    #[test]
+    fn the_transcript_interleaves_the_reasoning_with_the_calls_that_followed_it() {
+        let mut answer = Answer::default();
+        answer.apply(Update::Thinking("the port is a constant".into()));
+        apply_line(CLAUDE, CLAUDE_TOOL_START, &mut answer);
+        apply_line(CLAUDE, CLAUDE_TOOL_RESULT, &mut answer);
+        answer.apply(Update::Thinking("that is 19420".into()));
+        assert_eq!(
+            answer.progress().steps,
+            vec![
+                Step::Thought("the port is a constant".into()),
+                Step::Tool(Activity { tool: "Read".into(), target: String::new(), done: true }),
+                Step::Thought("that is 19420".into()),
+            ]
+        );
+        // And the call it names is the one the reader is waiting on — the newest.
+        assert_eq!(answer.progress().activity.expect("a tool").tool, "Read");
     }
 
     #[test]
     fn only_the_tail_of_the_reasoning_is_kept() {
         let mut answer = Answer::default();
         answer.apply(Update::Thinking("é".repeat(MAX_THINKING_BYTES)));
+        // A call between the two, so the tail is dropped across entries rather than
+        // inside one: an exhausted thought goes, and the call it explained stays.
+        answer.apply(Update::Tool { id: "c1".into(), name: "Grep".into(), target: "x".into() });
         answer.apply(Update::Thinking("the end".into()));
-        let thinking = answer.progress().thinking;
+        let progress = answer.progress();
+        let thinking = progress.thinking();
         assert!(thinking.len() <= MAX_THINKING_BYTES);
         // The latest reasoning is what a reader is shown, so it must survive.
         assert!(thinking.ends_with("the end"), "{thinking}");
+        assert!(
+            progress.steps.iter().any(|step| matches!(step, Step::Tool(_))),
+            "the calls are capped apart from the reasoning: {:?}",
+            progress.steps
+        );
+        // No blank thought is left where the cut emptied one.
+        assert!(!progress.steps.contains(&Step::Thought(String::new())));
     }
 
     #[test]
@@ -1479,11 +1635,20 @@ mod tests {
                 target: format!("pattern-{i}"),
             });
         }
-        assert_eq!(answer.calls.len(), MAX_TOOL_CALLS);
-        assert_eq!(answer.progress().tools_used, MAX_TOOL_CALLS + 10);
-        // The newest call is the one on screen.
+        let progress = answer.progress();
+        assert_eq!(progress.steps.len(), MAX_TOOL_CALLS);
+        assert_eq!(progress.tools_used, MAX_TOOL_CALLS + 10);
+        // The oldest calls are the ones dropped, so the transcript ends on the newest.
         assert_eq!(
-            answer.progress().activity.expect("a tool").target,
+            progress.steps.first(),
+            Some(&Step::Tool(Activity {
+                tool: "Grep".into(),
+                target: "pattern-10".into(),
+                done: false,
+            }))
+        );
+        assert_eq!(
+            progress.activity.expect("a tool").target,
             format!("pattern-{}", MAX_TOOL_CALLS + 9)
         );
     }

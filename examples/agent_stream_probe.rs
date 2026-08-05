@@ -113,7 +113,10 @@ async fn main() -> Result<()> {
                         if a.done { " ✓" } else { "" }
                     ))
                     .unwrap_or_default(),
-                if current.thinking.is_empty() { String::new() } else { " (reasoning)".into() },
+                match current.thinking().chars().count() {
+                    0 => String::new(),
+                    n => format!(" ({n} chars of reasoning over {} steps)", current.steps.len()),
+                },
             );
             // Only the answer is worth an edit: Teams sees the message, not the phase.
             if current.text.trim().is_empty() || current.text == posted {
