@@ -101,6 +101,30 @@ CREATE TABLE IF NOT EXISTS person_overrides (
     avatar_bytes        BLOB,
     updated_at          INTEGER NOT NULL DEFAULT 0
 );
+-- Custom emoji: Slack-style `:name:` substitution for outbound messages. The
+-- pack is held locally (nothing pulls from a server), and each emoji is either
+-- ART (raster bytes + dimensions) or an ALIAS (pointing to another name the
+-- pack holds). A row exists only while it is one or the other; clearing both
+-- deletes it, so "no emoji" is the absence of a row. The bytes are stored
+-- verbatim; validating the type and size is the RPC's job (where a client's
+-- input arrives), exactly like `person_overrides`.
+--
+-- The bytes are held as BYTES, not as a path or a URL. A path would break the
+-- moment the user moved the file, and a URL would make rendering an emoji a
+-- network request to a third party — the same reason a mail body is stripped
+-- of remote references, and the same reason a colleague's avatar lives here
+-- as bytes. The bytes are capped at `custom_emoji::MAX_CUSTOM_EMOJI_BYTES` on
+-- the way in.
+CREATE TABLE IF NOT EXISTS custom_emoji (
+    name         TEXT PRIMARY KEY,
+    alias_of     TEXT NOT NULL DEFAULT '',
+    content_type TEXT NOT NULL DEFAULT '',
+    bytes        BLOB,
+    width        INTEGER NOT NULL DEFAULT 0,
+    height       INTEGER NOT NULL DEFAULT 0,
+    source       TEXT NOT NULL DEFAULT '',
+    added_ms     INTEGER NOT NULL DEFAULT 0
+);
 -- Team channels, kept SEPARATE from `conversations` so channel posts never mix
 -- into the chat list. A channel's messages still live in the shared `messages`
 -- table keyed by its thread id, so open/backfill/send/react reuse the same
@@ -447,7 +471,7 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// v13 adds `sender_icons`, the icon of an organisation that mails the user (see
 /// [`Store::sender_icon`]). A whole new table rather than columns, and additive: an
 /// older binary never names it.
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -3966,6 +3990,136 @@ impl Store {
         Ok(())
     }
 
+    /// Every custom emoji in the pack, ordered by name ascending, bytes excluded.
+    pub fn custom_emoji(&self) -> Result<Vec<crate::custom_emoji::CustomEmoji>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT name, alias_of, content_type, width, height, source, added_ms
+             FROM custom_emoji ORDER BY name ASC"
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::custom_emoji::CustomEmoji {
+                name: r.get(0)?,
+                alias_of: r.get(1)?,
+                content_type: r.get(2)?,
+                width: r.get(3)?,
+                height: r.get(4)?,
+                source: r.get(5)?,
+                added_ms: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The raster art for one custom emoji: `(content_type, bytes)`, following one
+    /// alias hop. Returns `None` when the name is not in the pack or when an alias
+    /// points at a name that does not exist.
+    pub fn custom_emoji_art(&self, name: &str) -> Result<Option<(String, Vec<u8>)>> {
+        // ponytail: follow one hop, an alias may not point at an alias
+        let row: Option<(String, String, Option<Vec<u8>>)> = self.conn
+            .query_row(
+                "SELECT alias_of, content_type, bytes FROM custom_emoji WHERE name = ?1",
+                params![name],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+
+        match row {
+            None => Ok(None),
+            Some((alias_of, _, _)) if !alias_of.is_empty() => {
+                // This row is an alias; follow one hop to the target.
+                let target: Option<(String, Vec<u8>)> = self.conn
+                    .query_row(
+                        "SELECT content_type, bytes FROM custom_emoji
+                         WHERE name = ?1 AND alias_of = ''",
+                        params![alias_of],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                Ok(target)
+            }
+            Some((_, content_type, Some(bytes))) => {
+                // This row holds art directly.
+                Ok(Some((content_type, bytes)))
+            }
+            Some((_, _, None)) => Ok(None),
+        }
+    }
+
+    /// Set — or with both `None`, remove — one custom emoji. Exactly one of `art` or
+    /// `alias_of` must be present; both or neither is refused. An alias may not point
+    /// at an alias. The name is validated, and dimensions are capped. Validating the
+    /// byte cap and content type is the RPC's job (where a client's input arrives),
+    /// exactly like `set_person_avatar`.
+    pub fn set_custom_emoji(
+        &self,
+        name: &str,
+        art: Option<(&str, &[u8], u32, u32)>,
+        alias_of: Option<&str>,
+        source: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            crate::custom_emoji::is_valid_name(name),
+            "invalid custom emoji name: {name}"
+        );
+
+        match (art, alias_of) {
+            (Some((content_type, bytes, width, height)), None) => {
+                anyhow::ensure!(
+                    width <= crate::custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION,
+                    "emoji width {width} exceeds {}", crate::custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
+                );
+                anyhow::ensure!(
+                    height <= crate::custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION,
+                    "emoji height {height} exceeds {}", crate::custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
+                );
+                self.exec(
+                    "INSERT INTO custom_emoji (name, alias_of, content_type, bytes, width, height, source, added_ms)
+                     VALUES (?1, '', ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(name) DO UPDATE SET
+                        alias_of = '', content_type = ?2, bytes = ?3,
+                        width = ?4, height = ?5, source = ?6, added_ms = ?7",
+                    params![name, content_type, bytes, width, height, source, now_ms],
+                )?;
+            }
+            (None, Some(target)) => {
+                // An alias may not point at an alias.
+                let target_row: Option<String> = self.conn
+                    .query_row(
+                        "SELECT alias_of FROM custom_emoji WHERE name = ?1",
+                        params![target],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                anyhow::ensure!(
+                    target_row == Some(String::new()),
+                    "an alias may not point at an alias"
+                );
+                self.exec(
+                    "INSERT INTO custom_emoji (name, alias_of, content_type, bytes, width, height, source, added_ms)
+                     VALUES (?1, ?2, '', NULL, 0, 0, ?3, ?4)
+                     ON CONFLICT(name) DO UPDATE SET
+                        alias_of = ?2, content_type = '', bytes = NULL,
+                        width = 0, height = 0, source = ?3, added_ms = ?4",
+                    params![name, target, source, now_ms],
+                )?;
+            }
+            (None, None) => {
+                anyhow::bail!("a custom emoji is either art or an alias");
+            }
+            (Some(_), Some(_)) => {
+                anyhow::bail!("a custom emoji is either art or an alias, not both");
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove one custom emoji. Returns `true` when it was there, `false` when it was not.
+    pub fn remove_custom_emoji(&self, name: &str) -> Result<bool> {
+        let count = self.exec("DELETE FROM custom_emoji WHERE name = ?1", params![name])?;
+        Ok(count > 0)
+    }
+
     /// Everybody who has written in a conversation, most recent contributor first:
     /// their MRI and the display name their newest message carries (empty when we
     /// never captured one), resolved through the user's own nickname for them.
@@ -4344,7 +4498,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (13, 0x1381_4ce2_589a_1a10);
+        const PINNED: (i64, u64) = (14, 0xc4a6_c768_8fef_28a7);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -7199,5 +7353,62 @@ mod tests {
         s.begin_agent_run(&a_run("2001", 9_000)).unwrap();
         assert!(!s.take_abandoned_agent_run("19:c@thread.v2", "2001", 5_000).unwrap());
         assert_eq!(s.abandoned_agent_runs(i64::MAX).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_custom_emoji_round_trips_with_its_bytes() {
+        let s = Store::open_in_memory().unwrap();
+        let png: &[u8] = &[0x89, 0x50, 0x4E, 0x47];
+        s.set_custom_emoji("shipit", Some(("image/png", png, 128, 128)), None, "upload", 100).unwrap();
+        let all = s.custom_emoji().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].name, "shipit");
+        assert_eq!(all[0].width, 128);
+        assert_eq!(all[0].source, "upload");
+        assert_eq!(s.custom_emoji_art("shipit").unwrap().unwrap(), ("image/png".to_string(), png.to_vec()));
+    }
+
+    #[test]
+    fn an_alias_resolves_to_its_targets_art() {
+        let s = Store::open_in_memory().unwrap();
+        let png: &[u8] = &[1, 2, 3];
+        s.set_custom_emoji("shipit", Some(("image/png", png, 64, 64)), None, "upload", 100).unwrap();
+        s.set_custom_emoji("ship", None, Some("shipit"), "upload", 101).unwrap();
+        assert_eq!(s.custom_emoji_art("ship").unwrap().unwrap().1, png.to_vec());
+    }
+
+    #[test]
+    fn an_alias_never_points_at_an_alias() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_custom_emoji("shipit", Some(("image/png", &[1], 8, 8)), None, "upload", 100).unwrap();
+        s.set_custom_emoji("ship", None, Some("shipit"), "upload", 101).unwrap();
+        assert!(
+            s.set_custom_emoji("s", None, Some("ship"), "upload", 102).is_err(),
+            "a chain would make one read walk an unbounded graph"
+        );
+    }
+
+    #[test]
+    fn a_name_is_validated_in_the_store_too() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.set_custom_emoji("Ship It", Some(("image/png", &[1], 8, 8)), None, "upload", 1).is_err());
+    }
+
+    #[test]
+    fn removing_one_says_whether_it_was_there() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_custom_emoji("shipit", Some(("image/png", &[1], 8, 8)), None, "upload", 100).unwrap();
+        assert!(s.remove_custom_emoji("shipit").unwrap());
+        assert!(!s.remove_custom_emoji("shipit").unwrap());
+        assert!(s.custom_emoji().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_emoji_is_either_art_or_an_alias() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(
+            s.set_custom_emoji("x", None, None, "upload", 1).is_err(),
+            "a row that is neither art nor an alias names nothing"
+        );
     }
 }
