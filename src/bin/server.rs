@@ -7495,9 +7495,16 @@ async fn run_task_scan(ctx: &Ctx) -> Result<usize> {
 // line cannot state that, and the write token is never in its environment. What is left
 // is a RESOURCE trigger the user does not control — a colleague can cause an agent run
 // to be spent — and the three numbers below are the whole of what bounds it: one run per
-// burst rather than per message ({@link TASK_SCAN_DEBOUNCE}), a ceiling per hour
-// ({@link TASK_SCAN_MAX_PER_HOUR}), and one of this machine's backends at a time
-// ({@link TASK_SCAN_LEASE}).
+// burst rather than per message ({@link TASK_SCAN_DEBOUNCE}), a ceiling per PROCESS per
+// hour ({@link TASK_SCAN_MAX_PER_HOUR}), and claims spaced a lease apart across this
+// machine's backends ({@link TASK_SCAN_LEASE}).
+//
+// So the machine-wide figure is not the per-process one. With the released build running
+// beside the staged one (§ Running the released build beside the staged one) each keeps its
+// own count of 4, and the lease only guarantees their claims are ten minutes apart — which
+// works out at about 6 an hour between them, not 4 and not 8. Price the cost off that
+// number, and see {@link TASK_SCAN_LEASE} for why an overlap is harmless rather than
+// prevented.
 
 /// How long the first ask waits before the scan it armed runs, so a conversation costs
 /// one run rather than one per message. It is measured from that FIRST hit and never
@@ -7510,18 +7517,36 @@ const TASK_SCAN_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
 /// deadline is a fact the loop can simply read.
 const TASK_SCAN_TICK: Duration = Duration::from_secs(30);
 
-/// How many automatic scans this process will start inside one window. The button in the
-/// panel is deliberately not counted here: a run the user asked for is the user.
+/// How many automatic scans THIS PROCESS will start inside one window — never a machine-wide
+/// figure, since the ring it is counted over lives in this process's memory and the backend
+/// beside it keeps its own (see the block header for what the two come to together). The
+/// button in the panel is deliberately not counted at all: a run the user asked for is the
+/// user.
 const TASK_SCAN_MAX_PER_HOUR: usize = 4;
 
 /// The window {@link TASK_SCAN_MAX_PER_HOUR} is counted over, in milliseconds.
 const TASK_SCAN_WINDOW_MS: i64 = 3_600_000;
 
-/// How long the store-wide claim is held. Long enough that a slow run keeps the lease it
-/// took, short enough that a backend killed mid-scan does not hold it against its sibling
-/// for the rest of the day. Nothing releases it early, on purpose: a lease somebody has to
-/// remember to drop is worse than one that expires, and the sibling losing a few minutes of
-/// scanning costs nothing.
+/// How long the store-wide claim is held: it SPACES claims, and it does not serialise runs.
+///
+/// Two backends share this store and both come due on the same window, so what this buys is
+/// that their claims are at least this far apart. It cannot buy more: `agent::run` is bounded
+/// by `RUN_IDLE_TIMEOUT` (30 min of silence) and `RUN_MAX_DURATION` (8 h), both far longer
+/// than this, so a slow run outlives its own lease and the sibling may then claim and start a
+/// second one over the same candidates.
+///
+/// That overlap is harmless rather than prevented, and the two halves that make it so are
+/// worth naming because they are what let this number stay small: `tasks_one_per_source`
+/// makes a duplicate row impossible, so the second run writes nothing and honestly reports
+/// `found: 0`; and the watermark moves only when a run WRITES, so nothing is lost either. The
+/// cost of an overlap is one wasted run — which is what a lease long enough to cover 8 hours
+/// would trade for a machine that scans nothing for 8 hours after one backend is killed.
+///
+/// Ten minutes is therefore sized against the SPACING, not against a run: long enough that
+/// two backends coming due together do not both scan, short enough that a backend killed
+/// mid-scan does not hold it against its sibling for the rest of the day. Nothing releases it
+/// early, on purpose: a lease somebody has to remember to drop is worse than one that
+/// expires, and the sibling losing a few minutes of scanning costs nothing.
 const TASK_SCAN_LEASE: Duration = Duration::from_secs(10 * 60);
 
 /// What this PROCESS knows about the automatic scan: when the next one is due, and when it
@@ -7570,6 +7595,20 @@ fn task_scan_is_allowed(recent_starts: &[i64], now_ms: i64) -> bool {
     recent_starts.iter().filter(|at| **at > window).count() < TASK_SCAN_MAX_PER_HOUR
 }
 
+/// Should this tick start a scan: is one armed and due, and may this process spend it?
+///
+/// It takes the schedule by SHARED reference and that is the load-bearing part, not a
+/// detail of the signature: the decision cannot consume the arming. So a tick the CAP
+/// refuses leaves the deadline exactly where it is, and the run happens when the window
+/// slides rather than waiting for somebody to write again — which is what keeps the cap a
+/// ceiling instead of a ratchet. If a refusal cleared the deadline, a colleague typing once
+/// more would arm a fresh window, and their next message would buy the run this one was
+/// refused.
+fn task_scan_is_due(schedule: &TaskScanSchedule, now: Instant, now_ms: i64) -> bool {
+    schedule.due.is_some_and(|due| due <= now)
+        && task_scan_is_allowed(&schedule.recent_starts, now_ms)
+}
+
 /// A live message has landed: arm a scan when it reads like somebody asked for something.
 ///
 /// Called for every inbound frame, so it costs an uncontended lock and, at most, one strip
@@ -7579,6 +7618,13 @@ fn task_scan_is_allowed(recent_starts: &[i64], now_ms: i64) -> bool {
 /// It filters by nothing but the words — not the sender, not the conversation — because
 /// the candidate sweep already decides whose messages count and from where, and a second
 /// opinion here is exactly the drift that one spelling exists to prevent.
+///
+/// **The arming is a HINT; the watermark is the durable record.** It sits behind a fresh
+/// insert, so a sibling backend winning that race means nothing arms for this message — and
+/// nothing is lost, because the watermark has not moved and the next actionable message's
+/// scan reads these candidates too. What is unbounded is only the LATENCY until one arrives,
+/// which is why nothing downstream may treat an arming as a promise that a window will be
+/// scanned.
 fn arm_task_scan(ctx: &Ctx, message: &Message) {
     // A read-only backend never arms and never scans: a screenshot backend must not spend
     // an agent run on the user's behalf. `spawn_task_scan` and `run_task_scan` both refuse
@@ -7608,13 +7654,18 @@ fn spawn_task_scan(ctx: Ctx) {
             tokio::time::sleep(TASK_SCAN_TICK).await;
             let now = now_ms();
             {
-                let Ok(schedule) = ctx.task_scan.lock() else { continue };
-                // A cap that refuses leaves the deadline ARMED: those candidates are still
-                // unread, so the run happens when the window slides rather than waiting for
-                // somebody to write again.
-                if !schedule.due.is_some_and(|due| due <= Instant::now())
-                    || !task_scan_is_allowed(&schedule.recent_starts, now)
-                {
+                let Ok(schedule) = ctx.task_scan.lock() else {
+                    // A poisoned lock never heals, so this loop would spin here for the life
+                    // of the process with the feature quietly off and nothing said. One line,
+                    // and stop: `arm_task_scan` cannot take it either, so there is nothing
+                    // left for a later tick to find.
+                    eprintln!(
+                        "[tasks] the scan schedule is unreadable (poisoned lock) — \
+                         no message will arm a scan in this process again"
+                    );
+                    return;
+                };
+                if !task_scan_is_due(&schedule, Instant::now(), now) {
                     continue;
                 }
             }
@@ -7629,6 +7680,8 @@ fn spawn_task_scan(ctx: Ctx) {
                     false
                 }
             };
+            // The check above already proved this lock healthy, and nothing between them
+            // panics while holding it, so there is no second poisoned branch to report.
             if let Ok(mut schedule) = ctx.task_scan.lock() {
                 schedule.due = None;
                 if claimed {
@@ -9812,13 +9865,14 @@ mod tests {
         assert_eq!(from_mail.source_conversation_id, "");
         assert_eq!(from_mail.source_message_id, "");
 
+        assert_eq!(from_mail.asked_by_mri, "", "a mail names its sender by address, not by mri");
+
         // The SAME window recorded again — which is what a manual scan racing an automatic
         // one really is, since the watermark only moves once a run has written. The count is
         // what the panel is told it found, so it must be what LANDED and not what was asked
         // for: the rows are one per source, so this window adds none.
         assert_eq!(record_task_scan(&store, &found, answer, 43).unwrap(), 0);
         assert_eq!(store.tasks().unwrap().len(), 2, "and the user is shown each ask once");
-        assert_eq!(from_mail.asked_by_mri, "", "a mail names its sender by address, not by mri");
     }
 
     /// A store that has never scanned is one whose backlog is years deep — 11 739
@@ -9930,14 +9984,22 @@ mod tests {
         );
     }
 
-    /// Long enough that a slow run keeps the lease it took, short enough that a backend
-    /// killed mid-scan does not hold it against its sibling for the rest of the day.
-    /// Nothing releases it early, on purpose: a lease somebody must remember to drop is
-    /// worse than one that expires.
+    /// The lease spaces two backends' CLAIMS; it does not serialise their runs, and this
+    /// pins that the two are not confused. It is deliberately far shorter than a run may
+    /// last, so an overlap is possible by construction — made harmless by
+    /// `tasks_one_per_source` and by a watermark that moves only on a write — and a lease
+    /// stretched to cover 8 hours would instead leave the machine scanning nothing for 8
+    /// hours after one backend was killed. Nothing releases it early either: a lease
+    /// somebody must remember to drop is worse than one that expires.
     #[test]
-    fn the_lease_outlives_a_slow_run_but_not_a_dead_backend() {
+    fn the_lease_spaces_two_claims_and_never_pretends_to_cover_a_run() {
         assert!(TASK_SCAN_LEASE >= std::time::Duration::from_secs(300));
         assert!(TASK_SCAN_LEASE <= std::time::Duration::from_secs(3_600));
+        assert!(
+            TASK_SCAN_LEASE < agent::RUN_IDLE_TIMEOUT && TASK_SCAN_LEASE < agent::RUN_MAX_DURATION,
+            "a lease shorter than a run is the fact the doc rests on: if this ever inverts, \
+             the prose about spacing rather than serialising is what has to change"
+        );
     }
 
     /// The FIRST ask arms the window and the ones after it do not move it. A debounce
@@ -9973,6 +10035,60 @@ mod tests {
             1,
             "each start here is a whole window past the one before it"
         );
+
+        // And the realistic shape, which the boundary case above says nothing about: starts
+        // crowded INSIDE one window, a second apart. The trim is by age, so it drops none of
+        // them — what holds the ring down here is the CAP, and the loop reaches `record_start`
+        // only through it. So this walks the same gate the loop does; recording blind would
+        // measure a sequence the process cannot produce.
+        let mut crowded = TaskScanSchedule::default();
+        for n in 0..TASK_SCAN_MAX_PER_HOUR as i64 * 3 {
+            let at = n * 1_000;
+            if task_scan_is_allowed(&crowded.recent_starts, at) {
+                crowded.record_start(at);
+            }
+            assert!(
+                crowded.recent_starts.len() <= TASK_SCAN_MAX_PER_HOUR + 1,
+                "the ring grew to {} inside one window",
+                crowded.recent_starts.len()
+            );
+        }
+        assert_eq!(
+            crowded.recent_starts.len(),
+            TASK_SCAN_MAX_PER_HOUR,
+            "a busy window is bounded by the cap, which is the half the age trim cannot do"
+        );
+    }
+
+    /// The cap must be a CEILING and never a ratchet: a tick it refuses leaves the deadline
+    /// armed, so the run happens when the window slides. Were a refusal to clear it, a
+    /// colleague writing once more would arm a fresh window and their next message would buy
+    /// the run this one was refused — which is the one way somebody else's typing could get
+    /// past the bound.
+    #[test]
+    fn a_tick_the_cap_refuses_leaves_the_scan_armed() {
+        let now = Instant::now();
+        let now_ms = 10 * TASK_SCAN_WINDOW_MS;
+        let armed = |starts: Vec<i64>| TaskScanSchedule {
+            due: Some(now - Duration::from_secs(1)),
+            recent_starts: starts,
+        };
+
+        let ready = armed(vec![]);
+        assert!(task_scan_is_due(&ready, now, now_ms), "armed, due and unspent: this tick runs");
+
+        let spent = armed((0..TASK_SCAN_MAX_PER_HOUR as i64).map(|i| now_ms - i * 1_000).collect());
+        assert!(!task_scan_is_due(&spent, now, now_ms), "the cap refuses");
+        assert_eq!(spent.due, ready.due, "and the refusal must not have consumed the arming");
+        // The window slides and the SAME schedule runs, without anybody writing again.
+        assert!(task_scan_is_due(&spent, now, now_ms + TASK_SCAN_WINDOW_MS + 1));
+
+        // The other two refusals, for completeness: nothing armed, and armed but not yet due.
+        let idle = TaskScanSchedule::default();
+        assert!(!task_scan_is_due(&idle, now, now_ms), "nothing armed it");
+        let waiting =
+            TaskScanSchedule { due: Some(now + TASK_SCAN_DEBOUNCE), ..Default::default() };
+        assert!(!task_scan_is_due(&waiting, now, now_ms), "the debounce has not elapsed");
     }
 
     /// The automatic scan is WIRED, and this is the only test that can say so: every other
