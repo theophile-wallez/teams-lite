@@ -438,10 +438,40 @@ fn resolve_port(configured: Option<&str>, read_only: bool) -> u16 {
     }
 }
 
+/// The port this process listens on, resolved once from the environment.
+fn own_port() -> u16 {
+    let configured = std::env::var("TEAMS_LITE_PORT").ok();
+    resolve_port(configured.as_deref(), read_only())
+}
+
 /// The address this process binds, from the environment.
 fn bind_addr() -> String {
-    let configured = std::env::var("TEAMS_LITE_PORT").ok();
-    format!("127.0.0.1:{}", resolve_port(configured.as_deref(), read_only()))
+    format!("127.0.0.1:{}", own_port())
+}
+
+/// Where this backend keeps the endpoint id it registers ONE trouter worker under.
+///
+/// An endpoint id is what the real-time service routes a live message to, and a second
+/// registration of the same id REPLACES the first — the service then pushes every
+/// message, typing signal and read receipt to whichever backend registered last, and
+/// the other one goes silent while its reads keep working. That is not a hypothetical:
+/// the staged service (19420) and the released build (19422) run side by side on this
+/// machine (§ Running the released build beside the staged one), on ONE store — so an
+/// id derived from the store's path alone was one id for two backends, and the user's
+/// own app stopped showing a message until the page was reloaded, because the other
+/// install was holding the feed.
+///
+/// So the id is per PORT, which is exactly what tells this machine's backends apart
+/// (see the ports table in AGENTS.md), and per WORKER, because the messaging and calling
+/// workers are two endpoints of their own.
+///
+/// EVERY port is named, the default one included, and that is deliberate: the build that
+/// shares this machine may predate this fix — the released one does — and it still holds
+/// the unqualified `…​.epid`. A backend that kept that name would keep losing its feed to
+/// it. The cost is one fresh registration per install, once.
+fn endpoint_id_path(db_path: &str, port: u16, worker: &str) -> std::path::PathBuf {
+    let stem = if worker.is_empty() { "epid".to_string() } else { format!("{worker}-epid") };
+    std::path::Path::new(db_path).with_extension(format!("{port}.{stem}"))
 }
 
 /// Environment variable a launcher can use to pin the write token itself (rather
@@ -6653,8 +6683,10 @@ impl Ctx {
         let endpoints = calling::endpoints(&session)?;
         // A registration id of its own, persisted beside the messaging one: two
         // workers are two endpoints, and one id would make the second registration
-        // replace the first.
-        let epid_path = std::path::Path::new(self.db_path.as_str()).with_extension("calling-epid");
+        // replace the first. Per BACKEND as well as per worker, for the same reason
+        // (see `endpoint_id_path`) — two calling registrations on one machine would
+        // ring both, and the second would silence the first.
+        let epid_path = endpoint_id_path(self.db_path.as_str(), own_port(), "calling");
         let epid = trouter::load_or_create_epid(&epid_path);
         let endpoint = trouter::Endpoint::calling(&endpoints.trouter, &endpoints.registrar);
         eprintln!(
@@ -7173,7 +7205,9 @@ fn short_cause_id() -> String {
 /// The trouter re-acquires fresh credentials before every (re)connection via the
 /// `Ctx` credential provider, so the real-time feed survives token expiry.
 fn spawn_realtime(ctx: Ctx, db_path: String) {
-    let epid_path = std::path::Path::new(&db_path).with_extension("epid");
+    // One id per backend, never one per store: two backends registering the same id
+    // take the live feed from each other (see `endpoint_id_path`).
+    let epid_path = endpoint_id_path(&db_path, own_port(), "");
     let epid = trouter::load_or_create_epid(&epid_path);
 
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Message>>();
@@ -7254,29 +7288,41 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
                             .update_message_reactions(&m.conversation_id, &m.id, &m.reactions)
                             .unwrap_or(None)
                     };
-                    if inserted || reacted.is_some() {
-                        // Emit the authoritative stored row: on a reaction change
-                        // it is `reacted`; on a fresh insert / content edit re-read
-                        // so the broadcast still carries reactions preserved across
-                        // the change (the parsed `m` may hold the sentinel, not the
-                        // stored set).
-                        let row = reacted
-                            .or_else(|| store.get_message(&m.conversation_id, &m.id).ok().flatten())
-                            .unwrap_or_else(|| m.clone());
-                        ctx_msgs.emit("message", message_json(&row, &self_name, &self_mri));
-                        // Reach the devices no socket reaches: a phone whose Home
-                        // Screen app is closed learns about this message only through
-                        // Web Push. Only on a FRESH insert — a reaction arriving on an
-                        // old message is not news worth a lock screen.
-                        if inserted {
-                            push_live_message(
-                                &ctx_msgs, store, &row, is_channel, from_me, &self_mri,
-                            );
-                            // …and answer it, when the user summoned a local agent
-                            // with it. Same place for the same reason: a fresh insert
-                            // is the one event that means "this message is new".
-                            agent_live_message(&ctx_msgs, store, &row, from_me, &self_mri);
-                        }
+                    // BROADCAST EVERY LIVE FRAME, whether or not this process was the
+                    // one that wrote the row.
+                    //
+                    // It used to be gated on `inserted`, which reads as "nothing
+                    // changed, so nobody needs telling" — and that is wrong the moment
+                    // two backends share one store (§ Running the released build beside
+                    // the staged one). Both hold a feed, both ingest the same frame, and
+                    // the one that loses the insert by a millisecond would tell its own
+                    // pages nothing: the message would sit in the store, invisible until
+                    // a reload. The store's row is shared; what a page has SEEN is not.
+                    //
+                    // A re-delivered frame costs nothing, because a client merges a live
+                    // message into its history by id (`appendLiveMessage`).
+                    //
+                    // Emit the authoritative stored row: on a reaction change it is
+                    // `reacted`; otherwise re-read, so the broadcast carries reactions
+                    // preserved across the change (the parsed `m` may hold the sentinel,
+                    // not the stored set).
+                    let row = reacted
+                        .or_else(|| store.get_message(&m.conversation_id, &m.id).ok().flatten())
+                        .unwrap_or_else(|| m.clone());
+                    ctx_msgs.emit("message", message_json(&row, &self_name, &self_mri));
+                    // Reach the devices no socket reaches: a phone whose Home Screen app
+                    // is closed learns about this message only through Web Push. Only on
+                    // a FRESH insert — a reaction arriving on an old message is not news
+                    // worth a lock screen, and the backend that already stored this one
+                    // has already pushed it (the delivery is claimed either way, in
+                    // `push_deliveries`).
+                    if inserted {
+                        push_live_message(&ctx_msgs, store, &row, is_channel, from_me, &self_mri);
+                        // …and answer it, when the user summoned a local agent with it.
+                        // Same place for the same reason: a fresh insert is the one event
+                        // that means "this message is new", and the trigger is claimed in
+                        // the store so two backends answer it once.
+                        agent_live_message(&ctx_msgs, store, &row, from_me, &self_mri);
                     }
                 }
                 if activity_changed {
@@ -8465,6 +8511,74 @@ mod tests {
         // Junk falls back to the mode's default rather than panicking.
         assert_eq!(resolve_port(Some("nope"), false), DEFAULT_PORT);
         assert_eq!(resolve_port(Some("0"), true), READ_ONLY_PORT);
+    }
+
+    /// The live feed follows the ENDPOINT ID, and a second registration of one id
+    /// replaces the first — so two backends on this machine must never derive the same
+    /// id from the store they share. They did: the released build (19422) took the feed
+    /// from the staged service (19420), and the user's own app stopped showing a message
+    /// until the page was reloaded. Reads never noticed, which is what made it invisible.
+    #[test]
+    fn each_backend_registers_a_messaging_endpoint_of_its_own() {
+        let db = "/home/u/.local/share/teams-lite/teams-lite.sqlite";
+        let staged = endpoint_id_path(db, DEFAULT_PORT, "");
+        let released = endpoint_id_path(db, 19422, "");
+        let read_only = endpoint_id_path(db, READ_ONLY_PORT, "");
+        assert_ne!(staged, released, "two backends must not share one endpoint id");
+        assert_ne!(staged, read_only, "a read-only backend must not take the user's feed");
+        assert_ne!(released, read_only);
+
+        // Every port is named, the default one included: a build sharing this machine may
+        // predate this fix and still hold the unqualified `teams-lite.epid`, and a backend
+        // that kept that name would keep losing its feed to it.
+        assert_eq!(staged.file_name().unwrap(), "teams-lite.19420.epid");
+        assert_eq!(released.file_name().unwrap(), "teams-lite.19422.epid");
+
+        // A worker is an endpoint too: the calling registration is its own, per backend.
+        assert_eq!(
+            endpoint_id_path(db, DEFAULT_PORT, "calling").file_name().unwrap(),
+            "teams-lite.19420.calling-epid"
+        );
+        for port in [DEFAULT_PORT, 19422, READ_ONLY_PORT] {
+            assert_ne!(
+                endpoint_id_path(db, port, ""),
+                endpoint_id_path(db, port, "calling"),
+                "messaging and calling are two endpoints"
+            );
+        }
+    }
+
+    /// A live frame reaches the pages of the backend that RECEIVED it, whether or not
+    /// that backend was the one that wrote the row. Two backends share one store, so
+    /// "somebody already inserted it" says nothing about what our own clients have seen
+    /// — gating the broadcast on the insert left the loser of that race silent.
+    #[test]
+    fn a_live_message_is_broadcast_even_when_another_backend_stored_it_first() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let task = code
+            .split("// consume trouter messages: persist + broadcast.")
+            .nth(1)
+            .expect("the live-message task")
+            .split("// trouter status -> event")
+            .next()
+            .expect("the task ends before the status one");
+
+        let emit_at = task.find("emit(\"message\"").expect("the task broadcasts a message");
+        let push_at = task.find("push_live_message(").expect("the task pushes");
+        assert!(
+            !task.contains("if inserted || reacted.is_some() {"),
+            "the message broadcast is gated on this process having written the row. Two \
+             backends share one store, so the one that loses the insert by a millisecond \
+             would show its own pages nothing until a reload."
+        );
+        // Push and the agent trigger stay behind the insert: those are per-machine
+        // actions, and the backend that stored the message has already taken them.
+        assert!(emit_at < push_at, "the broadcast must not sit inside the insert-only branch");
+        assert!(
+            task[emit_at..].contains("if inserted {"),
+            "a push (and an agent answer) must still happen only on a fresh insert"
+        );
     }
 
     #[test]

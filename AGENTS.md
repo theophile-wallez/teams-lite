@@ -1405,6 +1405,25 @@ registration. Two things are deliberately NOT shared: the tailnet mapping (give 
 released one its own port if the phone should reach it) and calling, which stays off in
 that unit — two registered calling endpoints on one machine would ring both.
 
+**The REAL-TIME endpoint id is the sharpest thing they must not share, and it was the one
+bug this arrangement really cost.** The live feed follows the endpoint id, and a second
+registration of the same id REPLACES the first: the service then pushes every message,
+typing signal and read receipt to whichever backend registered last. The id was derived
+from the store's path, so one store meant one id — the released build took the feed, and
+the user's own app went live-silent. Nothing looked wrong: reads answer from the store,
+the other backend kept writing to it, so a sent message appeared only when the page was
+RELOADED. Two rules follow, and each is pinned by a test in `src/bin/server.rs`:
+
+- **One id per backend and per worker** (`endpoint_id_path`, keyed by the port, which is
+  what tells this machine's backends apart). That covers the read-only backend too: a
+  screenshot backend must not take the phone's live feed either.
+- **A live frame is broadcast by the backend that RECEIVED it**, whether or not that
+  process was the one that wrote the row. Both hold a feed and both ingest the same frame,
+  so gating the broadcast on `insert_message` returning true left the loser of that race
+  telling its own pages nothing. The store's row is shared; what a page has SEEN is not. A
+  re-delivered frame costs nothing, because a client merges by id. Push and the agent
+  answer stay behind the insert: those are per-machine actions, already claimed.
+
 ## A broken sign-in costs the LIVE feed, never the history
 
 Everything this app shows is local, so the backend serves the store whether or not it
