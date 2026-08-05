@@ -68,6 +68,14 @@ function AppInner() {
   const paneOpen =
     !!routeConversationId || !!routeMailId || onSettings || sidebarTab === "calendar";
 
+  // Whether the CalendarPane is the surface in that slot — Settings wins over it, and a
+  // conversation or a mail takes the pane over the grid. Named once because two things
+  // depend on it: the render below, and the keyboard, since that pane binds `t` to "today"
+  // on a window listener of its own and is the one place the task panel's `t` stands
+  // aside. Gating on the tab alone would have made `t` dead with a thread open beside it.
+  const onCalendar =
+    !onSettings && sidebarTab === "calendar" && !routeConversationId && !routeMailId;
+
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -176,16 +184,23 @@ function AppInner() {
         }
       }
 
-      // From here down every shortcut is a BARE key, so two things disqualify the event
-      // first, and one guard does it for all of them. Focus in a field means the user is
+      // From here down every shortcut is a BARE key, so three things disqualify the event
+      // first, and ONE guard does it for all of them. Focus in a field means the user is
       // writing — `isContentEditable` is what covers the composer, which is a TipTap
       // contenteditable rather than a <textarea>, and which the list keys below only
-      // avoided because a composer exists on the routes they already skip. And a held
-      // modifier means a shortcut: Cmd+K must never also move the selection up.
+      // avoided because a composer exists on the routes they already skip. A floating layer
+      // owns the keyboard while it has the focus, and a menu's own typeahead is letters, so
+      // `t` inside one must never reach the app behind it (`dialog` is spelled beside the
+      // two roles because the picture lightbox is a NATIVE <dialog>, whose role is implicit
+      // and so unmatched by an attribute selector). And a held modifier means a shortcut:
+      // Cmd+K must never also move the selection up.
       const target = e.target as HTMLElement | null;
       if (
         target &&
-        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable ||
+          target.closest('dialog,[role="dialog"],[role="menu"]'))
       ) {
         return;
       }
@@ -194,9 +209,9 @@ function AppInner() {
       // The task panel. Bare, because every modifier pair worth having is taken —
       // Cmd+K/Cmd+P are this app's, Cmd+T/Cmd+Shift+T/Cmd+J the browser's, Cmd+B bold in
       // the composer — and above the list keys, because the panel is meant to be read
-      // BESIDE an open thread. The one exception is the calendar, whose pane binds `t` to
-      // "today" on its own listener: two handlers on one key would fire both.
-      if ((e.key === "t" || e.key === "T") && sidebarTab !== "calendar") {
+      // BESIDE an open thread. The one exception is the calendar's own `t` (see
+      // `onCalendar`): two handlers on one key would fire both.
+      if ((e.key === "t" || e.key === "T") && !onCalendar) {
         e.preventDefault();
         controller.toggleTasksPanel();
         return;
@@ -230,6 +245,7 @@ function AppInner() {
       routeConversationId,
       routeMailId,
       onSettings,
+      onCalendar,
       sidebarTab,
       keyboardList,
       selectedIndex,
@@ -278,7 +294,7 @@ function AppInner() {
               chat's empty state on the right. */}
           {onSettings ? (
             <SettingsPane onBack={goToList} />
-          ) : sidebarTab === "calendar" && !routeConversationId && !routeMailId ? (
+          ) : onCalendar ? (
             <CalendarPane onBack={() => controller.setSidebarTab("chats")} />
           ) : routeMailId || (sidebarTab === "mail" && !routeConversationId) ? (
             <MailPane onBack={goToList} />

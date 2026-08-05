@@ -1852,6 +1852,20 @@ if (import.meta.main) {
       // A thread under it, because the panel's layout claim is about this pair: on a wide
       // screen it narrows the message pane instead of covering it.
       await openFirstConversation(page);
+
+      // First, the one thing about the `t` shortcut that a capture cannot show: it must NOT
+      // fire while a floating layer owns the keyboard, because a menu's own typeahead is
+      // letters. Pressing it with the message menu open would otherwise toggle the panel
+      // behind the menu — invisibly, which is how it would have reached a user.
+      await openMessageActions(page);
+      await page.keyboard.press("t");
+      await page.waitForTimeout(200);
+      if (await page.locator('[data-testid="tasks-panel"]').isVisible()) {
+        throw new Error("`t` opened the task panel while a menu had the keyboard");
+      }
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(300);
+
       await openTasksPanel(page);
       await page.waitForSelector('[data-testid="task-row"]');
       await shot(`${out}-light.png`);
@@ -1893,6 +1907,13 @@ if (import.meta.main) {
       await page.setViewportSize({ width: 390, height: 844 });
       await page.waitForTimeout(400);
       await shot(`${out}-mobile-light.png`);
+      // And the width the shape switches at, from below: 900px is wide enough for the
+      // two-column app and NOT wide enough to hold a thread beside a 22rem panel — the
+      // sidebar and the panel would leave some 230px of conversation — so it is the sheet
+      // too. That boundary is the whole reason the switch is at `lg` and not at `md`.
+      await page.setViewportSize({ width: 900, height: 850 });
+      await page.waitForTimeout(400);
+      await shot(`${out}-narrow-light.png`);
       await page.setViewportSize(VIEWPORT);
       await page.waitForTimeout(400);
 
@@ -1924,7 +1945,7 @@ if (import.meta.main) {
         `[preview] wrote ${out}-light.png, ${out}-panel-{light,dark}.png, ` +
           `${out}-suggested-light.png, ${out}-accepted-light.png, ` +
           `${out}-{scanning,scanned}-light.png, ` +
-          `${out}-mobile-light.png, ${out}-empty-light.png and ` +
+          `${out}-{mobile,narrow}-light.png, ${out}-empty-light.png and ` +
           `${out}-error-{light,dark}.png`,
       );
     });

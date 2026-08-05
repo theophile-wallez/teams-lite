@@ -3,7 +3,8 @@
 // ONE `<aside>`, in two shapes, and no new primitive. Wide, it is a 22rem column with a
 // left border, so opening it NARROWS the message pane instead of covering it — the whole
 // point of the panel is to be read beside a conversation. Narrow, it is a full-screen
-// sheet, because a 22rem column on a 390px phone is the phone.
+// sheet, because a 22rem column on a 390px phone is the phone. Where the two meet is
+// `WIDE_QUERY`, and the arithmetic behind that number is written down there.
 //
 // It is deliberately not a dialog and not a portal. There is no sheet or drawer in
 // components/ui, and Radix's `Dialog` would trap the focus inside the panel and mark the
@@ -46,10 +47,22 @@ import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { useAppState, useController } from "./controller-context";
 
-/** The width below which the panel is a full-screen sheet rather than a column — the
- *  `md` breakpoint the classes below switch on, spelled once so the layout and the one
- *  behaviour that depends on it (following a source, see `TaskRow`) cannot disagree. */
-const WIDE_QUERY = "(min-width: 48rem)";
+/**
+ * The width at which the panel stops being a full-screen sheet and becomes a side column.
+ *
+ * It is spelled TWICE and the two MUST agree: here, and as the `lg:` prefixes on the
+ * aside's own classes below. Tailwind's prefix is compiled from the literal, so neither can
+ * be derived from the other — the only thing holding them together is that they are ten
+ * lines apart. Change one, change the other: this query is what decides whether following a
+ * task's source closes the panel (see `TaskRow`), and a mismatch would leave a tap opening
+ * a thread behind a sheet that covers it.
+ *
+ * `lg` (64rem) rather than `md` (48rem), and the arithmetic is the reason: at 768px the
+ * sidebar's 320px plus this column's 22rem leave about 96px of message pane, which is
+ * covering the thread rather than sitting beside it — and being read beside the thread is
+ * the whole point of the wide shape. At 1024px it leaves ~352px, which is a column.
+ */
+const WIDE_QUERY = "(min-width: 64rem)";
 
 /** One row of section chrome: the label above its tasks. */
 const SECTION_LABEL =
@@ -58,6 +71,8 @@ const SECTION_LABEL =
 export function TasksPanel() {
   const controller = useController();
   const tasks = useAppState((s) => s.tasks);
+  const tasksLoaded = useAppState((s) => s.tasksLoaded);
+  const loadError = useAppState((s) => s.tasksError);
   const scan = useAppState((s) => s.taskScan);
   const calendarEvents = useAppState((s) => s.calendarEvents);
   const showDeclined = useAppState((s) => s.calendarSettings.showDeclined);
@@ -82,7 +97,12 @@ export function TasksPanel() {
   // Said of the TASKS, and only of them: today's meetings still list themselves under
   // Today, because "no tasks" and "you are in three meetings" are both true and the panel
   // must not swallow the second to state the first.
-  const noTasks = sections.every((section) => section.tasks.length === 0);
+  //
+  // And only once the list has really been READ. `tasks` is empty for the round trip after
+  // the panel opens and empty again when a first read failed, and announcing an empty plate
+  // in either case states something this page does not know — the same rule that keeps
+  // every write non-optimistic.
+  const noTasks = tasksLoaded && sections.every((section) => section.tasks.length === 0);
 
   // Every row's write funnels through here, so no control can forget to report a refusal.
   const write = (run: Promise<void>) => {
@@ -90,11 +110,17 @@ export function TasksPanel() {
     void run.catch((e: unknown) => setWriteError(failureText(e)));
   };
 
+  // One line for both failures, because they never coexist: a first read that failed leaves
+  // nothing to write to. The write is the more recent of the two, so it wins.
+  const errorLine = writeError ?? loadError;
+
   return (
     <aside
       data-testid="tasks-panel"
       aria-label="Tasks"
-      className="fixed inset-0 z-40 flex flex-col border-border bg-background md:relative md:inset-auto md:z-auto md:w-[22rem] md:shrink-0 md:border-l"
+      // The `lg:` half is the side column; everything below it is the sheet. Keep it in
+      // step with WIDE_QUERY above.
+      className="fixed inset-0 z-40 flex flex-col border-border bg-background lg:relative lg:inset-auto lg:z-auto lg:w-[22rem] lg:shrink-0 lg:border-l"
     >
       <header className="flex min-h-16 shrink-0 items-center gap-2 border-b border-border-subtle px-4 pt-[env(safe-area-inset-top)]">
         <h2 className="flex-1 truncate text-[15px] font-bold tracking-tight text-foreground">
@@ -162,12 +188,12 @@ export function TasksPanel() {
               : `Found ${scan.found} ${scan.found === 1 ? "task" : "tasks"} to look at.`}
           </p>
         )}
-        {writeError && (
+        {errorLine && (
           <p
             data-testid="tasks-error"
             className="border-b border-border-subtle px-4 py-2 text-[12px] leading-snug text-destructive"
           >
-            {writeError}
+            {errorLine}
           </p>
         )}
       </div>

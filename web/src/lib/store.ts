@@ -444,6 +444,15 @@ export type AppState = {
    *  display by `taskSections`; `dismissed` rows travel with the rest and are drawn
    *  nowhere, so a dismissal is undoable from the store rather than lost. */
   tasks: Task[];
+  /** Whether the list has been read at least once. Until it has, the panel says nothing
+   *  about being empty: `tasks` is `[]` both before the first read and when there is
+   *  genuinely nothing to do, and stating the second while in the first is a claim about a
+   *  state nothing holds. */
+  tasksLoaded: boolean;
+  /** Why the FIRST read failed, or null. A later refresh failing is deliberately silent —
+   *  the panel keeps the list it has — but a first read has nothing to keep, so it is
+   *  reported instead of leaving the panel to announce an empty plate it never read. */
+  tasksError: string | null;
   /** Whether the task panel is on screen. Local to this page: it is a view, not a
    *  setting, and a second page has its own answer. */
   tasksPanelOpen: boolean;
@@ -638,6 +647,8 @@ function initialState(): AppState {
     calendarError: null,
     openEventId: null,
     tasks: [],
+    tasksLoaded: false,
+    tasksError: null,
     // Closed, like every other surface that costs a read: the list is fetched when the
     // panel is first opened, so a user who never opens it pays nothing.
     tasksPanelOpen: false,
@@ -2484,24 +2495,40 @@ export class TeamsController {
   /** Show or hide the task panel. Opening reads the list, so the panel is the only
    *  thing that makes this app fetch tasks at all. */
   toggleTasksPanel(): void {
-    const open = !this.get().tasksPanelOpen;
-    this.set({ tasksPanelOpen: open });
-    if (open) void this.loadTasks();
+    // Closing goes through the one path that closes, so the scan's report is cleared
+    // whichever control put the panel away. Opening re-reads, which is also the retry
+    // after a first read that failed.
+    if (this.get().tasksPanelOpen) {
+      this.closeTasksPanel();
+      return;
+    }
+    this.set({ tasksPanelOpen: true });
+    void this.loadTasks();
   }
 
-  /** Close the panel (Escape, and the panel's own close button). */
+  /** Close the panel (Escape, and the panel's own close button), and drop the last scan's
+   *  report with it: a report belongs to the click it describes, and reopening the panel
+   *  must not put "Found 2 tasks…" beside a button nobody just pressed. A scan still in
+   *  flight keeps its `running`, or the button would offer a second sweep. */
   closeTasksPanel(): void {
-    this.set({ tasksPanelOpen: false });
+    this.set({
+      tasksPanelOpen: false,
+      taskScan: { running: this.get().taskScan.running, error: null, found: null },
+    });
   }
 
-  /** Re-read the whole list. Best-effort: a failure leaves what is on screen, because a
-   *  list that empties itself on a dropped socket reads as work that was lost. */
+  /** Re-read the whole list.
+   *
+   *  A REFRESH that fails keeps what is on screen: a list that empties itself on a dropped
+   *  socket reads as work that was lost. The FIRST read has nothing to keep, so its failure
+   *  is recorded — otherwise the panel would draw the empty state, which is a claim about a
+   *  list it never managed to read. */
   async loadTasks(): Promise<void> {
     try {
       const res = await this.backend.tasks();
-      this.set({ tasks: res.tasks ?? [] });
-    } catch {
-      /* ignore — the panel keeps the list it has */
+      this.set({ tasks: res.tasks ?? [], tasksLoaded: true, tasksError: null });
+    } catch (e) {
+      if (!this.get().tasksLoaded) this.set({ tasksError: errText(e) });
     }
   }
 
