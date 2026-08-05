@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Cancel01Icon } from "@hugeicons/core-free-icons";
+import { Cancel01Icon, Download04Icon } from "@hugeicons/core-free-icons";
 import {
   anchorTransform,
   clampPan,
@@ -55,6 +55,10 @@ const naturalOf = (img: HTMLImageElement | null): Size => ({
  *   returns to fit when zoomed in, and Escape closes.
  * - Two fingers pinch and one finger pans; at fit, a drag down closes. The app is
  *   used from a phone, so touch is not an afterthought.
+ * - The picture can be SAVED from here, which is the only place it can be: the
+ *   browser's own "Save image" never reaches a chat image (the message behind the
+ *   thumbnail takes the right-click and the long press, and the gestures in here
+ *   capture every pointer).
  */
 export function ImageLightbox(props: {
   src: string;
@@ -355,6 +359,27 @@ export function ImageLightbox(props: {
           cursor: view.zoom > 1 ? "grab" : "zoom-out",
         }}
       />
+      {/* Saving the picture. The browser's own "Save image" is out of reach here: on
+          the thumbnail the message behind it takes the right-click and the long press
+          (its actions menu), and in here every pointer is captured for the pan and
+          pinch gestures. The bytes are already a local blob, so this is a plain
+          download link — no fetch, no proxy call. */}
+      <a
+        href={props.src}
+        // ponytail: the alt is the attachment's own filename for a shared image and a
+        // description for a pasted one; either way a name with no extension gets one
+        // from the blob's MIME type, which is the browser's job and not ours.
+        download={props.alt}
+        aria-label={`Save image: ${props.alt}`}
+        data-testid="image-lightbox-save"
+        // The dialog captures every pointer it sees, and a captured pointer's click is
+        // retargeted to it — which would close the picture instead of saving it.
+        onPointerDown={(e) => e.stopPropagation()}
+        className="absolute right-16 top-4 flex size-10 items-center justify-center rounded-full bg-black/60 text-white shadow-card transition-colors hover:bg-black/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+        style={{ opacity: travelling ? 0 : 1, transition: `opacity ${TRAVEL_MS}ms ease-out` }}
+      >
+        <HugeiconsIcon icon={Download04Icon} className="size-5" strokeWidth={1.8} />
+      </a>
       <button
         type="button"
         aria-label="Close image preview"

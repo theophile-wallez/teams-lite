@@ -146,6 +146,31 @@ test.describe("media (images + attachments)", () => {
     await expect(lightbox).toHaveCount(0);
   });
 
+  test("saves the open picture, and stays open while doing it", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    const thumb = await loadedThumb(page);
+    const name = await thumb.getAttribute("alt");
+    await thumb.click();
+    const lightbox = page.locator('dialog[data-testid="image-lightbox"][open]');
+    await expect(lightbox).toHaveAttribute("data-phase", "open");
+
+    // The bytes are already a local blob, and the link saves them under the
+    // picture's own name — the browser's "Save image" is out of reach on a chat
+    // image (see the comment on the link).
+    const save = lightbox.locator('[data-testid="image-lightbox-save"]');
+    await expect(save).toHaveAttribute("href", /^blob:/);
+    await expect(save).toHaveAttribute("download", name!);
+
+    const download = page.waitForEvent("download");
+    await save.click();
+    expect(await (await download).suggestedFilename()).toContain(name!);
+    // The dialog captures every pointer for its own gestures, so a click that
+    // reached them would close the picture instead of saving it.
+    await expect(lightbox).toBeVisible();
+  });
+
   test("zooms the open picture in and out with the wheel", async ({ page }) => {
     await gotoApp(page);
     await openByPalette(page, "Media Gallery");
