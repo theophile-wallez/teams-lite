@@ -30,13 +30,23 @@
 // produces a real offer with a real fingerprint and real candidates while nobody's actual
 // microphone is opened. That is the whole point: the SDP is what is under test.
 //
+// **And it captures SILENCE, not Chrome's tone.** The fake device's default is a loud
+// repeating beep, and this meeting has real people in it — the user asked for it to stop
+// after the third run, which is a fair thing to ask of a driver that joins a room they are
+// sitting in. `--tone` brings it back for the one question silence cannot answer: whether
+// the audio path carries anything at all (see {@link fakeAudioArgs}).
+//
 // Usage:
 //
 //   cd web && bun run join-live            # join, watch, hang up, print the timeline
 //   cd web && bun run join-live -- --local # the same meeting through this machine's front
 //   cd web && bun run join-live -- --hold 45   # stay 45s before hanging up
+//   cd web && bun run join-live -- --tone  # capture Chrome's beep instead of silence
 
 import { chromium, type Browser, type Page } from "playwright-core";
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import { findChromium, openCalendarView } from "./preview";
 import { LOCAL_ORIGIN, TAILNET_ORIGIN } from "./sandbox-live";
 
@@ -94,6 +104,51 @@ const APP_READY_TIMEOUT_MS = 60_000;
 const JOIN_BUTTON_TIMEOUT_MS = 30_000;
 /** How long to watch a joined call before hanging up, unless `--hold` says otherwise. */
 const DEFAULT_HOLD_SECONDS = 25;
+
+/** How long the silent capture file lasts. Chrome loops it, so this only has to be long
+ *  enough that the loop point is not itself a click. */
+const SILENCE_SECONDS = 10;
+
+/**
+ * What to hand Chrome for its fake microphone.
+ *
+ * Silence by default. The fake device's own signal is a repeating beep at a healthy volume,
+ * and every run of this script puts it into a real meeting with real people — so the default
+ * has to be the one that costs them nothing. The offer is unchanged either way: same real
+ * fingerprint, same real candidates, same SDP, which is what this driver exists to test.
+ *
+ * `--tone` is for the one thing silence cannot prove. Opus sends comfort noise for a silent
+ * track, so `packetsSent` stays low and "the media path carries audio" is no longer visible
+ * in `getStats` — that is what the beep was for, and it is still there when that is the
+ * question being asked.
+ */
+function fakeAudioArgs(tone: boolean): string[] {
+  if (tone) return [];
+  const path = joinPath(tmpdir(), `teams-lite-silence-${SILENCE_SECONDS}s.wav`);
+  writeFileSync(path, silentWav(SILENCE_SECONDS));
+  return [`--use-file-for-fake-audio-capture=${path}`];
+}
+
+/** A WAV of nothing: 16-bit mono at 48 kHz, which is what Opus wants anyway. */
+function silentWav(seconds: number): Buffer {
+  const rate = 48_000;
+  const samples = rate * seconds;
+  const data = samples * 2;
+  const buffer = Buffer.alloc(44 + data); // the header, then zeros — silence needs no fill
+  buffer.write("RIFF", 0, "ascii");
+  buffer.writeUInt32LE(36 + data, 4);
+  buffer.write("WAVEfmt ", 8, "ascii");
+  buffer.writeUInt32LE(16, 16); // the size of the format chunk
+  buffer.writeUInt16LE(1, 20); // PCM
+  buffer.writeUInt16LE(1, 22); // one channel
+  buffer.writeUInt32LE(rate, 24);
+  buffer.writeUInt32LE(rate * 2, 28); // bytes per second
+  buffer.writeUInt16LE(2, 32); // bytes per frame
+  buffer.writeUInt16LE(16, 34); // bits per sample
+  buffer.write("data", 36, "ascii");
+  buffer.writeUInt32LE(data, 40);
+  return buffer;
+}
 
 /** One reading of the call bar, as the app itself renders it. */
 export type CallBarState = {
@@ -244,13 +299,16 @@ export type MediaStats = {
  */
 export async function withJoinLive<T>(
   body: (session: JoinLiveSession) => Promise<T>,
-  opts: { front?: "tailnet" | "local" } = {},
+  opts: { front?: "tailnet" | "local"; tone?: boolean } = {},
 ): Promise<T> {
   const origin = opts.front === "local" ? LOCAL_ORIGIN : TAILNET_ORIGIN;
   const url = origin;
   await assertFrontIsServing(origin);
 
-  console.log(`\n  LIVE ACCOUNT — pinned to meeting ${AUTHORIZED_MEETING_CODE}\n  ${url}\n`);
+  console.log(
+    `\n  LIVE ACCOUNT — pinned to meeting ${AUTHORIZED_MEETING_CODE}\n  ${url}\n` +
+      `  microphone: fake, capturing ${opts.tone === true ? "Chrome's TONE" : "silence"}\n`,
+  );
 
   let browser: Browser | null = null;
   let page: Page | null = null;
@@ -263,6 +321,8 @@ export async function withJoinLive<T>(
         "--use-fake-device-for-media-stream",
         "--use-fake-ui-for-media-stream",
         "--autoplay-policy=no-user-gesture-required",
+        // Silence, unless the caller asked for the tone. See `fakeAudioArgs`.
+        ...fakeAudioArgs(opts.tone === true),
       ],
     });
     const context = await browser.newContext({
@@ -815,6 +875,7 @@ function oneLine(text: string): string {
 if (import.meta.main) {
   const argv = process.argv.slice(2);
   const front = argv.includes("--local") ? "local" : "tailnet";
+  const tone = argv.includes("--tone");
   const holdAt = argv.indexOf("--hold");
   const hold = holdAt >= 0 ? Number(argv[holdAt + 1]) : DEFAULT_HOLD_SECONDS;
 
@@ -879,6 +940,6 @@ if (import.meta.main) {
           "  The backend journal has the frames: journalctl --user -u teams-lite-backend -n 60\n",
       );
     },
-    { front },
+    { front, tone },
   );
 }

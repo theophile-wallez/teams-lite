@@ -892,7 +892,24 @@ Instrumentation in the driver, so the app the user runs is unchanged.
 § 2.4's: the bundle says what the client BELIEVES after normalising, the tenant says what
 travels. Read the frame.
 
+One more thing the driver grew for this, and it is not a detail: **it captures SILENCE now.**
+Chrome's fake device plays a repeating beep, and every run of this script puts it into a
+real meeting with real people in it — the user asked for it to stop after the third join,
+which is a fair thing to ask. `--tone` brings it back for the one question silence cannot
+answer, because Opus sends comfort noise for a silent track and `packetsSent` then stops
+proving the path carries audio. The offer is identical either way, which is what the script
+is for.
+
 ### 10.8 What is still open
+
+- **The roster fix is pinned but not SEEN.** The measured shape is in the tests and the
+  driver reads a real frame with it, but the call bar still says "In the meeting" rather than
+  a name — correctly, and for a reason worth writing down: the only other participant in the
+  test meeting is the USER'S OWN second device. One person, two endpoints, one mri, so
+  `CallSession::others` excludes them and an empty list is the honest answer.
+  `participantCounts` says `totalParticipants: 2` beside it, which is the count of endpoints
+  and not of people — never draw a "2 others" from it. Seeing a name needs a second person in
+  the meeting.
 
 - **A CAMERA has never been seen in a roster.** The measurement ran with a shared screen and
   a camera that stayed off, so `main-video` was only ever `recvonly` with nobody behind it.
