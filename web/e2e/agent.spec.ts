@@ -327,10 +327,24 @@ test.describe("The local agent's answer", () => {
     // fixture rather than the behaviour.
     if (scroll?.scrolls) expect(scroll.gap).toBeLessThanOrEqual(24);
 
-    // Everything since the click was asserted while the answer streamed in behind it, so
-    // the panel held its open state through several frames — which is the other half of
-    // "the reader owns the fold". Nothing is asserted past the end of the run: the
-    // transcript is an overlay, and it goes with the run it belongs to.
+    // THE RUN ENDS, AND THE WORK DOES NOT. The overlay goes — the Teams message is the
+    // record again — and the transcript is kept beside it, in the same place, with the fold
+    // the reader chose: the panel is remounted here, so a fold held inside it would have
+    // reset. It is the only place the reasoning exists at all; the message carries the
+    // answer alone, which is why a reload leaves no panel.
+    await expect(page.locator('[data-testid="agent-stream"]')).toHaveCount(0, { timeout: 20_000 });
+    await expect(transcript).toHaveAttribute("data-open", "true");
+    await expect(steps).toHaveCount(2);
+    await expect(thoughts).toHaveCount(3);
+    await expect(thoughts.first()).toContainText("CLAUDE.md");
+
+    // And it folds again on a click, on the finished reply.
+    await page.locator('[data-testid="agent-transcript-toggle"]').click();
+    await expect(transcript).toHaveAttribute("data-open", "false");
+    await expect(page.locator('[data-testid="agent-transcript-toggle"]')).toContainText(
+      "Reasoning and 2 tool calls",
+    );
+    await expect(steps).toHaveCount(0);
   });
 
   test("answers nothing in a conversation nobody opted in", async ({ page }) => {

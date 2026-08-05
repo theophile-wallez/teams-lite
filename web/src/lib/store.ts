@@ -71,10 +71,13 @@ import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import {
   AGENT_RUN_STALE_MS,
   agentRunIsLive,
+  agentTranscriptOf,
+  keepAgentTranscript,
   parseAgentFrame,
   withAgentFrame,
   withoutAgentRun,
   type AgentRun,
+  type AgentTranscript,
 } from "./agent-run";
 import {
   UNKNOWN_CALL_STATUS,
@@ -340,6 +343,14 @@ export type AppState = {
    *  the backend's `agent_stream` event. A transient overlay on the message the run is
    *  writing into — the Teams message stays the record. See lib/agent-run.ts. */
   agentRuns: Record<string, AgentRun>;
+  /** What the runs this page WATCHED worked out, by the message each one wrote into.
+   *  The overlay is transient; this is not, because the reasoning exists nowhere else —
+   *  the Teams message holds the answer alone. Bounded, and gone on a reload. */
+  agentTranscripts: Record<string, AgentTranscript>;
+  /** Which of those panels the reader opened or folded, by the same key. Their choice
+   *  outlives the run and every remount of the row (see AgentStoredTranscript); a
+   *  message nobody touched is absent, which leaves the fold automatic. */
+  agentTranscriptsOpen: Record<string, boolean>;
 
   // ---- mail (read-only Outlook surface) ------------------------------------
 
@@ -550,6 +561,8 @@ function initialState(): AppState {
     push: INITIAL_PUSH_STATE,
     agent: null,
     agentRuns: {},
+    agentTranscripts: {},
+    agentTranscriptsOpen: {},
     mailFolders: [],
     mailFolderId: null,
     mailMessages: [],
@@ -1553,15 +1566,32 @@ export class TeamsController {
 
   /** Let go of a run: the answer is fully on screen (or the run went quiet for so long
    *  that claiming it is still writing would be a lie). The posted message then renders
-   *  on its own, which is what it does for every reply this app never watched. */
+   *  on its own, which is what it does for every reply this app never watched — with the
+   *  work the run showed kept beside it, folded (see {@link agentTranscripts}). */
   forgetAgentRun(convId: string, runId: string): void {
     const timer = this.agentRunTimers.get(convId);
     if (timer) {
       clearTimeout(timer);
       this.agentRunTimers.delete(convId);
     }
+    const run = this.get().agentRuns[convId];
     const runs = withoutAgentRun(this.get().agentRuns, convId, runId);
-    if (runs !== this.get().agentRuns) this.set({ agentRuns: runs });
+    if (runs === this.get().agentRuns) return;
+    const kept = run && run.run_id === runId ? agentTranscriptOf(run) : null;
+    this.set({
+      agentRuns: runs,
+      ...(kept
+        ? { agentTranscripts: keepAgentTranscript(this.get().agentTranscripts, kept) }
+        : {}),
+    });
+  }
+
+  /** The reader's own fold on a transcript panel. Recorded per message, because the panel
+   *  is remounted when the run ends and again on every pass of the virtualized history. */
+  setAgentTranscriptOpen(messageId: string, open: boolean): void {
+    this.set({
+      agentTranscriptsOpen: { ...this.get().agentTranscriptsOpen, [messageId]: open },
+    });
   }
 
   /** The group/channel name to show alongside the caller, or undefined for a 1:1

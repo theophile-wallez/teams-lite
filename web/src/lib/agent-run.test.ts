@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   AGENT_RUN_STALE_MS,
-  agentHasTranscript,
+  AGENT_TRANSCRIPTS_KEPT,
   agentPhaseLabel,
   agentRunIsLive,
   agentRunIsStale,
   agentTranscriptLabel,
+  agentTranscriptOf,
+  keepAgentTranscript,
   parseAgentFrame,
   withAgentFrame,
   withoutAgentRun,
   type AgentRun,
+  type AgentTranscript,
 } from "./agent-run";
 
 /** A frame as `agent_stream_frame` in src/bin/server.rs builds it. */
@@ -61,7 +64,7 @@ describe("parseAgentFrame", () => {
       { kind: "tool", tool: "Grep", target: "DEFAULT_PORT", done: true },
       { kind: "thought", text: "that is 19420" },
     ]);
-    expect(agentHasTranscript(run!)).toBe(true);
+    expect(agentTranscriptOf(run!)?.steps).toHaveLength(3);
   });
 
   it("drops a step it cannot draw rather than guessing at it", () => {
@@ -82,7 +85,6 @@ describe("parseAgentFrame", () => {
     // than arriving as a number and a string.
     expect(run!.steps).toEqual([{ kind: "tool", tool: "Read", target: "", done: false }]);
     expect(parseAgentFrame(frame({ steps: "a transcript" }))!.steps).toEqual([]);
-    expect(agentHasTranscript(parseAgentFrame(frame())!)).toBe(false);
   });
 
   it("refuses anything that is not a frame", () => {
@@ -218,15 +220,57 @@ describe("agentPhaseLabel", () => {
   it("says what a folded transcript holds, counted from the run and not from the rows", () => {
     const thought = { kind: "thought", text: "the port is a constant" } as const;
     const call = { kind: "tool", tool: "Grep", target: "PORT", done: true } as const;
-    expect(agentTranscriptLabel(run({ steps: [thought], tools_used: 0 }))).toBe("Reasoning");
-    expect(agentTranscriptLabel(run({ steps: [thought, call], tools_used: 1 }))).toBe(
-      "Reasoning and 1 tool call",
-    );
+    expect(agentTranscriptLabel([thought], 0)).toBe("Reasoning");
+    expect(agentTranscriptLabel([thought, call], 1)).toBe("Reasoning and 1 tool call");
     // A CLI that reports no reasoning (opencode) has only its calls to name.
-    expect(agentTranscriptLabel(run({ steps: [call], tools_used: 2 }))).toBe("2 tool calls");
+    expect(agentTranscriptLabel([call], 2)).toBe("2 tool calls");
     // The rows are capped at 32 and the count is not, so a long run says what it did
     // rather than what it kept.
-    expect(agentTranscriptLabel(run({ steps: [call], tools_used: 40 }))).toBe("40 tool calls");
+    expect(agentTranscriptLabel([call], 40)).toBe("40 tool calls");
+  });
+
+  it("is kept as a transcript once the run is over, and only when it worked something out", () => {
+    const finished = run({
+      phase: "done",
+      message_id: "1785773946200",
+      steps: [{ kind: "thought", text: "the port is a constant" }],
+      tools_used: 2,
+    });
+    expect(agentTranscriptOf(finished)).toEqual({
+      message_id: "1785773946200",
+      backend: "claude",
+      steps: finished.steps,
+      tools_used: 2,
+      at: finished.at,
+    });
+    // Nothing to disclose: a CLI that reports no reasoning, answering with no tool call.
+    expect(agentTranscriptOf(run({ steps: [], tools_used: 0 }))).toBeNull();
+    // And nothing to key it by: a run whose message was never echoed back.
+    expect(agentTranscriptOf(run({ message_id: "" }))).toBeNull();
+  });
+
+  it("keeps the newest transcripts and lets the oldest go", () => {
+    const transcript = (id: number): AgentTranscript => ({
+      message_id: `m${id}`,
+      backend: "claude",
+      steps: [{ kind: "thought", text: `run ${id}` }],
+      tools_used: 1,
+      at: id,
+    });
+    let kept: Record<string, AgentTranscript> = {};
+    for (let i = 1; i <= AGENT_TRANSCRIPTS_KEPT + 3; i += 1) {
+      kept = keepAgentTranscript(kept, transcript(i));
+    }
+    expect(Object.keys(kept)).toHaveLength(AGENT_TRANSCRIPTS_KEPT);
+    // The oldest three went; the newest is there. This app is left open for days on a
+    // phone, and a transcript is up to 16 KiB of reasoning.
+    expect(kept.m1).toBeUndefined();
+    expect(kept.m3).toBeUndefined();
+    expect(kept.m4).toBeDefined();
+    expect(kept[`m${AGENT_TRANSCRIPTS_KEPT + 3}`]).toBeDefined();
+    // A message that answered twice is one entry, not two.
+    const again = keepAgentTranscript(kept, { ...transcript(99), message_id: "m4" });
+    expect(Object.keys(again)).toHaveLength(AGENT_TRANSCRIPTS_KEPT);
   });
 
   it("says what went wrong when a run failed", () => {

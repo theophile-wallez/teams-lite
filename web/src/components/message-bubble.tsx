@@ -37,14 +37,19 @@ import {
   parseMessageBody,
 } from "~/lib/rich-text";
 import { agentAuthorship } from "~/lib/agent-message";
-import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
+import { agentRunIsLive, type AgentRun, type AgentTranscript } from "~/lib/agent-run";
 import { agentTagsInMessage } from "~/lib/agent-tag";
 import type { AgentCandidate } from "~/lib/mentions";
 import { CardAttachment } from "~/components/card-attachment";
 import { RichContent } from "~/components/rich-content";
 import { cn } from "~/lib/utils";
 import { AgentLogo } from "./agent-logo";
-import { AgentSignature, AgentStoredStatus, AgentStream } from "./agent-reply";
+import {
+  AgentSignature,
+  AgentStoredStatus,
+  AgentStoredTranscript,
+  AgentStream,
+} from "./agent-reply";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -220,6 +225,14 @@ function MessageBubbleImpl(props: {
   agentRun?: AgentRun;
   /** Let go of a settled run — passed straight through to {@link AgentStream}. */
   onAgentSettled?: () => void;
+  /** What the run that wrote this message worked out, kept after the run itself ended
+   *  (see lib/agent-run.ts). Absent on every reply this app never watched being written. */
+  agentTranscript?: AgentTranscript;
+  /** Whether the reader opened that panel, and how they say so. Held outside this
+   *  component because it is remounted when the run ends and on every pass of the
+   *  virtualized history; `null` leaves the fold automatic. */
+  agentTranscriptOpen?: boolean | null;
+  onAgentTranscriptToggle?: (messageId: string, open: boolean) => void;
   /** This message already sits on a surface of its own: it is the root post of a
    *  channel thread, and the thread's card is that surface. A message that would
    *  otherwise bring its own panel — an app card — renders flush inside it
@@ -479,6 +492,12 @@ function MessageBubbleImpl(props: {
     props.onReact(props.message, key);
   };
 
+  // The reader's fold on the agent's transcript, reported with this message's id. The
+  // choice is the pane's to hold: this component is remounted when the run is let go and
+  // the message takes the body back, and again on every pass of the virtualized history.
+  const onTranscriptToggle = (open: boolean) =>
+    props.onAgentTranscriptToggle?.(props.message.id, open);
+
   // The quoted message a reply carries. Its own variable because a streamed agent
   // answer needs it too: the answer is posted as a native reply to the message that
   // summoned it, and a quote that only appeared once the run finished would make the
@@ -532,25 +551,25 @@ function MessageBubbleImpl(props: {
       </div>
     ) : null;
 
-  // The message's rendered media/body — text/rich content, a quoted reply, and
-  // attachments. Pulled out so an image-only message can wrap it in the
-  // "atelier" mat (a framed card) while an ordinary message renders it plainly
-  // inside the bubble.
-  const mediaBody = (
+  // What the message says before its quote — the words an author wrote above the message
+  // they were replying to.
+  const bodyBeforeQuote = parsed.beforeHtml ? (
+    <RichContent
+      html={parsed.beforeHtml}
+      format={format}
+      hiddenHrefs={hiddenHrefs}
+      mentions={mentions}
+      cardShownSeparately={cardAttachments.length > 0}
+      agentTags={agentTags}
+    />
+  ) : null;
+
+  // And what it says after it, with its attachments. Its own variable for the same reason
+  // `quotedBlock` is one: an agent's reply puts the run's transcript between the request it
+  // quotes and the answer it wrote, and it must sit in the same place once the run is over
+  // as it did while the run was going.
+  const bodyBeyondQuote = (
     <>
-      {parsed.beforeHtml ? (
-        <RichContent
-          html={parsed.beforeHtml}
-          format={format}
-          hiddenHrefs={hiddenHrefs}
-          mentions={mentions}
-          cardShownSeparately={cardAttachments.length > 0}
-          agentTags={agentTags}
-        />
-      ) : null}
-
-      {quotedBlock}
-
       {parsed.bodyHtml ? (
         <RichContent
           html={parsed.bodyHtml}
@@ -583,6 +602,18 @@ function MessageBubbleImpl(props: {
           )}
         </div>
       ) : null}
+    </>
+  );
+
+  // The message's rendered media/body — text/rich content, a quoted reply, and
+  // attachments. Pulled out so an image-only message can wrap it in the
+  // "atelier" mat (a framed card) while an ordinary message renders it plainly
+  // inside the bubble.
+  const mediaBody = (
+    <>
+      {bodyBeforeQuote}
+      {quotedBlock}
+      {bodyBeyondQuote}
     </>
   );
 
@@ -748,13 +779,26 @@ function MessageBubbleImpl(props: {
                 <AgentStream
                   run={props.agentRun}
                   onSettled={props.onAgentSettled ?? (() => undefined)}
+                  transcriptOpen={props.agentTranscriptOpen ?? null}
+                  onTranscriptToggle={onTranscriptToggle}
                 />
               </>
             ) : agent ? (
               // A reply nobody watched being written: everything is known from the
-              // message itself, including whether it stopped mid-answer.
+              // message itself, including whether it stopped mid-answer. Plus the work
+              // behind it, when this app is the one that watched it being done — the
+              // message never carries that, so the panel is gone after a reload.
               <>
-                {mediaBody}
+                {bodyBeforeQuote}
+                {quotedBlock}
+                {props.agentTranscript ? (
+                  <AgentStoredTranscript
+                    transcript={props.agentTranscript}
+                    open={props.agentTranscriptOpen ?? null}
+                    onChoose={onTranscriptToggle}
+                  />
+                ) : null}
+                {bodyBeyondQuote}
                 <AgentStoredStatus authorship={agent} />
               </>
             ) : isUnsupported ? (

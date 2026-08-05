@@ -4,12 +4,12 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Alert02Icon, ArrowRight01Icon, CheckIcon, Loading02Icon } from "@hugeicons/core-free-icons";
 import { agentMarkdownToHtml } from "~/lib/agent-markdown";
 import {
-  agentHasTranscript,
   agentPhaseLabel,
   agentRunIsLive,
   agentTranscriptLabel,
   type AgentRun,
   type AgentStep,
+  type AgentTranscript,
 } from "~/lib/agent-run";
 import { agentDisplayName, type AgentBackendName } from "~/lib/agent-message";
 import { cn } from "~/lib/utils";
@@ -180,13 +180,24 @@ function boundaryAtOrBelow(text: string, at: number, target: number): number {
 }
 
 /**
- * What a live run's bubble holds: the answer so far, and a line saying what the agent is
- * doing to grow it.
+ * What a live run's bubble holds: the answer so far, the work behind it, and a line saying
+ * what the agent is doing to grow it.
  *
  * `onSettled` fires once a finished run has nothing left to reveal — the caller then lets
- * the run go and the posted message renders on its own (see `forgetAgentRun`).
+ * the run go and the posted message renders on its own (see `forgetAgentRun`), keeping the
+ * transcript beside it.
+ *
+ * `transcriptOpen` / `onTranscriptToggle` are the reader's own fold, held by the caller
+ * because this component is remounted twice over: once when the run is let go and the
+ * message takes over the body, and again whenever the virtualized history scrolls the row
+ * away. `null` means they have not said, which is what leaves the fold automatic.
  */
-export function AgentStream(props: { run: AgentRun; onSettled: () => void }) {
+export function AgentStream(props: {
+  run: AgentRun;
+  onSettled: () => void;
+  transcriptOpen?: boolean | null;
+  onTranscriptToggle?: (open: boolean) => void;
+}) {
   const { run } = props;
   const live = agentRunIsLive(run);
   const { revealed, caughtUp } = useSmoothReveal(run.text, live);
@@ -207,8 +218,16 @@ export function AgentStream(props: { run: AgentRun; onSettled: () => void }) {
   const html = revealed.trim() ? agentMarkdownToHtml(revealed) : "";
   return (
     <div data-testid="agent-stream" data-phase={run.phase}>
-      {/* Above the answer, because it is how the answer was reached. */}
-      <AgentTranscript run={run} />
+      {/* Above the answer, because it is how the answer was reached. The run is handed in
+          only while it is going: a finished one is a transcript like any other, and the
+          panel then says what it holds rather than what is happening. */}
+      <TranscriptPanel
+        steps={run.steps}
+        run={live ? run : null}
+        folded={agentTranscriptLabel(run.steps, run.tools_used)}
+        open={props.transcriptOpen ?? null}
+        onChoose={props.onTranscriptToggle ?? (() => undefined)}
+      />
       {html ? (
         <RichContent
           html={html}
@@ -250,6 +269,35 @@ function AgentFailure(props: { run: AgentRun }) {
 }
 
 /**
+ * The folded transcript of a reply that is FINISHED, above the message's own body.
+ *
+ * The run is over — the app let it go and the Teams message is the record again — but what
+ * the agent worked out is still worth having, so the panel outlives the overlay: one row
+ * saying what it holds, opening on a click into the same rows the run streamed into.
+ *
+ * It exists for as long as this page does and no longer, because the Teams message holds
+ * the answer and never the reasoning (see {@link AgentTranscript}). A reply answered from a
+ * phone, or before this page loaded, has no panel at all — which is the honest shape: there
+ * is nothing behind one to disclose.
+ */
+export function AgentStoredTranscript(props: {
+  transcript: AgentTranscript;
+  open: boolean | null;
+  onChoose: (open: boolean) => void;
+}) {
+  const { transcript } = props;
+  return (
+    <TranscriptPanel
+      steps={transcript.steps}
+      run={null}
+      folded={agentTranscriptLabel(transcript.steps, transcript.tools_used)}
+      open={props.open}
+      onChoose={props.onChoose}
+    />
+  );
+}
+
+/**
  * The run being worked out: what the agent is doing, and everything it has done.
  *
  * The header is the status line this component grew out of. It shimmers while the run has
@@ -259,7 +307,7 @@ function AgentFailure(props: { run: AgentRun }) {
  * too many. There is no spinner beside it for the same reason.
  *
  * Under it, the transcript: the model's reasoning as it is written, and a row for every
- * tool call, in the order they happened. Four things hold it together.
+ * tool call, in the order they happened. Five things hold it together.
  *
  * - **It scrolls itself, and only while the reader is following it.** The panel has a
  *   ceiling ({@link TRANSCRIPT_MAX_HEIGHT}) because it sits in a virtualized history that
@@ -270,22 +318,37 @@ function AgentFailure(props: { run: AgentRun }) {
  *   say it better than a label can, and stating it twice makes the panel look like it is
  *   reporting two things.
  * - **The fold is automatic, once, and then the reader owns it.** Nothing re-folds a panel
- *   somebody opened.
+ *   somebody opened — which is why the choice is the CALLER's to hold: this component is
+ *   remounted when the run is let go, and again on every pass of the virtualized history.
+ * - **It outlives the run.** The same rows are drawn from the kept transcript once the
+ *   overlay is gone (see {@link AgentStoredTranscript}), so a reply keeps its disclosure
+ *   for as long as the page is open.
  * - **The reasoning is data, not prose.** It is what the model said to itself, so it is
  *   set small, dim and italic, and no Markdown is applied to it — a heading the model
  *   happened to type is not a heading in this app's voice.
  */
-function AgentTranscript(props: { run: AgentRun }) {
+function TranscriptPanel(props: {
+  steps: AgentStep[];
+  /** The run, while it is going. `null` once it is over — a kept transcript has no phase,
+   *  nothing is arriving into it, and the header stops saying otherwise. */
+  run: AgentRun | null;
+  /** What the folded row says (see {@link agentTranscriptLabel}). */
+  folded: string;
+  /** The reader's own fold, or `null` while they have not said. Held by the caller, per
+   *  message: this panel is remounted when the run is let go and again on every scroll
+   *  through a virtualized history, and a fold that reset there would fight the reader. */
+  open: boolean | null;
+  onChoose: (open: boolean) => void;
+}) {
   const { run } = props;
   const reduce = useReducedMotion();
-  const live = agentRunIsLive(run);
-  const has = agentHasTranscript(run);
-  const waiting = live && run.phase !== "writing";
-  // Folded from the moment the answer starts arriving; the reader's own click wins from
-  // then on. `null` is "nobody has said", which is what makes the automatic fold a
-  // default rather than an override.
-  const [chosen, setChosen] = useState<boolean | null>(null);
-  const open = has && (chosen ?? run.text.trim() === "");
+  const live = !!run && agentRunIsLive(run);
+  const has = props.steps.length > 0;
+  const waiting = live && run?.phase !== "writing";
+  // Folded from the moment the answer starts arriving, and folded on a run that is over —
+  // the answer is then all there is to make room for. The reader's own choice wins over
+  // both, which is what `open === null` leaves room for.
+  const open = has && (props.open ?? (live && run.text.trim() === ""));
 
   const box = useRef<HTMLDivElement | null>(null);
   const following = useRef(true);
@@ -304,7 +367,7 @@ function AgentTranscript(props: { run: AgentRun }) {
   // A new row (a tool call, a thought opening after one) scrolls the panel down; a thought
   // that is still growing does it through {@link AgentThought}'s own `onGrow`, since the
   // reveal runs in that component and never re-renders this one.
-  useEffect(follow, [follow, run.steps.length]);
+  useEffect(follow, [follow, props.steps.length]);
 
   if (!live && !has) return null;
 
@@ -315,16 +378,15 @@ function AgentTranscript(props: { run: AgentRun }) {
   //   - folded while the answer arrives, or after it: what the fold HOLDS, which is what
   //     a reader clicks it for. The caret at the end of the answer already says it is
   //     being written, so the header does not spend its line saying it again.
-  const name = agentDisplayName(run.backend);
   const label =
-    live && (open || waiting)
+    run && live && (open || waiting)
       ? open && run.phase === "working"
-        ? `${name} is working`
+        ? `${agentDisplayName(run.backend)} is working`
         : agentPhaseLabel(run)
-      : agentTranscriptLabel(run);
+      : props.folded;
   // The last thought is the only one that can still be growing, so it is the only one
   // whose text is revealed rather than simply shown.
-  const growing = lastThoughtIndex(run.steps);
+  const growing = lastThoughtIndex(props.steps);
 
   return (
     <div
@@ -348,7 +410,7 @@ function AgentTranscript(props: { run: AgentRun }) {
           // reasoning and has called nothing has only this line to show.
           disabled={!has}
           aria-expanded={has ? open : undefined}
-          onClick={() => setChosen(!open)}
+          onClick={() => props.onChoose(!open)}
           className={cn(
             "flex min-w-0 items-center gap-1 rounded text-left",
             has && "hover:text-text",
@@ -419,7 +481,7 @@ function AgentTranscript(props: { run: AgentRun }) {
                   ever grows at its end. The one exception is its own cap dropping the
                   oldest rows (`MAX_TOOL_CALLS`), which shifts the rest — a re-mount, and
                   the only thing it costs is a fade on rows already read. */}
-              {run.steps.map((step, index) =>
+              {props.steps.map((step, index) =>
                 step.kind === "thought" ? (
                   <AgentThought
                     key={index}
@@ -598,6 +660,8 @@ export function AgentPendingBubble(props: {
    *  this row has no message of its own yet. */
   author?: string;
   onSettled: () => void;
+  transcriptOpen?: boolean | null;
+  onTranscriptToggle?: (messageId: string, open: boolean) => void;
 }) {
   const reduce = useReducedMotion();
   return (
@@ -618,7 +682,12 @@ export function AgentPendingBubble(props: {
           author={props.author}
           busy
         />
-        <AgentStream run={props.run} onSettled={props.onSettled} />
+        <AgentStream
+          run={props.run}
+          onSettled={props.onSettled}
+          transcriptOpen={props.transcriptOpen ?? null}
+          onTranscriptToggle={(open) => props.onTranscriptToggle?.(props.run.message_id, open)}
+        />
       </motion.div>
     </div>
   );

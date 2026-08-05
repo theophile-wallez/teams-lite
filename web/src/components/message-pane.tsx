@@ -109,6 +109,13 @@ export function MessagePane(props: { onBack?: () => void }) {
   // The agent run writing in THIS thread, if any. One per conversation, and a transient
   // overlay on the message it is writing into (see lib/agent-run.ts).
   const agentRun = useAppState((s) => (s.openId ? s.agentRuns[s.openId] : undefined));
+  // What the runs this page watched worked out, by the message each one wrote into, and
+  // which of those panels the reader opened. Both outlive their run: the transcript is the
+  // only record of the reasoning (the Teams message holds the answer alone), and the fold
+  // is the reader's — this history is virtualized, so a row's own state does not survive
+  // scrolling past it.
+  const agentTranscripts = useAppState((s) => s.agentTranscripts);
+  const agentTranscriptsOpen = useAppState((s) => s.agentTranscriptsOpen);
   // Our own display name, read off the newest message of ours. The agent's signature
   // names the account its answer went out under, and a run that has not been echoed
   // back yet has no message of its own to read it from.
@@ -532,6 +539,13 @@ export function MessagePane(props: { onBack?: () => void }) {
     if (agentRun) controller.forgetAgentRun(agentRun.conversation, agentRun.run_id);
   }, [controller, agentRun]);
 
+  // One stable callback for every row, because the bubble is memoized on its props: a new
+  // closure per message would re-render the whole history on every frame of a run.
+  const doAgentTranscriptToggle = useCallback(
+    (messageId: string, open: boolean) => controller.setAgentTranscriptOpen(messageId, open),
+    [controller],
+  );
+
   // The bubble's menu has already taken the confirmation (deleting is irreversible),
   // so this fires the call. An edit in progress on that message is dropped: its target
   // is about to be a placeholder.
@@ -567,6 +581,9 @@ export function MessagePane(props: { onBack?: () => void }) {
             highlighted={highlightId === m.id}
             agentRun={agentRun?.message_id === m.id ? agentRun : undefined}
             onAgentSettled={doAgentSettled}
+            agentTranscript={agentTranscripts[m.id]}
+            agentTranscriptOpen={agentTranscriptsOpen[m.id] ?? null}
+            onAgentTranscriptToggle={doAgentTranscriptToggle}
             onReply={doReply}
             onCopy={doCopy}
             answerAgents={answerAgents}
@@ -763,6 +780,12 @@ export function MessagePane(props: { onBack?: () => void }) {
                         run={row.run}
                         author={selfName}
                         onSettled={doAgentSettled}
+                        // Keyed by the message the run is writing into, exactly as a real
+                        // row is: the placeholder is replaced by that message the moment
+                        // Teams echoes it back, and a fold the reader made here must
+                        // survive that swap.
+                        transcriptOpen={agentTranscriptsOpen[row.run.message_id] ?? null}
+                        onTranscriptToggle={doAgentTranscriptToggle}
                       />
                     ) : (
                       renderMsg(row.message, row.prev, row.next)

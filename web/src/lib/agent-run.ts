@@ -237,23 +237,75 @@ export function withoutAgentRun(
   return next;
 }
 
-/** Whether the run has a transcript worth a panel: reasoning, a tool call, or both. */
-export function agentHasTranscript(run: AgentRun): boolean {
-  return run.steps.length > 0;
+/**
+ * What this app watched a run work out, kept after the run itself is over.
+ *
+ * The Teams message holds the answer and never the reasoning, so this is the ONLY place a
+ * finished run's transcript exists: in this page's memory, keyed by the message the run
+ * wrote into, for as long as the page is open. A reply this app never watched being
+ * written therefore has no panel at all — which is honest, and is why the panel is a
+ * disclosure rather than part of the message.
+ */
+export type AgentTranscript = {
+  /** The message the run wrote into — what a kept transcript is keyed by. */
+  message_id: string;
+  backend: string;
+  steps: AgentStep[];
+  tools_used: number;
+  /** The run's last frame's clock, so the oldest kept transcript is the one dropped. */
+  at: number;
+};
+
+/** The transcript of a run worth keeping, or null when the run worked nothing out — a CLI
+ *  that reports no reasoning, answering with no tool call, has nothing to disclose. */
+export function agentTranscriptOf(run: AgentRun): AgentTranscript | null {
+  if (!run.steps.length || !run.message_id) return null;
+  return {
+    message_id: run.message_id,
+    backend: run.backend,
+    steps: run.steps,
+    tools_used: run.tools_used,
+    at: run.at,
+  };
+}
+
+/**
+ * How many finished transcripts a page keeps.
+ *
+ * One is up to 16 KiB of reasoning (`MAX_THINKING_BYTES` in src/agent.rs) plus its rows,
+ * and this app is left open for days on a phone — so the newest are kept and the rest are
+ * let go. Deep enough that scrolling back through a session's answers still finds their
+ * work, which is what the panel is for.
+ */
+export const AGENT_TRANSCRIPTS_KEPT = 40;
+
+/** Add one transcript to the kept ones, dropping the oldest past
+ *  {@link AGENT_TRANSCRIPTS_KEPT}. Ordered by the run's own clock rather than by insertion,
+ *  because a message id says nothing about when its run happened. */
+export function keepAgentTranscript(
+  kept: Record<string, AgentTranscript>,
+  transcript: AgentTranscript,
+): Record<string, AgentTranscript> {
+  const next: Record<string, AgentTranscript> = { ...kept, [transcript.message_id]: transcript };
+  const ids = Object.keys(next);
+  if (ids.length <= AGENT_TRANSCRIPTS_KEPT) return next;
+  const oldestFirst = ids.sort((a, b) => (next[a]?.at ?? 0) - (next[b]?.at ?? 0));
+  for (const id of oldestFirst.slice(0, ids.length - AGENT_TRANSCRIPTS_KEPT)) delete next[id];
+  return next;
 }
 
 /**
  * What a FOLDED transcript says it holds — the label of the row that stands in for it
- * once the answer has started arriving.
+ * once the answer has started arriving, and the only thing a kept one ever says.
  *
  * The calls are counted from `tools_used` rather than from the rows, because the
  * transcript keeps only its newest ones (`MAX_TOOL_CALLS` in src/agent.rs) while the
  * count survives: a run that greped forty times says forty, and shows the last
  * thirty-two.
  */
-export function agentTranscriptLabel(run: AgentRun): string {
-  const tools = run.tools_used > 0 ? `${run.tools_used} tool call${plural(run.tools_used)}` : "";
-  const reasoned = run.steps.some((step) => step.kind === "thought");
+export function agentTranscriptLabel(steps: AgentStep[], toolsUsed: number): string {
+  const tools = toolsUsed > 0 ? `${toolsUsed} tool call${plural(toolsUsed)}` : "";
+  const reasoned = steps.some((step) => step.kind === "thought");
   if (reasoned) return tools ? `Reasoning and ${tools}` : "Reasoning";
   return tools || "Reasoning";
 }

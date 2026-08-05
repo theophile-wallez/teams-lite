@@ -95,7 +95,7 @@ the answer so far, the phase, the tool in flight, and the TRANSCRIPT — the mod
 reasoning and every tool call, interleaved in the order they happened (`agent::Step`). The
 web UI renders it word by word under the CLI's own mark (`web/src/components/agent-reply.tsx`
 and `agent-logo.tsx`, over `web/src/lib/agent-run.ts` and `agent-markdown.ts` — a port
-of the Rust markdown subset, pinned to it case for case by its tests). Five rules hold
+of the Rust markdown subset, pinned to it case for case by its tests). Six rules hold
 that surface together:
 
 - **The stream is an overlay on the posted message, never a message of its own.** The
@@ -131,9 +131,18 @@ that surface together:
   has not scrolled back inside it, the fold is automatic ONCE and the reader's own click
   wins from then on, and the header names the tool in flight only while the rows are folded
   — open, the rows say it better. The reasoning is drawn as data, never through the Markdown
-  renderer: it is what the model said to itself, not this app's voice. And it is an overlay
-  like everything else here, so it goes with the run: the Teams message holds the answer and
-  never the reasoning, which is why there is no disclosure on a stored reply.
+  renderer: it is what the model said to itself, not this app's voice.
+- **The transcript OUTLIVES the run, without ever becoming part of the message.** The
+  overlay goes when the run ends and the Teams message takes its body back — but the
+  reasoning exists nowhere else, so what this app watched is kept in the page
+  (`agentTranscripts`, keyed by the message, bounded by `AGENT_TRANSCRIPTS_KEPT`) and drawn
+  folded between the quoted request and the answer: the same place it stood while the run
+  was going, so nothing moves at the swap (`AgentStoredTranscript`). It is gone on a reload,
+  and a reply this app never watched — answered from a phone, or before the page loaded —
+  has no panel at all. That is the honest shape: the disclosure exists exactly when there is
+  something behind it. The reader's fold is held per message alongside it, because the panel
+  is remounted at that swap and again on every pass of the virtualized history — a fold kept
+  inside the panel would reset under them both times.
 - **The terminal frame goes out after the final edit, and it carries the transcript.** A
   finished run stops being an overlay, so the message it falls back to has to already hold
   the whole answer — and the last frame is the last chance to state the transcript, so a

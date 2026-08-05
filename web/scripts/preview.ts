@@ -1415,6 +1415,16 @@ if (import.meta.main) {
       await setTheme("light");
       await shot(`${out}-done-light.png`);
 
+      // The work survives the run: the finished reply keeps the folded row, and the same
+      // rows are behind it. Captured open, on the bubble, because that is the state a
+      // reader reaches for after the answer has landed.
+      await page.locator('[data-testid="agent-transcript-toggle"]').last().click();
+      await shot(
+        `${out}-kept-light.png`,
+        '[data-testid="message"]:has([data-testid="agent-transcript"])',
+      );
+      await scrollToNewest(page);
+
       // The other CLI, whose mark is drawn per theme (opencode ships one logo per
       // background) — so it is captured on both.
       await askAgent(page, "@opencode and where do the web ports live?");
