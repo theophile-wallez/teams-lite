@@ -2981,6 +2981,9 @@ export class TeamsController {
     });
   }
 
+  /** Deduplicates concurrent fetches: two components rendering the same emoji in
+   *  one frame (the normal case in a virtualized history) return the same promise,
+   *  so the bytes are requested once. */
   private cacheCustomEmoji(
     name: string,
     fetch: () => Promise<{ content_type?: string; data_base64?: string } | null>,

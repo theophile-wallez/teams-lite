@@ -51,9 +51,12 @@ describe("customEmojiNameError", () => {
     expect(customEmojiNameError("shipit", [])).toBeNull();
     expect(customEmojiNameError("ship-it_2+", [])).toBeNull();
     expect(customEmojiNameError("0", [])).toBeNull();
+    expect(customEmojiNameError("a".repeat(64), [])).toBeNull();
     expect(customEmojiNameError("", [])).toMatch(/lowercase/);
     expect(customEmojiNameError("ShipIt", [])).toMatch(/lowercase/);
+    expect(customEmojiNameError("+ship", [])).toMatch(/lowercase/);
     expect(customEmojiNameError("-ship", [])).toMatch(/lowercase/);
+    expect(customEmojiNameError("_ship", [])).toMatch(/lowercase/);
     expect(customEmojiNameError("ship it", [])).toMatch(/lowercase/);
     expect(customEmojiNameError("ship:it", [])).toMatch(/lowercase/);
     expect(customEmojiNameError("a".repeat(65), [])).toMatch(/lowercase/);

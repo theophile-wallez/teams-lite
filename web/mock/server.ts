@@ -6216,10 +6216,11 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       return Response.json({ ok: true, cleared: affected.length }, { status: 200 });
     }
     if (body.kind === "custom_emoji" && body.clear === true) {
+      const cleared = customEmojiPack.size;
       customEmojiPack.clear();
       seedCustomEmoji();
       broadcast("custom_emoji_changed", {});
-      return Response.json({ ok: true, cleared: true }, { status: 200 });
+      return Response.json({ ok: true, cleared }, { status: 200 });
     }
     if (body.kind === "read_receipt") {
       // Clear all injected read positions — lets a serial E2E suite reset the
