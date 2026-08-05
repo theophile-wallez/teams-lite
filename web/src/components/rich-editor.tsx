@@ -34,6 +34,7 @@ import {
 import {
   emojiQueryBefore,
   emojiSuggestions,
+  insertedEmojiName,
   type CustomEmoji,
   type EmojiSuggestion,
 } from "~/lib/custom-emoji";
@@ -413,10 +414,7 @@ export function RichEditor(props: {
       editor.chain().insertContentAt({ from, to }, suggestion.native + " ").run();
       return;
     }
-    // Custom emoji: find the target (the alias target if this is an alias, else the name).
-    const pack = props.customEmojiPack ?? [];
-    const emoji = pack.find((e) => e.name === suggestion.name);
-    const target = emoji?.alias_of ?? suggestion.name;
+    const target = insertedEmojiName(suggestion, props.customEmojiPack ?? []);
     editor
       .chain()
       .insertCustomEmoji({ name: suggestion.name, target, from, to })

@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { bodyIsOnlyEmoji, customEmojiNameError, emojiSuggestions } from "./custom-emoji";
+import {
+  bodyIsOnlyEmoji,
+  customEmojiNameError,
+  emojiSuggestions,
+  emojiQueryBefore,
+  insertedEmojiName,
+} from "./custom-emoji";
 import { parseRichHtml } from "./rich-text";
 
 describe("bodyIsOnlyEmoji", () => {
@@ -78,10 +84,18 @@ describe("emojiSuggestions", () => {
 
   it("offers custom emoji before Unicode ones", () => {
     const pack = [emoji("smirk-cat"), emoji("shipit")];
-    const unicode: [string, string][] = [["smile", "😄"], ["smiley", "😃"]];
+    const unicode: [string, string][] = [
+      ["smile", "😄"],
+      ["smiley", "😃"],
+    ];
     const out = emojiSuggestions("sm", pack, unicode);
     expect(out[0]).toEqual({ kind: "custom", name: "smirk-cat" });
-    expect(out.map((s) => s.name)).toContain("smile");
+    // Every custom result precedes the first Unicode one.
+    const firstUnicode = out.findIndex((s) => s.kind === "unicode");
+    const lastCustom = out.map((s, i) => (s.kind === "custom" ? i : -1)).filter((i) => i >= 0);
+    if (firstUnicode >= 0 && lastCustom.length > 0) {
+      expect(Math.max(...lastCustom)).toBeLessThan(firstUnicode);
+    }
   });
 
   it("matches an alias by its own name", () => {
@@ -91,5 +105,57 @@ describe("emojiSuggestions", () => {
 
   it("offers nothing for an empty query, so a lone colon opens no menu", () => {
     expect(emojiSuggestions("", [emoji("shipit")], [])).toEqual([]);
+  });
+});
+
+describe("emojiQueryBefore", () => {
+  it("returns null for prose with a colon, not an emoji code", () => {
+    expect(emojiQueryBefore("note: this")).toBeNull();
+  });
+
+  it("returns null for a completed emoji code", () => {
+    expect(emojiQueryBefore(":shipit:")).toBeNull();
+  });
+
+  it("finds the second query in a row of emoji codes", () => {
+    const result = emojiQueryBefore(":shipit: :par");
+    expect(result).toEqual({ query: "par", at: 9 });
+  });
+
+  it("returns null for a query longer than the 64-character bound", () => {
+    const longQuery = ":a".repeat(33);
+    expect(emojiQueryBefore(longQuery)).toBeNull();
+  });
+
+  it("returns null for a lone colon", () => {
+    expect(emojiQueryBefore(":")).toBeNull();
+  });
+});
+
+describe("insertedEmojiName", () => {
+  function emoji(name: string, aliasOf = ""): import("./protocol").CustomEmoji {
+    return {
+      name,
+      alias_of: aliasOf,
+      content_type: "image/png",
+      width: 64,
+      height: 64,
+      source: "local",
+      added_ms: Date.now(),
+    };
+  }
+
+  it("returns the emoji's own name for an ordinary emoji", () => {
+    const pack = [emoji("shipit")];
+    expect(insertedEmojiName({ name: "shipit" }, pack)).toBe("shipit");
+  });
+
+  it("returns the alias target for an alias", () => {
+    const pack = [emoji("ship", "shipit")];
+    expect(insertedEmojiName({ name: "ship" }, pack)).toBe("shipit");
+  });
+
+  it("returns the suggestion name when the emoji is absent from the pack", () => {
+    expect(insertedEmojiName({ name: "unknown" }, [])).toBe("unknown");
   });
 });

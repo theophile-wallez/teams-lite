@@ -38,6 +38,19 @@ export function emojiQueryBefore(text: string): EmojiQuery | null {
 }
 
 /**
+ * The name to insert for a picked emoji: the alias target when the suggestion is an
+ * alias, else the suggestion's own name. `alias_of` is `""` for ordinary emoji, not
+ * null, so `||` is the right operator here.
+ */
+export function insertedEmojiName(
+  suggestion: { name: string },
+  pack: readonly CustomEmoji[],
+): string {
+  const emoji = pack.find((e) => e.name === suggestion.name);
+  return emoji?.alias_of || suggestion.name;
+}
+
+/**
  * Port of `custom_emoji::is_valid_name` from the Rust backend. Must move with the
  * original. Slack's emoji name rule: first character must be a lowercase letter or
  * digit, then lowercase letters, digits, dashes, underscores, and plus signs. 1..64
