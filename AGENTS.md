@@ -536,7 +536,9 @@ user. Two independent mechanisms enforce that split:
   `toggleTeamSection` from the same file. For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
-  `bun run preview -- --out /tmp/ask --answer-with`. For the settings pane:
+  `bun run preview -- --out /tmp/ask --answer-with`. For the typing hint above the
+  composer, one typist then three: `bun run preview -- --out /tmp/typ --typing`
+  (it honours `--dpr`, because the faces in it are 20px). For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
   file. For Settings › AI providers and its model picker, open and closed in both
   themes: `bun run preview -- --out /tmp/prov --ai-providers`. For the update button, its

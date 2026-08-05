@@ -1,16 +1,10 @@
 import type { ReadReceipt } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
-import { Avatar, type AvatarPhoto } from "./avatar";
+import { Avatar, firstAvatarInitial, type AvatarPhoto } from "./avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 /** How many "seen by" avatars to show before collapsing the rest into a "+N". */
 const MAX_AVATARS = 4;
-
-/** The first letter of a name, for the dense overlapping stack (two initials get
- *  clipped by the overlap; the full name shows in the hovercard). */
-function firstInitial(name: string): string {
-  return name.trim().charAt(0).toUpperCase() || "?";
-}
 
 /** A display name for a receipt, falling back when the backend couldn't resolve
  *  one (a member outside our roster). */
@@ -62,7 +56,7 @@ export function ReadReceipts(props: { receipts: ReadReceipt[] }) {
                   <Avatar
                     seed={receipt.member_mri || name}
                     label={name}
-                    initials={firstInitial(name)}
+                    initials={firstAvatarInitial(name)}
                     fallback="person"
                     photo={photo}
                     className="size-4 text-[8px] font-semibold"

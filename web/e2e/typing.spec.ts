@@ -41,6 +41,32 @@ test.describe("typing indicator", () => {
     await emitTyping(page, { conversation: conv, sender: "Jordan Lee", sender_mri: "8:orgid:jordan" });
 
     await expect(indicator).toContainText("Riley and Jordan are typing");
+    // One face per person the hint names.
+    await expect(indicator.getByTestId("typing-avatar")).toHaveCount(2);
+  });
+
+  test("leads with the typist's face, on the composer's own column", async ({ page }) => {
+    await gotoApp(page);
+    const conv = await openConversationAt(page, 0);
+    const indicator = page.locator('[data-testid="typing-indicator"]');
+
+    await emitTyping(page, { conversation: conv, sender: "Riley Carter", sender_mri: "8:orgid:riley" });
+    const face = indicator.getByTestId("typing-avatar");
+    await expect(face).toHaveCount(1);
+
+    // The hint belongs to the box under it, so the two start on the same edge: the
+    // face lines up with the words the user types, not with the pane's own edge.
+    const faceBox = await face.boundingBox();
+    expect(faceBox).not.toBeNull();
+    const wordsX = await page.locator(".tiptap-message").evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return box.x + Number.parseFloat(getComputedStyle(el).paddingLeft);
+    });
+    expect(Math.abs(faceBox!.x - wordsX)).toBeLessThanOrEqual(2);
+    // ...and the face comes BEFORE the name, which is what a reader recognises first.
+    const name = await indicator.getByText("Riley is typing").boundingBox();
+    expect(name).not.toBeNull();
+    expect(faceBox!.x).toBeLessThan(name!.x);
   });
 
   test("does not leak a typing hint from another conversation", async ({ page }) => {

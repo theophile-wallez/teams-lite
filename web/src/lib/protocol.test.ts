@@ -44,6 +44,7 @@ import {
   mentionsByItemId,
   parseRichMessage,
   typingLabel,
+  typingPeople,
   formatCallEvent,
   formatCallDuration,
   mailFolderLabel,
@@ -1421,6 +1422,40 @@ describe("typingLabel", () => {
   it("de-duplicates repeated names and falls back to 'Someone' for blanks", () => {
     expect(typingLabel(["Clément", "Clément"])).toBe("Clément is typing");
     expect(typingLabel([""])).toBe("Someone is typing");
+  });
+});
+
+describe("typingPeople", () => {
+  it("keeps the typists in order, one per person", () => {
+    const typing = [
+      { mri: "8:orgid:a", name: "Clément BOSLE" },
+      { mri: "8:orgid:b", name: "Théophile WALLEZ" },
+    ];
+    expect(typingPeople(typing)).toEqual(typing);
+  });
+
+  it("coalesces on the first name, exactly like the label", () => {
+    // Two colleagues sharing a first name are ONE word in the hint, so they must
+    // be one face beside it — the row must never name a person it does not show.
+    const people = typingPeople([
+      { mri: "8:orgid:a", name: "Clément BOSLE" },
+      { mri: "8:orgid:b", name: "Clément DUPONT" },
+    ]);
+    expect(people).toEqual([{ mri: "8:orgid:a", name: "Clément BOSLE" }]);
+    expect(typingLabel(["Clément BOSLE", "Clément DUPONT"])).toBe("Clément is typing");
+  });
+
+  it("keeps the nameless typists apart under 'Someone'", () => {
+    expect(
+      typingPeople([
+        { mri: "8:orgid:a", name: "" },
+        { mri: "8:orgid:b", name: "" },
+      ]),
+    ).toEqual([{ mri: "8:orgid:a", name: "" }]);
+  });
+
+  it("returns nothing when nobody is typing", () => {
+    expect(typingPeople([])).toEqual([]);
   });
 });
 

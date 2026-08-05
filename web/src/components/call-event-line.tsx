@@ -2,7 +2,7 @@ import { useState } from "react";
 import { CallIcon, CallMissed01Icon } from "@hugeicons/core-free-icons";
 import { formatCallEvent, type CallSystemEvent } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
-import { Avatar, type AvatarPhoto } from "./avatar";
+import { Avatar, firstAvatarInitial, type AvatarPhoto } from "./avatar";
 import { SystemLine } from "./system-line";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import {
@@ -15,12 +15,6 @@ import {
 
 /** How many participant avatars to show before collapsing the rest into a "+N". */
 const MAX_AVATARS = 5;
-
-/** The first letter of a name, for the dense overlapping stack (two initials get
- *  clipped by the overlap; the full initials show in the hovercard and dialog). */
-function firstInitial(name: string): string {
-  return name.trim().charAt(0).toUpperCase() || "?";
-}
 
 /**
  * A system line for a call/meeting event — e.g. "Call ended · 10 min" followed by an
@@ -85,7 +79,7 @@ export function CallParticipants(props: { participants: string[]; mris?: string[
               <Avatar
                 seed={mri || name}
                 label={name}
-                initials={firstInitial(name)}
+                initials={firstAvatarInitial(name)}
                 fallback="person"
                 photo={participantPhoto(mri)}
                 className="size-6 text-[10px]"

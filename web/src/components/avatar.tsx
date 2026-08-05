@@ -43,6 +43,14 @@ export function avatarInitials(label: string): string {
   return (words[0]![0]! + words[words.length - 1]![0]!).toUpperCase();
 }
 
+/** The first letter of a name, for a dense OVERLAPPING stack — a read-receipts row,
+ *  a call event's participants, the typing hint's faces. The avatar to the left of a
+ *  face covers its own left edge, which clips two initials into a letter the reader
+ *  has to guess at ("NK" reads as "IK"), so a stack shows one. */
+export function firstAvatarInitial(name: string): string {
+  return name.trim().charAt(0).toUpperCase() || "?";
+}
+
 /** A real picture to load for an avatar. Three kinds of subject, addressed the way
  *  Teams addresses each one:
  *   - a person (`kind: "user"`, `id` = their MRI) or a Teams "team" group

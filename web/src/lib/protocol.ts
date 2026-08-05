@@ -1749,6 +1749,26 @@ export function typingLabel(names: string[]): string {
   }
 }
 
+/**
+ * The people a typing hint speaks for: one entry per distinct first name, in the
+ * order the label names them, keeping the first MRI that carried each name.
+ *
+ * {@link typingLabel} coalesces on the first name, so the faces drawn beside it are
+ * derived from the same rule — otherwise two colleagues sharing a first name would
+ * be one word and two pictures, and the row would name a person it does not show.
+ */
+export function typingPeople(typing: TypingName[]): TypingName[] {
+  const seen = new Set<string>();
+  const people: TypingName[] = [];
+  for (const person of typing) {
+    const key = firstName(person.name) || "Someone";
+    if (seen.has(key)) continue;
+    seen.add(key);
+    people.push(person);
+  }
+  return people;
+}
+
 // ---- mail (read-only Outlook surface) --------------------------------------
 //
 // Mirrors the Rust backend's `mail_*` methods (see src/mail.rs and the mail

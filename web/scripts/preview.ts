@@ -1256,6 +1256,52 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // The typing hint above the composer: one typist, then three. The whole-page shots
+  // are what shows the thing the row is judged on — it starts on the composer's own
+  // column, so the faces line up with the words the user types.
+  if (args.includes("--typing")) {
+    // The row is 20px tall, so `--dpr 4` is how the faces in it are really read.
+    await withPreview(
+      async ({ page, shot, setTheme, emit }) => {
+        const conversationId = await openConversation(page, "Ava Thompson");
+        const indicator = '[data-testid="typing-indicator"]';
+        const typers = [
+          { sender: "Lucas Silva", sender_mri: "8:orgid:lucas-silva" },
+          { sender: "Mia Chen", sender_mri: "8:orgid:mia-chen" },
+          { sender: "Noah Kim", sender_mri: "8:orgid:noah-kim" },
+        ];
+        const type = (who: (typeof typers)[number]) =>
+          emit({ kind: "typing", conversation: conversationId, ...who });
+
+        // 1. One person: their face, their name, the dots.
+        await type(typers[0]!);
+        await page.waitForSelector(indicator);
+        await page.waitForTimeout(300);
+        await shot(`${out}-one-light.png`);
+        await shot(`${out}-one-row-light.png`, indicator);
+        await setTheme("dark");
+        await shot(`${out}-one-dark.png`);
+        await shot(`${out}-one-row-dark.png`, indicator);
+        await setTheme("light");
+
+        // 2. Three of them: the faces stack, and the label counts the one it does not
+        //    name. Every typer is re-sent, which is what Teams does while somebody keeps
+        //    typing — and it re-arms the hint's own expiry.
+        for (const who of typers) await type(who);
+        await page.waitForTimeout(300);
+        await shot(`${out}-many-light.png`);
+        await shot(`${out}-many-row-light.png`, indicator);
+
+        console.log(
+          `[preview] wrote ${out}-one-{light,dark}.png, ${out}-one-row-{light,dark}.png, ` +
+            `${out}-many-light.png and ${out}-many-row-light.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
   // The Mail surface: the sidebar's Mail tab plus the reading pane, in both themes.
   if (args.includes("--mail")) {
     await withPreview(async ({ page, shot, setTheme }) => {
