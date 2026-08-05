@@ -527,10 +527,18 @@ const CLEANUP_SETTING: &str = "cleanup_revision";
 const SETTING_SELF_NAME: &str = "self_name";
 const SETTING_SELF_MRI: &str = "self_mri";
 
-/// How far the task scan has read: the newest message `seq` and the newest mail
+/// How far the task scan has read: the newest message `compose_time` and the newest mail
 /// `received` it has already looked at ([`Store::task_scan_watermark`]). Two keys rather
 /// than a column, because "already looked at" is not a property of a message.
-const SETTING_TASK_SCAN_SEQ: &str = "tasks_scan_seq";
+///
+/// A TIME and not a `seq`, which is what the first version of this stored. `messages.seq`
+/// is monotonic only WITHIN a conversation, so a global floor on it excluded every quieter
+/// thread whose own counter had not reached the busiest one's — permanently, and with
+/// nothing to see. The key is named after the column for that reason: a value written by
+/// that version (`500`) read as milliseconds is 1970, which sweeps the whole store, and
+/// that is the harmless direction for the wrong reason. A key of its own means the old
+/// value is simply never read.
+const SETTING_TASK_SCAN_COMPOSE_TIME: &str = "tasks_scan_compose_time";
 const SETTING_TASK_SCAN_RECEIVED: &str = "tasks_scan_received";
 
 /// The scan lease, as `<deadline_ms>:<holder>` ([`Store::claim_task_scan`]).
@@ -4349,11 +4357,19 @@ impl Store {
     /// The messages and mail that might hold a task: what has arrived since the scan
     /// watermark and looks like somebody asking for something.
     ///
+    /// `after_compose_time` is an epoch-ms message time and `after_received` an ISO mail
+    /// timestamp: two clocks, because the two sources are ordered by different columns.
+    /// Both are exclusive, so the window only ever moves forward — at the cost that two
+    /// messages composed in the SAME millisecond are one boundary, and a `>` past one of
+    /// them skips its sibling. That is the right trade for a watermark that can never go
+    /// backwards, and it costs nothing lasting: the next message to arrive arms the next
+    /// scan.
+    ///
     /// Capped at `limit`, so one scan of a busy week cannot become an unbounded prompt —
     /// and the cap is what makes the ordering load-bearing. The caller advances the
     /// watermark to the newest row it was handed, so what comes back has to be a PREFIX of
-    /// each source's own watermark order: the oldest unscanned messages by `seq`, the
-    /// oldest unscanned mail by `received`, each cut at its own end. A window cut across
+    /// each source's own watermark order: the oldest unscanned messages by `compose_time`,
+    /// the oldest unscanned mail by `received`, each cut at its own end. A window cut across
     /// the two — by time, after merging — would drop rows the advanced watermark then
     /// steps over, and those candidates would be lost for good.
     ///
@@ -4373,11 +4389,11 @@ impl Store {
     /// scans the rows after the watermark, a few times an hour at most.
     pub fn task_candidates(
         &self,
-        after_seq: i64,
+        after_compose_time: i64,
         after_received: &str,
         limit: usize,
     ) -> Result<Vec<crate::tasks::Candidate>> {
-        let mut messages = self.message_candidates(after_seq, limit)?;
+        let mut messages = self.message_candidates(after_compose_time, limit)?;
         let mut mail = self.mail_candidates(after_received, limit)?;
         // Each source is already its own oldest `limit`; the shared budget is spent by
         // dropping the NEWEST of whichever side has more, so both halves stay a prefix.
@@ -4392,26 +4408,35 @@ impl Store {
     }
 
     /// The message half of [`Store::task_candidates`].
-    fn message_candidates(&self, after_seq: i64, limit: usize) -> Result<Vec<crate::tasks::Candidate>> {
+    ///
+    /// Ordered and bounded by `compose_time`, never by `seq`: Teams' `sequenceId` counts
+    /// within ONE conversation, so a global floor on it hid every thread whose own counter
+    /// sat below the busiest one's — the quieter the thread, the more certainly its asks
+    /// were never read. A time is the same for every conversation.
+    fn message_candidates(
+        &self,
+        after_compose_time: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::tasks::Candidate>> {
         let sql = format!(
             "SELECT messages.id, messages.conversation_id, {SENDER}, messages.sender_mri,
                     strftime('%Y-%m-%dT%H:%M:%SZ', messages.compose_time / 1000, 'unixepoch'),
                     messages.content
                FROM messages
-              WHERE messages.seq > ?1
+              WHERE messages.compose_time > ?1
                 AND messages.deleted = 0
                 AND {PREFILTER}
                 AND NOT EXISTS (
                     SELECT 1 FROM tasks
                      WHERE tasks.source_message_id <> ''
                        AND tasks.source_message_id = messages.id)
-              ORDER BY messages.seq ASC, messages.id ASC
+              ORDER BY messages.compose_time ASC, messages.id ASC
               LIMIT ?2",
             SENDER = nicknamed!("messages.sender_mri", "messages.sender"),
             PREFILTER = candidate_prefilter("messages.content"),
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![after_seq, limit as i64], |r| {
+        let rows = stmt.query_map(params![after_compose_time, limit as i64], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -4492,23 +4517,26 @@ impl Store {
         Ok(found)
     }
 
-    /// How far the scan has read: the newest message `seq` and the newest mail `received`
-    /// it has already looked at. `(0, "")` on a store that has never scanned, which reads
-    /// every candidate it holds.
+    /// How far the scan has read: the newest message `compose_time` (epoch ms) and the
+    /// newest mail `received` it has already looked at.
+    ///
+    /// `(0, "")` on a store that has never scanned, and it keeps saying so: that pair means
+    /// "nothing has been looked at", which is the truth. Whether to skip a backlog rather
+    /// than read it is a decision about WHEN to scan, and it belongs to whoever starts one.
     pub fn task_scan_watermark(&self) -> Result<(i64, String)> {
-        let seq = self
-            .get_setting(SETTING_TASK_SCAN_SEQ)?
+        let compose_time = self
+            .get_setting(SETTING_TASK_SCAN_COMPOSE_TIME)?
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
         let received = self.get_setting(SETTING_TASK_SCAN_RECEIVED)?.unwrap_or_default();
-        Ok((seq, received))
+        Ok((compose_time, received))
     }
 
     /// Move the scan watermark. Written only after an extraction SUCCEEDED: a run that
     /// failed to parse must leave the window unscanned, or those candidates are lost for
     /// good (see the [`crate::tasks`] module doc).
-    pub fn set_task_scan_watermark(&self, seq: i64, received: &str) -> Result<()> {
-        self.set_setting(SETTING_TASK_SCAN_SEQ, &seq.to_string())?;
+    pub fn set_task_scan_watermark(&self, compose_time: i64, received: &str) -> Result<()> {
+        self.set_setting(SETTING_TASK_SCAN_COMPOSE_TIME, &compose_time.to_string())?;
         self.set_setting(SETTING_TASK_SCAN_RECEIVED, received)?;
         Ok(())
     }
@@ -7932,18 +7960,46 @@ mod tests {
         store
             .insert_message(&said("19:c@thread.v2", "m2", 2, "<p>please send the numbers</p>"))
             .unwrap();
+        // `said` composes at 2026-08-05T09:00:00Z plus a second per seq.
+        let first = 1_785_920_401_000;
         assert_eq!(store.task_candidates(0, "", 50).unwrap().len(), 2);
-        assert_eq!(store.task_candidates(1, "", 50).unwrap().len(), 1, "seq 1 is already scanned");
+        let left = store.task_candidates(first, "", 50).unwrap();
+        assert_eq!(left.len(), 1, "the first message is already scanned");
+        assert_eq!(left[0].id, "m2", "and the one after it is not");
 
         store.upsert_mail_folder(&folder("f", "Inbox", "Inbox", 0)).unwrap();
         let mut asking = mail("mail1", "f", "2026-07-01T09:00:00Z", true);
         asking.preview = "Please approve the invoice";
         store.upsert_mail_message(&asking).unwrap();
-        assert_eq!(store.task_candidates(2, "", 50).unwrap().len(), 1, "the mail is still unscanned");
-        assert!(
-            store.task_candidates(2, "2026-07-01T09:00:00Z", 50).unwrap().is_empty(),
-            "and its own watermark covers it"
+        let second = first + 1_000;
+        assert_eq!(
+            store.task_candidates(second, "", 50).unwrap().len(),
+            1,
+            "the mail has a watermark of its own, and it is still unscanned"
         );
+        assert!(
+            store.task_candidates(second, "2026-07-01T09:00:00Z", 50).unwrap().is_empty(),
+            "and that watermark covers it"
+        );
+    }
+
+    #[test]
+    fn the_watermark_is_a_time_because_a_seq_is_per_conversation() {
+        // THE BUG THIS EXISTS FOR: Teams' `sequenceId` counts within one conversation, so a
+        // global floor on it hid every thread whose own counter sat below the busiest one's
+        // — the quieter the thread, the more certainly its asks were never read.
+        let store = Store::open_in_memory().unwrap();
+        let mut busy = said("19:busy@thread.v2", "m500", 500, "<p>can you review the doc</p>");
+        busy.compose_time = 1_785_920_400_000; // 2026-08-05T09:00:00Z
+        store.insert_message(&busy).unwrap();
+
+        let mut quiet = said("19:quiet@thread.v2", "q1", 1, "<p>can you send the numbers</p>");
+        quiet.compose_time = 1_785_920_460_000; // a minute LATER, at seq 1
+        store.insert_message(&quiet).unwrap();
+
+        let found = store.task_candidates(1_785_920_400_000, "", 50).unwrap();
+        assert_eq!(found.len(), 1, "the quiet thread's ask is not behind the busy one's counter");
+        assert_eq!(found[0].id, "q1");
     }
 
     #[test]
@@ -8110,9 +8166,17 @@ mod tests {
     #[test]
     fn the_watermark_starts_at_the_beginning_and_moves_forward() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.task_scan_watermark().unwrap(), (0, String::new()));
-        store.set_task_scan_watermark(42, "2026-08-05T09:00:00Z").unwrap();
-        assert_eq!(store.task_scan_watermark().unwrap(), (42, "2026-08-05T09:00:00Z".to_string()));
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (0, String::new()),
+            "a store that never scanned says so, rather than guessing at a starting point"
+        );
+        store.set_task_scan_watermark(1_785_920_400_000, "2026-08-05T09:00:00Z").unwrap();
+        assert_eq!(
+            store.task_scan_watermark().unwrap(),
+            (1_785_920_400_000, "2026-08-05T09:00:00Z".to_string()),
+            "epoch ms for a message, an ISO timestamp for a mail"
+        );
     }
 
     #[test]
