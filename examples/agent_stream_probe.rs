@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     println!("signed in as {} ({})", session.self_name, session.self_mri);
 
     // 1. Post the placeholder, and read the id back out of the response. The ic3 token
-    // is only used to upload an image, and there is none here, so it stays empty.
+    // is only used to upload an image or emoji, and there is none here, so it stays empty.
     let sent = teams_send::send_message(
         &http,
         &session,
@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
         None,
         Some(&agent_policy::thinking_html(backend)),
         None,
+        &[],
         &[],
     )
     .await

@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
         None,
         Some(&html),
         None,
+        &[],
         &mentions,
     )
     .await

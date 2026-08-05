@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
         None,
         None,
         &[],
+        &[],
     )
     .await
     .context("post the message")?;

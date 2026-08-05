@@ -3291,6 +3291,31 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .map(teams_send::parse_mentions)
                 .transpose()?
                 .unwrap_or_default();
+
+            // Custom emoji: read the pack's art for each code in the outbound body, so
+            // the `:shipit:` codes become Teams' own inline emoji markup with the bytes
+            // uploaded to AMS. A failed upload propagates: the send fails, the composer
+            // shows it, and nothing is posted (CLAUDE.md § Sending messages and the brief
+            // § 5.4). The agent's answer passes an empty list, so its words are not our pack.
+            let (content_html, emoji_art) = if let Some(html) = content_html.as_ref() {
+                let codes = custom_emoji::codes_in_body(html);
+                let mut art = Vec::new();
+                if let Ok(store) = ctx.store() {
+                    for code in codes {
+                        if let Ok(Some((content_type, bytes))) = store.custom_emoji_art(&code) {
+                            art.push(teams_send::EmojiArt {
+                                name: code,
+                                content_type,
+                                bytes,
+                            });
+                        }
+                    }
+                }
+                (Some(html.clone()), art)
+            } else {
+                (None, Vec::new())
+            };
+
             let http = ctx.http.clone();
             let tokens = ctx.tokens.clone();
             let send_conv = conv.clone();
@@ -3303,9 +3328,23 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let reply_to = reply_to.clone();
                     let content_html = content_html.clone();
                     let image = image.clone();
+                    let emoji_art = emoji_art.clone();
                     let mentions = mentions.clone();
                     async move {
                         let ic3 = tokens.get(IC3_SCOPE).await?;
+                        let (rewritten_html, emoji_ids) = if !emoji_art.is_empty() {
+                            teams_send::resolve_custom_emoji(
+                                &http,
+                                &session,
+                                &ic3,
+                                &conv,
+                                content_html.as_deref().unwrap_or(""),
+                                &emoji_art,
+                            )
+                            .await?
+                        } else {
+                            (content_html.clone().unwrap_or_default(), Vec::new())
+                        };
                         teams_send::send_message(
                             &http,
                             &session,
@@ -3313,8 +3352,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             &conv,
                             &text,
                             reply_to.as_ref(),
-                            content_html.as_deref(),
+                            if rewritten_html.is_empty() { content_html.as_deref() } else { Some(&rewritten_html) },
                             image.as_ref(),
+                            &emoji_ids,
                             &mentions,
                         )
                         .await
@@ -3339,32 +3379,76 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let conv = param_str(params, "conversation")?;
             let message_id = param_str(params, "message_id")?;
             let text = param_str(params, "text")?;
+
+            // Custom emoji: the edit path escapes the plain text, then runs the same
+            // substitution over it that a send does. So an emoji survives an edit.
+            let escaped = teams_send::escape_html(text.trim());
+            let codes = custom_emoji::codes_in_body(&escaped);
+            let mut emoji_art = Vec::new();
+            if let Ok(store) = ctx.store() {
+                for code in codes {
+                    if let Ok(Some((content_type, bytes))) = store.custom_emoji_art(&code) {
+                        emoji_art.push(teams_send::EmojiArt {
+                            name: code,
+                            content_type,
+                            bytes,
+                        });
+                    }
+                }
+            }
+
             let http = ctx.http.clone();
+            let tokens = ctx.tokens.clone();
             let edit_conv = conv.clone();
             let edit_id = message_id.clone();
             let edit_text = text.clone();
-            ctx.retry_on_auth(move |session, _csa| {
-                let http = http.clone();
-                let conv = edit_conv.clone();
-                let message_id = edit_id.clone();
-                let text = edit_text.clone();
-                async move {
-                    teams_send::edit_message(&http, &session, &conv, &message_id, &text, None).await
-                }
-            })
-            .await?;
+            let final_html = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let tokens = tokens.clone();
+                    let conv = edit_conv.clone();
+                    let message_id = edit_id.clone();
+                    let text = edit_text.clone();
+                    let emoji_art = emoji_art.clone();
+                    let escaped = teams_send::escape_html(text.trim());
+                    async move {
+                        let ic3 = tokens.get(IC3_SCOPE).await?;
+                        let (rewritten_html, _emoji_ids) = if !emoji_art.is_empty() {
+                            teams_send::resolve_custom_emoji(
+                                &http,
+                                &session,
+                                &ic3,
+                                &conv,
+                                &escaped,
+                                &emoji_art,
+                            )
+                            .await?
+                        } else {
+                            (escaped.clone(), Vec::new())
+                        };
+                        teams_send::edit_message(
+                            &http,
+                            &session,
+                            &conv,
+                            &message_id,
+                            &text,
+                            Some(&rewritten_html),
+                        )
+                        .await?;
+                        Ok::<_, anyhow::Error>(rewritten_html)
+                    }
+                })
+                .await?;
 
             let (self_name, self_mri) = {
                 let session = ctx.session().await?;
                 (session.self_name.to_string(), session.self_mri.to_string())
             };
-            // `trim()` mirrors what the edit request itself sent (see
-            // `build_edit_body`), so the local row and the network agree.
-            let new_content = teams_send::escape_html(text.trim());
+            // Update the local row with the SAME body we sent (the rewritten html with
+            // emoji markup), so the row and the network agree — exactly what the comment
+            // above promised.
             if let Ok(store) = ctx.store() {
-                if let Some(updated) =
-                    store.update_message_content(&conv, &message_id, &new_content)?
-                {
+                if let Some(updated) = store.update_message_content(&conv, &message_id, &final_html)? {
                     ctx.emit("message", message_json(&updated, &self_name, &self_mri));
                 }
             }
@@ -7078,6 +7162,11 @@ async fn agent_send(
                 Some(&reply_to),
                 Some(&html),
                 None,
+                // An agent's answer carries no custom emoji: its words are not the
+                // user's pack, and an agent that turned text into art would upload
+                // bytes the user never chose to post — and re-upload them on every
+                // one-second edit as the answer streams.
+                &[],
                 // An agent's answer mentions nobody: it is a reply, and a machine must
                 // not be able to notify a colleague.
                 &[],
