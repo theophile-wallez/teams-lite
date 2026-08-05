@@ -509,6 +509,15 @@ async fn run_once(request: &Request, progress: &watch::Sender<Progress>) -> Resu
 /// consults `permissions` not at all, so its CLI runs with whatever tool set its own
 /// configuration gives it and this app cannot narrow that from here.
 ///
+/// What the empty list therefore states is that THIS APP grants nothing and names no
+/// escalation — not that the child can reach nothing. `--permission-mode default` denies
+/// what needs a PROMPT, and an allow rule is not a prompt: a `permissions.allow` entry in
+/// the user's own `~/.claude/settings.json` still applies, so a shell tool they allowlisted
+/// for themselves is one this child holds too. It is a floor rather than a wall, and it is
+/// the same floor the reply path has always stood on ([`Permissions::OwnConfig`] is the
+/// other end of the same premise). The workspace is a directory of this app's own
+/// ([`default_workspace`]), so no project settings of the user's are in scope.
+///
 /// A caller that NEEDS the empty allowlist honoured (the task scan, whose prompt is a
 /// colleague's words) asks this first and refuses to run rather than running a child it
 /// cannot bound. `an_empty_allowlist_is_only_claimed_where_the_command_line_states_it`

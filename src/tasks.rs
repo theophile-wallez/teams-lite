@@ -35,7 +35,10 @@ An empty list is the right answer when nothing was asked of the user.";
 /// How many candidates to show the model at most. Bounded so the prompt fits.
 pub const MAX_CANDIDATES: usize = 60;
 
-/// How many chars of a candidate's text to include. The rest is truncated.
+/// How many chars of a candidate's text reach the prompt. The rest is truncated.
+///
+/// Counted on the ESCAPED text, which is what really travels: `"` becomes `&quot;`, so a
+/// bound stated before escaping is six times wider than it reads (see [`build_prompt`]).
 pub const MAX_CANDIDATE_CHARS: usize = 600;
 
 /// How many chars a title may hold. Longer is truncated rather than refused.
@@ -75,12 +78,16 @@ pub fn looks_actionable(text: &str) -> bool {
     let lower = text.to_lowercase();
     let trimmed = lower.trim();
 
-    // Reject anything too short to be actionable
+    // Shorter than the shortest term below ("please"), so nothing dropped here could have
+    // matched anyway — and "ok" is the shape of most of what this saves reading.
     if trimmed.len() < 6 {
         return false;
     }
 
-    // Ask phrases
+    // The terms below deliberately over-accept: "see you monday" passes on the weekday
+    // alone. This tier only decides what the MODEL reads, and the two failures are not
+    // equal — a candidate it looks at and refuses costs part of one prompt, while one never
+    // offered is an ask the user never sees.
     if lower.contains("can you") || lower.contains("could you")
         || lower.contains("would you") || lower.contains("please")
         || lower.contains("don't forget") || lower.contains("dont forget")
@@ -88,14 +95,12 @@ pub fn looks_actionable(text: &str) -> bool {
         return true;
     }
 
-    // Task words
     if lower.contains("todo") || lower.contains("to do") || lower.contains("to-do")
         || lower.contains("what to do") || lower.contains("action item")
         || lower.contains("deadline") {
         return true;
     }
 
-    // Deadline words
     if lower.contains("before ") || lower.contains("by end of")
         || lower.contains("eod") || lower.contains("asap")
         || lower.contains("this week") || lower.contains("next week")
@@ -156,13 +161,22 @@ pub fn build_prompt(candidates: &[Candidate]) -> String {
     let mut result = String::from("<candidates>\n");
 
     for candidate in candidates.iter().take(MAX_CANDIDATES) {
-        let truncated = truncate_chars(&candidate.text, MAX_CANDIDATE_CHARS);
+        // Escaped FIRST and bounded after, because escaping only ever expands: one `"` is
+        // six chars on the wire, so 600 chars of quotes truncated before the escape reach
+        // the model as 3600. The first cut is a bound on the WORK — a mail body can be
+        // megabytes, and escaping all of it to keep 600 chars would be silly. A cut that
+        // lands inside an entity costs a few characters of a colleague's sentence and can
+        // never re-create the `<` or `"` the escape removed.
+        let truncated = truncate_chars(
+            &escape_xml(&truncate_chars(&candidate.text, MAX_CANDIDATE_CHARS)),
+            MAX_CANDIDATE_CHARS,
+        );
         result.push_str(&format!(
             "<candidate id=\"{}\" from=\"{}\" at=\"{}\">{}</candidate>\n",
             escape_xml(&candidate.id),
             escape_xml(&candidate.author),
             escape_xml(&candidate.when),
-            escape_xml(&truncated)
+            truncated
         ));
     }
 
@@ -362,8 +376,15 @@ mod tests {
 
     #[test]
     fn the_prompt_is_bounded_on_both_axes() {
+        // Half the candidates are quotes and ampersands, which is the case a bound stated
+        // on the raw text does not hold: `"` escapes to six chars, so 600 of them were
+        // 3600 on the wire and 60 such candidates were a 216 KB prompt where 36 KB was
+        // meant. Plain `x` alone can never see that.
         let many: Vec<Candidate> = (0..MAX_CANDIDATES + 20)
-            .map(|i| candidate(&format!("m{i}"), &"x".repeat(MAX_CANDIDATE_CHARS + 500)))
+            .map(|i| {
+                let filler = if i % 2 == 0 { "x" } else { "\"&" };
+                candidate(&format!("m{i}"), &filler.repeat(MAX_CANDIDATE_CHARS + 500))
+            })
             .collect();
         let prompt = build_prompt(&many);
         assert_eq!(prompt.matches("<candidate ").count(), MAX_CANDIDATES);
