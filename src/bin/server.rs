@@ -3732,12 +3732,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }
         }
 
-        // Join a meeting: TWO POSTs, because that is what a meeting is
-        // (NATIVE-CALLING.md § 2.3a, captured from the real client).
-        //
-        //   1. join the conversation — no media at all — and the answer names every link
-        //      the meeting offers: leave, mute, admit, and where to add audio;
-        //   2. add audio on that link, which is where the SDP rides.
+        // Join a meeting: ONE POST, and it carries the microphone
+        // (NATIVE-CALLING.md § 2.3a). The answer names every link the meeting offers —
+        // leave, mute, admit — and whether we are in its lobby.
         //
         // Outward, like placing a call: everybody already in the meeting sees the user
         // arrive, and their microphone is opened to all of them. A join rings nobody,
@@ -3768,6 +3765,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 &meeting,
                 &callbacks,
                 &call_id,
+                Some(&calling::MediaContent::sdp(sdp)),
             )
             .await
             {
@@ -3777,8 +3775,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     return Err(e);
                 }
             };
-            // The conversation is joined; hold its links before adding audio, so a
-            // failure in the second step can still be left properly.
+            // The meeting is joined. Its links are held before anything else, so an
+            // ending always has somewhere to post — and the lobby is a state of its own,
+            // because the one thing the user has to know is that nobody has let them in.
             {
                 let mut plane = ctx.calling.lock().unwrap();
                 if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
@@ -3791,42 +3790,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
             }
             ctx.emit_call_state();
-
-            match calling::add_audio(
-                &ctx.http,
-                &session,
-                &ic3,
-                &local,
-                &joined,
-                &calling::MediaContent::sdp(sdp),
-                &callbacks,
-                &call_id,
-            )
-            .await
-            {
-                Ok(answer) => {
-                    let links = calling::Links::collect(&answer);
-                    {
-                        let mut plane = ctx.calling.lock().unwrap();
-                        if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
-                            call.links.merge(&links);
-                        }
-                    }
-                    ctx.emit_call_state();
-                    Ok(json!({ "call_id": call_id, "links": links.names() }))
-                }
-                // The conversation was joined and the audio was not: leave rather than
-                // sit in a meeting nobody can hear us in.
-                Err(e) => {
-                    eprintln!("[calling] joined the meeting but could not add audio: {e:#}");
-                    if let Some(leave) = joined.links.get(&["leave", "hangup"]) {
-                        let payload = calling::hangup_payload(&local);
-                        let _ = ctx.post_call_signal(leave, &payload).await;
-                    }
-                    ctx.end_call_locally("CallEndReasonJoinFailed").await;
-                    Err(e)
-                }
-            }
+            Ok(json!({ "call_id": call_id, "links": joined.links.names() }))
         }
 
         // Answer the ringing call with our own SDP.

@@ -777,27 +777,31 @@ fn decode(value: &str) -> String {
     urlencoding::decode(value).map(|v| v.into_owned()).unwrap_or_else(|_| value.to_string())
 }
 
-/// Build the POST that JOINS a meeting's CONVERSATION.
+/// Build the ONE POST that joins a meeting, with or without a microphone.
 ///
-/// Captured from the real web client (2026-08-05, this tenant, this user's own meeting),
-/// which is why it looks nothing like the call payload above: **a join carries no media
-/// at all**. It joins the conversation and the answer hands back `links.addModality` —
-/// audio is a second request. Sending a `callInvitation` here is what earned a `400` with
-/// an empty body, twice.
+/// The fields are the captured request of the real web client (2026-08-05, this tenant,
+/// this user's own meeting), and `offer` is the one thing the capture did not show,
+/// because it was taken on the pre-join screen. The client's own builder settles it: it
+/// composes the conversation request and then adds EITHER `stream: {}` (subscribe to the
+/// roster and nothing more) OR `callInvitation` with the media — one body, one POST,
+/// whichever the user asked for.
+///
+/// `addModality` is NOT that second request, and reading it as one cost a round: it is
+/// how a 1:1 call grows a group modality (`addModalityAsync`, whose body carries no media
+/// at all), so the service answers `subCode 5021 — no modality blob in the request`.
 ///
 /// Everything below is the captured shape, field for field:
 ///
 /// * `messageId` is the STRING `"0"` for a meeting on the calendar, not null.
 /// * `meetingInfo.organizerId` is the BARE object id, not an mri.
 /// * `properties.allowConversationWithoutHost` is true — a scheduled meeting is hostless.
-/// * `capabilities` is null and `endpointCapabilities` is a bitmask of what the client
-///   supports. This app claims NONE of those extras, so it sends 0: claiming a capability
-///   we do not have (a compressed payload, a server-side mute) would have the service
-///   use it, and then the call breaks in a way no error names.
+/// * `capabilities` is null, and the two capability masks are the working client's own
+///   (see `CAPTURED_ENDPOINT_CAPABILITIES`).
 pub fn join_payload(
     local: &LocalParticipant,
     meeting: &MeetingJoin,
     callbacks: &CallbackBase,
+    offer: Option<&MediaContent>,
 ) -> Value {
     let mut payload = json!({
         "conversationRequest": {
@@ -864,6 +868,22 @@ pub fn join_payload(
     if let Some(info) = meeting.meeting_info() {
         payload["meetingInfo"] = info;
     }
+    // The MEDIA, when this join is the one that opens a microphone. It rides in a
+    // `callInvitation` — the same envelope a call's own offer travels in, minus
+    // `participants.to`, because a join rings nobody.
+    if let Some(offer) = offer {
+        payload["callInvitation"] = json!({
+            "callModalities": [MODALITY_AUDIO],
+            "links": {
+                "progress": callbacks.link(paths::CALL_PROGRESS),
+                "mediaAnswer": callbacks.link(paths::CALL_MEDIA_ANSWER),
+                "acceptance": callbacks.link(paths::CALL_ACCEPTANCE),
+                "redirection": callbacks.link(paths::CALL_REDIRECTION),
+                "end": callbacks.link(paths::CALL_END),
+            },
+            "mediaContent": offer.json(),
+        });
+    }
     payload
 }
 
@@ -882,7 +902,9 @@ pub struct JoinedConversation {
     pub raw: Value,
 }
 
-/// Join a meeting's conversation: one POST, no media.
+/// Join a meeting: ONE POST, and it carries the microphone when there is one.
+///
+/// `offer` absent joins for the roster alone, which is what a pre-join screen does.
 pub async fn join_meeting(
     http: &reqwest::Client,
     session: &Session,
@@ -891,9 +913,10 @@ pub async fn join_meeting(
     meeting: &MeetingJoin,
     callbacks: &CallbackBase,
     correlation_id: &str,
+    offer: Option<&MediaContent>,
 ) -> Result<JoinedConversation> {
     let endpoints = endpoints(session)?;
-    let payload = join_payload(local, meeting, callbacks);
+    let payload = join_payload(local, meeting, callbacks, offer);
     let raw =
         post_signal(http, &endpoints.conversation_service, session, ic3, correlation_id, &payload)
             .await?;
@@ -905,69 +928,6 @@ pub async fn join_meeting(
     })
 }
 
-/// `"0"` means "no message" for a calendar meeting, and the service is given null
-/// rather than the string.
-fn message_id_or_null(meeting: &MeetingJoin) -> Value {
-    if meeting.message_id == "0" || meeting.message_id.is_empty() {
-        Value::Null
-    } else {
-        Value::String(meeting.message_id.clone())
-    }
-}
-
-/// Build the POST that adds AUDIO to a conversation this endpoint has already joined.
-///
-/// The join above carries no media; the answer to it names `addModality`, and the SDP
-/// rides in a `callInvitation` — the only envelopes the client's own stack ever puts one
-/// in are `callInvitation`, `callAcceptance`, `mediaAnswer` and `mediaNegotiation`. So
-/// this is the invitation shape, addressed to the conversation rather than to a person:
-/// no `participants.to`, because a meeting rings nobody.
-pub fn add_audio_payload(
-    local: &LocalParticipant,
-    offer: &MediaContent,
-    callbacks: &CallbackBase,
-) -> Value {
-    json!({
-        "participants": { "from": local.json() },
-        "capabilities": Value::Null,
-        "endpointCapabilities": 0,
-        "callInvitation": {
-            "callModalities": [MODALITY_AUDIO],
-            "links": {
-                "progress": callbacks.link(paths::CALL_PROGRESS),
-                "mediaAnswer": callbacks.link(paths::CALL_MEDIA_ANSWER),
-                "acceptance": callbacks.link(paths::CALL_ACCEPTANCE),
-                "redirection": callbacks.link(paths::CALL_REDIRECTION),
-                "end": callbacks.link(paths::CALL_END),
-            },
-            "mediaContent": offer.json(),
-        },
-        "links": {
-            "addModalitySuccess": callbacks.link(paths::CONVERSATION_ADD_MODALITY_SUCCESS),
-            "addModalityFailure": callbacks.link(paths::CONVERSATION_ADD_MODALITY_FAILURE),
-        },
-        "debugContent": { "causeId": callbacks.cause_id },
-    })
-}
-
-/// Add audio to a joined conversation, on whichever link its answer named.
-pub async fn add_audio(
-    http: &reqwest::Client,
-    session: &Session,
-    ic3: &str,
-    local: &LocalParticipant,
-    joined: &JoinedConversation,
-    offer: &MediaContent,
-    callbacks: &CallbackBase,
-    correlation_id: &str,
-) -> Result<Value> {
-    let url = joined
-        .links
-        .get(&["addModality", "AddModality", "addParticipantAndModality"])
-        .context("the joined conversation named no link to add audio on")?;
-    let payload = add_audio_payload(local, offer, callbacks);
-    post_signal(http, url, session, ic3, correlation_id, &payload).await
-}
 
 /// Where a join has landed: in the meeting, or in its lobby waiting to be let in.
 ///
@@ -1568,7 +1528,11 @@ mod tests {
         let offer = MediaContent::sdp("v=0");
         let invitation =
             invitation_payload(&local(), &["8:orgid:her".into()], None, &offer, &callbacks());
-        let joined_audio = add_audio_payload(&local(), &offer, &callbacks());
+        let meeting = MeetingJoin::from_join_url(
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0",
+        )
+        .unwrap();
+        let joined_audio = join_payload(&local(), &meeting, &callbacks(), Some(&offer));
         assert_eq!(
             joined_audio.pointer("/callInvitation/callModalities").unwrap(),
             &json!(["audio"])
@@ -1674,7 +1638,7 @@ mod tests {
         assert_eq!(join.join_url, url);
         assert!(!join.is_channel_meeting());
 
-        let payload = join_payload(&local(), &join, &callbacks());
+        let payload = join_payload(&local(), &join, &callbacks(), None);
         // No thread to name, so none is invented.
         assert!(payload.pointer("/groupChat").is_none());
         assert_eq!(payload.pointer("/meetingData/meetingCode").unwrap(), "35017215452446");
@@ -1708,7 +1672,7 @@ mod tests {
             "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0",
         )
         .unwrap();
-        let payload = join_payload(&local(), &meeting, &callbacks());
+        let payload = join_payload(&local(), &meeting, &callbacks(), None);
         // The captured request names NO conversationType at all, so neither does this.
         assert!(payload.pointer("/conversationRequest/conversationType").is_none());
         // And the fields it does always carry, each of which a strict service may demand.
@@ -1725,7 +1689,7 @@ mod tests {
              ?context=%7b%22Tid%22%3a%22tenant%22%2c%22Oid%22%3a%22organizer%22%7d",
         )
         .expect("a join link");
-        let payload = join_payload(&local(), &meeting, &callbacks());
+        let payload = join_payload(&local(), &meeting, &callbacks(), None);
 
         // A join has no `to`: the meeting is already there, and nobody is rung.
         assert!(payload.pointer("/participants/to").is_none());
@@ -1817,8 +1781,8 @@ mod tests {
                 "invitation",
                 invitation_payload(&local(), &["8:orgid:her".into()], None, &offer, &callbacks()),
             ),
-            ("join", join_payload(&local(), &meeting, &callbacks())),
-            ("add audio", add_audio_payload(&local(), &offer, &callbacks())),
+            ("join", join_payload(&local(), &meeting, &callbacks(), None)),
+            ("join with audio", join_payload(&local(), &meeting, &callbacks(), Some(&offer))),
             ("acceptance", acceptance_payload(&local(), &offer, &callbacks())),
             ("media answer", media_answer_payload(&local(), &offer, &callbacks())),
             ("hangup", hangup_payload(&local())),
@@ -1853,7 +1817,7 @@ mod tests {
             "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0",
         )
         .unwrap();
-        let payload = join_payload(&local(), &meeting, &callbacks());
+        let payload = join_payload(&local(), &meeting, &callbacks(), None);
         assert_eq!(payload.pointer("/endpointCapabilities").unwrap(), 73463);
         assert_eq!(payload.pointer("/clientEndpointCapabilities").unwrap(), 63928042);
         assert_eq!(
@@ -1862,20 +1826,34 @@ mod tests {
         );
     }
 
-    /// Audio is the SECOND request, and it is where the SDP rides.
+    /// The microphone travels WITH the join, in one POST, and it rings nobody.
+    ///
+    /// Reading `addModality` as the second half of a join is what earned
+    /// `subCode 5021 — no modality blob in the request`: that link grows a GROUP modality
+    /// on a 1:1 call and its body carries no media at all. The client's own builder puts
+    /// the offer in a `callInvitation` beside the conversation request, and posts once.
     #[test]
-    fn adding_audio_carries_the_offer_and_rings_nobody() {
-        let payload =
-            add_audio_payload(&local(), &MediaContent::sdp("v=0 offer"), &callbacks());
+    fn a_join_carries_the_offer_and_rings_nobody() {
+        let meeting = MeetingJoin::from_join_url(
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0",
+        )
+        .unwrap();
+        let offer = MediaContent::sdp("v=0 offer");
+        let payload = join_payload(&local(), &meeting, &callbacks(), Some(&offer));
         let invitation = payload.pointer("/callInvitation").expect("an invitation");
         assert_eq!(invitation["callModalities"], json!(["audio"]));
         assert_eq!(invitation["mediaContent"]["blob"], "v=0 offer");
         assert_eq!(invitation["mediaContent"]["contentType"], SDP_CONTENT_TYPE);
-        // Still nobody to ring, and the two links the service answers an add on.
+        // The conversation request travels in the SAME body, which is the whole point.
+        assert!(payload.pointer("/conversationRequest/roster").is_some());
+        assert!(payload.pointer("/groupChat/threadId").is_some());
+        // Nobody to ring: a meeting's roster already exists.
         assert!(payload.pointer("/participants/to").is_none());
-        assert!(payload.pointer("/links/addModalitySuccess").is_some());
-        assert!(payload.pointer("/links/addModalityFailure").is_some());
         assert!(!payload.to_string().contains("video"));
+        // And a join for the roster alone carries no media at all — that is the shape
+        // the pre-join capture pins.
+        let roster_only = join_payload(&local(), &meeting, &callbacks(), None);
+        assert!(roster_only.pointer("/callInvitation").is_none());
     }
 
     #[test]
@@ -1884,7 +1862,7 @@ mod tests {
             "https://teams.microsoft.com/l/meetup-join/19%3aabc%40thread.tacv2/1719400000000",
         )
         .expect("a join link");
-        let payload = join_payload(&local(), &meeting, &callbacks());
+        let payload = join_payload(&local(), &meeting, &callbacks(), None);
         assert_eq!(payload.pointer("/groupChat/messageId").unwrap(), "1719400000000");
     }
 

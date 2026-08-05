@@ -1,14 +1,14 @@
-// Live probe: WHERE does a meeting join go, and in what shape?
+// Live probe: does a meeting join really work, in both of its shapes?
 //
-// The first real attempt was refused — `400 Bad Request` with an empty body — and the
-// service's own headers said why it could not have worked: the flightproxy forwarded
-// our POST to `cc/v1/calls`, the CALL CONTROLLER, which creates a call. A join is not a
-// call; the web client posts it to a CONVERSATION url, which it resolves first.
+// A join is ONE POST to the conversation service, and the client's own builder makes two
+// bodies from one function: the conversation request alone (the roster, which is what a
+// pre-join screen shows) and the same body carrying a `callInvitation` with the offer.
+// This runs both against a real meeting and prints what the service answers.
 //
-// The client's own code names that resolution: a create whose conversation already
-// exists is answered `409` with `conversationUrl.Location`, and the client then joins
-// that Location with `scenario: "409RedirectJoin"`. This walks exactly that, one
-// variant at a time, and prints what the service answers to each.
+// It is the shapes that are asked about, not the audio. Three earlier refusals came from
+// bodies nobody could see were wrong — an SDK envelope the transport strips, two
+// credentials where the client sends one, and `addModality`, which grows a group modality
+// on a 1:1 call and answers `subCode 5021` to a join.
 //
 // THIS REACHES A REAL MEETING, so two rails hold it:
 //
@@ -26,7 +26,7 @@
 //   . bin/broker-env.sh && teams_lite_export_broker_bus && \
 //     cargo run --example meeting_join_probe
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::json;
 use teams_lite::calling;
 
 /// The one meeting this probe may ever address: the user's own, authorized out loud for
@@ -127,11 +127,27 @@ async fn main() -> Result<()> {
     };
     let offer = calling::MediaContent::sdp(PLACEHOLDER_SDP);
 
-    // STEP 1: join the conversation. No media — that is what the real client sends when
-    // it opens the pre-join screen, captured field for field.
-    println!("\n---- step 1: join the conversation (no media)");
+    // Two joins, in the two shapes the client's own builder makes, one after the other:
+    // the roster alone (what a pre-join screen sends, and what the capture pins), then
+    // the same body carrying the microphone. Both are ONE POST.
     let correlation = uuid::Uuid::new_v4().to_string();
-    let joined = calling::join_meeting(
+    println!("\n---- roster only: join with no media");
+    match calling::join_meeting(
+        &http, &session, &ic3, &local, &meeting, &callbacks, &correlation, None,
+    )
+    .await
+    {
+        Ok(joined) => {
+            println!("     ACCEPTED  state: {}", joined.state);
+            println!("     links: {:?}", joined.links.names());
+            leave(&http, &session, &ic3, &local, &joined, &correlation).await;
+        }
+        Err(e) => println!("     refused: {e:#}"),
+    }
+
+    println!("\n---- with audio: the same body, carrying the offer");
+    let correlation = uuid::Uuid::new_v4().to_string();
+    let joined = match calling::join_meeting(
         &http,
         &session,
         &ic3,
@@ -139,14 +155,19 @@ async fn main() -> Result<()> {
         &meeting,
         &callbacks,
         &correlation,
+        Some(&offer),
     )
-    .await;
-    let joined = match joined {
+    .await
+    {
         Ok(joined) => {
             println!("     ACCEPTED");
             println!("     controller: {:?}", joined.controller);
             println!("     state: {}", joined.state);
             println!("     links: {:?}", joined.links.names());
+            println!(
+                "     media answer in the response: {}",
+                calling::media_answer_from_frame(&joined.raw).is_some()
+            );
             joined
         }
         Err(e) => {
@@ -155,142 +176,36 @@ async fn main() -> Result<()> {
         }
     };
 
-    // STEP 2: add audio, on the link the answer named. This is the half the capture did
-    // not show — the real client sends it when the user presses "Join now".
-    println!("\n---- step 2: add audio");
-    match calling::add_audio(
-        &http,
-        &session,
-        &ic3,
-        &local,
-        &joined,
-        &offer,
-        &callbacks,
-        &correlation,
-    )
-    .await
-    {
-        Ok(answer) => println!("     ACCEPTED: {}", one_line(&answer)),
-        Err(e) => println!("     refused: {e:#}"),
-    }
-
     // Leave again, whatever happened: a probe that stayed would be a silent participant.
     println!("\n---- leaving");
-    if let Some(leave) = joined.links.get(&["leave", "hangup"]) {
-        match calling::post_signal(
-            &http,
-            leave,
-            &session,
-            &ic3,
-            &correlation,
-            &json!({ "participants": { "from": {
-                "id": local.id, "displayName": local.display_name,
-                "endpointId": local.endpoint_id, "participantId": local.participant_id,
-                "languageId": "en-us" } } }),
-        )
-        .await
-        {
-            Ok(_) => println!("     left"),
-            Err(e) => println!("     could not leave: {e:#} — leave it in Teams if it stuck"),
-        }
-    }
+    leave(&http, &session, &ic3, &local, &joined, &correlation).await;
 
-    println!("\n== done. A 409 with a `conversationUrl.Location` is the answer we want:");
-    println!("   it names the conversation this meeting already has, which is what a join joins.");
+    println!("\n== done. Both shapes are ONE POST to the conversation service: the roster");
+    println!("   alone, or the same body carrying the offer. `addModality` is neither.");
     Ok(())
 }
 
-/// POST one variant, print what came back, and leave the meeting again if it worked.
-async fn attempt(
+/// Leave the meeting on whichever link its answer named. Called after every accepted
+/// join, because a probe that joined and stayed is a silent participant in a real
+/// meeting.
+async fn leave(
     http: &reqwest::Client,
     session: &teams_lite::teams::Session,
     ic3: &str,
-    what: &str,
-    url: &str,
-    payload: &Value,
+    local: &calling::LocalParticipant,
+    joined: &calling::JoinedConversation,
+    correlation: &str,
 ) {
-    let correlation = uuid::Uuid::new_v4().to_string();
-    println!("\n---- {what}\n     POST {url}");
-    match calling::post_signal(http, url, session, ic3, &correlation, payload).await {
-        Ok(answer) => {
-            println!("     ACCEPTED: {}", one_line(&answer));
-            let links = calling::Links::collect(&answer);
-            println!("     links: {:?}", links.names());
-            // Undo it at once: a probe that joined and stayed is a silent participant
-            // in a real meeting.
-            if let Some(leave) = links.hangup() {
-                let body = calling::hangup_payload(&local_of(session));
-                match calling::post_signal(http, leave, session, ic3, &correlation, &body).await {
-                    Ok(_) => println!("     left again"),
-                    Err(e) => println!("     COULD NOT LEAVE: {e:#} — leave it in Teams"),
-                }
-            } else {
-                println!("     no link to leave on; if this joined, leave it in Teams");
-            }
-        }
-        // The whole point of the probe: what the refusal says.
-        Err(e) => println!("     refused: {e:#}"),
+    let Some(url) = joined.links.get(&["leave", "hangup"]) else {
+        println!("     no link to leave on; if this joined, leave it in Teams");
+        return;
+    };
+    let body = json!({ "participants": { "from": {
+        "id": local.id, "displayName": local.display_name,
+        "endpointId": local.endpoint_id, "participantId": local.participant_id,
+        "languageId": "en-us" } } });
+    match calling::post_signal(http, url, session, ic3, correlation, &body).await {
+        Ok(_) => println!("     left"),
+        Err(e) => println!("     could not leave: {e:#} — leave it in Teams if it stuck"),
     }
-}
-
-fn local_of(session: &teams_lite::teams::Session) -> calling::LocalParticipant {
-    calling::LocalParticipant {
-        id: session.self_mri.clone(),
-        display_name: session.self_name.clone(),
-        endpoint_id: uuid::Uuid::new_v4().to_string(),
-        participant_id: uuid::Uuid::new_v4().to_string(),
-    }
-}
-
-/// A JSON answer on one line, short enough to read in a terminal.
-fn one_line(value: &Value) -> String {
-    let text = value.to_string();
-    text.chars().take(600).collect()
-}
-
-/// POST with the credentials named rather than the ones `post_signal` always sends, so
-/// the AUTHORIZATION can be varied independently of the payload.
-async fn raw_attempt(
-    http: &reqwest::Client,
-    session: &teams_lite::teams::Session,
-    bearer: Option<&str>,
-    what: &str,
-    url: &str,
-    payload: &Value,
-) {
-    println!("     -- {what}");
-    let mut request = http
-        .post(url)
-        .header("content-type", "application/json")
-        .header("X-Skypetoken", &session.skypetoken)
-        .header("X-Microsoft-Skype-Chain-ID", uuid::Uuid::new_v4().to_string())
-        .header("X-MS-Migration", "True")
-        .header("api-version", "2");
-    if let Some(bearer) = bearer {
-        request = request.header("authorization", format!("Bearer {bearer}"));
-    }
-    match request.json(payload).send().await {
-        Ok(response) => {
-            let status = response.status();
-            // `www-authenticate` is how the service names the token types it accepts, and
-            // it is the one header that would turn this from a guess into an answer.
-            let challenge = response
-                .headers()
-                .get("www-authenticate")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("<none>")
-                .to_string();
-            let body = response.text().await.unwrap_or_default();
-            println!(
-                "        {status} challenge={challenge} body={}",
-                body.chars().take(300).collect::<String>()
-            );
-        }
-        Err(e) => println!("        network: {e}"),
-    }
-}
-
-/// The first line of an error, for a one-line report.
-fn first_line(text: &str) -> &str {
-    text.lines().next().unwrap_or(text)
 }

@@ -937,14 +937,24 @@ is a shared screen is still one to open in Teams.
   headers into the error, and logs the request body under `TEAMS_LITE_CALL_DEBUG=1`.
   `examples/meeting_join_recon.rs` checks the parse against the user's own real meetings,
   READ-ONLY, and prints shapes rather than values because a join URL is a key.
-- **A join is TWO POSTs, and the first carries no media.** Step 1 joins the CONVERSATION
-  (`conversationRequest` + `groupChat` + `meetingInfo`, no `callInvitation` at all) and the
-  answer names every link the meeting offers; step 2 adds audio on `links.addModality`,
-  which is where the SDP rides. Putting the media in step 1 is refused with `400` and an
-  empty body — measured, twice, and the reason no amount of reading found it is that the
-  service says nothing. See NATIVE-CALLING.md § 2.3a for the captured shape, field for
-  field: `messageId` is the string `"0"`, `meetingInfo.organizerId` is a bare oid, and
-  there is no `conversationType`.
+- **A join is ONE POST, and the microphone travels in it.** It is the SAME body a call
+  sends: `conversationRequest` + `groupChat` + `meetingInfo`, plus a `callInvitation`
+  holding the offer — and minus `participants.to`, because a meeting rings nobody. The
+  client's own builder makes both shapes from one function and posts once: `stream: {}` for
+  the roster alone (a pre-join screen), `callInvitation` for a join with audio. The answer
+  names ~37 links and the lobby state; **the media answer is not in it**, it arrives on the
+  `mediaAnswer` callback link. See NATIVE-CALLING.md § 2.3a for the shape field for field:
+  `messageId` is the string `"0"`, `meetingInfo.organizerId` is a bare oid, and there is no
+  `conversationType`.
+- **`addModality` is NOT the second half of a join**, and three things follow from the round
+  that read it as one. The link grows a GROUP modality on a 1:1 call, so a join posted to it
+  answers `400 subCode 5021 — no modality blob in the request`. The body must carry no
+  `payload` envelope: every builder in the client's own bundle returns one, and its
+  transport strips it (`JSON.stringify(s.payload)`) — a wrapped body is refused `400` with
+  `{}` and names nothing, which is what this app sent for days. And a refusal measured while
+  the request was ALREADY failing for another reason proves nothing: "media in the first POST
+  is refused, measured twice" was recorded here in good faith and was the envelope all along.
+  Check the baseline passes before believing a variant.
 - **A join rings nobody**, which is the only thing it does differently from a call: the
   payload carries no `participants.to`. `call_join` is still an `OUTWARD_METHODS` entry,
   because everybody already in the meeting sees the user arrive and their microphone is

@@ -133,31 +133,52 @@ local participant, and `X-Microsoft-Skype-Client` takes the calling format
 (`SkypeSpaces/{build}/{platform}/TsCallingVersion=…`), not the Skype-era one the messaging
 services want.
 
-### 2.3a Joining a meeting: TWO POSTs, and the first carries no media
+### 2.3a Joining a meeting: ONE POST, in either of two shapes
 
-Captured from the real client on this tenant (2026-08-05), which settled a `400` no
-amount of reading had explained. A join is not a call:
+Verified live against a real meeting (2026-08-05, this tenant, this user's own meeting —
+`examples/meeting_join_probe.rs`, which leaves again after every accepted join). A join is
+the SAME POST as a call, to `conversationServiceUrl`, and it carries:
 
-1. **Join the conversation.** POST to `conversationServiceUrl` with
-   `conversationRequest` (subject, `roster {type:"Delta", rosterUpdate}`, four
-   `properties`, six `links`), `groupChat {threadId, messageId:"0"}` — a STRING, not null
-   — `participants.from` alone, `capabilities:null`, `endpointCapabilities`,
-   `clientEndpointCapabilities`, `endpointMetadata`, `meetingInfo {tenantId, organizerId}`
-   with the organizer as a BARE oid, `endpointState`, and `debugContent {causeId}`.
-   **No `callInvitation`, no SDP.** There is no `conversationType` field at all.
-   The answer is the meeting: `conversationController`, `state
-   {conversationType:"scheduledMeeting", isHostless, isMultiParty}`, `meetingDetails`,
-   `callLimits`, and `links` — `leave`, `addModality`, `mute`, `unmute`, `admit`,
-   `admitAll`, `subscribe`, `sendMessage`, and twenty more.
-2. **Add audio.** POST to `links.addModality`, and THAT is where the SDP rides: the only
-   envelopes the client ever puts one in are `callInvitation`, `callAcceptance`,
-   `mediaAnswer` and `mediaNegotiation`.
+`conversationRequest` (subject, `roster {type:"Delta", rosterUpdate}`, four `properties`,
+six `links`), `groupChat {threadId, messageId:"0"}` — a STRING, not null —
+`participants.from` alone, `capabilities:null`, `endpointCapabilities`,
+`clientEndpointCapabilities`, `endpointMetadata`, `meetingInfo {tenantId, organizerId}`
+with the organizer as a BARE oid, `endpointState`, and `debugContent {causeId}`. There is
+no `conversationType` field at all, and no `participants.to` — a join rings nobody.
 
-Sending step 2's media inside step 1 is refused with `400` and an empty body, which is
-what this app did at first — and so is a body that keeps the SDK's `payload` envelope
-(§ 2.3), which is what it did for days after that. The proxy names the upstream in
-`x-microsoft-skype-proxy-cluster-context` (`cc/v1/calls`), and that header is the only
-thing the service says about a refusal.
+Then ONE of two things, which is the client's own branch
+(`if (subscribe) payload.stream = {} else payload.callInvitation = {…}`):
+
+- **`stream: {}`** — join for the ROSTER alone. This is the pre-join screen, and it is the
+  shape the capture was taken in.
+- **`callInvitation {callModalities:["audio"], links {progress, mediaAnswer, acceptance,
+  redirection, end}, mediaContent}`** — join WITH a microphone. Identical to a call's own
+  invitation, minus the people to ring.
+
+The answer is the meeting either way: `conversationController`, `state
+{conversationType:"scheduledMeeting", isHostless, isMultiParty, isMeetingActivated}`, and
+~37 `links` — `leave`, `mute`, `unmute`, `admit`, `admitAll`, `subscribe`, `sendMessage`,
+`addParticipant`, and the rest. **The media answer is NOT in that response**: it arrives on
+the `mediaAnswer` callback link, over the calling trouter socket.
+
+**`addModality` is not the second half of a join, and reading it as one cost a round.** It
+is how a 1:1 call grows a group modality (`addModalityAsync`, whose body carries no media
+at all), so a join posted to it is refused:
+
+```
+400 subCode 5021 — "Add modality operation failed as there was no modality blob in the request."
+```
+
+That is also the first refusal in this whole feature that named its own cause. The two
+before it — a body carrying the SDK's `payload` envelope (§ 2.3), and one carrying two
+credentials — answered `400` with `{}` and nothing else. `x-microsoft-skype-proxy-cluster-context`
+naming the upstream (`cc/v1/calls`) was the only thing to go on.
+
+**One correction that matters for reading the history of this file:** an earlier round here
+recorded that "media in the first POST is refused, measured twice". That measurement was
+taken while every request still carried the `payload` envelope, so it measured the envelope
+and not the media. A conclusion drawn from a request that was failing for another reason is
+worth nothing — check the *baseline* passes before believing a variant's refusal.
 
 ### 2.4 Taking a call
 
