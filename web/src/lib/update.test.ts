@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { UpdateInfo, UpdateProgress } from "./protocol";
-import { downloadPercent, formatBytes, updateView } from "./update";
+import type { UpdateChanges, UpdateInfo, UpdateProgress } from "./protocol";
+import {
+  changesSummary,
+  countChanges,
+  downloadPercent,
+  formatBytes,
+  updateView,
+} from "./update";
 
 const info: UpdateInfo = {
   current: "abc1234",
@@ -123,6 +129,98 @@ describe("updateView", () => {
   it("treats a missing can_install as no", () => {
     const { can_install: _dropped, ...without } = info;
     expect(updateView(without, null, "connected").shape).toBe("link");
+  });
+});
+
+// ---- what the update brings ---------------------------------------------------------
+
+const changes: UpdateChanges = {
+  groups: [
+    { title: "New", changes: [{ scope: "calendar", summary: "join a meeting" }] },
+    {
+      title: "Fixed",
+      changes: [
+        { scope: "media", summary: "name a file safely" },
+        { summary: "report a refused send" },
+      ],
+    },
+  ],
+  total: 3,
+  omitted: 0,
+};
+
+describe("updateView, and the changelog behind the control", () => {
+  it("carries the changes while the update is still to be taken", () => {
+    for (const phase of ["idle", "downloading", "ready", "failed"] as const) {
+      expect(updateView({ ...info, changes }, progress({ phase }), "connected").changes).toEqual(
+        changes,
+      );
+    }
+    // And on the install this app cannot replace: the user is about to open a release
+    // page, so knowing what is in it beforehand is worth exactly as much.
+    expect(
+      updateView({ ...info, changes, can_install: false }, null, "connected").changes,
+    ).toEqual(changes);
+  });
+
+  // The list is what somebody decides WITH, so it goes once the decision is made. Both of
+  // these states are past it.
+  it("drops the changes once the update is taken", () => {
+    for (const phase of ["restarting", "installed"] as const) {
+      expect(
+        updateView({ ...info, changes }, progress({ phase }), "connected").changes,
+      ).toBeNull();
+    }
+  });
+
+  // A comparison the backend could not read (offline, rate-limited, a force-pushed
+  // history) must cost the DISCLOSURE and never the button: that an update exists is the
+  // thing the row is for.
+  it("still offers the update when nothing could be read about it", () => {
+    for (const absent of [undefined, null, { groups: [], total: 0, omitted: 0 }]) {
+      const view = updateView({ ...info, changes: absent }, null, "connected");
+      expect(view.changes).toBeNull();
+      expect(view.shape).toBe("button");
+      expect(view.action).toBe("download");
+    }
+  });
+
+  // The same rule the words obey: no state spells the build. A count answers what somebody
+  // hovers to ask — is this a typo or a fortnight? — and a sha answers nothing.
+  it("never spells the build in the disclosure either", () => {
+    const view = updateView({ ...info, changes }, null, "connected");
+    expect(changesSummary(view.changes)).not.toContain(info.latest);
+    expect(changesSummary(view.changes)).not.toContain(info.current);
+  });
+});
+
+describe("changesSummary", () => {
+  it("counts the changes, in the plural the count needs", () => {
+    expect(changesSummary(changes)).toBe("3 changes since your build");
+    expect(
+      changesSummary({
+        groups: [{ title: "Fixed", changes: [{ summary: "one thing" }] }],
+        total: 1,
+        omitted: 0,
+      }),
+    ).toBe("1 change since your build");
+  });
+
+  // A list that stops without saying so reads as a complete one — which is the whole
+  // reason `omitted` travels.
+  it("says how much it is not showing", () => {
+    expect(changesSummary({ ...changes, total: 40, omitted: 37 })).toBe(
+      "40 changes since your build — the newest 3 below",
+    );
+  });
+
+  it("says nothing about nothing", () => {
+    expect(changesSummary(null)).toBe("");
+  });
+
+  it("counts across every group", () => {
+    expect(countChanges(changes)).toBe(3);
+    expect(countChanges(null)).toBe(0);
   });
 });
 

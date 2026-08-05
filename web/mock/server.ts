@@ -3778,7 +3778,40 @@ let mockUpdate: {
   url: string;
   size: number;
   can_install: boolean;
+  changes: typeof MOCK_UPDATE_CHANGES | null;
 } | null = null;
+
+/** What the mock update brings, in the shape `changelog::Changelog` serializes to.
+ *
+ *  Written in the project's own commit style, with a scope on most entries and one without,
+ *  because the panel draws those two differently. Every group the backend can produce is
+ *  NOT here on purpose — this is one ordinary update, and a spec that wants the truncation
+ *  line arms `changes_omitted`. */
+const MOCK_UPDATE_CHANGES = {
+  groups: [
+    {
+      title: "New",
+      changes: [
+        { scope: "calendar", summary: "join a meeting from the event it belongs to" },
+        { scope: "mail", summary: "draw a sender's own mark beside their name" },
+      ],
+    },
+    {
+      title: "Fixed",
+      changes: [
+        { scope: "media", summary: "never let a sender's own words name a file on disk" },
+        { scope: "history", summary: "keep the scroll still while a tall row measures" },
+        { summary: "stop a refused send from looking like it went out" },
+      ],
+    },
+    {
+      title: "Documented",
+      changes: [{ scope: "calling", summary: "map video and screen sharing" }],
+    },
+  ],
+  total: 6,
+  omitted: 0,
+};
 
 /** How far the mock update has got. Mirrors `UpdateSlot` in src/bin/server.rs, including
  *  that the phase is replayed on connect whenever it is not `idle`. */
@@ -6047,6 +6080,21 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
             : "https://github.com/theophile-wallez/teams-lite/releases/tag/latest",
         size: typeof body.size === "number" ? body.size : MOCK_UPDATE_SIZE,
         can_install: body.can_install !== false,
+        // What it brings. `changes: false` is the backend that could not read the
+        // comparison — offline, rate-limited, a force-pushed history — which a spec needs,
+        // because the button must still be offered with nothing to disclose.
+        // `changes_omitted` arms the other end: a build so far behind that the list is
+        // capped, which is the one case the panel says something extra.
+        changes:
+          body.changes === false
+            ? null
+            : typeof body.changes_omitted === "number"
+              ? {
+                  ...MOCK_UPDATE_CHANGES,
+                  total: MOCK_UPDATE_CHANGES.total + body.changes_omitted,
+                  omitted: body.changes_omitted,
+                }
+              : MOCK_UPDATE_CHANGES,
       };
       resetMockUpdate();
       broadcast("update_available", { ...mockUpdate });

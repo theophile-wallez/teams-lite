@@ -1001,6 +1001,14 @@ struct UpdateSlot {
     asset: Option<teams_lite::update::Asset>,
     /// The commit the release was built from, which names the downloaded file.
     latest: String,
+    /// What the update brings: the commits between this build and the release, grouped by
+    /// `teams_lite::changelog`. `None` until it has been read — and it stays `None` when
+    /// GitHub could not answer, which the button draws as no list rather than as no button.
+    changes: Option<teams_lite::changelog::Changelog>,
+    /// The release `changes` describes. The list is cached against it because
+    /// `refresh_release` runs on every download attempt, and a comparison between two
+    /// commits that have not moved is the same comparison.
+    changes_rev: String,
     /// The downloaded build, once complete and verified.
     file: Option<std::path::PathBuf>,
     phase: UpdatePhase,
@@ -1392,12 +1400,27 @@ impl Ctx {
         // itself at all — a staged service cannot, and it keeps the release link instead.
         let installable =
             info.asset.is_some() && !read_only() && teams_lite::update::self_install().is_some();
+        // What the update BRINGS, when it is already known: the commits between this build
+        // and the release, which the button shows on hover. Read from the slot rather than
+        // taken as an argument, so this stays the one place the payload is spelled — the
+        // fetch is `learn_release_changes`, and it is cached against the release it
+        // describes.
+        let changes = self
+            .with_update(|slot| {
+                if slot.changes_rev == info.latest {
+                    slot.changes.clone()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(None);
         let data = json!({
             "current": info.current,
             "latest": info.latest,
             "url": info.url,
             "size": info.asset.as_ref().map(|a| a.size).unwrap_or(0),
             "can_install": installable,
+            "changes": changes,
         });
         let _ = self.with_update(|slot| {
             slot.available = Some(data.clone());
@@ -1406,6 +1429,38 @@ impl Ctx {
         });
         self.emit("update_available", data);
         installable
+    }
+
+    /// Read what the update brings, once per release, and cache it for the payload.
+    ///
+    /// Called BEFORE `publish_release`, because that method is where the payload is spelled
+    /// and it must not be two. Cached against the release's own commit: `refresh_release`
+    /// runs on every download attempt, and the list between two builds does not change
+    /// while both ends stand still — so a retried download costs no extra request.
+    ///
+    /// Quiet on failure, and the reason is the difference between the two facts it carries:
+    /// that an update EXISTS is what the button is for, and WHAT it brings is a nicety on
+    /// top. A rate-limited or force-pushed comparison leaves the button with no list, never
+    /// the user with no button.
+    async fn learn_release_changes(&self, info: &teams_lite::update::UpdateInfo) {
+        let known = self
+            .with_update(|slot| slot.changes_rev == info.latest && slot.changes.is_some())
+            .unwrap_or(false);
+        if known {
+            return;
+        }
+        let Some(current) = teams_lite::update::build_rev() else {
+            return;
+        };
+        match teams_lite::update::changes(&self.http, current, &info.latest).await {
+            Ok(log) => {
+                let _ = self.with_update(|slot| {
+                    slot.changes_rev = info.latest.clone();
+                    slot.changes = Some(log);
+                });
+            }
+            Err(e) => eprintln!("[update] what it brings could not be read: {e}"),
+        }
     }
 
     /// Forget the release: this build IS the newest one.
@@ -1438,12 +1493,16 @@ impl Ctx {
         match teams_lite::update::check(&self.http, current).await {
             Ok(Some(info)) => match info.asset.clone() {
                 Some(asset) => {
+                    self.learn_release_changes(&info).await;
                     self.publish_release(&info);
                     ReleaseNow::Asset(asset, info.latest)
                 }
                 // A release with no binary for this machine is not something to download,
-                // and it is not a failure either — the row goes back to being a link.
+                // and it is not a failure either — the row goes back to being a link. The
+                // list still travels: a link the user follows is a release page they are
+                // about to read, so knowing what is in it beforehand is worth as much.
                 None => {
+                    self.learn_release_changes(&info).await;
                     self.publish_release(&info);
                     ReleaseNow::Unknown
                 }
@@ -5792,6 +5851,10 @@ fn spawn_update_check(ctx: Ctx) {
     tokio::spawn(async move {
         match teams_lite::update::check(&ctx.http, current).await {
             Ok(Some(info)) => {
+                // What it brings, before it is announced: the payload is spelled once, in
+                // `publish_release`, so the list has to be known by the time it runs or the
+                // first thing every client hears would carry no list.
+                ctx.learn_release_changes(&info).await;
                 let installable = ctx.publish_release(&info);
                 eprintln!(
                     "[update] a newer build is available ({} -> {}){}",

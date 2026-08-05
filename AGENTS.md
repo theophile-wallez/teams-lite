@@ -665,9 +665,10 @@ user. Two independent mechanisms enforce that split:
   (it honours `--dpr`, because the faces in it are 20px). For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
   file. For Settings › AI providers and its model picker, open and closed in both
-  themes: `bun run preview -- --out /tmp/prov --ai-providers`. For the update button, its
-  progress mid-download and the link the other install shape keeps:
-  `bun run preview -- --out /tmp/upd --update`. For the write-lock banner, in both of its
+  themes: `bun run preview -- --out /tmp/prov --ai-providers`. For the update button, the
+  changelog it discloses on hover in both themes, its progress mid-download and the link the
+  other install shape keeps: `bun run preview -- --out /tmp/upd --update`. For the
+  write-lock banner, in both of its
   causes: `bun run preview -- --out /tmp/wl --write-lock`. To review a detail too
   small to read in a
   1200px page — a 16px icon, a chip, a badge — crop to it and raise the pixel
@@ -1425,6 +1426,27 @@ backend checks once at startup whether `latest` names a different commit and, if
 the sidebar offers the update as a blue button above the status line
 (`web/src/components/update-button.tsx`, over the pure `web/src/lib/update.ts`).
 
+**Every build publishes TWO releases, and each answers what the other cannot**
+(`.github/workflows/build.yml`). `build-<shortsha>` is immutable, one per commit, and kept
+FOR EVER: it is the record of what shipped, and its body is that build's changelog. `latest`
+is the rolling tag, recreated every time — and it can never move to another name, because
+`update::check` asks `/releases/tags/latest` and install.sh downloads
+`/releases/download/latest/…`, so every copy already installed depends on that spelling.
+The asset is therefore uploaded twice on purpose. **The BINARY is kept on the newest
+`ASSET_WINDOW` (10) builds only**: it is 134 MB and this project pushes about 19 times a
+day, so keeping every one would cost some 78 GB a month — older releases keep their notes,
+which is the part worth for ever and a few KB. `update::tests::the_release_workflow_…` pins
+the tag, the notes' machine-readable line, the history the changelog needs and the fact that
+pruning selects `build-` releases and never `latest`.
+
+**The changelog is written ONCE, in Rust** (`src/changelog.rs`), and read by two surfaces:
+CI renders its markdown into every release body through `examples/changelog.rs`, and the
+backend publishes the same structure to the app. A grouper in the workflow beside one in the
+crate would be two spellings of one list, drifting apart at the first commit type nobody
+thought of. It reads conventional commits — the type becomes the heading, the scope is kept
+apart from the summary, a `!` is lifted to a **Breaking** group above everything — and a
+subject written outside the convention keeps its own words rather than being dropped.
+
 **It is two clicks, and each one is the user's.** `update_download` streams the release
 asset into `~/.cache/teams-lite/updates` and reports progress as a fill inside the button;
 `update_apply` puts it in place and restarts onto it. Nothing happens on its own: the
@@ -1437,7 +1459,29 @@ button says what it costs before it is pressed.
   sentence, and there is one release to take, so it names nothing the user can act on.
   `latest` stays in the payload because the BACKEND compares it with its own build to
   decide there is an update at all. A test in `web/src/lib/update.test.ts` scans every
-  phase for it.
+  phase for it — the disclosure below included, which counts changes and names no commit.
+- **What the update BRINGS is a disclosure on the control itself.** Resting the pointer on
+  the button opens the commits between this build and the release, beside it
+  (`UpdateChangesPanel`, a hover card — the person card's own primitive and delays, so one
+  hover means one thing across the app). The backend reads them from GitHub's compare API in
+  one request (`update::changes`), which is why the list is right even for a build a hundred
+  releases back, and caches them against the release so a retried download costs no request.
+  Five rules hold it, each pinned by `web/e2e/update.spec.ts`:
+  - **It is a floating panel, never a section in the row.** The row is the button (below), so
+    a list that unfolded under it would move the control the user is aiming at. The spec
+    measures the button's own box across the hover.
+  - **A phone gets it from a LONG PRESS**, because there is no hover there and this app is
+    used from one — the chat row's "…" makes the same split, and a TAP stays the update
+    itself (`web/e2e/mobile.spec.ts` pins both halves).
+  - **It is bounded and scrolls itself**, and what it leaves out it COUNTS: GitHub's compare
+    stops at 250 commits and `changelog::MAX_CHANGES` caps the payload, so the heading says
+    "43 changes since your build — the newest 6 below". A list that stops without saying so
+    reads as a complete one.
+  - **A comparison that could not be read costs the DISCLOSURE, never the button.** Offline,
+    rate-limited, a force-pushed history: `changes` arrives null and the update is still
+    offered. That an update EXISTS is what the row is for; what it brings is the nicety.
+  - **It goes once the decision is made.** `restarting` and `installed` carry no list: it is
+    what somebody decides WITH, and from there the release notes hold it.
 - **The progress takes the place of the label, and the button does not move.** The percent
   is drawn where the pressed words were, over the fill. `web/e2e/update.spec.ts` measures
   the button's own position across the click.
@@ -1527,9 +1571,12 @@ button says what it costs before it is pressed.
 the `{kind: "update"}` test hook, which a spec MUST clear afterwards — one mock process
 serves the whole run, and a left-behind update moves every later sidebar). `fail_once` on
 that hook arms the replaced-asset failure, because the half a PAGE owns is that a failure it
-shows is one the button really recovers from. `cd web && bun run preview -- --out /tmp/upd
---update` captures the button, the download mid-transfer, the restart it offers next, the
-failure and its reason, and the link the other install shape keeps.
+shows is one the button really recovers from; `changes: false` arms the comparison the
+backend could not read, and `changes_omitted` the build so far behind that the list is
+capped. `cd web && bun run preview -- --out /tmp/upd
+--update` captures the button, the changelog it discloses in both themes, the capped list,
+the download mid-transfer, the restart it offers next, the failure and its reason, and the
+link the other install shape keeps.
 
 ## The always-on service
 

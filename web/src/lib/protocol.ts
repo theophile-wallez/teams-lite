@@ -349,6 +349,40 @@ export type UpdateInfo = {
   url: string;
   size?: number;
   can_install?: boolean;
+  /** What the update brings, when the backend could read it. See {@link UpdateChanges}. */
+  changes?: UpdateChanges | null;
+};
+
+/** One change: the conventional-commit scope it declared, and the author's own words.
+ *
+ *  `scope` and `breaking` are absent on an ordinary entry rather than false/empty —
+ *  the backend skips them (`Change` in src/changelog.rs), so the common line on the wire
+ *  is one field. */
+export type UpdateChange = {
+  scope?: string;
+  summary: string;
+  breaking?: boolean;
+};
+
+/** A heading and the changes under it: "New", "Fixed", "Breaking"… The titles and their
+ *  order are the backend's (`TYPES` in src/changelog.rs), never re-derived here — there is
+ *  one grouping in this project and the release notes on GitHub are rendered from it too. */
+export type UpdateChangeGroup = {
+  title: string;
+  changes: UpdateChange[];
+};
+
+/** Everything between the running build and the release the button offers.
+ *
+ *  `total` counts the changes there are, and `omitted` how many are missing from `groups`
+ *  — GitHub's compare API stops at 250 commits and the backend caps the payload, so a
+ *  build left running for a week gets a bounded list that still says how far behind it is.
+ *  Absent or null means the backend could not read the comparison (offline, rate-limited,
+ *  a force-pushed history): the button is still offered, with nothing to disclose. */
+export type UpdateChanges = {
+  groups: UpdateChangeGroup[];
+  total: number;
+  omitted: number;
 };
 
 /** Where the update has got to. One value, and the six the backend can send

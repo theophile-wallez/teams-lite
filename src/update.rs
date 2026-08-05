@@ -165,6 +165,69 @@ pub async fn check(http: &reqwest::Client, current_rev: &str) -> Result<Option<U
     }
 }
 
+/// Read the commits between two builds — what the update would actually bring.
+///
+/// GitHub's compare API answers that in one request, which is why the changelog is not
+/// assembled from the release history: the running build may be a hundred releases back,
+/// and this is true whether or not any of them still exists. The subjects are handed to
+/// `changelog::from_commits`, which is the ONE place they are grouped (CI renders the same
+/// module into every release body — see src/changelog.rs).
+///
+/// Best-effort like the check it follows. A commit GitHub cannot find (a force-pushed
+/// history), a rate limit, a 5xx: the caller shows the button with no list rather than no
+/// button, because what an update BRINGS is a nicety and that there IS one is not.
+pub async fn changes(
+    http: &reqwest::Client,
+    base: &str,
+    head: &str,
+) -> Result<crate::changelog::Changelog> {
+    let api = format!("https://api.github.com/repos/{REPO}/compare/{base}...{head}");
+    let resp = http
+        .get(&api)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await
+        .context("github compare request")?;
+    anyhow::ensure!(resp.status().is_success(), "github compare -> {}", resp.status());
+    let body: serde_json::Value = resp.json().await.context("github compare body")?;
+    Ok(parse_comparison(&body))
+}
+
+/// Turn a compare response into a changelog.
+///
+/// Pure, so the shape is unit-tested without a network. Two fields matter and they are not
+/// the same number: `commits` is what this page carries — GitHub stops at 250 — while
+/// `total_commits` is how many there really are. Passing both is what lets the app say
+/// "and 40 more" instead of quietly ending the list.
+pub fn parse_comparison(body: &serde_json::Value) -> crate::changelog::Changelog {
+    let subjects: Vec<String> = body
+        .get("commits")
+        .and_then(|c| c.as_array())
+        .map(|commits| {
+            commits
+                .iter()
+                .filter_map(|c| c.get("commit")?.get("message")?.as_str())
+                // The first line only: a commit body is a paragraph the author wrote for
+                // whoever reads the history, not a line in a list.
+                .map(|message| message.lines().next().unwrap_or("").trim().to_string())
+                .filter(|subject| !subject.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Newest first, which is not the order the API answers in: `compare` lists commits
+    // oldest first, and a reader scanning a group wants the newest at the top.
+    let subjects: Vec<String> = subjects.into_iter().rev().collect();
+    let total = body
+        .get("total_commits")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(subjects.len());
+    crate::changelog::from_commits(&subjects, total)
+}
+
 /// Find the release's own `teams` binary in the API's `assets` array.
 ///
 /// Both fields are required: a download URL with no size would leave the progress bar
@@ -620,6 +683,54 @@ mod tests {
         assert_eq!(parse_asset(Some(&assets_json(ASSET_NAME, 0))), None);
     }
 
+    // ---- what the update brings (the compare API) ----------------------------
+
+    fn comparison_json(total: u64, messages: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "total_commits": total,
+            "commits": messages
+                .iter()
+                .map(|m| serde_json::json!({ "commit": { "message": m } }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// The API answers oldest first and the reader wants newest first, so the order is
+    /// REVERSED here — the one thing about this parse that is easy to get silently wrong.
+    #[test]
+    fn a_comparison_is_read_newest_first() {
+        let got = parse_comparison(&comparison_json(2, &["fix: the older one", "fix: the newer one"]));
+        let summaries: Vec<&str> =
+            got.groups[0].changes.iter().map(|c| c.summary.as_str()).collect();
+        assert_eq!(summaries, vec!["the newer one", "the older one"]);
+    }
+
+    /// A commit message is a subject and then a paragraph. Only the subject is a line in a
+    /// list; the body is what the author wrote for whoever reads the history.
+    #[test]
+    fn only_a_commits_first_line_becomes_a_change() {
+        let got = parse_comparison(&comparison_json(
+            1,
+            &["feat(calendar): join a meeting\n\nA long explanation nobody wants in a list."],
+        ));
+        assert_eq!(got.groups[0].changes[0].summary, "join a meeting");
+    }
+
+    /// GitHub's compare stops at 250 commits and states the real count beside them, so a
+    /// build far behind gets a bounded list that still says how far behind it is.
+    #[test]
+    fn a_truncated_comparison_still_states_the_real_total() {
+        let got = parse_comparison(&comparison_json(300, &["fix: the one page we were given"]));
+        assert_eq!(got.total, 300);
+        assert_eq!(got.omitted, 299);
+    }
+
+    #[test]
+    fn an_empty_comparison_is_an_empty_changelog() {
+        assert!(parse_comparison(&comparison_json(0, &[])).is_empty());
+        assert!(parse_comparison(&serde_json::json!({})).is_empty());
+    }
+
     #[test]
     fn verify_accepts_a_complete_elf() {
         assert!(verify(&[0x7f, b'E', b'L', b'F'], 100, 100).is_ok());
@@ -862,6 +973,59 @@ mod tests {
         assert!(
             installer.contains(r#"[ "$unit" = teams-lite-app.service ] && [ ! -x "$APP_BIN" ]"#),
             "teams-lite-app.service must be skipped when the released binary is not installed"
+        );
+    }
+
+    /// What CI publishes, and the four things about it this module depends on.
+    ///
+    /// The workflow is on the other side of a process boundary — nothing in the crate runs
+    /// it — so a change there is invisible to every other test, and each of these failures
+    /// is silent: the app would keep working and quietly stop being able to update, or
+    /// start showing a changelog that is empty or wrong.
+    #[test]
+    fn the_release_workflow_keeps_the_tag_this_module_reads_and_the_notes_it_parses() {
+        let workflow = include_str!("../.github/workflows/build.yml");
+
+        // The ROLLING TAG is the app's own address. `check` asks
+        // /releases/tags/latest and install.sh downloads /releases/download/latest/…, so
+        // every copy already installed depends on this name existing, with the asset on it.
+        assert!(
+            workflow.contains("gh release create latest out/teams-linux-x64"),
+            "the rolling `latest` release must keep carrying the asset: it is the URL every \
+             installed build asks about, and moving it would leave them unable to update"
+        );
+
+        // The notes' machine-readable line, which `parse_release_rev` falls back to when
+        // GitHub resolves `target_commitish` to a branch name.
+        assert!(
+            workflow.contains(r#"echo "Rolling build from ${GITHUB_SHA}"#),
+            "the release notes must state the commit as a 40-character sha, first: it is the \
+             fallback `parse_release_rev` reads"
+        );
+
+        // The changelog comes from the crate's own renderer, so the release body and the
+        // list the button shows are one list (see src/changelog.rs).
+        assert!(
+            workflow.contains("cargo run --quiet --example changelog"),
+            "the release body must be rendered by examples/changelog.rs, never by a second \
+             grouper written in the workflow"
+        );
+        // And it needs the history to render from: a shallow clone answers `git log` with
+        // this commit alone, which reads as a project that changed one thing.
+        assert!(
+            workflow.contains("fetch-depth: 0"),
+            "the changelog is `git log` between two builds, so the clone must hold history"
+        );
+
+        // The asset window prunes BUILD releases only. `latest` losing its binary is the
+        // same failure as `latest` losing its name.
+        let prunes = workflow
+            .split("Keep the binary on the newest builds only")
+            .nth(1)
+            .expect("the workflow prunes old assets");
+        assert!(
+            prunes.contains(r#"startswith("build-")"#),
+            "pruning must select the immutable per-build releases by name, never `latest`"
         );
     }
 

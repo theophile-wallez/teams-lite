@@ -266,6 +266,12 @@ export async function emitUpdate(
     /** Make the next download fail, once — the replaced-asset failure the user really
      *  hit. What follows it is the retry, which has to work. */
     fail_once?: boolean;
+    /** `false` is the backend that could NOT read what the update brings (offline,
+     *  rate-limited, a force-pushed history). The button must still be offered. */
+    changes?: false;
+    /** A build so far behind that the list is capped: the panel then states how many
+     *  changes it is not showing. */
+    changes_omitted?: number;
     /** Simulate the restart an apply ends in: the backend drops every socket, and the
      *  one that answers next is the new build, with no update to announce. */
     restarted?: boolean;

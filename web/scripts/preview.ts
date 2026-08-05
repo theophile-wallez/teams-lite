@@ -1009,6 +1009,28 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-offered-dark.png`);
 
+      // WHAT IT BRINGS, which is the one part of this row that is not in the row: the
+      // commits between this build and the release, disclosed by resting the pointer on the
+      // button. Captured in both themes because the panel is the app's floating surface and
+      // its own contrast is the thing a screenshot answers.
+      await page.locator('[data-testid="update-button"]').hover();
+      await page.locator('[data-testid="update-changes"]').waitFor({ state: "visible" });
+      await shot(`${out}-changes-dark.png`);
+      await setTheme("light");
+      await shot(`${out}-changes-light.png`);
+      await setTheme("dark");
+
+      // A build far behind: the list is capped and the panel says so, which is the only
+      // sentence in it that is ours rather than an author's.
+      await emit({ kind: "update", changes_omitted: 37 });
+      await page.locator('[data-testid="update-control"][data-phase="idle"]').waitFor();
+      await page.locator('[data-testid="update-button"]').hover();
+      await page.locator('[data-testid="update-changes"]').waitFor({ state: "visible" });
+      await shot(`${out}-changes-capped-dark.png`);
+      // Off the button, or the panel covers every state captured below it.
+      await page.mouse.move(700, 320);
+      await page.locator('[data-testid="update-changes"]').waitFor({ state: "hidden" });
+
       // Mid-download: the progress is a fill behind the button's own label, so this
       // capture is the only way to review it.
       await page.locator('[data-testid="update-button"]').click();
@@ -1042,8 +1064,9 @@ if (import.meta.main) {
       await emit({ kind: "update", available: false });
       console.log(
         `[preview] wrote ${out}-offered-light.png, ${out}-offered-dark.png, ` +
-          `${out}-downloading-dark.png, ${out}-ready-dark.png, ${out}-failed-dark.png ` +
-          `and ${out}-link-dark.png`,
+          `${out}-changes-dark.png, ${out}-changes-light.png, ` +
+          `${out}-changes-capped-dark.png, ${out}-downloading-dark.png, ` +
+          `${out}-ready-dark.png, ${out}-failed-dark.png and ${out}-link-dark.png`,
       );
     });
     process.exit(0);

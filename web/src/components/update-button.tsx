@@ -23,13 +23,39 @@
 // primary action of every dialog wears. An update is the one thing here the user gains
 // something by pressing, so it reads as an invitation rather than as a warning — the
 // destructive red belongs to the broker banner, which reports something broken.
+//
+// WHAT THE UPDATE BRINGS IS A DISCLOSURE ON THE CONTROL ITSELF: hover it and the commits
+// between this build and the release open in a panel beside it (a long press on a touch
+// screen, which is this app's own pointer convention — see use-long-press.ts and the chat
+// row's "…"). Three things follow from the row being the button, and each is pinned by
+// web/e2e/update.spec.ts:
+//
+//   • It is a POPOVER, portaled and anchored — never a section that grows in the row. The
+//     row sits at the foot of a sidebar of chat rows, and a list unfolding under the button
+//     would move the control the user is aiming at, which is the same rule that makes the
+//     download's cost a title rather than a line.
+//   • It is BOUNDED and scrolls itself. A build a week behind is 130-odd commits, and a
+//     panel as tall as the window would cover the conversation.
+//   • The words in it are the AUTHORS' — the commit subjects, grouped by the backend
+//     (src/changelog.rs, the same module that writes every release body on GitHub). This
+//     file states no heading of its own and re-derives no grouping.
 
+import { useState } from "react";
+import * as HoverCardPrimitive from "@radix-ui/react-hover-card";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Download04Icon, Refresh01Icon } from "@hugeicons/core-free-icons";
 import { ThinkingOrb } from "thinking-orbs";
 import { Button } from "./ui/button";
+import { useLongPress } from "./use-long-press";
 import { useAppState, useController } from "./controller-context";
-import { updateView, type UpdateAction } from "~/lib/update";
+import { changesSummary, updateView, type UpdateAction } from "~/lib/update";
+import type { UpdateChanges } from "~/lib/protocol";
+
+/** Long enough that crossing the button on the way to a chat does not open it, short
+ *  enough to feel like an answer. The person card's own pair, so one hover means one
+ *  thing across the app (see person-card.tsx). */
+const OPEN_DELAY_MS = 420;
+const CLOSE_DELAY_MS = 160;
 
 export function UpdateButton() {
   const info = useAppState((s) => s.update);
@@ -38,7 +64,21 @@ export function UpdateButton() {
   const resolvedTheme = useAppState((s) => s.resolvedTheme);
   const controller = useController();
 
+  // Controlled, because TWO gestures open the disclosure: the hover card's own (a pointer
+  // resting on the trigger, and a Tab to it) and a long press, which is the only one a
+  // touch screen has — Radix's hover card ignores touch entirely, by design. The click
+  // stays what it always was: the update itself.
+  const [changesOpen, setChangesOpen] = useState(false);
+
   const view = updateView(info, progress, live);
+  const changes = view.changes;
+  // Both hooks run before the early return below, unconditionally: this component renders
+  // nothing at all most of the time, and a hook behind that return would change order the
+  // moment an update appeared.
+  const longPress = useLongPress({
+    enabled: Boolean(changes),
+    onLongPress: () => setChangesOpen(true),
+  });
   if (view.shape === "hidden") return null;
 
   // INVERTED, and it has to be: the orb sits on `bg-primary`, whose own foreground flips
@@ -80,44 +120,56 @@ export function UpdateButton() {
           {view.label}
         </p>
       ) : (
-        <Button
-          size="sm"
-          data-testid="update-button"
-          data-percent={view.percent}
-          title={view.hint}
-          onClick={() => onClick(view.action)}
-          disabled={view.busy}
-          // `relative` + `overflow-hidden` are what let the progress be a fill rather
-          // than a bar of its own. `disabled:opacity-50` from the variant would grey the
-          // download out mid-transfer, so a busy button keeps full contrast: it is
-          // working, not unavailable.
-          className="relative w-full overflow-hidden disabled:opacity-100"
+        <HoverCardPrimitive.Root
+          open={changesOpen && Boolean(changes)}
+          onOpenChange={setChangesOpen}
+          openDelay={OPEN_DELAY_MS}
+          closeDelay={CLOSE_DELAY_MS}
         >
-          {view.busy && view.percent > 0 && (
-            <span
-              data-testid="update-progress-fill"
-              aria-hidden
-              // Behind the label, and lighter than the button rather than darker: the
-              // filled part is the part that is DONE. `transition-[width]` keeps the
-              // percent steps from reading as a stutter — the frames arrive once per
-              // percent, which is not a smooth cadence on a fast connection.
-              className="absolute inset-y-0 left-0 bg-primary-foreground/25 transition-[width] duration-200 ease-out"
-              style={{ width: `${view.percent}%` }}
-            />
-          )}
-          <span className="relative flex items-center gap-2">
-            {view.busy ? (
-              <UpdateOrb label={view.label} theme={orbTheme} />
-            ) : (
-              <HugeiconsIcon
-                icon={view.action === "apply" ? Refresh01Icon : Download04Icon}
-                className="size-4"
-                strokeWidth={1.8}
-              />
-            )}
-            {view.label}
-          </span>
-        </Button>
+          <HoverCardPrimitive.Trigger asChild>
+            <Button
+              size="sm"
+              data-testid="update-button"
+              data-percent={view.percent}
+              data-changes={changes ? "yes" : "no"}
+              title={view.hint}
+              onClick={() => onClick(view.action)}
+              {...longPress.handlers}
+              disabled={view.busy}
+              // `relative` + `overflow-hidden` are what let the progress be a fill rather
+              // than a bar of its own. `disabled:opacity-50` from the variant would grey the
+              // download out mid-transfer, so a busy button keeps full contrast: it is
+              // working, not unavailable.
+              className="relative w-full overflow-hidden disabled:opacity-100"
+            >
+              {view.busy && view.percent > 0 && (
+                <span
+                  data-testid="update-progress-fill"
+                  aria-hidden
+                  // Behind the label, and lighter than the button rather than darker: the
+                  // filled part is the part that is DONE. `transition-[width]` keeps the
+                  // percent steps from reading as a stutter — the frames arrive once per
+                  // percent, which is not a smooth cadence on a fast connection.
+                  className="absolute inset-y-0 left-0 bg-primary-foreground/25 transition-[width] duration-200 ease-out"
+                  style={{ width: `${view.percent}%` }}
+                />
+              )}
+              <span className="relative flex items-center gap-2">
+                {view.busy ? (
+                  <UpdateOrb label={view.label} theme={orbTheme} />
+                ) : (
+                  <HugeiconsIcon
+                    icon={view.action === "apply" ? Refresh01Icon : Download04Icon}
+                    className="size-4"
+                    strokeWidth={1.8}
+                  />
+                )}
+                {view.label}
+              </span>
+            </Button>
+          </HoverCardPrimitive.Trigger>
+          {changes && <UpdateChangesPanel changes={changes} />}
+        </HoverCardPrimitive.Root>
       )}
 
       {/* The link carries its hint as a title, because a second line under a one-line
@@ -130,6 +182,78 @@ export function UpdateButton() {
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * What the update brings: the commits between this build and the release, grouped.
+ *
+ * The words are the authors' and the groups are the backend's (`src/changelog.rs`, which
+ * also renders every release body on GitHub — one list, two places). Nothing here decides
+ * what a change IS; this draws the answer.
+ *
+ * Bounded and scrolling, for the case that makes a changelog interesting: a build left
+ * running for a week is 130-odd commits behind, and the panel must not become as tall as
+ * the window. `max-h` in `rem` rather than `vh` — on a phone in landscape a `vh` cap is a
+ * few lines, and this opens from a long press there.
+ *
+ * A hover card rather than a popover, and that is what keeps the focus where it is: this
+ * opens under the pointer on a control the user may be about to press, and a popover would
+ * move the caret into the panel the moment it appeared.
+ */
+function UpdateChangesPanel({ changes }: { changes: UpdateChanges }) {
+  return (
+    <HoverCardPrimitive.Portal>
+      <HoverCardPrimitive.Content
+        data-testid="update-changes"
+        side="top"
+        align="start"
+        sideOffset={8}
+        collisionPadding={12}
+        className="z-50 w-[min(22rem,calc(100vw-1.5rem))] rounded-xl border border-border/60 bg-popover p-3 text-popover-foreground shadow-pop backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95 data-[side=bottom]:slide-in-from-top-1 data-[side=top]:slide-in-from-bottom-1"
+      >
+        <p
+          data-testid="update-changes-summary"
+          className="mb-2 text-[11px] font-medium text-text-dim"
+        >
+          {changesSummary(changes)}
+        </p>
+        <div className="max-h-[19rem] overflow-y-auto pr-1">
+          {changes.groups.map((group) => (
+            <div key={group.title} className="mb-2 last:mb-0">
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-faint">
+                {group.title}
+              </p>
+              <ul className="flex flex-col gap-1">
+                {group.changes.map((change, index) => (
+                  <li
+                    // The subject is not unique — "docs: a note" happens twice in a week —
+                    // so the key is the position inside its own group, which is stable for
+                    // as long as the list is (it is replaced whole, never edited).
+                    key={`${group.title}-${index}`}
+                    data-testid="update-change"
+                    className="text-[11px] leading-snug text-text"
+                  >
+                    {change.breaking && (
+                      <span className="mr-1 font-semibold uppercase text-warning">
+                        Breaking
+                      </span>
+                    )}
+                    {change.scope && (
+                      // The em dash is what keeps "calendar join a meeting" from reading as
+                      // one sentence, and it is the separator the release notes use for the
+                      // same pair — one list, one spelling.
+                      <span className="font-medium text-text-dim">{change.scope} — </span>
+                    )}
+                    {change.summary}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      </HoverCardPrimitive.Content>
+    </HoverCardPrimitive.Portal>
   );
 }
 

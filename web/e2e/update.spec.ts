@@ -163,6 +163,84 @@ test.describe("in-app update", () => {
     await expect(page.locator('[data-testid="conversation-row"]').first()).toBeVisible();
   });
 
+  // ---- what the update brings ---------------------------------------------------------
+  // The changelog is a DISCLOSURE on the control: the row is still the button, and what a
+  // reader asks for opens beside it rather than growing under it.
+
+  test("discloses what the update brings, without moving the button", async ({
+    page,
+    consoleErrors,
+  }) => {
+    await gotoApp(page);
+    await emitUpdate(page, { latest: "def5678" });
+    const button = page.getByTestId("update-button");
+    await expect(button).toBeVisible();
+    await expect(button).toHaveAttribute("data-changes", "yes");
+
+    const before = await button.boundingBox();
+    const panel = page.getByTestId("update-changes");
+    await expect(panel).toHaveCount(0);
+
+    await button.hover();
+    await expect(panel).toBeVisible();
+
+    // The authors' own words, grouped by the backend — this app re-derives neither.
+    await expect(panel).toContainText("Fixed");
+    await expect(panel).toContainText("never let a sender's own words name a file on disk");
+    // The scope is drawn beside the summary, so a reader sees WHERE before WHAT.
+    await expect(panel).toContainText("media");
+    // And the heading counts, because that is what somebody hovers to ask: how much is
+    // this? A commit sha answers nothing and appears nowhere.
+    await expect(page.getByTestId("update-changes-summary")).toHaveText(
+      "6 changes since your build",
+    );
+    await expect(panel).not.toContainText("def5678");
+
+    // THE BUTTON HAS NOT MOVED. The panel is portaled and anchored; a list that unfolded in
+    // the row would shift the control the user is aiming at, which is the same reason the
+    // download's cost is a title and not a line.
+    const after = await button.boundingBox();
+    expect(after?.y).toBeCloseTo(before?.y ?? 0, 0);
+    expect(after?.height).toBeCloseTo(before?.height ?? 0, 0);
+
+    // It closes on its own when the pointer leaves, and the click underneath is still the
+    // update — a disclosure must not swallow the action it explains.
+    await page.mouse.move(700, 320);
+    await expect(panel).toBeHidden();
+    await button.click();
+    await expect(page.locator('[data-testid="update-control"][data-phase="ready"]')).toBeVisible({
+      timeout: 30_000,
+    });
+    expect(realErrors(consoleErrors)).toEqual([]);
+  });
+
+  // A phone has no hover, so the way in there is a long press — pinned in mobile.spec.ts,
+  // beside the chat row's own hold, because one gesture must mean one thing across the app.
+
+  // The list is bounded — a build a week behind is 130-odd commits — and a list that stops
+  // without saying so reads as a complete one.
+  test("says how much of a long list it is not showing", async ({ page }) => {
+    await gotoApp(page);
+    await emitUpdate(page, { latest: "def5678", changes_omitted: 37 });
+    await page.getByTestId("update-button").hover();
+    await expect(page.getByTestId("update-changes-summary")).toHaveText(
+      "43 changes since your build — the newest 6 below",
+    );
+  });
+
+  // The disclosure is the nicety; that an update EXISTS is the row's job. A comparison the
+  // backend could not read must cost the first and never the second.
+  test("still offers the update when nothing could be read about it", async ({ page }) => {
+    await gotoApp(page);
+    await emitUpdate(page, { latest: "def5678", changes: false });
+    const button = page.getByTestId("update-button");
+    await expect(button).toBeVisible();
+    await expect(button).toHaveText(/Update available/);
+    await expect(button).toHaveAttribute("data-changes", "no");
+    await button.hover();
+    await expect(page.getByTestId("update-changes")).toHaveCount(0);
+  });
+
   // The notice used to live in the status line, where it REPLACED the connection text —
   // and hid a real `error:` during a sign-in outage. It has its own row now.
   test("never covers the status line", async ({ page }) => {
