@@ -92,14 +92,17 @@ export function taskDueLabel(dueDate: string, today: string): string {
   if (dueDate === "") return "";
   if (dueDate === today) return "Today";
 
-  // Compare day strings directly for Tomorrow and Yesterday. These are fixed-width
-  // YYYY-MM-DD strings, so we can derive the adjacent days without Date arithmetic
-  // (which can shift a label by a day under a timezone).
-  const todayDate = new Date(today + "T00:00:00");
+  // The adjacent days are derived with Date arithmetic done in ONE zone end to end: parsed
+  // as UTC, stepped with `setUTCDate`, read back through `toISOString`, which is UTC too.
+  // Mixing them is the bug this branch shipped twice — a local parse read back as UTC lands
+  // a day early at every positive offset, so in Paris a task two days overdue was labelled
+  // "Yesterday". A `due_date` is a calendar day with no time in it, so no zone is the right
+  // one; what matters is that only one is used.
+  const todayDate = new Date(today + "T00:00:00Z");
   const tomorrow = new Date(todayDate);
-  tomorrow.setDate(todayDate.getDate() + 1);
+  tomorrow.setUTCDate(todayDate.getUTCDate() + 1);
   const yesterday = new Date(todayDate);
-  yesterday.setDate(todayDate.getDate() - 1);
+  yesterday.setUTCDate(todayDate.getUTCDate() - 1);
 
   const tomorrowStr = tomorrow.toISOString().split("T")[0];
   const yesterdayStr = yesterday.toISOString().split("T")[0];

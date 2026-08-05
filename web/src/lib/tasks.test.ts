@@ -69,6 +69,30 @@ describe("taskDueLabel", () => {
     expect(taskDueLabel("2026-10-15", "2026-08-05")).toBe("Oct 15");
     expect(taskDueLabel("", "2026-08-05")).toBe("");
   });
+
+  // Every label above passes in UTC whatever the arithmetic does, which is why this machine
+  // never saw the bug: a local parse read back as UTC shifts a day only at a NON-ZERO
+  // offset, and the user's own machine is Europe/Paris. So the zones are named here rather
+  // than left to whoever runs the suite — east of UTC and west of it, where a shift goes
+  // opposite ways.
+  for (const zone of ["Europe/Paris", "Asia/Tokyo", "America/Los_Angeles", "Pacific/Kiritimati"]) {
+    test(`a due day reads the same in ${zone} as it does in UTC`, () => {
+      const was = process.env.TZ;
+      process.env.TZ = zone;
+      try {
+        expect(taskDueLabel("2026-08-05", "2026-08-05")).toBe("Today");
+        expect(taskDueLabel("2026-08-06", "2026-08-05")).toBe("Tomorrow");
+        expect(taskDueLabel("2026-08-04", "2026-08-05")).toBe("Yesterday");
+        expect(taskDueLabel("2026-08-03", "2026-08-05")).toBe("Aug 3");
+        expect(taskDueLabel("2026-12-24", "2026-08-05")).toBe("Dec 24");
+      } finally {
+        // Put the runner's own zone back, including "it had none": one worker runs this
+        // whole file, so a zone left behind would be the next case's zone too.
+        if (was === undefined) delete process.env.TZ;
+        else process.env.TZ = was;
+      }
+    });
+  }
 });
 
 describe("taskIsOverdue", () => {
