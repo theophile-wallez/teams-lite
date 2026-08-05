@@ -78,22 +78,20 @@ test.describe("custom emoji", () => {
     await page.locator(editable).click();
     await page.keyboard.type("got it :shipit:");
     await page.keyboard.press("Enter");
-    await page.waitForTimeout(500);
 
-    const messages = page.locator("[data-message-id]");
-    const count = await messages.count();
-    const lastMessage = messages.nth(count - 1);
-    await expect(lastMessage.locator('img[alt=":shipit:"]')).toBeVisible({ timeout: 5_000 });
+    await page.locator('[data-testid="message-body"]:has-text("got it")').last().waitFor();
+    const sentMessage = page.locator('[data-testid="message-body"]:has-text("got it")').last();
+    await expect(sentMessage.locator('img[alt=":shipit:"]')).toBeVisible({ timeout: 5_000 });
 
     // A code the pack does not hold stays plain text.
     await page.locator(editable).click();
     await page.keyboard.type(":notanemoji:");
     await page.keyboard.press("Enter");
-    await page.waitForTimeout(500);
-    const count2 = await messages.count();
-    const lastMessage2 = messages.nth(count2 - 1);
-    await expect(lastMessage2).toContainText(":notanemoji:");
-    await expect(lastMessage2.locator('img[alt=":notanemoji:"]')).toHaveCount(0);
+
+    await page.locator('[data-testid="message-body"]:has-text("notanemoji")').last().waitFor();
+    const plainMessage = page.locator('[data-testid="message-body"]:has-text("notanemoji")').last();
+    await expect(plainMessage).toContainText(":notanemoji:");
+    await expect(plainMessage.locator('img[alt=":notanemoji:"]')).toHaveCount(0);
 
     expect(realErrors(consoleErrors)).toEqual([]);
   });

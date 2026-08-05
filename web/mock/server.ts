@@ -5448,7 +5448,8 @@ function editMessage(convId: string, messageId: string, text: string): void {
   if (!t) return;
   const msg = t.messages.find((m) => m.id === messageId);
   if (!msg) return;
-  const content = escapeHtml(text);
+  let content = escapeHtml(text);
+  content = substituteCustomEmoji(content);
   if (msg.content === content) return; // no-op edit: nothing to broadcast
   msg.content = content;
   t.recompute();
@@ -5504,6 +5505,96 @@ function reactMessage(convId: string, messageId: string, key: string): boolean {
 
 /** ~150ms after a `send`, echo the message back as the backend's trouter would,
  *  then clear the draft (matches src/bin/server.rs behavior on a successful send). */
+/** Substitute each `:code:` in `html` with custom emoji markup, the same way the Rust
+ *  backend does in `custom_emoji::substitute_codes`. A code the pack holds becomes
+ *  `<img itemtype="http://schema.skype.com/Emoji" ... >`, a code it does not hold stays
+ *  text. Skips `<code>`, `<pre>`, and reply quotes — the three regions the backend skips. */
+function substituteCustomEmoji(html: string): string {
+  const pack = Array.from(customEmojiPack.values());
+  const names = new Map(pack.map((e) => [e.name, e]));
+  const aliases = new Map(pack.filter((e) => e.alias_of).map((e) => [e.name, e.alias_of]));
+
+  let out = "";
+  let pos = 0;
+  let skipDepth = { code: 0, pre: 0, blockquote: 0 };
+
+  while (pos < html.length) {
+    const tagStart = html.indexOf("<", pos);
+    if (tagStart === -1) {
+      out += substituteInText(html.slice(pos), names, aliases, skipDepth);
+      break;
+    }
+
+    out += substituteInText(html.slice(pos, tagStart), names, aliases, skipDepth);
+
+    const tagEnd = html.indexOf(">", tagStart);
+    if (tagEnd === -1) {
+      out += html.slice(tagStart);
+      break;
+    }
+
+    const tag = html.slice(tagStart, tagEnd + 1);
+    out += tag;
+    pos = tagEnd + 1;
+
+    const tagContent = html.slice(tagStart + 1, tagEnd).trim();
+    const isClosing = tagContent.startsWith("/");
+    const tagName = (isClosing ? tagContent.slice(1) : tagContent).split(/\s/)[0]?.toLowerCase();
+
+    if (tagName === "code" || tagName === "pre" || tagName === "blockquote") {
+      skipDepth[tagName as keyof typeof skipDepth] += isClosing ? -1 : 1;
+      if (skipDepth[tagName as keyof typeof skipDepth] < 0) skipDepth[tagName as keyof typeof skipDepth] = 0;
+    }
+  }
+  return out;
+}
+
+function substituteInText(
+  text: string,
+  names: Map<string, CustomEmojiEntry>,
+  aliases: Map<string, string>,
+  skipDepth: { code: number; pre: number; blockquote: number },
+): string {
+  if (skipDepth.code > 0 || skipDepth.pre > 0 || skipDepth.blockquote > 0) return text;
+
+  let out = "";
+  let pos = 0;
+  const bytes = text.split("");
+
+  while (pos < bytes.length) {
+    if (bytes[pos] === ":") {
+      const start = pos;
+      pos++;
+      let name = "";
+      while (pos < bytes.length && bytes[pos] !== ":") {
+        const c = bytes[pos];
+        if (c && /[a-z0-9_+\-]/.test(c)) {
+          name += c;
+          pos++;
+        } else {
+          break;
+        }
+      }
+      if (pos < bytes.length && bytes[pos] === ":" && name) {
+        pos++;
+        const target = aliases.get(name) || name;
+        const emoji = names.get(target);
+        if (emoji) {
+          out += `<img itemtype="http://schema.skype.com/Emoji" itemid="${name}" alt=":${name}:" src="https://eu-api.asm.skype.com/v1/objects/0-mock-${name}/views/imgo" width="20" height="20">`;
+        } else {
+          out += text.slice(start, pos);
+        }
+      } else {
+        out += text.slice(start, pos);
+      }
+    } else {
+      out += bytes[pos];
+      pos++;
+    }
+  }
+  return out;
+}
+
 function scheduleSendEcho(
   convId: string,
   text: string,
@@ -5516,7 +5607,8 @@ function scheduleSendEcho(
     const t = threadFor(convId);
     if (!t) return;
     const seq = nextSeq(t.messages);
-    const body = composeContent(text, replyTo, contentHtml);
+    let body = composeContent(text, replyTo, contentHtml);
+    body = substituteCustomEmoji(body);
     const imageHtml = image ? sentImageContent(image) : "";
     const msg: ChatMessage = {
       id: `${convId}#${seq}`,

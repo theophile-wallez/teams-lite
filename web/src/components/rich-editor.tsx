@@ -220,6 +220,12 @@ export function RichEditor(props: {
   const emojiActiveIndexRef = useRef(0);
   const emojiRankedRef = useRef<EmojiSuggestion[]>([]);
   const emojiDismissedRef = useRef<string | null>(null);
+  // The pack and shortcodes, in refs so the suggestion logic reads the latest values.
+  const customEmojiPackRef = useRef(props.customEmojiPack);
+  const unicodeShortcodesRef = useRef(props.unicodeShortcodes);
+
+  customEmojiPackRef.current = props.customEmojiPack;
+  unicodeShortcodesRef.current = props.unicodeShortcodes;
 
   const setEmojiState = (next: EmojiQueryState | null) => {
     emojiRef.current = next;
@@ -376,8 +382,8 @@ export function RichEditor(props: {
   const rankedEmoji = emoji
     ? emojiSuggestions(
         emoji.query,
-        props.customEmojiPack,
-        props.unicodeShortcodes,
+        customEmojiPackRef.current,
+        unicodeShortcodesRef.current,
       )
     : [];
   emojiRankedRef.current = rankedEmoji;
@@ -414,7 +420,7 @@ export function RichEditor(props: {
       editor.chain().insertContentAt({ from, to }, suggestion.native + " ").run();
       return;
     }
-    const target = insertedEmojiName(suggestion, props.customEmojiPack);
+    const target = insertedEmojiName(suggestion, customEmojiPackRef.current);
     editor
       .chain()
       .insertCustomEmoji({ name: suggestion.name, target, from, to })
