@@ -4012,11 +4012,10 @@ impl Store {
 
     /// The raster art for one custom emoji: `(content_type, bytes)`, following one
     /// alias hop. Returns `None` when the name is not in the pack or when an alias
-    /// points at a name that does not exist.
+    /// points at a name that does not exist. One hop is provably sufficient because
+    /// `set_custom_emoji` refuses an alias that points at another alias, so following
+    /// one hop is enough and a loop would be an unbounded walk over user-controlled data.
     pub fn custom_emoji_art(&self, name: &str) -> Result<Option<(String, Vec<u8>)>> {
-        // One hop is sufficient: `set_custom_emoji` refuses to create an alias that
-        // points at another alias, so following one hop is provably enough and a loop
-        // would be an unbounded walk over user-controlled data.
         let row: Option<(String, String, Option<Vec<u8>>)> = self.conn
             .query_row(
                 "SELECT alias_of, content_type, bytes FROM custom_emoji WHERE name = ?1",

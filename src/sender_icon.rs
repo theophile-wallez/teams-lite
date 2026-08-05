@@ -231,8 +231,9 @@ pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 
 /// Fetch a raster image from a URL, checking every rail: public-IP-only resolution,
 /// byte cap on the claimed and actual lengths, raster sniff on the bytes rather than
-/// the claimed type, no cookie/referrer/query. Returns `Ok(None)` for a non-success
-/// status, a claimed or actual size over the cap, or bytes that are not a raster image.
+/// the claimed type. Adds no cookie, referrer, or query of its own. Returns `Ok(None)`
+/// for a non-success status, a claimed or actual size over the cap, or bytes that are
+/// not a raster image.
 ///
 /// This is the reusable core of `fetch_icon` and is shared by every caller that fetches
 /// an image from a URL a user supplied — the sender icon and the custom emoji URL

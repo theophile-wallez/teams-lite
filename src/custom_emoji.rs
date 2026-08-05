@@ -92,10 +92,9 @@ pub fn substitute_codes(html: &str, art: &dyn Fn(&str) -> Option<String>) -> Str
                 for (start, end, name) in code_spans_in_text(text) {
                     out.push_str(&text[pos..start]);
                     if let Some(src) = art(&name) {
-                        // This markup was verified against the live tenant on 2026-08-05:
-                        // `itemtype`, `src`, `width` and `height` survive Teams' server-side
-                        // sanitizer, the images render inline between the words, and stock
-                        // Teams draws them at text size.
+                        // These four attributes were measured against the live tenant on
+                        // 2026-08-05: they survive Teams' server-side sanitizer, so the emoji
+                        // render inline at text size in stock clients rather than as a picture.
                         out.push_str(r#"<img itemtype="http://schema.skype.com/Emoji" itemid=""#);
                         out.push_str(&name);
                         out.push_str(r#"" alt=":"#);

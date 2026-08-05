@@ -304,12 +304,10 @@ const OUTWARD_METHODS: [&str; 13] = [
 /// Reading the overrides back stays open: it returns what the user themselves chose.
 ///
 /// `custom_emoji_add`, `custom_emoji_remove` and `custom_emoji_import` are the three
-/// entries that write the custom emoji pack. Like the person overrides, they write only
-/// to the store — but they are gated because the pack decides what art this machine can
-/// post as emoji under the user's name on the next send. A client that merely found this
-/// socket could add a picture whose content the user never chose, and that picture would
-/// leave this machine in the next message they send that names it. Reading the pack back
-/// stays open: it returns what the user themselves put in.
+/// entries that write the custom emoji pack. They write only to the store, and they are
+/// gated because a client that could edit the pack could post pictures this machine never
+/// approved under the user's own name on the next send. Reading the pack back stays open:
+/// it returns what the user themselves put in.
 ///
 /// `set_calling` and `call_prepare` are the two calling entries that post nothing.
 /// `set_calling` registers (or unregisters) a calling endpoint with Teams, which
