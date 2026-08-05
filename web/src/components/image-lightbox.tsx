@@ -349,7 +349,9 @@ export function ImageLightbox(props: {
         close();
       }}
       // The picture's own context menu, which the message behind used to take: no
-      // preventDefault, so the browser offers "Save image as…" over the picture.
+      // preventDefault, so the browser offers "Save image as…" over the picture. The
+      // click rides along — same tree, same leak, and nothing behind a modal is the
+      // reader's to hit.
       onContextMenu={stopLeak}
       onClick={stopLeak}
       onPointerDown={onPointerDown}
@@ -388,15 +390,18 @@ export function ImageLightbox(props: {
           download link — no fetch, no proxy call. */}
       <a
         href={props.src}
-        // ponytail: the alt is the attachment's own filename for a shared image and a
-        // description for a pasted one; either way a name with no extension gets one
-        // from the blob's MIME type, which is the browser's job and not ours.
-        download={props.alt}
+        // The alt is the attachment's own filename for a shared image and a description
+        // for a pasted one, so a name with no extension gets one from the blob's MIME
+        // type — the browser's job, not ours. What is NOT left to the browser is the
+        // path: this string is written by whoever sent the picture, and a separator in
+        // it addresses a directory. Browsers do strip it; a file on the user's disk is
+        // not the place to rely on that.
+        download={props.alt.replace(/[\\/]/g, "_")}
         aria-label={`Save image: ${props.alt}`}
         data-testid="image-lightbox-save"
         // The dialog captures every pointer it sees, and a captured pointer's click is
         // retargeted to it — which would close the picture instead of saving it.
-        onPointerDown={(e) => e.stopPropagation()}
+        onPointerDown={stopLeak}
         className="absolute right-16 top-4 flex size-10 items-center justify-center rounded-full bg-black/60 text-white shadow-card transition-colors hover:bg-black/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
         style={{ opacity: travelling ? 0 : 1, transition: `opacity ${TRAVEL_MS}ms ease-out` }}
       >
