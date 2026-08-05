@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
          itemid=\"b\" alt=\":b:\" src=\"{}\" width=\"20\" height=\"20\"> after",
         ams1.src, ams2.src
     );
-    let sent = send_with_ams_refs(&http, &session, &ic3, SANDBOX, &content, &[&ams1.id, &ams2.id])
+    let sent = send_with_ams_refs(&http, &session, &ic3, &content, &[&ams1.id, &ams2.id])
         .await
         .context("send message with custom emoji")?;
     anyhow::ensure!(!sent.id.is_empty(), "the send returned no message id");
@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
          itemid=\"a\" alt=\":a:\" src=\"{}\" width=\"20\" height=\"20\"> red.png",
         ams1.src
     );
-    let result2 = send_with_ams_refs(&http, &session, &ic3, SANDBOX, &content2, &[&ams1.id]).await;
+    let result2 = send_with_ams_refs(&http, &session, &ic3, &content2, &[&ams1.id]).await;
     match result2 {
         Ok(sent2) => {
             println!("\nsecond message accepted, id = {}", sent2.id);
@@ -270,7 +270,6 @@ async fn send_with_ams_refs(
     http: &reqwest::Client,
     session: &teams::Session,
     _ic3: &str,
-    conversation_id: &str,
     content: &str,
     ams_ids: &[&str],
 ) -> Result<teams_send::Sent> {
@@ -280,7 +279,7 @@ async fn send_with_ams_refs(
         .trim_end_matches('/');
     let url = format!(
         "{chat}/v1/users/ME/conversations/{}/messages",
-        urlencoding::encode(conversation_id)
+        urlencoding::encode(SANDBOX)
     );
     let cmid = teams_send::new_client_message_id();
 
@@ -309,7 +308,7 @@ async fn send_with_ams_refs(
     let status = resp.status();
     let resp_body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("send -> {status}: {}", resp_body.chars().take(160).collect::<String>());
+        anyhow::bail!("send -> {status}: {}", resp_body.chars().take(500).collect::<String>());
     }
 
     Ok(teams_send::Sent {
@@ -357,7 +356,7 @@ async fn read_message(
     anyhow::ensure!(
         status.is_success(),
         "read -> {status}: {}",
-        body.chars().take(160).collect::<String>()
+        body.chars().take(500).collect::<String>()
     );
     serde_json::from_str(&body).context("the message body is not JSON")
 }

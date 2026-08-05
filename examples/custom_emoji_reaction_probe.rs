@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     // 3. Set a custom emoji reaction: arbitrary key shaped as `tlcustom-shipit-<ams_id>`.
     let custom_key = format!("tlcustom-shipit-{}", ams_id);
     println!("\nsetting custom emoji reaction with key = {}", custom_key);
-    let set_result = set_reaction_raw(&http, &session, SANDBOX, &sent.id, &custom_key, true).await;
+    let set_result = set_reaction_raw(&http, &session, &sent.id, &custom_key, true).await;
     match &set_result {
         Ok(()) => println!("reaction PUT succeeded (2xx)"),
         Err(e) => {
@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
 
     // 5. Clear the reaction with value: 0.
     println!("\nclearing reaction with value: 0...");
-    let clear_result = set_reaction_raw(&http, &session, SANDBOX, &sent.id, &custom_key, false).await;
+    let clear_result = set_reaction_raw(&http, &session, &sent.id, &custom_key, false).await;
     match &clear_result {
         Ok(()) => println!("clear PUT succeeded (2xx)"),
         Err(e) => {
@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
     // 7. Test a deliberately long key to find the length ceiling.
     let long_key = format!("tlcustom-{}", "a".repeat(280));
     println!("\nsetting long key ({} chars)...", long_key.len());
-    let long_result = set_reaction_raw(&http, &session, SANDBOX, &sent.id, &long_key, true).await;
+    let long_result = set_reaction_raw(&http, &session, &sent.id, &long_key, true).await;
     let long_accepted = long_result.is_ok();
     println!("long key ({} chars) accepted: {}", long_key.len(), if long_accepted { "yes" } else { "no" });
 
@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
         println!("\n>>> LOOK AT THE SANDBOX THREAD IN TEAMS NOW — clearing in 90 seconds");
         std::thread::sleep(std::time::Duration::from_secs(90));
 
-        let _ = set_reaction_raw(&http, &session, SANDBOX, &sent.id, &long_key, false).await;
+        let _ = set_reaction_raw(&http, &session, &sent.id, &long_key, false).await;
     }
 
     println!("\nOK — custom emoji reaction probe complete");
@@ -237,7 +237,6 @@ fn ams_endpoint(session: &teams::Session) -> Result<&str> {
 async fn set_reaction_raw(
     http: &reqwest::Client,
     session: &teams::Session,
-    conversation_id: &str,
     message_id: &str,
     key: &str,
     on: bool,
@@ -248,7 +247,7 @@ async fn set_reaction_raw(
         .trim_end_matches('/');
     let url = format!(
         "{chat}/v1/users/ME/conversations/{}/messages/{}/properties?name=emotions",
-        urlencoding::encode(conversation_id),
+        urlencoding::encode(SANDBOX),
         urlencoding::encode(message_id)
     );
     let value = if on { now_ms() } else { 0 };
@@ -317,7 +316,7 @@ async fn read_emotions(
     anyhow::ensure!(
         status.is_success(),
         "read -> {status}: {}",
-        body.chars().take(160).collect::<String>()
+        body.chars().take(500).collect::<String>()
     );
     let parsed: Value = serde_json::from_str(&body).context("the message body is not JSON")?;
 
