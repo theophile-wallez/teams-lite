@@ -3046,24 +3046,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     anyhow::anyhow!("Could not fetch a raster image from that URL")
                 })?;
 
-                anyhow::ensure!(
-                    custom_emoji::CUSTOM_EMOJI_TYPES.contains(&media.content_type.as_str()),
-                    "an emoji must be a PNG, JPEG, GIF or WebP image"
-                );
-
-                let (width, height) = sender_icon::image_dimensions(&media.bytes)
-                    .ok_or_else(|| anyhow::anyhow!("Could not read image dimensions"))?;
-
-                anyhow::ensure!(
-                    width <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
-                        && height <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION,
-                    "an emoji must be 512 pixels or smaller on a side"
-                );
+                let (content_type, width, height) = custom_emoji::measure_art(&media.bytes)?;
 
                 let source_with_domain = format!("url:{}", domain);
                 store.set_custom_emoji(
                     &name,
-                    Some((&media.content_type, &media.bytes, width, height)),
+                    Some((content_type, &media.bytes, width, height)),
                     None,
                     &source_with_domain,
                     now_ms(),
@@ -3078,67 +3066,28 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 let media =
                     teams_media::fetch_media(&ctx.http, &session, media_url).await?;
 
-                anyhow::ensure!(
-                    custom_emoji::CUSTOM_EMOJI_TYPES.contains(&media.content_type.as_str()),
-                    "an emoji must be a PNG, JPEG, GIF or WebP image"
-                );
-
-                anyhow::ensure!(
-                    media.bytes.len() <= custom_emoji::MAX_CUSTOM_EMOJI_BYTES,
-                    "an emoji must be 128 KB or smaller"
-                );
-
-                let (width, height) = sender_icon::image_dimensions(&media.bytes)
-                    .ok_or_else(|| anyhow::anyhow!("Could not read image dimensions"))?;
-
-                anyhow::ensure!(
-                    width <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
-                        && height <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION,
-                    "an emoji must be 512 pixels or smaller on a side"
-                );
+                let (content_type, width, height) = custom_emoji::measure_art(&media.bytes)?;
 
                 store.set_custom_emoji(
                     &name,
-                    Some((&media.content_type, &media.bytes, width, height)),
+                    Some((content_type, &media.bytes, width, height)),
                     None,
                     "message",
                     now_ms(),
                 )?;
             } else if let Some(data) = data_base64 {
-                let content_type = param_str(params, "content_type")?;
-                anyhow::ensure!(
-                    custom_emoji::CUSTOM_EMOJI_TYPES.contains(&content_type.as_str()),
-                    "an emoji must be a PNG, JPEG, GIF or WebP image"
-                );
-
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(data)
                     .context("emoji data is not valid base64")?;
-                anyhow::ensure!(
-                    bytes.len() <= custom_emoji::MAX_CUSTOM_EMOJI_BYTES,
-                    "an emoji must be 128 KB or smaller"
-                );
-
-                let width: u32 = params
-                    .get("width")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| anyhow::anyhow!("width is required"))?
-                    .try_into()?;
-                let height: u32 = params
-                    .get("height")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| anyhow::anyhow!("height is required"))?
-                    .try_into()?;
-
-                anyhow::ensure!(
-                    width <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
-                        && height <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION,
-                    "an emoji must be 512 pixels or smaller on a side"
-                );
+                // The type and the size are read from the BYTES, not from what the caller
+                // said about them: this is the path the Add Emoji dialog uses, so it was
+                // the one place the 512 px cap and the "never SVG" rule were a UI
+                // courtesy rather than a store invariant.
+                let (content_type, width, height) = custom_emoji::measure_art(&bytes)?;
 
                 store.set_custom_emoji(
                     &name,
-                    Some((&content_type, &bytes, width, height)),
+                    Some((content_type, &bytes, width, height)),
                     None,
                     &source,
                     now_ms(),
@@ -3209,15 +3158,6 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         continue;
                     }
 
-                    let content_type = entry
-                        .get("content_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if !custom_emoji::CUSTOM_EMOJI_TYPES.contains(&content_type) {
-                        errors.push(format!("{}: invalid content type", name));
-                        continue;
-                    }
-
                     let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
                         Ok(b) => b,
                         Err(_) => {
@@ -3226,30 +3166,15 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         }
                     };
 
-                    if bytes.len() > custom_emoji::MAX_CUSTOM_EMOJI_BYTES {
-                        errors.push(format!("{}: too large", name));
-                        continue;
-                    }
-
-                    let width: u32 = entry
-                        .get("width")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0)
-                        .try_into()
-                        .unwrap_or(0);
-                    let height: u32 = entry
-                        .get("height")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0)
-                        .try_into()
-                        .unwrap_or(0);
-
-                    if width > custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
-                        || height > custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
-                    {
-                        errors.push(format!("{}: dimensions too large", name));
-                        continue;
-                    }
+                    // A pack file is a file: the type and the size it states about a row
+                    // are as unchecked as anything else in it, so the bytes are measured.
+                    let (content_type, width, height) = match custom_emoji::measure_art(&bytes) {
+                        Ok(measured) => measured,
+                        Err(e) => {
+                            errors.push(format!("{}: {}", name, e));
+                            continue;
+                        }
+                    };
 
                     match store.set_custom_emoji(
                         name,

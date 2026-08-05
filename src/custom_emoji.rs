@@ -58,6 +58,37 @@ pub fn is_valid_name(name: &str) -> bool {
     bytes.iter().all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_' || b == b'+')
 }
 
+/// What art really is: the type sniffed from the BYTES and the dimensions read out of
+/// them, or the sentence to refuse it with.
+///
+/// Never the type a client declared or a server's own header claimed, and never a size a
+/// client measured. The caps in this module are a store invariant — every row holds a
+/// raster image inside them — and an invariant a caller can talk its way past is a
+/// comment. The dialog measures the picture too, so the user is told before they wait
+/// for an upload; this is what makes that a courtesy rather than the check.
+///
+/// One function because there are four ways into the pack — a file or a paste, a URL, a
+/// colleague's message, an imported pack — and a check written four times is a check
+/// three of them will eventually be missing.
+pub fn measure_art(bytes: &[u8]) -> anyhow::Result<(&'static str, u32, u32)> {
+    let content_type = crate::sender_icon::image_kind(bytes)
+        .filter(|kind| CUSTOM_EMOJI_TYPES.contains(kind))
+        .ok_or_else(|| anyhow::anyhow!("an emoji must be a PNG, JPEG, GIF or WebP image"))?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_CUSTOM_EMOJI_BYTES,
+        "an emoji must be {} KB or smaller",
+        MAX_CUSTOM_EMOJI_BYTES / 1024
+    );
+    let (width, height) = crate::sender_icon::image_dimensions(bytes)
+        .ok_or_else(|| anyhow::anyhow!("Could not read image dimensions"))?;
+    anyhow::ensure!(
+        width <= MAX_CUSTOM_EMOJI_DIMENSION && height <= MAX_CUSTOM_EMOJI_DIMENSION,
+        "an emoji must be {} pixels or smaller on a side",
+        MAX_CUSTOM_EMOJI_DIMENSION
+    );
+    Ok((content_type, width, height))
+}
+
 const CUSTOM_REACTION_PREFIX: &str = "tlcustom-";
 
 /// The Teams emotion key for a custom emoji reaction: our prefix, then the URL of the
@@ -383,6 +414,38 @@ mod tests {
     fn everything_around_a_code_is_byte_identical() {
         let body = "<p>a &amp; b <strong>c</strong> :nope: <a href=\"http://x/:shipit:\">l</a></p>";
         assert_eq!(substitute_codes(body, &art), body, "no code the pack holds, no change");
+    }
+
+    /// A PNG stating a size. The first 24 bytes are all `image_dimensions` reads, and the
+    /// signature is all `image_kind` reads, so this is a whole image as far as both go.
+    fn png_of(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn art_is_measured_from_its_bytes_and_never_from_a_claim() {
+        assert_eq!(measure_art(&png_of(20, 20)).unwrap(), ("image/png", 20, 20));
+
+        // An SVG is a document, not a bitmap. It used to be enough to CALL it a PNG.
+        let refusal = measure_art(br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("PNG, JPEG, GIF or WebP"), "{refusal}");
+
+        // The dimension cap holds against the picture rather than against the numbers
+        // beside it, which is what makes it a store invariant.
+        let refusal = measure_art(&png_of(513, 20)).unwrap_err().to_string();
+        assert!(refusal.contains("512 pixels"), "{refusal}");
+
+        let mut heavy = png_of(20, 20);
+        heavy.resize(MAX_CUSTOM_EMOJI_BYTES + 1, 0);
+        let refusal = measure_art(&heavy).unwrap_err().to_string();
+        assert!(refusal.contains("128 KB"), "{refusal}");
     }
 
     #[test]
