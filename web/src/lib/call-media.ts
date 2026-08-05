@@ -62,6 +62,15 @@ export type RemoteVideo = {
   stream: MediaStream;
 };
 
+/** The two things this app can send beyond a microphone. */
+export type SendKind = "camera" | "screen";
+
+/** What one of those looks like locally, for the preview the sender sees. */
+export type LocalVideo = {
+  kind: SendKind;
+  stream: MediaStream;
+};
+
 /** One live call's media. */
 export type CallMedia = {
   /** The SDP this side produced — the offer for an outgoing call, the answer for an
@@ -90,6 +99,38 @@ export type CallMedia = {
   readonly remoteVideo: RemoteVideo[];
   /** Called whenever {@link remoteVideo} changes, so the UI can redraw its tiles. */
   onRemoteVideoChange?: (videos: RemoteVideo[]) => void;
+  /**
+   * Open the camera (or the screen) and return the OFFER to hand the backend.
+   *
+   * The call was negotiated with audio alone, so this adds a section that does not exist yet
+   * and the service only accepts that on an established call. The browser asks its own
+   * permission first, which is the second gate under the user's click.
+   *
+   * Throws {@link CaptureUnavailableError} when they refuse it or there is no device — a
+   * refusal is not a bug and the UI explains it rather than reporting it.
+   */
+  startSending(kind: SendKind): Promise<string>;
+  /**
+   * Stop sending one of them, and return the offer that says so — or `null` when it was not
+   * being sent.
+   *
+   * The track is stopped HERE whatever the offer does afterwards: a camera whose light stays
+   * on because a POST failed is the worst possible outcome of turning it off.
+   */
+  stopSending(kind: SendKind): Promise<string | null>;
+  /** What this page is sending, for the preview the sender sees. */
+  readonly localVideo: LocalVideo[];
+  /** Called when {@link localVideo} changes — including when the BROWSER stops a screen
+   *  share from its own bar, which no click of ours would report. */
+  onLocalVideoChange?: (videos: LocalVideo[]) => void;
+  /**
+   * Called when a capture ended WITHOUT this app asking — the browser's own "Stop sharing".
+   *
+   * `offer` is the renegotiation that takes the section down, for the caller to post. It
+   * exists because only the caller can reach the backend, and the service has to be told or
+   * the meeting keeps a section that carries nothing.
+   */
+  onSendingEnded?: (kind: SendKind, offer: string | null) => void;
 };
 
 /** What starting media needs. `remoteOffer` is present when answering a call. */
@@ -111,6 +152,27 @@ export class MicrophoneUnavailableError extends Error {
   }
 }
 
+/** Thrown when the camera or the screen could not be opened — refused, or absent.
+ *
+ *  Separate from the microphone's for the same reason that one is separate: refusing to show
+ *  a camera is a decision, not a fault, and a call carries on without it. The message names
+ *  which one, because "could not open the camera" and "could not share the screen" send the
+ *  reader to different places. */
+export class CaptureUnavailableError extends Error {
+  constructor(
+    readonly kind: SendKind,
+    cause: unknown,
+  ) {
+    super(
+      kind === "camera"
+        ? "teams-lite could not open the camera."
+        : "teams-lite could not capture the screen.",
+    );
+    this.name = "CaptureUnavailableError";
+    this.cause = cause;
+  }
+}
+
 /**
  * Open the microphone, negotiate, and return the SDP to hand the backend.
  *
@@ -122,13 +184,17 @@ export class MicrophoneUnavailableError extends Error {
 export async function startCallMedia(options: CallMediaOptions): Promise<CallMedia> {
   const stream = await openMicrophone();
   const pc = new RTCPeerConnection({ iceServers: options.iceServers });
+  // One element per remote STREAM, not one for the call. A meeting sends the voices it wants
+  // us to hear as separate streams (the service's own `multipleAudioStreams`), so a single
+  // element would play one person and drop the rest — and a one-to-one call is just the case
+  // where there is exactly one.
+  //
+  // All three live OUTSIDE the try, so the teardown below can reach them: a failure between
+  // here and the offer must release every capture, not only the microphone.
+  const remoteAudio = new RemoteAudio();
+  const remoteVideo = new RemoteVideoTracks();
+  const senders = new LocalSenders();
   try {
-    // One element per remote STREAM, not one for the call. A meeting sends the voices
-    // it wants us to hear as separate streams (the service's own
-    // `multipleAudioStreams`), so a single element would play one person and drop the
-    // rest — and a one-to-one call is just the case where there is exactly one.
-    const remoteAudio = new RemoteAudio();
-    const remoteVideo = new RemoteVideoTracks();
     pc.addEventListener("track", (event) => {
       const [remote] = event.streams;
       if (!remote) return;
@@ -157,11 +223,12 @@ export async function startCallMedia(options: CallMediaOptions): Promise<CallMed
     if (!localSdp) throw new Error("the browser produced no SDP");
     // Out through the service's own spelling. The service refuses a browser's transport
     // profile outright (`UnrecognizedTransportProfile`), so this is not a nicety.
-    return liveCallMedia(pc, stream, remoteAudio, remoteVideo, toMsSdp(localSdp));
+    return liveCallMedia(pc, stream, remoteAudio, remoteVideo, senders, toMsSdp(localSdp));
   } catch (error) {
     // Never leave the microphone open behind a failure: the browser would keep showing
     // the recording indicator for a call that does not exist.
     stopTracks(stream);
+    senders.stopAll();
     pc.close();
     throw error;
   }
@@ -254,6 +321,129 @@ class RemoteAudio {
   }
 }
 
+/** The service's own label for each kind this app can send. It is not derivable from the
+ *  m-line — both are `m=video` — and it is what the service reads to tell them apart. */
+const SEND_LABELS: Record<SendKind, string> = {
+  camera: "main-video",
+  screen: SHARING_LABEL,
+};
+
+/**
+ * Open one of the two capture devices.
+ *
+ * The camera is asked for at a size a tile in a meeting is drawn at rather than at whatever
+ * the device offers: a 4K webcam encoded at 4K to be shown 128 px wide costs the user's
+ * upload and their battery for nothing. The screen is asked for unconstrained in size,
+ * because a screen is text and downscaled text is unreadable — which is the entire reason
+ * somebody shares one.
+ */
+async function openCapture(kind: SendKind): Promise<MediaStream> {
+  try {
+    if (kind === "camera") {
+      return await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24 } },
+        audio: false,
+      });
+    }
+    return await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 15 } },
+      // NEVER the system audio. The user is already on this call with their microphone, and a
+      // second audio track from the screen would put every sound on their machine into a
+      // meeting they only meant to show a picture to.
+      audio: false,
+    });
+  } catch (error) {
+    throw new CaptureUnavailableError(kind, error);
+  }
+}
+
+/**
+ * What this page is sending, and the transceivers it goes out on.
+ *
+ * A transceiver is REUSED per kind: a camera turned off and on again takes the section it
+ * already had, because every added section is one more m-line the far side must accept and
+ * the count would otherwise only grow.
+ */
+class LocalSenders {
+  private live = new Map<SendKind, { transceiver: RTCRtpTransceiver; stream: MediaStream }>();
+  /** Sections of a kind that was switched off. Kept so switching it on reuses one, and so
+   *  its LABEL survives: the section is still in the SDP, and relabelling it would describe
+   *  a different stream on a section the far side already knows. */
+  private idle = new Map<SendKind, RTCRtpTransceiver>();
+  onChange?: (videos: LocalVideo[]) => void;
+  /** Called when the BROWSER ends a capture by itself — the "Stop sharing" bar it draws over
+   *  every screen share, which no click of ours passes through. */
+  onEndedByBrowser?: (kind: SendKind) => void;
+
+  async start(pc: RTCPeerConnection, kind: SendKind): Promise<void> {
+    const stream = await openCapture(kind);
+    const [track] = stream.getVideoTracks();
+    if (!track) throw new CaptureUnavailableError(kind, new Error("the capture had no video"));
+    // The browser's own bar stops a share without telling this app anything. Without this the
+    // meeting would keep a section carrying nothing while the button still said on.
+    track.addEventListener("ended", () => this.onEndedByBrowser?.(kind));
+    const reuse = this.live.get(kind)?.transceiver ?? this.idle.get(kind);
+    if (reuse) {
+      this.idle.delete(kind);
+      await reuse.sender.replaceTrack(track);
+      reuse.direction = "sendonly";
+      this.live.set(kind, { transceiver: reuse, stream });
+    } else {
+      const transceiver = pc.addTransceiver(track, { direction: "sendonly", streams: [stream] });
+      this.live.set(kind, { transceiver, stream });
+    }
+    this.notify();
+  }
+
+  /** Stop one, and say whether there was anything to stop. */
+  async stop(kind: SendKind): Promise<boolean> {
+    const held = this.live.get(kind);
+    if (!held) return false;
+    // The TRACK first, always. Everything after this can fail, and the camera light going out
+    // must not depend on any of it.
+    for (const track of held.stream.getTracks()) track.stop();
+    this.live.delete(kind);
+    this.idle.set(kind, held.transceiver);
+    await held.transceiver.sender.replaceTrack(null).catch(() => {});
+    held.transceiver.direction = "inactive";
+    this.notify();
+    return true;
+  }
+
+  /** The label each of our own sections must carry, keyed by mid. Read AFTER
+   *  `setLocalDescription`, because a transceiver has no mid before one. */
+  labels(): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const [kind, held] of this.live) {
+      if (held.transceiver.mid) out.set(held.transceiver.mid, SEND_LABELS[kind]);
+    }
+    for (const [kind, transceiver] of this.idle) {
+      if (transceiver.mid) out.set(transceiver.mid, SEND_LABELS[kind]);
+    }
+    return out;
+  }
+
+  get videos(): LocalVideo[] {
+    return [...this.live].map(([kind, held]) => ({ kind, stream: held.stream }));
+  }
+
+  get kinds(): SendKind[] {
+    return [...this.live.keys()];
+  }
+
+  private notify(): void {
+    this.onChange?.(this.videos);
+  }
+
+  stopAll(): void {
+    for (const held of this.live.values()) {
+      for (const track of held.stream.getTracks()) track.stop();
+    }
+    this.live.clear();
+    this.idle.clear();
+  }
+}
+
 /**
  * Every video stream arriving on the call, keyed by the section it arrived on.
  *
@@ -274,6 +464,12 @@ class RemoteVideoTracks {
   /** Remember what the service's own offer called each section, before answering it. */
   learnLabels(offerSdp: string): void {
     for (const [mid, label] of labelsByMid(offerSdp)) this.labels.set(mid, label);
+  }
+
+  /** Every label learned so far. An offer of OURS has to restate them: a section the service
+   *  named is one the far side already knows by that name. */
+  knownLabels(): Map<string, string> {
+    return new Map(this.labels);
   }
 
   add(event: RTCTrackEvent, stream: MediaStream): void {
@@ -323,6 +519,7 @@ function liveCallMedia(
   stream: MediaStream,
   remoteAudio: RemoteAudio,
   remoteVideo: RemoteVideoTracks,
+  senders: LocalSenders,
   localSdp: string,
 ): CallMedia {
   let stopped = false;
@@ -362,10 +559,23 @@ function liveCallMedia(
     setMuted(muted: boolean): void {
       for (const track of stream.getAudioTracks()) track.enabled = !muted;
     },
+    async startSending(kind: SendKind): Promise<string> {
+      if (stopped) throw new CaptureUnavailableError(kind, new Error("the call is over"));
+      await senders.start(pc, kind);
+      const offer = await offerLocalMedia();
+      if (!offer) throw new CaptureUnavailableError(kind, new Error("no offer was produced"));
+      return offer;
+    },
+    async stopSending(kind: SendKind): Promise<string | null> {
+      if (stopped) return null;
+      if (!(await senders.stop(kind))) return null;
+      return offerLocalMedia();
+    },
     stop(): void {
       if (stopped) return;
       stopped = true;
       stopTracks(stream);
+      senders.stopAll();
       pc.close();
       remoteAudio.stop();
       remoteVideo.clear();
@@ -376,8 +586,43 @@ function liveCallMedia(
     get remoteVideo() {
       return stopped ? [] : remoteVideo.videos;
     },
+    get localVideo() {
+      return stopped ? [] : senders.videos;
+    },
   };
+
+  /**
+   * Make the offer that says what this side is now sending.
+   *
+   * It is serialized behind the same queue the incoming renegotiations use, because they are
+   * the same connection and the same signaling state: an offer built while an answer is being
+   * applied is glare, and the browser throws rather than guessing.
+   *
+   * Every section's label is restated — the ones the service named on its own offers, and
+   * ours — because a label is per section and an offer that dropped one would rename a stream
+   * the far side already knows.
+   */
+  async function offerLocalMedia(): Promise<string | null> {
+    const run = negotiating.then(async () => {
+      if (stopped) return null;
+      await pc.setLocalDescription(await pc.createOffer());
+      const local = pc.localDescription?.sdp;
+      if (!local) return null;
+      const labels = new Map([...remoteVideo.knownLabels(), ...senders.labels()]);
+      return toMsSdp(local, labels);
+    });
+    negotiating = run.catch(() => {});
+    return run;
+  }
+
   remoteVideo.onChange = (videos) => media.onRemoteVideoChange?.(videos);
+  senders.onChange = (videos) => media.onLocalVideoChange?.(videos);
+  // The browser's own "Stop sharing" bar. It ends the track and nothing else: this app has to
+  // notice, take the section down and tell the service, or the meeting keeps a section that
+  // carries nothing while the button still says on.
+  senders.onEndedByBrowser = (kind) => {
+    void media.stopSending(kind).then((offer) => media.onSendingEnded?.(kind, offer));
+  };
   return media;
 }
 
@@ -421,9 +666,34 @@ export function simulatedCallMedia(): CallMedia {
     // Muting is the one thing that needs no stand-in: there is no track to disable, and
     // the state the UI draws comes from the backend either way.
     setMuted(): void {},
+    // Sending is reproduced too, and it opens NOTHING: the preview is a canvas, so a capture
+    // asks no permission and no camera light comes on. That is what lets the buttons, the
+    // preview and the offer be reviewed without a device — and a mock that called
+    // `getDisplayMedia` would put a picker in front of every capture run.
+    async startSending(kind: SendKind): Promise<string> {
+      if (stopped) throw new CaptureUnavailableError(kind, new Error("the call is over"));
+      if (!media.localVideo.some((video) => video.kind === kind)) {
+        media.localVideo.push({ kind, stream: simulatedVideoStream() });
+        media.onLocalVideoChange?.(media.localVideo);
+      }
+      return SIMULATED_SDP;
+    },
+    async stopSending(kind: SendKind): Promise<string | null> {
+      const at = media.localVideo.findIndex((video) => video.kind === kind);
+      if (at === -1) return null;
+      for (const track of media.localVideo[at]!.stream.getTracks()) track.stop();
+      media.localVideo.splice(at, 1);
+      media.onLocalVideoChange?.(media.localVideo);
+      return SIMULATED_SDP;
+    },
+    localVideo: [],
     stop(): void {
       stopped = true;
       media.remoteVideo.length = 0;
+      for (const video of media.localVideo) {
+        for (const track of video.stream.getTracks()) track.stop();
+      }
+      media.localVideo.length = 0;
     },
     get connectionState(): RTCPeerConnectionState {
       return stopped ? "closed" : "connected";

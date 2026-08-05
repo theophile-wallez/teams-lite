@@ -61,10 +61,25 @@ export type ActiveCall = {
   /** What everybody ELSE in the meeting is publishing, so this page can ask for it. Empty
    *  for a one-to-one call and for a backend too old to say. */
   publishing: PublishingParticipant[];
+  /** What this MACHINE is sending beyond audio: `"camera"`, `"screen"`, or neither. Published
+   *  by the backend so two open pages agree and a reconnecting one is told rather than
+   *  guessing from its own memory. */
+  sending: string[];
   /** Whether answering is possible — decided by the backend, which holds the links. */
   can_accept: boolean;
   can_hangup: boolean;
+  /** Whether new media can be offered at all. The service refuses it on a call that is not
+   *  established, and only the backend knows whether the link exists. */
+  can_send_media: boolean;
 };
+
+/** The modality name the service reads for one of the two things this app can send.
+ *
+ *  `ScreenSharer` and not `ScreenViewer`: sending a screen and watching one are two different
+ *  modalities, and the one that says "my screen is on the wire" is this. */
+export function modalityFor(kind: "camera" | "screen"): string {
+  return kind === "camera" ? "Video" : "ScreenSharer";
+}
 
 /** One person in the meeting and the streams they publish. */
 export type PublishingParticipant = {

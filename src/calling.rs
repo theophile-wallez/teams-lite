@@ -100,6 +100,9 @@ pub mod paths {
     pub const CALL_MEDIA_ANSWER: &str = "/call/mediaAnswer/";
     pub const CALL_MEDIA_ACKNOWLEDGEMENT: &str = "/call/mediaAcknowledgement/";
     pub const CALL_MEDIA_RENEGOTIATION: &str = "/call/mediaRenegotiation/";
+    /// Where the service refuses media we offered. `/call/rejection/` in the client's own
+    /// table — the same path a refused CALL arrives on, which is why it is spelled once.
+    pub const CALL_MEDIA_REJECTION: &str = "/call/rejection/";
     pub const CALL_REDIRECTION: &str = "/call/redirection/";
     pub const CALL_TRANSFER: &str = "/call/transfer/";
     pub const CALL_REPLACEMENT: &str = "/call/replacement/";
@@ -352,6 +355,12 @@ impl Links {
     }
 
     /// Keep the service from tearing the call down while it is still up.
+    /// Where OUR own new media is offered — the link the service hands us on the
+    /// acceptance, and the one an outgoing renegotiation is POSTed to.
+    pub fn media_renegotiation(&self) -> Option<&str> {
+        self.get(&["mediaRenegotiation"])
+    }
+
     pub fn keep_alive(&self) -> Option<&str> {
         self.get(&["keepAlive"])
     }
@@ -855,6 +864,39 @@ pub fn media_answer_payload(
                 "mediaAcknowledgement": callbacks.link(paths::CALL_MEDIA_ACKNOWLEDGEMENT),
             },
             "mediaContent": answer.json(),
+        }
+    })
+}
+
+/// Build the body that offers NEW media on a call that is already up.
+///
+/// This is the outgoing twin of [`media_renegotiation_from_frame`], and it is how a camera or
+/// a shared screen goes out: the call was negotiated with audio alone, so adding either means
+/// offering a section that does not exist yet. The client's own builder is the same shape, and
+/// the service refuses one on a call that is not established —
+/// `"media renegotiation can only be performed on an established call"`.
+///
+/// `modalities` is what the offer DECLARES, and it must match what the SDP carries:
+/// `ScreenSharer` for a screen, `Video` for a camera. The service reads the words, so a
+/// declaration wider than the blob is a claim about the user's machine that nothing backs.
+pub fn media_offer_payload(
+    local: &LocalParticipant,
+    offer: &MediaContent,
+    callbacks: &CallbackBase,
+    modalities: &[&str],
+) -> Value {
+    json!({
+        "mediaNegotiation": {
+            "sender": local.json(),
+            "callModalities": modalities,
+            "links": {
+                // Where the service answers this offer, and where it may refuse it. Both are
+                // ours: an offer nobody can answer is an offer that hangs.
+                "mediaAnswer": callbacks.link(paths::CALL_MEDIA_ANSWER),
+                "mediaAcknowledgement": callbacks.link(paths::CALL_MEDIA_ACKNOWLEDGEMENT),
+                "rejection": callbacks.link(paths::CALL_MEDIA_REJECTION),
+            },
+            "mediaContent": offer.json(),
         }
     })
 }

@@ -249,7 +249,11 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// nothing about the user — but the same method carries an SDP, and an SDP is what offers
 /// their camera or their screen. A gate that depended on reading the blob would be a gate
 /// nobody could check, so it is gated as the widest thing it can do.
-const OUTWARD_METHODS: [&str; 14] = [
+/// `call_offer_media` is the sharpest calling entry after `call_place`. It is what puts the
+/// user's CAMERA or their SCREEN in front of everybody in a meeting — a screen more so than a
+/// face, because a screen shows whatever else is on it. Nothing calls it but a click, and the
+/// browser asks its own permission on top.
+const OUTWARD_METHODS: [&str; 15] = [
     "send",
     "edit",
     "delete",
@@ -261,6 +265,7 @@ const OUTWARD_METHODS: [&str; 14] = [
     "call_join",
     "call_accept",
     "call_answer_media",
+    "call_offer_media",
     "call_hangup",
     "call_mute",
     "gitlab_set_approval",
@@ -1214,6 +1219,12 @@ struct CallSession {
     /// The sequence number of the next source request, which the service reads to order
     /// them. One counter per call, because it numbers this client's own requests.
     source_request_sequence: u64,
+    /// What this MACHINE is sending beyond audio: `"camera"`, `"screen"`, or neither.
+    ///
+    /// It is in the session rather than in the page because two open pages share one call:
+    /// a phone that reconnects mid-call has to be told the camera is on, and a button drawn
+    /// from a page's own memory would say off while the meeting sees a face.
+    sending: Vec<String>,
 }
 
 impl CallSession {
@@ -1265,8 +1276,15 @@ impl CallSession {
                 .collect::<Vec<_>>(),
             // What the user may do next, decided HERE rather than in the page: the
             // links are what make an action possible, and only this side sees them.
+            // What this MACHINE is sending beyond audio, so every page agrees and a
+            // reconnecting one is told rather than guessing from its own memory.
+            "sending": self.sending,
             "can_accept": self.phase == CallPhase::Ringing && self.offer.is_some(),
             "can_hangup": self.phase != CallPhase::Ended,
+            // New media is only accepted on an ESTABLISHED call, in the service's own words.
+            // Decided here because only this side knows whether the link exists.
+            "can_send_media": self.phase == CallPhase::Connected
+                && self.links.media_renegotiation().is_some(),
         })
     }
 }
@@ -3721,6 +3739,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     end_reason: None,
                     renegotiation_answer_link: None,
                     source_request_sequence: 0,
+                    sending: Vec::new(),
                 };
                 {
                     let mut plane = ctx.calling.lock().unwrap();
@@ -3853,6 +3872,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         end_reason: None,
                         renegotiation_answer_link: None,
                         source_request_sequence: 0,
+                        sending: Vec::new(),
                     };
                     {
                         let mut plane = ctx.calling.lock().unwrap();
@@ -4096,6 +4116,65 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }
             eprintln!("[calling] answered a media renegotiation: modalities={modalities:?}");
             Ok(json!({ "call_id": call_id }))
+        }
+
+        // OFFER new media on a call that is already up: the user's camera, or their screen.
+        //
+        // The call was negotiated with audio alone, so either one is a section that does not
+        // exist yet — which the service only accepts on an ESTABLISHED call, in its own words:
+        // "media renegotiation can only be performed on an established call". The link is the
+        // `mediaRenegotiation` one it handed us on the acceptance.
+        //
+        // `sending` is what the page says it is turning on, and it is recorded here so
+        // `call_state` can say so to every client: a second page must not draw a camera
+        // button as off while this machine is sending.
+        "call_offer_media" => {
+            let call_id = param_str(params, "call_id")?;
+            let sdp = param_str(params, "sdp")?;
+            let modalities = param_modalities(params)?;
+            let sending = param_str_list(params, "sending");
+            let (local, callbacks, url) = {
+                let plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_ref()
+                    .filter(|c| c.id == call_id)
+                    .context("call_offer_media: no such call")?;
+                if call.phase != CallPhase::Connected {
+                    anyhow::bail!(
+                        "call_offer_media: this call is not connected yet — the service \
+                         refuses new media on a call that is not established"
+                    );
+                }
+                let url = call
+                    .links
+                    .media_renegotiation()
+                    .map(str::to_string)
+                    .context(
+                        "call_offer_media: this call has no renegotiation link — the service \
+                         names it on the acceptance",
+                    )?;
+                (call.local.clone(), call.callbacks.clone(), url)
+            };
+            let offer = calling::MediaContent::sdp(sdp);
+            let names: Vec<&str> = modalities.iter().map(String::as_str).collect();
+            let payload = calling::media_offer_payload(&local, &offer, &callbacks, &names);
+            let response = ctx.post_call_signal(&url, &payload).await?;
+            {
+                let links = calling::Links::collect(&response);
+                let mut plane = ctx.calling.lock().unwrap();
+                if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                    call.links.merge(&links);
+                    call.sending = sending.clone();
+                }
+            }
+            ctx.emit_call_state();
+            eprintln!("[calling] offered media: modalities={modalities:?} sending={sending:?}");
+            // The ANSWER may be in this response or arrive on our `mediaAnswer` callback —
+            // the service has done both for other negotiations. Handing back whichever is
+            // here lets the page apply it without waiting for a frame that may not come.
+            let answer = calling::media_answer_from_frame(&response).map(|m| m.blob);
+            Ok(json!({ "call_id": call_id, "answer_sdp": answer }))
         }
 
         // Ask the meeting's media server to put somebody's stream on one of our sections.
@@ -7618,6 +7697,7 @@ impl Ctx {
             end_reason: None,
             renegotiation_answer_link: None,
             source_request_sequence: 0,
+            sending: Vec::new(),
         };
 
         {
@@ -8638,6 +8718,7 @@ mod tests {
             end_reason: None,
             renegotiation_answer_link: None,
             source_request_sequence: 0,
+            sending: Vec::new(),
         };
         let json = call.json();
         assert_eq!(json["phase"], "ringing");
@@ -8686,6 +8767,7 @@ mod tests {
             end_reason: None,
             renegotiation_answer_link: None,
             source_request_sequence: 0,
+            sending: Vec::new(),
         };
         assert_eq!(call.json()["can_accept"], false);
         // And a call that is over offers nothing at all.

@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ComputerScreenShareIcon, Video01Icon } from "@hugeicons/core-free-icons";
-import type { RemoteVideo } from "~/lib/call-media";
+import type { LocalVideo, RemoteVideo } from "~/lib/call-media";
 import { useAppState } from "./controller-context";
 
 /**
@@ -28,6 +28,7 @@ import { useAppState } from "./controller-context";
  */
 export function CallVideoStage() {
   const videos = useAppState((s) => s.callVideo);
+  const mine = useAppState((s) => s.callLocalVideo);
   const names = useAppState((s) => s.callVideoNames);
   const reduce = useReducedMotion();
 
@@ -36,7 +37,7 @@ export function CallVideoStage() {
 
   return (
     <AnimatePresence>
-      {videos.length > 0 && (
+      {(videos.length > 0 || mine.length > 0) && (
         <motion.div
           key="call-video"
           data-testid="call-video"
@@ -76,9 +77,57 @@ export function CallVideoStage() {
               ))}
             </div>
           )}
+          {/* WHAT THE USER IS SENDING, last and smallest.
+              A preview is not vanity: a screen share shows whatever else is on that screen,
+              and the only way somebody can tell what the meeting is seeing is to see it too.
+              It is mirrored for a camera and never for a screen — a mirrored face is what a
+              person expects of themselves, and a mirrored screen is unreadable. */}
+          {mine.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {mine.map((video) => (
+                <LocalFrame key={video.kind} video={video} />
+              ))}
+            </div>
+          )}
         </motion.div>
       )}
     </AnimatePresence>
+  );
+}
+
+function LocalFrame(props: { video: LocalVideo }) {
+  const { video } = props;
+  const element = useRef<HTMLVideoElement | null>(null);
+  useEffect(() => {
+    const node = element.current;
+    if (!node || node.srcObject === video.stream) return;
+    node.srcObject = video.stream;
+  }, [video.stream]);
+
+  return (
+    <div
+      data-testid="call-video-local"
+      data-kind={video.kind}
+      className="relative aspect-video w-32 shrink-0 overflow-hidden rounded-xl bg-element ring-1 ring-primary/40"
+    >
+      <video
+        ref={element}
+        className={`size-full object-cover ${video.kind === "camera" ? "-scale-x-100" : ""}`}
+        autoPlay
+        playsInline
+        // Always muted, and this one for a second reason: playing a capture of the user's own
+        // machine back through their speakers is a feedback loop.
+        muted
+      />
+      <p className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1 pt-4 text-[11px] font-medium text-white">
+        <HugeiconsIcon
+          icon={video.kind === "screen" ? ComputerScreenShareIcon : Video01Icon}
+          className="size-3 shrink-0"
+          strokeWidth={2}
+        />
+        <span className="truncate">{video.kind === "screen" ? "Your screen" : "You"}</span>
+      </p>
+    </div>
   );
 }
 

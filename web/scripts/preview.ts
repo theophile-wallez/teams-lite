@@ -1405,6 +1405,22 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-video-dark.png`, '[data-testid="call-video"]');
       await setTheme("light");
+
+      // 8. SENDING. The camera and the screen, each one click, each one the consent for that
+      //    action. Nothing is opened here either: against the mock the preview is a canvas,
+      //    so no camera light comes on and no picker appears.
+      await shot(`${out}-send-off-light.png`, '[data-testid="call-bar"]');
+      await page.locator('[data-testid="call-camera"]').click();
+      await page.waitForSelector('[data-testid="call-video-local"][data-kind="camera"]');
+      await page.waitForSelector('[data-testid="call-camera"][aria-pressed="true"]');
+      await page.locator('[data-testid="call-share"]').click();
+      await page.waitForSelector('[data-testid="call-video-local"][data-kind="screen"]');
+      await page.waitForTimeout(400);
+      await shot(`${out}-send-on-light.png`, '[data-testid="call-bar"]');
+      await shot(`${out}-sending-light.png`, '[data-testid="call-video"]');
+      await setTheme("dark");
+      await shot(`${out}-sending-dark.png`, '[data-testid="call-video"]');
+      await setTheme("light");
       await page.locator('[data-testid="call-hangup"]').click();
 
       console.log(
@@ -1412,7 +1428,8 @@ if (import.meta.main) {
           `${out}-button-light.png, ${out}-ringing-{light,card-light,card-dark}.png and ` +
           `${out}-{connected-card-light,muted-card-light,connected-card-dark}.png and ` +
           `${out}-meeting-{actions-light,lobby-light,card-light,card-dark}.png and ` +
-          `${out}-video-{light,page-light,dark}.png`,
+          `${out}-video-{light,page-light,dark}.png and ` +
+          `${out}-send-{off-light,on-light}.png and ${out}-sending-{light,dark}.png`,
       );
     });
     process.exit(0);

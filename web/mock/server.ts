@@ -3110,8 +3110,13 @@ type MockCall = {
   /** What the others publish, and the source ids a subscription is addressed by — the
    *  half of the roster the real backend reads out of `endpoints[…].call.mediaStreams`. */
   publishing: MockPublishing[];
+  /** What THIS machine is sending beyond audio, published so every client agrees. */
+  sending: string[];
   can_accept: boolean;
   can_hangup: boolean;
+  /** New media is only accepted on an established call, so the buttons are only offered
+   *  there. */
+  can_send_media: boolean;
 };
 
 /** One person in the meeting and what they are sending. */
@@ -3285,8 +3290,10 @@ function injectMockCallInvite(conversation: string): MockCall | null {
     connected_at_ms: null,
     end_reason: null,
     publishing: [],
+    sending: [],
     can_accept: true,
     can_hangup: true,
+    can_send_media: false,
   };
   // Calling has to be on for a real invite to reach this machine at all, so an invite
   // implies it: a spec that rings without flipping the switch is testing a state the
@@ -5135,8 +5142,10 @@ function dispatch(method: string, params: unknown): unknown {
           connected_at_ms: null,
           end_reason: null,
           publishing: [],
+          sending: [],
           can_accept: false,
           can_hangup: true,
+          can_send_media: false,
         };
         broadcastMockCall();
         return { call_id: mockCall.id, ice_servers: [{ urls: ["stun:mock.invalid:3478"] }] };
@@ -5165,8 +5174,10 @@ function dispatch(method: string, params: unknown): unknown {
         connected_at_ms: null,
         end_reason: null,
         publishing: [],
+        sending: [],
         can_accept: false,
         can_hangup: true,
+        can_send_media: false,
       };
       broadcastMockCall();
       return {
@@ -5217,6 +5228,9 @@ function dispatch(method: string, params: unknown): unknown {
             in_lobby: false,
             phase: "connected",
             connected_at_ms: Date.now(),
+            // The service refuses new media on a call that is not established, so the
+            // camera and share buttons appear exactly here and not before.
+            can_send_media: true,
           };
           broadcastMockCall();
         }, MOCK_CALL_ANSWER_MS),
@@ -5256,6 +5270,7 @@ function dispatch(method: string, params: unknown): unknown {
         phase: "connected",
         connected_at_ms: Date.now(),
         can_accept: false,
+        can_send_media: true,
       };
       broadcastMockCall();
       return { call_id: callId };
@@ -5281,6 +5296,36 @@ function dispatch(method: string, params: unknown): unknown {
         throw new Error("call_answer_media: no such call");
       }
       return { call_id: callId };
+    }
+
+    // OFFERING new media: the user's camera, or their screen. The mock records what the page
+    // says it is sending and publishes it, because that state belongs to the machine and not
+    // to one page — which is exactly the thing a second open page would get wrong.
+    case "call_offer_media": {
+      const callId = requireString(params, "call_id");
+      requireString(params, "sdp");
+      const o = asObject(params);
+      const modalities = Array.isArray(o.modalities) ? o.modalities : [];
+      for (const name of modalities) {
+        if (!["audio", "Video", "ScreenSharer", "ScreenViewer"].some(
+          (known) => String(name).toLowerCase() === known.toLowerCase(),
+        )) {
+          throw new Error(`${JSON.stringify(name)} is not a modality this app negotiates`);
+        }
+      }
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_offer_media: no such call");
+      if (mockCall.phase !== "connected") {
+        throw new Error(
+          "call_offer_media: this call is not connected yet — the service refuses new media " +
+            "on a call that is not established",
+        );
+      }
+      const sending = Array.isArray(o.sending) ? o.sending.map(String) : [];
+      mockCall = { ...mockCall, sending };
+      broadcastMockCall();
+      // The real service answers in the response for this negotiation, so the mock does too:
+      // a page that waited for a frame the backend never sends would never apply an answer.
+      return { call_id: callId, answer_sdp: MOCK_ANSWER_SDP };
     }
 
     // A subscription: put somebody's source on one of our sections. It publishes nothing

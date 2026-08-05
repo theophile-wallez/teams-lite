@@ -87,6 +87,7 @@ import {
   callEndLabel,
   holdsMicrophone,
   isLive,
+  modalityFor,
   type CallMediaSignal,
   type CallStatus,
 } from "./call";
@@ -95,7 +96,9 @@ import {
   simulatedCallMedia,
   startCallMedia,
   type CallMedia,
+  type LocalVideo,
   type RemoteVideo,
+  type SendKind,
 } from "./call-media";
 import { coalesce } from "./singleflight";
 import {
@@ -333,6 +336,10 @@ export type AppState = {
    * replacing the stream restarts the picture.
    */
   callVideo: RemoteVideo[];
+  /** What THIS page is sending, for the preview only the sender sees. The MEETING's view of
+   *  it is `callStatus.call.sending`, which the backend publishes to every client so two open
+   *  pages agree and a reconnecting one is told rather than guessing. */
+  callLocalVideo: LocalVideo[];
   /**
    * Whose picture is on each section, keyed by mid.
    *
@@ -575,6 +582,7 @@ function initialState(): AppState {
     callError: null,
     callNotice: null,
     callVideo: [],
+    callLocalVideo: [],
     callVideoNames: {},
     readReceipts: [],
     mentionCandidates: [],
@@ -1564,7 +1572,9 @@ export class TeamsController {
     this.callMedia = null;
     // The tiles go with the connection that fed them. A `<video>` left holding a stopped
     // stream shows its last frame for good, which reads as a call that is still up.
-    if (this.get().callVideo.length > 0) this.set({ callVideo: [], callVideoNames: {} });
+    if (this.get().callVideo.length > 0 || this.get().callLocalVideo.length > 0) {
+      this.set({ callVideo: [], callLocalVideo: [], callVideoNames: {} });
+    }
   }
 
   /** Open the microphone and negotiate, using the mock's inert stand-in when the
@@ -1580,6 +1590,7 @@ export class TeamsController {
     if (this.get().backendIsMock) {
       const mock = simulatedCallMedia();
       mock.onRemoteVideoChange = (videos) => this.set({ callVideo: videos });
+      mock.onLocalVideoChange = (videos) => this.set({ callLocalVideo: [...videos] });
       return mock;
     }
     const media = await startCallMedia({
@@ -1595,7 +1606,84 @@ export class TeamsController {
     // The tiles are reactive state; the connection behind them is not. This is the one
     // bridge between the two, and it is set before anything can arrive on it.
     media.onRemoteVideoChange = (videos) => this.set({ callVideo: videos });
+    media.onLocalVideoChange = (videos) => this.set({ callLocalVideo: [...videos] });
+    // The BROWSER's own "Stop sharing" bar. It ends the track and tells this app nothing
+    // else, so the service has to be told from here or the meeting keeps a section that
+    // carries no picture while the button still says on.
+    media.onSendingEnded = (kind, offer) => void this.publishSending(offer, `stop ${kind}`);
     return media;
+  }
+
+  /**
+   * Turn the user's CAMERA on or off in the call they are in.
+   *
+   * The click is the consent, and the browser asks its own permission under it. Nothing here
+   * runs on its own: a machine that opened a camera by itself would be the worst thing in
+   * this app.
+   */
+  async setCameraOn(on: boolean): Promise<void> {
+    await this.setSending("camera", on);
+  }
+
+  /**
+   * Share the user's SCREEN, or stop.
+   *
+   * Sharper than the camera and treated the same way, because the difference is not in the
+   * mechanism: a face shows a face, and a screen shows whatever else is on it. The browser's
+   * own picker is what chooses WHAT is shared, and this app never pre-selects it.
+   */
+  async setScreenShareOn(on: boolean): Promise<void> {
+    await this.setSending("screen", on);
+  }
+
+  /**
+   * Start or stop one capture, and tell the service what changed.
+   *
+   * Both directions are one function because the failure handling has to be identical: an
+   * offer that does not go out must leave the page and the meeting agreeing, and the only way
+   * to guarantee that is one path.
+   */
+  private async setSending(kind: SendKind, on: boolean): Promise<void> {
+    const media = this.callMedia;
+    const call = this.get().callStatus.call;
+    if (!media || !call) return;
+    this.set({ callError: null });
+    try {
+      const offer = on ? await media.startSending(kind) : await media.stopSending(kind);
+      await this.publishSending(offer, `${on ? "start" : "stop"} ${kind}`);
+    } catch (error) {
+      // A refused camera is a decision, not a fault, so it is said in the user's words and
+      // the call carries on. Whatever happened, the capture is released: `startSending`
+      // stops its own tracks on the way out.
+      this.set({ callError: callErrorText(error) });
+      if (on) await media.stopSending(kind).catch(() => {});
+    }
+  }
+
+  /**
+   * POST the offer that says what this side now sends, and apply the answer.
+   *
+   * `sending` travels with it so the BACKEND can publish it to every client: a second page,
+   * or a phone that reconnects mid-call, has to be told the camera is on rather than draw its
+   * button from its own memory.
+   */
+  private async publishSending(offer: string | null, what: string): Promise<void> {
+    const media = this.callMedia;
+    const call = this.get().callStatus.call;
+    if (!media || !call || !offer) return;
+    const kinds = media.localVideo.map((video) => video.kind);
+    const modalities = ["audio", ...kinds.map(modalityFor)];
+    try {
+      const result = await this.backend.callOfferMedia(call.id, offer, modalities, kinds);
+      // The answer is in the response when the service put it there, and arrives as a
+      // `call_media` frame when it did not. Applying whichever came is what makes the
+      // section carry anything.
+      if (result.answer_sdp) await media.setRemoteAnswer(result.answer_sdp);
+    } catch (error) {
+      console.error(`[call] could not ${what}`, error);
+      this.set({ callError: callErrorText(error) });
+      throw error;
+    }
   }
 
   /** Ask the backend what this machine can do about calls. Called on connect, and

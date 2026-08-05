@@ -415,14 +415,15 @@ consult-and-add, and an invented value is a `400 {}`. The lobby is a state of it
 the roster arrives as `rosterUpdate` frames. The one media difference is that a meeting sends several voices as
 several streams, so the page keeps one audio element per stream.
 
-**Video is RECEIVED**: a colleague's shared screen and a colleague's camera are drawn (§ 10,
-and § Seeing video in AGENTS.md). Three RPCs carry it — `call_answer_media` answers the
-renegotiation the service makes on its own, `call_subscribe` asks for one person's stream, and
-`call_state.publishing` carries the source ids that make a subscription addressable.
+**Video is received AND sent** (§ 10, and § Video in a meeting in AGENTS.md). Four RPCs carry
+it: `call_answer_media` answers the renegotiation the service makes on its own,
+`call_subscribe` asks for one person's stream, `call_offer_media` offers the user's own camera
+or screen, and `call_state.publishing` carries the source ids that make a subscription
+addressable.
 
-What is deliberately NOT built: SENDING a camera or a screen, a group call the user assembles
-themselves, transfer, hold, DTMF, admitting somebody from a lobby, and any call this app
-places without a click. Each is a product decision with its own surface.
+What is deliberately NOT built: a group call the user assembles themselves, transfer, hold,
+DTMF, admitting somebody from a lobby, and any call this app places without a click. Each is a
+product decision with its own surface.
 
 ## 7. Consent — a call is at least as outward as a send
 
@@ -920,7 +921,14 @@ files are `calling::media_renegotiation_from_frame` / `source_request_payload` /
 `web/src/components/call-video.tsx`. The mock renegotiates with the measured labels and mids,
 so the whole path is reviewable with no tenant.
 
-Sending is not built and no code names `getUserMedia({video})` or `getDisplayMedia`.
+Sending is built too: `calling::media_offer_payload` and the `call_offer_media` RPC, over
+`LocalSenders` in `web/src/lib/call-media.ts` (one reused transceiver per kind, the labels
+restated on every offer) and the two toggles in `call-bar.tsx`. It POSTs a `mediaNegotiation`
+to the `mediaRenegotiation` link the acceptance named, declaring `Video` for a camera and
+`ScreenSharer` for a screen.
+
+**It has never been sent to the tenant.** Everything above is the client's own shape and the
+mock's reproduction of it; § 10.8 says what that leaves open.
 
 ### 10.8 What is still open
 
@@ -944,6 +952,19 @@ Sending is not built and no code names `getUserMedia({video})` or `getDisplayMed
   on every one of them and this app posts neither. Whether the service minds being ignored is
   known — it does not, the call runs for its whole length — but what it does with an answer is
   not.
-- **Sending is entirely untried**: no camera, no screen, no `contentSharing` session. And the
-  one thing § 10.4 asserts about that session is already suspect, because no participant in
-  the measured roster carried a `contentSharing` object at all.
+- **Sending is BUILT but untried against the tenant.** The outgoing renegotiation has never
+  been POSTed, so the service has never had the chance to refuse its shape — and it refuses
+  without explaining more often than not (§ 8). Three specific unknowns:
+  - **Whether a `contentSharing` session is needed at all.** § 10.4 says the client opens one,
+    with six links and a presenter. But no participant in the measured roster carried a
+    `contentSharing` object *even while sharing* — their share was a `mediaStreams` entry and
+    nothing else. So this app offers the section and the `ScreenSharer` modality and opens no
+    session, which is the smallest thing consistent with what was measured. If the meeting
+    shows nothing, that session is the first thing to add.
+  - **Whether an offer of ours is accepted on the `mediaRenegotiation` link.** That link is
+    the service's own, handed to us on the acceptance, and the client's own builder posts this
+    body to it — but `startOutgoingNegotiation` and `updateMediaDescriptions` arrive on the
+    same frame and one of those may be the real target.
+  - **Whether a bare H.264 send section is enough.** Simulcast is off in the client's config
+    so none of its envelope is sent, and `max-br` / `x-mediabw` are not stated either. A
+    refusal would name what it wants.

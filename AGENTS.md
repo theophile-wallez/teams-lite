@@ -979,14 +979,38 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   live test is the user's own click, on their own machine, to somebody who agreed to it
   beforehand — see NATIVE-CALLING.md § 8 for what is still unverified against the tenant.
 
-## Seeing video (RECEIVED only — this app sends no camera and no screen)
+## Video in a meeting — received, and sent
 
-A meeting draws the pictures other people put into it: a colleague's shared SCREEN on a
-stage, their CAMERA as a tile beside it (`web/src/components/call-video.tsx`, over the
-`callVideo` state). **Nothing here sends.** There is no camera button, no share button, and
-no code that opens `getUserMedia({video})` or `getDisplayMedia` — sending is outward in a way
-receiving is not, and it is a separate feature with its own consent gate (NATIVE-CALLING.md
-§ 10.5).
+A meeting draws the pictures other people put into it — a colleague's shared SCREEN on a
+stage, their CAMERA as a tile beside it — and it can put the user's own camera and screen
+into the meeting (`web/src/components/call-video.tsx` and the two toggles in `call-bar.tsx`,
+over `callVideo` / `callLocalVideo`).
+
+**Sending is the sharper half, and the split in the gates says so.** Receiving publishes
+nothing about the user; sending puts their face — or whatever else is on their screen — in
+front of everybody in the meeting. So `call_offer_media` is an `OUTWARD_METHODS` entry beside
+`call_place`, every capture starts from one click, the browser asks its own permission under
+it, and nothing in this app opens a camera on its own. Four more rules:
+
+- **Both are OFF until asked, every call.** There is no remembered preference, because a
+  camera that came on with the call is the worst thing this app could do.
+- **The toggles are drawn only where they would work** — `can_send_media`, which the backend
+  decides: the service refuses new media on a call that is not established (its own words),
+  so a button before that reports a refusal the user can do nothing about.
+- **The state is the BACKEND's** (`call.sending`), not the page's. Two open pages share one
+  call, and a phone that reconnects mid-call has to be TOLD the camera is on rather than draw
+  its button from its own memory.
+- **The sender sees their own picture, and the screen is never mirrored.** A preview is not
+  vanity: a screen share shows whatever else is on that screen, and the only way somebody can
+  tell what the meeting is seeing is to see it too. A camera IS mirrored, because that is what
+  a person expects of themselves.
+- **The BROWSER can stop a share without asking us** — its own "Stop sharing" bar ends the
+  track and nothing else. `onSendingEnded` catches that and takes the section down with the
+  service, or the meeting keeps a section carrying no picture while the button still says on.
+- **The track is stopped before anything that can fail.** A camera whose light stays on
+  because a POST was refused is the worst possible outcome of turning it off.
+- **The screen never carries system audio.** `getDisplayMedia` is asked with `audio: false`:
+  the user is already on the call with their microphone, and they asked to show a picture.
 
 Everything about it follows from one measured fact: **the service renegotiates on its own,
 and its offer already carries the sections.** ~9 s into a join it POSTs a

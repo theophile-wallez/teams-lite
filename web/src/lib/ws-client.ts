@@ -747,6 +747,27 @@ export class Backend {
       ...(request.fmtParams ? { fmt_params: request.fmtParams } : {}),
     });
   }
+  /**
+   * OFFER new media on a call that is already up: the user's camera, or their screen.
+   *
+   * The sharpest calling method after placing a call — it puts their face, or whatever else
+   * is on their screen, in front of everybody in the meeting. `sending` says which captures
+   * are live so the backend can publish it to every client; `modalities` says what the SDP
+   * carries, and a name outside the four the service knows is refused.
+   */
+  callOfferMedia(
+    callId: string,
+    sdp: string,
+    modalities: string[],
+    sending: string[],
+  ): Promise<{ call_id: string; answer_sdp: string | null }> {
+    return this.writeRequest<{ call_id: string; answer_sdp: string | null }>("call_offer_media", {
+      call_id: callId,
+      sdp,
+      modalities,
+      sending,
+    });
+  }
   /** End the call, or decline it while it is still ringing. Outward either way: the
    *  other side is told. */
   callHangup(callId: string): Promise<{ call_id: string; told_service: boolean }> {
