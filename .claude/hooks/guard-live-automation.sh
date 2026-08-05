@@ -838,10 +838,16 @@ fi
 # whose next reader learns to write around it. `cargo run --bin server` stays matched
 # anywhere: that spelling does not appear by accident.
 #
-# TWO PATHS, not one. `target/(debug|release)/server` is the build output; the
+# THREE PATHS, not one. `target/(debug|release)/server` is the build output; the
 # always-on service runs a STAGED copy outside the checkout
 # (~/.local/share/teams-lite/service/server, see bin/teams-lite-service.sh), and a
 # rule that knew only about target/ would wave that one straight through.
+# The third is the RELEASED install's: the `teams` binary embeds the backend and
+# extracts it to ~/.cache/teams-lite/server before spawning it (`extractEmbeddedBackend`
+# in launcher/src/backend.ts). That is the send-capable backend on the port the user's
+# own app owns, it is present on any machine install.sh touched — including one with no
+# checkout at all — and it is the one an agent reaches for when nothing is built yet,
+# precisely because it needs no build.
 # The leading path may be spelled with a variable or a tilde — `$HOME/.local/...`,
 # `~/.local/...`, `"$PWD"/target/...` — so the prefix class accepts those characters
 # too. Without `$` and `~` in it, the staged path only matched when written relative.
@@ -852,7 +858,7 @@ fi
 # `TEAMS_NO_IDLE_EXIT=1 target/release/server` matched nothing at all and walked
 # straight through the rule it is the clearest example of.
 at_backend_command_start="${at_command_start}((bash|sh|zsh)[[:space:]]+)*[\"']?[A-Za-z0-9_./~\${}-]*"
-runs_the_backend_binary="${at_backend_command_start}(target/(debug|release)|teams-lite/service)/server([[:space:]]|\$)"
+runs_the_backend_binary="${at_backend_command_start}(target/(debug|release)|teams-lite/service|cache/teams-lite)/server([[:space:]]|\$)"
 # Every way of EXECUTING a launcher still matches, including through an interpreter
 # (`bash bin/teams-dev-server.sh`) — which is why the prefix list above names the
 # shells. `bash -n` is a syntax check and is exempted by `inspecting_a_file`.
