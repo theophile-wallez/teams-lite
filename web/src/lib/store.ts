@@ -45,6 +45,7 @@ import {
   type ChatMessage,
   type ChatPrefs,
   type Conversation,
+  type CustomEmoji,
   type IncomingCall,
   type GitLabApprovalResult,
   type LinkMetadata,
@@ -719,6 +720,15 @@ export class TeamsController {
   // the app renders on every frame, and only Settings asks for it.
   private overrideListeners = new Set<() => void>();
 
+  // Custom emoji blob cache: name -> a promise of a blob object URL, or null when there
+  // is no art. Cached the same way as avatars, but evicted on `custom_emoji_changed` so
+  // a replaced emoji shows its new art rather than keeping the old one until reload.
+  private customEmojiCache = new Map<string, Promise<string | null>>();
+  private customEmojiObjectUrls: string[] = [];
+
+  // Surfaces that read the custom emoji pack, so they can re-read when it changes.
+  private customEmojiListeners = new Set<() => void>();
+
   // Live OS dark-mode query, watched only while appearance === "system".
   private darkQuery: MediaQueryList | null = null;
   private darkListener: ((e: MediaQueryListEvent) => void) | null = null;
@@ -1051,6 +1061,13 @@ export class TeamsController {
     on("person_override_changed", (raw) => {
       const mri = (raw as { mri?: string } | null)?.mri;
       if (mri) this.forgetPerson(mri);
+    });
+
+    // The custom emoji pack changed — here, or in the other backend sharing this store.
+    // Evict the blob URLs and notify listeners, so a replaced emoji shows its new art
+    // rather than keeping the old one until a reload.
+    on("custom_emoji_changed", () => {
+      this.forgetCustomEmoji();
     });
 
     on("conversations_changed", () => void this.refreshConversations());
@@ -2941,6 +2958,124 @@ export class TeamsController {
     this.presenceCache.set(mri, { at: Date.now(), value: pending });
     pending.catch(() => this.presenceCache.delete(mri));
     return pending;
+  }
+
+  // ---- custom emoji --------------------------------------------------------
+
+  /** The custom emoji pack, without the art bytes (those are fetched per name
+   *  through {@link customEmojiUrl}). */
+  async loadCustomEmoji(): Promise<CustomEmoji[]> {
+    const res = await this.backend.customEmoji();
+    return res.emoji ?? [];
+  }
+
+  /** Resolve one custom emoji's art to a local blob object URL, fetching the bytes
+   *  through the backend. Cached and de-duplicated per name; a "no art" miss is
+   *  cached so it is never re-requested, while a transient failure is evicted for a
+   *  later retry. Returns `null` when the emoji has no art. */
+  customEmojiUrl(name: string): Promise<string | null> {
+    if (!name) return Promise.resolve(null);
+    return this.cacheCustomEmoji(name, async () => {
+      const res = await this.backend.customEmojiImage(name);
+      return res.data_base64 ? res : null;
+    });
+  }
+
+  private cacheCustomEmoji(
+    name: string,
+    fetch: () => Promise<{ content_type?: string; data_base64?: string } | null>,
+  ): Promise<string | null> {
+    const cached = this.customEmojiCache.get(name);
+    if (cached) return cached;
+
+    const pending = (async () => {
+      const res = await fetch();
+      if (!res || !res.data_base64) return null;
+      const blob = new Blob([base64ToArrayBuffer(res.data_base64)], {
+        type: res.content_type || "application/octet-stream",
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      this.customEmojiObjectUrls.push(objectUrl);
+      return objectUrl;
+    })();
+
+    this.customEmojiCache.set(name, pending);
+    pending.catch(() => this.customEmojiCache.delete(name));
+    return pending;
+  }
+
+  /** Add one emoji to the pack. The name must be valid and available, and exactly
+   *  one source must be present. Rejects with the backend's own reason on failure. */
+  async addCustomEmoji(params: {
+    name: string;
+    alias_of?: string;
+    content_type?: string;
+    data_base64?: string;
+    width?: number;
+    height?: number;
+    url?: string;
+    media_url?: string;
+    source: string;
+  }): Promise<void> {
+    await this.backend.customEmojiAdd(params);
+  }
+
+  /** Remove one emoji from the pack. Returns true when it existed, false when it
+   *  was already gone. */
+  async removeCustomEmoji(name: string): Promise<boolean> {
+    const res = await this.backend.customEmojiRemove(name);
+    return res.removed;
+  }
+
+  /** Import a pack of emoji, adding all that pass. Returns the count added. */
+  async importCustomEmoji(emoji: Array<{
+    name: string;
+    alias_of: string;
+    content_type: string;
+    data_base64: string;
+    width: number;
+    height: number;
+  }>): Promise<number> {
+    const res = await this.backend.customEmojiImport(emoji);
+    return res.added;
+  }
+
+  /** Export the pack with its art, for download. */
+  async exportCustomEmoji(): Promise<{
+    emoji: Array<{
+      name: string;
+      alias_of: string;
+      content_type: string;
+      data_base64: string;
+      width: number;
+      height: number;
+    }>;
+  }> {
+    return await this.backend.customEmojiExport();
+  }
+
+  /** Call `listener` whenever the custom emoji pack changes — here, or in another
+   *  page on this store. Returns the unsubscribe. */
+  onCustomEmojiChange(listener: () => void): () => void {
+    this.customEmojiListeners.add(listener);
+    return () => {
+      this.customEmojiListeners.delete(listener);
+    };
+  }
+
+  /** Evict the custom emoji cache and notify listeners. Called both when this app
+   *  makes the change and when the other backend sharing this store does
+   *  (`custom_emoji_changed`), so two open pages and the two backends sharing the
+   *  store agree. Without this, a replaced emoji keeps its old art until a reload. */
+  private forgetCustomEmoji(): void {
+    for (const [name] of this.customEmojiCache) {
+      this.customEmojiCache.delete(name);
+    }
+    for (const objectUrl of this.customEmojiObjectUrls) {
+      URL.revokeObjectURL(objectUrl);
+    }
+    this.customEmojiObjectUrls = [];
+    for (const listener of this.customEmojiListeners) listener();
   }
 
   // ---- settings + link enrichment -----------------------------------------

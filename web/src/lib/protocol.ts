@@ -595,6 +595,18 @@ export type PersonPresence = {
  *  for (a person it knows nothing about is simply absent). */
 export type PresenceResult = { presences: PersonPresence[] };
 
+/** One custom emoji entry from the pack (mirrors the Rust `CustomEmojiEntry` in
+ *  src/custom_emoji.rs). */
+export type CustomEmoji = {
+  name: string;
+  alias_of: string;
+  content_type: string;
+  width: number;
+  height: number;
+  source: string;
+  added_ms: number;
+};
+
 /** Wire shape of the `read_receipt` live event: one member's read position moved. */
 export type ReadReceiptSignal = ReadReceipt & { conversation_id: string };
 

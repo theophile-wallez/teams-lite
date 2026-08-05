@@ -2348,6 +2348,19 @@ function seedAgentSandbox(): void {
     },
     121_000,
   );
+  // A message with custom emoji markup, so Task 6's render path is exercised in the mock.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        '<p>Got it <img itemtype="http://schema.skype.com/Emoji" itemid="shipit" ' +
+        'alt=":shipit:" src="https://eu-api.asm.skype.com/v1/objects/0-mock/views/imgo" ' +
+        'width="20" height="20"> — thanks!</p>',
+      is_self: false,
+    },
+    130_000,
+  );
 
   addFixtureConversation(convId, "Agent Sandbox", messages);
 }
@@ -2491,6 +2504,69 @@ function personOverrideView(mri: string): {
     teams_name: teamsNameFor(mri),
     updated_at: entry?.updated_at ?? 0,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Custom emoji — the mock pack, seeded with three emoji so Task 6's render
+// path is exercised with nothing leaving the machine.
+// ---------------------------------------------------------------------------
+
+type CustomEmojiEntry = {
+  name: string;
+  alias_of: string;
+  content_type: string;
+  width: number;
+  height: number;
+  source: string;
+  added_ms: number;
+  data_base64: string;
+};
+
+const customEmojiPack = new Map<string, CustomEmojiEntry>();
+
+function seedCustomEmoji(): void {
+  const now = Date.now();
+  customEmojiPack.set("shipit", {
+    name: "shipit",
+    alias_of: "",
+    content_type: "image/png",
+    width: 20,
+    height: 20,
+    source: "mock",
+    added_ms: now - 1000,
+    data_base64: mockEmojiImage("shipit", 180),
+  });
+  customEmojiPack.set("partyparrot", {
+    name: "partyparrot",
+    alias_of: "",
+    content_type: "image/gif",
+    width: 20,
+    height: 20,
+    source: "mock",
+    added_ms: now - 500,
+    data_base64: mockEmojiImage("partyparrot", 270),
+  });
+  customEmojiPack.set("ship", {
+    name: "ship",
+    alias_of: "shipit",
+    content_type: "",
+    width: 0,
+    height: 0,
+    source: "mock",
+    added_ms: now,
+    data_base64: "",
+  });
+}
+
+function mockEmojiImage(name: string, hue: number): string {
+  const letters = name.slice(0, 2).toUpperCase();
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">` +
+    `<rect width="20" height="20" rx="3" fill="hsl(${hue} 72% 52%)"/>` +
+    `<text x="10" y="14" text-anchor="middle" font-family="Arial, sans-serif" ` +
+    `font-size="12" font-weight="bold" fill="#ffffff">${letters}</text>` +
+    `</svg>`;
+  return Buffer.from(svg, "utf8").toString("base64");
 }
 
 // ---------------------------------------------------------------------------
@@ -4837,6 +4913,95 @@ function dispatch(method: string, params: unknown): unknown {
       return { presences: mris.map(mockPresence) };
     }
 
+    // ---- custom emoji ------------------------------------------------------
+
+    case "custom_emoji": {
+      const emoji = [...customEmojiPack.values()].map((e) => ({
+        name: e.name,
+        alias_of: e.alias_of,
+        content_type: e.content_type,
+        width: e.width,
+        height: e.height,
+        source: e.source,
+        added_ms: e.added_ms,
+      }));
+      return { emoji };
+    }
+
+    case "custom_emoji_image": {
+      const name = requireString(params, "name");
+      const entry = customEmojiPack.get(name);
+      if (!entry || !entry.data_base64) {
+        return { content_type: "", data_base64: "" };
+      }
+      return { content_type: entry.content_type, data_base64: entry.data_base64 };
+    }
+
+    case "custom_emoji_export": {
+      const emoji = [...customEmojiPack.values()].map((e) => ({
+        name: e.name,
+        alias_of: e.alias_of,
+        content_type: e.content_type,
+        data_base64: e.data_base64,
+        width: e.width,
+        height: e.height,
+      }));
+      return { emoji };
+    }
+
+    case "custom_emoji_add": {
+      const name = requireString(params, "name");
+      const source = requireString(params, "source");
+      const o = asObject(params);
+      const alias_of = typeof o.alias_of === "string" ? o.alias_of : "";
+      const content_type = typeof o.content_type === "string" ? o.content_type : "";
+      const data_base64 = typeof o.data_base64 === "string" ? o.data_base64 : "";
+      const width = typeof o.width === "number" ? o.width : 20;
+      const height = typeof o.height === "number" ? o.height : 20;
+      customEmojiPack.set(name, {
+        name,
+        alias_of,
+        content_type,
+        width,
+        height,
+        source,
+        added_ms: Date.now(),
+        data_base64,
+      });
+      broadcast("custom_emoji_changed", {});
+      return { added: true };
+    }
+
+    case "custom_emoji_remove": {
+      const name = requireString(params, "name");
+      const removed = customEmojiPack.delete(name);
+      if (removed) broadcast("custom_emoji_changed", {});
+      return { removed };
+    }
+
+    case "custom_emoji_import": {
+      const o = asObject(params);
+      const emoji = Array.isArray(o.emoji) ? o.emoji : [];
+      let added = 0;
+      for (const e of emoji) {
+        if (typeof e === "object" && e && typeof e.name === "string") {
+          customEmojiPack.set(e.name, {
+            name: e.name,
+            alias_of: typeof e.alias_of === "string" ? e.alias_of : "",
+            content_type: typeof e.content_type === "string" ? e.content_type : "",
+            width: typeof e.width === "number" ? e.width : 20,
+            height: typeof e.height === "number" ? e.height : 20,
+            source: "import",
+            added_ms: Date.now(),
+            data_base64: typeof e.data_base64 === "string" ? e.data_base64 : "",
+          });
+          added++;
+        }
+      }
+      if (added > 0) broadcast("custom_emoji_changed", {});
+      return { added };
+    }
+
     // ---- push notifications ------------------------------------------------
     // The mock accepts a subscription and answers with a plausible status, so a
     // spec or `bun run preview` can drive the whole Settings flow. It never sends
@@ -6050,6 +6215,12 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       for (const mri of affected) broadcast("person_override_changed", { mri });
       return Response.json({ ok: true, cleared: affected.length }, { status: 200 });
     }
+    if (body.kind === "custom_emoji" && body.clear === true) {
+      customEmojiPack.clear();
+      seedCustomEmoji();
+      broadcast("custom_emoji_changed", {});
+      return Response.json({ ok: true, cleared: true }, { status: 200 });
+    }
     if (body.kind === "read_receipt") {
       // Clear all injected read positions — lets a serial E2E suite reset the
       // shared mock between specs so "seen by" avatars never leak across tests.
@@ -6550,6 +6721,7 @@ seedForwardedMessages();
 seedPlainTextSamples();
 seedAgentSandbox();
 seedMergeRequestReview();
+seedCustomEmoji();
 // Seed channels LAST so the chat seed's PRNG sequence (and thus the Chats list
 // the existing specs assert on) is left completely unchanged.
 seedChannels();

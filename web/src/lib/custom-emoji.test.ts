@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { bodyIsOnlyEmoji } from "./custom-emoji";
+import { bodyIsOnlyEmoji, customEmojiNameError } from "./custom-emoji";
 import { parseRichHtml } from "./rich-text";
 
 describe("bodyIsOnlyEmoji", () => {
@@ -35,5 +35,27 @@ describe("bodyIsOnlyEmoji", () => {
   it("returns true for emoji with only whitespace and line breaks", () => {
     const nodes = parseRichHtml(`<p>${EMOJI_IMG}<br>${EMOJI_IMG}</p>`);
     expect(bodyIsOnlyEmoji(nodes)).toBe(true);
+  });
+});
+
+describe("customEmojiNameError", () => {
+  it("names a taken emoji with Slack's own sentence", () => {
+    expect(customEmojiNameError("shipit", ["shipit"])).toBe(
+      "If your emoji name is taken, choose another.",
+    );
+    expect(customEmojiNameError("Ship It", [])).toMatch(/lowercase/);
+    expect(customEmojiNameError("shipit", [])).toBeNull();
+  });
+
+  it("ports the name rule from custom_emoji::is_valid_name", () => {
+    expect(customEmojiNameError("shipit", [])).toBeNull();
+    expect(customEmojiNameError("ship-it_2+", [])).toBeNull();
+    expect(customEmojiNameError("0", [])).toBeNull();
+    expect(customEmojiNameError("", [])).toMatch(/lowercase/);
+    expect(customEmojiNameError("ShipIt", [])).toMatch(/lowercase/);
+    expect(customEmojiNameError("-ship", [])).toMatch(/lowercase/);
+    expect(customEmojiNameError("ship it", [])).toMatch(/lowercase/);
+    expect(customEmojiNameError("ship:it", [])).toMatch(/lowercase/);
+    expect(customEmojiNameError("a".repeat(65), [])).toMatch(/lowercase/);
   });
 });
