@@ -569,6 +569,11 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "launcher/dist/teams --port 19450"),
         ("BLOCK", PROJECT, "./launcher/dist/teams"),
         ("BLOCK", PROJECT, "$HOME/.teams-lite/bin/teams --dev"),
+        # `teams-bin` is the installed binary itself — `teams` beside it is only the
+        # wrapper install.sh writes. It is the name `ps` and TEAMS_LITE_LAUNCHER_BIN
+        # give, so it is the spelling an agent copies while diagnosing the live app.
+        ("BLOCK", PROJECT, "~/.teams-lite/bin/teams-bin --no-open"),
+        ("BLOCK", PROJECT, "nohup /home/claude/.teams-lite/bin/teams-bin --port 19440 &"),
         ("BLOCK", PROJECT, "bin/teams-launcher.sh"),
         ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 teams"),
         ("BLOCK", PROJECT, "cd launcher && bun run src/index.ts"),
@@ -740,9 +745,12 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, "systemctl --user daemon-reload"),
         ("ALLOW", PROJECT, "journalctl --user -u teams-lite-backend -n 50 --no-pager"),
         ("ALLOW", PROJECT, "ls -la $HOME/.local/share/teams-lite/service/server"),
-        # Looking at the released install starts nothing either.
+        # Looking at the released install starts nothing either — including the two
+        # commands that FIND it, which is how its own command line gets read.
         ("ALLOW", PROJECT, "ls -la ~/.cache/teams-lite/server"),
         ("ALLOW", PROJECT, "pgrep -af 'cache/teams-lite/server'"),
+        ("ALLOW", PROJECT, "pgrep -af teams-bin"),
+        ("ALLOW", PROJECT, "ls -l ~/.teams-lite/bin/teams-bin"),
         # Diagnosing the container is the normal way to answer "why is it empty".
         ("ALLOW", PROJECT, "intune-container status"),
         ("ALLOW", PROJECT, "intune-container doctor"),

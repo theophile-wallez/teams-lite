@@ -842,12 +842,11 @@ fi
 # always-on service runs a STAGED copy outside the checkout
 # (~/.local/share/teams-lite/service/server, see bin/teams-lite-service.sh), and a
 # rule that knew only about target/ would wave that one straight through.
-# The third is the RELEASED install's: the `teams` binary embeds the backend and
-# extracts it to ~/.cache/teams-lite/server before spawning it (`extractEmbeddedBackend`
-# in launcher/src/backend.ts). That is the send-capable backend on the port the user's
-# own app owns, it is present on any machine install.sh touched — including one with no
-# checkout at all — and it is the one an agent reaches for when nothing is built yet,
-# precisely because it needs no build.
+# The third is the RELEASED install's: `teams` extracts the backend it embeds to
+# ~/.cache/teams-lite/server and spawns it (`extractEmbeddedBackend` in
+# launcher/src/backend.ts). It needs no build, which is exactly why an agent on a
+# machine with nothing compiled reaches for it — and it binds the port the user's own
+# app owns.
 # The leading path may be spelled with a variable or a tilde — `$HOME/.local/...`,
 # `~/.local/...`, `"$PWD"/target/...` — so the prefix class accepts those characters
 # too. Without `$` and `~` in it, the staged path only matched when written relative.
@@ -987,7 +986,11 @@ fi
 #
 # Every spelling that RUNS it: the compiled binary wherever it was installed
 # (launcher/dist/teams, ~/.teams-lite/bin/teams, a `teams` on the PATH), the repo
-# wrapper that resolves the broker bus for it, and the source entrypoint. Anchored to a
+# wrapper that resolves the broker bus for it, and the source entrypoint. `teams-bin`
+# is that binary and `teams` is only the wrapper install.sh writes beside it (:57 and
+# :85), so `teams-bin` is the name `ps` and TEAMS_LITE_LAUNCHER_BIN give — the spelling
+# an agent copies while diagnosing the live app, which is the one place a command line
+# is read rather than composed. Anchored to a
 # command position like rules 3 and 3a, so prose, `git add launcher/dist/teams` and
 # `chmod +x` still run nothing. `teams-lite-service.sh` and friends do not match:
 # the name must be followed by a space or the end of the segment. The entrypoint is
@@ -996,7 +999,7 @@ fi
 # anchored there for the same reason it is in rule 2a: unanchored, those three letters
 # matched inside `stage-bundle.ts`, so a `sed` over a list of files that happened to
 # name both was read as a launch.
-runs_the_teams_command="${at_backend_command_start}teams([[:space:]]|\$)"
+runs_the_teams_command="${at_backend_command_start}teams(-bin)?([[:space:]]|\$)"
 runs_the_teams_launcher="${at_backend_command_start}teams-launcher\.sh([[:space:]]|\$)"
 runs_the_teams_entrypoint="${at_command_start}bun[^;&|]*(launcher/)?src/index\.ts"
 if ! stopping_a_process && ! inspecting_a_file && ! searching_text && ! printing_usage &&
