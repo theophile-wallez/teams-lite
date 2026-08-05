@@ -759,8 +759,8 @@ signalingFatal, media, escalation}` is the client's list of ways that goes wrong
 
 **This is the measurement that replaced the experiment**, and it makes receiving far cheaper
 than § 10.5 first ordered it. This app joins with ONE audio section and answers nothing
-afterwards — and the service still POSTs a `mediaRenegotiation` to us, unprompted, ~9 s into
-every join. Its offer grows as the meeting does. Audio only, nobody sharing:
+afterwards — and the service still POSTs a `mediaRenegotiation` to us, unprompted, ~9 s in.
+Its offer grows as the meeting does. Audio only, nobody sharing:
 
     audio port=3478 RTP/SAVP label:main-audio       mid:0
     x-data port=3480 RTP/SAVP label:data            mid:4 x-ssrc-range:9313-9412
@@ -777,6 +777,14 @@ Five things follow, and all five are measured rather than reasoned:
   fixed mid, with its SSRC range declared. There is no first-offer experiment to run and no
   guess about whether an inactive video section is accepted: the service adds the section
   when there is something to put on it.
+- **But it is not unconditional, and an earlier draft of this section said it was.** Measured
+  on five joins: four received a renegotiation ~9 s in, and every one of those had a SECOND
+  endpoint in the meeting. The fifth joined a meeting that was empty apart from us and got
+  none at all in 30 s. So the trigger is the meeting having something to offer, not the join —
+  and a receive path that waited for one in an empty meeting would wait for ever, correctly.
+  Nothing in this app depends on the difference (it answers what arrives and does nothing
+  otherwise), but a test that joins alone and expects an offer would be testing a state the
+  service does not produce.
 - **The mids are a fixed layout**, and the gaps say what is missing: `0` audio, `3`
   application sharing, `4` data — so `1` and `2` are the `main-video` slots, which appear
   when a camera does. `maxReinvitelessMediaForVideoForWeb` is the cap on that count.

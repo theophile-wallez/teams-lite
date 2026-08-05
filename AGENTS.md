@@ -989,11 +989,15 @@ receiving is not, and it is a separate feature with its own consent gate (NATIVE
 § 10.5).
 
 Everything about it follows from one measured fact: **the service renegotiates on its own,
-and its offer already carries the sections.** ~9 s into every join it POSTs a
+and its offer already carries the sections.** ~9 s into a join it POSTs a
 `mediaRenegotiation`, and a second after somebody shares their screen that offer grows
 `label:applicationsharing-video` at a fixed mid with its SSRC range declared. So there is
-nothing to ask for — the whole receive path is *answer it, then subscribe*. Six rules hold it
-together, and `web/e2e/calling.spec.ts` pins each:
+nothing to ask for — the whole receive path is *answer it, then subscribe*. It is not
+unconditional: measured on five joins, the four that got one all had a second endpoint in the
+meeting and the one that joined an empty meeting got none. Nothing here depends on the
+difference — it answers what arrives and does nothing otherwise — but do not write a test that
+joins alone and waits for an offer. Six rules hold it together, and
+`web/e2e/calling.spec.ts` pins each:
 
 - **An offer is not an answer, and this app used to read it as one.** `media_answer_from_frame`
   matched `mediaNegotiation` too, so the page was handed an offer where it expected an answer,
