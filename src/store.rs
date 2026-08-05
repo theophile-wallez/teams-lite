@@ -4014,7 +4014,9 @@ impl Store {
     /// alias hop. Returns `None` when the name is not in the pack or when an alias
     /// points at a name that does not exist.
     pub fn custom_emoji_art(&self, name: &str) -> Result<Option<(String, Vec<u8>)>> {
-        // ponytail: follow one hop, an alias may not point at an alias
+        // One hop is sufficient: `set_custom_emoji` refuses to create an alias that
+        // points at another alias, so following one hop is provably enough and a loop
+        // would be an unbounded walk over user-controlled data.
         let row: Option<(String, String, Option<Vec<u8>>)> = self.conn
             .query_row(
                 "SELECT alias_of, content_type, bytes FROM custom_emoji WHERE name = ?1",

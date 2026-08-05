@@ -52,7 +52,6 @@ pub fn is_valid_name(name: &str) -> bool {
         return false;
     }
     let bytes = name.as_bytes();
-    // ponytail: first character must be lowercase letter or digit
     if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
         return false;
     }
@@ -93,7 +92,10 @@ pub fn substitute_codes(html: &str, art: &dyn Fn(&str) -> Option<String>) -> Str
                 for (start, end, name) in code_spans_in_text(text) {
                     out.push_str(&text[pos..start]);
                     if let Some(src) = art(&name) {
-                        // ponytail: Teams' own emoji markup, verified against the tenant
+                        // This markup was verified against the live tenant on 2026-08-05:
+                        // `itemtype`, `src`, `width` and `height` survive Teams' server-side
+                        // sanitizer, the images render inline between the words, and stock
+                        // Teams draws them at text size.
                         out.push_str(r#"<img itemtype="http://schema.skype.com/Emoji" itemid=""#);
                         out.push_str(&name);
                         out.push_str(r#"" alt=":"#);
@@ -153,7 +155,6 @@ impl<'a> Iterator for WalkIter<'a> {
 
         let bytes = self.html.as_bytes();
 
-        // ponytail: if we're inside a skipped region, find its close tag
         if let Some(skip_idx) = self.skip_depth.iter().position(|&d| d > 0) {
             if let Some(close_start) = find_close_tag(&bytes[self.pos..], SKIPPED_TAGS[skip_idx]) {
                 let segment_start = self.pos;
@@ -162,7 +163,6 @@ impl<'a> Iterator for WalkIter<'a> {
                 self.pos = segment_end;
                 return Some(Segment::Raw(&self.html[segment_start..segment_end]));
             } else {
-                // ponytail: no close tag found, rest is raw
                 let segment_start = self.pos;
                 self.pos = self.html.len();
                 return Some(Segment::Raw(&self.html[segment_start..]));
@@ -170,7 +170,6 @@ impl<'a> Iterator for WalkIter<'a> {
         }
 
         if bytes[self.pos] == b'<' {
-            // ponytail: find the end of this tag
             let tag_end = bytes[self.pos + 1..]
                 .iter()
                 .position(|&b| b == b'>')
@@ -179,7 +178,6 @@ impl<'a> Iterator for WalkIter<'a> {
             if let Some(end) = tag_end {
                 let tag_content = &self.html[self.pos + 1..end - 1];
 
-                // ponytail: check if this opens a skipped tag
                 for (i, &skip_tag) in SKIPPED_TAGS.iter().enumerate() {
                     if tag_content.starts_with(skip_tag)
                         && (tag_content.len() == skip_tag.len()
@@ -195,13 +193,11 @@ impl<'a> Iterator for WalkIter<'a> {
                 self.pos = end;
                 return Some(Segment::Raw(&self.html[segment_start..end]));
             } else {
-                // ponytail: malformed, treat rest as raw
                 let segment_start = self.pos;
                 self.pos = self.html.len();
                 return Some(Segment::Raw(&self.html[segment_start..]));
             }
         } else {
-            // ponytail: text run until next tag
             let run_end = bytes[self.pos..]
                 .iter()
                 .position(|&b| b == b'<')
@@ -262,7 +258,6 @@ fn code_spans_in_text(text: &str) -> impl Iterator<Item = (usize, usize, String)
                 pos += 1;
                 let name_start = pos;
 
-                // ponytail: scan a name using is_valid_name's character set
                 if pos < bytes.len() && (bytes[pos].is_ascii_lowercase() || bytes[pos].is_ascii_digit()) {
                     pos += 1;
                     while pos < bytes.len() {
@@ -274,7 +269,6 @@ fn code_spans_in_text(text: &str) -> impl Iterator<Item = (usize, usize, String)
                         }
                     }
 
-                    // ponytail: closing colon and length check
                     if pos < bytes.len() && bytes[pos] == b':' {
                         let name = &text[name_start..pos];
                         if name.len() <= 64 {
@@ -283,7 +277,6 @@ fn code_spans_in_text(text: &str) -> impl Iterator<Item = (usize, usize, String)
                         }
                     }
                 }
-                // ponytail: not a code, keep scanning from after the opening ':'
             } else {
                 pos += 1;
             }
