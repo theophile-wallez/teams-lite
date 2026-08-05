@@ -658,13 +658,22 @@ pub fn media_answer_payload(
 /// Build the body that ends our leg of a call.
 pub fn hangup_payload(local: &LocalParticipant) -> Value {
     json!({
-        "callEnd": {
-            "sender": local.json(),
-            // 0 is "the user hung up" — the ordinary ending, and the only one
-            // this app ever reports about itself.
+        // WHO is leaving. The service refuses a body that names nobody with a `400`, and
+        // then the user is out of the call HERE while Teams still has them in it — a
+        // phantom participant everybody else can see. Measured: our own `callEnd` shape
+        // was refused on every `leave` of a joined meeting.
+        "participants": { "from": local.json() },
+        // Why the CONVERSATION ended for us, and why the CALL leg did. The client sends
+        // both, and both are the ordinary ending: nothing failed, the user left.
+        "conversationTransactionEnd": {
+            "reason": "noError",
             "code": 0,
-            "phrase": "CallEndReasonHangup",
-        }
+            "phrase": "ConversationEndedNoModality",
+        },
+        "callTransactionEnd": {
+            "code": 0,
+            "phrase": "LocalUserInitiated",
+        },
     })
 }
 
@@ -1608,7 +1617,13 @@ mod tests {
 
     #[test]
     fn a_hangup_and_a_rejection_name_who_sent_them() {
-        assert_eq!(hangup_payload(&local()).pointer("/callEnd/sender/id").unwrap(), "8:orgid:me");
+        let hangup = hangup_payload(&local());
+        assert_eq!(hangup.pointer("/participants/from/id").unwrap(), "8:orgid:me");
+        // Both endings, the way the client's own `leaveConversation` sends them. A body
+        // that names nobody is refused with a 400, and then Teams still has the user in
+        // the meeting while this app does not.
+        assert_eq!(hangup.pointer("/conversationTransactionEnd/reason").unwrap(), "noError");
+        assert!(hangup.pointer("/callTransactionEnd/code").is_some());
         assert_eq!(
             rejection_payload(&local()).pointer("/callRejection/sender/id").unwrap(),
             "8:orgid:me"
