@@ -4163,6 +4163,21 @@ export class TeamsController {
     void this.refreshNotifications();
     const openId = this.get().openId;
     if (openId) void this.reconcileOpen(openId);
+    this.rereadGitLabPeople();
+  }
+
+  /** Re-read what the GitLab page says about its people, after a rename.
+   *
+   *  A merge request's author is named by the BACKEND, which resolves them against the
+   *  user's own Teams on the way out (`with_teams_people` in src/bin/server.rs) — so a
+   *  rename changes that answer while GitLab's own copy of it is untouched. That is why the
+   *  read asks for no refresh: it is served from the backend's own response cache, and
+   *  nothing here reaches GitLab. Only what is already loaded is re-read; a list nobody has
+   *  opened is named when it is. */
+  private rereadGitLabPeople(): void {
+    if (this.gitlabListCache.size > 0) void this.refreshGitLabList();
+    const key = this.get().openMergeRequest;
+    if (key) void this.loadMergeRequestPage(key, false);
   }
 
   loadProfile(mri: string): Promise<PersonProfile | null> {

@@ -3597,8 +3597,12 @@ function mockApprovalResult(url: string): {
   const state = mockApprovalFor(url);
   if (!state) return { approval: null, token_set: true };
   const parsed = parseGitLabUrl(url, mockSettings.gitlab_host || "gitlab.com");
-  const approved_by = [...state.others, ...(state.mine ? ["Théophile WALLEZ"] : [])];
-  return {
+  // People, not bare names — the shape the Rust `Approval` carries, so the same walk that
+  // names a merge request's author names whoever approved it (`withMockTeamsPeople`).
+  const approved_by = [...state.others, ...(state.mine ? [MOCK_GITLAB_ME.name] : [])].map(
+    (name) => ({ name, username: name.toLowerCase().replace(/[^a-z]+/g, ".") }),
+  );
+  return withMockTeamsPeople({
     approval: {
       reference: `!${parsed?.iid ?? 1}`,
       approved: approved_by.length > 0,
@@ -3608,7 +3612,7 @@ function mockApprovalResult(url: string): {
       mine: state.mine,
     },
     token_set: true,
-  };
+  });
 }
 
 // ---- the merge-request page (`gitlab_mr_*`) ---------------------------------
@@ -3695,6 +3699,75 @@ const MOCK_GITLAB_ME: MockGitLabPerson = { name: "Théophile WALLEZ", username: 
 const MOCK_GITLAB_ADA: MockGitLabPerson = { name: "Ada Lovelace", username: "ada" };
 const MOCK_GITLAB_GRACE: MockGitLabPerson = { name: "Grace Hopper", username: "grace" };
 const MOCK_GITLAB_BOT: MockGitLabPerson = { name: "review-bot", username: "review-bot" };
+/** Two colleagues who are in this mock's TEAMS as well as on its GitLab, under the same real
+ *  name — so the page draws them as those colleagues: their Teams face, and the name the user
+ *  gave them if they gave one (see `mockTeamsPersonFor`). Mia HAS a photo in this mock and
+ *  Lucas does not, which is the whole range of the feature on one merge request: a real face,
+ *  a Teams name over tinted initials, and — in Ada, Grace and the bot, who are on GitLab only
+ *  — GitLab's own words untouched. */
+const MOCK_GITLAB_MIA: MockGitLabPerson = { name: "Mia Chen", username: "mia.chen" };
+const MOCK_GITLAB_LUCAS: MockGitLabPerson = { name: "Lucas Silva", username: "lucas.silva" };
+
+// ---- who a GitLab user is in TEAMS -----------------------------------------
+//
+// The mock's half of `src/gitlab_people.rs`: a merge request's people are matched to the
+// people this app knows by their REAL NAME, and the answer travels as one more field on each
+// person. It is done at the answer boundary, exactly where the backend does it — never baked
+// into the fixtures — because that is what makes a rename show up here at once, and what
+// keeps GitLab's own words the thing the fixtures hold.
+
+/** The comparison key two systems' record of one person has to agree on: case folded and
+ *  whitespace collapsed. A port of `gitlab_people::name_key`, whose own doc says why accents
+ *  are NOT folded (it was measured, and it changes nothing). */
+function mockNameKey(name: string): string {
+  return name.trim().toLowerCase().split(/\s+/).join(" ");
+}
+
+/** Everybody this mock's Teams can name, by that key — the stand-in for
+ *  `Store::named_people`. It holds the user themselves under the name TEAMS has for them,
+ *  which is not the "You" this mock's own messages carry: the real store holds a real name
+ *  there too, and it is what a GitLab account of theirs matches. */
+const mockTeamsPeopleByName = new Map<string, Person>([
+  ...PEOPLE.map((person) => [mockNameKey(person.name), person] as const),
+  [mockNameKey(MOCK_GITLAB_ME.name), { name: SELF_NAME, mri: SELF_MRI }],
+]);
+
+/** The Teams person one GitLab display name is, or `undefined` when this app knows nobody by
+ *  it. The NAME that comes back is the user's own nickname when they set one, like every
+ *  other name this mock answers with (`nickname`). */
+function mockTeamsPersonFor(name: string): { mri: string; name: string } | undefined {
+  const person = mockTeamsPeopleByName.get(mockNameKey(name));
+  if (!person) return undefined;
+  return { mri: person.mri, name: nickname(person.mri) || person.name };
+}
+
+/** Name every person in one GitLab payload — the walk `gitlab_people::annotate` does, under
+ *  the same rule: a person is an object carrying both a `name` and a `username`, so one pass
+ *  reaches a row's author, a merge request's reviewers and every comment's author, and never
+ *  a CI job (which has a name and no handle).
+ *
+ *  It answers a COPY. The fixtures above are shared by every read — a row hands out the very
+ *  object a detail and a note hand out — so writing an identity into them would be this mock
+ *  remembering something a real GitLab never said. */
+function withMockTeamsPeople<T>(payload: T): T {
+  payload = structuredClone(payload);
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const map = value as Record<string, unknown>;
+    if (typeof map.name === "string" && typeof map.username === "string") {
+      const teams = mockTeamsPersonFor(map.name);
+      if (teams) map.teams = teams;
+      else delete map.teams;
+    }
+    for (const child of Object.values(map)) walk(child);
+  };
+  walk(payload);
+  return payload;
+}
 
 /** Minutes ago as an ISO timestamp, so the fixtures read as recent work. */
 function agoIso(minutes: number): string {
@@ -3737,7 +3810,9 @@ const mockMergeRequests: MockMergeRequest[] = [
     state: "opened",
     draft: false,
     author: MOCK_GITLAB_ADA,
-    reviewers: [MOCK_GITLAB_ME],
+    // One person the app's own Teams knows (Lucas) beside one it does not (Ada), on one
+    // merge request: both shapes of a person are on screen at once.
+    reviewers: [MOCK_GITLAB_ME, MOCK_GITLAB_LUCAS],
     assignees: [MOCK_GITLAB_ADA],
     labels: ["infra", "needs-review"],
     source_branch: "feature/ha-replicas",
@@ -3768,7 +3843,10 @@ const mockMergeRequests: MockMergeRequest[] = [
         notes: [
           {
             id: 69_848,
-            author: MOCK_GITLAB_GRACE,
+            // A colleague this app's Teams also knows, so the comment carries her real face
+            // and the name the user calls her — beside the bot below, which stays what
+            // GitLab called it.
+            author: MOCK_GITLAB_MIA,
             body: "Two replicas is right, but please check the `preStop` timing against the load balancer.",
             system: false,
             created_at: agoIso(90),
@@ -3868,7 +3946,9 @@ const mockMergeRequests: MockMergeRequest[] = [
     description: "Widens the forwarder's policy to the new bucket.",
     state: "opened",
     draft: true,
-    author: MOCK_GITLAB_GRACE,
+    // A colleague the app's own Teams knows, on a merge request no spec ever merges or
+    // closes — which is what lets one pin that a rename reaches this page.
+    author: MOCK_GITLAB_MIA,
     reviewers: [],
     assignees: [],
     labels: [],
@@ -6170,7 +6250,16 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
           return true;
         })
         .map(mockMergeRequestRow);
-      return { scope, state, items, total: items.length, truncated: false, token_set: true };
+      // Every answer this page gets says who its people are in Teams, exactly as the
+      // backend's does — see `withMockTeamsPeople`.
+      return withMockTeamsPeople({
+        scope,
+        state,
+        items,
+        total: items.length,
+        truncated: false,
+        token_set: true,
+      });
     }
 
     case "gitlab_mr_detail": {
@@ -6178,7 +6267,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const iid = requireNumber(params, "iid");
       const mr = mockMergeRequestFor(projectPath, iid);
       if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
-      return mockMergeRequestDetail(mr);
+      return withMockTeamsPeople(mockMergeRequestDetail(mr));
     }
 
     case "gitlab_mr_notes": {
@@ -6186,7 +6275,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const iid = requireNumber(params, "iid");
       const mr = mockMergeRequestFor(projectPath, iid);
       if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
-      return mockDiscussionList(mr);
+      return withMockTeamsPeople(mockDiscussionList(mr));
     }
 
     case "gitlab_mr_pipeline": {
@@ -6253,7 +6342,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       else mr.discussions.push({ id: `d-${mr.iid}-${note.id}`, individual_note: true, notes: [note] });
       mr.updated_at = note.created_at;
       broadcastMockMergeRequest(mr);
-      return { note: { ...note, discussion_id: thread?.id } };
+      return withMockTeamsPeople({ note: { ...note, discussion_id: thread?.id } });
     }
 
     // DELETE one of the user's OWN comments. The real backend re-reads whose it is before

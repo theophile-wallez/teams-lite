@@ -3,6 +3,11 @@
 // These mirror the Rust backend's WebSocket protocol (see src/bin/server.rs).
 // Nothing here touches the DOM, the network, or any runtime-specific API.
 
+// The one type this file borrows rather than restates. A GitLab person has one spelling in
+// this app — `gitlab_mr::Person` plus the identity the backend resolves onto it — and an
+// approval names people, so it takes that spelling instead of a second copy that would drift.
+import type { GitLabPerson } from "./gitlab-mr";
+
 // Mirrors the Rust `ConversationKind` (src/store.rs).
 export type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
 
@@ -907,8 +912,10 @@ export type GitLabApproval = {
   approved?: boolean;
   approvals_required?: number;
   approvals_left?: number;
-  /** Who has approved, by display name, in GitLab's own order. */
-  approved_by?: string[];
+  /** Who has approved, in GitLab's own order — each one a person the backend may have
+   *  matched to a colleague, so the sentence names them the way the rest of this app does
+   *  (`personFace`). An older backend answered bare names; nothing reads it as one. */
+  approved_by?: GitLabPerson[];
   /** Whether the user's OWN account is among them, matched on GitLab's user id. This
    *  is what decides whether the menu offers "Approve" or "Revoke approval": the two
    *  are opposite actions, and offering the wrong one is a mistake the reader cannot

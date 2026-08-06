@@ -21,6 +21,7 @@ import {
   conversationDiscussions,
   formatJobDuration,
   mergeVerdict,
+  personFace,
   pipelineIsLive,
   pipelineStages,
   pipelineTone,
@@ -31,6 +32,7 @@ import {
   type GitLabDiscussion,
   type GitLabJob,
   type GitLabNote,
+  type GitLabPerson,
   type MergeRequestDetail,
   type PipelineTone,
 } from "~/lib/gitlab-mr";
@@ -56,9 +58,13 @@ import { RichNodes } from "./rich-content";
 //   - **A control is drawn only where it would work.** The Merge button reads GitLab's own
 //     `detailed_merge_status`, so a blocked merge request shows a disabled control with the
 //     reason on it instead of a refusal after the fact.
-//   - **Nothing here is fetched from the browser.** Faces are tinted initials, and the
-//     description and every comment are rendered through the app's own markdown subset —
-//     never GitLab's rendered HTML, which would carry remote references with it.
+//   - **Nothing here is fetched from GITLAB by the browser.** Its `avatar_url` is never
+//     requested, and the description and every comment are rendered through the app's own
+//     markdown subset — never GitLab's rendered HTML, which would carry remote references
+//     with it. A face IS drawn for a person the user's own Teams knows, through the
+//     backend's `fetch_avatar` like every other avatar in this app: that is a Teams read,
+//     it tells the GitLab instance nothing, and it is what makes a colleague here the same
+//     colleague as in a chat (see `personFace`).
 //
 // The Changes / diff section is deliberately absent: reviewing code is its own surface, and
 // the reads it needs (`/diffs`, `/versions`) are not in this build. What is already here for
@@ -232,31 +238,43 @@ function MergeRequestHeader(props: { detail: MergeRequestDetail }) {
   );
 }
 
-/** One row of people, as faces and names. Tinted initials, never a fetched avatar. */
-function PersonLine(props: { label: string; people: { name: string; username: string }[] }) {
+/** One row of people, as faces and names. A colleague the user's Teams knows is drawn as
+ *  that colleague — their Teams face and the name this app calls them (see `personFace`);
+ *  anybody else keeps GitLab's own name over tinted initials. */
+function PersonLine(props: { label: string; people: GitLabPerson[] }) {
   return (
     <div className="flex items-center gap-2">
       <span className="text-[12px] text-text-faint">{props.label}</span>
       {props.people.map((person) => (
-        <span
-          key={person.username || person.name}
-          data-testid="gitlab-person"
-          title={person.username ? `@${person.username}` : person.name}
-          className="flex items-center gap-1.5 rounded-full bg-accent/60 py-0.5 pl-0.5 pr-2"
-        >
-          <Avatar
-            seed={person.username || person.name}
-            label={person.name || person.username}
-            initials={(person.name || person.username).slice(0, 1).toUpperCase()}
-            fallback="person"
-            className="size-5 text-[9px]"
-          />
-          <span className="max-w-[160px] truncate text-[12px] text-text-dim">
-            {person.name || person.username}
-          </span>
-        </span>
+        <PersonChip key={person.username || person.name} person={person} />
       ))}
     </div>
+  );
+}
+
+/** One person, as a face beside a name. The GitLab handle stays in the title whatever the
+ *  chip is called: it is how the reader finds them on the instance, so a Teams name never
+ *  replaces it. */
+function PersonChip(props: { person: GitLabPerson }) {
+  const person = props.person;
+  const face = useMemo(() => personFace(person), [person]);
+  return (
+    <span
+      data-testid="gitlab-person"
+      data-person={face.label}
+      title={person.username ? `@${person.username}` : person.name}
+      className="flex items-center gap-1.5 rounded-full bg-accent/60 py-0.5 pl-0.5 pr-2"
+    >
+      <Avatar
+        seed={face.seed}
+        label={face.label}
+        photo={face.photo}
+        initials={face.label.slice(0, 1).toUpperCase()}
+        fallback="person"
+        className="size-5 text-[9px]"
+      />
+      <span className="max-w-[160px] truncate text-[12px] text-text-dim">{face.label}</span>
+    </span>
   );
 }
 
@@ -537,7 +555,11 @@ function ApprovalPanel() {
           <p data-testid="gitlab-approved">GitLab reports this as approved.</p>
         ) : null}
         {approval.approved_by && approval.approved_by.length > 0 ? (
-          <p data-testid="gitlab-approved-by">Approved by {approval.approved_by.join(", ")}.</p>
+          // Named the way every other person on this page is: a colleague the app knows is
+          // called what the user calls them, and anybody else keeps GitLab's own word.
+          <p data-testid="gitlab-approved-by">
+            Approved by {approval.approved_by.map((p) => personFace(p).label).join(", ")}.
+          </p>
         ) : (
           <p className="text-text-faint">Nobody has approved it yet.</p>
         )}
@@ -730,7 +752,7 @@ function DiscussionPanel() {
           <ul data-testid="gitlab-events" className="flex flex-col gap-1 border-l border-border-subtle pl-3">
             {events.map((note) => (
               <li key={note.id} className="text-[11px] text-text-faint">
-                <span className="text-text-dim">{note.author.name || note.author.username}</span>{" "}
+                <span className="text-text-dim">{personFace(note.author).label}</span>{" "}
                 {note.body} · {formatNoteTime(note.created_at)}
               </li>
             ))}
@@ -814,6 +836,7 @@ function NoteBubble(props: { note: GitLabNote }) {
   const controller = useController();
   const acting = useAppState((s) => s.gitlabActing);
   const nodes = useMemo(() => parseGitLabMarkdown(note.body), [note.body]);
+  const author = useMemo(() => personFace(note.author), [note.author]);
   const deleting = acting === `delete:${note.id}`;
   const [armed, setArmed] = useState(false);
 
@@ -821,14 +844,15 @@ function NoteBubble(props: { note: GitLabNote }) {
     <div data-testid="gitlab-note" data-note={note.id} data-mine={note.mine ? "true" : undefined}>
       <div className="flex items-center gap-2">
         <Avatar
-          seed={note.author.username || note.author.name}
-          label={note.author.name || note.author.username}
-          initials={(note.author.name || note.author.username).slice(0, 1).toUpperCase()}
+          seed={author.seed}
+          label={author.label}
+          photo={author.photo}
+          initials={author.label.slice(0, 1).toUpperCase()}
           fallback="person"
           className="size-5 text-[9px]"
         />
-        <span className="text-[12px] font-medium text-foreground">
-          {note.author.name || note.author.username}
+        <span data-testid="gitlab-note-author" className="text-[12px] font-medium text-foreground">
+          {author.label}
         </span>
         <time className="text-[11px] text-text-faint">{formatNoteTime(note.created_at)}</time>
         {note.resolvable && (

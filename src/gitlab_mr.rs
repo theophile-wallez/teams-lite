@@ -213,12 +213,17 @@ pub struct MergeRequestList {
 
 /// One person GitLab names.
 ///
-/// `avatar_url` is GitLab's own, and **nothing fetches it**: the page draws tinted initials
-/// instead, so displaying a merge request makes no request from the browser — the same
-/// guarantee `mail_html` gives a mail body. It travels because it is what GitLab said, and
-/// because a future avatar proxy (the shape `fetch_media` already has for Teams) would need
-/// it; a bare `<img src>` would not do, since an avatar on a private instance answers 401
+/// `avatar_url` is GitLab's own, and **nothing fetches it**: no request is ever made to the
+/// instance for a picture, so displaying a merge request costs the GitLab host nothing — the
+/// same guarantee `mail_html` gives a mail body. It travels because it is what GitLab said;
+/// a bare `<img src>` would not do, since an avatar on a private instance answers 401
 /// without a session and a broken picture is worse than initials.
+///
+/// **The face the page really draws is TEAMS'**, when this person is somebody the user's own
+/// Teams knows: the answer that leaves the backend carries one more field, `teams`, naming
+/// them (see [`crate::gitlab_people`], and `with_teams_people` in src/bin/server.rs). It is
+/// added on the way OUT rather than parsed in here, because it is local, current, and must
+/// never be frozen into the response cache this module's reads are stored in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Person {
     pub name: String,

@@ -269,6 +269,37 @@ test.describe("renaming a person, here only", () => {
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 
+  test("a rename reaches the merge-request page, where GitLab named them", async ({
+    page,
+    consoleErrors,
+  }) => {
+    await gotoApp(page);
+    // Mia is on this tenant's GitLab under her real name, so the merge-request page draws her
+    // as the colleague she is (see § The GitLab page in CLAUDE.md). Renaming her is the
+    // sharpest case for that: the answer the page is drawn from comes from GitLab, and the
+    // name on it does not.
+    const gitlabTab = page.locator('[data-testid="tab-gitlab"]');
+    const authored = page.locator('[data-testid="gitlab-row"][data-iid="297"]');
+    await gitlabTab.click();
+    await expect(authored).toHaveAttribute("data-author", "Mia Chen");
+
+    await page.locator('[data-testid="tab-chats"]').click();
+    await openByPalette(page, "Mia Chen");
+    const header = page.locator('[data-testid="conversation-title"]');
+    await expect(header).toHaveText("Mia Chen");
+    await openRenameDialog(page, header);
+    await saveName(page, "Renamed Reviewer");
+    await expect(header).toHaveText("Renamed Reviewer", { timeout: 10_000 });
+
+    // No reload, and GitLab is asked nothing: the rename re-reads what this app already
+    // holds, because the identity is resolved on the way out of the backend rather than
+    // stored in the answer GitLab gave.
+    await gitlabTab.click();
+    await expect(authored).toHaveAttribute("data-author", "Renamed Reviewer", { timeout: 10_000 });
+
+    expect(realErrors(consoleErrors)).toEqual([]);
+  });
+
   test("the dialog refuses a file that is not one of the four image formats", async ({
     page,
     consoleErrors,

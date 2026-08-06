@@ -112,7 +112,9 @@ use teams_lite::{
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
-use teams_lite::{gitlab, gitlab_approval, gitlab_mr, gitlab_mr_write, link_preview};
+use teams_lite::{
+    gitlab, gitlab_approval, gitlab_mr, gitlab_mr_write, gitlab_people, link_preview,
+};
 
 /// The port the user's own backend owns: what the `teams` command and the web app
 /// dial by default.
@@ -1139,6 +1141,15 @@ struct Ctx {
     /// readers would ask GitLab twice a second and earn the token a rate limit. See
     /// [`gitlab_cached`].
     gitlab_refreshing: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// The Teams people a GitLab name can resolve to, and when the list was folded.
+    ///
+    /// It is a cache with a window, like the GitLab reads it serves (see
+    /// [`TEAMS_PEOPLE_TTL`]): building it reads every person this machine has ever been told
+    /// about — 294 of them here, from 12 603 messages — and the page asks for one on every
+    /// answer it hands out, pipeline poll included. What it holds is only the MATCHING keys,
+    /// Teams' own names, so a rename needs no invalidation at all: the name a page DRAWS is
+    /// read per answer through `Store::display_name_for_mri`. See [`teams_people_of`].
+    gitlab_people: Arc<Mutex<Option<(i64, Arc<gitlab_people::Roster>)>>>,
 }
 
 /// Everything this machine knows about audio calling right now.
@@ -2400,6 +2411,7 @@ async fn main() -> Result<()> {
         last_repair: Arc::new(Mutex::new(None)),
         calling: Arc::new(Mutex::new(CallingPlane::default())),
         gitlab_refreshing: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        gitlab_people: Arc::new(Mutex::new(None)),
     };
 
     // Watch the broker, and react once per CHANGE of state (see `observe_broker`).
@@ -4552,7 +4564,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 &url,
             )
             .await?;
-            Ok(json!({ "approval": approval, "token_set": settings.gitlab_token.is_some() }))
+            // Who approved is one more list of people on this page, so it is named the same
+            // way the rest of it is.
+            let mut answer =
+                json!({ "approval": approval, "token_set": settings.gitlab_token.is_some() });
+            with_teams_people(ctx, &mut answer);
+            Ok(answer)
         }
 
         // Give, or take back, the user's own approval of a merge request. THE one write
@@ -4588,7 +4605,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             if let Some((project_path, iid)) = gitlab_merge_request_of(&url, &settings.gitlab_host) {
                 forget_gitlab_merge_request(ctx, &project_path, iid);
             }
-            Ok(json!({ "approval": approval, "token_set": true }))
+            let mut answer = json!({ "approval": approval, "token_set": true });
+            with_teams_people(ctx, &mut answer);
+            Ok(answer)
         }
 
         // ---- the merge-request page: reads ------------------------------------
@@ -4754,7 +4773,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             )
             .await?;
             forget_gitlab_merge_request(ctx, &project_path, iid);
-            Ok(json!({ "note": note }))
+            // The comment the page adds at once, so it arrives wearing the same face as the
+            // ones it lands beside — the note it is drawn from is the user's own.
+            let mut answer = json!({ "note": note });
+            with_teams_people(ctx, &mut answer);
+            Ok(answer)
         }
 
         // DELETE one of the user's OWN comments — the undo that makes the comment above
@@ -6074,6 +6097,7 @@ async fn gitlab_cached(
     refresh: bool,
     read: GitLabRead,
 ) -> Result<Value> {
+    let mut value = None;
     if !refresh {
         let cached = {
             let store = ctx.store()?;
@@ -6082,7 +6106,7 @@ async fn gitlab_cached(
         // An unparseable payload is treated as no payload: a build that changed a field's
         // shape must not serve the old one for a minute.
         if let Some((payload, age)) = cached {
-            if let Ok(value) = serde_json::from_str::<Value>(&payload) {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&payload) {
                 if age > ttl.as_millis() as i64 {
                     let ctx_bg = ctx.clone();
                     let key_bg = key.clone();
@@ -6091,11 +6115,90 @@ async fn gitlab_cached(
                         gitlab_refresh_behind_the_page(&ctx_bg, key_bg, read_bg).await;
                     });
                 }
-                return Ok(value);
+                value = Some(parsed);
             }
         }
     }
-    gitlab_fetch_and_cache(ctx, &key, &read).await
+    let mut value = match value {
+        Some(value) => value,
+        None => gitlab_fetch_and_cache(ctx, &key, &read).await?,
+    };
+    // The LAST thing that happens to any answer, on both paths, and never before the cache:
+    // who these people are in Teams is local and current, and a copy of it frozen on disk
+    // would outlive a rename.
+    with_teams_people(ctx, &mut value);
+    Ok(value)
+}
+
+/// How long a folded roster of Teams people is reused before it is built again.
+///
+/// The window's cost is one thing only: a colleague whose FIRST message this machine has
+/// ever stored is drawn as a stranger on the GitLab page for up to a minute. Its benefit is
+/// that opening a merge request — four reads at once — reads 294 people once instead of four
+/// times, and that a pipeline poll every 6 s costs nothing. The same trade, and the same
+/// minute, as the merge-request list's own window.
+const TEAMS_PEOPLE_TTL: Duration = Duration::from_secs(60);
+
+/// Add to one GitLab answer, in place, who each of its people is in Teams.
+///
+/// Called on every payload the page is handed — the four reads above, and the note a comment
+/// write hands back — so a colleague wears one face and one name everywhere in this app. The
+/// resolution itself is `gitlab_people`; what lives here is where its two halves come from:
+/// the roster to match a real name against, and each matched person's CURRENT display name,
+/// which is [`store::Store::display_name_for_mri`] — the same read every other name in this
+/// app goes through, so the user's own nickname wins here exactly as it does in a chat.
+///
+/// It cannot fail the read. A face and a nicer name are what this adds; a store that cannot
+/// be opened costs them and leaves GitLab's own words, which is what the page drew before
+/// this existed.
+///
+/// Both reads are LAZY, which is what keeps it off the hot path: the roster is built on the
+/// first person the payload holds, and the store is opened on the first person who really
+/// resolves. A pipeline — THE live read, polled every few seconds while CI runs — names
+/// nobody at all, so it costs nothing here.
+fn with_teams_people(ctx: &Ctx, value: &mut Value) {
+    let mut roster: Option<Arc<gitlab_people::Roster>> = None;
+    let mut store: Option<Store> = None;
+    // One lookup per distinct name, not per row: a hundred merge requests are written by a
+    // couple of dozen people, and a comment thread by fewer.
+    let mut resolved: std::collections::HashMap<String, Option<gitlab_people::TeamsPerson>> =
+        std::collections::HashMap::new();
+    gitlab_people::annotate(value, &mut |name| {
+        if let Some(known) = resolved.get(name) {
+            return known.clone();
+        }
+        let person = (|| {
+            if roster.is_none() {
+                roster = teams_people_of(ctx);
+            }
+            let mri = roster.as_ref()?.mri_for(name)?;
+            if store.is_none() {
+                store = ctx.store().ok();
+            }
+            let display = store.as_ref()?.display_name_for_mri(mri).ok().flatten()?;
+            Some(gitlab_people::TeamsPerson { mri: mri.to_string(), name: display })
+        })();
+        resolved.insert(name.to_string(), person.clone());
+        person
+    });
+}
+
+/// The folded roster of Teams people, from the cache when it is fresh enough.
+///
+/// `None` when the store cannot be read, which costs the identities and nothing else.
+fn teams_people_of(ctx: &Ctx) -> Option<Arc<gitlab_people::Roster>> {
+    {
+        let cached = ctx.gitlab_people.lock().unwrap();
+        if let Some((built, roster)) = cached.as_ref() {
+            if now_ms().saturating_sub(*built) < TEAMS_PEOPLE_TTL.as_millis() as i64 {
+                return Some(roster.clone());
+            }
+        }
+    }
+    let people = ctx.store().ok()?.named_people().ok()?;
+    let roster = Arc::new(gitlab_people::Roster::from_people(people));
+    *ctx.gitlab_people.lock().unwrap() = Some((now_ms(), roster.clone()));
+    Some(roster)
 }
 
 /// Make one read, store it, and hand it back.
@@ -6126,7 +6229,11 @@ async fn gitlab_refresh_behind_the_page(ctx: &Ctx, key: String, read: GitLabRead
     ctx.gitlab_refreshing.lock().unwrap().remove(&key);
 
     match outcome {
-        Ok(value) => {
+        Ok(mut value) => {
+            // The same last step the handler's own answer takes: an event carries the page's
+            // whole payload, so a fresh copy that skipped this would replace every face and
+            // every Teams name with GitLab's own a moment after they were drawn.
+            with_teams_people(ctx, &mut value);
             let (event, mut data) = read.event();
             if let (Some(object), Some(payload)) = (data.as_object_mut(), value.as_object()) {
                 for (field, value) in payload {
@@ -11457,6 +11564,75 @@ mod lifecycle_tests {
                  clears the marker on every device the user owns."
             );
         }
+    }
+
+    // Every GitLab payload the page is handed must say who its people are in Teams, or the
+    // one answer that forgot is the one surface where a colleague reads as a stranger — and
+    // it must be said AFTER the response cache, since `gitlab_reads` outlives a rename (see
+    // AGENTS.md § A GitLab user who is also a colleague). Both halves are scanned, because
+    // there is no single line either could be enforced by.
+    #[test]
+    fn every_gitlab_answer_names_its_people_and_never_the_cache() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        // The two places a read leaves the backend: the handler's own answer, and the event a
+        // refresh behind the page broadcasts.
+        for (function, ends_at, anchor) in [
+            ("async fn gitlab_cached(", "/// How long a folded roster", "store.gitlab_read"),
+            (
+                "async fn gitlab_refresh_behind_the_page(",
+                "/// Drop everything cached about",
+                "gitlab_refreshing",
+            ),
+        ] {
+            let body = code
+                .split(function)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{function} is gone"))
+                .split(ends_at)
+                .next()
+                .expect("the function ends before the next item");
+            assert!(body.contains(anchor), "scanned the wrong text for {function}");
+            assert!(
+                body.contains("with_teams_people"),
+                "`{function}` no longer names `with_teams_people`, so the page would draw \
+                 GitLab's own name for a colleague this app already knows."
+            );
+        }
+        // And the three answers that carry people without going through those two.
+        for (arm, anchor) in [
+            ("\"gitlab_approvals\" =>", "gitlab_approval::fetch"),
+            ("\"gitlab_set_approval\" =>", "gitlab_approval::set"),
+            ("\"gitlab_mr_comment\" =>", "gitlab_mr_write::comment"),
+        ] {
+            let handler = code
+                .split(arm)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{arm} is gone"))
+                .split("        \"")
+                .next()
+                .expect("the arm ends at the next one");
+            assert!(handler.contains(anchor), "scanned the wrong text for {arm}");
+            assert!(
+                handler.contains("with_teams_people"),
+                "the {arm} answer names people and no longer names `with_teams_people`."
+            );
+        }
+        // The cache keeps GITLAB'S OWN words: an identity written into it would outlive the
+        // rename that changed it, on disk, across restarts.
+        let cache = code
+            .split("async fn gitlab_fetch_and_cache(")
+            .nth(1)
+            .expect("the caching read")
+            .split("/// Refresh one read behind the page")
+            .next()
+            .expect("the function ends before the next item");
+        assert!(cache.contains("put_gitlab_read"), "scanned the wrong text for the cache write");
+        assert!(
+            !cache.contains("with_teams_people"),
+            "`gitlab_fetch_and_cache` names `with_teams_people`, so a Teams name would be \
+             stored in `gitlab_reads` and served back after the user changed it."
+        );
     }
 
     // The one method that requests something from a server nobody here configured. Its

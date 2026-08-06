@@ -19,10 +19,11 @@
 //     the configured host — and anything that is not a merge request is refused before
 //     the network.
 //   - **It says who approved, so the UI never guesses.** The approval state names the
-//     people on it, and whether the user themselves is among them is answered by
-//     comparing GitLab's own ids ([`fetch_user`]), never by matching a display name.
-//     "Approve" and "Revoke approval" are opposite actions and offering the wrong one
-//     is the one mistake a reader cannot see coming.
+//     people on it — as PEOPLE, so the GitLab page can name a colleague the way the rest
+//     of the app does (see [`crate::gitlab_people`]) — and whether the user themselves is
+//     among them is answered by comparing GitLab's own ids ([`fetch_user`]), never by
+//     matching a display name. "Approve" and "Revoke approval" are opposite actions and
+//     offering the wrong one is the one mistake a reader cannot see coming.
 //   - **The write needs a token; the read does not.** A public merge request enriches
 //     for anybody, but an approval is an act by a GitLab account, so a missing token is
 //     refused here rather than sent as an anonymous POST GitLab would reject.
@@ -33,6 +34,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::gitlab::{self, Resource};
+use crate::gitlab_mr;
 
 /// How long to wait on the GitLab API. Longer than the enrichment timeout: this is one
 /// action the user is watching the outcome of, not a card that may quietly stay a link.
@@ -57,9 +59,15 @@ pub struct Approval {
     pub approvals_required: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approvals_left: Option<u64>,
-    /// The people who have approved, by display name, in GitLab's own order.
+    /// The people who have approved, in GitLab's own order.
+    ///
+    /// [`gitlab_mr::Person`] rather than a bare name, because this page names a colleague the
+    /// way the whole app names them: a person carrying a `name` and a `username` is what
+    /// [`crate::gitlab_people::annotate`] matches to the user's own Teams, and one shape here
+    /// means one rule there (see AGENTS.md § A GitLab user who is also a colleague). Which of
+    /// the two words a reader sees is the surface's decision (`personFace`), never this one's.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub approved_by: Vec<String>,
+    pub approved_by: Vec<gitlab_mr::Person>,
     /// Whether the user's OWN account is among them — matched on GitLab's user id, so a
     /// colleague sharing a display name can never be mistaken for them. `false` when
     /// there is no token to identify the account with.
@@ -259,8 +267,10 @@ fn approver_ids(body: &serde_json::Value) -> Vec<u64> {
         .unwrap_or_default()
 }
 
-/// The display names on an approval body, in GitLab's order, dropping the empty ones.
-fn approver_names(body: &serde_json::Value) -> Vec<String> {
+/// The people on an approval body, in GitLab's order, dropping the ones it names neither
+/// way. Both words travel: a display name is what a reader reads, and a handle is what is
+/// left when GitLab holds no name — and the pair is what matches this person to a colleague.
+fn approvers(body: &serde_json::Value) -> Vec<gitlab_mr::Person> {
     body.get("approved_by")
         .and_then(serde_json::Value::as_array)
         .map(|entries| {
@@ -268,12 +278,16 @@ fn approver_names(body: &serde_json::Value) -> Vec<String> {
                 .iter()
                 .filter_map(|entry| {
                     let user = entry.get("user").unwrap_or(entry);
-                    user.get("name")
-                        .or_else(|| user.get("username"))
-                        .and_then(serde_json::Value::as_str)
+                    let field = |key: &str| {
+                        user.get(key).and_then(serde_json::Value::as_str).unwrap_or_default()
+                    };
+                    let person = gitlab_mr::Person {
+                        name: field("name").to_string(),
+                        username: field("username").to_string(),
+                        avatar_url: None,
+                    };
+                    (!person.name.is_empty() || !person.username.is_empty()).then_some(person)
                 })
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
                 .collect()
         })
         .unwrap_or_default()
@@ -287,7 +301,7 @@ fn build_approval(iid: u64, body: &serde_json::Value, me: Option<u64>) -> Approv
         approved: body.get("approved").and_then(serde_json::Value::as_bool),
         approvals_required: body.get("approvals_required").and_then(serde_json::Value::as_u64),
         approvals_left: body.get("approvals_left").and_then(serde_json::Value::as_u64),
-        approved_by: approver_names(body),
+        approved_by: approvers(body),
         mine: me.is_some_and(|me| approver_ids(body).contains(&me)),
     }
 }
@@ -444,8 +458,22 @@ mod tests {
         assert_eq!(state.approved, Some(true));
         assert_eq!(state.approvals_required, Some(2));
         assert_eq!(state.approvals_left, Some(1));
-        // A missing display name falls back to the handle, never to a blank row.
-        assert_eq!(state.approved_by, vec!["Ada Lovelace", "grace"]);
+        // Both words travel, so the surface can fall back to the handle and the identity can
+        // be matched to a colleague. An entry GitLab names neither way is dropped.
+        assert_eq!(
+            state.approved_by,
+            vec![
+                gitlab_mr::Person {
+                    name: "Ada Lovelace".into(),
+                    username: "ada".into(),
+                    avatar_url: None,
+                },
+                gitlab_mr::Person { name: String::new(), username: "grace".into(), avatar_url: None },
+            ]
+        );
+        assert!(build_approval(1, &serde_json::json!({ "approved_by": [{ "user": {} }] }), None)
+            .approved_by
+            .is_empty());
         assert!(state.mine, "id 12 approved");
 
         // Another account's approval is not the user's, whatever it is called.

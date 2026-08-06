@@ -675,13 +675,16 @@ more rules hold the page together:
   offers that, exactly as it refuses to delete a Teams message that is not the user's own.
 - **A reply lands in the thread it answers.** `discussion_id` decides the endpoint, because
   a reply posted as a new comment lands in the wrong place and nothing reports it.
-- **Nothing on this page is fetched by the browser.** Faces are tinted initials — GitLab's
-  `avatar_url` travels and nothing requests it, since an avatar on a private instance answers
-  401 without a session — and the description and every comment go through the app's own
-  markdown parser (`parseGitLabMarkdown`), never GitLab's rendered HTML, which would bring
-  remote references with it. An IMAGE is the sharp case and it is handled in the parser: a
-  `![alt](url)` becomes the LINK its alt text names, never an `<img>`, so a description
-  written by somebody outside this app cannot make the page fetch anything either.
+- **Nothing on this page is fetched FROM GITLAB by the browser.** Its `avatar_url` travels and
+  nothing requests it — an avatar on a private instance answers 401 without a session — and
+  the description and every comment go through the app's own markdown parser
+  (`parseGitLabMarkdown`), never GitLab's rendered HTML, which would bring remote references
+  with it. An IMAGE is the sharp case and it is handled in the parser: a `![alt](url)` becomes
+  the LINK its alt text names, never an `<img>`, so a description written by somebody outside
+  this app cannot make the page fetch anything either. A real FACE **is** drawn, and it is a
+  TEAMS read: it goes through the backend's own `fetch_avatar` like every other avatar in this
+  app, it tells the GitLab instance nothing, and it is what § A GitLab user who is also a
+  colleague is about.
 - **The list can never ask for merged merge requests.** `ListScope` and `ListState` are
   closed Rust sets and `merged` is not among them, so the page's whole promise is enforced by
   the type rather than by a filter somebody could widen.
@@ -698,6 +701,62 @@ more rules hold the page together:
   creases their fills meet along cross in the middle of a 17px mark and read as bars over it.
   The two boxes are one size in one place, so the swap changes the ink and never the target.
   `web/e2e/gitlab.spec.ts` measures that.
+
+### A GitLab user who is also a colleague is drawn as the colleague
+
+Most people on a merge request are the user's own colleagues, and this app already knows them:
+their Teams face, and the name the user themselves gave them (§ Renaming a person). So a
+GitLab user is matched to a Teams person **by their real name**, and the page then draws that
+person — `src/gitlab_people.rs` decides who somebody is, `with_teams_people` in
+`src/bin/server.rs` puts the answer on every payload the page gets, and `personFace` in
+`web/src/lib/gitlab-mr.ts` is the one place the surface reads it.
+
+**The match is MEASURED, by `examples/gitlab_teams_people_recon.rs`** — READ-ONLY, over the
+merge requests the token can see and the store's own people. Measured 2026-08-06 on
+`git.sia.partners` against 12 603 stored messages naming 294 people: of the 26 people named on
+200 merge requests, **18 resolve, 0 are ambiguous, 8 do not** — and all 8 of those are a GitLab
+import's `Placeholder <name>` account. All 18 are spelled identically on both sides, because
+this instance is provisioned from the same directory Teams is. Run it again rather than
+widening the key on a hunch; what the numbers already refused is accent folding.
+
+Seven rules hold it, and each is pinned by a test:
+
+- **The identity is only ever ADDED to what GitLab said.** GitLab's `name` and `username`
+  travel untouched beside it, the handle stays in the chip's title (it is how a colleague is
+  found on the instance), and a person the store cannot name keeps GitLab's own words over
+  tinted initials.
+- **An AMBIGUOUS name names nobody**, and **only a PERSON is ever matched** (`8:…`, so a Teams
+  app can never lend its face to a GitLab account). The wrong face on a name is worse than no
+  face — the rule § @mentions already applies to a mention.
+- **What is compared is TEAMS' own name; what is DRAWN is the user's.** The roster is built
+  from `Store::named_people` with no nickname applied, because what is being matched is two
+  systems' record of one person — and the name the page shows then goes through
+  `Store::display_name_for_mri`, so a rename wins here exactly as in a chat, and a custom
+  avatar wins because `fetch_avatar` serves the override first.
+- **It is stitched on at the ANSWER, never into the cache.** `gitlab_reads` keeps GitLab's own
+  words (§ Performance); the identity is local and current, so freezing it on disk would
+  outlive a rename. That is also why a rename re-reads the page from the backend's cache and
+  asks GitLab nothing (`rereadGitLabPeople`).
+- **One walk reaches every person.** A person is an object carrying both a `name` and a
+  `username` — `gitlab_mr::Person` and nothing else in these payloads — so a row's author, a
+  merge request's reviewers, every comment's author and whoever APPROVED are covered by one
+  rule, and a field added later is covered too. A CI job has a name and no handle, and is left
+  alone. That is why `Approval.approved_by` carries people rather than the bare names it used
+  to: one shape means one rule, and the sentence "Approved by …" would otherwise be the one
+  place on this page that still names a renamed colleague by their old name.
+- **A stale identity is REPLACED rather than kept**, so a payload that carried one from an
+  earlier pass can never show a colleague under a name they no longer have.
+- **The roster is cached for a minute** (`TEAMS_PEOPLE_TTL`), because building it reads every
+  person this machine was ever told about and the page asks on every answer, pipeline poll
+  included. What that minute costs is that a colleague whose FIRST stored message just arrived
+  is a stranger for up to a minute; it costs nothing about a rename, since only the matching
+  keys are cached.
+
+`web/mock/server.ts` reproduces it with no tenant and no GitLab (`withMockTeamsPeople`, over
+the mock's own people): one colleague with a Teams photo, one without, the user themselves, and
+Ada, Grace and a bot who are on GitLab only — so all four shapes are on screen at once.
+`web/e2e/gitlab.spec.ts` pins them, and `web/e2e/person-override.spec.ts` pins that a rename
+reaches this page with no reload.
 
 **The markdown is real GFM, and its subset is MEASURED rather than guessed**
 (`web/src/lib/gitlab-markdown.ts`, over the shared inline scanner in `markdown-inline.ts`).
@@ -1993,17 +2052,20 @@ a fold, a pin or a local read position.
   reads.** `nicknamed!` is baked into `SELECT_COLS` and into the `conversations` /
   `channels` / `display_name_for_mri` / `other_party_name` / `thread_senders` queries,
   so a rename covers every message that person ever sent, the title of their 1:1, the
-  sidebar's preview attribution, the typing line, the "seen by" row and the @mention
-  list at once. That placement is the whole design: `insert_message` freezes a
+  sidebar's preview attribution, the typing line, the "seen by" row, the @mention
+  list and their merge requests at once. That placement is the whole design: `insert_message` freezes a
   message's `sender` at first insert and no sync refreshes it, so a rename applied at
   render time would have to be applied at a dozen render sites — and the one that got
   forgotten is the bug. Never move it out to a caller.
-- **What the store never produced, the server resolves explicitly.** Three names do not
+- **What the store never produced, the server resolves explicitly.** Four names do not
   come through a store read: the activity feed's actor (`feed_json`), the sender of a
-  live push (`push_live_message`, which gets the frame that just arrived), and a 1:1's
+  live push (`push_live_message`, which gets the frame that just arrived), a 1:1's
   title in `conversation_context` — which is why that one takes `self_mri`, so a
-  nickname the user gave THEMSELVES can never retitle their own chat. The phone is the
-  sharpest case: it is the one surface the user cannot correct by looking again.
+  nickname the user gave THEMSELVES can never retitle their own chat — and a person on the
+  GitLab page, whose name arrives from GITLAB and is matched to a colleague by it
+  (`with_teams_people`, see § A GitLab user who is also a colleague). Each of the four ends
+  in the same `display_name_for_mri`, so there is one answer about a name in this app. The
+  phone is the sharpest case: it is the one surface the user cannot correct by looking again.
 - **The override never rewrites a message.** An @mention chip inside a body, the author
   of a reply quote, and the participant list of a call event all keep the words their
   frame carried. The rule is one sentence: it applies to every name this app STATES
@@ -2136,7 +2198,8 @@ user's. What changes is only what is asked.
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
   `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its reads in
   `src/gitlab_mr.rs` over a durable response cache, its four writes in
-  `src/gitlab_mr_write.rs` (see § The GitLab page) — plus the approval those trackers got
+  `src/gitlab_mr_write.rs`, and who each of its people is in Teams in
+  `src/gitlab_people.rs` (see § The GitLab page) — plus the approval those trackers got
   first, and its undo (`src/gitlab_approval.rs`, see § The trackers),
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see

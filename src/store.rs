@@ -4098,6 +4098,32 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Everybody Teams has NAMED to this machine: one `(mri, name)` pair per person and per
+    /// name they have written under, with no override applied.
+    ///
+    /// It is the local answer to "who does this app know?", and its one caller is the
+    /// GitLab page, which matches a merge request's people against it by real name (see
+    /// [`crate::gitlab_people`]). Three things about the shape are deliberate:
+    ///
+    /// - **The name is TEAMS' own**, never the user's nickname for them. What is being
+    ///   compared is two systems' record of one person, and a nickname is neither system's;
+    ///   the name the page then DRAWS goes through [`Store::display_name_for_mri`] like
+    ///   every other name in this app, so a rename still wins where it is shown.
+    /// - **Every name a person has written under travels**, not only their newest. Teams
+    ///   renames people — a marriage, a corrected spelling — and a GitLab account carrying
+    ///   the old one is still that colleague.
+    /// - **Only a person**: `8:…` MRIs, so a Teams app that posts (`28:…`) is never in the
+    ///   roster at all. [`crate::gitlab_people::Roster::from_people`] re-checks that, since
+    ///   the rule belongs with the matching rather than with one query.
+    pub fn named_people(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT sender_mri, sender FROM messages
+             WHERE sender_mri LIKE '8:%' AND sender <> ''",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The newest `limit` messages of a conversation, ordered oldest -> newest (for display).
     pub fn newest_messages(&self, conversation_id: &str, limit: i64) -> Result<Vec<Message>> {
         let sql = format!(
@@ -5847,6 +5873,35 @@ mod tests {
         assert_eq!(
             s.teams_display_name_for_mri("8:orgid:rob").unwrap().as_deref(),
             Some("Robert SMITH")
+        );
+    }
+
+    /// The roster the GitLab page matches its people against: Teams' own names, every name
+    /// a person wrote under, and no Teams app.
+    #[test]
+    fn the_named_people_are_teams_own_names_and_only_people() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation_full(&upd("grp", "Team chat", 500, ConversationKind::Group)).unwrap();
+        s.insert_message(&msg_from("grp", 1, "Robert SMITH", "8:orgid:rob")).unwrap();
+        // The same person under a second name: Teams renamed them, and both still name them.
+        s.insert_message(&msg_from("grp", 2, "Robert SMYTHE", "8:orgid:rob")).unwrap();
+        s.insert_message(&msg_from("grp", 3, "Grace HOPPER", "8:orgid:grace")).unwrap();
+        // A Teams app that posts, and a message we never captured a name for.
+        s.insert_message(&msg_from("grp", 4, "Workflows", "28:358f0194-6b0e")).unwrap();
+        s.insert_message(&msg_from("grp", 5, "", "8:orgid:nameless")).unwrap();
+
+        // A nickname changes what is DRAWN, never what is matched.
+        s.set_person_name("8:orgid:rob", Some("Bob"), 1_000).unwrap();
+
+        let mut people = s.named_people().unwrap();
+        people.sort();
+        assert_eq!(
+            people,
+            vec![
+                ("8:orgid:grace".to_string(), "Grace HOPPER".to_string()),
+                ("8:orgid:rob".to_string(), "Robert SMITH".to_string()),
+                ("8:orgid:rob".to_string(), "Robert SMYTHE".to_string()),
+            ]
         );
     }
 

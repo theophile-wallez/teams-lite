@@ -299,8 +299,8 @@ test.describe.serial("the GitLab merge-request page", () => {
     await openGitLab(page);
     await openMergeRequest(page, 596);
 
-    // Grace's comment is not the user's, so there is nothing to delete on it — GitLab would
-    // let a maintainer remove it, and this app never offers that.
+    // A colleague's comment is not the user's, so there is nothing to delete on it — GitLab
+    // would let a maintainer remove it, and this app never offers that.
     const theirs = page
       .locator('[data-testid="gitlab-note"]')
       .filter({ hasText: "Two replicas is right" });
@@ -382,10 +382,52 @@ test.describe.serial("the GitLab merge-request page", () => {
     await approve.click();
     // The row becomes its own undo — the reason the approval write exists at all.
     await expect(approve).toHaveText("Revoke approval");
-    await expect(page.locator('[data-testid="gitlab-approved-by"]')).toContainText("Théophile");
+    // Who approved is named the way this app names people: the user's own approval reads as
+    // the user, not as the way their GitLab account happens to be spelled.
+    await expect(page.locator('[data-testid="gitlab-approved-by"]')).toContainText("You");
 
     await approve.click();
     await expect(approve).toHaveText("Approve");
+  });
+
+  test("draws a colleague the app's own Teams knows as that colleague", async ({ page }) => {
+    await openGitLab(page);
+
+    // The sidebar has no room for a name, so the row states whose face it draws. The user's
+    // own merge request is attributed the way this app calls THEM — not the way GitLab spells
+    // their account, which is the whole point of matching the two by real name.
+    await expect(page.locator(`${row}[data-iid="595"]`)).toHaveAttribute("data-author", "You");
+    // …and a merge request by somebody only GitLab knows keeps GitLab's own words.
+    await expect(page.locator(`${row}[data-iid="63"]`)).toHaveAttribute(
+      "data-author",
+      "Ada Lovelace",
+    );
+
+    await openMergeRequest(page, 596);
+
+    // A colleague in both systems, drawn as the colleague: their Teams name, and their real
+    // face — fetched through the backend like every other avatar here, never from GitLab.
+    const note = page.locator('[data-testid="gitlab-note"]').filter({ hasText: "Two replicas" });
+    await expect(note.locator('[data-testid="gitlab-note-author"]')).toHaveText("Mia Chen");
+    await expect(note.locator("img[data-picture='face']")).toBeVisible();
+
+    // The people on the merge request, in all three shapes. The user themselves is named the
+    // way this app names them everywhere else.
+    const person = (name: string) =>
+      page.locator(`[data-testid="gitlab-person"][data-person="${name}"]`).first();
+    await expect(person("You")).toBeVisible();
+    // A colleague the app knows who has no Teams photo keeps tinted initials — there is
+    // nothing to fetch, and the app never falls back to GitLab's own avatar URL.
+    await expect(person("Lucas Silva")).toBeVisible();
+    await expect(person("Lucas Silva").locator("img")).toHaveCount(0);
+    // And somebody GitLab alone knows keeps GitLab's own name, over initials.
+    await expect(person("Ada Lovelace")).toBeVisible();
+    await expect(person("Ada Lovelace").locator("img")).toHaveCount(0);
+
+    // The bot that reviews is nobody in Teams, and stays what GitLab called it.
+    const robot = page.locator('[data-testid="gitlab-note"]').filter({ hasText: "MEDIUM" });
+    await expect(robot.locator('[data-testid="gitlab-note-author"]')).toHaveText("review-bot");
+    await expect(robot.locator("img")).toHaveCount(0);
   });
 
   test("says a machine with no token can read nothing, rather than showing an empty list", async ({

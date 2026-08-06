@@ -12,6 +12,7 @@ import {
   SCOPE_HINTS,
   SCOPE_LABELS,
   mergeRequestId,
+  personFace,
   rowStateLabel,
   sameMergeRequest,
   type MergeRequestRow,
@@ -291,6 +292,7 @@ function MergeRequestSidebarRow(props: {
   onClick: () => void;
 }) {
   const row = props.row;
+  const author = useMemo(() => personFace(row.author), [row.author]);
   const updated = useMemo(() => formatUpdated(row.updated_at), [row.updated_at]);
   const stateLabel = rowStateLabel(row);
   const named = row.detailed_merge_status
@@ -307,6 +309,9 @@ function MergeRequestSidebarRow(props: {
       data-testid="gitlab-row"
       data-project={row.project_path}
       data-iid={row.iid}
+      // Who the face stands for. The row has no room for a name — three lines are already
+      // the project, the title and the blockers — so this is where the author is stated.
+      data-author={author.label}
       data-open={props.open ? "true" : undefined}
       data-draft={row.draft ? "true" : undefined}
       aria-current={props.open ? "true" : undefined}
@@ -315,11 +320,13 @@ function MergeRequestSidebarRow(props: {
         props.open ? "bg-row-open shadow-card" : "hover:bg-row-hovered",
       )}
     >
-      {/* Tinted initials, never GitLab's avatar URL: drawing a merge request must make no
-          request from the browser, exactly as displaying a mail must not. */}
+      {/* The author's real face when this is somebody the user's Teams knows, fetched
+          through the backend like every other avatar here; tinted initials otherwise.
+          GitLab's own avatar URL is never requested — see `personFace`. */}
       <Avatar
-        seed={row.author.username || row.author.name}
-        label={row.author.name || row.author.username}
+        seed={author.seed}
+        label={author.label}
+        photo={author.photo}
         fallback="person"
         className="mt-0.5 size-7 text-[10px]"
         testId="gitlab-author"
