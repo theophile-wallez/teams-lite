@@ -679,9 +679,11 @@ real GitLab project**: doing that is the user's own click, in their own app.
 The sidebar's fifth tab is GitLab: the merge requests that are **not merged**, and one of
 them in full — its description, its live pipeline, its approvals, its comments — with the actions
 GitLab's own page offers, and its **diff** on a full-screen page of its own (§ The DIFF is a PAGE).
+One merge request is FOUR pages, named by a sub-header (§ The four PAGES of a merge request).
 `src/gitlab_mr.rs` holds every READ, `src/gitlab_mr_write.rs` the four writes,
 `web/src/lib/gitlab-mr.ts` the pure decisions the surface is built from (`gitlab-diff.ts` the
-diff's own), and `web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
+diff's own, and `gitlab-mr-pages.ts` the page set's), and
+`web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
 
 **The split between the two backend modules is the whole safety story**, and it is the one
 in § The trackers: reading a tracker is what the feature is for, and writing to one is the
@@ -930,6 +932,49 @@ a `---` disappeared. Four things follow, and each is pinned by a test:
   still runs) and it stops when the page closes, so a page nobody is looking at asks GitLab
   nothing. Its interval (6 s) sits ABOVE the backend's 5 s window on purpose: below it, every
   poll would be served the same cached answer and the panel would look frozen.
+
+### The four PAGES of a merge request (a sub-header, and two that hold nothing yet)
+
+One merge request is four surfaces, exactly as GitLab's own is: **Overview**, **Commits**,
+**Pipelines**, **Diffs** — named by a sub-header under the header that says WHICH merge
+request. `web/src/lib/gitlab-mr-pages.ts` holds the set and every pure fact about it,
+`web/src/components/gitlab-mr-pages.tsx` draws the strip and the two pages that hold nothing,
+and the four routes are the files under `web/src/routes/_app.mr.$mergeRequestId*`. Commits and
+Pipelines are deliberately EMPTY today: the strip and the routes came first, so the reads can
+be added one page at a time without moving anything the reader has learned. Six rules hold it,
+and `web/e2e/gitlab.spec.ts` pins each:
+
+- **Every page is a ROUTE, never a piece of state.** Three things follow and none is available
+  to a `useState`: a page survives a reload, it can be sent to a colleague, and the browser's
+  own Back leaves it. That is the rule the diff already earned its own route with, applied to
+  all four — so `/mr/<id>` IS the Overview, and the other three hang off it.
+- **The strip is on ALL FOUR, the full-screen diff included.** A sub-header that named the
+  pages of a merge request and then vanished on one of them would leave the reader with a Back
+  button where they wanted a Commits tab. It is one component drawn twice, so there is one
+  spelling of the four routes.
+- **It is drawn as soon as a merge request is OPEN, before its detail arrives.** The URL
+  already says which merge request the pages belong to, and a strip that waited on a read
+  would trap the reader on the page they are waiting on.
+- **All four are offered whatever a read answered.** A tab is where the reader goes rather
+  than an invitation into content, so a strip whose shape changed per merge request would move
+  the target between two of them — and what a page could not read, that page says (the diff's
+  own failure already does). The `ChangesPanel`'s "Review the changes" keeps the opposite rule,
+  because THAT one is a press into content.
+- **A page that holds nothing SAYS so, and offers GitLab's own for it**
+  (`unbuiltMergeRequestPage`, `gitlabPageUrl` — built from the merge request's own `web_url`,
+  never from the configured host and an assembled path). Drawn blank it would read as a read
+  that failed. The Pipelines one names the OVERVIEW, which already follows the pipeline in
+  flight, so a reader after a running job is never left at a page that cannot answer them.
+- **It wears the app's own tab idiom and is a `nav`, not the `Tabs` primitive.**
+  `TabsTrigger` points `aria-controls` at a panel in the same document, and three of these
+  four are places rather than panels — the Diffs one replaces the whole screen. So it is
+  buttons carrying `aria-current`, and the row SCROLLS sideways rather than widening: four
+  labels are wider than a 320 px phone, and a header that grows past its column takes the
+  page's own controls off the right of the screen (the lesson the long title already taught
+  this page).
+
+`cd web && bun run preview -- --out /tmp/mr --gitlab` captures the strip in both themes, the
+two empty pages, and the strip at a phone's width (`openMergeRequestPage` is its helper).
 
 ### The DIFF is a PAGE of its own (`/mr/<id>/diff`)
 
@@ -1309,11 +1354,12 @@ user. Two independent mechanisms enforce that split:
   `openCalendarView` / `openFirstEvent`. For the team → channel tree:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
   `toggleTeamSection` from the same file. For the merge-request page — its tab strip at rest
-  and current, the list, the page,
+  and current, the list, the page, its own sub-header of four pages in both themes and at a
+  phone's width, the two pages that hold nothing yet,
   the merge armed, the comments, the description folded and opened, the description at a phone's
   width, a 150-character title at both widths and a blocked merge:
-  `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt`
-  from the same file. For its DIFF PAGE — the way in, the page in both themes, the split layout,
+  `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt` /
+  `openMergeRequestPage` from the same file. For its DIFF PAGE — the way in, the page in both themes, the split layout,
   each of the three files with no patch, the expand control and what it hands over, and both of
   its columns at a phone's width:
   `bun run preview -- --out /tmp/diff --diff`, or `openChanges` / `pickDiffFile` from the same

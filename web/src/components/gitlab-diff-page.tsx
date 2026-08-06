@@ -34,6 +34,7 @@ import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
 import { DiffLineComposer, DiffLineThread } from "./gitlab-diff-comments";
 import { GitLabLogo } from "./gitlab-logo";
+import { MergeRequestPageStrip } from "./gitlab-mr-pages";
 
 // The DIFF PAGE: the whole screen, the changed files down the left, one of them read on the
 // right. It is its own route (`/mr/<id>/diff` — see routes/_app.mr.$mergeRequestId.diff.tsx),
@@ -190,6 +191,13 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
           </a>
         )}
       </header>
+
+      {/* The same sub-header the merge request's own pane carries, so the four pages are
+          reachable from all four rather than from three (see `gitlab-mr-pages.tsx`). Back
+          still leaves the page; this is how a reader goes straight to the Commits of what they
+          are reading. It takes THIS header's own padding, so the strip and the title above it
+          start on one line — this page is narrower in its gutters than the pane is. */}
+      <MergeRequestPageStrip current="diffs" className="md:px-4" />
 
       {error && !diff ? (
         <DiffFailure error={error} webUrl={detail?.web_url} />

@@ -16,7 +16,9 @@ import { Route as AppCConversationIdRouteImport } from './routes/_app.c.$convers
 import { Route as AppMMailIdRouteImport } from './routes/_app.m.$mailId'
 import { Route as AppMrMergeRequestIdRouteImport } from './routes/_app.mr.$mergeRequestId'
 import { Route as AppMrMergeRequestIdIndexRouteImport } from './routes/_app.mr.$mergeRequestId.index'
+import { Route as AppMrMergeRequestIdCommitsRouteImport } from './routes/_app.mr.$mergeRequestId.commits'
 import { Route as AppMrMergeRequestIdDiffRouteImport } from './routes/_app.mr.$mergeRequestId.diff'
+import { Route as AppMrMergeRequestIdPipelinesRouteImport } from './routes/_app.mr.$mergeRequestId.pipelines'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -53,11 +55,23 @@ const AppMrMergeRequestIdIndexRoute =
     path: '/',
     getParentRoute: () => AppMrMergeRequestIdRoute,
   } as any)
+const AppMrMergeRequestIdCommitsRoute =
+  AppMrMergeRequestIdCommitsRouteImport.update({
+    id: '/commits',
+    path: '/commits',
+    getParentRoute: () => AppMrMergeRequestIdRoute,
+  } as any)
 const AppMrMergeRequestIdDiffRoute = AppMrMergeRequestIdDiffRouteImport.update({
   id: '/diff',
   path: '/diff',
   getParentRoute: () => AppMrMergeRequestIdRoute,
 } as any)
+const AppMrMergeRequestIdPipelinesRoute =
+  AppMrMergeRequestIdPipelinesRouteImport.update({
+    id: '/pipelines',
+    path: '/pipelines',
+    getParentRoute: () => AppMrMergeRequestIdRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
@@ -65,7 +79,9 @@ export interface FileRoutesByFullPath {
   '/c/$conversationId': typeof AppCConversationIdRoute
   '/m/$mailId': typeof AppMMailIdRoute
   '/mr/$mergeRequestId': typeof AppMrMergeRequestIdRouteWithChildren
+  '/mr/$mergeRequestId/commits': typeof AppMrMergeRequestIdCommitsRoute
   '/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
+  '/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
   '/mr/$mergeRequestId/': typeof AppMrMergeRequestIdIndexRoute
 }
 export interface FileRoutesByTo {
@@ -73,7 +89,9 @@ export interface FileRoutesByTo {
   '/': typeof AppIndexRoute
   '/c/$conversationId': typeof AppCConversationIdRoute
   '/m/$mailId': typeof AppMMailIdRoute
+  '/mr/$mergeRequestId/commits': typeof AppMrMergeRequestIdCommitsRoute
   '/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
+  '/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
   '/mr/$mergeRequestId': typeof AppMrMergeRequestIdIndexRoute
 }
 export interface FileRoutesById {
@@ -84,7 +102,9 @@ export interface FileRoutesById {
   '/_app/c/$conversationId': typeof AppCConversationIdRoute
   '/_app/m/$mailId': typeof AppMMailIdRoute
   '/_app/mr/$mergeRequestId': typeof AppMrMergeRequestIdRouteWithChildren
+  '/_app/mr/$mergeRequestId/commits': typeof AppMrMergeRequestIdCommitsRoute
   '/_app/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
+  '/_app/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
   '/_app/mr/$mergeRequestId/': typeof AppMrMergeRequestIdIndexRoute
 }
 export interface FileRouteTypes {
@@ -95,7 +115,9 @@ export interface FileRouteTypes {
     | '/c/$conversationId'
     | '/m/$mailId'
     | '/mr/$mergeRequestId'
+    | '/mr/$mergeRequestId/commits'
     | '/mr/$mergeRequestId/diff'
+    | '/mr/$mergeRequestId/pipelines'
     | '/mr/$mergeRequestId/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -103,7 +125,9 @@ export interface FileRouteTypes {
     | '/'
     | '/c/$conversationId'
     | '/m/$mailId'
+    | '/mr/$mergeRequestId/commits'
     | '/mr/$mergeRequestId/diff'
+    | '/mr/$mergeRequestId/pipelines'
     | '/mr/$mergeRequestId'
   id:
     | '__root__'
@@ -113,7 +137,9 @@ export interface FileRouteTypes {
     | '/_app/c/$conversationId'
     | '/_app/m/$mailId'
     | '/_app/mr/$mergeRequestId'
+    | '/_app/mr/$mergeRequestId/commits'
     | '/_app/mr/$mergeRequestId/diff'
+    | '/_app/mr/$mergeRequestId/pipelines'
     | '/_app/mr/$mergeRequestId/'
   fileRoutesById: FileRoutesById
 }
@@ -172,6 +198,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppMrMergeRequestIdIndexRouteImport
       parentRoute: typeof AppMrMergeRequestIdRoute
     }
+    '/_app/mr/$mergeRequestId/commits': {
+      id: '/_app/mr/$mergeRequestId/commits'
+      path: '/commits'
+      fullPath: '/mr/$mergeRequestId/commits'
+      preLoaderRoute: typeof AppMrMergeRequestIdCommitsRouteImport
+      parentRoute: typeof AppMrMergeRequestIdRoute
+    }
     '/_app/mr/$mergeRequestId/diff': {
       id: '/_app/mr/$mergeRequestId/diff'
       path: '/diff'
@@ -179,16 +212,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppMrMergeRequestIdDiffRouteImport
       parentRoute: typeof AppMrMergeRequestIdRoute
     }
+    '/_app/mr/$mergeRequestId/pipelines': {
+      id: '/_app/mr/$mergeRequestId/pipelines'
+      path: '/pipelines'
+      fullPath: '/mr/$mergeRequestId/pipelines'
+      preLoaderRoute: typeof AppMrMergeRequestIdPipelinesRouteImport
+      parentRoute: typeof AppMrMergeRequestIdRoute
+    }
   }
 }
 
 interface AppMrMergeRequestIdRouteChildren {
+  AppMrMergeRequestIdCommitsRoute: typeof AppMrMergeRequestIdCommitsRoute
   AppMrMergeRequestIdDiffRoute: typeof AppMrMergeRequestIdDiffRoute
+  AppMrMergeRequestIdPipelinesRoute: typeof AppMrMergeRequestIdPipelinesRoute
   AppMrMergeRequestIdIndexRoute: typeof AppMrMergeRequestIdIndexRoute
 }
 
 const AppMrMergeRequestIdRouteChildren: AppMrMergeRequestIdRouteChildren = {
+  AppMrMergeRequestIdCommitsRoute: AppMrMergeRequestIdCommitsRoute,
   AppMrMergeRequestIdDiffRoute: AppMrMergeRequestIdDiffRoute,
+  AppMrMergeRequestIdPipelinesRoute: AppMrMergeRequestIdPipelinesRoute,
   AppMrMergeRequestIdIndexRoute: AppMrMergeRequestIdIndexRoute,
 }
 

@@ -577,6 +577,120 @@ test.describe.serial("the GitLab merge-request page", () => {
     expect(diffTitle.x + diffTitle.width).toBeLessThanOrEqual(1201);
   });
 
+  // ---- the four PAGES of a merge request ----------------------------------
+  //
+  // The sub-header under the header: Overview, Commits, Pipelines, Diffs — GitLab's own set in
+  // GitLab's own order, each one a route of its own (see lib/gitlab-mr-pages.ts). Two of the
+  // four hold nothing yet and say so, which is what these tests hold them to.
+
+  /** The strip's own button for one page. */
+  function pageTab(page: Page, name: string) {
+    return page.locator(`[data-testid="gitlab-mr-page"][data-page="${name}"]`);
+  }
+
+  test("names the four pages of a merge request, and opens on the Overview", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    const strip = page.locator('[data-testid="gitlab-mr-pages"]');
+    await expect(strip).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-mr-page"]')).toHaveText([
+      "Overview",
+      "Commits",
+      "Pipelines",
+      "Diffs",
+    ]);
+
+    // Opening a merge request means its Overview, and the strip says which page that is —
+    // to a reader and to a screen reader alike.
+    await expect(strip).toHaveAttribute("data-page", "overview");
+    await expect(pageTab(page, "overview")).toHaveAttribute("aria-current", "page");
+    await expect(page.locator('[data-testid="gitlab-heading"]')).toBeVisible();
+    expect(page.url()).toMatch(/\/mr\/[^/]+$/);
+  });
+
+  test("a page is a PLACE: its own URL, reloadable, and Back leaves it", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await pageTab(page, "commits").click();
+
+    // The URL is what makes it a place rather than a piece of state, exactly as the diff's is.
+    expect(page.url()).toMatch(/\/commits$/);
+    await expect(page.locator('[data-testid="gitlab-mr-pages"]')).toHaveAttribute(
+      "data-page",
+      "commits",
+    );
+    // A page this app does not read yet SAYS so and offers GitLab's own for it. Drawn blank it
+    // would read as a read that failed.
+    const unbuilt = page.locator('[data-testid="gitlab-mr-unbuilt"]');
+    await expect(unbuilt).toHaveAttribute("data-page", "commits");
+    await expect(unbuilt).toContainText("not read here yet");
+    await expect(page.locator('[data-testid="gitlab-mr-unbuilt-link"]')).toHaveAttribute(
+      "href",
+      /\/commits$/,
+    );
+    // And nothing of the Overview is left behind it: one page at a time, or the reader would
+    // be reading the description under a heading that says Commits.
+    await expect(page.locator('[data-testid="gitlab-heading"]')).toHaveCount(0);
+
+    await page.reload();
+    await expect(page.locator('[data-testid="gitlab-mr-unbuilt"]')).toHaveAttribute(
+      "data-page",
+      "commits",
+    );
+
+    // The browser's own Back returns to the page the reader came from.
+    await page.goBack();
+    await expect(page.locator('[data-testid="gitlab-heading"]')).toBeVisible();
+    expect(page.url()).not.toMatch(/\/commits$/);
+  });
+
+  test("the Pipelines page says where a running pipeline is already followed", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await pageTab(page, "pipelines").click();
+
+    // It holds nothing yet, so what it owes the reader is where to look instead — and the
+    // Overview polls the pipeline in flight.
+    const unbuilt = page.locator('[data-testid="gitlab-mr-unbuilt"]');
+    await expect(unbuilt).toHaveAttribute("data-page", "pipelines");
+    await expect(unbuilt).toContainText("Overview");
+    await expect(page.locator('[data-testid="gitlab-mr-unbuilt-link"]')).toHaveAttribute(
+      "href",
+      /\/pipelines$/,
+    );
+
+    // Back to the Overview from the strip itself, which is the way a reader takes.
+    await pageTab(page, "overview").click();
+    await expect(page.locator('[data-testid="gitlab-pipeline"]')).toBeVisible();
+  });
+
+  test("the strip is on the DIFF page too, and reaches the other three from it", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    // The Diffs tab opens the full-screen diff — the same place "Review the changes" opens.
+    await pageTab(page, "diffs").click();
+    await expect(page.locator('[data-testid="gitlab-diff-page"]')).toBeVisible();
+    expect(page.url()).toMatch(/\/diff$/);
+    await expect(page.locator('[data-testid="gitlab-mr-pages"]')).toHaveAttribute(
+      "data-page",
+      "diffs",
+    );
+
+    // A strip that vanished on one of the four would leave the reader with a Back button
+    // where they wanted a Commits tab.
+    await pageTab(page, "commits").click();
+    await expect(page.locator('[data-testid="gitlab-mr-unbuilt"]')).toHaveAttribute(
+      "data-page",
+      "commits",
+    );
+    // And the app's own sidebar is back, because the diff was the one page that took it.
+    await expect(page.locator('[data-testid="sidebar"]')).toBeVisible();
+  });
+
   // ---- the DIFF, which is a page of its own -------------------------------
   //
   // `/mr/<id>/diff` — the whole screen, the changed files down the left, one of them read on

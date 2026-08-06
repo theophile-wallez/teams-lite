@@ -48,6 +48,11 @@ import { Avatar } from "./avatar";
 import { useAppState, useController } from "./controller-context";
 import { ChangesPanel } from "./gitlab-changes";
 import { GitLabLogo } from "./gitlab-logo";
+import {
+  MergeRequestPageStrip,
+  UnbuiltMergeRequestPage,
+  useMergeRequestPage,
+} from "./gitlab-mr-pages";
 import { Panel } from "./gitlab-panel";
 import { RichNodes } from "./rich-content";
 
@@ -81,6 +86,12 @@ import { RichNodes } from "./rich-content";
 // Shiki is behind that route rather than on the path of every merge request anybody opens. A
 // review comment still keeps the file and line it hangs on (`note.position`), and this page
 // names that file, so a comment on a line the diff does not show is never one about nothing.
+//
+// **This pane is the OVERVIEW, one of four pages**, and the sub-header under its header names
+// all four (`gitlab-mr-pages.tsx`): Overview, Commits, Pipelines, Diffs — GitLab's own set in
+// GitLab's own order. The strip is drawn as soon as a merge request is open, before its detail
+// has arrived, because the URL already says which merge request the pages belong to: a strip
+// that waited on a read would leave the reader unable to leave the page they are waiting on.
 
 /** The folded box, named so the control can say what it opens. One merge request is drawn at
  *  a time, so one id is enough. */
@@ -106,6 +117,9 @@ export function GitLabPane(props: {
   const loading = useAppState((s) => s.gitlabDetailLoading);
   const error = useAppState((s) => s.gitlabDetailError);
   const controller = useController();
+  // Which of the four pages the URL asks for. `diffs` never reaches here — the shell draws
+  // that one over this pane, full screen — so this pane holds the three that live in it.
+  const page = useMergeRequestPage();
 
   if (!open) return <GitLabEmptyState />;
 
@@ -163,30 +177,45 @@ export function GitLabPane(props: {
         )}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6">
-        <article className="mx-auto flex w-full max-w-3xl flex-col gap-5">
-          {error && !detail ? (
-            <p data-testid="gitlab-detail-error" className="text-[13px] text-destructive">
-              {error}
-            </p>
-          ) : !detail ? (
-            <p className="flex items-center gap-2 py-6 text-[13px] text-text-faint">
-              <HugeiconsIcon icon={Loading02Icon} className="size-3.5 animate-spin" strokeWidth={1.6} />
-              Loading the merge request…
-            </p>
-          ) : (
-            <>
-              <MergeRequestHeader detail={detail} />
-              <MergeRequestDescription detail={detail} />
-              <PipelinePanel />
-              <ApprovalPanel />
-              <ActionPanel detail={detail} />
-              <ChangesPanel detail={detail} onOpenDiff={props.onOpenDiff ?? (() => {})} />
-              <DiscussionPanel />
-            </>
-          )}
-        </article>
-      </div>
+      {/* The four pages of this merge request, in GitLab's own order. It sits under the
+          header — which names WHICH merge request — because that is what a sub-header is: the
+          same subject, a different page of it. */}
+      <MergeRequestPageStrip current={page} />
+
+      {/* A page this app does not read yet says so and offers GitLab's own, rather than being
+          drawn blank — which reads as a read that failed. */}
+      {page !== "overview" ? (
+        <UnbuiltMergeRequestPage page={page} webUrl={detail?.web_url} />
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6">
+          <article className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+            {error && !detail ? (
+              <p data-testid="gitlab-detail-error" className="text-[13px] text-destructive">
+                {error}
+              </p>
+            ) : !detail ? (
+              <p className="flex items-center gap-2 py-6 text-[13px] text-text-faint">
+                <HugeiconsIcon
+                  icon={Loading02Icon}
+                  className="size-3.5 animate-spin"
+                  strokeWidth={1.6}
+                />
+                Loading the merge request…
+              </p>
+            ) : (
+              <>
+                <MergeRequestHeader detail={detail} />
+                <MergeRequestDescription detail={detail} />
+                <PipelinePanel />
+                <ApprovalPanel />
+                <ActionPanel detail={detail} />
+                <ChangesPanel detail={detail} onOpenDiff={props.onOpenDiff ?? (() => {})} />
+                <DiscussionPanel />
+              </>
+            )}
+          </article>
+        </div>
+      )}
     </section>
   );
 }

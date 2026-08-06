@@ -468,6 +468,25 @@ export async function openMergeRequestAt(page: Page, index: number): Promise<str
   return `!${iid}`;
 }
 
+/**
+ * Move to one of the four PAGES of the open merge request through the sub-header the reader
+ * presses — Overview, Commits, Pipelines or Diffs (see lib/gitlab-mr-pages.ts).
+ *
+ * Each is a route, so this is a navigation rather than a piece of state being swapped. The
+ * WAIT is on the strip's own statement of which page is current, which is present on all four
+ * — the diff page carries the same strip — and never on the body, since two of the four
+ * deliberately hold nothing.
+ */
+export async function openMergeRequestPage(
+  page: Page,
+  name: "overview" | "commits" | "pipelines" | "diffs",
+): Promise<void> {
+  await page.locator(`[data-testid="gitlab-mr-page"][data-page="${name}"]`).click();
+  await page.waitForSelector(`[data-testid="gitlab-mr-pages"][data-page="${name}"]`, {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+}
+
 /** Scroll the Changes section into view and wait for its diff to be drawn.
  *
  *  The wait is for the PATCH rather than the section: the section paints from the read, and
@@ -1910,6 +1929,36 @@ if (import.meta.main) {
         await openMergeRequestAt(page, 0);
         await shot(`${out}-light.png`);
 
+        // The SUB-HEADER: the four pages of this merge request, in GitLab's own order, with
+        // the Overview current. Cropped, because what is worth reading here is which pill is
+        // lit and that the four fit — pass `--dpr 4` for the labels.
+        const pages = '[data-testid="gitlab-mr-pages"]';
+        await shot(`${out}-pages-light.png`, pages);
+        await setTheme("dark");
+        await shot(`${out}-pages-dark.png`, pages);
+        await setTheme("light");
+
+        // A page this app does not read yet: it SAYS which one is missing and offers GitLab's
+        // own for it. Drawn blank it would read as a read that failed.
+        await openMergeRequestPage(page, "commits");
+        await shot(`${out}-commits-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-commits-dark.png`);
+        await setTheme("light");
+        // And the Pipelines one names where a running pipeline is already followed.
+        await openMergeRequestPage(page, "pipelines");
+        await shot(`${out}-pipelines-light.png`);
+
+        // The strip at a phone's width, which is where four labels have to fit: it scrolls
+        // sideways rather than widening the pane, because a header that grows past its column
+        // takes the page's own controls off the right of the screen.
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(400);
+        await shot(`${out}-pages-mobile-light.png`);
+        await page.setViewportSize(VIEWPORT);
+        await page.waitForTimeout(400);
+        await openMergeRequestPage(page, "overview");
+
         // The merge ARMED — the second click is the one that lands the branch, and the
         // sentence under it is what says so before anybody presses it.
         await page.locator('[data-testid="gitlab-merge"]').click();
@@ -1981,6 +2030,8 @@ if (import.meta.main) {
         console.log(
           `[preview] wrote ${out}-tabs-{rest,current}-{light,dark}.png, ` +
             `${out}-list-light.png, ${out}-light.png, ` +
+            `${out}-pages-{light,dark,mobile-light}.png, ` +
+            `${out}-commits-{light,dark}.png, ${out}-pipelines-light.png, ` +
             `${out}-merge-armed-light.png, ${out}-comments-light.png, ` +
             `${out}-description-mobile-light.png, ` +
             `${out}-long-title-{light,mobile-light}.png, ` +
