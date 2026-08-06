@@ -942,24 +942,43 @@ detail: the tokens must never reach a browser, and a microphone is only reachabl
 one. So an SDP crosses the local WebSocket in each direction and nothing else about a
 call does — this side never handles RTP, and the page never learns a Teams URL.
 
-- **Calling is OFF until the user turns it on** (`SETTING_CALLING`, Settings › Audio
-  calls). The switch IS the consent gate for the whole feature, because turning it on
-  REGISTERS a calling endpoint with Teams: their real incoming calls are then offered
-  here as well as on their phone. Turning it off **unregisters** — a registration left
-  behind keeps routing their calls to a client that is not listening, and a call offered
-  to a device that never rings is a call they miss. Never make it the default, and never
-  turn it on for the user.
+- **Calling is ON, with no switch anywhere** (`calling_available` in `src/bin/server.rs`).
+  The app IS a Teams client, so it REGISTERS a calling endpoint at startup the way every
+  other client the user is signed in on does, and their real incoming calls are offered
+  here as well as on their phone. There used to be a Settings switch, off by default; it
+  was the wrong shape for the one thing it gated — registering reaches nobody by itself,
+  and the actions that reach a person are gated one by one below. Four things hold the
+  new shape, and each is pinned by a test:
+  - **A SECOND install says no, and only a second install.** A read-only backend never
+    registers (a screenshot backend must not become a device the user's calls ring on),
+    and `TEAMS_LITE_CALLING=0` is what `packaging/systemd/teams-lite-app.service` carries
+    so the released build runs beside the staged one in silence — two registrations on one
+    machine ring BOTH. Only an explicit `0` turns it off: a misspelled value is ON,
+    because the cost of guessing wrong is a call the user never hears about and nothing
+    that looks broken.
+  - **The registration is TAKEN BACK as the app goes away.** `stop_calling` runs on the
+    idle shutdown, because a registration Teams still believes in keeps routing their
+    calls to a process that is gone, and a call offered to a device that never rings is a
+    call they miss. It would expire within the hour on its own; every call inside that
+    hour is the reason not to wait for it.
+  - **What a window cannot do, it says.** `enabled: false` is no longer something the user
+    can fix, so the disabled call and Join controls say what that window IS — never "turn
+    it on in Settings", which would name a switch that does not exist
+    (`callUnavailableReason` / `meetingUnavailableReason`).
+  - **The page never assumes it.** `UNKNOWN_CALL_STATUS` is still both flags false until
+    the backend answers: a hopeful `true` would claim the user's calls ring here while
+    nothing is registered.
 - **Four methods reach a person, and they are `OUTWARD_METHODS` entries**: `call_place`
   starts a device buzzing in somebody's pocket, `call_accept` opens the user's own
   microphone to whoever is on the other end, `call_hangup` ends the call for both of them
   (or declines it, which the caller is shown), and `call_mute` publishes whether they can
   be heard. None can be taken back, and each one carries out one click the user just made
   — nothing in this feature ever acts on its own.
-- **`set_calling` and `call_prepare` are `MACHINE_METHODS` entries**, with their own
-  refusal words: the first decides whether this machine is a device the user's calls ring
-  on, the second reserves the one call slot and hands the page the relay credentials this
-  backend holds. `call_status` stays open: it returns no SDP, no links and no credentials,
-  only what the UI has to draw.
+- **`call_prepare` is a `MACHINE_METHODS` entry**, with its own refusal words: it reserves
+  the one call slot and hands the page the relay credentials this backend holds.
+  `call_status` stays open: it returns no SDP, no links and no credentials, only what the
+  UI has to draw. There is no method that turns calling on — the registration is the
+  backend's own act at startup, so no client can ask for it and none can take it away.
 - **One call at a time.** A second simultaneous call needs a second microphone and a UI
   that can hold two. An invite that arrives while a call is up is left for the user's
   other devices to ring, which is what Teams does with a client that does not answer.
@@ -1007,7 +1026,8 @@ call does — this side never handles RTP, and the page never learns a Teams URL
     What the mock proves is the whole surface; what the protocol rests on is that the body
     is the join's own shape with a longer `participants.to`.
 - **The microphone is released on ONE path.** Every ending — our hangup, theirs, a
-  dropped connection, calling switched off — arrives as the backend's `call_state` frame,
+  dropped connection, this machine stopping taking calls — arrives as the backend's
+  `call_state` frame,
   and the store's handler is the only place that stops the media. A path that released it
   somewhere else would eventually miss a case and leave the browser's recording indicator
   on for a call that does not exist.
@@ -1069,8 +1089,11 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   microphone**, and the page pairs it with `simulatedCallMedia` because that backend
   announces itself as a mock. That is what makes this surface reviewable with nothing
   leaving the machine: `cd web && bun run preview -- --out /tmp/call --call` captures the
-  switch, the button, the ring, the page, the window it folds into and the notice, and
-  `web/e2e/calling.spec.ts` pins every rule above. A MID-CALL failure is reachable only
+  button, the ring, the page, the window it folds into and the notice, and
+  `web/e2e/calling.spec.ts` pins every rule above. That mock CALLS out of the box, like the
+  backend it stands for, and its `{kind:"calling", enabled:false}` test hook is the only
+  way to the window that does not — a spec MUST reset it (`call_invite {reset:true}`), since
+  one mock process serves the whole run. A MID-CALL failure is reachable only
   through that mock's `{kind:"call_media", refuse:true}` test hook, which refuses the NEXT
   capture and only that one: the page's simulated camera never refuses, and the service that
   would is a real tenant. A spec must reset afterwards — `call_invite {reset:true}` clears it
@@ -2053,8 +2076,10 @@ has, and every duplication hazard is handled where it belongs: a live notificati
 claimed in `push_deliveries` before it is pushed, an `@claude` trigger is claimed before it
 is answered, and the presence endpoint id lives in the store so both backends refresh ONE
 registration. Two things are deliberately NOT shared: the tailnet mapping (give the
-released one its own port if the phone should reach it) and calling, which stays off in
-that unit — two registered calling endpoints on one machine would ring both.
+released one its own port if the phone should reach it) and calling, which the app unit
+turns off with `TEAMS_LITE_CALLING=0` — every other backend registers as a device the
+user's calls ring on, and two registrations on one machine would ring both. The staged
+pair is the app they read their Teams on, so it keeps the calls.
 
 **The REAL-TIME endpoint id is the sharpest thing they must not share, and it was the one
 bug this arrangement really cost.** The live feed follows the endpoint id, and a second

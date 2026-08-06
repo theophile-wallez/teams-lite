@@ -163,15 +163,6 @@ const SETTING_SENDER_ICONS: &str = "sender_icons";
 /// two backends that share this store (the always-on service and the user's dev one)
 /// can leave a trail of registrations Teams still counts as us.
 const SETTING_PRESENCE_ENDPOINT_ID: &str = "presence_endpoint_id";
-/// Native calling (`"1"` = on, anything else = off, and OFF is the default): let this
-/// app take and place audio calls (see [`teams_lite::calling`] and NATIVE-CALLING.md).
-///
-/// A setting rather than a build-time feature, and off by default, because turning it
-/// on REGISTERS a calling endpoint with Teams — and Teams then routes the user's real
-/// incoming calls to it, alongside their phone and their desktop client. That is a
-/// change to their account even before this app rings once, so it is theirs to make;
-/// turning it off unregisters, so their calls stop being offered here.
-const SETTING_CALLING: &str = "calling";
 /// This machine's VAPID private key (base64url), generated on first use. It must
 /// stay stable: every device's subscription embeds the matching public half, so a
 /// new key silently stops every phone that already opted in (see
@@ -313,22 +304,17 @@ const OUTWARD_METHODS: [&str; 15] = [
 /// misstates (see the local agent's signature line in AGENTS.md), so relabelling it is
 /// the user's own act and nothing that merely found this socket gets to perform it.
 /// Reading the overrides back stays open: it returns what the user themselves chose.
-/// `set_calling` and `call_prepare` are the two calling entries that post nothing.
-/// `set_calling` registers (or unregisters) a calling endpoint with Teams, which
-/// decides whether the user's real incoming calls are offered on this machine at all
-/// — the consent gate for the whole feature, and the reason it is not a standing
-/// licence to ring anybody. `call_prepare` reserves the one call slot this machine
-/// has and hands the page the relay credentials its `RTCPeerConnection` needs; the
-/// credentials are why it is gated rather than open, because a client that merely
-/// found this socket has no business holding them.
+/// `call_prepare` is the calling entry that posts nothing: it reserves the one call slot
+/// this machine has and hands the page the relay credentials its `RTCPeerConnection`
+/// needs. The credentials are why it is gated rather than open, because a client that
+/// merely found this socket has no business holding them.
 /// `call_subscribe` ASKS the meeting's media server for somebody's stream and publishes
 /// nothing at all about the user — so it is not outward, and it is not open either: it acts
 /// on the one call this machine holds.
-const MACHINE_METHODS: [&str; 16] = [
+const MACHINE_METHODS: [&str; 15] = [
     "repair_broker",
     "update_download",
     "update_apply",
-    "set_calling",
     "call_prepare",
     "call_subscribe",
     "push_subscribe",
@@ -374,9 +360,6 @@ fn machine_effect(method: &str) -> &'static str {
         }
         "set_person_name" | "set_person_avatar" => {
             "decides the name and the face this machine puts on a colleague's messages"
-        }
-        "set_calling" => {
-            "registers this machine with Teams as a device the user's calls ring on"
         }
         "call_prepare" => {
             "reserves this machine's one call and hands out the media credentials it holds"
@@ -1078,8 +1061,8 @@ struct Ctx {
     /// See {@link REPAIR_MIN_INTERVAL} and `start_broker_repair`.
     last_repair: Arc<Mutex<Option<std::time::Instant>>>,
     /// The audio-calling plane: the calling connection's own address, and the one
-    /// call this machine is in. Empty and idle until the user turns calling on
-    /// ({@link SETTING_CALLING}) — see [`CallingPlane`].
+    /// call this machine is in. Empty and idle on a backend that does not call at all
+    /// ({@link calling_available}) — see [`CallingPlane`].
     calling: Arc<Mutex<CallingPlane>>,
 }
 
@@ -2321,7 +2304,7 @@ async fn main() -> Result<()> {
     spawn_realtime(ctx.clone(), db_path);
 
     // calling: a second trouter connection, registered as the web client registers
-    // it — but only when the user turned calling on (see `spawn_calling`).
+    // it, so the user's calls ring here too (see `spawn_calling`).
     spawn_calling(ctx.clone());
 
     // mail: poll whichever folders a client opens (read-only, and idle until one
@@ -2370,6 +2353,11 @@ async fn main() -> Result<()> {
             accepted = listener.accept() => accepted,
             _ = &mut idle_shutdown => {
                 eprintln!("[lifecycle] no UI clients remain — shutting down");
+                // Stop being a device the user's calls ring on, before the process that
+                // would answer is gone. The registration would expire on its own within
+                // the hour, and every call offered inside that hour is one they miss:
+                // Teams routes to the endpoints it believes are running.
+                ctx.stop_calling().await;
                 return Ok(());
             }
         };
@@ -3646,47 +3634,18 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         }
 
         // ---- audio calling ------------------------------------------------
-        // Seven methods, and the split between them IS the consent design:
+        // Six methods, and the split between them IS the consent design:
         //   `call_status`  reads state, and is the only open one.
-        //   `set_calling`  registers this machine as a device the user's calls ring
-        //                  on — the gate for the whole feature.
         //   `call_prepare` reserves the one call and hands out the media credentials.
         //   `call_place` / `call_accept` / `call_hangup` / `call_mute` reach a person.
+        // There is no method that turns calling on: this backend registers as a device
+        // the user's calls ring on the way every client they signed in on does (see
+        // {@link calling_available}), and what reaches a person is `call_place`.
         // See `teams_lite::calling` and NATIVE-CALLING.md.
 
         // What this machine can do about calls, and what call it is in. Open, because
         // it returns no SDP and no credentials — only what the UI has to draw.
         "call_status" => Ok(ctx.call_state_payload()),
-
-        // Turn calling on or off.
-        //
-        // ON registers a calling endpoint with Teams, and the user's real incoming
-        // calls are then offered here as well as on their phone. OFF unregisters, so
-        // they stop being offered — the registration is what makes this machine a
-        // device, and leaving one behind would silently swallow their calls.
-        "set_calling" => {
-            let enabled = params
-                .get("enabled")
-                .and_then(Value::as_bool)
-                .context("`enabled` must be true or false")?;
-            // Stored first for ON so a reconnect inside `start_calling` already reads
-            // the new value, and last for OFF so nothing re-registers behind the
-            // unregister.
-            if enabled {
-                ctx.store()?.set_setting(SETTING_CALLING, "1")?;
-                if let Err(e) = ctx.start_calling().await {
-                    // Roll the setting back: a switch that reads "on" while no
-                    // endpoint is registered claims the user's calls ring here.
-                    ctx.store()?.set_setting(SETTING_CALLING, "0")?;
-                    return Err(e);
-                }
-            } else {
-                ctx.stop_calling().await;
-                ctx.store()?.set_setting(SETTING_CALLING, "0")?;
-            }
-            ctx.emit_call_state();
-            Ok(ctx.call_state_payload())
-        }
 
         // Everything the page needs to build one `RTCPeerConnection`, and the
         // reservation of the single call this machine holds.
@@ -7308,11 +7267,39 @@ fn agent_status_json(store: &Store) -> Result<Value> {
 // an answer in — and this side never handles RTP.
 // ---------------------------------------------------------------------------
 
-/// Is calling turned on in this store? Off in a fresh one, and off for a read-only
-/// backend whatever the store says: a screenshot backend must not register a device
-/// the user's calls ring on.
-fn calling_enabled(store: &Store) -> bool {
-    !read_only() && store.get_setting(SETTING_CALLING).ok().flatten().as_deref() == Some("1")
+/// Does this backend take and place calls? Yes, on the user's own app.
+///
+/// The app IS a Teams client, so it registers as a device their calls ring on the way
+/// every other client they are signed in on does — there is no switch, because a
+/// messaging client that cannot be called is half a client, and the one this machine
+/// runs is the one they are sitting in front of. Registering is reversible in both
+/// directions and by itself reaches nobody: what rings a person is `call_place`, which
+/// is gated as the outward action it is.
+///
+/// Two backends say no, and each is a SECOND install rather than the user's app:
+///
+///   * a READ-ONLY backend, whatever else it is told — a screenshot backend must not
+///     become a device the user's calls ring on;
+///   * a backend carrying `TEAMS_LITE_CALLING=0`, which is how the released build runs
+///     beside the staged one (`packaging/systemd/teams-lite-app.service`). Two calling
+///     registrations on one machine ring both, and the user asked to be called once.
+fn calling_available() -> bool {
+    if read_only() {
+        return false;
+    }
+    static CALLING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CALLING.get_or_init(|| {
+        !calling_disabled_by(std::env::var("TEAMS_LITE_CALLING").ok().as_deref())
+    })
+}
+
+/// Does this environment value turn calling off? Only an explicit `0` does.
+///
+/// Pure (the value is injected) so the precedence is unit-tested. Unset is ON, because
+/// the common case is the app the user launched and nothing sets this; a value nobody
+/// recognises is ON too, since a typo must not quietly stop their calls from ringing.
+fn calling_disabled_by(configured: Option<&str>) -> bool {
+    matches!(configured.map(str::trim), Some("0"))
 }
 
 impl Ctx {
@@ -7320,11 +7307,10 @@ impl Ctx {
     /// that reconnects mid-call learns exactly what a live one already knows.
     fn call_state_payload(&self) -> Value {
         let plane = self.calling.lock().unwrap();
-        let enabled = self.store().map(|s| calling_enabled(&s)).unwrap_or(false);
         json!({
-            "enabled": enabled,
+            "enabled": calling_available(),
             // Ready means a call could start right now: the connection is up and
-            // registered. A switch that is on while this is false is honest about a
+            // registered. A backend that calls while this is false is honest about a
             // connection that has not come back yet.
             "ready": plane.channel.is_some() && plane.connected,
             "call": plane.call.as_ref().map(CallSession::json),
@@ -7350,8 +7336,7 @@ impl Ctx {
     ///
     /// One connection of its own, on the calling trouter, registered as the web
     /// client registers it. It reconnects forever on its own (`trouter::run`), so
-    /// this is called once per process and once more whenever the user switches the
-    /// setting on.
+    /// this is called once per process, at boot (see `spawn_calling`).
     async fn start_calling(&self) -> Result<()> {
         if self.calling.lock().unwrap().connection.is_some() {
             return Ok(());
@@ -8199,18 +8184,15 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
     });
 }
 
-/// Bring the calling connection up at boot, but only when the user turned calling on.
+/// Bring the calling connection up at boot, on every backend that calls at all.
 ///
-/// Off in a fresh store and off for a read-only backend, because coming up REGISTERS a
-/// device the user's calls ring on (see {@link SETTING_CALLING}). A failure is one
-/// journal line and nothing else: the rest of the app does not depend on it.
+/// This is the whole of "calling is on": the app registers as a device the user's calls
+/// ring on, once, at startup (see {@link calling_available} for the two backends that
+/// do not). A failure is one journal line and nothing else: the rest of the app does not
+/// depend on it, and `trouter::run` reconnects on its own.
 fn spawn_calling(ctx: Ctx) {
     tokio::spawn(async move {
-        let enabled = match ctx.store() {
-            Ok(store) => calling_enabled(&store),
-            Err(_) => false,
-        };
-        if !enabled {
+        if !calling_available() {
             return;
         }
         if let Err(e) = ctx.start_calling().await {
@@ -8736,11 +8718,8 @@ mod tests {
             );
         }
 
-        // The two that post nothing: gated, but never described as posting.
-        for (method, phrase) in [
-            ("set_calling", "calls ring on"),
-            ("call_prepare", "media credentials"),
-        ] {
+        // The one that posts nothing: gated, but never described as posting.
+        for (method, phrase) in [("call_prepare", "media credentials")] {
             assert!(!OUTWARD_METHODS.contains(&method), "{method} posts nothing");
             assert_eq!(write_class(method), Some(WriteClass::Machine), "{method}");
             let err = check_write_allowed(method, &json!({}), Some("tok"))
@@ -8752,18 +8731,29 @@ mod tests {
         assert_eq!(write_class("call_status"), None);
     }
 
-    /// Calling is off in a fresh store, and off for a read-only backend whatever the
-    /// store says: coming up registers a device the user's calls ring on.
+    /// Calling is on unless this backend is told otherwise, and only an explicit `0`
+    /// tells it: the app is a Teams client, and a client the user cannot be called on is
+    /// half a client. The one thing this must never do is stop their calls ringing
+    /// because a value was misspelled.
     #[test]
-    fn calling_is_off_until_the_user_turns_it_on() {
-        let store = Store::open_in_memory().unwrap();
-        assert!(!calling_enabled(&store), "a fresh store must not register a calling endpoint");
-        store.set_setting(SETTING_CALLING, "1").unwrap();
-        assert_eq!(calling_enabled(&store), !read_only());
-        for off in ["0", "", "true", "yes"] {
-            store.set_setting(SETTING_CALLING, off).unwrap();
-            assert!(!calling_enabled(&store), "only \"1\" means on, not {off:?}");
+    fn calling_is_on_unless_this_backend_is_told_otherwise() {
+        assert!(!calling_disabled_by(None), "the app the user launched calls");
+        assert!(!calling_disabled_by(Some("1")), "the spelling that means on");
+        assert!(calling_disabled_by(Some("0")), "the second install says 0");
+        assert!(calling_disabled_by(Some(" 0 ")), "a unit file's padding is not a value");
+        // A typo is ON, deliberately: the cost of guessing wrong here is a call the user
+        // never hears about, and nothing about it looks broken.
+        for on in ["", "no", "false", "off", "00"] {
+            assert!(!calling_disabled_by(Some(on)), "{on:?} is not the off switch");
         }
+    }
+
+    /// A read-only backend never registers, whatever the environment says: a screenshot
+    /// backend must not become a device the user's calls ring on. Read-only is decided
+    /// before the environment is even read, so the two can never disagree.
+    #[test]
+    fn a_read_only_backend_is_never_a_device_calls_ring_on() {
+        assert_eq!(calling_available(), !read_only());
     }
 
     /// A meeting is named in one of two ways, because the user reaches one from two

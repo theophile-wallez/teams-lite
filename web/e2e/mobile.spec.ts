@@ -258,11 +258,6 @@ test.describe("mobile single-pane layout", () => {
    */
   test("a folded call leaves most of a phone's screen to the conversation", async ({ page }) => {
     await gotoApp(page);
-    await page.locator('[data-testid="open-settings"]').click();
-    await page.locator('[data-testid="calling-toggle"]').click();
-    await expect(page.locator('[data-testid="calling-state"]')).toContainText("registered");
-    await page.goBack();
-
     await openConversationNamed(page, "Design Sync");
     await page.locator('[data-testid="meeting-join-here"]').click();
     const stage = page.locator('[data-testid="call-stage"]');

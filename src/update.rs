@@ -946,6 +946,15 @@ mod tests {
              orphaned backend holding its port"
         );
 
+        // No calling, which is the other opposite: every other backend registers as a
+        // device the user's calls ring on, and two registrations on one machine ring
+        // BOTH. The staged pair is the app they read their Teams on, so it keeps the
+        // calls and this install exercises the released artifact in silence.
+        assert!(
+            unit.contains("Environment=TEAMS_LITE_CALLING=0"),
+            "the released build must not be a second device the user's calls ring on"
+        );
+
         // Not part of the staged pair's target: restarting or enabling that target must
         // not reach a second app the user did not ask for.
         let joins_staged_target = unit

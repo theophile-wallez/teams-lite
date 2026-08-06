@@ -319,14 +319,9 @@ export type AppState = {
   /** What this machine can do about audio calls, and the one call it is in (see
    *  lib/call.ts). Both flags are false until the backend answers `call_status`: a
    *  hopeful `enabled` would tell the user their calls ring here while nothing is
-   *  registered. */
+   *  registered. The backend decides it — there is no switch in this app, and a
+   *  page holds no preference of its own about calling. */
   callStatus: CallStatus;
-  /** Why the CALLING SWITCH refused, drawn under that switch in Settings — and nowhere
-   *  else. It is state rather than a notice because it is the outcome of a control that
-   *  is still on screen, so it belongs beside it (Settings › Audio calls); everything a
-   *  CALL itself has to say is about a call that no longer exists, and goes out as a
-   *  transient notice instead (lib/notice.ts). */
-  callError: string | null;
   /**
    * The video arriving on the call right now — a colleague's camera, a colleague's shared
    * screen. Empty whenever there is nothing to draw, which is most calls.
@@ -575,7 +570,6 @@ function initialState(): AppState {
     typingByConversation: {},
     incomingCalls: [],
     callStatus: UNKNOWN_CALL_STATUS,
-    callError: null,
     callVideo: [],
     callLocalVideo: [],
     callVideoNames: {},
@@ -1686,21 +1680,6 @@ export class TeamsController {
     } catch {
       // An older backend has no `call_status`; the unknown state is the safe reading.
       this.set({ callStatus: UNKNOWN_CALL_STATUS });
-    }
-  }
-
-  /** Turn calling on or off. The consent gate: ON registers this machine with Teams as
-   *  a device the user's calls ring on.
-   *
-   *  A refusal here is the one that stays put: the switch that asked for it is still on
-   *  screen, so the reason is drawn under it rather than floated over the app. */
-  async setCallingEnabled(enabled: boolean): Promise<void> {
-    this.set({ callError: null });
-    try {
-      this.set({ callStatus: await this.backend.setCalling(enabled) });
-    } catch (error) {
-      this.set({ callError: errText(error) });
-      await this.refreshCallStatus();
     }
   }
 

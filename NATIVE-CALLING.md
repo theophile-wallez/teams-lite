@@ -371,12 +371,15 @@ WebRTC or the microphone.
 
 ## 6. The surface, and what each part is for
 
-Seven RPCs, and the split between them IS the consent design (see § 7):
+Six RPCs, and the split between them IS the consent design (see § 7). There is no RPC
+that turns calling on: the backend registers as a device the user's calls ring on at
+startup, the way every Teams client they are signed in on does (`calling_available` in
+`src/bin/server.rs`), so no client can ask for the registration and none can take it
+away. A read-only backend and one carrying `TEAMS_LITE_CALLING=0` never register.
 
 | Method | Gate | What it does |
 | --- | --- | --- |
 | `call_status` | open | The state the UI draws. No SDP, no links, no credentials. |
-| `set_calling` | `MACHINE_METHODS` | Registers (or unregisters) this machine as a device the user's calls ring on. |
 | `call_prepare` | `MACHINE_METHODS` | Reserves the one call, and returns the ICE servers (plus the offer, when answering). |
 | `call_place` | `OUTWARD_METHODS` | The § 2.3 POST, carrying our offer. Rings a person. |
 | `call_join` | `OUTWARD_METHODS` | The same POST for a MEETING: no `to`, plus `meetingInfo`. Rings nobody. |
@@ -403,7 +406,7 @@ The browser half is two files: `web/src/lib/call.ts` (pure state model) and
 `call-media.ts` (the microphone, one `RTCPeerConnection`, the remote audio element). The UI
 is `call-bar.tsx` (a RINGING call, and the notice a call leaves behind), `call-stage.tsx`
 (the PAGE a live call takes over, and the window it folds into, over `lib/call-stage.ts`),
-`call-video.tsx` (one picture), `call-button.tsx` (a 1:1 header) and the Settings switch.
+`call-video.tsx` (one picture) and `call-button.tsx` (a 1:1 header).
 
 A meeting is joined rather than placed, and it is the same plane. The join link comes in
 two shapes and `calling::MeetingJoin` reads both: the long
@@ -435,9 +438,11 @@ that hold `send` hold here, and one is stricter:
   no standing licence, and a call is never placed by anything automatic.
 - **`call` / `answer` / `hangup` are `OUTWARD_METHODS` entries**: the write token,
   refused on a read-only backend, and named in the automation hook.
-- **Registering the calling endpoint changes where Teams routes the user's real calls.**
-  That is a side effect on their account even when this app never rings anybody, so the
-  registration stays behind a setting that is off by default.
+- **Registering the calling endpoint changes where Teams routes the user's real calls**,
+  and the app does it at startup, because that is what a Teams client is: their calls are
+  offered here as well as on their other clients. It reaches nobody by itself — every
+  action that does is gated one by one above — and it is taken back as the app shuts down.
+  A read-only backend and the second install (`TEAMS_LITE_CALLING=0`) never register.
 - **The live target is the sandbox chat and its one consenting counterpart**, exactly as
   § Sending messages says. A test call goes there and nowhere else.
 - Answering a call the user was already being offered is the one action that starts
@@ -562,7 +567,7 @@ than pinning the names in this file.
 
 And the surface itself, with no tenant, no registration and no microphone:
 
-    cd web && bun run preview -- --out /tmp/call --call     # the switch, the ring, the bar
+    cd web && bun run preview -- --out /tmp/call --call     # the button, the ring, the page
     cd web && bun run test                                  # the state model
     cd web && bun run test:e2e -- calling.spec.ts           # the whole flow, through the mock
     cargo test                                              # the payloads, the frames, the gates

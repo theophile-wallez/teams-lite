@@ -1325,9 +1325,9 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  // Audio calling: the switch that is the consent, the button in a 1:1 header, a call
-  // ringing with a working Answer, the PAGE it becomes once answered — its people, its
-  // chat, its picture — and the window that page folds into and is dragged around in.
+  // Audio calling: the button in a 1:1 header, a call ringing with a working Answer, the
+  // PAGE it becomes once answered — its people, its chat, its picture — and the window
+  // that page folds into and is dragged around in.
   //
   // Nothing here registers anything or opens a microphone. The mock reproduces the
   // signaling and the page uses `simulatedCallMedia` because the backend announced
@@ -1335,29 +1335,20 @@ if (import.meta.main) {
   // the machine (see web/mock/server.ts and src/lib/call-media.ts).
   if (args.includes("--call")) {
     await withPreview(async ({ page, shot, setTheme, emit }) => {
-      // 1. Off, which is the state a fresh backend is really in: the button is drawn
-      //    but disabled, and its tooltip says where to turn calling on.
-      await openConversation(page, "Ava Thompson");
-      await shot(`${out}-off-light.png`, '[data-testid="message-pane"] header');
-
-      // 2. The switch. Turning it on is the consent, so it is performed rather than
-      //    assumed — the same reason the agent's mode is switched on in its capture.
-      await openSettings(page);
-      const section = page.locator('[data-testid="calling-settings"]');
-      await section.waitFor();
-      await shot(`${out}-settings-light.png`, '[data-testid="calling-settings"]');
-      await page.locator('[data-testid="calling-toggle"]').click();
-      await page.waitForSelector('[data-testid="calling-state"]:has-text("registered")');
-      await shot(`${out}-settings-on-light.png`, '[data-testid="calling-settings"]');
-      await setTheme("dark");
-      await shot(`${out}-settings-on-dark.png`, '[data-testid="calling-settings"]');
-      await setTheme("light");
-
-      // 3. The header button, now live.
+      // 1. The header button, live with no step in between: the backend registered as a
+      //    device the user's calls ring on at startup, and there is no switch anywhere.
       const conversationId = await openConversation(page, "Ava Thompson");
       await shot(`${out}-button-light.png`, '[data-testid="message-pane"] header');
 
-      // 4. Ringing, with an Answer that works.
+      // 2. A window whose backend does not take calls at all — a read-only one, or the
+      //    second install beside the user's app. The control stays and says so.
+      await emit({ kind: "calling", enabled: false });
+      await page.waitForTimeout(300);
+      await shot(`${out}-off-light.png`, '[data-testid="message-pane"] header');
+      await emit({ kind: "call_invite", reset: true });
+      await page.waitForTimeout(300);
+
+      // 3. Ringing, with an Answer that works.
       await emit({ kind: "call_invite", conversation: conversationId });
       await page.waitForSelector('[data-testid="call-bar"][data-phase="ringing"]');
       await page.waitForTimeout(300);
@@ -1367,7 +1358,7 @@ if (import.meta.main) {
       await shot(`${out}-ringing-card-dark.png`, '[data-testid="call-bar"]');
       await setTheme("light");
 
-      // 5. Answered: the CALL AS A PAGE — the header, the time, the controls, and the card
+      // 4. Answered: the CALL AS A PAGE — the header, the time, the controls, and the card
       //    with the person in the middle of it. This is the whole surface, so the shot is
       //    the page rather than a crop.
       await page.locator('[data-testid="call-answer"]').click();
@@ -1382,7 +1373,7 @@ if (import.meta.main) {
       await shot(`${out}-stage-dark.png`);
       await setTheme("light");
 
-      // 5a. FOLDED. The same element, morphed into a window the user drags out of the way
+      // 4a. FOLDED. The same element, morphed into a window the user drags out of the way
       //     — so the shot after the drag is the proof that the position is the window's own
       //     and that expanding returns from exactly there.
       await page.locator('[data-testid="call-stage-minimize"]').click();
@@ -1409,7 +1400,7 @@ if (import.meta.main) {
       await page.locator('[data-testid="call-hangup"]').first().click();
       await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
 
-      // 5b. A GROUP chat: the same button, and a label that says it rings everybody. Then
+      // 4b. A GROUP chat: the same button, and a label that says it rings everybody. Then
       //     the stage, which names the CONVERSATION and fills in who picked up.
       await openConversation(page, "Platform Team");
       await shot(`${out}-group-button-light.png`, '[data-testid="message-pane"] header');
@@ -1422,7 +1413,7 @@ if (import.meta.main) {
       await page.locator('[data-testid="call-hangup"]').first().click();
       await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
 
-      // 5c. A MEETING chat, which is the other thing a chat header can offer: Join, from the
+      // 4c. A MEETING chat, which is the other thing a chat header can offer: Join, from the
       //     thread itself, with no calendar and no link. The meeting the thread was minted
       //     for is the one action it gets — and once joined, that thread's own chat is the
       //     panel beside the picture.
@@ -1440,7 +1431,7 @@ if (import.meta.main) {
       await page.waitForTimeout(600);
       await shot(`${out}-meeting-chat-stage-light.png`);
 
-      // 5d. The two panels. The CHAT is already open — a call in a conversation opens with
+      // 4d. The two panels. The CHAT is already open — a call in a conversation opens with
       //     it (`initialCallStagePanel`), which is what the shot above shows — so this walks
       //     to People, the roster the service reports, and back.
       await page.locator('[data-testid="call-stage-people"]').click();
@@ -1459,7 +1450,7 @@ if (import.meta.main) {
       await page.locator('[data-testid="call-hangup"]').first().click();
       await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
 
-      // 6. A meeting from the CALENDAR: the Join button beside the link out, the lobby,
+      // 5. A meeting from the CALENDAR: the Join button beside the link out, the lobby,
       //    then the roster.
       //
       // Back to the root first: the calendar pane only shows when no conversation is in
@@ -1485,7 +1476,7 @@ if (import.meta.main) {
       await page.waitForSelector('[data-testid="call-phase"]:has-text("others")');
       await shot(`${out}-meeting-stage-light.png`);
 
-      // 7. And the PICTURE. The mock's service renegotiates right after the roster, the
+      // 6. And the PICTURE. The mock's service renegotiates right after the roster, the
       //    page answers and subscribes, and the shared screen takes the whole content with
       //    the camera as a tile under it. Nothing here opens a camera: the streams come
       //    from a canvas (`simulatedCallMedia`).
@@ -1497,7 +1488,7 @@ if (import.meta.main) {
       await shot(`${out}-video-dark.png`, '[data-testid="call-video"]');
       await setTheme("light");
 
-      // 8. SENDING. The camera and the screen, each one click, each one the consent for that
+      // 7. SENDING. The camera and the screen, each one click, each one the consent for that
       //    action. Nothing is opened here either: against the mock the preview is a canvas,
       //    so no camera light comes on and no picker appears.
       await shot(`${out}-send-off-light.png`, '[data-testid="call-stage"] header');
@@ -1520,7 +1511,7 @@ if (import.meta.main) {
       await shot(`${out}-sending-dark.png`, '[data-testid="call-stage"]');
       await setTheme("light");
 
-      // 9. And what the app SAYS when one of those is refused. It is a transient notice
+      // 8. And what the app SAYS when one of those is refused. It is a transient notice
       //    (web/src/lib/notice.ts), so the page shot is the one that matters: it shows the
       //    notice clear of the header every control sits in. The refusal is armed through the
       //    mock's own hook — the simulated camera never refuses, and the service that would
@@ -1540,8 +1531,8 @@ if (import.meta.main) {
       await page.locator('[data-testid="call-hangup"]').first().click();
 
       console.log(
-        `[preview] wrote ${out}-off-light.png, ${out}-settings-{light,on-light,on-dark}.png, ` +
-          `${out}-button-light.png, ${out}-ringing-{light,card-light,card-dark}.png and ` +
+        `[preview] wrote ${out}-button-light.png, ${out}-off-light.png, ` +
+          `${out}-ringing-{light,card-light,card-dark}.png and ` +
           `${out}-stage-{light,header-light,muted-light,dark}.png and ` +
           `${out}-mini-{light,page-light,dragged-light,dark,video-light}.png and ` +
           `${out}-group-{button-light,dialing-light,stage-light}.png and ` +

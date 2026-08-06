@@ -489,9 +489,10 @@ async function findPinnedJoinButton(page: Page) {
   throw new Error(
     `No event in the last ${AGENDA_WINDOWS_BACK + 1} agenda windows offers a join for ` +
       `meeting ${AUTHORIZED_MEETING_CODE} (${AUTHORIZED_MEETING_DAY}), which is the only ` +
-      `one this script may join. Either it is further back than that, or calling is off ` +
-      `in Settings — the button is disabled then, and this script will not click a ` +
-      `disabled one. It joins that meeting and no other; do not point it elsewhere.`,
+      `one this script may join. Either it is further back than that, or this backend does ` +
+      `not take calls (a read-only one, or one carrying TEAMS_LITE_CALLING=0) — the button ` +
+      `is disabled then, and this script will not click a disabled one. It joins that ` +
+      `meeting and no other; do not point it elsewhere.`,
   );
 }
 

@@ -20,14 +20,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
  * instead, addressed by that thread — so a meeting the user was invited to is reachable
  * from the chat list, without going to the calendar for its link.
  *
- * It is drawn only where it would really work — on a machine the user turned calling on,
- * with the calling connection up and no call already in flight. Everywhere else it is
- * absent rather than disabled: a button that cannot do the thing it names is worse than no
- * button, and the reason it is missing belongs in Settings, where the switch is.
+ * It is drawn only where it would really work — the calling connection up, and no call
+ * already in flight. Everywhere else it is absent rather than disabled: a button that
+ * cannot do the thing it names is worse than no button.
  *
- * The one exception is a chat where calling is simply OFF. There the control stays,
- * disabled, with the reason in its tooltip — because that is the case the user can fix, and
- * a missing button would leave them looking for a feature the app has.
+ * The one exception is a window whose backend does not take calls at all — a read-only
+ * one, or the second install that runs beside the user's app. There the control stays,
+ * disabled, with the reason in its tooltip: the feature exists, this window is not where
+ * it happens, and a missing button would leave them looking for it.
  */
 export function CallButton(props: { conversationId: string }) {
   const controller = useController();

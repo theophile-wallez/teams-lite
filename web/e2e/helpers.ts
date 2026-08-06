@@ -245,8 +245,25 @@ export async function emitCallInvite(page: Page, conversation: string): Promise<
   expect(res.ok()).toBeTruthy();
 }
 
-/** End any mock call and turn calling back off — the state a fresh backend is in. It also
- *  clears an armed media refusal, so `refuseNextCallMedia` needs no separate undo. */
+/**
+ * Make this window's backend one that does not take calls at all.
+ *
+ * There is no switch in the app — the backend the user launches registers as a device
+ * their calls ring on at startup — so this hook is the only way to that state, and it is
+ * the state two real backends report: a read-only one, and the second install that runs
+ * beside the user's app with `TEAMS_LITE_CALLING=0`. What it exercises is that the call
+ * and Join controls stay, disabled, saying so. Always finish with `resetCall`.
+ */
+export async function disableCalling(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "calling", enabled: false },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** End any mock call and put calling back to what a real backend reports — it calls. It
+ *  also clears an armed media refusal and an armed `disableCalling`, so neither needs a
+ *  separate undo. */
 export async function resetCall(page: Page): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "call_invite", reset: true },

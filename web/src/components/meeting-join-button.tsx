@@ -23,9 +23,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
  * that code lives in the event and nowhere in the conversation. So the button takes either
  * {@link MeetingAddress} and states the one it holds.
  *
- * Drawn only for an address this app can really join, and only where a join would work. When
- * calling is off it stays, disabled, with the reason in its tooltip — that is the case
- * the user can fix, and Settings is where they fix it.
+ * Drawn only for an address this app can really join, and only where a join would work. In a
+ * window whose backend does not take calls at all it stays, disabled, with the reason in its
+ * tooltip: the meeting is real and this window is not where it is joined.
  */
 export function MeetingJoinButton(props: {
   meeting: MeetingAddress;

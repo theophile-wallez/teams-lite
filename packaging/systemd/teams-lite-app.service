@@ -83,11 +83,16 @@ Environment=TEAMS_LITE_PORT=@APP_BACKEND_PORT@
 # neither ~/.local/bin nor ~/.bun/bin (the same gap the staged units work around).
 Environment=PATH=@AGENT_PATH@
 
-# Local overrides, e.g. TEAMS_LITE_CALLING=1. The "-" makes a missing file harmless.
-# Deliberately NOT set here, exactly as for the staged backend: TEAMS_LITE_CALLING (it
-# re-routes how the user's real calls ring across their endpoints — and two registered
-# calling endpoints on one machine would ring both), TEAMS_LITE_CALL_DEBUG and
-# TEAMS_LITE_CALL_CAPTURE.
+# NO CALLING in this unit, and this is the one place that says so. Every other backend
+# registers as a device the user's calls ring on, because that is what a Teams client is
+# — but two registrations on one machine ring BOTH, and this install exists to exercise
+# the released artifact, not to answer the user's phone calls twice. The staged pair on
+# @BACKEND_PORT@ is the app they actually use, so it keeps the calls.
+Environment=TEAMS_LITE_CALLING=0
+
+# Local overrides. The "-" makes a missing file harmless. Deliberately NOT set here,
+# exactly as for the staged backend: TEAMS_LITE_CALL_DEBUG and TEAMS_LITE_CALL_CAPTURE
+# (they write call identities, SDP and session keys).
 EnvironmentFile=-@CONFIG_DIR@/app.env
 
 Restart=always

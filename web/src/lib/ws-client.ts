@@ -658,22 +658,16 @@ export class Backend {
     );
   }
   // ---- audio calling ------------------------------------------------------
-  // Seven methods, and the split between them is the consent design: reading state
-  // is open, and every step that rings a person, opens the microphone or hands out
-  // the media credentials is a write request. See `./call.ts` and NATIVE-CALLING.md.
+  // Six methods, and the split between them is the consent design: reading state is
+  // open, and every step that rings a person, opens the microphone or hands out the
+  // media credentials is a write request. There is nothing here that turns calling on:
+  // the backend registers as a device the user's calls ring on at startup, the way every
+  // other Teams client they signed in on does. See `./call.ts` and NATIVE-CALLING.md.
 
   /** Whether this machine can take calls, and what call it is in. A read: it carries
    *  no SDP and no credentials. */
   callStatus(): Promise<CallStatus> {
     return this.request<CallStatus>("call_status", {});
-  }
-  /** Turn calling on or off.
-   *
-   *  A WRITE request, and the consent gate for the whole feature: ON registers this
-   *  machine with Teams as a device the user's calls ring on, OFF unregisters it so they
-   *  stop being offered here (a `MACHINE_METHODS` entry, refused read-only). */
-  setCalling(enabled: boolean): Promise<CallStatus> {
-    return this.writeRequest<CallStatus>("set_calling", { enabled });
   }
   /** Reserve the one call this machine holds, and get what one `RTCPeerConnection`
    *  needs.

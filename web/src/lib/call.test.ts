@@ -112,7 +112,11 @@ describe("whether a call can be placed", () => {
   });
 
   it("says why it cannot, in the order the user can act on", () => {
-    expect(callUnavailableReason(status({ enabled: false }))).toMatch(/Settings/);
+    // A window that does not call at all is a read-only backend or the second install, and
+    // neither is something the user turns on: the sentence says what this window IS, and
+    // never sends them to a switch that no longer exists.
+    expect(callUnavailableReason(status({ enabled: false }))).toMatch(/cannot take calls/);
+    expect(callUnavailableReason(status({ enabled: false }))).not.toMatch(/Settings/);
     expect(callUnavailableReason(status({ ready: false }))).toMatch(/not registered/);
     expect(callUnavailableReason(status({ call: call() }))).toMatch(/one call at a time/);
     expect(callUnavailableReason(status())).toBe("");
@@ -232,7 +236,7 @@ describe("what the bar says", () => {
     );
     expect(callEndLabel(call({ end_reason: "CallEndReasonReconnected" }))).toMatch(/connection/);
     expect(callEndLabel(call({ end_reason: "CallEndReasonCallingTurnedOff" }))).toMatch(
-      /turned off/,
+      /stopped taking calls/,
     );
     // A code we have never seen still says something rather than nothing.
     expect(callEndLabel(call({ end_reason: "code 486" }))).toBe("The call ended.");
@@ -281,7 +285,8 @@ describe("joining a meeting", () => {
     expect(canJoinMeeting(status({ enabled: false }))).toBe(false);
     expect(canJoinMeeting(status({ ready: false }))).toBe(false);
     expect(canJoinMeeting(status({ call: meeting({ phase: "connected" }) }))).toBe(false);
-    expect(meetingUnavailableReason(status({ enabled: false }))).toMatch(/Settings/);
+    expect(meetingUnavailableReason(status({ enabled: false }))).toMatch(/cannot take calls/);
+    expect(meetingUnavailableReason(status({ enabled: false }))).not.toMatch(/Settings/);
     expect(meetingUnavailableReason(status({ call: meeting() }))).toMatch(/one call at a time/);
     expect(meetingUnavailableReason(status())).toBe("");
   });

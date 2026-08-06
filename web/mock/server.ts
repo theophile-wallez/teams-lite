@@ -3281,9 +3281,12 @@ function mockSectionDropOffer(label: string): string {
   ].join("\r\n");
 }
 
-/** Off, exactly like a fresh Rust store: turning it on is the consent, so a spec has to
- *  perform that step rather than find it already done. */
-let mockCallingEnabled = false;
+/** ON, exactly like the Rust backend the user launches: it registers as a device their
+ *  calls ring on at startup, and there is no switch to find. The
+ *  `{kind:"calling", enabled:false}` test hook is the only way back, and it reproduces the
+ *  two backends that really answer `false` — a read-only one, and the second install that
+ *  carries `TEAMS_LITE_CALLING=0`. */
+let mockCallingEnabled = true;
 let mockCall: MockCall | null = null;
 /** Timers of a simulated call, cleared on every ending so a reused mock cannot let an
  *  old call finish connecting inside a later spec. */
@@ -3296,8 +3299,8 @@ let mockRefusesNextMedia = false;
 function mockCallStatus(): { enabled: boolean; ready: boolean; call: MockCall | null } {
   return {
     enabled: mockCallingEnabled,
-    // Ready the moment it is on: the mock has no connection to wait for, and a switch
-    // stuck on "connecting…" would be a state the real backend leaves in seconds.
+    // Ready as soon as it calls at all: the mock has no connection to wait for, and a
+    // state stuck on "connecting…" is one the real backend leaves in seconds.
     ready: mockCallingEnabled,
     call: mockCall,
   };
@@ -3364,9 +3367,9 @@ function injectMockCallInvite(conversation: string): MockCall | null {
     can_hangup: true,
     can_send_media: false,
   };
-  // Calling has to be on for a real invite to reach this machine at all, so an invite
-  // implies it: a spec that rings without flipping the switch is testing a state the
-  // backend cannot be in.
+  // A backend that does not call is a backend no invite reaches, so an invite implies
+  // one that does: a spec ringing a window that reported `enabled:false` would be
+  // testing a state no backend can be in.
   mockCallingEnabled = true;
   broadcastMockCall();
   return mockCall;
@@ -5178,15 +5181,6 @@ function dispatch(method: string, params: unknown): unknown {
     case "call_status":
       return mockCallStatus();
 
-    case "set_calling": {
-      const o = asObject(params);
-      if (typeof o.enabled !== "boolean") throw new Error("`enabled` must be true or false");
-      mockCallingEnabled = o.enabled;
-      if (!o.enabled) endMockCall("CallEndReasonCallingTurnedOff");
-      broadcastMockCall();
-      return mockCallStatus();
-    }
-
     case "call_prepare": {
       const o = asObject(params);
       if (!mockCallingEnabled) throw new Error("call_prepare: calling is not connected yet");
@@ -6237,10 +6231,23 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       });
       return Response.json({ ok: true, drop: body.drop }, { status: 200 });
     }
+    // A backend that does not take calls at all: a read-only one, or the second install
+    // that carries `TEAMS_LITE_CALLING=0`. The app itself has no switch, so this hook is
+    // the only way to reach that state — and it is the state the disabled call button and
+    // the disabled Join button say their reason in. A spec MUST reset afterwards
+    // (`call_invite {reset:true}` puts it back), since one mock process serves the run.
+    if (body.kind === "calling" && body.enabled === false) {
+      endMockCall("CallEndReasonCallingTurnedOff");
+      mockCallingEnabled = false;
+      broadcastMockCall();
+      return Response.json({ ok: true, enabled: false }, { status: 200 });
+    }
     if (body.kind === "call_invite") {
       if (body.reset === true) {
         endMockCall("CallEndReasonHangup");
-        mockCallingEnabled = false;
+        // Back to what a real backend reports: it calls. The hook above is the only way
+        // out of that, and it must not leak into the next spec.
+        mockCallingEnabled = true;
         mockRefusesNextMedia = false;
         broadcastMockCall();
         return Response.json({ ok: true, reset: true }, { status: 200 });

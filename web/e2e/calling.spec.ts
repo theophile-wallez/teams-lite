@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import {
   calendarEvent,
+  disableCalling,
   dropCallCapture,
   emitCallInvite,
   gotoApp,
@@ -12,7 +13,7 @@ import {
   test,
 } from "./helpers";
 
-// Audio calling: the switch that is the consent, the button that places a call, the
+// Audio calling: the button that places a call, the
 // ringing card with a working Answer, and the PAGE the call becomes once it is up
 // (web/src/components/call-bar.tsx, call-stage.tsx and call-button.tsx, over
 // web/src/lib/call.ts, call-stage.ts and call-media.ts — and src/calling.rs for the
@@ -23,7 +24,7 @@ import {
 // picks because the backend announced itself as a mock. So what this file pins is every
 // rule that is ours to keep:
 //
-//   * calling is OFF until the user turns it on, and the button says so;
+//   * calling is ON with no switch to find, and a window that cannot call says so;
 //   * what a conversation offers is decided by the conversation: ring the person, ring the
 //     whole group, or JOIN the meeting the thread was minted for;
 //   * the ringing card can be answered and declined, and a live call is muted from its
@@ -35,45 +36,51 @@ import {
 // Every test ends by resetting the mock, because one mock process serves the whole run
 // and a call left ringing would ring inside every later spec.
 
-/** Turn calling on through the Settings switch — the only place the app offers it, and
- *  the consent gate for the whole feature. */
-async function turnCallingOn(page: import("@playwright/test").Page): Promise<void> {
-  await page.locator('[data-testid="open-settings"]').click();
-  const toggle = page.locator('[data-testid="calling-toggle"]');
-  await expect(toggle).toBeVisible();
-  await expect(toggle).toHaveAttribute("aria-checked", "false");
-  await toggle.click();
-  await expect(toggle).toHaveAttribute("aria-checked", "true");
-  await expect(page.locator('[data-testid="calling-state"]')).toContainText("registered");
-}
-
 test.describe("Audio calling", () => {
   test.afterEach(async ({ page }) => {
     await resetCall(page);
   });
 
-  test("is off until the user turns it on, and the call button says where", async ({ page }) => {
+  test("is on the moment the app is open, with no switch to find", async ({ page }) => {
     await gotoApp(page);
     await openConversationNamed(page, "Ava Thompson");
 
-    // The button exists in a one-to-one chat even while calling is off — that is the
-    // one case the user can fix, and a missing button would hide the feature.
+    // No step in between: the backend registered as a device the user's calls ring on at
+    // startup, the way every other Teams client they are signed in on does.
+    const button = page.locator('[data-testid="call-button"]');
+    await expect(button).toBeEnabled();
+    await expect(button).toHaveAttribute("aria-label", /Call Ava Thompson/);
+
+    // And Settings offers nothing about it, because there is nothing to offer.
+    await page.locator('[data-testid="open-settings"]').click();
+    await expect(page.locator('[data-testid="calling-settings"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="calling-toggle"]')).toHaveCount(0);
+  });
+
+  /** A window whose backend does not call at all — a read-only one, or the second install
+   *  beside the user's app. The control stays and says so: the feature exists, this window
+   *  is not where it happens, and the sentence never sends them to a switch. */
+  test("says so in a window that cannot take calls", async ({ page }) => {
+    await gotoApp(page);
+    await disableCalling(page);
+    await openConversationNamed(page, "Ava Thompson");
+
     const button = page.locator('[data-testid="call-button"]');
     await expect(button).toBeVisible();
     await expect(button).toBeDisabled();
-    await expect(button).toHaveAttribute("aria-label", /Settings/);
+    await expect(button).toHaveAttribute("aria-label", /cannot take calls/);
+    await expect(button).not.toHaveAttribute("aria-label", /Settings/);
 
-    await turnCallingOn(page);
-    await openConversationNamed(page, "Ava Thompson");
-    await expect(button).toBeEnabled();
-    await expect(button).toHaveAttribute("aria-label", /Call Ava Thompson/);
+    // A meeting is the other half of the same sentence.
+    await openConversationNamed(page, "Design Sync");
+    const join = page.locator('[data-testid="meeting-join-here"]');
+    await expect(join).toBeDisabled();
   });
 
   /** A group chat is CALLED, and the label says what that reaches: every member at once,
    *  which is the fact the user needs before a click nothing takes back. */
   test("rings the whole group from a group chat", async ({ page }) => {
     await gotoApp(page);
-    await turnCallingOn(page);
     await openConversationNamed(page, "Platform Team");
     const button = page.locator('[data-testid="call-button"]');
     await expect(button).toBeEnabled();
@@ -98,7 +105,6 @@ test.describe("Audio calling", () => {
    *  invited answer the same question, and only one of them is what the thread is for. */
   test("joins the meeting a meeting chat was opened for", async ({ page }) => {
     await gotoApp(page);
-    await turnCallingOn(page);
     // The header control of an ordinary chat first, so the box the meeting's own must match
     // is measured rather than assumed.
     await openConversationNamed(page, "Platform Team");
@@ -142,7 +148,6 @@ test.describe("Audio calling", () => {
   /** Notes is the one chat with nobody in it, so it offers neither. */
   test("offers nothing in the chat with oneself", async ({ page }) => {
     await gotoApp(page);
-    await turnCallingOn(page);
     await openConversationNamed(page, "Notes");
     await expect(page.locator('[data-testid="call-button"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="meeting-join-here"]')).toHaveCount(0);
@@ -150,7 +155,6 @@ test.describe("Audio calling", () => {
 
   test("places a call, shows it connect, and hangs up", async ({ page }) => {
     await gotoApp(page);
-    await turnCallingOn(page);
     await openConversationNamed(page, "Ava Thompson");
 
     await page.locator('[data-testid="call-button"]').click();
@@ -232,9 +236,11 @@ test.describe("Audio calling", () => {
     await expect(page.locator('[data-testid="call-notice"]')).toHaveCount(0);
   });
 
-  /** Turning calling off is the other half of the consent: the user's calls stop being
-   *  offered here, and a call in flight ends rather than outliving the switch. */
-  test("ends the call when calling is turned off", async ({ page }) => {
+  /** A machine that stops taking calls takes the call with it: it stops being a device
+   *  the user's calls ring on, and a call in flight cannot outlive that. It is what the
+   *  app does as it shuts down, and the ending is one the user did not ask for — so it is
+   *  stated, once. */
+  test("ends the call when this machine stops taking calls", async ({ page }) => {
     await gotoApp(page);
     await openConversationNamed(page, "Ava Thompson");
     const conversationId = await page
@@ -246,17 +252,12 @@ test.describe("Audio calling", () => {
       "ringing",
     );
 
-    await page.locator('[data-testid="open-settings"]').click();
-    const toggle = page.locator('[data-testid="calling-toggle"]');
-    // The invite implied calling is on, which is the only state it could have arrived in.
-    await expect(toggle).toHaveAttribute("aria-checked", "true");
-    await toggle.click();
-    await expect(toggle).toHaveAttribute("aria-checked", "false");
+    await disableCalling(page);
 
     await expect(page.locator('[data-testid="call-bar"]')).toHaveCount(0);
     // This ending the user did not ask for, so it is stated once.
     const notice = page.locator('[data-testid="call-notice"]');
-    await expect(notice).toContainText("turned off");
+    await expect(notice).toContainText("stopped taking calls");
 
     // And then it GOES, without anybody dismissing it. As a card it had no timer at all:
     // `not connected` sat over the chat list until the next call was placed, which is the
@@ -300,28 +301,22 @@ test.describe("Joining a meeting", () => {
       "_blank",
     );
     await page.keyboard.press("Escape");
-    // The in-app join exists, and is refused while calling is off — the one case the
-    // user can fix.
+    // The in-app join is live, because this backend takes calls — there is no switch to
+    // find, and the event states the meeting it joins.
     const join = details.locator('[data-testid="meeting-join-here"]');
     await expect(join).toBeVisible();
+    await expect(join).toBeEnabled();
+    await expect(join).toHaveAttribute("aria-label", /Join this meeting/);
+
+    // And in a window whose backend does not take calls at all — a read-only one, or the
+    // second install — it stays, disabled, saying that rather than naming a switch.
+    await disableCalling(page);
     await expect(join).toBeDisabled();
-    await expect(join).toHaveAttribute("aria-label", /Settings/);
+    await expect(join).toHaveAttribute("aria-label", /cannot take calls/);
   });
 
   test("joins a meeting: the lobby, then the meeting, then who is in it", async ({ page }) => {
     await gotoApp(page);
-    // Turning calling on is the consent for this too: joining opens the microphone to
-    // everybody in the meeting.
-    await page.locator('[data-testid="open-settings"]').click();
-    await page.locator('[data-testid="calling-toggle"]').click();
-    await expect(page.locator('[data-testid="calling-toggle"]')).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
-    // Settings owns the detail pane while it is open, so leave it the way the user
-    // would before opening the calendar.
-    await page.goBack();
-    await expect(page.locator('[data-testid="settings-pane"]')).toHaveCount(0);
 
     await openCalendarTab(page);
     await openCalendarView(page, "day");
@@ -378,14 +373,6 @@ test.describe("Joining a meeting", () => {
     page,
   }) => {
     await page.goto("/");
-    await page.locator('[data-testid="open-settings"]').click();
-    await page.locator('[data-testid="calling-toggle"]').click();
-    await expect(page.locator('[data-testid="calling-toggle"]')).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
-    await page.goBack();
-    await expect(page.locator('[data-testid="settings-pane"]')).toHaveCount(0);
 
     await openCalendarTab(page);
     await openCalendarView(page, "day");
@@ -447,10 +434,6 @@ test.describe("Joining a meeting", () => {
    */
   test("sends the camera and the screen, and says so to every client", async ({ page }) => {
     await page.goto("/");
-    await page.locator('[data-testid="open-settings"]').click();
-    await page.locator('[data-testid="calling-toggle"]').click();
-    await page.goBack();
-    await expect(page.locator('[data-testid="settings-pane"]')).toHaveCount(0);
     await openCalendarTab(page);
     await openCalendarView(page, "day");
     await calendarEvent(page, "ev-overlap-a").click();
@@ -511,10 +494,6 @@ test.describe("Joining a meeting", () => {
    */
   test("says why a capture was refused, clear of the controls it is about", async ({ page }) => {
     await page.goto("/");
-    await page.locator('[data-testid="open-settings"]').click();
-    await page.locator('[data-testid="calling-toggle"]').click();
-    await page.goBack();
-    await expect(page.locator('[data-testid="settings-pane"]')).toHaveCount(0);
     await openCalendarTab(page);
     await openCalendarView(page, "day");
     await calendarEvent(page, "ev-overlap-a").click();
@@ -573,9 +552,6 @@ test.describe("Joining a meeting", () => {
    */
   test("releases a capture the meeting dropped, and says why it went off", async ({ page }) => {
     await page.goto("/");
-    await turnCallingOn(page);
-    await page.goBack();
-    await expect(page.locator('[data-testid="settings-pane"]')).toHaveCount(0);
     await openCalendarTab(page);
     await openCalendarView(page, "day");
     await calendarEvent(page, "ev-overlap-a").click();
@@ -759,7 +735,6 @@ test.describe("The call's own page", () => {
  *  a picture and a thread of its own — which is everything this page draws. */
 async function joinTheMeetingChat(page: import("@playwright/test").Page): Promise<void> {
   await gotoApp(page);
-  await turnCallingOn(page);
   await openConversationNamed(page, "Design Sync");
   await page.locator('[data-testid="meeting-join-here"]').click();
   await expect(page.locator('[data-testid="call-stage"]')).toHaveAttribute(

@@ -488,17 +488,20 @@ if ! sanctioned_automation; then
     # tooling would also cut a live `@claude` reply in half — the same failure
     # `teams-lite-service.sh update --now` is blocked for.
     #
-    # The `call_*` methods and `set_calling` are the sharpest entries in this list: a
-    # call RINGS a person. `call_place` starts a device buzzing in somebody's pocket,
-    # `call_accept` opens the user's own microphone to whoever is on the other end,
-    # `call_join` walks the user into a meeting, where everybody present sees them arrive,
-    # `call_hangup` ends the call for both of them, and `call_mute` states whether they
-    # can be heard. `set_calling` registers this machine with Teams as a device their
-    # calls ring on — so a script naming it could route the user's real calls to a
-    # client nobody is watching — and `call_prepare` reserves the one call slot and
-    # hands out the relay credentials the backend holds (OUTWARD_METHODS and
-    # MACHINE_METHODS in src/bin/server.rs). Reading `call_status` is not a write and is
-    # not listed.
+    # The `call_*` methods are the sharpest entries in this list: a call RINGS a person.
+    # `call_place` starts a device buzzing in somebody's pocket, `call_accept` opens the
+    # user's own microphone to whoever is on the other end, `call_join` walks the user into
+    # a meeting, where everybody present sees them arrive, `call_hangup` ends the call for
+    # both of them, and `call_mute` states whether they can be heard. `call_prepare`
+    # reserves the one call slot and hands out the relay credentials the backend holds
+    # (OUTWARD_METHODS and MACHINE_METHODS in src/bin/server.rs). Reading `call_status` is
+    # not a write and is not listed.
+    #
+    # `set_calling` is KEPT here although this app no longer has that method: calling is on
+    # by default now and no client turns it on or off (`calling_available`). A backend
+    # staged before that change is still listening on 19420 for weeks at a time, and it
+    # would still answer — so a script naming it could unregister the device the user's
+    # calls ring on, on the very install they are using.
     #
     # `set_person_name` and `set_person_avatar` write only to the local store too, and
     # are in the list because of WHAT they write: the name and the face this app puts on

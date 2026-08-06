@@ -15,13 +15,13 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
  * plane. It knows nothing about media, which is why "Answer" here is disabled and the
  * primary action opens the chat.
  *
- * It is the OTHER banner. When this machine is really being called — calling turned on,
- * an invite on the calling socket — `components/call-bar.tsx` draws that call with a
- * working Answer, and the awareness card for the same conversation is dropped: two cards
+ * It is the OTHER banner. When this machine is really being called — an invite on the
+ * calling socket — `components/call-bar.tsx` draws that call with a working Answer, and
+ * the awareness card for the same conversation is dropped: two cards
  * for one call, one of which says it cannot be answered, would be the app arguing with
  * itself. The awareness banner still covers every case the calling plane does not: a call
- * in a group chat, a channel meeting, a call that rang while calling was off, and a call
- * the user took on their phone.
+ * in a group chat, a channel meeting, a call that rang at a window whose backend does not
+ * take calls, and a call the user took on their phone.
  *
  * Fixed to the top-centre, under the call bar. Renders one card per ringing
  * conversation. Each is cleared by its backend `ended`/`missed`, a manual dismiss, or the

@@ -113,11 +113,13 @@ export type PublishedStream = {
 
 /** Everything `call_status` reports, and the payload of every `call_state` event. */
 export type CallStatus = {
-  /** Whether the user turned calling on. False on a read-only backend whatever the
-   *  store says. */
+  /** Whether this window's backend takes calls at all. True on the app the user
+   *  launched — it registers as a device their calls ring on, like every other Teams
+   *  client they are signed in on. False on the two backends that are a SECOND install:
+   *  a read-only one, and one carrying `TEAMS_LITE_CALLING=0`. There is no switch. */
   enabled: boolean;
   /** Whether a call could start right now: the calling connection is up and
-   *  registered. A switch that is on while this is false is honest about a connection
+   *  registered. A backend that calls while this is false is honest about a connection
    *  that has not come back yet. */
   ready: boolean;
   call: ActiveCall | null;
@@ -143,13 +145,13 @@ export type CallMediaSignal = {
 
 /** The status a client holds before the backend has answered.
  *
- *  Both flags are false on purpose. `enabled` false is what the backend defaults to,
- *  and `ready` false means no call can start — a hopeful `true` on either would tell
- *  the user their calls ring here while nothing is registered. */
+ *  Both flags are false on purpose: no call can start through a backend that has not
+ *  spoken yet, and a hopeful `true` on either would tell the user their calls ring here
+ *  while nothing is registered. The backend says otherwise within one round trip. */
 export const UNKNOWN_CALL_STATUS: CallStatus = { enabled: false, ready: false, call: null };
 
-/** Whether this app could place a call at all: the user turned it on, the connection is
- *  up, and no call is in flight (one at a time — one microphone). */
+/** Whether this app could place a call at all: this backend takes calls, the connection
+ *  is up, and no call is in flight (one at a time — one microphone). */
 export function canPlaceCall(status: CallStatus): boolean {
   return status.enabled && status.ready && !isLive(status.call);
 }
@@ -327,7 +329,9 @@ export function callEndLabel(call: ActiveCall | null): string {
     case "CallEndReasonReconnected":
       return "The connection moved, so the call ended.";
     case "CallEndReasonCallingTurnedOff":
-      return "Calling was turned off.";
+      // No switch says this any more: this machine stopped being a device calls ring on,
+      // which is what the app does as it shuts down.
+      return "This machine stopped taking calls.";
     default:
       return "The call ended.";
   }
@@ -363,8 +367,8 @@ function decodeURIComponentSafe(value: string): string {
   }
 }
 
-/** Whether a meeting could be joined right now: calling is on, the connection is up, and
- *  this machine is not already in a call.
+/** Whether a meeting could be joined right now: this backend takes calls, the connection
+ *  is up, and this machine is not already in a call.
  *
  *  The one-to-one rule does NOT apply — a meeting is many people by definition, and it is
  *  the service that mixes them. What still applies is one call at a time. */
@@ -373,9 +377,13 @@ export function canJoinMeeting(status: CallStatus): boolean {
 }
 
 /** Why a meeting cannot be joined right now, for the tooltip on a disabled Join button.
- *  Empty when it can. */
+ *  Empty when it can.
+ *
+ *  `enabled` false is no longer something the user can fix — there is no switch, so it
+ *  says what this window IS rather than what to go and turn on. It is a read-only backend
+ *  or a second install, and the app they launched is the one that joins. */
 export function meetingUnavailableReason(status: CallStatus): string {
-  if (!status.enabled) return "Turn calling on in Settings to join a meeting here.";
+  if (!status.enabled) return "This window cannot take calls, so it cannot join a meeting.";
   if (!status.ready) return "This machine is not registered for calls yet.";
   if (isLive(status.call)) return "This app holds one call at a time.";
   return "";
@@ -388,7 +396,7 @@ export function meetingUnavailableReason(status: CallStatus): string {
  *  call is possible in the first place ({@link conversationCallAction}) — a conversation
  *  nothing can be done with has no control to hang a reason off. */
 export function callUnavailableReason(status: CallStatus): string {
-  if (!status.enabled) return "Turn calling on in Settings to call from here.";
+  if (!status.enabled) return "This window cannot take calls, so it cannot place one.";
   if (!status.ready) return "This machine is not registered for calls yet.";
   if (isLive(status.call)) return "This app holds one call at a time.";
   return "";
