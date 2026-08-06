@@ -1455,6 +1455,21 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-sending-dark.png`, '[data-testid="call-video"]');
       await setTheme("light");
+
+      // 9. And what the app SAYS when one of those is refused. It is a transient notice
+      //    (web/src/lib/notice.ts), so the page shot is the one that matters: it shows the
+      //    notice above the card rather than over the button that hangs up. The refusal is
+      //    armed through the mock's own hook — the simulated camera never refuses, and the
+      //    service that would is a real tenant.
+      await emit({ kind: "call_media", refuse: true });
+      await page.locator('[data-testid="call-camera"]').click();
+      await page.waitForSelector('[data-testid="call-notice"]');
+      await page.waitForTimeout(500);
+      await shot(`${out}-notice-light.png`);
+      await shot(`${out}-notice-card-light.png`, '[data-testid="call-notice"]');
+      await setTheme("dark");
+      await shot(`${out}-notice-card-dark.png`, '[data-testid="call-notice"]');
+      await setTheme("light");
       await page.locator('[data-testid="call-hangup"]').click();
 
       console.log(
@@ -1465,7 +1480,8 @@ if (import.meta.main) {
           `${out}-meeting-chat-{light,dark,icon,card-light}.png and ` +
           `${out}-meeting-{actions-light,lobby-light,card-light,card-dark}.png and ` +
           `${out}-video-{light,page-light,dark}.png and ` +
-          `${out}-send-{off-light,on-light}.png and ${out}-sending-{light,dark}.png`,
+          `${out}-send-{off-light,on-light}.png and ${out}-sending-{light,dark}.png and ` +
+          `${out}-notice-{light,card-light,card-dark}.png`,
       );
     });
     process.exit(0);

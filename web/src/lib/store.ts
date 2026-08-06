@@ -93,7 +93,6 @@ import {
   type MeetingAddress,
 } from "./call";
 import {
-  MicrophoneUnavailableError,
   simulatedCallMedia,
   startCallMedia,
   type CallMedia,
@@ -101,6 +100,8 @@ import {
   type RemoteVideo,
   type SendKind,
 } from "./call-media";
+import { callFailureMessage } from "./call-failure";
+import { CALL_NOTICE, dismissNotice, showNotice } from "./notice";
 import { coalesce } from "./singleflight";
 import {
   requestRange,
@@ -320,14 +321,12 @@ export type AppState = {
    *  hopeful `enabled` would tell the user their calls ring here while nothing is
    *  registered. */
   callStatus: CallStatus;
-  /** Why the last call attempt failed, in words for the user — a refused microphone,
-   *  a conversation that cannot be called. Cleared when the next one starts. */
+  /** Why the CALLING SWITCH refused, drawn under that switch in Settings — and nowhere
+   *  else. It is state rather than a notice because it is the outcome of a control that
+   *  is still on screen, so it belongs beside it (Settings › Audio calls); everything a
+   *  CALL itself has to say is about a call that no longer exists, and goes out as a
+   *  transient notice instead (lib/notice.ts). */
   callError: string | null;
-  /** Why the last call ended, when it is worth saying — a call the user did not end
-   *  themselves. Its own field rather than a read of the ended call, because the call is
-   *  dropped the moment that frame is delivered: the backend hands out ONE frame with the
-   *  ending in it and then frees the slot. Cleared on its own after a few seconds. */
-  callNotice: string | null;
   /**
    * The video arriving on the call right now — a colleague's camera, a colleague's shared
    * screen. Empty whenever there is nothing to draw, which is most calls.
@@ -457,10 +456,6 @@ const TYPING_TIMEOUT_MS = 8000;
 // must not leave a banner ringing forever. Comfortably past Teams' own ring window.
 const CALL_RING_TIMEOUT_MS = 45_000;
 
-/** How long the line about a call that ended stays on screen. Long enough to read a
- *  sentence, short enough that nobody has to dismiss it. */
-const CALL_NOTICE_MS = 6_000;
-
 /** How long a fetched presence is trusted before the next person card refetches
  *  it. Short enough that a colleague who just joined a meeting reads as busy on
  *  the next hover, long enough that re-hovering the same name (or several
@@ -581,7 +576,6 @@ function initialState(): AppState {
     incomingCalls: [],
     callStatus: UNKNOWN_CALL_STATUS,
     callError: null,
-    callNotice: null,
     callVideo: [],
     callLocalVideo: [],
     callVideoNames: {},
@@ -1431,9 +1425,6 @@ export class TeamsController {
    *  it. Its observable half is `callStatus`. */
   private callMedia: CallMedia | null = null;
 
-  /** Drops the "why the call ended" line after {@link CALL_NOTICE_MS}. */
-  private callNoticeTimer: ReturnType<typeof setTimeout> | null = null;
-
   /** Fold one `call_state` frame in, and stop the microphone when the call is over.
    *
    *  This is the ONE place media is torn down, whichever side ended the call: our own
@@ -1444,30 +1435,26 @@ export class TeamsController {
     this.set({ callStatus: status });
     const call = status.call;
     if (!holdsMicrophone(call)) this.stopCallMedia();
-    if (isLive(call)) {
-      // A new call clears whatever the last one left on screen.
-      this.showCallNotice(null);
-      return;
-    }
-    // The ONE frame that says the call is over. Its reason is kept here because the
-    // slot is freed immediately afterwards — reading it off `callStatus` later would
-    // find nothing. An ending the user caused says nothing back at them.
-    if (call?.phase === "ended") this.showCallNotice(callEndLabel(call) || null);
+    // A live call says nothing, and — importantly — takes nothing back. Clearing the
+    // notice here looked right and was wrong: these frames arrive throughout a call (a
+    // roster, a renegotiation, a camera going on), so the first one after a refused
+    // capture erased the reason a beat after it appeared. What a new attempt leaves
+    // behind is taken back where that attempt STARTS, which is the only place that knows
+    // one is starting.
+    if (isLive(call)) return;
+    // The ONE frame that says the call is over. It is said here because the slot is freed
+    // immediately afterwards — reading the reason off `callStatus` later would find
+    // nothing. An ending the user caused says nothing back at them.
+    if (call?.phase === "ended") this.reportCall(callEndLabel(call), "report");
   }
 
-  /** Show (or clear) the one line about a call that ended, and drop it on its own.
-   *  A toast that stays is a toast the user has to dismiss. */
-  private showCallNotice(text: string | null): void {
-    if (this.callNoticeTimer) {
-      clearTimeout(this.callNoticeTimer);
-      this.callNoticeTimer = null;
-    }
-    this.set({ callNotice: text });
-    if (!text) return;
-    this.callNoticeTimer = setTimeout(() => {
-      this.callNoticeTimer = null;
-      this.set({ callNotice: null });
-    }, CALL_NOTICE_MS);
+  /** Say one thing about the call — why it ended, or why it did not happen.
+   *
+   *  It is a NOTICE and not state: by the time there is anything to say the call is
+   *  gone, so there is no surface of its own left to say it in, and a sentence that
+   *  nothing clears is a sentence that stays for ever. That is what this used to be. */
+  private reportCall(text: string, kind: "error" | "report"): void {
+    showNotice({ text, kind, id: CALL_NOTICE, testId: "call-notice" });
   }
 
   /** The far side's SDP. An ANSWER is what turns a ringing call into audio; an OFFER is
@@ -1648,7 +1635,6 @@ export class TeamsController {
     const media = this.callMedia;
     const call = this.get().callStatus.call;
     if (!media || !call) return;
-    this.set({ callError: null });
     try {
       const offer = on ? await media.startSending(kind) : await media.stopSending(kind);
       await this.publishSending(offer, `${on ? "start" : "stop"} ${kind}`);
@@ -1656,7 +1642,7 @@ export class TeamsController {
       // A refused camera is a decision, not a fault, so it is said in the user's words and
       // the call carries on. Whatever happened, the capture is released: `startSending`
       // stops its own tracks on the way out.
-      this.set({ callError: callErrorText(error) });
+      this.reportCall(callFailureMessage(error), "error");
       if (on) await media.stopSending(kind).catch(() => {});
     }
   }
@@ -1682,7 +1668,7 @@ export class TeamsController {
       if (result.answer_sdp) await media.setRemoteAnswer(result.answer_sdp);
     } catch (error) {
       console.error(`[call] could not ${what}`, error);
-      this.set({ callError: callErrorText(error) });
+      this.reportCall(callFailureMessage(error), "error");
       throw error;
     }
   }
@@ -1699,7 +1685,10 @@ export class TeamsController {
   }
 
   /** Turn calling on or off. The consent gate: ON registers this machine with Teams as
-   *  a device the user's calls ring on. */
+   *  a device the user's calls ring on.
+   *
+   *  A refusal here is the one that stays put: the switch that asked for it is still on
+   *  screen, so the reason is drawn under it rather than floated over the app. */
   async setCallingEnabled(enabled: boolean): Promise<void> {
     this.set({ callError: null });
     try {
@@ -1714,8 +1703,7 @@ export class TeamsController {
    *  offer. Every step is the user's own click — nothing here starts on its own. */
   async startCall(conversationId: string): Promise<void> {
     if (isLive(this.get().callStatus.call)) return;
-    this.set({ callError: null });
-    this.showCallNotice(null);
+    dismissNotice(CALL_NOTICE);
     let callId: string | null = null;
     try {
       const prepared = await this.backend.callPrepare({ conversation: conversationId });
@@ -1723,7 +1711,7 @@ export class TeamsController {
       this.callMedia = await this.openCallMedia({ iceServers: prepared.ice_servers });
       await this.backend.callPlace(prepared.call_id, this.callMedia.localSdp);
     } catch (error) {
-      this.set({ callError: callErrorText(error) });
+      this.reportCall(callFailureMessage(error), "error");
       this.stopCallMedia();
       // The backend reserved the call before the failure, so release it: a machine that
       // thinks it is dialling refuses the next call.
@@ -1743,8 +1731,7 @@ export class TeamsController {
    */
   async joinMeeting(meeting: MeetingAddress, subject?: string): Promise<void> {
     if (isLive(this.get().callStatus.call)) return;
-    this.set({ callError: null });
-    this.showCallNotice(null);
+    dismissNotice(CALL_NOTICE);
     let callId: string | null = null;
     try {
       const prepared = await this.backend.callPrepare({ meeting, subject });
@@ -1752,7 +1739,7 @@ export class TeamsController {
       this.callMedia = await this.openCallMedia({ iceServers: prepared.ice_servers });
       await this.backend.callJoin(prepared.call_id, meeting, this.callMedia.localSdp);
     } catch (error) {
-      this.set({ callError: callErrorText(error) });
+      this.reportCall(callFailureMessage(error), "error");
       this.stopCallMedia();
       if (callId) await this.hangUpCall();
       await this.refreshCallStatus();
@@ -1763,8 +1750,7 @@ export class TeamsController {
   async answerCall(): Promise<void> {
     const call = this.get().callStatus.call;
     if (!call || !call.can_accept) return;
-    this.set({ callError: null });
-    this.showCallNotice(null);
+    dismissNotice(CALL_NOTICE);
     try {
       const prepared = await this.backend.callPrepare({ callId: call.id });
       if (!prepared.offer_sdp) throw new Error("that call carried nothing to answer");
@@ -1774,7 +1760,7 @@ export class TeamsController {
       });
       await this.backend.callAccept(call.id, this.callMedia.localSdp);
     } catch (error) {
-      this.set({ callError: callErrorText(error) });
+      this.reportCall(callFailureMessage(error), "error");
       this.stopCallMedia();
       await this.hangUpCall();
     }
@@ -3911,19 +3897,6 @@ export class TeamsController {
     setCuesEnabled(enabled);
     if (enabled) playCue("ready");
   }
-}
-
-/** Why a call attempt failed, in words the user can act on.
- *
- *  A refused microphone is the one failure that is not a bug, and it is the common one:
- *  the browser asks once, the user says no, and every later call fails the same way
- *  until they change it in the site settings. So it gets its own sentence rather than a
- *  `NotAllowedError` the page would show verbatim. */
-function callErrorText(e: unknown): string {
-  if (e instanceof MicrophoneUnavailableError) {
-    return "teams-lite could not open the microphone. Allow it for this site, then try again.";
-  }
-  return errText(e);
 }
 
 function errText(e: unknown): string {

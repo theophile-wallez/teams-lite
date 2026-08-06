@@ -237,10 +237,27 @@ export async function emitCallInvite(page: Page, conversation: string): Promise<
   expect(res.ok()).toBeTruthy();
 }
 
-/** End any mock call and turn calling back off — the state a fresh backend is in. */
+/** End any mock call and turn calling back off — the state a fresh backend is in. It also
+ *  clears an armed media refusal, so `refuseNextCallMedia` needs no separate undo. */
 export async function resetCall(page: Page): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "call_invite", reset: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Make the next camera or screen the user turns on FAIL, once — the service refusing new
+ * media on a live call.
+ *
+ * It is the only reachable mid-call failure: `simulatedCallMedia` never refuses a capture,
+ * and the service that would is a real tenant. What it exercises is that the reason is
+ * SAID (it used to be swallowed — the card that carried it was drawn only while no call was
+ * live) and said clear of the card holding Hang up. Always finish with `resetCall`.
+ */
+export async function refuseNextCallMedia(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_media", refuse: true },
   });
   expect(res.ok()).toBeTruthy();
 }

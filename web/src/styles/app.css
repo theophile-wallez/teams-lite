@@ -141,6 +141,16 @@ html[data-virtual-keyboard-open] .composer-shell {
   padding-bottom: 0;
 }
 
+/* How far off the bottom a transient notice sits (components/app-toaster.tsx). The BASE
+ * clears the composer and the home indicator, which is the same inset the call bar takes
+ * — a card over the message box swallows the click that focuses it. `call-bar.tsx` then
+ * overrides `--notice-inset-bottom` with its own height while it draws a card, so a
+ * notice stacks above that card instead of over its controls. The base is a variable of
+ * its own so the reservation can add to it without spelling the inset twice. */
+:root {
+  --notice-inset-base: calc(6rem + env(safe-area-inset-bottom));
+}
+
 @layer base {
   html,
   body,

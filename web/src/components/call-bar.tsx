@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -41,10 +41,7 @@ import { Button } from "./ui/button";
  */
 export function CallBar() {
   const call = useAppState((s) => s.callStatus.call);
-  const error = useAppState((s) => s.callError);
-  // Why the last call ended, kept by the store: the call itself is dropped the moment
-  // that frame arrives, so the reason cannot be read off it afterwards.
-  const ended = useAppState((s) => s.callNotice);
+  const stack = useNoticeReservation();
 
   // Bottom, not top, and one place for both states. A connected call stays for
   // minutes, so a top-centre card would sit over the conversation's own header for the
@@ -54,22 +51,63 @@ export function CallBar() {
   // width, because a floating pill in a corner is a target nobody hits. It clears the
   // composer rather than resting on it: a card over the message box would swallow the
   // click that focuses it, and a call is not a reason to stop being able to type.
+  //
+  // Why a call ENDED, and why one failed, are not here any more: each is one sentence
+  // about a call that no longer exists, so each is a transient notice (lib/notice.ts).
+  // As a card it had no timer at all — `not connected` stayed over the chat list until
+  // the next call — and it was drawn only while NO call was live, which is exactly when
+  // a refused camera has something to say.
   return (
-    <div className="pointer-events-none fixed inset-x-3 bottom-24 z-[95] flex flex-col items-stretch gap-2 pb-[env(safe-area-inset-bottom)] sm:inset-x-auto sm:right-4 sm:items-end">
+    <div
+      ref={stack}
+      className="pointer-events-none fixed inset-x-3 bottom-24 z-[95] flex flex-col items-stretch gap-2 pb-[env(safe-area-inset-bottom)] sm:inset-x-auto sm:right-4 sm:items-end"
+    >
       {/* The picture, ABOVE the bar and outside its AnimatePresence: it comes and goes on
           its own timing — a screen starts and stops several times in one call — and the
           controls must not move when it does. */}
       <CallVideoStage />
       <AnimatePresence>
         {call && isLive(call) && <CallCard key="call" call={call} />}
-        {/* A failure the user did not cause, and an ending they did not ask for, each
-            get one line. An ordinary hangup says nothing: they were there. */}
-        {!isLive(call) && (error || ended) && (
-          <CallNotice key="notice" text={error ?? ended ?? ""} />
-        )}
       </AnimatePresence>
     </div>
   );
+}
+
+/** The gap between this stack and a notice above it — the column's own `gap-2`, so the
+ *  two read as one stack whether or not a call is up. */
+const NOTICE_GAP = 8;
+
+/**
+ * Keep a transient notice clear of whatever this stack is drawing.
+ *
+ * A notice is positioned by sonner and this column by CSS, so neither can lay the other
+ * out: the height travels between them as `--notice-inset-bottom` instead (the base inset
+ * lives in styles/app.css, and app-toaster.tsx reads the pair). Without it a camera the
+ * browser refused would put its sentence over the card holding Hang up.
+ *
+ * The CONTENT box is what is measured, so the stack's own safe-area padding is not counted
+ * twice — the base inset already carries it. An empty stack (no call, no picture) reports
+ * nothing and the notice falls back to that base.
+ */
+function useNoticeReservation() {
+  return useCallback((node: HTMLElement | null) => {
+    if (!node || typeof ResizeObserver === "undefined") return;
+    const root = document.documentElement;
+    const observer = new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height ?? 0;
+      root.style.setProperty(
+        "--notice-inset-bottom",
+        height > 0
+          ? `calc(var(--notice-inset-base) + ${Math.round(height) + NOTICE_GAP}px)`
+          : "var(--notice-inset-base)",
+      );
+    });
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+      root.style.removeProperty("--notice-inset-bottom");
+    };
+  }, []);
 }
 
 function CallCard(props: { call: ActiveCall }) {
@@ -248,21 +286,4 @@ function CallClock(props: { call: ActiveCall }) {
     return () => clearInterval(timer);
   }, []);
   return <span data-testid="call-duration">{callDurationLabel(props.call, now) || "In a call"}</span>;
-}
-
-function CallNotice(props: { text: string }) {
-  const reduce = useReducedMotion();
-  return (
-    <motion.p
-      data-testid="call-notice"
-      role="status"
-      initial={{ opacity: 0, y: reduce ? 0 : -6 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.18, ease: "easeOut" }}
-      className="pointer-events-auto rounded-xl border border-border bg-card px-3 py-2 text-xs text-text-dim shadow-pop sm:max-w-80"
-    >
-      {props.text}
-    </motion.p>
-  );
 }

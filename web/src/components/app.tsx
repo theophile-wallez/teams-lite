@@ -10,6 +10,7 @@ import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
 import { CallBar } from "./call-bar";
 import { IncomingCallBanner } from "./incoming-call-banner";
+import { AppToaster } from "./app-toaster";
 import { Splash } from "./splash";
 import { useChatSections } from "./use-chat-sections";
 import { TooltipProvider } from "./ui/tooltip";
@@ -265,6 +266,11 @@ function AppInner() {
           answer, the other is a note that a call happened somewhere. */}
       <CallBar />
       <IncomingCallBanner />
+
+      {/* Where a transient notice lands — one sentence about something that happened,
+          which leaves on its own (see lib/notice.ts). It sits above the call bar rather
+          than over it, and the bar reserves that room itself. */}
+      <AppToaster />
 
       {/* A repair restarts the backend on purpose, so the socket drops and the
           reconnect can outlast its 35 s give-up window. Telling the user the backend

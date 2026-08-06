@@ -996,6 +996,33 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   and the store's handler is the only place that stops the media. A path that released it
   somewhere else would eventually miss a case and leave the browser's recording indicator
   on for a call that does not exist.
+- **What a call has to SAY is a transient notice, and this app's only one**
+  (`web/src/lib/notice.ts`, drawn by `app-toaster.tsx` over `sonner`). Why a call ended for a
+  reason the user did not choose, why one never went out, why a capture was refused: by the
+  time there is anything to say the call is gone, so there is no surface of its own left to
+  say it in. It was a CARD before, and the card was wrong twice — it carried no timer at all,
+  so `not connected` sat over the user's chat list until they placed another call, and it was
+  drawn only while NO call was live, which is exactly when a refused camera has something to
+  say. Five rules hold it, and `web/e2e/calling.spec.ts` pins each:
+  - **It leaves on its own.** `NOTICE_MS` for a report of something that happened,
+    `ERROR_NOTICE_MS` for a failure — longer, because that is the one the user may have to
+    act on. Nothing here ever waits to be dismissed.
+  - **It sits ABOVE the call, never over it.** The call bar measures its own stack into
+    `--notice-inset-bottom` (the base inset is in `styles/app.css`), so a sentence about a
+    refused camera stacks over the card instead of over the button that hangs up — and both
+    clear the composer, for the reason the call bar already clears it.
+  - **A new attempt takes the old reason back, and a `call_state` frame never does.** Those
+    frames arrive all through a call — a roster, a renegotiation, a camera going on — so
+    clearing there erased a refusal a beat after it appeared. The dismiss lives where an
+    attempt STARTS, which is the only place that knows one is starting.
+  - **The words are the user's, not the socket's** (`web/src/lib/call-failure.ts`, the twin
+    of `send-failure.ts`): the RPC name the backend opens every refusal with is dropped, the
+    socket's `not connected` becomes what it costs the call, and a failure that carried no
+    words at all — the service answers `400` with an empty body — still says something.
+  - **Only a CALL comes through here.** A failed send stays at the composer and an approval
+    stays in the menu it was clicked in (§ Sending messages, § The trackers), and the write
+    lock, a broken sign-in and a pending update keep their banners and their row: each of
+    those is a STATE of the app, and a state that scrolls away is one nobody can check.
 - **The registration mimics the WEB client, not the desktop one.** `SkypeSpacesWeb_2.6`,
   TTL 3600, path = the bare surl, on a connection of its own to `calling_trouterUrl`
   (`trouter::Endpoint::calling`). The desktop client's `NGCallManagerWin` /
@@ -1025,8 +1052,11 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   microphone**, and the page pairs it with `simulatedCallMedia` because that backend
   announces itself as a mock. That is what makes this surface reviewable with nothing
   leaving the machine: `cd web && bun run preview -- --out /tmp/call --call` captures the
-  switch, the button, the ring and the bar, and `web/e2e/calling.spec.ts` pins every rule
-  above.
+  switch, the button, the ring, the bar and the notice, and `web/e2e/calling.spec.ts` pins
+  every rule above. A MID-CALL failure is reachable only through that mock's
+  `{kind:"call_media", refuse:true}` test hook, which refuses the NEXT capture and only that
+  one: the page's simulated camera never refuses, and the service that would is a real
+  tenant. A spec must reset afterwards — `call_invite {reset:true}` clears it with the rest.
 - **There is no sanctioned live call.** Unlike a send, a call has NO pre-authorized
   target: the sandbox chat is a group thread, and ringing it would ring real people. A
   live test is the user's own click, on their own machine, to somebody who agreed to it

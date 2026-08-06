@@ -6,6 +6,7 @@ import {
   openCalendarTab,
   openCalendarView,
   openConversationNamed,
+  refuseNextCallMedia,
   resetCall,
   test,
 } from "./helpers";
@@ -243,9 +244,24 @@ test.describe("Audio calling", () => {
 
     await expect(page.locator('[data-testid="call-bar"]')).toHaveCount(0);
     // This ending the user did not ask for, so it is stated once.
-    await expect(page.locator('[data-testid="call-notice"]')).toContainText("turned off");
+    const notice = page.locator('[data-testid="call-notice"]');
+    await expect(notice).toContainText("turned off");
+
+    // And then it GOES, without anybody dismissing it. As a card it had no timer at all:
+    // `not connected` sat over the chat list until the next call was placed, which is the
+    // whole reason a notice is a notice and not state (web/src/lib/notice.ts).
+    await expect(notice).toHaveCount(0, { timeout: NOTICE_GONE_MS });
   });
+
 });
+
+/** Long enough for the slowest notice (`ERROR_NOTICE_MS`) plus its exit, short enough
+ *  that a notice which never left still fails this. */
+const NOTICE_GONE_MS = 15_000;
+
+/** How long a notice takes to slide in and stop moving — sonner's own 400ms transition,
+ *  plus a frame. Well inside the notice's life, so a box read after it is the settled one. */
+const NOTICE_SETTLE_MS = 450;
 
 test.describe("Joining a meeting", () => {
   test.afterEach(async ({ page }) => {
@@ -460,5 +476,62 @@ test.describe("Joining a meeting", () => {
     // Leaving takes every preview with it, and releases every capture.
     await page.locator('[data-testid="call-hangup"]').click();
     await expect(page.locator('[data-testid="call-video-local"]')).toHaveCount(0);
+  });
+
+  /**
+   * A capture the service REFUSES, mid-call. Two things about it, and the card this notice
+   * replaced got both wrong: it was drawn only while no call was live, so a mid-call
+   * refusal was the one failure nobody was ever told about — and wherever the reason goes
+   * now, it must not land on the card that holds Hang up.
+   */
+  test("says why a capture was refused, above the call rather than over it", async ({ page }) => {
+    await page.goto("/");
+    await page.locator('[data-testid="open-settings"]').click();
+    await page.locator('[data-testid="calling-toggle"]').click();
+    await page.goBack();
+    await expect(page.locator('[data-testid="settings-pane"]')).toHaveCount(0);
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+    await calendarEvent(page, "ev-overlap-a").click();
+    await page.locator('[data-testid="meeting-join-here"]').click();
+
+    const bar = page.locator('[data-testid="call-bar"]');
+    await expect(bar).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    const camera = page.locator('[data-testid="call-camera"]');
+    await expect(camera).toBeVisible();
+
+    await refuseNextCallMedia(page);
+    await camera.click();
+
+    const notice = page.locator('[data-testid="call-notice"]');
+    await expect(notice).toContainText("refused");
+    // In the service's own words, minus the RPC name it opens them with — that is written
+    // for whoever holds the socket, and it reads as a fault code here (lib/call-failure.ts).
+    await expect(notice).not.toContainText("call_offer_media");
+
+    // WHERE it lands, measured rather than read off a class list: the notice comes to rest
+    // ABOVE the whole call stack, so its bottom edge is at or over that stack's top one.
+    //
+    // Measured once, and FIRST, because a notice does not stay: it slides in, waits out
+    // `ERROR_NOTICE_MS` and slides back out, so a box read late is one of a notice leaving
+    // and a box read after that is no box at all. One settle, then one measurement.
+    await expect(notice).toHaveAttribute("data-mounted", "true");
+    await page.waitForTimeout(NOTICE_SETTLE_MS);
+    const noticeBox = await notice.boundingBox();
+    const stackBox = await page.locator('[data-testid="call-video"]').boundingBox();
+    expect(noticeBox).toBeTruthy();
+    expect(stackBox).toBeTruthy();
+    expect(noticeBox!.y + noticeBox!.height).toBeLessThanOrEqual(stackBox!.y + 1);
+
+    // The meeting is untouched: a picture that could not go out is no reason to end it, and
+    // the capture was released rather than left running behind a button that says off.
+    await expect(bar).toHaveAttribute("data-phase", "connected");
+    await expect(camera).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator('[data-testid="call-video-local"]')).toHaveCount(0);
+
+    // And the click after it works: ONE refusal, so the surface is seen recovering.
+    await camera.click();
+    await expect(camera).toHaveAttribute("aria-pressed", "true");
+    await page.locator('[data-testid="call-hangup"]').click();
   });
 });

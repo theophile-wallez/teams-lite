@@ -3228,6 +3228,10 @@ let mockCall: MockCall | null = null;
 /** Timers of a simulated call, cleared on every ending so a reused mock cannot let an
  *  old call finish connecting inside a later spec. */
 let mockCallTimers: ReturnType<typeof setTimeout>[] = [];
+/** Armed by the `{kind:"call_media", refuse:true}` test hook: the NEXT `call_offer_media`
+ *  is refused, and only that one. It is what makes a mid-call failure reviewable — the
+ *  page's simulated camera never refuses, and the service that would is a real tenant. */
+let mockRefusesNextMedia = false;
 
 function mockCallStatus(): { enabled: boolean; ready: boolean; call: MockCall | null } {
   return {
@@ -5362,6 +5366,12 @@ function dispatch(method: string, params: unknown): unknown {
         }
       }
       if (!mockCall || mockCall.id !== callId) throw new Error("call_offer_media: no such call");
+      // Armed by the `{kind:"call_media", refuse:true}` test hook, and spent here: one
+      // refusal, so the click after it works and the surface is seen recovering.
+      if (mockRefusesNextMedia) {
+        mockRefusesNextMedia = false;
+        throw new Error("call_offer_media: the service refused this media offer");
+      }
       if (mockCall.phase !== "connected") {
         throw new Error(
           "call_offer_media: this call is not connected yet — the service refuses new media " +
@@ -6123,10 +6133,20 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // `call_invite`, not `call`: that kind is the AWARENESS signal below (the
     // after-the-fact chat event), and the two are different things — one is a call this
     // machine can answer, the other is a note that a call happened.
+    // Make the next capture the user asks for FAIL, once — the service refusing new media
+    // mid-call. It is the only way to see what a mid-call failure does to this surface: the
+    // page's simulated media never refuses, and a real refusal needs a real tenant. A spec
+    // MUST reset afterwards (`call_invite {reset:true}` clears it), since one mock process
+    // serves the whole run.
+    if (body.kind === "call_media" && body.refuse === true) {
+      mockRefusesNextMedia = true;
+      return Response.json({ ok: true, refuse: true }, { status: 200 });
+    }
     if (body.kind === "call_invite") {
       if (body.reset === true) {
         endMockCall("CallEndReasonHangup");
         mockCallingEnabled = false;
+        mockRefusesNextMedia = false;
         broadcastMockCall();
         return Response.json({ ok: true, reset: true }, { status: 200 });
       }
