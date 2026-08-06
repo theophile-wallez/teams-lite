@@ -1770,6 +1770,21 @@ joins alone and waits for an offer. Six rules hold it together, and
   not optional, and an empty answer means say nothing rather than offer no codec at all), and
   `LocalSenders.addVideoSection` is the ONE place a section is created, so the list cannot be
   forgotten on one of the two paths.
+- **A colleague's video was never drawable, and TWO named refusals were in the way.** Both were
+  found by driving a real meeting with a real second participant sharing
+  (`bun run join-live -- --share`), and each one names itself — which is the whole reason to
+  prefer a refusal over a hypothesis:
+  - **Chrome threw the service's own offer out.** `InvalidAccessError … A BUNDLE group contains a
+    codec collision for header extension id=3. The id must be the same across all bundled media
+    descriptions` — the service gives one header-extension id two meanings across the sections of
+    one bundle. `fromMsSdp` therefore makes the offer CONSISTENT before Chrome sees it: every URI
+    keeps the first id it was given, and a URI whose id is taken moves to the lowest free one.
+    Dropping the clashing line instead was tried and moved the problem — Chrome then numbered the
+    extension differently per section in its ANSWER and the service refused that.
+  - **The service threw our answer out.** `SdpParsingFailure`, with no line named. The cause was
+    a section the browser had REJECTED: this app sent Chrome's whole description for it, and the
+    client's own transform writes a stub — `m=<kind> 0 RTP/SAVP 34` with its mid and its label and
+    nothing else (`Kn(e) = e.port === 0`). With the stub, the call survives the renegotiation.
 - **Every section states its SSRCs as `a=x-ssrc-range`**, added beside the browser's own
   `a=ssrc:` lines rather than replacing them — which is what the captured client offer does
   (NATIVE-CALLING.md § 2.5) and what the service does on every section of its own. Audio is

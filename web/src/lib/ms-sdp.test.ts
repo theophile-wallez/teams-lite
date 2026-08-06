@@ -119,20 +119,53 @@ describe("toMsSdp", () => {
     expect(out).toContain("a=msid-semantic: WMS *");
   });
 
-  it("leaves a REJECTED section its own port and describes no transport for it", () => {
-    // Zero is the whole statement. Giving it the bundle's port would claim a transport for a
-    // stream that does not exist.
+  it("writes a REJECTED section as the stub the client writes", () => {
+    // `Kn(e) = e.port === 0` in the client's own transform: every key but the kind, the port,
+    // the profile, the payloads, the mid and the label is deleted, and the payload list becomes
+    // `34`. Sending Chrome's whole description for a section it had rejected earned
+    // `SdpParsingFailure` and ended the call a second after the answer went out.
     const withRejected = [
       CHROME_OFFER,
-      "m=video 0 UDP/TLS/RTP/SAVPF 107",
+      "m=x-data 0 UDP/TLS/RTP/SAVPF 0",
       "c=IN IP4 0.0.0.0",
-      "a=mid:1",
-      "a=inactive",
+      "a=rtcp:9 IN IP4 0.0.0.0",
+      "a=ice-options:trickle",
+      "a=setup:active",
+      "a=mid:4",
+      "a=rtcp-mux",
       "",
     ].join("\r\n");
-    const out = toMsSdp(withRejected);
-    expect(out).toContain("m=video 0 RTP/SAVP 107");
-    expect(out).not.toContain("m=video 51234");
+    const out = toMsSdp(withRejected, new Map([["4", "data"]])).split("\r\n");
+    const at = out.findIndex((line) => line.startsWith("m=x-data"));
+    expect(at).toBeGreaterThan(-1);
+    expect(out[at]).toBe("m=x-data 0 RTP/SAVP 34");
+    // Its mid and its label, and NOTHING else — the section ends where the description does.
+    expect(out.slice(at + 1).filter((line) => line !== "")).toEqual([
+      "a=mid:4",
+      "a=label:data",
+    ]);
+  });
+
+  it("keeps a live section whole while stubbing the rejected one beside it", () => {
+    // The stub rule must not reach a section that carries anything: the codecs, the direction
+    // and the transport of a live one are the whole point of the description.
+    const mixed = [
+      CHROME_OFFER,
+      "m=video 9 UDP/TLS/RTP/SAVPF 107",
+      "c=IN IP4 0.0.0.0",
+      "a=mid:3",
+      "a=recvonly",
+      "a=rtpmap:107 H264/90000",
+      "m=x-data 0 UDP/TLS/RTP/SAVPF 0",
+      "c=IN IP4 0.0.0.0",
+      "a=mid:4",
+      "",
+    ].join("\r\n");
+    const out = toMsSdp(mixed).split("\r\n");
+    expect(out).toContain("m=video 51234 RTP/SAVP 107");
+    expect(out).toContain("a=rtpmap:107 H264/90000");
+    expect(out).toContain("a=recvonly");
+    expect(out).toContain("m=x-data 0 RTP/SAVP 34");
   });
 
   it("says nothing new when no section carries a candidate", () => {
@@ -439,5 +472,133 @@ describe("toMsSdp: the SSRC range", () => {
     ].join("\r\n");
     const out = lines(toMsSdp(sdp)).filter((l) => l.startsWith("a=x-ssrc-range:"));
     expect(out).toEqual(["a=x-ssrc-range:9-9"]);
+  });
+});
+
+// The header extensions a BUNDLE may carry. Chrome refuses a whole description whose bundled
+// sections give one id two meanings — "A BUNDLE group contains a codec collision for header
+// extension id=3. The id must be the same across all bundled media descriptions" — and this
+// service really does that on the renegotiation that carries a colleague's shared screen
+// (measured 2026-08-06). Losing an extension costs a little quality; losing the description
+// costs the picture.
+
+describe("fromMsSdp: header extensions across a bundle", () => {
+  const offer = (...media: string[]) =>
+    ["v=0", "t=0 0", "a=group:BUNDLE 0 3", ...media, ""].join("\r\n");
+
+  it("moves a clashing extension to a free id rather than dropping it", () => {
+    // Dropping it was the first fix and it moved the problem: with the extension gone from one
+    // section Chrome numbered it freely in its ANSWER — id 2 on audio, id 1 on video — and the
+    // service refused THAT with `SdpParsingFailure`. Both measured against the tenant.
+    const out = fromMsSdp(
+      offer(
+        "m=audio 3478 RTP/SAVP 111",
+        "a=mid:0",
+        "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+        "m=video 3481 RTP/SAVP 107",
+        "a=mid:3",
+        "a=extmap:3 urn:3gpp:video-orientation",
+      ),
+    ).split("\r\n");
+    // Both survive, on different ids.
+    const declared = out.filter((line) => line.startsWith("a=extmap:"));
+    expect(declared.length).toBe(2);
+    const ids = declared.map((line) => line.slice("a=extmap:".length).split(" ")[0]);
+    expect(new Set(ids).size).toBe(2);
+    // The first one keeps the id it asked for; the second takes the lowest free one.
+    expect(out).toContain(
+      "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+    );
+    expect(out).toContain("a=extmap:1 urn:3gpp:video-orientation");
+  });
+
+  it("gives one extension ONE id across every section it appears on", () => {
+    // The rule Chrome states: "The id must be the same across all bundled media descriptions."
+    const out = fromMsSdp(
+      offer(
+        "m=audio 3478 RTP/SAVP 111",
+        "a=mid:0",
+        "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+        "m=video 3481 RTP/SAVP 107",
+        "a=mid:3",
+        "a=extmap:7 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+      ),
+    ).split("\r\n");
+    const ids = out
+      .filter((line) => line.includes("abs-send-time"))
+      .map((line) => line.slice("a=extmap:".length).split(" ")[0]);
+    expect(ids).toEqual(["2", "2"]);
+  });
+
+  it("never leaves one id meaning two things", () => {
+    const out = fromMsSdp(
+      offer(
+        "m=audio 3478 RTP/SAVP 111",
+        "a=mid:0",
+        "a=extmap:3 urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+        "m=video 3481 RTP/SAVP 107",
+        "a=mid:3",
+        "a=extmap:3 urn:3gpp:video-orientation",
+        "a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid",
+      ),
+    ).split("\r\n");
+    const byId = new Map<string, Set<string>>();
+    for (const line of out.filter((l) => l.startsWith("a=extmap:"))) {
+      const rest = line.slice("a=extmap:".length);
+      const at = rest.indexOf(" ");
+      const id = rest.slice(0, at).split("/")[0]!;
+      const uri = rest.slice(at + 1);
+      byId.set(id, (byId.get(id) ?? new Set()).add(uri));
+    }
+    for (const [id, uris] of byId) expect(uris.size, `id ${id}`).toBe(1);
+  });
+
+  it("keeps the SAME extension repeated on every section", () => {
+    // Agreeing sections are the normal case and must be left alone: an extension declared
+    // identically on each is exactly what the bundle rule asks for.
+    const out = fromMsSdp(
+      offer(
+        "m=audio 3478 RTP/SAVP 111",
+        "a=mid:0",
+        "a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid",
+        "m=video 3481 RTP/SAVP 107",
+        "a=mid:3",
+        "a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid",
+      ),
+    ).split("\r\n");
+    expect(out.filter((line) => line.startsWith("a=extmap:4 ")).length).toBe(2);
+  });
+
+  it("reads an id with a direction suffix as the same id", () => {
+    // `a=extmap:3/sendonly <uri>` is id 3. Reading it as a different one would let the very
+    // collision this exists to stop straight through.
+    const out = fromMsSdp(
+      offer(
+        "m=audio 3478 RTP/SAVP 111",
+        "a=mid:0",
+        "a=extmap:3 urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+        "m=video 3481 RTP/SAVP 107",
+        "a=mid:3",
+        "a=extmap:3/sendonly urn:3gpp:video-orientation",
+      ),
+    ).split("\r\n");
+    expect(out.filter((line) => line.startsWith("a=extmap:3")).length).toBe(1);
+  });
+
+  it("resolves the MS spelling before it compares", () => {
+    // The service writes two URIs with backslashes. Restored first, they are the SAME extension
+    // as the slashed form — so comparing before the rewrite would drop a line that agreed.
+    const uri = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
+    const out = fromMsSdp(
+      offer(
+        "m=audio 3478 RTP/SAVP 111",
+        "a=mid:0",
+        `a=extmap:2 ${uri}`,
+        "m=video 3481 RTP/SAVP 107",
+        "a=mid:3",
+        `a=extmap:2 ${uri.replace(/\//g, "\\")}`,
+      ),
+    ).split("\r\n");
+    expect(out.filter((line) => line === `a=extmap:2 ${uri}`).length).toBe(2);
   });
 });

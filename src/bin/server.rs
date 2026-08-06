@@ -4384,6 +4384,14 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
             }
             eprintln!("[calling] answered a media renegotiation: modalities={modalities:?}");
+            // The whole structure of what was posted. The service refuses an answer with
+            // `SdpParsingFailure` and names no line, so this is the only way to see which one
+            // it means. Keys, candidates and SSRCs are dropped (`calling::sdp_structure`).
+            if std::env::var("TEAMS_LITE_SDP_DEBUG").is_ok() {
+                for line in calling::sdp_structure(&answer.blob) {
+                    eprintln!("[sdp] {line}");
+                }
+            }
             Ok(json!({ "call_id": call_id }))
         }
 

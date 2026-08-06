@@ -854,6 +854,31 @@ pub fn content_sharing_leave_payload(local: &LocalParticipant, callbacks: &Callb
     })
 }
 
+/// Every line of an SDP that is not a key, an address or a candidate — for a refusal that
+/// names no line.
+///
+/// The service answers `SdpParsingFailure` and says nothing else, so the only way forward is
+/// to read what was really posted. It prints the STRUCTURE: `v=`, `o=` reduced to its shape,
+/// the session attributes, and each section's own lines — with every candidate, fingerprint,
+/// ICE credential and SSRC dropped, which is the discipline `web/scripts/join-live.ts` follows
+/// for the same reason.
+pub fn sdp_structure(sdp: &str) -> Vec<String> {
+    const SECRET: [&str; 7] = [
+        "a=candidate:",
+        "a=fingerprint:",
+        "a=ice-pwd:",
+        "a=ice-ufrag:",
+        "a=ssrc:",
+        "a=x-candidate-ipv6:",
+        "o=",
+    ];
+    sdp.lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty() && !SECRET.iter().any(|p| line.starts_with(p)))
+        .map(String::from)
+        .collect()
+}
+
 /// A media OFFER the service made mid-call, and where to answer it.
 ///
 /// **This is how a shared screen arrives, and it arrives unprompted.** Measured: ~9 s into

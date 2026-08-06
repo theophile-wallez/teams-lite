@@ -254,6 +254,9 @@ export type JoinLiveSession = {
   share: (holdMs?: number) => Promise<{ pressed: boolean; sending: string[] }>;
   /** OUR OWN offer, section by section — see {@link readLocalOffer}. */
   localOffer: () => Promise<string[]>;
+  /** Every description this side APPLIED, whole. For reading a refusal that names no line:
+   *  the caller strips what must not be printed. */
+  rawDescriptions: () => Promise<Array<{ type: string; sdp: string }>>;
 };
 
 /**
@@ -474,6 +477,10 @@ export async function withJoinLive<T>(
       signals: () => readSignals(page as Page),
       share: (holdMs = SHARE_HOLD_MS) => shareTheScreen(page as Page, holdMs),
       localOffer: () => readLocalOffer(page as Page),
+      rawDescriptions: () =>
+        (page as Page).evaluate("window.__tlOffers || []") as Promise<
+          Array<{ type: string; sdp: string }>
+        >,
     };
     return await body(session);
   } finally {

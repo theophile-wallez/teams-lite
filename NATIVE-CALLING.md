@@ -1192,6 +1192,32 @@ attempt cost.
   `StartScreenSharing waitFor: "_UpdateMediaDescriptions"`, the `updateMediaDescriptions` link
   from `executeNegotiation`'s other branch, which changes media DESCRIPTIONS with no SDP
   renegotiation at all. That is the next thing to build, and it is the last one.
+- **RECEIVING was blocked by two refusals, both now named and both now fixed** (2026-08-06,
+  driven against the pinned meeting with the user sharing from real Teams):
+
+  1. **Chrome refused the service's renegotiation offer**, so the section carrying a colleague's
+     screen never reached a `track` event and the stage drew nothing:
+
+         InvalidAccessError: Failed to set remote offer sdp: A BUNDLE group contains a codec
+         collision for header extension id=3. The id must be the same across all bundled media
+         descriptions
+
+     The service declares one extension id with different URIs on different sections of one
+     bundle. `fromMsSdp` now canonicalises them: first id per URI wins, a URI whose id is taken
+     moves to the lowest free one. **Dropping the clashing line was tried first and was worse** —
+     Chrome then chose its own ids per section in the ANSWER (id 2 on audio, id 1 on video) and
+     the service refused that with `SdpParsingFailure`.
+  2. **The service refused our answer**, ending the call a second after it went out, with
+     `SdpParsingFailure` and no line named. The cause was the `x-data` section the browser had
+     REJECTED: this app sent Chrome's whole description for it. The client's own transform writes
+     a STUB for a port-0 section — `Kn(e) = e.port === 0`, which deletes every key but the kind,
+     port, profile, payloads, mid and label and sets the payloads to `34`. With the stub the call
+     stays up through the renegotiation for as long as it is held.
+
+  So both ends of the receive path are open for the first time: Chrome accepts the offer, and the
+  service accepts the answer. **A TILE has still not been seen**, because the second participant
+  had left by the time the last refusal was fixed — that is one more run with somebody sharing,
+  and nothing else.
 - Three specific unknowns remain, and the refusal above narrowed none of them:
   - **Whether a `contentSharing` session is needed at all.** § 10.4 says the client opens one,
     with six links and a presenter. But no participant in the measured roster carried a
