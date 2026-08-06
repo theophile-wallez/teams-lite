@@ -638,6 +638,9 @@ type ConvState = {
 const store = new Map<string, ConvState>();
 /** Insertion order preserved so the seed is reproducible; sidebar sorts by time. */
 const order: string[] = [];
+/** The conversations whose sidebar time never moves again, so their place in that sort is a
+ *  constant for the whole run. Filled by {@link addFixtureConversation}, which says why. */
+const frozenSidebarTime = new Set<string>();
 
 /** A channel mirrors ConvState but tracks a `Channel` summary instead of a
  *  `Conversation`; its messages reuse the shared pipeline (see {@link threadFor}). */
@@ -799,7 +802,11 @@ function systemEventSidebarLabel(event: SystemEvent): string {
 function recomputeSummary(cs: ConvState): void {
   const last = cs.messages.at(-1);
   if (!last) return;
-  cs.conv.last_message_time = last.compose_time;
+  // A FIXTURE thread keeps the time its seed gave it, whatever a spec posts into it, so its
+  // place in the sidebar is a constant for the whole run — see `addFixtureConversation` for
+  // what that protects. Everything else about the summary still follows the newest message:
+  // what breaks other specs is the ORDER, not the words in the row.
+  if (!frozenSidebarTime.has(cs.conv.id)) cs.conv.last_message_time = last.compose_time;
   cs.conv.last_message_preview = last.system_event
     ? systemEventSidebarLabel(last.system_event)
     : previewOf(last.content);
@@ -1860,9 +1867,19 @@ function pusher(convId: string, base: number, messages: ChatMessage[]) {
   };
 }
 
-/** Register a fixture conversation from an already-built message list. Dated in the
- *  past by its caller so it never sorts to the top of the sidebar; specs reach it
- *  by name through the command palette. */
+/** Register a fixture conversation from an already-built message list. Dated in the past by
+ *  its caller so it never sorts to the top of the sidebar; specs reach it by name through
+ *  the command palette.
+ *
+ *  And it STAYS down there, because its sidebar time is frozen at what the seed computed
+ *  (`frozenSidebarTime`). One mock process serves the whole run and the sidebar sorts by
+ *  recency, so a spec that SENDS into its own fixture would otherwise make that fixture
+ *  conversation number 0 for every spec that follows — and ~90 places open
+ *  `openConversationAt(page, 0)` meaning "a chat I can send into". `custom-emoji.spec.ts`
+ *  sends six messages into its thread and did exactly that, which turned reactions.spec.ts
+ *  red. Freezing it here rather than cleaning up afterwards is what makes the promise above
+ *  hold for what a spec does as well as for what the seed wrote: there is no discipline for
+ *  the next feature fixture to remember. */
 function addFixtureConversation(convId: string, name: string, messages: ChatMessage[]): void {
   const conv: Conversation = {
     id: convId,
@@ -1881,7 +1898,10 @@ function addFixtureConversation(convId: string, name: string, messages: ChatMess
     draft: "",
   };
   const cs: ConvState = { conv, messages, participants: [PEOPLE[0]!] };
+  // The seed's own date first, then the freeze — in that order, or the row would keep the
+  // zero above and a sidebar built for review would show 1970 under every fixture.
   recomputeSummary(cs);
+  frozenSidebarTime.add(convId);
   store.set(convId, cs);
   order.push(convId);
 }
@@ -2358,7 +2378,8 @@ function seedAgentSandbox(): void {
  *  sandbox, which is a conversation three other spec files already assert on — and the emoji
  *  feature has no business changing what those see, nor what a deep link into a seeded
  *  thread has to scroll past. `custom-emoji.spec.ts` sends here too, so the six messages it
- *  posts land where nothing else looks. */
+ *  posts land where nothing else looks — and, because this is a fixture, they do not move
+ *  the thread in the sidebar either (see `addFixtureConversation`). */
 function seedCustomEmojiThread(): void {
   const convId = "19:custom-emoji-demo@thread.v2";
   const base = Date.now() - 21 * 24 * 60 * 60_000;

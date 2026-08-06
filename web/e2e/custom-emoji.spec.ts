@@ -19,7 +19,11 @@ import type { Locator, Page } from "@playwright/test";
  * Everything happens in the "Custom Emoji" thread, which the mock seeds for this feature
  * alone (`seedCustomEmojiThread` in web/mock/server.ts): it carries the colleague's message
  * with real inline emoji markup that rules 2 and 3 need, and it is the one thread no other
- * spec asserts on — so the six messages these tests send perturb nothing.
+ * spec asserts on. The six messages these tests send perturb nothing for a second reason
+ * too, and it is not this file's doing: a fixture thread's sidebar time is frozen at its
+ * seed, so posting here cannot lift it above the chat that `openConversationAt(page, 0)`
+ * means in ~90 other places. That it CAN is how this spec once turned reactions.spec.ts red
+ * — see `addFixtureConversation`.
  *
  * `afterEach` puts the pack back to what a fresh mock seeds: one mock process serves the
  * whole run, so a pack left changed would move every later spec's picker and composer.
