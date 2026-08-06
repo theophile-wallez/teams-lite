@@ -3303,6 +3303,15 @@ let mockCallTimers: ReturnType<typeof setTimeout>[] = [];
  *  is refused, and only that one. It is what makes a mid-call failure reviewable — the
  *  page's simulated camera never refuses, and the service that would is a real tenant. */
 let mockRefusesNextMedia = false;
+/** The content-sharing session this mock has granted, if any. A share asks for one before it
+ *  offers a section, and asking twice is refused exactly as the Rust backend refuses it —
+ *  which is what makes "the session is given back on every ending" a rule a spec can hold the
+ *  app to rather than a sentence in a comment. */
+let mockSharingSession: string | null = null;
+/** The ORDER the sharing calls arrived in, for the one rule a spec cannot read off the screen:
+ *  the modality is asked for BEFORE the section is offered. A meeting rejects a section from an
+ *  endpoint that never asked, so an app that offered first would look right and share nothing. */
+let mockSharingOrder: string[] = [];
 /** Armed by the `{kind:"call_start", hold:"prepare"|"place"}` test hook: that ONE step of
  *  the next start answers late, and only that one.
  *
@@ -3345,6 +3354,10 @@ function clearMockCallTimers(): void {
  *  the Rust backend emits, so the page releases its (simulated) microphone. */
 function endMockCall(reason: string): void {
   clearMockCallTimers();
+  // The session goes with the call: the meeting's presenter cannot outlive the meeting, and a
+  // session left behind would refuse the first share of the NEXT call in a shared mock.
+  mockSharingSession = null;
+  mockSharingOrder = [];
   if (!mockCall) return;
   mockCall = { ...mockCall, phase: "ended", end_reason: reason, can_accept: false, can_hangup: false };
   broadcastMockCall();
@@ -6113,6 +6126,11 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         }
       }
       if (!mockCall || mockCall.id !== callId) throw new Error("call_offer_media: no such call");
+      // The ORDER, for the rule no screen can show: the session is asked for before the
+      // section is offered.
+      if (Array.isArray(o.sending) && o.sending.includes("screen")) {
+        mockSharingOrder.push("offer_media");
+      }
       // Armed by the `{kind:"call_media", refuse:true}` test hook, and spent here: one
       // refusal, so the click after it works and the surface is seen recovering.
       if (mockRefusesNextMedia) {
@@ -6144,6 +6162,29 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       if (typeof o.source_id !== "number") throw new Error("call_subscribe: source_id is required");
       if (!mockCall || mockCall.id !== callId) throw new Error("call_subscribe: no such call");
       return { call_id: callId, source_id: o.source_id };
+    }
+
+    // The meeting's content-sharing session: a screen share asks for one before it offers a
+    // section, because a meeting shows ONE screen at a time and the service rejects a section
+    // from an endpoint that never asked. Reproduced so the ORDER is reviewable — the modality
+    // first, the media after it — with no tenant and no presenter.
+    case "call_start_sharing": {
+      const callId = requireString(params, "call_id");
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_start_sharing: no such call");
+      if (mockSharingSession) {
+        throw new Error("call_start_sharing: this call already holds a sharing session");
+      }
+      mockSharingSession = `mock-sharing-${callId}`;
+      mockSharingOrder.push("start_sharing");
+      return { call_id: callId, can_stop: true };
+    }
+
+    case "call_stop_sharing": {
+      const callId = requireString(params, "call_id");
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_stop_sharing: no such call");
+      const told = mockSharingSession !== null;
+      mockSharingSession = null;
+      return { call_id: callId, told_service: told };
     }
 
     case "call_hangup": {
@@ -7086,6 +7127,13 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // Answer an offer of the page's in a way no browser can read — the third way a capture
     // ends without a click, after a refusal and a drop, and the one that used to cost the
     // whole call. Nothing is armed: the answer goes out now, on the live call.
+    // What ORDER the sharing calls arrived in. It is the one rule of this feature a spec
+    // cannot read off the screen: a meeting rejects a section from an endpoint that never
+    // asked to present, so an app that offered the media first would look right on screen and
+    // share nothing at all.
+    if (body.kind === "call_sharing_order") {
+      return Response.json({ ok: true, order: mockSharingOrder }, { status: 200 });
+    }
     if (body.kind === "call_media" && body.unreadable === true) {
       if (!mockCall) return Response.json({ ok: false, error: "no call" }, { status: 409 });
       broadcast("call_media", {

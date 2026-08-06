@@ -4,6 +4,7 @@ import {
   calendarEvent,
   disableCalling,
   answerCallMediaUnreadably,
+  callSharingOrder,
   dropCallCapture,
   emitCallInvite,
   endCallWithReason,
@@ -677,6 +678,61 @@ test.describe("Joining a meeting", () => {
     await expect(stage).toHaveAttribute("data-phase", "connected");
     await camera.click();
     await expect(camera).toHaveAttribute("aria-pressed", "true");
+    await page.locator('[data-testid="call-hangup"]').first().click();
+  });
+
+  /**
+   * A SCREEN asks the meeting to present before it offers a picture.
+   *
+   * A meeting shows one screen at a time, so sharing one is a session and not a track: measured
+   * on 2026-08-06, a meeting rejected an `applicationsharing-video` section outright — no mid,
+   * no label, a zeroed port — from an endpoint that had never asked to present, with the
+   * section labelled correctly and offering the codecs a client offers.
+   *
+   * The ORDER is what this pins, because no screen can show it: a page that offered the media
+   * first would look exactly right and share nothing at all.
+   */
+  test("asks the meeting to present before it offers the picture, and gives the session back", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+    await calendarEvent(page, "ev-overlap-a").click();
+    await page.locator('[data-testid="meeting-join-here"]').click();
+
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    const share = page.locator('[data-testid="call-share"]');
+    await share.click();
+    await expect(share).toHaveAttribute("aria-pressed", "true");
+
+    // The session FIRST, the section after it. Offering the other way round is the failure
+    // this whole path exists for.
+    expect(await callSharingOrder(page)).toEqual(["start_sharing", "offer_media"]);
+
+    // A CAMERA asks for NO session: it is a track, and a meeting carries as many as it has
+    // people. Only the one screen is a session — so its own offer adds a section and no
+    // second modality, however many times the sections are re-stated.
+    const sessions = async () =>
+      (await callSharingOrder(page)).filter((step) => step === "start_sharing").length;
+    await page.locator('[data-testid="call-camera"]').click();
+    await expect(page.locator('[data-testid="call-camera"]')).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(await sessions()).toBe(1);
+
+    // And it is GIVEN BACK on the way out, so the next share is granted one. The mock refuses
+    // a second session while one is held, so a stop that never happened makes this click fail.
+    await share.click();
+    await expect(share).toHaveAttribute("aria-pressed", "false");
+    await share.click();
+    await expect(share).toHaveAttribute("aria-pressed", "true");
+    expect(await sessions()).toBe(2);
+    // Still the session first: the second share asked again before it offered again.
+    expect((await callSharingOrder(page)).slice(-2)).toEqual(["start_sharing", "offer_media"]);
+
     await page.locator('[data-testid="call-hangup"]').first().click();
   });
 

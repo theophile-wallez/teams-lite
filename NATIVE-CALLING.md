@@ -1074,6 +1074,48 @@ attempt cost.
   Both are copies of the client rather than inventions, and neither is verified: the next
   share attempt is what says. The journal names the answer's sections
   (`calling::media_sections`), so the outcome is one line either way.
+- **The section was still rejected with all of that, and the client's code names why: a screen
+  is a SESSION.** Measured 2026-08-06, second attempt, in a meeting, with the section labelled
+  `applicationsharing-video`, the conference codec list applied and `x-ssrc-range` stated:
+
+      offered media: modalities=["audio", "ScreenSharer"] sending=["screen"]
+      a media answer arrived: audio mid=0 label=main-audio accepted | video REJECTED
+
+  Note what the rejected line does NOT carry: no `mid` and no `label`. The service did not echo
+  the section at all — it refused to have one. And the call SURVIVED it, which is the earlier
+  fix holding: audio was untouched and nothing hung up.
+
+  The client's own path is `startScreenSharing` → `startContentSharingAsync` →
+  `ContentSharingSession.start(addModalityUrl, content, …)`, which POSTs `j2(session, content)`:
+
+  ```js
+  { participants: { from: <local participant>, to: [] },
+    contentSharing: { identifier, subject, sessionState, sequenceNumber,
+                      links: { sessionUpdate, sessionEnd } },
+    links: { addModalitySuccess, addModalityFailure } }
+  ```
+
+  with a `ContentSharingCorrelationId` header, and it sets `isPresenter = true` on the answer.
+  `startContentSharingAsync` fills that body as `{contentIdentifier: e, subject: i || null,
+  sessionState: t || null, sequenceNumber: 1}` — so two of the four fields are legitimately
+  null and the sequence number is the literal `1`. The answer carries the session's own six
+  links (`contentSharingController`, `takeControl`, `updateSessionState`, `sync`,
+  `notificationLinks`, `leave`).
+
+  **That is § 10.4's session, and it is now built**: `calling::content_sharing_payload` /
+  `content_sharing_leave_payload` / `ContentSharing`, the `call_start_sharing` and
+  `call_stop_sharing` RPCs, and the page asking for one before it offers the section. Read
+  AGENTS.md § Video in a meeting for the five rules. Two things about it are worth keeping in
+  mind next time:
+  - **The session's `leave` must never be merged into the call's links.** `Links::collect`
+    takes the deepest of a name and the call already has a `leave` — merged in, giving a share
+    back would hang the call up. It is read into its own struct for that reason.
+  - **`takeControl` and `updateSessionState` are deliberately not read.** A link nothing posts
+    to goes stale in a struct, and this app has neither feature.
+
+  **Still unverified**: the POST has never been accepted or refused by the tenant. If it is
+  refused it will say so with a subCode, which is more than the section's silent rejection ever
+  did.
 - Three specific unknowns remain, and the refusal above narrowed none of them:
   - **Whether a `contentSharing` session is needed at all.** § 10.4 says the client opens one,
     with six links and a presenter. But no participant in the measured roster carried a

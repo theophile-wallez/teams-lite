@@ -273,7 +273,7 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// `sha` is not the branch's head, so the page can only ever merge the commit it drew —
 /// plus the second, explicit confirmation the UI asks for, exactly as it does before a
 /// message deletion.
-const OUTWARD_METHODS: [&str; 19] = [
+const OUTWARD_METHODS: [&str; 21] = [
     "send",
     "edit",
     "delete",
@@ -286,6 +286,8 @@ const OUTWARD_METHODS: [&str; 19] = [
     "call_accept",
     "call_answer_media",
     "call_offer_media",
+    "call_start_sharing",
+    "call_stop_sharing",
     "call_hangup",
     "call_mute",
     "gitlab_set_approval",
@@ -1312,6 +1314,13 @@ struct CallSession {
     /// a phone that reconnects mid-call has to be told the camera is on, and a button drawn
     /// from a page's own memory would say off while the meeting sees a face.
     sending: Vec<String>,
+    /// The content-sharing session this endpoint holds, once a meeting has granted one.
+    ///
+    /// A meeting shows ONE screen at a time, so sharing is a session and not a track: the
+    /// service rejects an `applicationsharing-video` section from an endpoint that is not the
+    /// presenter (measured 2026-08-06). It is `None` until the user shares, and it carries the
+    /// way OUT, because a share that could not be given up is not a share this app would make.
+    sharing: Option<calling::ContentSharing>,
 }
 
 impl CallSession {
@@ -3873,6 +3882,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     renegotiation_answer_link: None,
                     source_request_sequence: 0,
                     sending: Vec::new(),
+                    sharing: None,
                 };
                 {
                     let mut plane = ctx.calling.lock().unwrap();
@@ -4023,6 +4033,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         renegotiation_answer_link: None,
                         source_request_sequence: 0,
                         sending: Vec::new(),
+                        sharing: None,
                     };
                     {
                         let mut plane = ctx.calling.lock().unwrap();
@@ -4312,6 +4323,106 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }
             eprintln!("[calling] answered a media renegotiation: modalities={modalities:?}");
             Ok(json!({ "call_id": call_id }))
+        }
+
+        // Become the PRESENTER of the meeting's content-sharing session.
+        //
+        // A meeting shows one screen at a time, so a share is a session before it is a track:
+        // measured on 2026-08-06, a meeting rejected an `applicationsharing-video` section
+        // outright — no mid, no label, a zeroed port — from an endpoint that had not asked for
+        // one. The client asks first (`startContentSharingAsync`), POSTing a `contentSharing`
+        // blob to the `addModality` link, and only then offers the section.
+        //
+        // It is an `OUTWARD_METHODS` entry because it announces to everybody in the meeting
+        // that this endpoint is about to show them something, and because the section that
+        // follows carries whatever is on the user's screen.
+        "call_start_sharing" => {
+            let call_id = param_str(params, "call_id")?;
+            let (local, callbacks, url, correlation_id) = {
+                let plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_ref()
+                    .filter(|c| c.id == call_id && !c.ended())
+                    .context("call_start_sharing: no such call")?;
+                if call.phase != CallPhase::Connected {
+                    anyhow::bail!(
+                        "call_start_sharing: this call is not connected yet — a modality is \
+                         added to a live conversation"
+                    );
+                }
+                if call.sharing.is_some() {
+                    anyhow::bail!("call_start_sharing: this call already holds a sharing session");
+                }
+                let url = call.links.add_modality().map(str::to_string).context(
+                    "call_start_sharing: this call has no addModality link — the service names \
+                     it on the conversation",
+                )?;
+                (
+                    call.local.clone(),
+                    call.callbacks.clone(),
+                    url,
+                    uuid::Uuid::new_v4().to_string(),
+                )
+            };
+            let payload = calling::content_sharing_payload(&local, &callbacks, &correlation_id);
+            let response = ctx.post_call_signal(&url, &payload).await?;
+            // The answer's links are kept APART from the call's own: it carries a `leave` of
+            // its own, and `Links::collect` takes the deepest of a name — merged in, it would
+            // overwrite the link this app hangs the CALL up on.
+            let session = calling::ContentSharing::from_answer(&correlation_id, &response);
+            let can_stop = session.leave.is_some();
+            {
+                let mut plane = ctx.calling.lock().unwrap();
+                if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                    call.sharing = Some(session);
+                }
+            }
+            eprintln!(
+                "[calling] the meeting granted a sharing session: can_stop={can_stop} \
+                 links={:?}",
+                calling::Links::collect(&response).names()
+            );
+            Ok(json!({ "call_id": call_id, "can_stop": can_stop }))
+        }
+
+        // Give the sharing session back.
+        //
+        // Outward for the same reason as the start, and gated the same way: the meeting is
+        // told this endpoint has stopped presenting. It is deliberately forgiving — a session
+        // the service never named a way out of is dropped locally rather than kept for ever,
+        // because the alternative is a call that can never share again.
+        "call_stop_sharing" => {
+            let call_id = param_str(params, "call_id")?;
+            let held = {
+                let mut plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_mut()
+                    .filter(|c| c.id == call_id)
+                    .context("call_stop_sharing: no such call")?;
+                let held = call.sharing.take();
+                (held, call.local.clone(), call.callbacks.clone())
+            };
+            let (session, local, callbacks) = held;
+            let Some(session) = session else {
+                return Ok(json!({ "call_id": call_id, "told_service": false }));
+            };
+            let told = match &session.leave {
+                Some(url) => {
+                    let payload = calling::content_sharing_leave_payload(&local, &callbacks);
+                    match ctx.post_call_signal(url, &payload).await {
+                        Ok(_) => true,
+                        Err(e) => {
+                            eprintln!("[calling] the sharing session would not close: {e:#}");
+                            false
+                        }
+                    }
+                }
+                None => false,
+            };
+            eprintln!("[calling] gave the sharing session up: told_service={told}");
+            Ok(json!({ "call_id": call_id, "told_service": told }))
         }
 
         // OFFER new media on a call that is already up: the user's camera, or their screen.
@@ -8884,6 +8995,7 @@ impl Ctx {
             renegotiation_answer_link: None,
             source_request_sequence: 0,
             sending: Vec::new(),
+            sharing: None,
         };
 
         {
@@ -10210,6 +10322,7 @@ mod tests {
             renegotiation_answer_link: None,
             source_request_sequence: 0,
             sending: Vec::new(),
+            sharing: None,
         };
         let json = call.json();
         assert_eq!(json["phase"], "ringing");
@@ -10261,6 +10374,7 @@ mod tests {
             renegotiation_answer_link: None,
             source_request_sequence: 0,
             sending: Vec::new(),
+            sharing: None,
         };
         assert_eq!(call.json()["can_accept"], false);
         // And a call that is over offers nothing at all.
@@ -10337,6 +10451,42 @@ mod tests {
             "`one_to_one` is answered more than once in call_prepare. A meeting and an \
              answered call must not claim it: the reservation belongs to the one shape the \
              client reserves for."
+        );
+    }
+
+    /// A share ASKS before it offers, and it can always be given back.
+    ///
+    /// A meeting shows one screen at a time, so a section from an endpoint that never asked to
+    /// present is rejected outright — measured 2026-08-06, with the section labelled correctly
+    /// and offering the codecs a client offers. Both halves are outward: everybody in the
+    /// meeting is told who is presenting.
+    #[test]
+    fn sharing_a_screen_is_a_session_that_is_gated_and_can_be_given_back() {
+        assert!(OUTWARD_METHODS.contains(&"call_start_sharing"));
+        assert!(OUTWARD_METHODS.contains(&"call_stop_sharing"));
+
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let start = code
+            .rsplit("\"call_start_sharing\" => {")
+            .next()
+            .and_then(|rest| rest.split("\"call_stop_sharing\" => {").next())
+            .expect("the start handler");
+        // The link is the conversation's own, and the session is asked of a LIVE call: the
+        // service adds a modality to an ongoing conversation and refuses one before that.
+        assert!(start.contains("add_modality()"), "the session is asked for on `addModality`");
+        assert!(start.contains("CallPhase::Connected"), "a modality needs a live conversation");
+        // The answer is read into its OWN struct. Merging it would overwrite the call's
+        // `leave` with the session's, so giving a share up would hang the call up.
+        assert!(
+            start.contains("ContentSharing::from_answer") && !start.contains("links.merge"),
+            "the session's links must never be merged into the call's"
+        );
+
+        let stop = code.rsplit("\"call_stop_sharing\" => {").next().expect("the stop handler");
+        assert!(
+            stop.contains("content_sharing_leave_payload"),
+            "a share that cannot be given back is not one this app would start"
         );
     }
 

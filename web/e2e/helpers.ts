@@ -369,6 +369,22 @@ export async function rejectCallCapture(page: Page, kind: "camera" | "screen"): 
 }
 
 /**
+ * The ORDER the sharing calls reached the mock in.
+ *
+ * The one rule of a screen share that no screen shows: a meeting grants ONE screen at a time,
+ * so the content-sharing session is asked for BEFORE the section is offered — an app that
+ * offered first looks right and shares nothing, which is what the tenant answered on
+ * 2026-08-06. Reset with the call, like everything else about it.
+ */
+export async function callSharingOrder(page: Page): Promise<string[]> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_sharing_order" },
+  });
+  expect(res.ok()).toBeTruthy();
+  return ((await res.json()) as { order: string[] }).order;
+}
+
+/**
  * Answer an offer of the page's in a way no browser can read — the third way a capture ends
  * with no click behind it, and the one that used to cost the whole call.
  *

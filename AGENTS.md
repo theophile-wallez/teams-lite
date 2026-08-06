@@ -1573,6 +1573,36 @@ joins alone and waits for an offer. Six rules hold it together, and
     not do.
   - **A reserved section publishes NOTHING.** It is `inactive` and carries no track, so no
     camera and no screen is opened until the user asks: the consent gate is untouched.
+- **A SCREEN is a SESSION before it is a track, and a meeting grants one at a time.** Measured
+  2026-08-06 against the tenant: a meeting rejected an `applicationsharing-video` section
+  outright — no mid, no label, a zeroed port — with the section negotiated correctly, labelled
+  correctly and offering the codecs a client offers. What this app never did is ASK to present.
+  The client asks first (`startContentSharingAsync` → the session's `start`), POSTing a
+  `contentSharing` blob to the conversation's `addModality` link and setting `isPresenter` on
+  the answer. So `call_start_sharing` and `call_stop_sharing` are `OUTWARD_METHODS` entries
+  either side of the media offer, and the automation hook blocks a script that names either.
+  Five rules, each pinned by a test:
+  - **The session is asked for BEFORE the section is offered, and before the capture.** The
+    order is the client's own, and it is the one rule of this feature no screen can show — a
+    page that offered the media first looks exactly right and shares nothing. `web/mock/server.ts`
+    records the order for that reason (`{kind:"call_sharing_order"}`), and a meeting that
+    refuses to grant one never opens a screen picker.
+  - **A CAMERA asks for nothing.** A meeting carries as many cameras as it has people; only the
+    one screen is a session, so a camera stays the plain renegotiation it always was.
+  - **The session's links are read APART from the call's** (`calling::ContentSharing`). The
+    answer carries a `leave` of its own and `Links::collect` takes the deepest of a name, so
+    merging it would overwrite the link this app hangs the CALL up on: giving a share back
+    would have ended the call.
+  - **It is given back on the ONE path every ending of a screen passes through** —
+    `onLocalVideoChange`, which is the user's own press, the browser's "Stop sharing" bar, a
+    section the meeting dropped, and an offer rolled back because its answer could not be read.
+    It is the rule the microphone already follows: a release wired per ending misses one, and a
+    meeting still believing this endpoint is its presenter REFUSES the next share. A spec
+    catches that, because the mock refuses a second session while one is held.
+  - **A share that cannot be given back is not one this app starts.** The answer's own `leave`
+    is what `call_stop_sharing` posts to, and a session the service named no way out of is
+    reported rather than remembered — the principle § The trackers states for an irreversible
+    write.
 - **A CONFERENCE is offered three video codecs, and a one-to-one is offered every one the
   browser has.** That split is the client's own — `allowedVideoCodecsMultiparty` is
   `[H264, AV1, rtx]` with `filterCodecsInSdpMultiparty: true`, while `allowedVideoCodecs` is

@@ -361,6 +361,13 @@ impl Links {
         self.get(&["mediaRenegotiation"])
     }
 
+    /// Where a MODALITY is added to a live conversation — a group modality on a 1:1, and the
+    /// content-sharing session a screen share needs (see [`content_sharing_payload`]). It is
+    /// not the second half of a JOIN, which is what reading it as one cost a debugging round.
+    pub fn add_modality(&self) -> Option<&str> {
+        self.get(&["addModality"])
+    }
+
     pub fn keep_alive(&self) -> Option<&str> {
         self.get(&["keepAlive"])
     }
@@ -706,6 +713,107 @@ pub fn media_sections(sdp: &str) -> Vec<String> {
     }
     flush(&section, &mid, &label, &mut out);
     out
+}
+
+/// The content-sharing SESSION a meeting grants, and the links it hands back.
+///
+/// **A meeting has ONE screen at a time, so sharing one is a session rather than a track.**
+/// Measured on 2026-08-06: a meeting answered an `applicationsharing-video` section of ours
+/// by rejecting it outright — no mid, no label, just a zeroed port — with the section
+/// negotiated correctly, labelled correctly and offering the codecs a client offers. What
+/// this app never did is ASK to be the presenter, which the client does first
+/// (`startContentSharingAsync` → the session's `start`, POSTing a `contentSharing` blob to
+/// the `addModality` link and setting `isPresenter` on the answer).
+///
+/// The links come back on that answer, and they are kept APART from the call's own
+/// ([`Links::collect`] takes the deepest of a name, and this answer carries a `leave` of its
+/// own — merged in, it would overwrite the link this app hangs a CALL up on).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContentSharing {
+    /// The correlation id this app minted for the session, which every later call to it
+    /// carries — in a header on the way out, and in the frames the service sends back.
+    pub correlation_id: String,
+    /// The service's own id for the session, once it names one.
+    pub session_id: Option<String>,
+    /// Where to give the session up. Without it a share could be started and never stopped,
+    /// which is the shape this project refuses on principle.
+    pub leave: Option<String>,
+}
+
+impl ContentSharing {
+    /// Read the session out of the answer to the `addModality` POST.
+    ///
+    /// Only two things are taken: the id the service named it, and the way out. The other
+    /// four links it offers — `contentSharingController`, `takeControl`, `updateSessionState`,
+    /// `sync` — belong to features this app does not have, and a link nothing posts to is a
+    /// link that goes stale in a struct.
+    pub fn from_answer(correlation_id: &str, answer: &Value) -> Self {
+        let sharing = ["/_decoded/contentSharing", "/contentSharing"]
+            .iter()
+            .find_map(|p| answer.pointer(p));
+        Self {
+            correlation_id: correlation_id.to_string(),
+            session_id: sharing
+                .and_then(|s| s.get("sessionId"))
+                .and_then(Value::as_str)
+                .map(String::from),
+            leave: sharing
+                .and_then(|s| s.get("links"))
+                .and_then(|l| l.get("leave").or_else(|| l.get("contentSharingLeave")))
+                .and_then(Value::as_str)
+                .map(String::from),
+        }
+    }
+}
+
+/// Ask a meeting to make this endpoint the presenter of a content-sharing session.
+///
+/// The client's own `j2`, field for field: the local participant, an empty `to`, the
+/// `contentSharing` blob and the two callbacks the service reports the session's own changes
+/// on. `subject` and `sessionState` are NULL because the client's builder passes
+/// `i || null` / `t || null` and this app has neither to state — a screen has no subject and
+/// the state is the service's to decide. `sequenceNumber` is 1, which is the literal the
+/// client sends on a start.
+///
+/// It carries no `payload` envelope, for the reason § Joining a meeting gives: every builder
+/// in the client's bundle returns one and its transport strips it, so a wrapped body is
+/// refused `400` with `{}` and names nothing.
+pub fn content_sharing_payload(
+    local: &LocalParticipant,
+    callbacks: &CallbackBase,
+    identifier: &str,
+) -> Value {
+    json!({
+        "participants": { "from": local.json(), "to": [] },
+        "contentSharing": {
+            "identifier": identifier,
+            "subject": Value::Null,
+            "sessionState": Value::Null,
+            "sequenceNumber": 1,
+            "links": {
+                "sessionUpdate": callbacks.link(paths::CONVERSATION_CONTENT_SHARING_UPDATE),
+                "sessionEnd": callbacks.link(paths::CONVERSATION_CONTENT_SHARING_END),
+            },
+        },
+        "links": {
+            "addModalitySuccess": callbacks.link(paths::CONVERSATION_ADD_MODALITY_SUCCESS),
+            "addModalityFailure": callbacks.link(paths::CONVERSATION_ADD_MODALITY_FAILURE),
+        },
+    })
+}
+
+/// Give the session up: the body the client's own `K2` sends, which names the same two
+/// callbacks and nothing else.
+pub fn content_sharing_leave_payload(local: &LocalParticipant, callbacks: &CallbackBase) -> Value {
+    json!({
+        "participants": { "from": local.json() },
+        "contentSharing": {
+            "links": {
+                "sessionUpdate": callbacks.link(paths::CONVERSATION_CONTENT_SHARING_UPDATE),
+                "sessionEnd": callbacks.link(paths::CONVERSATION_CONTENT_SHARING_END),
+            },
+        },
+    })
 }
 
 /// A media OFFER the service made mid-call, and where to answer it.
@@ -2245,6 +2353,61 @@ mod tests {
         }
 
         assert!(media_sections("").is_empty());
+    }
+
+    /// The content-sharing session a screen share needs, field for field against the
+    /// client's own `j2` — and never carrying a link that would overwrite the call's.
+    #[test]
+    fn a_content_sharing_modality_asks_to_present_and_names_its_own_callbacks() {
+        let payload = content_sharing_payload(&local(), &callbacks(), "session-guid");
+        assert_eq!(payload.pointer("/contentSharing/identifier").unwrap(), "session-guid");
+        // The client's builder passes `i || null` / `t || null`, and this app has neither: a
+        // screen has no subject, and the state is the service's to decide.
+        assert_eq!(payload.pointer("/contentSharing/subject").unwrap(), &Value::Null);
+        assert_eq!(payload.pointer("/contentSharing/sessionState").unwrap(), &Value::Null);
+        // The literal the client sends on a start.
+        assert_eq!(payload.pointer("/contentSharing/sequenceNumber").unwrap(), 1);
+        // It reaches nobody: a session is asked of the SERVICE, not offered to a person.
+        assert_eq!(payload.pointer("/participants/to").unwrap(), &json!([]));
+        // Two callbacks for the session's own changes, and two for the modality itself.
+        for pointer in [
+            "/contentSharing/links/sessionUpdate",
+            "/contentSharing/links/sessionEnd",
+            "/links/addModalitySuccess",
+            "/links/addModalityFailure",
+        ] {
+            let link = payload.pointer(pointer).and_then(Value::as_str).expect(pointer);
+            assert!(link.starts_with("https://"), "{pointer} must be a callback of ours");
+        }
+        // And no envelope. A wrapped body is refused `400` with `{}` and names nothing —
+        // the failure § Joining a meeting cost days to.
+        assert!(payload.get("payload").is_none());
+    }
+
+    /// The session's links are read APART from the call's, because it carries a `leave` of its
+    /// own and `Links::collect` takes the deepest of a name. Merged in, giving a SHARE up
+    /// would have hung the call up instead.
+    #[test]
+    fn a_sharing_sessions_leave_never_becomes_the_calls_own() {
+        let answer = json!({
+            "contentSharing": {
+                "sessionId": "cs-1",
+                "links": { "leave": "https://x/content-sharing-leave", "takeControl": "https://x/tc" }
+            },
+            // What the call already holds, in the same answer.
+            "links": { "leave": "https://x/hang-up" }
+        });
+        let session = ContentSharing::from_answer("corr-1", &answer);
+        assert_eq!(session.correlation_id, "corr-1");
+        assert_eq!(session.session_id.as_deref(), Some("cs-1"));
+        assert_eq!(session.leave.as_deref(), Some("https://x/content-sharing-leave"));
+        // The one that must never be confused for it.
+        assert_ne!(session.leave.as_deref(), Some("https://x/hang-up"));
+
+        // An answer that names no way out is read as one: a session this app could not give
+        // back is reported rather than remembered.
+        let bare = ContentSharing::from_answer("corr-2", &json!({ "contentSharing": {} }));
+        assert!(bare.leave.is_none());
     }
 
     /// A content type we cannot hand a browser must be refused rather than passed

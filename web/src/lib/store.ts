@@ -1862,6 +1862,9 @@ export class TeamsController {
   }
 
   private stopCallMedia(): void {
+    // The session dies with the call — a meeting has no presenter once nobody is in it — so
+    // the flag goes rather than a POST: the links it would use are the ended call's own.
+    this.sharingSessionHeld = false;
     // A recording is closed out HERE, on the one path the microphone is released on and for
     // the same reason: every ending — our hangup, theirs, a dropped transport, calling
     // switched off — comes through this function, and a recording lost because of which side
@@ -1918,6 +1921,13 @@ export class TeamsController {
     media.onLocalVideoChange = (videos) => {
       this.set({ callLocalVideo: [...videos] });
       this.syncRecorder();
+      // The SESSION is given back on the one path every ending of a screen share passes
+      // through, which is this one — the user's own press, the browser's "Stop sharing" bar, a
+      // section the meeting dropped, and an offer rolled back because its answer could not be
+      // read. It is the rule the microphone already follows, and for the same reason: a
+      // release wired per ending eventually misses one, and a meeting left believing this
+      // endpoint is still its presenter refuses the NEXT share.
+      if (!videos.some((video) => video.kind === "screen")) void this.releaseSharingSession();
     };
     // A voice joining or leaving. It changes nothing on screen — the audio elements play it
     // either way — so a recording is its only reader.
@@ -1971,15 +1981,47 @@ export class TeamsController {
     const call = this.get().callStatus.call;
     if (!media || !call) return;
     try {
+      // A SCREEN is asked for before it is offered: a meeting shows one at a time, so this
+      // endpoint has to hold its content-sharing session or the section is rejected outright.
+      // The order is the client's own — the modality first, the media after it — and it comes
+      // BEFORE the capture, so a meeting that will not grant one never opens a screen picker.
+      if (kind === "screen" && on) {
+        await this.backend.callStartSharing(call.id);
+        this.sharingSessionHeld = true;
+      }
       const offer = on ? await media.startSending(kind) : await media.stopSending(kind);
       await this.publishSending(offer, `${on ? "start" : "stop"} ${kind}`);
     } catch (error) {
       // A refused camera is a decision, not a fault, so it is said in the user's words and
-      // the call carries on. Whatever happened, the capture is released: `startSending`
-      // stops its own tracks on the way out.
+      // the call carries on. Whatever happened, the capture is released: `startSending` stops
+      // its own tracks on the way out, and releasing it is what gives the session back — a
+      // share that failed after the meeting granted one would otherwise leave a presenter
+      // showing nothing.
       this.reportCall(callFailureMessage(error), "error");
-      if (on) await media.stopSending(kind).catch(() => {});
+      if (on) {
+        await media.stopSending(kind).catch(() => {});
+        // A capture that never started raises no change, so the session is released here too.
+        if (kind === "screen") await this.releaseSharingSession();
+      }
     }
+  }
+
+  /** Whether the meeting has granted this endpoint its content-sharing session. Not reactive:
+   *  nothing on screen is drawn from it, and the button reads the backend's own `sending`. */
+  private sharingSessionHeld = false;
+
+  /**
+   * Give the meeting's sharing session back, once, if this endpoint holds one.
+   *
+   * Idempotent and silent: the picture has already stopped by the time this runs, so there is
+   * nothing left for the user to act on, and a failure costs the meeting one stale presenter
+   * rather than costing them anything.
+   */
+  private async releaseSharingSession(): Promise<void> {
+    const call = this.get().callStatus.call;
+    if (!this.sharingSessionHeld || !call) return;
+    this.sharingSessionHeld = false;
+    await this.backend.callStopSharing(call.id).catch(() => {});
   }
 
   /**

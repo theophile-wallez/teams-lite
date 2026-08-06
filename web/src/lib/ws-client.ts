@@ -816,6 +816,26 @@ export class Backend {
       sending,
     });
   }
+  /**
+   * Ask the meeting to make this endpoint the presenter of its content-sharing session.
+   *
+   * A meeting shows ONE screen at a time, so a share is a session before it is a track: the
+   * service rejects an `applicationsharing-video` section from an endpoint that never asked
+   * for one (measured 2026-08-06). Outward, because everybody in the meeting is told that
+   * this endpoint is about to show them something.
+   */
+  callStartSharing(callId: string): Promise<{ call_id: string; can_stop: boolean }> {
+    return this.writeRequest<{ call_id: string; can_stop: boolean }>("call_start_sharing", {
+      call_id: callId,
+    });
+  }
+  /** Give the sharing session back. Outward for the same reason, and never skipped: a share
+   *  this app could start and not stop is one it would not make. */
+  callStopSharing(callId: string): Promise<{ call_id: string; told_service: boolean }> {
+    return this.writeRequest<{ call_id: string; told_service: boolean }>("call_stop_sharing", {
+      call_id: callId,
+    });
+  }
   /** End the call, or decline it while it is still ringing. Outward either way: the
    *  other side is told. */
   callHangup(callId: string): Promise<{ call_id: string; told_service: boolean }> {
