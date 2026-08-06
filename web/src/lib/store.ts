@@ -1564,14 +1564,18 @@ export class TeamsController {
     this.set({ typingByConversation: { ...prev, [convId]: names } });
   }
 
-  // ---- incoming calls (awareness only) -------------------------------------
+  // ---- incoming calls (awareness) ------------------------------------------
   //
-  // teams-lite has no media stack: it cannot carry, answer, or place a call.
-  // These handlers turn the backend's `call` event into a ring/dismiss banner so
-  // the user KNOWS a call is happening and can jump to the chat (or answer in
-  // real Teams). A `started` rings; `ended`/`missed` — or a manual dismiss, or a
-  // safety timeout — clears it. The backend already suppresses calls we started
-  // ourselves, so a `started` here is always someone else calling.
+  // These handlers turn the backend's `call` event — the after-the-fact `Event/Call`
+  // chat message, not the calling plane — into a ring/dismiss banner, so the user
+  // KNOWS a call is happening in a conversation nothing rang here. A `started` rings;
+  // `ended`/`missed` — or a manual dismiss, or a safety timeout — clears it. The
+  // backend already suppresses calls we started ourselves, so a `started` here is
+  // always someone else calling.
+  //
+  // What the CARD offers is decided there (`components/incoming-call-banner.tsx`): a
+  // ringing MEETING is joined, because its thread is a join address on its own, and every
+  // other conversation is opened. The real calling plane is the block below.
 
   /** Fold a live `call` signal into the ringing-banner list. */
   private onCall(sig: CallSignal): void {

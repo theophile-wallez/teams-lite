@@ -17,6 +17,7 @@ import {
   isMeeting,
   isMeetingJoinLink,
   meetingAddressOf,
+  meetingAddressOfThread,
   meetingUnavailableReason,
   type ActiveCall,
   type CallPhase,
@@ -178,6 +179,19 @@ describe("what a conversation's header offers", () => {
   it("never reads a chat as a meeting on anything but its id", () => {
     expect(meetingAddressOf(conversation({ kind: "one_on_one" }))).toBeNull();
     expect(meetingAddressOf(undefined)).toBeNull();
+  });
+
+  /** The incoming-call card holds only the id the awareness event named, and it joins the
+   *  meeting from there — so the rule reads a bare thread id under the same spelling. */
+  it("reads the same rule from a bare thread id", () => {
+    expect(meetingAddressOfThread("19:meeting_YWI2Y2E5MDIt@thread.v2")).toEqual({
+      kind: "thread",
+      thread: "19:meeting_YWI2Y2E5MDIt@thread.v2",
+    });
+    expect(meetingAddressOfThread("19:group-chat@thread.v2")).toBeNull();
+    expect(meetingAddressOfThread("19:abc@thread.skype")).toBeNull();
+    expect(meetingAddressOfThread(undefined)).toBeNull();
+    expect(meetingAddressOfThread(null)).toBeNull();
   });
 });
 

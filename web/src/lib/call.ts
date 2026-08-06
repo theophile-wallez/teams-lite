@@ -222,14 +222,23 @@ export function conversationCallAction(
  */
 export type MeetingAddress = { kind: "link"; joinUrl: string } | { kind: "thread"; thread: string };
 
-/** The meeting address of a conversation, or null when it names no meeting.
+/** The meeting address of a THREAD id, or null when it names no meeting.
  *
  *  A port of the same `19:meeting_` rule the backend applies (`MeetingJoin::from_thread_id`),
  *  so a button is offered only where the backend would agree — and the backend parses it
- *  again, so the worst a disagreement costs is a button that reports a refusal. */
+ *  again, so the worst a disagreement costs is a button that reports a refusal.
+ *
+ *  It takes the bare id, because a call is reached from two states that hold two different
+ *  things: a chat header has the whole {@link Conversation}, and the incoming-call banner has
+ *  only the id the awareness event named. One spelling of the rule, for both. */
+export function meetingAddressOfThread(id: string | undefined | null): MeetingAddress | null {
+  if (!id?.startsWith("19:meeting_")) return null;
+  return { kind: "thread", thread: id };
+}
+
+/** The meeting address of a conversation, or null when it names no meeting. */
 export function meetingAddressOf(conversation: Conversation | undefined): MeetingAddress | null {
-  if (!conversation?.id.startsWith("19:meeting_")) return null;
-  return { kind: "thread", thread: conversation.id };
+  return meetingAddressOfThread(conversation?.id);
 }
 
 /** What the call is doing, in the words the UI shows. Written for somebody glancing at

@@ -2,26 +2,34 @@ import { useNavigate } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CallIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
-import { isLive } from "~/lib/call";
+import { isLive, meetingAddressOfThread } from "~/lib/call";
 import { incomingCallTitle, type Channel, type Conversation, type IncomingCall } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
 import { CallParticipants } from "./call-event-line";
+import { MeetingJoinButton } from "./meeting-join-button";
 import { Button } from "./ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 /**
  * The call-AWARENESS banner: a note that a call is happening in a conversation,
  * built from the after-the-fact `Event/Call` chat message rather than from the calling
- * plane. It knows nothing about media, which is why "Answer" here is disabled and the
- * primary action opens the chat.
+ * plane.
  *
  * It is the OTHER banner. When this machine is really being called — an invite on the
- * calling socket — `components/call-bar.tsx` draws that call with a working Answer, and
- * the awareness card for the same conversation is dropped: two cards
- * for one call, one of which says it cannot be answered, would be the app arguing with
- * itself. The awareness banner still covers every case the calling plane does not: a call
- * in a group chat, a channel meeting, a call that rang at a window whose backend does not
- * take calls, and a call the user took on their phone.
+ * calling socket — `components/call-bar.tsx` draws that call with its own Answer, and
+ * the awareness card for the same conversation is dropped: two cards for one call would be
+ * the app arguing with itself. The awareness banner still covers every case the calling
+ * plane does not: a call in a group chat, a channel meeting, a call that rang at a window
+ * whose backend does not take calls, and a call the user took on their phone.
+ *
+ * **Every action on this card is one that really happens.** It used to carry an "Answer"
+ * that was disabled for ever, under a tooltip pointing at real Teams — true when the app
+ * had no media stack, and stale from the day it grew one (§ Audio calls). A MEETING's
+ * thread is a join address on its own, so a meeting that is ringing is joined from here, by
+ * the app's own Join control: one spelling of that action, carrying the rails it already
+ * has — the address it states for a driver to prove, and the reason a window that cannot
+ * call gives. Every other conversation offers "Open chat" alone, where the header holds the
+ * control that conversation really supports. A button that can never be pressed says less
+ * than no button at all, and it says it in the place the user is deciding.
  *
  * Fixed to the top-centre, under the call bar. Renders one card per ringing
  * conversation. Each is cleared by its backend `ended`/`missed`, a manual dismiss, or the
@@ -72,7 +80,13 @@ function IncomingCallCard(props: { call: IncomingCall }) {
   const conversations = useAppState((s) => s.conversations);
   const channels = useAppState((s) => s.channels);
 
-  const title = incomingCallTitle(call, groupLabelFor(call, conversations, channels));
+  const groupLabel = groupLabelFor(call, conversations, channels);
+  const title = incomingCallTitle(call, groupLabel);
+  // A meeting is the one ringing conversation this card can act on: its thread IS the join
+  // address (`calling::MeetingJoin::from_thread_id`). A group chat's call and a channel
+  // meeting are not addressable from here, and placing a call into that chat would ring
+  // everybody again rather than joining what is already going on.
+  const meeting = meetingAddressOfThread(call.conversationId);
 
   const openChat = () => {
     controller.dismissIncomingCall(call.conversationId);
@@ -118,24 +132,10 @@ function IncomingCallCard(props: { call: IncomingCall }) {
       )}
 
       <div className="flex items-center justify-end gap-2">
-        {/* "Answer" is intentionally disabled: teams-lite has no media stack and
-            cannot join a call. The tooltip says so and points at real Teams, so
-            the boundary is explicit rather than a silently broken button. */}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span tabIndex={0}>
-              <Button
-                size="sm"
-                disabled
-                data-testid="incoming-call-answer"
-                className="pointer-events-none"
-              >
-                Answer
-              </Button>
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>Calls can't be answered in teams-lite — join in Microsoft Teams.</TooltipContent>
-        </Tooltip>
+        {/* The meeting's own Join, in the app's one spelling of it. The subject is the name
+            this card is already showing, so the meeting is called the same thing in the call
+            it opens. */}
+        {meeting && <MeetingJoinButton meeting={meeting} subject={groupLabel} />}
         <Button variant="secondary" size="sm" data-testid="incoming-call-open" onClick={openChat}>
           Open chat
         </Button>

@@ -253,7 +253,7 @@ function destinationsOf(event: CalendarEvent): Destination[] {
 /** The box both shapes below wear — the chip the calendar's own view menu is drawn as,
  *  so a way out of the app never reads as the primary action beside it. */
 const CHIP =
-  "flex shrink-0 items-center gap-1.5 rounded-lg bg-card px-3 py-1.5 text-[13px] text-text-dim shadow-chip transition-colors hover:text-foreground";
+  "flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-card px-3 text-[13px] text-text-dim shadow-chip transition-colors hover:text-foreground";
 
 /**
  * "Open in" — every way out of this app, in ONE control.

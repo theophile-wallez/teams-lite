@@ -73,7 +73,11 @@ export function MeetingJoinButton(props: {
             // a conversation the user walks into must not move the controls of the one they
             // came from.
             "grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-          : "flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
+          : // `h-8` is the height a small button has everywhere in this app (`ui/button`'s
+            // own `sm`), because the pill shares a row with one: the calendar's way out, and
+            // "Open chat" on the incoming-call card. Two controls of one row at two heights
+            // read as two designs.
+            "flex h-8 items-center gap-1.5 rounded-lg bg-primary px-3 text-[13px] font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
       }
     >
       {/* The HANDSET in both shapes, and in a chat header the same one the call button
