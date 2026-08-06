@@ -4072,6 +4072,13 @@ let mockGitLabWriteRefusal: string | null = null;
  *  is what the page's own notice is drawn from. Same hook. */
 let mockGitLabTokenMissing = false;
 
+/** When set, the DIFF read fails with this sentence. Its own switch rather than a share of
+ *  `mockGitLabWriteRefusal`, because the two prove opposite halves: a refused write must be
+ *  reported beside the button, and a refused diff must cost the Changes panel and nothing
+ *  else — the page's other four panels have to stay drawn. Same hook, same contract: a spec
+ *  that arms it MUST clear it. */
+let mockGitLabDiffRefusal: string | null = null;
+
 function mockMergeRequestFor(projectPath: string, iid: number): MockMergeRequest | undefined {
   return mockMergeRequests.find((mr) => mr.project_path === projectPath && mr.iid === iid);
 }
@@ -4174,6 +4181,251 @@ function mockPipelineView(mr: MockMergeRequest): Record<string, unknown> {
 
 function mockDiscussionList(mr: MockMergeRequest): Record<string, unknown> {
   return { discussions: mr.discussions, truncated: false };
+}
+
+// ---- the diff ---------------------------------------------------------------
+//
+// The Changes section reads what a merge request changed, and the mock has to reproduce every
+// state a real answer holds — because four of the five are files with NO patch, and each says
+// something different (see `diffFileState` in web/src/lib/gitlab-diff.ts). Measured on the
+// real instance by `examples/merge_request_diff_recon.rs`: of 508 files over 25 merge
+// requests, 356 carried a patch, 18 were pure renames, 4 were binary and 148 were collapsed
+// by GitLab. So the fixture below holds one of each, plus a generated file and a directory
+// deep enough for the tree to have something to fold.
+//
+// The PATCH is a complete unified diff, header and all — the shape `gitlab_mr::unified_patch`
+// writes, never GitLab's bare hunks, because the page's renderer parses the header to learn
+// what happened to the file.
+
+/** One file of a mock diff, in the shape the backend answers with. */
+type MockDiffFile = {
+  path: string;
+  old_path?: string;
+  change: "new" | "deleted" | "renamed" | "changed";
+  patch?: string;
+  additions: number;
+  deletions: number;
+  binary?: boolean;
+  /** Whether GitLab would refuse to expand it. Its patch is dropped by `mockDiffFor` unless
+   *  the reader asks for the expanded read, which is the whole flow this reproduces. */
+  collapsed?: boolean;
+  generated?: boolean;
+};
+
+/** The files each mock merge request changed, keyed the way the reads address it.
+ *
+ *  Deliberately several languages: the renderer resolves a Shiki grammar per extension, so a
+ *  fixture of one language would never exercise a second load. */
+const mockDiffFiles = new Map<string, MockDiffFile[]>([
+  [
+    "acme/webapp!596",
+    [
+      {
+        path: "charts/user-facing/values.yaml",
+        change: "changed",
+        additions: 6,
+        deletions: 2,
+        patch:
+          "diff --git a/charts/user-facing/values.yaml b/charts/user-facing/values.yaml\n" +
+          "--- a/charts/user-facing/values.yaml\n" +
+          "+++ b/charts/user-facing/values.yaml\n" +
+          "@@ -12,8 +12,12 @@ web:\n" +
+          "   image:\n" +
+          "     repository: registry.acme.dev/web\n" +
+          '     tag: "1.42.0"\n' +
+          "-  replicaCount: 1\n" +
+          "+  replicaCount: 2\n" +
+          "+  podDisruptionBudget:\n" +
+          "+    minAvailable: 1\n" +
+          "   resources:\n" +
+          "     requests:\n" +
+          "-      cpu: 100m\n" +
+          "+      cpu: 250m\n" +
+          "+      memory: 256Mi\n" +
+          "+  terminationGracePeriodSeconds: 30\n" +
+          " \n" +
+          " api:\n",
+      },
+      {
+        path: "charts/user-facing/templates/pdb.yaml",
+        change: "new",
+        additions: 12,
+        deletions: 0,
+        patch:
+          "diff --git a/charts/user-facing/templates/pdb.yaml b/charts/user-facing/templates/pdb.yaml\n" +
+          "new file mode 100644\n" +
+          "--- /dev/null\n" +
+          "+++ b/charts/user-facing/templates/pdb.yaml\n" +
+          "@@ -0,0 +1,12 @@\n" +
+          "+{{- range $name, $svc := .Values.services }}\n" +
+          "+{{- if $svc.podDisruptionBudget }}\n" +
+          "+apiVersion: policy/v1\n" +
+          "+kind: PodDisruptionBudget\n" +
+          "+metadata:\n" +
+          "+  name: {{ $name }}\n" +
+          "+spec:\n" +
+          "+  minAvailable: {{ $svc.podDisruptionBudget.minAvailable }}\n" +
+          "+  selector:\n" +
+          "+    matchLabels:\n" +
+          "+      app: {{ $name }}\n" +
+          "+{{- end }}\n" +
+          "+{{- end }}\n",
+      },
+      {
+        path: "src/server/health.ts",
+        change: "changed",
+        additions: 9,
+        deletions: 3,
+        patch:
+          "diff --git a/src/server/health.ts b/src/server/health.ts\n" +
+          "--- a/src/server/health.ts\n" +
+          "+++ b/src/server/health.ts\n" +
+          "@@ -1,10 +1,16 @@\n" +
+          'import type { Server } from "./types";\n' +
+          " \n" +
+          "-export function health(server: Server) {\n" +
+          "-  return server.ready ? 200 : 503;\n" +
+          "+/** Whether this replica may take traffic.\n" +
+          "+ *\n" +
+          "+ * A draining replica answers 503 while it finishes the connections it holds, so the\n" +
+          "+ * load balancer stops sending it new ones before the pod goes. */\n" +
+          "+export function health(server: Server): number {\n" +
+          "+  if (server.draining) return 503;\n" +
+          "+  if (!server.ready) return 503;\n" +
+          "+  return 200;\n" +
+          " }\n" +
+          " \n" +
+          "-export const READY_PATH = \"/ready\";\n" +
+          "+export const READY_PATH = \"/readyz\";\n" +
+          "+export const LIVE_PATH = \"/livez\";\n",
+      },
+      // A pure RENAME: no hunks at all, so the header IS the change. Measured on 18 of 508
+      // files, several of which GitLab also flagged `collapsed` — which is exactly what the
+      // page must not read as an elision.
+      {
+        path: "src/server/drain.ts",
+        old_path: "src/server/shutdown.ts",
+        change: "renamed",
+        additions: 0,
+        deletions: 0,
+        patch:
+          "diff --git a/src/server/shutdown.ts b/src/server/drain.ts\n" +
+          "similarity index 100%\n" +
+          "rename from src/server/shutdown.ts\n" +
+          "rename to src/server/drain.ts\n",
+      },
+      // A BINARY file: GitLab describes it with one sentence rather than hunks, and this page
+      // states that rather than running its prose through a code renderer.
+      {
+        path: "docs/diagrams/rollout.png",
+        change: "new",
+        additions: 0,
+        deletions: 0,
+        binary: true,
+      },
+      // A file GitLab COLLAPSED. Its patch exists here and is withheld until the reader asks
+      // for the expanded read — which is the flow `canExpandDiff` gates.
+      {
+        path: "bun.lock",
+        change: "changed",
+        additions: 4,
+        deletions: 4,
+        collapsed: true,
+        generated: true,
+        patch:
+          "diff --git a/bun.lock b/bun.lock\n" +
+          "--- a/bun.lock\n" +
+          "+++ b/bun.lock\n" +
+          "@@ -204,8 +204,8 @@\n" +
+          '     "@types/node": {\n' +
+          '-      "version": "22.9.0",\n' +
+          '-      "resolved": "https://registry.npmjs.org/@types/node/-/node-22.9.0.tgz",\n' +
+          '+      "version": "22.10.2",\n' +
+          '+      "resolved": "https://registry.npmjs.org/@types/node/-/node-22.10.2.tgz",\n' +
+          '     },\n' +
+          '     "typescript": {\n' +
+          '-      "version": "5.6.3",\n' +
+          '+      "version": "5.7.2",\n' +
+          '     },\n',
+      },
+      {
+        path: "docs/runbooks/old-drain.md",
+        change: "deleted",
+        additions: 0,
+        deletions: 5,
+        patch:
+          "diff --git a/docs/runbooks/old-drain.md b/docs/runbooks/old-drain.md\n" +
+          "deleted file mode 100644\n" +
+          "--- a/docs/runbooks/old-drain.md\n" +
+          "+++ /dev/null\n" +
+          "@@ -1,5 +0,0 @@\n" +
+          "-# Draining a node by hand\n" +
+          "-\n" +
+          "-1. `kubectl drain <node>`\n" +
+          "-2. wait for the last pod to go\n" +
+          "-3. hope\n",
+      },
+    ],
+  ],
+  [
+    "acme/infra!297",
+    [
+      {
+        path: "terraform/lambda/policy.tf",
+        change: "changed",
+        additions: 5,
+        deletions: 1,
+        patch:
+          "diff --git a/terraform/lambda/policy.tf b/terraform/lambda/policy.tf\n" +
+          "--- a/terraform/lambda/policy.tf\n" +
+          "+++ b/terraform/lambda/policy.tf\n" +
+          '@@ -8,7 +8,11 @@ data "aws_iam_policy_document" "lambda" {\n' +
+          "   statement {\n" +
+          '     effect  = "Allow"\n' +
+          '-    actions = ["s3:GetObject"]\n' +
+          '+    actions = [\n' +
+          '+      "s3:GetObject",\n' +
+          '+      "s3:ListBucket",\n' +
+          "+    ]\n" +
+          '+    resources = [aws_s3_bucket.uploads.arn]\n' +
+          "   }\n" +
+          " }\n",
+      },
+    ],
+  ],
+]);
+
+/** What one merge request changed, at one depth.
+ *
+ *  The COLLAPSE is reproduced the way GitLab really behaves: the plain read withholds the
+ *  patch of every collapsed file and counts them, and the expanded read hands them over. That
+ *  is the whole reason this mock has a diff at all — the flow behind `canExpandDiff` cannot be
+ *  seen from a fixture where every file has its patch. */
+function mockDiffFor(mr: MockMergeRequest, depth: "listed" | "raw"): Record<string, unknown> {
+  const source = mockDiffFiles.get(`${mr.project_path}!${mr.iid}`) ?? [];
+  const expanded = depth === "raw";
+  const files = source.map((file) => {
+    const withheld = file.collapsed === true && !expanded;
+    return {
+      path: file.path,
+      ...(file.old_path ? { old_path: file.old_path } : {}),
+      change: file.change,
+      // A binary file never has a patch at either depth: GitLab will not diff one.
+      ...(file.binary || withheld || !file.patch ? {} : { patch: file.patch }),
+      additions: withheld ? 0 : file.additions,
+      deletions: withheld ? 0 : file.deletions,
+      binary: file.binary === true,
+      collapsed: withheld,
+      generated: file.generated === true,
+    };
+  });
+  return {
+    files,
+    total: files.length,
+    truncated: false,
+    collapsed: files.filter((file) => file.collapsed).length,
+    expanded,
+  };
 }
 
 /** Tell every open page that one merge request moved — the same `stale` frame the real
@@ -6355,6 +6607,23 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return mockPipelineView(mr);
     }
 
+    // What the merge request CHANGED. `depth` is the closed set the backend keeps, so an
+    // unknown name is refused here too rather than quietly read as the cheap one — a page
+    // served the plain diff for the expanded read it asked for would report the files GitLab
+    // withheld as files GitLab withheld twice.
+    case "gitlab_mr_diff": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const depth = asObject(params).depth ?? "listed";
+      if (depth !== "listed" && depth !== "raw") {
+        throw new Error(`a diff is listed or raw, not ${String(depth)}`);
+      }
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabDiffRefusal) throw new Error(mockGitLabDiffRefusal);
+      return mockDiffFor(mr, depth);
+    }
+
     // MERGE. The one write in this app that no later call takes back — and the `sha` is
     // what stands between it and landing a commit nobody read, so this mock checks it the
     // way GitLab does: a mismatch is the 409 the page has to report.
@@ -7485,6 +7754,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       if (body.clear === true) {
         mockGitLabWriteRefusal = null;
         mockGitLabTokenMissing = false;
+        mockGitLabDiffRefusal = null;
         // The live pipeline goes back to its first frame too: every read moves it on, so a
         // spec that wants to WATCH it move has to start from a known one.
         resetMockLivePipeline();
@@ -7492,8 +7762,14 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       }
       mockGitLabWriteRefusal = typeof body.refuse === "string" ? body.refuse : null;
       mockGitLabTokenMissing = body.no_token === true;
+      mockGitLabDiffRefusal = typeof body.refuse_diff === "string" ? body.refuse_diff : null;
       return Response.json(
-        { ok: true, refuse: mockGitLabWriteRefusal, no_token: mockGitLabTokenMissing },
+        {
+          ok: true,
+          refuse: mockGitLabWriteRefusal,
+          no_token: mockGitLabTokenMissing,
+          refuse_diff: mockGitLabDiffRefusal,
+        },
         { status: 200 },
       );
     }

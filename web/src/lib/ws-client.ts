@@ -11,6 +11,7 @@ import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { CallPreparation, CallStatus, MeetingAddress } from "./call";
 import type { SendImage } from "./composer-image";
+import type { DiffDepth, GitLabDiff } from "./gitlab-diff";
 import type {
   GitLabDiscussionList,
   GitLabPipelineView,
@@ -1172,7 +1173,7 @@ export class Backend {
 
   // ---- the merge-request page ---------------------------------------------
   //
-  // Four reads and four writes, and the split is the whole safety story of the page:
+  // Five reads and four writes, and the split is the whole safety story of the page:
   // reading a tracker is what it is for, and writing to one is the user's own click.
   //
   // Every read answers from the backend's durable cache first and refreshes behind the
@@ -1224,6 +1225,28 @@ export class Backend {
     return this.request<GitLabPipelineView>("gitlab_mr_pipeline", {
       project_path: key.projectPath,
       iid: key.iid,
+      refresh,
+    });
+  }
+
+  /** What the merge request CHANGED, for the Changes section.
+   *
+   *  `depth` picks between the two reads GitLab offers, and the difference is measured
+   *  (`examples/merge_request_diff_recon.rs`): `listed` is one page of the modern `/diffs`
+   *  endpoint and carries whatever GitLab chose to expand, `raw` is the older
+   *  `/changes?access_raw_diffs=true` and expands everything at half a megabyte on a large
+   *  merge request. So `listed` is what opening the section costs and `raw` is the reader's
+   *  own ask — see `canExpandDiff` in lib/gitlab-diff.ts. Both are closed names on the
+   *  backend, so this can never widen into a third endpoint. */
+  gitlabMergeRequestDiff(
+    key: MergeRequestKey,
+    depth: DiffDepth = "listed",
+    refresh = false,
+  ): Promise<GitLabDiff> {
+    return this.request<GitLabDiff>("gitlab_mr_diff", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      depth,
       refresh,
     });
   }

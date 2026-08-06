@@ -3,7 +3,7 @@
 // `src/gitlab.rs` enriches ONE link into a card. This module answers the other question
 // — "what is waiting for me, and what is going on inside it?" — which is the whole of the
 // GitLab page: a list of merge requests that are not merged, and for one of them its
-// description, its live pipeline, its approvals and its comments.
+// description, its live pipeline, its approvals, its DIFF and its comments.
 //
 // It is a read path, and it carries the read path's rails unchanged:
 //
@@ -35,8 +35,11 @@
 //     to fetch 5 000 landed merge requests by mistake.
 //   - **A note's body is MARKDOWN, and a discussion is not always a thread.** GitLab
 //     returns `individual_note: true` for a standalone comment and `false` for a real
-//     thread; a `DiffNote` carries the file and line it hangs on. Both shapes travel, so
-//     the code-review section this page will grow has the position it needs already.
+//     thread; a `DiffNote` carries the file and line it hangs on. Both shapes travel, so a
+//     review comment always names the file it hangs on even when the diff shows another.
+//
+// The DIFF has four measured facts of its own, and they are the sharpest in this file —
+// they are in the section header above [`DiffFile`], with the recon that measured them.
 
 use std::time::Duration;
 
@@ -64,6 +67,11 @@ const DISCUSSIONS_PER_PAGE: usize = 100;
 /// is generous enough for a real pipeline (the largest on this tenant runs 3) and bounded
 /// so a 500-job monorepo pipeline cannot push a page over.
 const JOBS_PER_PAGE: usize = 100;
+
+/// How many changed files one diff read asks for. GitLab's own maximum, and the number its
+/// own diff view caps a merge request at; `x-total` travels beside the rows, so a merge
+/// request with more says what it left out rather than looking complete.
+const DIFF_PER_PAGE: usize = 100;
 
 /// Which merge requests a list read asks for. Both halves are closed sets rather than
 /// strings from the client: a scope is a query parameter GitLab interprets, and a page
@@ -382,6 +390,163 @@ pub struct Discussion {
     pub notes: Vec<Note>,
 }
 
+// ---- the diff -----------------------------------------------------------------
+//
+// What one merge request CHANGED, as the Changes section reads it. Everything here follows
+// from what `examples/merge_request_diff_recon.rs` measured against the real instance, and
+// each measurement is a trap for the next reader:
+//
+//   - **GitLab's own `diff` opens at `@@`.** There is no `diff --git`, no `--- a/…` and no
+//     `+++ b/…` on it — measured on 338 of the 342 rows that carried one, the other four
+//     being binary markers. So a renderer that takes a patch has to be handed one this app
+//     WROTE, which is [`unified_patch`]: the paths, the modes and the rename come from the
+//     row's own fields, and only the hunks are GitLab's text.
+//   - **A pure RENAME carries no diff at all**, and its `collapsed` flag is noise. A rename
+//     with no content change has nothing to show by definition, so the header alone says it
+//     — and reading that empty string as an elision would report every moved file as one
+//     GitLab refused to expand.
+//   - **The COLLAPSE is a property of the merge request, never of the page.** The same 96 of
+//     149 files came back collapsed at every `per_page` from 10 to 100, and the expanded
+//     bytes were 174 703 every time: GitLab expands a diff collection up to a byte budget
+//     and collapses the rest. So paging is not a way out, `access_raw_diffs` is — and it is
+//     only on the older `/changes` (measured: identical row shape, 146 of those 149
+//     expanded, 500 KB in one answer, and `/diffs` ignores the parameter). That read is
+//     [`DiffDepth::Raw`] and it happens on the reader's own ask, never by default.
+//   - **A BINARY file carries a one-line marker** (`Binary files a/… and /dev/null differ`)
+//     rather than hunks. It is stated as a binary file; running that sentence through a code
+//     renderer would draw GitLab's prose as somebody's code.
+
+/// How a file changed, in the one word the tree and the header both read.
+///
+/// A closed set rather than the four booleans GitLab sends, because every surface asks the
+/// same question — what happened to this file — and four flags is four chances to answer it
+/// differently. `renamed` covers both of GitLab's renames: whether the content moved as well
+/// is the patch's business, not the tree's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileChange {
+    New,
+    Deleted,
+    Renamed,
+    Changed,
+}
+
+impl FileChange {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Deleted => "deleted",
+            Self::Renamed => "renamed",
+            Self::Changed => "changed",
+        }
+    }
+
+    /// Which change a row's own flags describe. `new` and `deleted` win over `renamed`,
+    /// because GitLab sets neither pair together and a file that arrived did not move.
+    fn from_flags(new: bool, deleted: bool, renamed: bool) -> Self {
+        if new {
+            Self::New
+        } else if deleted {
+            Self::Deleted
+        } else if renamed {
+            Self::Renamed
+        } else {
+            Self::Changed
+        }
+    }
+}
+
+/// One changed file, and the patch that shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiffFile {
+    /// The path the file has NOW — its old one for a deletion, since that is the only path
+    /// a deleted file ever had. What the tree is keyed on, so every surface names one file
+    /// one way.
+    pub path: String,
+    /// Where it was, when that differs from `path`. Absent otherwise, so a rename is the
+    /// one case a surface has two names to draw.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub change: &'static str,
+    /// A COMPLETE unified patch for this one file — the `diff --git` header this app wrote
+    /// over the hunks GitLab sent. `None` when there is nothing to render: a binary file, or
+    /// one GitLab did not expand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
+    /// Lines added and removed, counted from the hunks. Zero on a file with no patch, which
+    /// is honest: nothing arrived to count.
+    pub additions: u64,
+    pub deletions: u64,
+    /// A file GitLab described with a marker instead of hunks. The section says so; it never
+    /// draws the marker as code.
+    pub binary: bool,
+    /// A file GitLab did not expand, because the merge request's diff crossed its own byte
+    /// budget. The one state that a second read can mend (see [`DiffDepth::Raw`]).
+    pub collapsed: bool,
+    /// GitLab's own `generated_file` — a lockfile, a bundle, anything its `.gitattributes`
+    /// marks. Carried so the tree can say which files are worth a reader's attention; never
+    /// used to hide one, because a generated file is where a surprising change hides.
+    pub generated: bool,
+}
+
+/// Everything one merge request changed, and what this read left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MergeRequestDiff {
+    pub files: Vec<DiffFile>,
+    /// How many files changed in total, when GitLab says (`x-total`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// True when GitLab holds more files than travelled. A list that stops without saying it
+    /// stopped reads as a complete one.
+    pub truncated: bool,
+    /// How many of the files that DID travel carry no patch because GitLab collapsed them.
+    /// The number the section offers its second read for; `0` means there is nothing to ask.
+    pub collapsed: u64,
+    /// Whether this answer is the EXPANDED read. The section states it, because "GitLab
+    /// would not expand these" and "we did not ask it to" are different sentences.
+    pub expanded: bool,
+}
+
+/// Which of the two diff reads to make.
+///
+/// A closed set rather than a boolean from the client, for the reason [`ListScope`] is one:
+/// the two are different endpoints with different costs, and the page offers exactly these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffDepth {
+    /// `GET …/diffs` — the modern endpoint, one page, and whatever GitLab chose to expand.
+    /// What opening the Changes section costs.
+    Listed,
+    /// `GET …/changes?access_raw_diffs=true` — the older endpoint, which reads from Gitaly
+    /// and expands everything. Measured at 500 KB for a 149-file merge request, so it is
+    /// the reader's own ask and never the default.
+    Raw,
+}
+
+impl DiffDepth {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "listed" => Some(Self::Listed),
+            "raw" => Some(Self::Raw),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Listed => "listed",
+            Self::Raw => "raw",
+        }
+    }
+
+    /// The cache entry this depth's answer is stored under, beneath the merge request's own
+    /// prefix — so a write forgets both together.
+    pub fn cache_kind(self) -> &'static str {
+        match self {
+            Self::Listed => "diff",
+            Self::Raw => "diff-raw",
+        }
+    }
+}
+
 /// Every discussion on one merge request, oldest first — GitLab's own order, which is
 /// the order a conversation happened in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -555,6 +720,194 @@ pub async fn fetch_discussions(
     Ok(DiscussionList { discussions, truncated: more })
 }
 
+/// What one merge request changed.
+///
+/// Two endpoints behind one shape (see [`DiffDepth`]), because the row GitLab returns is
+/// byte-for-byte the same on both — measured: `a_mode b_mode collapsed deleted_file diff
+/// generated_file new_file new_path old_path renamed_file too_large`, on all 149 rows of
+/// `/changes?access_raw_diffs=true` and all 508 rows of `/diffs`. One parser is what keeps
+/// the expanded read from being a second, drifting spelling of the plain one.
+pub async fn fetch_diff(
+    http: &reqwest::Client,
+    gitlab_host: &str,
+    token: Option<&str>,
+    project_path: &str,
+    iid: u64,
+    depth: DiffDepth,
+) -> Result<MergeRequestDiff> {
+    let token = require_token(token)?;
+    let base = merge_request_api(gitlab_host, project_path, iid);
+    let endpoint = match depth {
+        DiffDepth::Listed => format!("{base}/diffs?per_page={DIFF_PER_PAGE}"),
+        DiffDepth::Raw => format!("{base}/changes?access_raw_diffs=true"),
+    };
+
+    let resp = get(http, &endpoint, Some(token)).await.context("gitlab diff")?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("{}", refusal(status, "the changes"));
+    }
+    // Read before the body, since consuming the response moves it. Only `/diffs` paginates,
+    // so only it publishes a count — the expanded read carries every file by construction.
+    let total = resp
+        .headers()
+        .get("x-total")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let body: serde_json::Value = resp.json().await.context("gitlab diff body")?;
+
+    // `/diffs` answers with the array itself; `/changes` wraps it in the whole merge request.
+    let rows = match depth {
+        DiffDepth::Listed => body.as_array(),
+        DiffDepth::Raw => body.get("changes").and_then(serde_json::Value::as_array),
+    };
+    let files: Vec<DiffFile> =
+        rows.map(|rows| rows.iter().filter_map(diff_file_from_json).collect()).unwrap_or_default();
+
+    let collapsed = files.iter().filter(|file| file.collapsed).count() as u64;
+    Ok(MergeRequestDiff {
+        truncated: total.is_some_and(|t| t > files.len() as u64),
+        collapsed,
+        expanded: matches!(depth, DiffDepth::Raw),
+        total: total.or(Some(files.len() as u64)),
+        files,
+    })
+}
+
+/// One changed file from a diff row, or `None` when the row names no file.
+fn diff_file_from_json(value: &serde_json::Value) -> Option<DiffFile> {
+    // A row with neither path is not a file. Either one alone is enough: GitLab sets both on
+    // every row it sends, and a row missing one is still addressable by the other.
+    let new_path = str_field(value, "new_path");
+    let old_path = str_field(value, "old_path");
+    let (new_path, old_path) = match (new_path, old_path) {
+        (Some(new_path), Some(old_path)) => (new_path, old_path),
+        (Some(path), None) | (None, Some(path)) => (path.clone(), path),
+        (None, None) => return None,
+    };
+
+    let change = FileChange::from_flags(
+        bool_field(value, "new_file"),
+        bool_field(value, "deleted_file"),
+        bool_field(value, "renamed_file"),
+    );
+    let hunks = value.get("diff").and_then(serde_json::Value::as_str).unwrap_or("");
+    // GitLab's marker for a file it will not diff. Matched on the text because that IS how it
+    // travels — the row carries no flag for it, measured on all four such rows.
+    let binary = hunks.starts_with("Binary files");
+    // A pure rename has no hunks BY DEFINITION, so its empty diff is not an elision — and
+    // GitLab sets `collapsed` on those rows anyway, which is what would have made every moved
+    // file report as one it refused to expand.
+    let collapsed = hunks.is_empty() && !matches!(change, FileChange::Renamed);
+
+    // A file with nothing to render carries no patch at all, so the page states what it is
+    // rather than drawing an empty one (see the section header for the three ways that
+    // happens). Every other file gets the header this app writes over GitLab's hunks.
+    let patch = if binary || collapsed {
+        None
+    } else {
+        Some(unified_patch(value, &old_path, &new_path, change, hunks))
+    };
+    let (additions, deletions) = count_changed_lines(hunks);
+
+    Some(DiffFile {
+        // A deleted file's `new_path` is the path it HAD (GitLab echoes it rather than
+        // blanking it), so the same field names every file — but the old path is then not a
+        // second name and must not be drawn as a move.
+        path: if matches!(change, FileChange::Deleted) { old_path.clone() } else { new_path },
+        old_path: if matches!(change, FileChange::Renamed) { Some(old_path) } else { None },
+        change: change.as_str(),
+        patch,
+        additions,
+        deletions,
+        binary,
+        collapsed,
+        generated: bool_field(value, "generated_file"),
+    })
+}
+
+/// A complete unified patch for one file: the header this app writes, over GitLab's hunks.
+///
+/// GitLab sends the hunks alone (measured — see the section header), so everything a patch
+/// parser reads about the FILE has to be written here. The shape is git's own, because that
+/// is what every diff renderer parses and because it is the one spelling that can express a
+/// pure rename — which carries no hunks at all, and would otherwise be a file with no patch.
+fn unified_patch(
+    value: &serde_json::Value,
+    old_path: &str,
+    new_path: &str,
+    change: FileChange,
+    hunks: &str,
+) -> String {
+    let a_mode = str_field(value, "a_mode");
+    let b_mode = str_field(value, "b_mode");
+    let mut patch = format!("diff --git a/{old_path} b/{new_path}\n");
+    match change {
+        FileChange::New => {
+            patch.push_str(&format!("new file mode {}\n", b_mode.as_deref().unwrap_or("100644")));
+        }
+        FileChange::Deleted => {
+            patch.push_str(&format!("deleted file mode {}\n", a_mode.as_deref().unwrap_or("100644")));
+        }
+        FileChange::Renamed => {
+            // `similarity index` is what tells a parser a rename with no hunks is a PURE one
+            // rather than a truncated patch, so it is stated from what the hunks say.
+            patch.push_str(if hunks.is_empty() {
+                "similarity index 100%\n"
+            } else {
+                "similarity index 90%\n"
+            });
+            patch.push_str(&format!("rename from {old_path}\nrename to {new_path}\n"));
+        }
+        FileChange::Changed => {}
+    }
+    // A mode that CHANGED is stated on a file that neither arrived nor left, because a
+    // permission change with no hunks is otherwise a file with an empty patch.
+    if matches!(change, FileChange::Changed | FileChange::Renamed) {
+        if let (Some(a), Some(b)) = (&a_mode, &b_mode) {
+            if a != b {
+                patch.push_str(&format!("old mode {a}\nnew mode {b}\n"));
+            }
+        }
+    }
+
+    // The `---` / `+++` pair, which is what a hunk hangs under. `/dev/null` on the side the
+    // file does not have, exactly as git writes it.
+    if !hunks.is_empty() {
+        patch.push_str(&match change {
+            FileChange::New => format!("--- /dev/null\n+++ b/{new_path}\n"),
+            FileChange::Deleted => format!("--- a/{old_path}\n+++ /dev/null\n"),
+            _ => format!("--- a/{old_path}\n+++ b/{new_path}\n"),
+        });
+        patch.push_str(hunks);
+        if !hunks.ends_with('\n') {
+            patch.push('\n');
+        }
+    }
+    patch
+}
+
+/// How many lines a patch adds and removes, from its hunks alone.
+///
+/// The `+++` and `---` header lines are never in `hunks` (GitLab does not send them), but the
+/// guard stays: this counts what it is given, and a caller that one day hands it a full patch
+/// must not have its file header counted as one added and one removed line.
+fn count_changed_lines(hunks: &str) -> (u64, u64) {
+    let mut additions = 0;
+    let mut deletions = 0;
+    for line in hunks.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            additions += 1;
+        } else if line.starts_with('-') {
+            deletions += 1;
+        }
+    }
+    (additions, deletions)
+}
+
 /// The numeric id of the account a token belongs to, cached for the life of the process.
 ///
 /// Two reads need it — "merge requests I review" and "which comments are mine" — and it
@@ -593,7 +946,11 @@ pub async fn fetch_user_id(
 // ---- plumbing ---------------------------------------------------------------
 
 /// The API base of one merge request.
-pub(crate) fn merge_request_api(gitlab_host: &str, project_path: &str, iid: u64) -> String {
+///
+/// `pub` rather than crate-private because the READ-ONLY recon examples address a merge
+/// request the way this module does — one spelling of the endpoint, measured rather than
+/// re-typed (see `examples/merge_request_diff_recon.rs`).
+pub fn merge_request_api(gitlab_host: &str, project_path: &str, iid: u64) -> String {
     format!(
         "{}/projects/{}/merge_requests/{iid}",
         gitlab::api_base(gitlab_host),
@@ -1212,6 +1569,216 @@ mod tests {
         assert!(note_position(Some(&serde_json::json!({ "new_line": 3 }))).is_none());
         assert!(note_position(Some(&serde_json::json!("not an object"))).is_none());
         assert!(note_position(None).is_none());
+    }
+
+    /// Every read of one merge request shares one prefix — the DIFF included, or a merge
+    /// would leave the changes of the branch it just landed in the cache.
+    #[test]
+    fn both_diff_reads_sit_under_the_merge_requests_own_prefix() {
+        let prefix = cache_prefix("group/sub/app", 42);
+        for depth in [DiffDepth::Listed, DiffDepth::Raw] {
+            assert!(
+                cache_key("group/sub/app", 42, depth.cache_kind()).starts_with(&prefix),
+                "{} must sit under the shared prefix",
+                depth.as_str()
+            );
+        }
+        // The two depths are different answers and must never share an entry: the plain read
+        // is what opening the section costs, and serving it as the expanded one would report
+        // collapsed files as expanded.
+        assert_ne!(DiffDepth::Listed.cache_kind(), DiffDepth::Raw.cache_kind());
+    }
+
+    #[test]
+    fn a_diff_depth_is_a_closed_set() {
+        for name in ["listed", "raw"] {
+            assert_eq!(DiffDepth::from_str(name).map(DiffDepth::as_str), Some(name));
+        }
+        // A client cannot invent one, for the reason a scope cannot: it decides which GitLab
+        // endpoint the token reaches.
+        assert_eq!(DiffDepth::from_str("changes"), None);
+        assert_eq!(DiffDepth::from_str("access_raw_diffs=true"), None);
+        assert_eq!(DiffDepth::from_str(""), None);
+    }
+
+    /// The shape the tenant really answers with, and the patch this app writes over it.
+    #[test]
+    fn writes_the_header_gitlab_never_sends() {
+        // Measured: `diff` opens at `@@`, with no `diff --git` and no `---` / `+++`.
+        let row = serde_json::json!({
+            "old_path": "src/lib/greet.ts",
+            "new_path": "src/lib/greet.ts",
+            "a_mode": "100644",
+            "b_mode": "100644",
+            "new_file": false,
+            "renamed_file": false,
+            "deleted_file": false,
+            "generated_file": false,
+            "collapsed": false,
+            "too_large": false,
+            "diff": "@@ -1,3 +1,4 @@\n export function greet() {\n-  return \"hi\";\n+  const out = \"hello\";\n+  return out;\n }\n",
+        });
+        let file = diff_file_from_json(&row).expect("a changed file");
+        assert_eq!(file.path, "src/lib/greet.ts");
+        assert_eq!(file.old_path, None, "an unmoved file has no second name");
+        assert_eq!(file.change, "changed");
+        assert_eq!((file.additions, file.deletions), (2, 1));
+        assert!(!file.binary && !file.collapsed && !file.generated);
+        let patch = file.patch.expect("a patch");
+        // The header is what a diff renderer reads the file from, and GitLab sent none of it.
+        assert!(patch.starts_with("diff --git a/src/lib/greet.ts b/src/lib/greet.ts\n"), "{patch}");
+        assert!(patch.contains("--- a/src/lib/greet.ts\n+++ b/src/lib/greet.ts\n"), "{patch}");
+        // GitLab's own hunks travel untouched, under it.
+        assert!(patch.contains("@@ -1,3 +1,4 @@\n"), "{patch}");
+        assert!(patch.ends_with('\n'), "a patch ends in a newline");
+    }
+
+    #[test]
+    fn a_new_file_and_a_deleted_one_name_dev_null_on_the_side_they_lack() {
+        let added = diff_file_from_json(&serde_json::json!({
+            "old_path": "docs/new.md", "new_path": "docs/new.md",
+            "a_mode": "0", "b_mode": "100644",
+            "new_file": true, "renamed_file": false, "deleted_file": false,
+            "diff": "@@ -0,0 +1,2 @@\n+# Title\n+Body\n",
+        }))
+        .expect("a new file");
+        assert_eq!(added.change, "new");
+        assert_eq!((added.additions, added.deletions), (2, 0));
+        let patch = added.patch.expect("a patch");
+        assert!(patch.contains("new file mode 100644\n"), "{patch}");
+        assert!(patch.contains("--- /dev/null\n+++ b/docs/new.md\n"), "{patch}");
+
+        let gone = diff_file_from_json(&serde_json::json!({
+            "old_path": "docs/old.md", "new_path": "docs/old.md",
+            "a_mode": "100644", "b_mode": "0",
+            "new_file": false, "renamed_file": false, "deleted_file": true,
+            "diff": "@@ -1,2 +0,0 @@\n-# Title\n-Body\n",
+        }))
+        .expect("a deleted file");
+        assert_eq!(gone.change, "deleted");
+        // A deleted file is named by the path it HAD, and that path is not a second name.
+        assert_eq!(gone.path, "docs/old.md");
+        assert_eq!(gone.old_path, None);
+        let patch = gone.patch.expect("a patch");
+        assert!(patch.contains("deleted file mode 100644\n"), "{patch}");
+        assert!(patch.contains("--- a/docs/old.md\n+++ /dev/null\n"), "{patch}");
+    }
+
+    /// A pure rename carries NO diff, and that empty string is not an elision.
+    ///
+    /// Measured on this tenant: every renamed row came back with `diff: ""`, and several of
+    /// them with `collapsed: true` as well. Reading either as "GitLab would not expand this"
+    /// would report every moved file as one the reader has to ask again for.
+    #[test]
+    fn a_pure_rename_is_a_rename_and_never_a_collapsed_file() {
+        let file = diff_file_from_json(&serde_json::json!({
+            "old_path": "src/old/name.ts", "new_path": "src/new/name.ts",
+            "a_mode": "100644", "b_mode": "100644",
+            "new_file": false, "renamed_file": true, "deleted_file": false,
+            "collapsed": true,
+            "diff": "",
+        }))
+        .expect("a renamed file");
+        assert_eq!(file.change, "renamed");
+        assert!(!file.collapsed, "a rename with no hunks has nothing to expand");
+        assert_eq!(file.path, "src/new/name.ts");
+        assert_eq!(file.old_path.as_deref(), Some("src/old/name.ts"));
+        let patch = file.patch.expect("a rename still has a patch — its header IS the change");
+        assert!(patch.contains("similarity index 100%\n"), "{patch}");
+        assert!(patch.contains("rename from src/old/name.ts\nrename to src/new/name.ts\n"), "{patch}");
+        // With no hunks there is nothing for a `---` / `+++` pair to hang under.
+        assert!(!patch.contains("---"), "{patch}");
+
+        // A rename that ALSO changed content keeps both halves.
+        let moved = diff_file_from_json(&serde_json::json!({
+            "old_path": "a.ts", "new_path": "b.ts",
+            "a_mode": "100644", "b_mode": "100644",
+            "new_file": false, "renamed_file": true, "deleted_file": false,
+            "diff": "@@ -1 +1 @@\n-one\n+two\n",
+        }))
+        .expect("a renamed file");
+        let patch = moved.patch.expect("a patch");
+        assert!(patch.contains("similarity index 90%\n"), "{patch}");
+        assert!(patch.contains("--- a/a.ts\n+++ b/b.ts\n"), "{patch}");
+    }
+
+    #[test]
+    fn a_binary_file_is_stated_and_never_rendered_as_code() {
+        // GitLab's own marker, which is how a binary file travels — there is no flag for it.
+        let file = diff_file_from_json(&serde_json::json!({
+            "old_path": "docs/diagram.png", "new_path": "docs/diagram.png",
+            "a_mode": "100644", "b_mode": "0",
+            "new_file": false, "renamed_file": false, "deleted_file": true,
+            "diff": "Binary files a/docs/diagram.png and /dev/null differ\n",
+        }))
+        .expect("a binary file");
+        assert!(file.binary);
+        assert!(!file.collapsed, "GitLab answered about this file — it simply will not diff it");
+        assert_eq!(file.patch, None, "a marker sentence is not somebody's code");
+        assert_eq!((file.additions, file.deletions), (0, 0));
+    }
+
+    #[test]
+    fn a_collapsed_file_carries_no_patch_and_says_so() {
+        let file = diff_file_from_json(&serde_json::json!({
+            "old_path": "src/big.ts", "new_path": "src/big.ts",
+            "a_mode": "100644", "b_mode": "100644",
+            "new_file": false, "renamed_file": false, "deleted_file": false,
+            "collapsed": true, "too_large": false,
+            "diff": "",
+        }))
+        .expect("a collapsed file");
+        assert!(file.collapsed);
+        assert_eq!(file.patch, None);
+        assert_eq!(file.change, "changed");
+    }
+
+    #[test]
+    fn a_mode_only_change_states_the_mode() {
+        let file = diff_file_from_json(&serde_json::json!({
+            "old_path": "bin/run.sh", "new_path": "bin/run.sh",
+            "a_mode": "100644", "b_mode": "100755",
+            "new_file": false, "renamed_file": false, "deleted_file": false,
+            "diff": "@@ -1 +1 @@\n-#!/bin/sh\n+#!/usr/bin/env bash\n",
+        }))
+        .expect("a file");
+        let patch = file.patch.expect("a patch");
+        assert!(patch.contains("old mode 100644\nnew mode 100755\n"), "{patch}");
+    }
+
+    #[test]
+    fn a_row_naming_no_file_is_dropped() {
+        assert!(diff_file_from_json(&serde_json::json!({ "diff": "@@ -1 +1 @@\n+x\n" })).is_none());
+        // One path alone is enough: it still names a file.
+        let file = diff_file_from_json(&serde_json::json!({
+            "new_path": "only.txt", "diff": "@@ -0,0 +1 @@\n+x\n", "new_file": true
+        }))
+        .expect("a file");
+        assert_eq!(file.path, "only.txt");
+    }
+
+    #[test]
+    fn counts_only_the_lines_a_hunk_changed() {
+        // A `+++` / `---` pair is never in GitLab's hunks, but a caller that hands one over
+        // must not have the file header counted as a change.
+        assert_eq!(
+            count_changed_lines("--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-a\n+b\n c\n"),
+            (1, 1)
+        );
+        assert_eq!(count_changed_lines(""), (0, 0));
+        // A context line that happens to start with a space is neither.
+        assert_eq!(count_changed_lines("@@ -1 +1 @@\n x\n"), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_tokenless_diff_read_never_reaches_the_network() {
+        let http = reqwest::Client::new();
+        for depth in [DiffDepth::Listed, DiffDepth::Raw] {
+            let err = fetch_diff(&http, "gitlab.com", None, "a/b", 1, depth)
+                .await
+                .expect_err("a diff cannot be read anonymously");
+            assert!(err.to_string().contains("needs a personal access token"), "{err}");
+        }
     }
 
     #[test]

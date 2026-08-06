@@ -113,6 +113,12 @@ import {
   renegotiationRefusedMessage,
 } from "./call-failure";
 import {
+  canExpandDiff,
+  type DiffDepth,
+  type DiffLayout,
+  type GitLabDiff,
+} from "./gitlab-diff";
+import {
   isNotMerged,
   mergeRequestId,
   pipelineIsLive,
@@ -552,6 +558,25 @@ export type AppState = {
   /** Its comments, and its pipeline with jobs. */
   gitlabNotes: GitLabDiscussionList | null;
   gitlabPipeline: GitLabPipelineView | null;
+  /** What it CHANGED, for the Changes section. Read with the page, like the four above:
+   *  reviewing the diff is what a merge-request page is for, so it is never behind a click.
+   *  The RENDERER is lazy (see gitlab-diff-view.tsx) because Shiki carries a grammar per
+   *  language; the read itself
+   *  is measured at ~40 KB for a typical merge request on this instance. */
+  gitlabDiff: GitLabDiff | null;
+  gitlabDiffLoading: boolean;
+  /** Reported inside the section rather than on the page: a diff that could not be read
+   *  costs the Changes panel and nothing else, exactly as the comments do. */
+  gitlabDiffError: string | null;
+  /** Which file the section is showing, or null for "whichever `selectDiffFile` picks".
+   *  Per merge request, so walking away and back keeps the file the reader was on. */
+  gitlabDiffPath: string | null;
+  /** Whether the reader has asked for the expanded read of THIS merge request. Their ask,
+   *  their merge request: it is not a preference, because the cost is per diff. */
+  gitlabDiffDepth: DiffDepth;
+  /** Unified or split, the reader's own choice, persisted per browser. A narrow screen
+   *  overrides it to unified without forgetting it (see `effectiveDiffLayout`). */
+  gitlabDiffLayout: DiffLayout;
   /** What the composer holds, per merge request, so walking away and back keeps a
    *  half-written comment — and a reply keeps its own draft apart from the main one. */
   gitlabCommentDraft: string;
@@ -642,6 +667,11 @@ const GITLAB_PIPELINE_POLL_MS = 6000;
 const VISIBLE_CALENDARS_KEY = "teams-lite:visible-calendars";
 // And the view menu's display preferences.
 const CALENDAR_SETTINGS_KEY = "teams-lite:calendar-settings";
+// Whether the reader reads a diff unified or split. Client-only, like the calendar's own
+// preferences and for the same reason: it is a per-screen decision and there is no upstream
+// to write it to. What is deliberately NOT here is the expanded read — that is per merge
+// request, because its cost is (see `canExpandDiff`).
+const GITLAB_DIFF_LAYOUT_KEY = "teams-lite:gitlab-diff-layout";
 
 /**
  * The calendar's display preferences — the three toggles the view menu offers.
@@ -779,6 +809,12 @@ function initialState(): AppState {
     gitlabApproval: null,
     gitlabNotes: null,
     gitlabPipeline: null,
+    gitlabDiff: null,
+    gitlabDiffLoading: false,
+    gitlabDiffError: null,
+    gitlabDiffPath: null,
+    gitlabDiffDepth: "listed",
+    gitlabDiffLayout: "unified",
     gitlabCommentDraft: "",
     gitlabReplyTo: null,
     gitlabActing: null,
@@ -979,6 +1015,7 @@ export class TeamsController {
     this.applyPersistedCollapsedSections();
     this.applyPersistedVisibleCalendars();
     this.applyPersistedCalendarSettings();
+    this.applyPersistedDiffLayout();
     this.wireEvents();
     this.watchWakeups();
 
@@ -1393,6 +1430,16 @@ export class TeamsController {
         const notes = d as unknown as GitLabDiscussionList;
         this.gitlabNotesCache.set(id, notes);
         this.set({ gitlabNotes: notes });
+      } else if (d.kind === "diff" || d.kind === "diff-raw") {
+        // The DEPTH is part of the kind, so the plain read refreshing behind the page can
+        // never replace the expanded one a reader asked for — it holds fewer patches.
+        const depth: DiffDepth = d.kind === "diff-raw" ? "raw" : "listed";
+        if (!Array.isArray(d.files)) return;
+        const diff = d as unknown as GitLabDiff;
+        this.gitlabDiffCache.set(this.gitlabDiffKey(id, depth), diff);
+        if (this.get().gitlabDiffDepth === depth) {
+          this.set({ gitlabDiff: diff, gitlabDiffError: null });
+        }
       } else if (d.kind === "pipeline") {
         const view = d as unknown as GitLabPipelineView;
         this.set({ gitlabPipeline: view });
@@ -3125,6 +3172,12 @@ export class TeamsController {
    *  Bounded LRU — a session spent reviewing must not accumulate every merge request. */
   private gitlabDetailCache = new Map<string, MergeRequestDetail>();
   private gitlabNotesCache = new Map<string, GitLabDiscussionList>();
+  /** The diff per merge request AND per depth, so walking back to one paints at once and the
+   *  expanded read a reader paid for is never silently replaced by the plain one. */
+  private gitlabDiffCache = new Map<string, GitLabDiff>();
+  /** Which file the reader was on, per merge request. Kept OUT of the reactive state for the
+   *  reason a draft is: it survives a walk away without re-rendering anything. */
+  private gitlabDiffPathCache = new Map<string, string>();
   /** Comment drafts per merge request, so leaving a half-written comment and coming back
    *  keeps it. Kept OUT of the reactive state for the same reason chat drafts are. */
   private gitlabDraftCache = new Map<string, string>();
@@ -3146,6 +3199,8 @@ export class TeamsController {
     this.gitlabListCache.clear();
     this.gitlabDetailCache.clear();
     this.gitlabNotesCache.clear();
+    this.gitlabDiffCache.clear();
+    this.gitlabDiffPathCache.clear();
     this.set({
       gitlabList: [],
       gitlabTotal: null,
@@ -3155,6 +3210,8 @@ export class TeamsController {
       gitlabNotes: null,
       gitlabPipeline: null,
       gitlabApproval: null,
+      gitlabDiff: null,
+      gitlabDiffError: null,
     });
     if (this.get().sidebarTab === "gitlab") void this.loadMergeRequests(true);
     if (this.get().openMergeRequest) void this.reloadMergeRequest();
@@ -3250,6 +3307,11 @@ export class TeamsController {
     const id = mergeRequestId(key);
     const detail = this.gitlabDetailCache.get(id) ?? null;
     const notes = this.gitlabNotesCache.get(id) ?? null;
+    // The depth is per merge request, so a reader who paid for the expanded read of THIS one
+    // gets it back — while another merge request opens on the cheap read, as it should.
+    const diff = this.gitlabDiffCache.get(this.gitlabDiffKey(id, "raw"))
+      ?? this.gitlabDiffCache.get(this.gitlabDiffKey(id, "listed"))
+      ?? null;
     this.stopPipelinePolling();
     this.set({
       openMergeRequest: key,
@@ -3257,6 +3319,11 @@ export class TeamsController {
       gitlabDetailLoading: !detail,
       gitlabDetailError: null,
       gitlabNotes: notes,
+      gitlabDiff: diff,
+      gitlabDiffLoading: !diff,
+      gitlabDiffError: null,
+      gitlabDiffPath: this.gitlabDiffPathCache.get(id) ?? null,
+      gitlabDiffDepth: diff?.expanded ? "raw" : "listed",
       // The pipeline is deliberately NOT cached across opens: a stale CI badge is the one
       // piece of this page that would be read as current when it is minutes old.
       gitlabPipeline: null,
@@ -3320,7 +3387,97 @@ export class TeamsController {
       });
 
     const pipeline = this.loadPipeline(key, refresh);
-    await Promise.all([detail, notes, pipeline]);
+    const diff = this.loadDiff(key, this.get().gitlabDiffDepth, refresh);
+    await Promise.all([detail, notes, pipeline, diff]);
+  }
+
+  /** The key one merge request's diff is cached under, per depth.
+   *
+   *  Per depth because the two answers differ in what they HOLD — the plain one carried 47
+   *  patches of 100 files where the expanded one carried 142 of 149 (measured) — so one entry
+   *  would serve a reader the cheap answer for the read they paid for. */
+  private gitlabDiffKey(id: string, depth: DiffDepth): string {
+    return `${id}:${depth}`;
+  }
+
+  /** Read what a merge request changed.
+   *
+   *  A failure costs the Changes panel and nothing else — the contract the comments already
+   *  hold: this page is a header, four panels and a composer, and one panel that cannot be
+   *  read must not empty the others. */
+  private async loadDiff(
+    key: MergeRequestKey,
+    depth: DiffDepth,
+    refresh: boolean,
+  ): Promise<void> {
+    const id = mergeRequestId(key);
+    const open = () => sameMergeRequest(this.get().openMergeRequest, key);
+    // Only claim the spinner while the reader has nothing on screen, or asked for this
+    // read themselves: a background refresh behind a drawn diff is not something to say.
+    if (open() && (!this.get().gitlabDiff || refresh)) this.set({ gitlabDiffLoading: true });
+    try {
+      const diff = await this.backend.gitlabMergeRequestDiff(key, depth, refresh);
+      this.gitlabDiffCache.set(this.gitlabDiffKey(id, depth), diff);
+      // The depth is checked as well as the merge request: a reader who asked for the
+      // expanded read while the plain one was still travelling must not have it replaced by
+      // the smaller answer that arrives second.
+      if (open() && this.get().gitlabDiffDepth === depth) {
+        this.set({ gitlabDiff: diff, gitlabDiffError: null });
+      }
+    } catch (e) {
+      if (open() && this.get().gitlabDiffDepth === depth && !this.get().gitlabDiff) {
+        this.set({ gitlabDiffError: errText(e) });
+      }
+    } finally {
+      if (open() && this.get().gitlabDiffDepth === depth) this.set({ gitlabDiffLoading: false });
+    }
+  }
+
+  /** Show one file of the open diff. */
+  setGitLabDiffFile(path: string): void {
+    const key = this.get().openMergeRequest;
+    if (key) this.gitlabDiffPathCache.set(mergeRequestId(key), path);
+    this.set({ gitlabDiffPath: path });
+  }
+
+  /** Ask GitLab to expand the files it collapsed.
+   *
+   *  The reader's own ask, and it happens once: the answer is cached under its own depth, and
+   *  `canExpandDiff` stops the control being offered again — the expanded read costs half a
+   *  megabyte on a large merge request, and it does not always expand everything. */
+  async expandGitLabDiff(): Promise<void> {
+    const key = this.get().openMergeRequest;
+    if (!key || !canExpandDiff(this.get().gitlabDiff)) return;
+    const cached = this.gitlabDiffCache.get(this.gitlabDiffKey(mergeRequestId(key), "raw"));
+    this.set({ gitlabDiffDepth: "raw", gitlabDiffError: null });
+    if (cached) {
+      this.set({ gitlabDiff: cached });
+      return;
+    }
+    await this.loadDiff(key, "raw", false);
+  }
+
+  /** Switch between the unified and the split layout, and remember it. */
+  setGitLabDiffLayout(layout: DiffLayout): void {
+    if (this.get().gitlabDiffLayout === layout) return;
+    this.set({ gitlabDiffLayout: layout });
+    try {
+      localStorage.setItem(GITLAB_DIFF_LAYOUT_KEY, layout);
+    } catch {
+      /* ignore — a failed persist just doesn't survive reload */
+    }
+  }
+
+  /** Load the persisted layout choice. Best-effort and SSR-safe, like every other
+   *  client-only preference: a failure leaves the unified default, which is the one that
+   *  works at every width. */
+  private applyPersistedDiffLayout(): void {
+    try {
+      const raw = localStorage.getItem(GITLAB_DIFF_LAYOUT_KEY);
+      if (raw === "unified" || raw === "split") this.set({ gitlabDiffLayout: raw });
+    } catch {
+      /* ignore — the layout choice is non-critical */
+    }
   }
 
   private async loadMergeRequestApproval(key: MergeRequestKey, webUrl: string): Promise<void> {
@@ -3375,6 +3532,11 @@ export class TeamsController {
       gitlabNotes: null,
       gitlabPipeline: null,
       gitlabApproval: null,
+      gitlabDiff: null,
+      gitlabDiffLoading: false,
+      gitlabDiffError: null,
+      gitlabDiffPath: null,
+      gitlabDiffDepth: "listed",
       gitlabCommentDraft: "",
       gitlabReplyTo: null,
       gitlabActing: null,
@@ -3401,6 +3563,12 @@ export class TeamsController {
       this.gitlabDetailCache.delete(oldest.value);
       this.gitlabNotesCache.delete(oldest.value);
       this.gitlabDraftCache.delete(oldest.value);
+      this.gitlabDiffPathCache.delete(oldest.value);
+      // Both depths, because the diff is by far the largest thing kept per merge request —
+      // measured at half a megabyte for one expanded read — and a reviewer walks through
+      // dozens in a session.
+      this.gitlabDiffCache.delete(this.gitlabDiffKey(oldest.value, "listed"));
+      this.gitlabDiffCache.delete(this.gitlabDiffKey(oldest.value, "raw"));
     }
   }
 

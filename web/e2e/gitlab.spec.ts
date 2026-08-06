@@ -455,6 +455,185 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(page.locator('[data-testid="gitlab-pane-empty"]')).toBeVisible();
   });
 
+  // ---- the Changes section: the diff ---------------------------------------
+  //
+  // The one part of this page drawn by somebody else's renderer — `@pierre/trees` for the
+  // file tree, `@pierre/diffs` for the patch, both behind a lazy import. So these tests
+  // assert on this app's own `data-testid`s and on ONE attribute of pierre's
+  // (`data-item-path`, which is how a row is addressed); asserting on their internals would
+  // be a test of their release notes.
+  //
+  // Every state a real GitLab answer holds is in the fixture, because four of the five are
+  // files with NO patch (see `mockDiffFiles` in web/mock/server.ts). They sit BEFORE the
+  // merge below, which is destructive to !596.
+
+  /** Open the Changes section of the merge request already on screen, and wait for a patch.
+   *
+   *  The wait is on the PATCH rather than the section: the section paints from the read, and
+   *  what takes time after that is the lazy chunk and then Shiki resolving the file's own
+   *  grammar. */
+  async function openChanges(page: Page) {
+    await page.locator('[data-testid="gitlab-changes"]').scrollIntoViewIfNeeded();
+    await expect(page.locator('[data-testid="gitlab-diff-patch"]')).toBeVisible({
+      timeout: 25_000,
+    });
+  }
+
+  /** Show one file of the open diff by pressing its row.
+   *
+   *  Pierre's tree renders into a shadow root and Playwright's CSS engine pierces an open
+   *  one, so this drives the row a reader would press. The assertion afterwards is on this
+   *  app's own heading, which is what proves the press reached the section. */
+  async function pickFile(page: Page, path: string) {
+    await page.locator(`[data-item-path="${path}"]`).first().click();
+    await expect(page.locator('[data-testid="gitlab-changes-file"]')).toHaveAttribute(
+      "data-path",
+      path,
+    );
+  }
+
+  test("states what changed, and opens on a file with something to read", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openChanges(page);
+
+    // The heading counts what TRAVELLED and the lines that moved, and the way out to
+    // GitLab's own diff stays whatever this page can draw.
+    const summary = page.locator('[data-testid="gitlab-changes-summary"]');
+    await expect(summary).toContainText("7 files");
+    await expect(summary).toContainText("+27");
+    await expect(page.locator('[data-testid="gitlab-changes-link"]')).toHaveAttribute(
+      "href",
+      /\/diffs$/,
+    );
+
+    // Nothing was picked, so the section opens on the first file that HAS a patch — never on
+    // a sentence explaining why there is nothing to see, which reads as a failed load.
+    await expect(page.locator('[data-testid="gitlab-changes-file"]')).toHaveAttribute(
+      "data-change",
+      "changed",
+    );
+    await expect(page.locator('[data-testid="gitlab-diff-tree"]')).toBeVisible();
+    // A file with a patch explains nothing: the patch is the explanation.
+    await expect(page.locator('[data-testid="gitlab-changes-file-notice"]')).toHaveCount(0);
+  });
+
+  test("shows the file whose row was pressed, and its own stat", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openChanges(page);
+
+    await pickFile(page, "src/server/health.ts");
+    const file = page.locator('[data-testid="gitlab-changes-file"]');
+    await expect(file).toContainText("+9");
+    await expect(file).toContainText("−3");
+    await expect(page.locator('[data-testid="gitlab-diff-patch"]')).toBeVisible();
+  });
+
+  test("tells the files with no patch apart", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openChanges(page);
+    const notice = page.locator('[data-testid="gitlab-changes-file-notice"]');
+
+    // A pure RENAME: no hunks by definition, and its patch IS the header stating the move. So
+    // it explains NOTHING — and it must never read as a file GitLab collapsed, which is what
+    // GitLab's own `collapsed: true` on those rows would have made it.
+    await pickFile(page, "src/server/drain.ts");
+    const file = page.locator('[data-testid="gitlab-changes-file"]');
+    await expect(file).toHaveAttribute("data-change", "renamed");
+    await expect(file).toContainText("src/server/shutdown.ts");
+    await expect(notice).toHaveCount(0);
+
+    // A BINARY file: GitLab describes it with one sentence rather than hunks, and this page
+    // says so instead of running that prose through a code renderer.
+    await pickFile(page, "docs/diagrams/rollout.png");
+    await expect(notice).toHaveAttribute("data-state", "binary");
+    await expect(notice).toContainText(/binary/i);
+    await expect(page.locator('[data-testid="gitlab-diff-patch"]')).toHaveCount(0);
+
+    // A file GitLab COLLAPSED — the one state a second read can mend. And a generated file
+    // says so, because a surprising change hides in one.
+    await pickFile(page, "bun.lock");
+    await expect(notice).toHaveAttribute("data-state", "collapsed");
+    await expect(notice).toContainText(/did not expand/i);
+    await expect(file).toContainText("generated");
+  });
+
+  test("offers the expanded read once, names what it costs, then stops offering", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openChanges(page);
+
+    const expand = page.locator('[data-testid="gitlab-changes-expand"]');
+    await expect(expand).toContainText("Expand 1 file");
+    // The cost, before the press — the rule the update button follows for its 130 MB.
+    await expect(page.locator('[data-testid="gitlab-changes-expand-hint"]')).toContainText(
+      /slower and much larger/i,
+    );
+
+    // The collapsed file carries no patch until the reader asks.
+    await pickFile(page, "bun.lock");
+    await expect(page.locator('[data-testid="gitlab-changes-file-notice"]')).toHaveAttribute(
+      "data-state",
+      "collapsed",
+    );
+
+    await expand.click();
+    // Now it does, and the sentence about it is gone.
+    await expect(page.locator('[data-testid="gitlab-diff-patch"]')).toBeVisible({
+      timeout: 25_000,
+    });
+    await expect(page.locator('[data-testid="gitlab-changes-file-notice"]')).toHaveCount(0);
+    // Offered ONCE: a second press would pay half a megabyte for the same answer, and the
+    // expanded read does not always expand everything either.
+    await expect(expand).toHaveCount(0);
+  });
+
+  test("is unified on a phone, and offers no layout it cannot draw", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openChanges(page);
+    // Split needs two columns of code and this app is read from a phone, so the toggle is not
+    // drawn at all: a control that changes nothing reads as a bug.
+    await expect(page.locator('[data-testid="gitlab-diff-layout"]')).toHaveCount(0);
+    // The tree is still there — it is how a file is picked, at every width.
+    await expect(page.locator('[data-testid="gitlab-diff-tree"]')).toBeVisible();
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const toggle = page.locator('[data-testid="gitlab-diff-layout"]');
+    await expect(toggle).toHaveAttribute("data-layout", "unified");
+    await page.locator('[data-testid="gitlab-diff-layout-split"]').click();
+    await expect(toggle).toHaveAttribute("data-layout", "split");
+    // Put it back: the choice is persisted per browser, and one mock process serves the run.
+    await page.locator('[data-testid="gitlab-diff-layout-unified"]').click();
+    await expect(toggle).toHaveAttribute("data-layout", "unified");
+  });
+
+  test("a diff that cannot be read costs the Changes panel and nothing else", async ({ page }) => {
+    await setMergeRequestControl(page, {
+      refuse_diff: "GitLab refused: this account may not read the changes",
+    });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await page.locator('[data-testid="gitlab-changes"]').scrollIntoViewIfNeeded();
+
+    await expect(page.locator('[data-testid="gitlab-changes-error"]')).toContainText(
+      "may not read the changes",
+    );
+    // The page is a header and five panels. One that cannot be read must not empty the
+    // others — the contract the comments already hold.
+    await expect(page.locator('[data-testid="gitlab-heading"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-pipeline"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-comments"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-actions"]')).toBeVisible();
+    // And the way out to GitLab's own diff is still offered, which is the one thing left.
+    await expect(page.locator('[data-testid="gitlab-changes-link"]')).toBeVisible();
+  });
+
   test("merges, and the merge request leaves the list for good", async ({ page }) => {
     // LAST, deliberately: it is the one test that cannot be undone against the fixtures,
     // exactly as the action itself cannot be undone against GitLab.

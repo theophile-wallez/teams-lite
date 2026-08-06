@@ -675,15 +675,16 @@ real GitLab project**: doing that is the user's own click, in their own app.
 ## The GitLab page (a sidebar of merge requests, and the four writes it offers)
 
 The sidebar's fifth tab is GitLab: the merge requests that are **not merged**, and one of
-them in full — its description, its live pipeline, its approvals, its comments — with the
-actions GitLab's own page offers. `src/gitlab_mr.rs` holds every READ, `src/gitlab_mr_write.rs`
-the four writes, `web/src/lib/gitlab-mr.ts` the pure decisions the surface is built from, and
+them in full — its description, its live pipeline, its approvals, its **diff** and its
+comments — with the actions GitLab's own page offers. `src/gitlab_mr.rs` holds every READ,
+`src/gitlab_mr_write.rs` the four writes, `web/src/lib/gitlab-mr.ts` the pure decisions the
+surface is built from (`gitlab-diff.ts` the diff's own), and
 `web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
 
 **The split between the two backend modules is the whole safety story**, and it is the one
 in § The trackers: reading a tracker is what the feature is for, and writing to one is the
-user's own click. The four reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`) are
-open like every other read; the four writes (`gitlab_mr_merge`, `_comment`,
+user's own click. The five reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`, `_diff`)
+are open like every other read; the four writes (`gitlab_mr_merge`, `_comment`,
 `_delete_comment`, `_set_state`) are `OUTWARD_METHODS` entries — the write token, refused
 read-only, and the automation hook refuses a command line, a script or a cargo example that
 names their endpoints.
@@ -863,8 +864,9 @@ a `---` disappeared. Four things follow, and each is pinned by a test:
   at once and refreshes behind the page — stale-while-revalidate — so a re-opened merge
   request paints from disk and the fresh copy arrives on a `gitlab_mr_updated` event. The
   window is per KIND, by what a stale answer costs: 60 s for the list, 30 s for the detail
-  and the comments, **5 s for the pipeline**. A write drops every read of the merge request
-  it changed, through the one prefix they share (`gitlab_mr::cache_prefix`).
+  and the comments, **5 s for the pipeline** and **120 s for the diff** (the longest, because a
+  diff moves only when somebody pushes and it is the biggest read). A write drops every read of
+  the merge request it changed, through the one prefix they share (`gitlab_mr::cache_prefix`).
 - **Refreshes are single-flight** (`Ctx::gitlab_refreshing`). A page polls its pipeline while
   CI runs and two open pages poll the same one; without it, one merge request under two
   readers would ask GitLab twice a second and earn the token a rate limit.
@@ -882,15 +884,115 @@ a `---` disappeared. Four things follow, and each is pinned by a test:
   nothing. Its interval (6 s) sits ABOVE the backend's 5 s window on purpose: below it, every
   poll would be served the same cached answer and the panel would look frozen.
 
-**The diff is not here yet, and the page says so.** A Changes section states the file count
-and links to GitLab's own, because a page that silently lacked the diff would read as a page
-whose diff failed to load. What is already in place for it: a `DiffNote` keeps the file and
-line it hangs on (`note.position`), and the page names that file, so a review comment is
-never a comment about nothing.
+### The DIFF (a tree of files, and one of them read in full)
 
-**The four READS are verified against the real instance**, by
+The Changes section is the diff: the changed files as a TREE on the left, one of them
+highlighted on the right. It is the one part of this app drawn by somebody else's renderer —
+**`@pierre/trees`** for the tree ([trees.software](https://trees.software)) and
+**`@pierre/diffs`** for the patch ([diffs.com](https://diffs.com), Shiki underneath) — and the
+seam is where all the care is. `src/gitlab_mr.rs` holds the read and WRITES the patch,
+`web/src/lib/gitlab-diff.ts` every pure decision, `web/src/components/gitlab-changes.tsx` the
+section, and `gitlab-diff-view.tsx` the whole of this app's contact with either package.
+
+**Every fact below was measured against the real instance** by
+`examples/merge_request_diff_recon.rs` — READ-ONLY, over 508 files on the 25 newest open merge
+requests, printing counts and shapes and never anybody's code:
+
+    cargo run --example merge_request_diff_recon
+
+- **GitLab's own `diff` opens at `@@`.** No `diff --git`, no `--- a/…`, no `+++ b/…` — on all
+  338 rows that carried hunks. A patch renderer reads the FILE out of that header, so
+  `gitlab_mr::unified_patch` writes one from the row's own `old_path` / `new_path` / modes /
+  flags, and only the hunks are GitLab's text. Measured back: 356 of 356 patches that travel
+  open with the header this app wrote. `unidiff=true` gives `--- / +++` and was rejected — it
+  still writes no `rename from`, which is the one thing a pure rename has to say.
+- **A pure RENAME carries no diff at all**, and GitLab sets `collapsed: true` on those rows
+  anyway. Reading that as an elision reported every moved file as one GitLab refused to expand,
+  so `renamed` wins over `collapsed` on BOTH sides — in `diff_file_from_json` and again in
+  `diffFileState`, because a payload from an older backend must not draw it either. 18 of 508.
+- **The COLLAPSE is a property of the merge request, never of the page.** The same 96 of 149
+  files came back collapsed at every `per_page` from 10 to 100, and the expanded bytes were
+  174 703 every time: GitLab expands a diff collection up to a byte budget and collapses the
+  rest. **Paging is not the way out** — do not "fix" a collapsed file by asking for a smaller
+  page. `access_raw_diffs=true` IS, and only on the older `/changes`: `/diffs` ignores the
+  parameter (measured, byte for byte). That read is `DiffDepth::Raw`, it expanded 142 of those
+  149 in one **523 KB** answer, and it is therefore the READER'S OWN ASK — `canExpandDiff`
+  offers it once, `expandDiffHint` names the cost before the press, and it is never the
+  default. The row shape of the two endpoints is IDENTICAL (`a_mode b_mode collapsed
+  deleted_file diff generated_file new_file new_path old_path renamed_file too_large`, on all
+  149 and all 508), which is what lets one parser serve both.
+- **A BINARY file carries a one-line marker** (`Binary files a/… and /dev/null differ`) rather
+  than hunks. It is STATED; running GitLab's prose through a code renderer would draw it as
+  somebody's code. 4 of 508.
+
+So four of the five states a file arrives in have NO patch, and each says something different
+because the reader's next move differs. That is `diffFileState`, and it is why the section's
+decisions are pure and testable without loading a megabyte of highlighter to make them.
+
+Seven more rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
+
+- **The renderer is a LAZY chunk, and that is load-bearing.** `@pierre/diffs` carries Shiki,
+  which resolves a TextMate grammar per language as a dynamic import — measured at a 728 KB
+  chunk of its own plus one per language, and **+3.9 MiB gzipped on the release asset** (which
+  the launcher embeds, so it is on every in-app update). It must never sit on the path of a
+  chat: `gitlab-diff-view.tsx` is reached only through `lazy(() => import(…))`, exactly as the
+  emoji picker is. The grammars are worth their room — a review surface that drew an unlisted
+  language as plain text would fail silently on the file somebody needed.
+- **Both packages render into a SHADOW ROOT**, so their internals cannot be styled from
+  app.css and are not meant to be: each publishes a `--diffs-*` / `--trees-*` property per
+  colour and app.css maps the surfaces onto this app's tokens. What stays THEIRS is the syntax
+  palette (`pierre-light` / `pierre-dark`, from `@pierre/theme`, which ships with the renderer)
+  and the git status tint per row — that is a colour vocabulary, not a surface.
+- **The theme is passed EXPLICITLY, never sniffed.** Both resolve `light-dark()` from the used
+  `color-scheme`, and their own `:host` leaves it at `light dark` — which follows the OS rather
+  than this app's appearance setting, so a reader whose OS is dark and whose app is light got a
+  black diff in a white page. `themeType` carries the app's resolved theme to the highlighter,
+  and app.css pins `color-scheme` on both hosts (an outer-tree rule beats `:host`). It is the
+  mistake the update button's orb already made once.
+- **The GLYPHS are this app's own** (`web/src/lib/tree-icons.ts`). Pierre ships a coloured
+  file-type icon pack and it is a second icon set — a different grid at a different weight,
+  three centimetres from this app's own tab strip, which is what § Project shape bans. So
+  hugeicons' data is serialized into the sprite pierre injects into its shadow root, under
+  **this app's own symbol ids**: pierre PREPENDS its built-in sprite and a `<use href="#id">`
+  takes the first match, so a sprite reusing their four ids loses to theirs every time (it did,
+  and the capture showed it). `set: "none"` and `colored: false` are both needed too. The
+  chevron is the DOWN one, because pierre rotates it `-90deg` on a collapsed row.
+- **The tree model is created ONCE and mutated.** A new diff — the expanded read, another merge
+  request — is `resetPaths` + `setGitStatus` on the one model, which is what keeps the reader's
+  folds and their scroll position across it. It needs an explicit HEIGHT rather than a
+  `max-height`: it virtualizes its rows, so it measures its box before drawing any, and a box
+  with only a max measures zero — which drew an empty column the width of a tree.
+- **A narrow screen is always UNIFIED** (`effectiveDiffLayout`, `SPLIT_MIN_WIDTH`). Split needs
+  two columns of code and this app is read from a phone, where 390px is two columns of eight
+  characters. The preference is kept and persisted per browser; it simply cannot apply there,
+  and the toggle is not drawn at all — a control that changes nothing reads as a bug.
+- **A diff that cannot be read costs THIS panel and nothing else** — the contract the comments
+  already hold. And the way out to GitLab's own `/diffs` stays whatever this page can draw: a
+  file GitLab will not expand, a merge request past 100 files and a review comment on a line
+  this page does not show are all reasons a reader still wants theirs.
+
+The diff is read WITH the page, as a fifth parallel read, because reviewing code is what a
+merge-request page is for — never behind a click. It is cached for 120 s (`GITLAB_DIFF_TTL`,
+the longest window on the page: a diff moves only when somebody pushes, and it is the biggest
+read), under the merge request's own prefix so a write forgets it, and per DEPTH so the
+expanded answer a reader paid for is never replaced by the plain one.
+
+A `DiffNote` still keeps the file and line it hangs on (`note.position`), and the page names
+that file — so a comment on a line this section does not show is never a comment about nothing.
+
+`web/mock/server.ts` reproduces every state with no GitLab and no token (`mockDiffFiles`,
+which holds a patch, a pure rename, a binary file, a file GitLab collapsed and a generated one
+over several languages, plus `refuse_diff` on the `{kind:"gitlab_mr"}` hook — a spec MUST clear
+it). `cd web && bun run preview -- --out /tmp/diff --diff` captures the section in both themes,
+the split layout, all three files with no patch, the expand control and what it hands over, and
+the whole thing at a phone's width. **No diff has been rendered from the real instance yet**:
+the reads are measured (above) and the surface is pinned against the mock, so what is untested
+is the pairing — one open of a real merge request in the user's own app.
+
+**The four page READS are verified against the real instance**, by
 `examples/merge_request_page_recon.rs` — which is READ-ONLY, reads the host and token out of
-the app's own store, and prints counts and field presence rather than anybody's words:
+the app's own store, and prints counts and field presence rather than anybody's words (the
+fifth, the diff, has a recon of its own — see § The DIFF):
 
     cargo run --example merge_request_page_recon
 
@@ -1024,7 +1126,11 @@ user. Two independent mechanisms enforce that split:
   and current, the list, the page,
   the merge armed, the comments, the description at a phone's width and a blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt`
-  from the same file. For the chat list's sections and the "…"
+  from the same file. For its DIFF — the tree beside the patch in both themes, the split
+  layout, each of the three files with no patch, the expand control and what it hands over,
+  and the whole section at a phone's width:
+  `bun run preview -- --out /tmp/diff --diff`, or `openChanges` / `pickDiffFile` from the same
+  file. For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
   `bun run preview -- --out /tmp/ask --answer-with`. For the typing hint above the
@@ -2306,7 +2412,8 @@ user's. What changes is only what is asked.
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
   and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
-  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its reads in
+  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its five reads (the DIFF
+  among them, whose unified patch this app writes over GitLab's bare hunks) in
   `src/gitlab_mr.rs` over a durable response cache and its four writes in
   `src/gitlab_mr_write.rs`, plus who a person on EITHER tracker is in the user's own Teams
   (`src/tracker_people.rs`, see § A tracker user who is also a colleague) — plus the approval
@@ -2333,7 +2440,10 @@ user's. What changes is only what is asked.
     corner radius — so a row mixing them reads as two designs sharing one screen.
     `web/src/lib/icon-library.test.ts` pins that: it scans the source tree and the
     manifest, and fails on a second icon package. Pick the nearest hugeicons glyph
-    rather than installing one.
+    rather than installing one. A vendored component that ships its OWN pack is held to
+    the same rule through its own seam rather than exempted: `@pierre/trees` draws the
+    merge-request diff's file tree with hugeicons, serialized into the sprite it injects
+    (`web/src/lib/tree-icons.ts`, see § The DIFF).
   - There was a terminal UI (OpenTUI + Solid, in `ui/`) until 2026-08-03. It is gone,
     and the web app is the only client: do not re-add a second front-end, and read a
     comment that names one as history rather than as a place to keep in sync.

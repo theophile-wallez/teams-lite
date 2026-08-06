@@ -39,7 +39,9 @@ import { personFace } from "~/lib/tracker-people";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { useAppState, useController } from "./controller-context";
+import { ChangesPanel } from "./gitlab-changes";
 import { GitLabLogo } from "./gitlab-logo";
+import { Panel } from "./gitlab-panel";
 import { RichNodes } from "./rich-content";
 
 // The merge-request page. It occupies the same slot as `MessagePane` and `MailPane`, so the
@@ -66,10 +68,12 @@ import { RichNodes } from "./rich-content";
 //     it tells the GitLab instance nothing, and it is what makes a colleague here the same
 //     colleague as in a chat (see `personFace`).
 //
-// The Changes / diff section is deliberately absent: reviewing code is its own surface, and
-// the reads it needs (`/diffs`, `/versions`) are not in this build. What is already here for
-// it: a diff comment keeps the file and line it hangs on (`note.position`), and the page
-// names that file, so a review comment is never a comment about nothing.
+// The Changes section — the diff itself — is `gitlab-changes.tsx`, and it is deliberately a
+// module of its own: what draws it is `@pierre/trees` and `@pierre/diffs` behind a lazy
+// import, because Shiki carries a grammar per language and must never sit on the path of a
+// chat. A review comment still keeps the file and line it hangs on (`note.position`), and the
+// page names that file, so a comment on a line this page does not show is never a comment
+// about nothing.
 
 export function GitLabPane(props: { onBack?: () => void }) {
   const open = useAppState((s) => s.openMergeRequest);
@@ -152,7 +156,7 @@ export function GitLabPane(props: { onBack?: () => void }) {
               <PipelinePanel />
               <ApprovalPanel />
               <ActionPanel detail={detail} />
-              <ChangesPlaceholder detail={detail} />
+              <ChangesPanel detail={detail} />
               <DiscussionPanel />
             </>
           )}
@@ -690,36 +694,6 @@ function ActionPanel(props: { detail: MergeRequestDetail }) {
   );
 }
 
-/** Where the code review will live, and what already points at it.
- *
- *  Not a stub for its own sake: the section says plainly that the diff is not here and
- *  offers the one thing that does work today — GitLab's own Changes tab — because a page
- *  that silently lacked the diff would read as a page whose diff failed to load. */
-function ChangesPlaceholder(props: { detail: MergeRequestDetail }) {
-  const detail = props.detail;
-  return (
-    <Panel title="Changes" testId="gitlab-changes">
-      <p className="text-[12px] text-text-faint">
-        {detail.changes_count
-          ? `${detail.changes_count} file${detail.changes_count === "1" ? "" : "s"} changed. `
-          : ""}
-        The diff is not reviewed here yet.{" "}
-        {detail.web_url && (
-          <a
-            href={`${detail.web_url}/diffs`}
-            target="_blank"
-            rel="noreferrer"
-            data-testid="gitlab-changes-link"
-            className="text-text-dim underline-offset-2 hover:text-foreground hover:underline"
-          >
-            Open the changes in GitLab
-          </a>
-        )}
-      </p>
-    </Panel>
-  );
-}
-
 /** The conversation: real comments as bubbles, GitLab's own events as a quiet timeline, and
  *  a composer that posts under the user's name on their own Enter. */
 function DiscussionPanel() {
@@ -801,8 +775,9 @@ function DiscussionThread(props: { discussion: GitLabDiscussion }) {
         discussion.individual_note ? "bg-card" : "bg-card ring-1 ring-inset ring-border-subtle",
       )}
     >
-      {/* Where a thread hangs in the code, when it does. The diff is not here yet, so the
-          file and line are what keep a review comment attached to something. */}
+      {/* Where a thread hangs in the code, when it does. The Changes section shows one file
+          at a time, so the file and the line are what keep a review comment attached to
+          something the reader can go and find. */}
       {first?.position && (
         <p data-testid="gitlab-note-position" className="font-mono text-[11px] text-text-faint">
           {first.position.new_path ?? first.position.old_path}
@@ -981,31 +956,6 @@ function CommentComposer() {
         </p>
       )}
     </div>
-  );
-}
-
-/** One panel of the page: a heading, an optional control on its right, and its content. */
-function Panel(props: {
-  title: string;
-  testId: string;
-  right?: React.ReactNode;
-  children: React.ReactNode;
-  "data-live"?: string;
-}) {
-  return (
-    <section
-      data-testid={props.testId}
-      data-live={props["data-live"]}
-      className="flex flex-col gap-2 rounded-2xl bg-card/60 p-3"
-    >
-      <div className="flex items-center gap-2">
-        <h3 className="text-[12px] font-semibold uppercase tracking-wide text-text-faint">
-          {props.title}
-        </h3>
-        <div className="ml-auto flex items-center gap-2">{props.right}</div>
-      </div>
-      {props.children}
-    </section>
   );
 }
 

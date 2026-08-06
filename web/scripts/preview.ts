@@ -37,6 +37,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/cal --calendar     # the Calendar surface
 //   bun run web/scripts/preview.ts --out /tmp/chan --channels    # the team → channel tree
 //   bun run web/scripts/preview.ts --out /tmp/mr --gitlab       # the merge-request page
+//   bun run web/scripts/preview.ts --out /tmp/diff --diff       # the Changes section
 //   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
 //   bun run web/scripts/preview.ts --out /tmp/img --image       # the picture lightbox
 //   bun run web/scripts/preview.ts --out /tmp/pics --compose-images # several pending images
@@ -464,6 +465,40 @@ export async function openMergeRequestAt(page: Page, index: number): Promise<str
     .first()
     .waitFor({ timeout: APP_READY_TIMEOUT_MS });
   return `!${iid}`;
+}
+
+/** Scroll the Changes section into view and wait for its diff to be drawn.
+ *
+ *  The wait is for the PATCH rather than the section: the section paints from the read, and
+ *  what takes time after that is the lazy chunk (`@pierre/diffs` carries Shiki) and then the
+ *  grammar for the file's own language. A shot taken before both is a shot of the
+ *  "Highlighting…" placeholder. */
+export async function openChanges(page: Page): Promise<void> {
+  await page.locator('[data-testid="gitlab-changes"]').scrollIntoViewIfNeeded();
+  await page.waitForSelector('[data-testid="gitlab-diff-patch"]', {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+  // The highlighter resolves its grammar and theme asynchronously, so the element exists
+  // before it holds any code. One frame past that is what makes a capture readable.
+  await page.waitForTimeout(800);
+}
+
+/** Show one file of the open diff by clicking its row in the tree.
+ *
+ *  The tree renders inside a shadow root, and Playwright's CSS engine pierces an open one — so
+ *  this drives the row a reader would press rather than the store behind it. `data-item-path`
+ *  is `@pierre/trees`' own attribute per row; the WAIT is on this app's own heading, which is
+ *  what proves the click reached the section rather than only the tree.
+ *
+ *  What is asserted afterwards is always the app's own `[data-testid]`s. Reaching further into
+ *  a vendor's markup would be a test of their release notes. */
+export async function pickDiffFile(page: Page, path: string): Promise<void> {
+  await page.locator(`[data-item-path="${path}"]`).first().click();
+  await page.waitForSelector(`[data-testid="gitlab-changes-file"][data-path="${path}"]`, {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+  // A file whose language the highlighter has not loaded yet resolves one more grammar.
+  await page.waitForTimeout(600);
 }
 
 /**
@@ -1852,6 +1887,73 @@ if (import.meta.main) {
             `${out}-merge-armed-light.png, ${out}-comments-light.png, ` +
             `${out}-description-mobile-light.png, ${out}-blocked-{light,dark}.png and ` +
             `${out}-dark.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
+  // The DIFF: the Changes section, which is the one part of this page drawn by somebody
+  // else's renderer (`@pierre/trees` and `@pierre/diffs`, behind a lazy import — see
+  // web/src/components/gitlab-diff-view.tsx). Every state a real answer holds is in the
+  // mock's fixture: a patch, a pure rename, a binary file, a file GitLab collapsed and a
+  // generated one, over several languages so the highlighter really resolves more than one
+  // grammar.
+  if (args.includes("--diff")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        await openGitLabTab(page);
+        await openMergeRequestAt(page, 0);
+        const changes = '[data-testid="gitlab-changes"]';
+        await openChanges(page);
+
+        // The section whole: the tree beside the patch, in both themes. This is where the CSS
+        // seam is checked — both renderers live in a shadow root and follow the app's own
+        // `color-scheme` rather than the OS's (see app.css § the merge-request DIFF).
+        await shot(`${out}-light.png`, changes);
+        await setTheme("dark");
+        await shot(`${out}-dark.png`, changes);
+        await setTheme("light");
+
+        // SPLIT, which is the layout the section only offers where it fits.
+        await page.locator('[data-testid="gitlab-diff-layout-split"]').click();
+        await page.waitForTimeout(500);
+        await shot(`${out}-split-light.png`, changes);
+        await page.locator('[data-testid="gitlab-diff-layout-unified"]').click();
+        await page.waitForTimeout(300);
+
+        // The three files with NO patch, each of which says something different. Picked by
+        // path out of the tree rather than by clicking a row: the row is inside a shadow
+        // root, and the point of these three shots is the SENTENCE under the file.
+        for (const [name, path] of [
+          ["rename", "src/server/drain.ts"],
+          ["binary", "docs/diagrams/rollout.png"],
+          ["collapsed", "bun.lock"],
+        ] as const) {
+          await pickDiffFile(page, path);
+          await shot(`${out}-${name}-light.png`, changes);
+        }
+
+        // The expanded read: the control names the count and what it costs, and pressing it
+        // hands over the patches GitLab withheld.
+        await shot(`${out}-expand-light.png`, '[data-testid="gitlab-changes-expand"]');
+        await page.locator('[data-testid="gitlab-changes-expand"]').click();
+        await page.waitForSelector('[data-testid="gitlab-diff-patch"]', { timeout: 15_000 });
+        await page.waitForTimeout(600);
+        await shot(`${out}-expanded-light.png`, changes);
+
+        // And on a PHONE, where the tree sits above the diff and split cannot apply at all.
+        await pickDiffFile(page, "src/server/health.ts");
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(500);
+        await shot(`${out}-mobile-light.png`);
+        await page.setViewportSize(VIEWPORT);
+
+        console.log(
+          `[preview] wrote ${out}-{light,dark}.png, ${out}-split-light.png, ` +
+            `${out}-{rename,binary,collapsed}-light.png, ${out}-expand-light.png, ` +
+            `${out}-expanded-light.png and ${out}-mobile-light.png`,
         );
       },
       { deviceScaleFactor: dpr },

@@ -14,6 +14,7 @@
 //          | get_settings | set_settings | set_always_available | enrich_link
 //          | gitlab_approvals | gitlab_set_approval
 //          | gitlab_mr_list | gitlab_mr_detail | gitlab_mr_notes | gitlab_mr_pipeline
+//          | gitlab_mr_diff
 //          | gitlab_mr_merge | gitlab_mr_comment | gitlab_mr_delete_comment
 //          | gitlab_mr_set_state
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
@@ -85,7 +86,7 @@
 //
 // The `gitlab_mr_*` methods are the MERGE-REQUEST PAGE (see `gitlab_mr` for the reads,
 // `gitlab_mr_write` for the writes, and AGENTS.md § The GitLab page). The reads — `list`,
-// `detail`, `notes`, `pipeline` — are open like every other read and answer from a durable
+// `detail`, `notes`, `pipeline`, `diff` — are open like every other read and answer from a durable
 // response cache (`gitlab_reads`) before they ask GitLab, so the page paints from disk and
 // refreshes behind itself. The four writes — `merge`, `comment`, `delete_comment`,
 // `set_state` — are {@link OUTWARD_METHODS} entries, and `gitlab_mr_merge` is the one that
@@ -4880,6 +4881,26 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             .await
         }
 
+        // What the merge request CHANGED, for the Changes section. `depth` picks between the
+        // modern `/diffs` — one page, and whatever GitLab chose to expand — and the older
+        // `/changes?access_raw_diffs=true`, which expands everything and costs half a
+        // megabyte on a big merge request. It is a closed Rust set, so a client can never
+        // widen it into a third endpoint (see `gitlab_mr::DiffDepth`), and the expanded read
+        // is the reader's own ask: `listed` is what opening the section costs.
+        "gitlab_mr_diff" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let refresh = params.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            let depth = gitlab_diff_depth(params)?;
+            gitlab_cached(
+                ctx,
+                gitlab_mr::cache_key(&project_path, iid, depth.cache_kind()),
+                GITLAB_DIFF_TTL,
+                refresh,
+                GitLabRead::Diff { project_path, iid, depth },
+            )
+            .await
+        }
+
         // The head pipeline and its jobs. THE live read: the page repeats it while CI is
         // running, so its cache window is seconds rather than half a minute — long enough
         // that two open pages cost one request, short enough that a job turning green shows
@@ -6202,6 +6223,12 @@ const GITLAB_NOTES_TTL: Duration = Duration::from_secs(30);
 /// window is short enough that a job turning green is seen when it happens — and long
 /// enough that two open pages, or a page and a phone, cost ONE request between them.
 const GITLAB_PIPELINE_TTL: Duration = Duration::from_secs(5);
+/// THE BIG one, and the one that moves least. A diff changes only when somebody PUSHES to
+/// the branch, which is minutes or hours apart, and the expanded read is half a megabyte on
+/// a large merge request — so this is the longest window on the page. It matters little
+/// either way: a push moves the `sha` the detail carries within 30 s, and the reader's own
+/// Reload asks for a fresh one.
+const GITLAB_DIFF_TTL: Duration = Duration::from_secs(120);
 
 /// One read of the merge-request page, and everything needed to make it again.
 ///
@@ -6215,6 +6242,7 @@ enum GitLabRead {
     Detail { project_path: String, iid: u64 },
     Notes { project_path: String, iid: u64 },
     Pipeline { project_path: String, iid: u64 },
+    Diff { project_path: String, iid: u64, depth: gitlab_mr::DiffDepth },
 }
 
 impl GitLabRead {
@@ -6238,6 +6266,12 @@ impl GitLabRead {
             }
             Self::Pipeline { project_path, iid } => {
                 json!(gitlab_mr::fetch_pipeline(&ctx.http, host, token, project_path, *iid).await?)
+            }
+            Self::Diff { project_path, iid, depth } => {
+                json!(
+                    gitlab_mr::fetch_diff(&ctx.http, host, token, project_path, *iid, *depth)
+                        .await?
+                )
             }
         })
     }
@@ -6265,6 +6299,16 @@ impl GitLabRead {
             Self::Pipeline { project_path, iid } => (
                 "gitlab_mr_updated",
                 json!({ "project_path": project_path, "iid": iid, "kind": "pipeline" }),
+            ),
+            // The DEPTH is part of the kind, so a page showing the expanded diff is never
+            // handed the plain one — which holds fewer patches — a moment after asking.
+            Self::Diff { project_path, iid, depth } => (
+                "gitlab_mr_updated",
+                json!({
+                    "project_path": project_path,
+                    "iid": iid,
+                    "kind": depth.cache_kind(),
+                }),
             ),
         }
     }
@@ -6470,6 +6514,19 @@ fn gitlab_list_query(params: &Value) -> Result<gitlab_mr::ListQuery> {
         None => gitlab_mr::ListState::Opened,
     };
     Ok(gitlab_mr::ListQuery { scope, state })
+}
+
+/// Which of the two diff reads a client asked for.
+///
+/// Defaults to the cheap one rather than failing, because that is what opening the Changes
+/// section costs — and a name outside the closed set is refused rather than forwarded, since
+/// it decides which GitLab endpoint the user's token reaches.
+fn gitlab_diff_depth(params: &Value) -> Result<gitlab_mr::DiffDepth> {
+    match params.get("depth").and_then(Value::as_str) {
+        Some(name) => gitlab_mr::DiffDepth::from_str(name)
+            .with_context(|| format!("a diff is listed or raw, not {name}")),
+        None => Ok(gitlab_mr::DiffDepth::Listed),
+    }
 }
 
 /// Longest project path accepted from a client. GitLab's own limit on a full path is 255
@@ -9877,6 +9934,7 @@ mod tests {
             "gitlab_mr_detail",
             "gitlab_mr_notes",
             "gitlab_mr_pipeline",
+            "gitlab_mr_diff",
         ] {
             assert_eq!(write_class(read), None, "{read} is a read");
             assert!(check_write_allowed(read, &json!({}), None).is_ok(), "{read}");

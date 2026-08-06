@@ -897,3 +897,65 @@ html[data-virtual-keyboard-open] .composer-shell {
     transparent 2px 6px
   );
 }
+
+/* ---------------------------------------------------------------------------
+   The merge-request DIFF: the seam between this app's tokens and Pierre's two
+   custom elements (§ The GitLab page).
+
+   `@pierre/diffs` and `@pierre/trees` render into a SHADOW ROOT, so nothing
+   inside them can be styled from here and nothing is meant to be. Each publishes
+   a custom property per colour instead, and every one of them reads an
+   `-override` from the host first — which is the vendor's own seam, and the only
+   thing this block uses. It is the choice made for magicui's ShineBorder: keep
+   the vendor's file, own the boundary.
+
+   `color-scheme` is the load-bearing declaration. Both packages resolve their
+   palettes with CSS `light-dark()`, and their own `:host` rules leave the scheme
+   at `light dark` — which follows the OS, not this app's appearance setting. So a
+   reader whose OS is dark and whose app is light would get a black diff in a
+   white page. A rule here on the host element beats `:host` (the outer tree wins
+   for the host), so these two lines are what make the diff follow the app.
+   `themeType` carries the same answer to the highlighter — see
+   `gitlab-diff-view.tsx`. */
+diffs-container,
+file-tree-container {
+  color-scheme: light;
+  display: block;
+  min-width: 0;
+}
+[data-theme="dark"] diffs-container,
+[data-theme="dark"] file-tree-container {
+  color-scheme: dark;
+}
+
+/* The code's own type is the app's mono stack at the size the rest of the page
+   reads code at, so a patch and an inline `code` span are one typeface. */
+diffs-container {
+  --diffs-font-family: ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Mono",
+    "Liberation Mono", monospace;
+  --diffs-header-font-family: inherit;
+  --diffs-font-size: 12px;
+  --diffs-line-height: 19px;
+  /* The surfaces come from this app so a diff sits in the page rather than on it.
+     Only the SURFACE is ours: the syntax colours are the Shiki theme's
+     (`pierre-light` / `pierre-dark`), which is what the package is for. */
+  --diffs-light-bg: var(--card);
+  --diffs-dark-bg: var(--card);
+  --diffs-light: var(--foreground);
+  --diffs-dark: var(--foreground);
+}
+
+/* The tree is a sidebar of this app, so it takes this app's sidebar colours —
+   and the accent that tints its selected row is the one accent. What stays
+   Pierre's is the git status tint per row: added, modified, renamed and deleted
+   are that vocabulary's own colours, and they are the thing the row says. */
+file-tree-container {
+  --trees-accent-override: var(--primary);
+  --trees-bg-override: var(--card);
+  --trees-fg-override: var(--text-dim);
+  --trees-fg-muted-override: var(--text-faint);
+  --trees-border-color-override: var(--border-subtle);
+  --trees-font-family-override: inherit;
+  --trees-font-size-override: 12px;
+  --trees-focus-ring-color-override: var(--ring);
+}

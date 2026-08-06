@@ -568,7 +568,7 @@ export async function setApprovalControl(
  *  left behind turns every later merge on that surface into an error nobody armed. */
 export async function setMergeRequestControl(
   page: Page,
-  body: { refuse?: string; no_token?: boolean; clear?: boolean },
+  body: { refuse?: string; no_token?: boolean; refuse_diff?: string; clear?: boolean },
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "gitlab_mr", ...body },
