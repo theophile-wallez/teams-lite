@@ -39,6 +39,9 @@ const DEFAULT_SCROLL_HOUR = 8;
 /** Height of one all-day bar in the band, and the band's floor: an empty band still
  *  reserves one lane. */
 const BAND_LANE_HEIGHT = 22;
+/** Under this height a block is shorter than one padded line of title, so it drops its
+ *  padding and centres the title instead (see `EventBlock`). */
+const TIGHT_BLOCK_HEIGHT = 18;
 /** Width of the hour gutter. Also the left inset of the header and the band, so their
  *  columns line up with the ones beneath them. */
 const GUTTER_CLASS = "w-14 shrink-0";
@@ -268,29 +271,35 @@ function DayColumn(props: {
         ))}
       </div>
 
-      {blocks.map((block) => (
-        <EventBlock
-          key={block.event.id}
-          event={block.event}
-          color={props.colorOf(block.event.calendar_id)}
-          selected={props.openEventId === block.event.id}
-          past={isPast(block.event, props.now)}
-          onOpen={props.onOpenEvent}
-          // Under about 40 minutes there is only room for one line, and the title is
-          // the line worth keeping.
-          compact={(block.height / 100) * height < 34}
-          className="absolute"
-          style={{
-            top: `${block.top}%`,
-            height: `${block.height}%`,
-            left: `${block.left}%`,
-            width: `${block.width}%`,
-            // Later columns of a cascade paint over earlier ones, which is what makes
-            // the overlap read as depth rather than as a collision.
-            zIndex: 10 + block.column,
-          }}
-        />
-      ))}
+      {blocks.map((block) => {
+        const blockHeight = (block.height / 100) * height;
+        return (
+          <EventBlock
+            key={block.event.id}
+            event={block.event}
+            color={props.colorOf(block.event.calendar_id)}
+            selected={props.openEventId === block.event.id}
+            past={isPast(block.event, props.now)}
+            onOpen={props.onOpenEvent}
+            // Under about 40 minutes there is only room for one line, and the title is
+            // the line worth keeping.
+            compact={blockHeight < 34}
+            // A quarter of an hour is 12px at the shortest hour row, which is less than
+            // one padded line: the title then has to take the whole block.
+            tight={blockHeight < TIGHT_BLOCK_HEIGHT}
+            className="absolute"
+            style={{
+              top: `${block.top}%`,
+              height: `${block.height}%`,
+              left: `${block.left}%`,
+              width: `${block.width}%`,
+              // Later columns of a cascade paint over earlier ones, which is what makes
+              // the overlap read as depth rather than as a collision.
+              zIndex: 10 + block.column,
+            }}
+          />
+        );
+      })}
     </div>
   );
 }

@@ -211,6 +211,27 @@ test.describe("calendar", () => {
     }
   });
 
+  test("never draws a quarter-hour meeting over the one that follows it", async ({ page }) => {
+    await gotoApp(page);
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+
+    // Three quarter-hour meetings, back to back, on the default calendar. The day holds
+    // no overlap, so the blocks must not overlap either — a short block is grown for its
+    // title only as far as the next meeting's start.
+    const boxes = [];
+    for (const id of ["ev-quarter-0", "ev-quarter-1", "ev-quarter-2"]) {
+      const block = calendarEvent(page, id);
+      await expect(block).toBeVisible();
+      boxes.push((await block.boundingBox())!);
+    }
+    for (let i = 1; i < boxes.length; i++) {
+      expect(boxes[i - 1]!.y + boxes[i - 1]!.height).toBeLessThanOrEqual(boxes[i]!.y + 1);
+    }
+    // And none of them is cascaded aside: they share the column's leading edge.
+    for (const box of boxes) expect(box.x).toBeCloseTo(boxes[0]!.x, 0);
+  });
+
   test("opens the details beside the event, and puts them away on a background click", async ({
     page,
   }) => {

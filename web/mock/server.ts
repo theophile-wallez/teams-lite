@@ -6711,6 +6711,19 @@ function seedCalendar(): void {
     });
   }
 
+  // Three quarter-hour meetings back to back this morning: the case where the grid must
+  // NOT overlap anything. A short block is grown so its title fits, and the growth stops
+  // at the next meeting's start — without that, each of these covered the one after it.
+  for (const [index, minute] of [0, 15, 30].entries()) {
+    addMockEvent({
+      id: `ev-quarter-${index}`,
+      subject: ["Triage", "Standby handover", "Metrics check"][index]!,
+      start: mockAt(0, 11, minute),
+      end: mockAt(0, 11, minute + 15),
+      join_url: index === 1 ? teamsJoin : "",
+    });
+  }
+
   // Three overlapping meetings this afternoon: the case the column layout exists for.
   addMockEvent({
     id: "ev-overlap-a",

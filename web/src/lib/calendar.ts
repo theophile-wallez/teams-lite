@@ -541,9 +541,14 @@ const COLUMN_RIGHT_GAP_PERCENT = 6;
 /** How far each cascaded block is overlapped by the one after it. */
 const COLUMN_OVERLAP_PERCENT = 10;
 
-/** The shortest block the grid will draw, as a percentage of the day. A 5-minute
- *  meeting is otherwise a 2px sliver with no room for its own title. */
+/** The height a short block is grown to, as a percentage of the day. A 5-minute
+ *  meeting is otherwise a 2px sliver with no room for its own title. It is a courtesy
+ *  and not a floor: it yields to the meeting that follows (see `layoutDayGrid`). */
 const MIN_BLOCK_PERCENT = (30 / (24 * 60)) * 100;
+
+/** What a block keeps when the meeting after it leaves less room than that — enough
+ *  for the rail and a line of fill, so the event is still visible and clickable. */
+const MIN_VISIBLE_BLOCK_PERCENT = (5 / (24 * 60)) * 100;
 
 /**
  * Lay out a day's timed events as positioned blocks.
@@ -552,6 +557,12 @@ const MIN_BLOCK_PERCENT = (30 / (24 * 60)) * 100;
  * a group, every member of the group is given a column, and the group's width is the
  * number of columns it needed. Computing it per cluster rather than per day is what
  * keeps a lone afternoon meeting full-width even when the morning was triple-booked.
+ *
+ * A short block is grown to `MIN_BLOCK_PERCENT` so its title fits, and that growth is
+ * BOUNDED by the next meeting's start (`roomMs`). Unbounded, a 15-minute meeting was
+ * drawn 30 minutes tall and covered the meeting that started at its end — two blocks
+ * printed over each other where the calendar holds no overlap at all. A cascade is how
+ * this grid states a real overlap, so it must never state one the day does not have.
  */
 export function layoutDayGrid(
   events: CalendarEvent[],
@@ -571,9 +582,32 @@ export function layoutDayGrid(
     .filter(({ span }) => !span.banded && spanOverlaps(span, dayStart, dayEnd))
     .sort((a, b) => a.span.startMs - b.span.startMs || a.event.id.localeCompare(b.event.id));
 
+  /**
+   * The start of the first meeting after `index` that begins once `endMs` has passed
+   * — the end of the day when there is none.
+   *
+   * That meeting is the one drawn UNDER this block in the same column: a meeting
+   * starting earlier than `endMs` overlaps this one and takes a column of its own, and
+   * the column is reused by the first event free to take it, which is this one.
+   */
+  const nextStart = (index: number, endMs: number): number => {
+    for (let i = index + 1; i < timed.length; i++) {
+      const start = Math.max(timed[i]!.span.startMs, dayStart);
+      if (start >= endMs) return start;
+    }
+    return dayEnd;
+  };
+
   const blocks: TimedBlock[] = [];
-  /** The events of the cluster being built, and the columns they occupy. */
-  let cluster: { event: CalendarEvent; startMs: number; endMs: number; column: number }[] = [];
+  /** The events of the cluster being built, the columns they occupy, and how far each
+   *  one may grow beyond its own duration. */
+  let cluster: {
+    event: CalendarEvent;
+    startMs: number;
+    endMs: number;
+    roomMs: number;
+    column: number;
+  }[] = [];
   let clusterEnd = -Infinity;
 
   const flush = () => {
@@ -582,13 +616,20 @@ export function layoutDayGrid(
     for (const item of cluster) {
       const rawTop = clamp(((item.startMs - dayStart) / DAY_MS) * 100, 0, 100);
       const rawHeight = ((item.endMs - item.startMs) / DAY_MS) * 100;
-      // The minimum height wins over the exact position: a 15-minute meeting at
-      // 23:45 is nudged up to sit flush with the bottom rather than being squashed
-      // to an illegible sliver or overflowing the column.
-      const height = clamp(Math.max(rawHeight, MIN_BLOCK_PERCENT), MIN_BLOCK_PERCENT, 100);
+      const room = (item.roomMs / DAY_MS) * 100;
+      // A short meeting is grown until its title fits, or until the next meeting
+      // starts — whichever comes first. A real duration is never shortened, because
+      // `roomMs` is at least the event's own length.
+      const height = clamp(
+        Math.max(rawHeight, Math.min(MIN_BLOCK_PERCENT, room)),
+        MIN_VISIBLE_BLOCK_PERCENT,
+        100,
+      );
       const { left, width } = cascade(item.column, columns, rightGap);
       blocks.push({
         event: item.event,
+        // The room above wins over the exact position for the last minutes of the day:
+        // a block is nudged up to sit flush with the bottom rather than overflowing it.
         top: Math.min(rawTop, 100 - height),
         height,
         left,
@@ -601,7 +642,7 @@ export function layoutDayGrid(
     clusterEnd = -Infinity;
   };
 
-  for (const { event, span } of timed) {
+  timed.forEach(({ event, span }, index) => {
     // Clip to the day so an event running past midnight fills the column to the
     // bottom rather than overflowing it.
     const startMs = Math.max(span.startMs, dayStart);
@@ -616,9 +657,9 @@ export function layoutDayGrid(
     let column = 0;
     while (taken.has(column)) column++;
 
-    cluster.push({ event, startMs, endMs, column });
+    cluster.push({ event, startMs, endMs, roomMs: nextStart(index, endMs) - startMs, column });
     clusterEnd = Math.max(clusterEnd, endMs);
-  }
+  });
   flush();
 
   return blocks;
