@@ -407,6 +407,34 @@ export type UpdateProgress = {
   error: string;
 };
 
+/** What the `update_check` RPC answers — Settings › This app asking GitHub NOW rather than
+ *  waiting for the two-minute poll (`Ctx::check_release_now` in src/bin/server.rs).
+ *
+ *  It is a verdict, never a failure to be thrown: `failed` is one of the outcomes, because
+ *  "GitHub could not be reached" is as much an answer to the press as "you are up to date"
+ *  is. The update ROW is unaffected either way — it follows the `update_available` event the
+ *  same check publishes. */
+export type UpdateCheckResult = {
+  outcome: "available" | "current" | "busy" | "unknown" | "unsupported" | "failed";
+  /** Why the request failed, in GitHub's or the transport's own words. Only on `failed`. */
+  error?: string;
+};
+
+/** What the `restart_backend` RPC answers.
+ *
+ *  `restarted: false` is not an error: the backend refuses ONCE while a local agent is
+ *  writing a reply (`blocked: "agent"`, with the count), and the user's second press carries
+ *  `force`. Everything the user cannot press through — no launcher and no supervisor, a
+ *  missing write token, a read-only backend — is a rejected request instead. */
+export type BackendRestartResult = {
+  restarted: boolean;
+  /** What is bringing the backend back: the launcher that owns it, or its supervisor. */
+  via?: "launcher" | "supervisor";
+  blocked?: "agent";
+  /** How many agent replies this backend is writing right now. */
+  runs?: number;
+};
+
 export type LiveStatus = "connecting" | "connected" | "disconnected";
 
 /** Wire shape of the backend `broker_status` event (see `broker_status_payload` in

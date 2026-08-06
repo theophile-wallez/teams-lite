@@ -26,6 +26,7 @@ import type { OutboundMention } from "./mentions";
 import type {
   AddressPeopleResult,
   AppSettings,
+  BackendRestartResult,
   CalendarInfo,
   CalendarViewResult,
   Channel,
@@ -44,6 +45,7 @@ import type {
   ReadReceiptsResult,
   ReplyTo,
   SettingsPatch,
+  UpdateCheckResult,
   UpdateProgress,
   WriteLock,
 } from "./protocol";
@@ -622,6 +624,28 @@ export class Backend {
    *  and drops this socket on the way; recovery is the page's own reconnect. */
   repairBroker(): Promise<{ started: boolean; reason?: string }> {
     return this.writeRequest<{ started: boolean; reason?: string }>("repair_broker", {});
+  }
+
+  /** Ask GitHub, now, whether a newer build than this one has been published — Settings ›
+   *  This app, rather than waiting up to two minutes for the poll.
+   *
+   *  An ordinary READ: it changes nothing on this machine and publishes nothing about the
+   *  user, and it is the same request the backend already makes on a timer. The update ROW
+   *  follows the `update_available` event this may publish; the answer here is what the
+   *  BUTTON says, including the two the events cannot carry — that there is nothing new, and
+   *  that GitHub could not be reached. */
+  updateCheck(): Promise<UpdateCheckResult> {
+    return this.request<UpdateCheckResult>("update_check", {});
+  }
+  /** Restart the backend, through whatever runs it.
+   *
+   *  A WRITE request, though it posts nothing to Teams: it takes the process every open page
+   *  is talking to down (a `MACHINE_METHODS` entry in src/bin/server.rs). It answers
+   *  `restarted: false` with a count while a local agent is mid-reply — the user's second
+   *  press passes `force` — and this socket goes down a moment after an accepted one, so the
+   *  page's own reconnect is what says the restart really happened. */
+  restartBackend(force = false): Promise<BackendRestartResult> {
+    return this.writeRequest<BackendRestartResult>("restart_backend", { force });
   }
 
   /** Start downloading the new build. Answers with the phase this leaves us in, and

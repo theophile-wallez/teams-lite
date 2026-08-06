@@ -44,6 +44,14 @@ Environment=TEAMS_NO_IDLE_EXIT=1
 # Stated explicitly so a stray TEAMS_LITE_READ_ONLY in the environment cannot move
 # the listener to the read-only port and leave the web unit talking to nothing.
 Environment=TEAMS_LITE_PORT=@BACKEND_PORT@
+# This unit starts the backend again when it exits (Restart=always, below), and that is
+# what lets the app offer Settings › This app › Restart the backend: the backend restarts
+# by EXITING here, and there is nothing for it to ask. It is declared rather than detected
+# because a process cannot read its own unit's Restart=, and an INVOCATION_ID inherited
+# from a parent unit would make a hand-started backend look supervised — see
+# src/restart.rs, whose test pins this line against the Restart= below. Move one, move
+# the other.
+Environment=TEAMS_LITE_RESTART_ON_EXIT=1
 # The local agent spawns its CLI by name (`claude`, `opencode`), and the systemd user
 # manager's PATH holds neither ~/.local/bin nor ~/.bun/bin — the same gap the web unit
 # works around with an absolute @BUN@. Without this the trigger is dropped with one

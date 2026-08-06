@@ -37,6 +37,7 @@ import {
   type AppSettings,
   type BrokerStatus,
   type CalendarEvent,
+  type BackendRestartResult,
   type CalendarInfo,
   type CalendarViewResult,
   type CallSignal,
@@ -66,6 +67,7 @@ import {
   type SettingsPatch,
   type TypingName,
   type TypingSignal,
+  type UpdateCheckResult,
   type UpdateInfo,
   type UpdateProgress,
   type WriteLock,
@@ -4504,6 +4506,33 @@ export class TeamsController {
       // A refused repair sounds; an accepted one does not. The repair only STARTS
       // here — the socket drops a moment later and the reconnect is the real answer,
       // so a success cue now would applaud a result nobody has yet.
+      playCue("error");
+      throw e;
+    }
+  }
+
+  /** Ask GitHub now whether a newer build exists — Settings › This app.
+   *
+   *  A read, so it is passed straight through: the row that offers an update follows the
+   *  `update_available` event this may publish, exactly as it does after a poll, and the
+   *  ANSWER is only what the button says. A failure to reach GitHub arrives as an outcome
+   *  rather than as a rejection, so there is one place the words are chosen (see
+   *  lib/maintenance.ts). */
+  checkForUpdate(): Promise<UpdateCheckResult> {
+    return this.backend.updateCheck();
+  }
+
+  /** Restart the backend — Settings › This app.
+   *
+   *  `force` is the user's second press, after the backend said a local agent is mid-reply.
+   *  Nothing is set on the store: the socket drops a moment later and comes back on its own,
+   *  which is the state the whole app already draws, and the ROW that asked is where the
+   *  outcome belongs. A refused request sounds, like a refused repair — an accepted one does
+   *  not, because what the user asked for has not happened yet. */
+  async restartBackend(force: boolean): Promise<BackendRestartResult> {
+    try {
+      return await this.backend.restartBackend(force);
+    } catch (e) {
       playCue("error");
       throw e;
     }

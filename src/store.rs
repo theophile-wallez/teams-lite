@@ -7319,6 +7319,15 @@ mod tests {
             s.get_setting(crate::update::SETTING_RELEASE_CHECKED_MS).unwrap().as_deref(),
             Some((now + interval).to_string().as_str())
         );
+
+        // The user's own **Check for updates** passes `now` as the cutoff, which takes the
+        // slot however recently somebody asked: they pressed the button to learn where they
+        // stand NOW, and an answer up to an interval old is not that (see
+        // `Ctx::claim_release_read`). It still moves the timestamp, so the clock's next tick
+        // stands down rather than spending a second request behind the press.
+        let pressed = now + interval + 1;
+        assert!(s.claim_release_check(pressed, pressed).unwrap());
+        assert!(!s.claim_release_check(pressed + 1, pressed + 1 - interval).unwrap());
     }
 
     fn a_run(message_id: &str, heartbeat_ms: i64) -> AgentRun {

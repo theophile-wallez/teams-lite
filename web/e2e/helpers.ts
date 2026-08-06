@@ -422,6 +422,34 @@ export async function emitUpdate(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Arm what Settings › This app is answered with, through the mock's gated test hook: the
+ *  outcome of an update check, how many agent replies a restart would cut off, and the
+ *  machine that has nothing to restart its backend at all.
+ *
+ *  ALWAYS reset it with `{ reset: true }` before the spec ends. The mock is a shared process
+ *  and `reuseExistingServer` adopts it across runs, so a backend armed to refuse a restart
+ *  would refuse for every later spec. */
+export async function emitMaintenance(
+  page: Page,
+  body: {
+    /** Override what `update_check` answers. Only the outcomes the mock cannot genuinely be
+     *  in need arming — "available" and "current" come from the release it holds. */
+    check?: "available" | "current" | "busy" | "unknown" | "unsupported" | "failed";
+    /** How many agent replies this backend is writing: what makes the armed "Restart
+     *  anyway" reachable. */
+    runs?: number;
+    /** The install nothing would restart — no launcher, no supervisor. The one refusal the
+     *  user cannot press through. */
+    refuse?: boolean;
+    reset?: boolean;
+  } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "maintenance", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Arm where the page stands with the write lock in the mock, through its gated test
  *  hook. `foreign` is the state in which every read answers and every outward action is
  *  refused — the one the banner exists for.

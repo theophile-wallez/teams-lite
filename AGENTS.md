@@ -874,7 +874,10 @@ user. Two independent mechanisms enforce that split:
   --user start` on the always-on service's units, and including the `teams` command
   itself, which is that backend plus the real app on 19440 in one word — and
   `teams-lite-service.sh update --now`, the switch that skips the wait for a live
-  `@claude` run and so freezes a half-written reply in the thread. It reads the
+  `@claude` run and so freezes a half-written reply in the thread — and `restart_backend`,
+  which is that same failure from inside the app (see § Settings › This app). Asking whether a
+  release is newer (`update_check`) stays allowed: it is a read, and the backend already makes
+  that request every two minutes. It reads the
   *contents* of what a command runs, including an untracked `examples/*.rs` a `cargo
   run --example` names. Searching, stopping and inspecting stay allowed on purpose: a
   `grep` whose pattern names a launcher runs nothing, and a guard that fired on it
@@ -902,7 +905,9 @@ user. Two independent mechanisms enforce that split:
   (it honours `--dpr`, because the faces in it are 20px). For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
   file. For Settings › AI providers and its model picker, open and closed in both
-  themes: `bun run preview -- --out /tmp/prov --ai-providers`. For the update button, the
+  themes: `bun run preview -- --out /tmp/prov --ai-providers`. For Settings › This app — the
+  update check's answer and the restart armed on a live agent run:
+  `bun run preview -- --out /tmp/app --maintenance`. For the update button, the
   changelog it discloses on hover in both themes, its progress mid-download and the link the
   other install shape keeps: `bun run preview -- --out /tmp/upd --update`. For recording a
   call — the control and the sentence it carries, the live state, the card it leaves in the
@@ -2112,7 +2117,8 @@ user's. What changes is only what is asked.
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
   § The local agent) and the app's own update — the check, the download and the swap
-  (`src/update.rs`, see § Updating the app from inside it).
+  (`src/update.rs`, see § Updating the app from inside it) — plus the restart the user can
+  ask for without a new build at all (`src/restart.rs`, see § Settings › This app).
   Exposed over a local WebSocket (`ws://127.0.0.1:19420`).
 - One front-end, talking to the backend only through that WebSocket. Local-first is
   enforced server-side; the front-end touches neither the network nor SQLite directly.
@@ -2375,6 +2381,9 @@ button says what it costs before it is pressed.
 - The notice used to be an eleven-pixel link that REPLACED the status line, where it hid
   the truncated `error:` a sign-in outage puts there (see `broker-banner.tsx`). It has its
   own row now, and `web/e2e/update.spec.ts` pins that it never covers that line again.
+- **The user can also ask NOW, from Settings › This app** (`update_check`), which is the poll's
+  own pass on their own ask — and the only surface that answers "there is nothing new". See
+  § Settings › This app, which also holds the restart that has no new binary in it.
 
 `web/mock/server.ts` reproduces the whole flow with no GitHub and no binary (armed with
 the `{kind: "update"}` test hook, which a spec MUST clear afterwards — one mock process
@@ -2386,6 +2395,91 @@ capped. `cd web && bun run preview -- --out /tmp/upd
 --update` captures the button, the changelog it discloses in both themes, the capped list,
 the download mid-transfer, the restart it offers next, the failure and its reason, and the
 link the other install shape keeps.
+
+## Settings › This app (a manual check, and a restart)
+
+Settings' last section holds the two things the user can do to the APP rather than to their
+Teams account: **Check for updates**, and **Restart the backend**
+(`web/src/components/maintenance-settings.tsx`, over the pure `web/src/lib/maintenance.ts`).
+Both exist for the same reason, and it is the reason most of this app exists: it is read from
+a PHONE, over a tailnet, and the machine it runs on is somewhere else — everything either row
+does used to need a terminal on that machine.
+
+**Both report their outcome where the click was made**, which is the rule § Sending messages
+states for the composer and § The trackers for the approval menu. These two need it more than
+either: a check that finds nothing new changes nothing anywhere else in the app, and a restart
+nobody carried out looks exactly like one that worked. The words for every state live in
+`maintenance.ts` so they are unit-tested; the component holds the one thing a pure function
+cannot know — whether the socket really went down and came back.
+
+**`update_check` is the POLL's own pass, on the user's ask** (`Ctx::check_release_now`, over
+the shared `Ctx::release_pass` — one spelling of "is there a newer build", with `ReleaseAsk`
+carrying the single difference between the clock and the button). Four rules, each pinned by a
+test:
+
+- **It is an OPEN read, unlike everything else in this area.** It changes nothing on this
+  machine, publishes nothing about the user, and makes the request the backend already makes
+  every two minutes — a gate would only stop a page from answering "am I up to date?".
+- **The user's ask TAKES the machine's slot**, whatever its timestamp says
+  (`Ctx::claim_release_read`): they pressed the button to learn where they stand now, and an
+  answer up to two minutes old is not that. It still MOVES the timestamp, so the clock's next
+  tick stands down — one request for the press, not one for the press and one behind it.
+- **A request the USER asked for and could not make is a failure, never a verdict.** The poll
+  falls back to the stored answer with one journal line; a manual check reports the reason
+  instead, because "you are up to date" on the strength of a read that failed is the one
+  answer it must not give.
+- **The row says an update exists and points at the SIDEBAR.** The update control there is
+  the one place a build is downloaded and restarted onto (§ Updating the app from inside it);
+  a second one here would be a second spelling of six states. Nothing in either surface ever
+  names a commit.
+
+**`restart_backend` is `update_apply` minus the new binary, and the same two shapes carry it
+out** (`src/restart.rs` decides which). It is the one repair for a backend that answers reads
+and has stopped doing something else — and it is deliberately NOT the fix for a broken
+sign-in, which has its own button on its own banner because that one restarts the Intune
+container instead. Five rules hold it, and each is pinned by a test:
+
+- **A backend cannot restart itself, so something has to bring it back — and each watcher
+  SAYS so.** The staged service is the backend under systemd, so it exits and `Restart=always`
+  starts it again; the `teams` command and `teams-lite-app.service` run the LAUNCHER, which
+  owns the backend as a child and re-spawns it on the `backend_restart` event
+  (`launcher/src/backend-restart.ts`), with its web server never going down — so the page
+  stays served and only its socket blinks. Neither is detected: `INVOCATION_ID` proves only
+  that systemd started something in this tree (a launcher unit's child inherits it) and
+  `Restart=` is invisible from inside a process, so the launcher sets `TEAMS_LITE_LAUNCHER` on
+  every backend it spawns and the backend unit declares `TEAMS_LITE_RESTART_ON_EXIT`. **A
+  backend nobody watches is REFUSED** and told so — a button that stopped the app for good is
+  the one outcome this must not have.
+- **The re-spawned child keeps the PINNED write token.** A fresh one would leave every send
+  refused until somebody reloaded, which is the exact failure the pinned token exists to
+  prevent (§ Automation safety).
+- **The user asks twice while a local agent is writing a reply.** A run dies with the process
+  and nothing can resume it, so the first press is answered with the count it would cut off
+  (`restarted: false, blocked: "agent"`) and `force` is the second press — Delete's own
+  pattern, decided in the BACKEND because the count is a fact only it holds: a page knows
+  about the runs it happened to watch, and the common case is a reply asked for from a phone.
+  The sentence never says the answer is lost, because it is not: whichever backend comes up
+  rewrites that message as interrupted (`repair_abandoned_agent_runs`).
+- **The answer goes out before the process does** (`RESTART_ANSWER_GRACE`), because the reply
+  travels on the socket the restart drops — and the calling registration is handed back on the
+  way out, exactly as the idle shutdown does it and for its reason.
+- **The SOCKET is the proof.** It drops when the backend goes and returns when it is back, so
+  a restart this page watched happen is one it can report. Nothing dropping inside
+  `RESTART_STALLED_MS` is the launcher not being there at all — the backend accepted, asked,
+  and nobody acted — and the row says so rather than spinning for ever. A connection that went
+  and has not returned stays `Restarting…` on purpose: the app already says the backend is
+  down, and this row must not call a restart on its way a failure.
+
+It is gated as a `MACHINE_METHODS` entry — the write token, refused read-only — and the
+automation hook blocks a script that names it against a live port, for the reason it blocks
+`update_apply`: tooling must not restart the app somebody is reading.
+
+`web/mock/server.ts` reproduces both rows with no GitHub and nothing to restart (the
+`{kind:"maintenance"}` test hook arms a check's outcome, the agent runs a restart would cut
+off, and the machine that would refuse — a spec MUST reset it, since one mock process serves
+the whole run). `cd web && bun run preview -- --out /tmp/app --maintenance` captures the
+section, the check's answer and the armed restart in both themes, and
+`web/e2e/maintenance.spec.ts` pins every rule above.
 
 ## The always-on service
 

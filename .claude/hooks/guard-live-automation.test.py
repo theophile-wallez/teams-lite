@@ -367,6 +367,20 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'update_apply' }));\n"
     ),
+    # Restarting the backend: the process the user's own pages talk to, and a local agent's
+    # half-written reply with it (MACHINE_METHODS in src/bin/server.rs).
+    "backend-restarter.ts": (
+        "// Restarts the backend the user's own app is talking to.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'restart_backend' }));\n"
+    ),
+    # Asking whether a newer build exists changes nothing on the machine and is the same
+    # request the backend already makes every two minutes: a read, and allowed.
+    "update-checker.ts": (
+        "// Asks the backend whether a release is newer, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'update_check' }));\n"
+    ),
     "person-override-reader.ts": (
         "// Reads back what the user themselves chose, which is allowed.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
@@ -510,6 +524,7 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/person-renamer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/person-refacer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/self-updater.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/backend-restarter.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-backend-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-relay-writer.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/released-backend-reader.ts"),
@@ -722,6 +737,7 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/agent-status-reader.ts"),
         # …and so is reading back the names and faces the user chose themselves.
         ("ALLOW", PROJECT, f"bun run {tmp}/person-override-reader.ts"),
+        ("ALLOW", PROJECT, f"bun run {tmp}/update-checker.ts"),
         # Reading the call state names no write and reaches nobody.
         ("ALLOW", PROJECT, f"bun run {tmp}/call-status-reader.ts"),
         # An example pinned to the pre-authorized channel is the sanctioned shape,

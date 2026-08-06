@@ -17,6 +17,7 @@ pub mod mail;
 pub mod mail_html;
 pub mod push;
 pub mod push_policy;
+pub mod restart;
 pub mod retry;
 pub mod sender_icon;
 pub mod teams;

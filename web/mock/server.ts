@@ -4542,6 +4542,40 @@ let mockUpdateFailsOnce = false;
 const MOCK_REPLACED_RELEASE_ERROR =
   "the release was replaced while it was being fetched (134092928 bytes, not 134088832)";
 
+/** What Settings › This app is armed to answer (the `{kind: "maintenance"}` test hook).
+ *
+ *  `check` overrides what `update_check` reports — every outcome but "available"/"current"
+ *  needs arming, because those two are the only ones the mock can be genuinely in. `runs` is
+ *  how many agent replies the pretend backend is writing, which is what makes the armed
+ *  "Restart anyway" reachable; `refuse` is the shape with no launcher and no supervisor, the
+ *  one refusal the user cannot press through.
+ *
+ *  A spec MUST reset it (`{kind: "maintenance", reset: true}`): one mock process serves the
+ *  whole run, and a backend armed to refuse a restart is one every later spec inherits. */
+let mockMaintenance: {
+  check: string | null;
+  runs: number;
+  refuse: boolean;
+} = { check: null, runs: 0, refuse: false };
+
+/** The refusal a hand-started backend really gives, word for word from
+ *  `restart::NOTHING_WOULD_RESTART_IT` — with the RPC name the socket prefixes it with, so
+ *  the mock exercises the stripping `lib/maintenance.ts` does. */
+const MOCK_NO_RESTARTER_ERROR =
+  "restart_backend: refused: nothing here would start this backend again — it was started " +
+  "by hand, so restart it the way it was started";
+
+/** Why a check could not be made, for the `failed` outcome. The transport's own words, since
+ *  that is what `update::fetch_release` propagates. */
+const GITHUB_UNREACHABLE = "error sending request for url (https://api.github.com/…)";
+
+/** How long the mock waits before it drops the sockets on an accepted restart.
+ *
+ *  The answer to the RPC travels on the socket the restart takes down, exactly as it does in
+ *  the real backend (`RESTART_ANSWER_GRACE` in src/bin/server.rs) — so a mock that closed
+ *  them inside the handler would swallow the reply and the page would never leave "asking". */
+const MOCK_RESTART_ANSWER_MS = 150;
+
 /** Put the update back to "nothing has been asked of it", timers included. One mock
  *  process serves a whole E2E run, so a download left in flight would report progress
  *  into the next spec. */
@@ -5437,6 +5471,38 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         }, 500);
       }
       return { started: true };
+    }
+
+    // Settings › This app, first row: ask "now" whether a newer build exists. There is no
+    // GitHub here, so the answer is what this mock is currently holding — armed, and
+    // otherwise the honest "you are on the newest build", which is the answer the row exists
+    // to be able to give at all.
+    case "update_check": {
+      if (mockMaintenance.check) return { outcome: mockMaintenance.check, error: GITHUB_UNREACHABLE };
+      if (mockUpdateProgress.phase !== "idle") return { outcome: "busy" };
+      // A release the mock holds is announced the way a real pass announces one, so the
+      // sidebar's row appears from the press rather than from the test hook.
+      if (mockUpdate) {
+        broadcast("update_available", { ...mockUpdate });
+        return { outcome: "available" };
+      }
+      return { outcome: "current" };
+    }
+
+    // Second row: restart the backend. Nothing is spawned here — what a page can be shown is
+    // the answer and then the socket going, which is the whole of what it reacts to.
+    case "restart_backend": {
+      if (mockMaintenance.refuse) throw new Error(MOCK_NO_RESTARTER_ERROR);
+      // The arming is the backend's, driven by `force` and never by a counter, exactly as in
+      // `Ctx::restart_backend`: the first press is answered with the runs it would cut off,
+      // and the second one carries the user's answer to that.
+      if (mockMaintenance.runs > 0 && asObject(params).force !== true) {
+        return { restarted: false, blocked: "agent", runs: mockMaintenance.runs };
+      }
+      setTimeout(() => {
+        for (const ws of sockets) ws.close();
+      }, MOCK_RESTART_ANSWER_MS);
+      return { restarted: true, via: "launcher" };
     }
 
     // The update's first click: fetch the new build. Reports progress on a timer the way
@@ -7139,6 +7205,22 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         { ok: true, state: mockWriteLockState, pinned: mockWriteLockPinned },
         { status: 200 },
       );
+    }
+    // Arm what Settings › This app answers: the outcome of a check, how many agent replies a
+    // restart would cut off, and the machine that has nothing to restart it. A spec MUST
+    // reset it — one mock process serves the whole run, and a backend armed to refuse would
+    // refuse for every later spec.
+    if (body.kind === "maintenance") {
+      if (body.reset === true) {
+        mockMaintenance = { check: null, runs: 0, refuse: false };
+        return Response.json({ ok: true, maintenance: mockMaintenance }, { status: 200 });
+      }
+      mockMaintenance = {
+        check: typeof body.check === "string" ? body.check : null,
+        runs: typeof body.runs === "number" ? body.runs : 0,
+        refuse: body.refuse === true,
+      };
+      return Response.json({ ok: true, maintenance: mockMaintenance }, { status: 200 });
     }
     // Arm (or clear) a pending update, and say whether this pretend install can replace
     // itself — the difference between the button and the plain link (`can_install` in

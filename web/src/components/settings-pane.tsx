@@ -23,6 +23,7 @@ import { pushBlockerMessage } from "~/lib/push";
 import { cn } from "~/lib/utils";
 import { AiProvidersSettings } from "./ai-providers-settings";
 import { CallRecordingsSettings } from "./call-recordings-settings";
+import { MaintenanceSettings } from "./maintenance-settings";
 import { RenamedPeopleSettings } from "./renamed-people-settings";
 import { useAppState, useController } from "./controller-context";
 import { LinearLogo } from "./linear-logo";
@@ -69,7 +70,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
         <div className="flex min-w-0 flex-col">
           <h2 className="truncate text-sm font-medium text-foreground">Settings</h2>
           <p className="truncate text-[11px] text-text-faint">
-            AI providers, integrations, privacy, people, appearance, and sounds
+            AI providers, integrations, privacy, people, appearance, sounds, and this app
           </p>
         </div>
       </header>
@@ -87,6 +88,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
           <NotificationSettings />
           <AppearanceSettings />
           <SoundsSettings />
+          <MaintenanceSettings />
         </div>
       </div>
     </section>

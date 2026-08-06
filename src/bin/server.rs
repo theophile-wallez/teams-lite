@@ -22,10 +22,10 @@
 //          | agent_status | agent_set_mode | agent_set_tools | agent_set_provider
 //          | agent_set_unrestricted
 //          | person_override | person_overrides | set_person_name | set_person_avatar
-//          | update_download | update_apply
+//          | update_check | update_download | update_apply | restart_backend
 // Events:  status | message | conversations_changed | notifications_changed | typing
 //          | read_receipt | call | call_signal | update_available | update_progress
-//          | update_restart
+//          | update_restart | backend_restart
 //          | mail_folders_changed | mail_list_updated | mail_list_error
 //          | calendars_changed | calendar_view_updated | calendar_view_error
 //          | gitlab_list_updated | gitlab_mr_updated | gitlab_read_error
@@ -342,8 +342,17 @@ const OUTWARD_METHODS: [&str; 19] = [
 /// `call_subscribe` ASKS the meeting's media server for somebody's stream and publishes
 /// nothing at all about the user — so it is not outward, and it is not open either: it acts
 /// on the one call this machine holds.
-const MACHINE_METHODS: [&str; 15] = [
+///
+/// `restart_backend` takes THIS process down and lets whatever runs it start it again (see
+/// [`teams_lite::restart`], and Settings › This app). It is the sibling of `update_apply`
+/// minus the new binary: every open page loses its socket for as long as the restart takes,
+/// a live `@claude` reply is cut off where it stood, and the user's calls do not ring here
+/// meanwhile. Nothing that merely found this socket gets to do that to the app the user is
+/// reading — and `update_check`, which only ASKS GitHub whether a newer build exists,
+/// deliberately stays open beside it: it changes nothing on this machine.
+const MACHINE_METHODS: [&str; 16] = [
     "repair_broker",
+    "restart_backend",
     "update_download",
     "update_apply",
     "call_prepare",
@@ -367,6 +376,10 @@ const MACHINE_METHODS: [&str; 15] = [
 fn machine_effect(method: &str) -> &'static str {
     match method {
         "repair_broker" => "restarts the Intune container on this machine",
+        "restart_backend" => {
+            "restarts this app's backend on this machine, which drops every open page's \
+             connection and cuts off a local agent that is writing a reply"
+        }
         "update_download" => "downloads a new build of this app onto this machine",
         "update_apply" => {
             "replaces this app's own binary on this machine, and restarts everything the \
@@ -469,6 +482,14 @@ const REPAIR_MIN_INTERVAL: Duration = Duration::from_secs(20 * 60);
 /// rather than one: the launcher stops the web server and kills this process, and a
 /// loaded machine can take a moment over it.
 const RESTART_GRACE: Duration = Duration::from_secs(10);
+
+/// How long a requested restart waits before it takes this process down.
+///
+/// The RPC's own answer travels on the socket the restart drops, so a restart that acted at
+/// once would swallow the outcome of the click that asked for it — the one frame the user is
+/// waiting on. Long enough for a local WebSocket write, short enough that nothing about the
+/// press feels delayed.
+const RESTART_ANSWER_GRACE: Duration = Duration::from_millis(250);
 
 /// Read-only mode (`TEAMS_LITE_READ_ONLY=1`): refuse every {@link OUTWARD_METHODS}
 /// call before it can reach the network.
@@ -1865,6 +1886,74 @@ impl Ctx {
         Ok(restarting)
     }
 
+    /// Restart this backend on the same build, because the user asked from
+    /// Settings › This app.
+    ///
+    /// It is `apply_update` without the new binary, and the same two shapes carry it out:
+    /// a launcher re-spawns the backend it owns (its web server never goes down), and a
+    /// supervised backend simply EXITS and is started again. Which one — and whether either
+    /// exists — is [`teams_lite::restart`]'s decision, and a shape nobody watches is refused
+    /// rather than taken down.
+    ///
+    /// Three things about it:
+    ///
+    ///   * **A live `@claude` reply is asked about first.** A run dies with this process and
+    ///     nothing can resume it, so a restart leaves that message frozen until a sweep
+    ///     closes it (`repair_abandoned_agent_runs`). The first ask therefore reports the
+    ///     runs instead of restarting, and `force` is the user's second press — the shape
+    ///     Delete and the merge already have, decided HERE because the count is a fact only
+    ///     this process holds: a page knows about the runs it happened to watch, and the
+    ///     common case is a run started from a phone.
+    ///   * **The answer goes out before the process does.** The reply travels on the socket
+    ///     this restart takes down, so both paths wait `RESTART_ANSWER_GRACE` first —
+    ///     otherwise the click's own outcome is the one frame that never arrives.
+    ///   * **The calling registration is taken back on the way out**, exactly as the idle
+    ///     shutdown does and for its reason: Teams routes a call to the endpoints it
+    ///     believes are running, and a device that does not ring is a call the user misses.
+    async fn restart_backend(&self, params: &Value) -> Result<Value> {
+        use teams_lite::restart::Restarter;
+
+        let restarter = teams_lite::restart::restarter();
+        anyhow::ensure!(
+            restarter != Restarter::Nothing,
+            teams_lite::restart::NOTHING_WOULD_RESTART_IT
+        );
+
+        let writing = live_agent_runs_here();
+        if writing > 0 && !params.get("force").and_then(Value::as_bool).unwrap_or(false) {
+            return Ok(json!({ "restarted": false, "blocked": "agent", "runs": writing }));
+        }
+
+        let via = match restarter {
+            Restarter::Launcher => "launcher",
+            Restarter::Supervisor => "supervisor",
+            Restarter::Nothing => unreachable!("refused above"),
+        };
+        eprintln!("[lifecycle] restarting on request — the {via} brings this backend back");
+
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RESTART_ANSWER_GRACE).await;
+            ctx.stop_calling().await;
+            match restarter {
+                // The launcher listens for this on the keepalive socket it already holds
+                // (launcher/src/backend-restart.ts) and re-spawns the backend alone. The
+                // port is what tells it the frame is about the child it owns — the same
+                // check `update_restart` makes with the binary path, and for the same
+                // reason: anything on this machine can open a frame on this socket.
+                Restarter::Launcher => {
+                    ctx.emit("backend_restart", json!({ "port": own_port() }));
+                }
+                // Nothing to ask: exiting IS the restart, and the supervisor starts us
+                // again. SQLite runs in WAL with per-request commits, so an abrupt stop
+                // loses nothing that was acknowledged (see the backend unit's own note).
+                Restarter::Supervisor => std::process::exit(0),
+                Restarter::Nothing => {}
+            }
+        });
+        Ok(json!({ "restarted": true, "via": via }))
+    }
+
     /// A valid CSA-audience token (auto-refreshed).
     async fn csa(&self) -> Result<String> {
         self.tokens.get(teams_read::CSA_SCOPE).await
@@ -2583,6 +2672,18 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // their account runs through.
         "update_download" => ctx.start_update_download().await,
         "update_apply" => ctx.apply_update().await,
+
+        // Ask GitHub, now, whether `latest` names a different commit — the poll's own pass,
+        // on the user's ask rather than on the clock (see `Ctx::check_release_now`). OPEN
+        // like every other read: it changes nothing on this machine, it publishes nothing
+        // about the user, and it is the same request the poll already makes every two
+        // minutes.
+        "update_check" => ctx.check_release_now().await,
+
+        // Restart this backend, through whatever runs it. A MACHINE method: it takes the
+        // process every open page is talking to down, so it is the user's own click and
+        // nothing a client that merely found the socket may ask for.
+        "restart_backend" => ctx.restart_backend(params).await,
 
         // ---- push notifications (see src/push.rs) ------------------------------
         // What an installed web app needs to receive a notification while it is
@@ -6792,16 +6893,54 @@ fn spawn_release_poll(ctx: Ctx) {
         let mut ticks = tokio::time::interval(RELEASE_CHECK_INTERVAL);
         loop {
             ticks.tick().await;
-            ctx.poll_release(current).await;
+            // The outcome is the button's business (see `Ctx::check_release_now`): a pass
+            // on the clock has nobody waiting on an answer, and it has already published
+            // whatever moved.
+            let _ = ctx.release_pass(current, ReleaseAsk::Poll).await;
         }
     });
+}
+
+/// Whether a pass of the release watch may spend a GitHub request, and on whose behalf.
+///
+/// The two differ in exactly one respect — whether the machine's slot has to be free — and
+/// that difference is the whole reason a button exists beside the clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseAsk {
+    /// The two-minute clock (`spawn_release_poll`). It asks only when nothing on this
+    /// machine has asked inside the interval.
+    Poll,
+    /// The user pressed **Check for updates**. It takes the slot whatever the timestamp
+    /// says, because an answer up to two minutes old is not what they pressed for.
+    User,
+}
+
+/// What one pass found, for the caller that has to report it. The poll drops it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReleaseOutcome {
+    /// A newer build exists, and the update row is already offering it.
+    Available,
+    /// This build IS the newest one.
+    Current,
+    /// The pass stood aside: the user has already pressed something and a download owns
+    /// the payload.
+    Busy,
+    /// Nothing could be compared — a build made from source, GitHub naming no commit we
+    /// can read, or no stored answer yet on a backend that never fetches.
+    Unknown,
+    /// The request itself failed, in GitHub's own words (or the transport's).
+    Failed(String),
 }
 
 impl Ctx {
     /// One pass of the release watch: read what `latest` names, compare it with this
     /// build, and publish only what CHANGED.
     ///
-    /// Three rules, and each is pinned by a test:
+    /// Shared by the clock and by the user's own **Check for updates**, so there is one
+    /// spelling of "is there a newer build" rather than two that drift — `ask` carries the
+    /// single difference between them (see [`ReleaseAsk`]).
+    ///
+    /// Four rules, and each is pinned by a test:
     ///
     ///   * **One request per MACHINE, not per backend.** The answer is the same for every
     ///     process here, so it is fetched under a claim and shared through the store
@@ -6811,36 +6950,49 @@ impl Ctx {
     ///   * **Silence unless something moved.** A client hears `update_available` when the
     ///     release changes and never on a pass that found the same one, so a page open for
     ///     a week is not sent one event every two minutes — and the journal keeps one line
-    ///     per release rather than 720 a day.
+    ///     per release rather than 720 a day. The OUTCOME is returned either way: the user
+    ///     who pressed the button has to be told there is nothing new, which is the one
+    ///     answer an event cannot carry.
     ///   * **A download owns the payload while it runs.** Every phase but `Idle` means the
     ///     user has pressed something, and the asset a bar is drawn against is re-read by
-    ///     the download itself (`refresh_release`). A poll that overwrote it mid-transfer
+    ///     the download itself (`refresh_release`). A pass that overwrote it mid-transfer
     ///     would move the total under the bar.
-    async fn poll_release(&self, current: &str) {
+    ///   * **A request the USER asked for and could not make is a failure, never a verdict.**
+    ///     The poll falls back to the stored answer and says one line to the journal; a
+    ///     manual check reports what went wrong instead, because "you are up to date" on
+    ///     the strength of a read that failed is the one answer it must not give.
+    async fn release_pass(&self, current: &str, ask: ReleaseAsk) -> ReleaseOutcome {
         if !matches!(self.with_update(|slot| slot.phase), Ok(UpdatePhase::Idle)) {
-            return;
+            return ReleaseOutcome::Busy;
         }
         // A read-only backend never takes the claim: it is a screenshot backend, it cannot
         // install anything, and holding the machine's slot would delay by up to one
         // interval the discovery by the app that CAN act on it. It still reads the stored
         // answer, so its UI says what the app's does.
-        if !read_only() && self.claim_release_read() {
+        let mut failure = None;
+        if !read_only() && self.claim_release_read(ask) {
             match teams_lite::update::fetch_release(&self.http).await {
                 Ok(Some(release)) => self.remember_release(&release),
                 // GitHub answered and named no commit we could read: nothing to store, and
                 // the previous answer stands rather than being erased by an unreadable one.
                 Ok(None) => {}
-                // Reached-but-failed or offline. One line, never surfaced to the user —
-                // and never a reason to drop what we already knew.
-                Err(e) => eprintln!("[update] check skipped: {e}"),
+                // Reached-but-failed or offline. One line, never a reason to drop what we
+                // already knew — and kept, for the caller that has somebody waiting on it.
+                Err(e) => {
+                    eprintln!("[update] check skipped: {e}");
+                    failure = Some(format!("{e}"));
+                }
             }
         }
-        let Some(release) = self.stored_release() else { return };
+        if let (ReleaseAsk::User, Some(why)) = (ask, failure) {
+            return ReleaseOutcome::Failed(why);
+        }
+        let Some(release) = self.stored_release() else { return ReleaseOutcome::Unknown };
         match teams_lite::update::compare(&release, current) {
             Some(info) => {
                 let known = self.with_update(|slot| slot.latest.clone()).unwrap_or_default();
                 if known == info.latest {
-                    return;
+                    return ReleaseOutcome::Available;
                 }
                 // What it brings, before it is announced: the payload is spelled once, in
                 // `publish_release`, so the list has to be known by the time it runs or the
@@ -6857,6 +7009,7 @@ impl Ctx {
                         " — update it the way it was installed"
                     }
                 );
+                ReleaseOutcome::Available
             }
             // This build IS the release. Empty the row if it was offering one — the user
             // updated on another install, or CI moved the tag back onto this commit — but
@@ -6873,19 +7026,50 @@ impl Ctx {
                 } else {
                     teams_lite::update::discard_downloads();
                 }
+                ReleaseOutcome::Current
             }
         }
+    }
+
+    /// The `update_check` RPC: the pass above, on the user's own ask, reported back to the
+    /// control they pressed.
+    ///
+    /// The row in the sidebar still appears (or empties) on its own, because the pass
+    /// publishes exactly what a poll publishes — this answer is what the BUTTON says, and
+    /// the one thing the events cannot carry is "there is nothing new", which is the
+    /// commonest outcome of pressing it.
+    async fn check_release_now(&self) -> Result<Value> {
+        // A build made from source has no commit to compare, so there is nothing to ask
+        // GitHub about — the same reason the poll never starts in that build. Said rather
+        // than silently answered "up to date": one is a fact, the other a guess.
+        let Some(current) = teams_lite::update::build_rev() else {
+            return Ok(json!({ "outcome": "unsupported" }));
+        };
+        Ok(match self.release_pass(current, ReleaseAsk::User).await {
+            ReleaseOutcome::Available => json!({ "outcome": "available" }),
+            ReleaseOutcome::Current => json!({ "outcome": "current" }),
+            ReleaseOutcome::Busy => json!({ "outcome": "busy" }),
+            ReleaseOutcome::Unknown => json!({ "outcome": "unknown" }),
+            ReleaseOutcome::Failed(error) => json!({ "outcome": "failed", "error": error }),
+        })
     }
 
     /// Take the machine's release-check slot, or find that another backend has it.
     /// A store that cannot answer is read as "not ours", so a failure costs one pass
     /// rather than turning the poll into a per-backend one.
-    fn claim_release_read(&self) -> bool {
+    ///
+    /// The user's own ask takes the slot whatever its timestamp says — they pressed the
+    /// button to learn where they stand NOW, and a two-minute-old answer is not that. It
+    /// still MOVES the timestamp, so the clock's next pass stands down: one request for the
+    /// press, not one for the press and one for the tick behind it.
+    fn claim_release_read(&self, ask: ReleaseAsk) -> bool {
         let now = now_ms();
+        let free_since = match ask {
+            ReleaseAsk::Poll => now - RELEASE_CHECK_INTERVAL.as_millis() as i64,
+            ReleaseAsk::User => now,
+        };
         self.store()
-            .and_then(|store| {
-                store.claim_release_check(now, now - RELEASE_CHECK_INTERVAL.as_millis() as i64)
-            })
+            .and_then(|store| store.claim_release_check(now, free_since))
             .unwrap_or(false)
     }
 
@@ -7211,6 +7395,29 @@ fn publish_agent_run_marker(run: &store::AgentRun) {
         run.started_ms,
     );
     let _ = std::fs::write(dir.join(marker_name(&run.message_id)), body);
+}
+
+/// How many agent replies THIS process is writing right now.
+///
+/// Read from the markers rather than from the store, and narrowed to our own pid, because
+/// the question a restart asks is "what would I cut off": the store's rows belong to every
+/// backend on this machine, and a run in the other one survives us untouched. It is the same
+/// directory `bin/teams-lite-service.sh` counts before it restarts the units
+/// (`wait_for_quiet_agent`) — one place a live run is published, two readers.
+///
+/// Best-effort like everything else about the markers: no runtime directory, or a directory
+/// that will not open, reads as no runs — which is what the caller would have assumed.
+fn live_agent_runs_here() -> usize {
+    let Some(dir) = agent_run_marker_dir() else { return 0 };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+    let ours = format!("pid={}", std::process::id());
+    entries
+        .flatten()
+        .filter(|entry| {
+            std::fs::read_to_string(entry.path())
+                .is_ok_and(|body| body.lines().any(|line| line.trim() == ours))
+        })
+        .count()
 }
 
 /// Take a finished run's marker away. Called on every exit path, so the directory
@@ -9605,6 +9812,59 @@ mod tests {
         assert!(check_write_allowed("repair_broker", &params, Some("tok")).is_err());
     }
 
+    /// Restarting the backend is gated; ASKING GitHub about a release is not.
+    ///
+    /// The split is the whole shape of Settings › This app. One takes down the process every
+    /// open page is talking to, cuts off a local agent mid-reply and stops the user's calls
+    /// ringing here for a moment; the other makes one HTTP request the poll already makes
+    /// every two minutes and changes nothing on this machine. A gate on the second would
+    /// only stop a page from answering "am I up to date?".
+    #[test]
+    fn restarting_the_backend_is_gated_and_checking_for_an_update_is_not() {
+        assert!(!OUTWARD_METHODS.contains(&"restart_backend"));
+        assert_eq!(write_class("restart_backend"), Some(WriteClass::Machine));
+        assert_eq!(write_class("update_check"), None);
+    }
+
+    #[test]
+    fn restarting_the_backend_is_refused_without_the_token() {
+        let err = check_write_allowed("restart_backend", &json!({}), Some("tok"))
+            .expect_err("must refuse a tokenless restart");
+        assert!(err.contains("write token"), "{err}");
+        // Its own words, not the class's: what this one costs is every page's connection
+        // and a reply an agent was writing.
+        assert!(err.contains("backend"), "{err}");
+        assert!(err.contains("agent"), "{err}");
+    }
+
+    /// A restart answers the click that asked for it, and only then goes.
+    ///
+    /// Scanned rather than run, because the method ends in a killed process: what has to
+    /// hold is the ORDER of three things. The agent count is read BEFORE anything is taken
+    /// down (a reply frozen mid-answer is the one cost the user has to be asked about); the
+    /// reply's grace comes before the exit (the answer travels on the socket this drops, so
+    /// acting at once swallows it); and the calling registration is handed back before the
+    /// process that would answer a call is gone.
+    #[test]
+    fn a_requested_restart_asks_about_the_agent_and_answers_before_it_goes() {
+        let source = include_str!("server.rs");
+        let body = source
+            .split("    async fn restart_backend(")
+            .nth(1)
+            .expect("the restart handler")
+            .split("\n    /// A valid CSA-audience token")
+            .next()
+            .expect("the handler ends before the next method");
+
+        let agent = body.find("live_agent_runs_here()").expect("the agent count");
+        let grace = body.find("RESTART_ANSWER_GRACE").expect("the answer's own grace");
+        let calling = body.find("stop_calling()").expect("the calling registration");
+        let exit = body.find("std::process::exit(0)").expect("the exit");
+        assert!(agent < grace, "the runs a restart would cut off are read before it starts");
+        assert!(grace < calling, "the click's own answer goes out before anything is stopped");
+        assert!(calling < exit, "a device Teams still routes calls to must be taken back");
+    }
+
     #[test]
     fn the_push_methods_are_gated_but_are_not_outward_facing() {
         // Subscribing decides which devices this machine notifies. It posts nothing
@@ -10121,10 +10381,10 @@ mod tests {
     fn the_release_poll_shares_one_request_and_speaks_only_on_a_change() {
         let source = include_str!("server.rs");
         let pass = source
-            .split("    async fn poll_release(")
+            .split("    async fn release_pass(")
             .nth(1)
-            .expect("the poll's own pass")
-            .split("\n    /// Take the machine's release-check slot")
+            .expect("the release watch's own pass")
+            .split("\n    /// The `update_check` RPC")
             .next()
             .expect("the pass ends before the next method");
 
@@ -10135,7 +10395,7 @@ mod tests {
                  drawn against",
             ),
             (
-                "!read_only() && self.claim_release_read()",
+                "!read_only() && self.claim_release_read(ask)",
                 "the claim must be taken before the fetch, and never by a read-only \
                  backend — it cannot install anything and would hold the machine's slot",
             ),
@@ -10156,7 +10416,7 @@ mod tests {
         // The fetch happens inside the claim, never beside it. Read positionally, because
         // that ordering IS the budget: a fetch above the claim would spend a request per
         // backend and the claim would only decide who writes the answer down.
-        let claim = pass.find("claim_release_read()").expect("the claim");
+        let claim = pass.find("claim_release_read(ask)").expect("the claim");
         let fetch = pass.find("update::fetch_release(").expect("the fetch");
         assert!(claim < fetch, "the request must happen under the claim, not beside it");
     }

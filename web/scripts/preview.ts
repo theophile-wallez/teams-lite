@@ -48,6 +48,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/agent --agent     # the local-agent menu
 //   bun run web/scripts/preview.ts --out /tmp/reply --agent-reply  # the agent answering
 //   bun run web/scripts/preview.ts --out /tmp/prov --ai-providers # Settings › AI providers
+//   bun run web/scripts/preview.ts --out /tmp/app --maintenance # Settings › This app
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
 //   bun run web/scripts/preview.ts --out /tmp/tag --agent-tag   # tagging an agent
 //   bun run web/scripts/preview.ts --out /tmp/ask --answer-with # "Answer with <agent>" on a message
@@ -2355,6 +2356,45 @@ if (import.meta.main) {
         await setTheme("dark");
         await shot(`${out}-dark.png`, element);
         console.log(`[preview] wrote ${out}-light.png and ${out}-dark.png`);
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
+  // Settings › This app: the two rows, and the three answers that are worth looking at
+  // rather than trusting — because each one is a sentence appearing in a row of controls,
+  // which is what the column below it moves for (web/src/components/maintenance-settings.tsx).
+  if (args.includes("--maintenance")) {
+    await withPreview(
+      async ({ page, shot, setTheme, emit }) => {
+        await openSettings(page);
+        const section = '[data-testid="maintenance-settings"]';
+        await page.locator(section).scrollIntoViewIfNeeded();
+        await shot(`${out}-light.png`, element ?? section);
+        await setTheme("dark");
+        await shot(`${out}-dark.png`, element ?? section);
+        await setTheme("light");
+
+        // The check's own answer. The mock holds no release out of the box, so this is the
+        // reassuring one — and the commonest, which is the reason the row exists at all.
+        await page.locator('[data-testid="update-check-button"]').click();
+        await page.waitForSelector('[data-testid="update-check-message"]');
+        await shot(`${out}-checked-light.png`, element ?? section);
+
+        // And the restart ARMED: a local agent is mid-reply, so the second press is the
+        // user answering for it. The colour and the sentence are the whole of that state.
+        await emit({ kind: "maintenance", runs: 1 });
+        await page.locator('[data-testid="restart-backend-button"]').click();
+        await page.waitForSelector('[data-testid="restart-backend-message"]');
+        await shot(`${out}-armed-light.png`, element ?? section);
+        await setTheme("dark");
+        await shot(`${out}-armed-dark.png`, element ?? section);
+        await setTheme("light");
+        await emit({ kind: "maintenance", reset: true });
+        console.log(
+          `[preview] wrote ${out}-{light,dark,checked-light,armed-light,armed-dark}.png`,
+        );
       },
       { deviceScaleFactor: dpr },
     );
