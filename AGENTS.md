@@ -1559,6 +1559,20 @@ joins alone and waits for an offer. Six rules hold it together, and
     not do.
   - **A reserved section publishes NOTHING.** It is `inactive` and carries no track, so no
     camera and no screen is opened until the user asks: the consent gate is untouched.
+- **A CONFERENCE is offered three video codecs, and a one-to-one is offered every one the
+  browser has.** That split is the client's own — `allowedVideoCodecsMultiparty` is
+  `[H264, AV1, rtx]` with `filterCodecsInSdpMultiparty: true`, while `allowedVideoCodecs` is
+  empty and `filterCodecsInSdp` false — and this app offered Chrome's whole list everywhere:
+  VP8 and VP9 first, into a service whose own video sections carry `H264/90000` alone.
+  `conferenceVideoCodecs` is the pure half (H.264 FIRST, `rtx` kept because retransmission is
+  not optional, and an empty answer means say nothing rather than offer no codec at all), and
+  `LocalSenders.addVideoSection` is the ONE place a section is created, so the list cannot be
+  forgotten on one of the two paths.
+- **Every section states its SSRCs as `a=x-ssrc-range`**, added beside the browser's own
+  `a=ssrc:` lines rather than replacing them — which is what the captured client offer does
+  (NATIVE-CALLING.md § 2.5) and what the service does on every section of its own. Audio is
+  accepted without it, so it is not what makes a section work; a send section the service must
+  allocate a channel for is where that would show.
 - **A capture the meeting never ACCEPTED is not one it dropped, and the advice is the whole
   difference.** A section rejected in the answer to the very offer that added it never carried
   anything, so "Share it again" sends the user into the identical refusal — which is what

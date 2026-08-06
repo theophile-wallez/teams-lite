@@ -269,3 +269,73 @@ describe("the labels a section carries", () => {
     expect(out.match(/a=label:/g)).toHaveLength(1);
   });
 });
+
+// The SSRCs a section carries, stated the service's own way. The captured client offer adds
+// `a=x-ssrc-range` to every section and keeps `a=ssrc:` beside it (§ 2.5), and the service
+// declares one on every section of its own offers.
+
+describe("toMsSdp: the SSRC range", () => {
+  const lines = (sdp: string) => sdp.split("\r\n");
+
+  it("states the range beside the browser's own a=ssrc lines", () => {
+    const sdp = [
+      "v=0",
+      "t=0 0",
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+      "a=mid:0",
+      "a=ssrc:4195875351 cname:abc",
+      "a=ssrc:4195875351 msid:stream track",
+      "",
+    ].join("\r\n");
+    const out = lines(toMsSdp(sdp));
+    // ADDED, not substituted: the client keeps both.
+    expect(out).toContain("a=x-ssrc-range:4195875351-4195875351");
+    expect(out).toContain("a=ssrc:4195875351 cname:abc");
+    // One line per section, however many attributes repeat the same id.
+    expect(out.filter((l) => l.startsWith("a=x-ssrc-range:")).length).toBe(1);
+  });
+
+  it("gives every section its own range", () => {
+    const sdp = [
+      "v=0",
+      "t=0 0",
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+      "a=mid:0",
+      "a=ssrc:111 cname:a",
+      "m=video 9 UDP/TLS/RTP/SAVPF 107",
+      "a=mid:1",
+      "a=ssrc:222 cname:b",
+      "a=ssrc:333 cname:b",
+      "",
+    ].join("\r\n");
+    const out = lines(toMsSdp(sdp));
+    expect(out).toContain("a=x-ssrc-range:111-111");
+    // Two SSRCs on one section — a simulcast or an rtx stream — span a range.
+    expect(out).toContain("a=x-ssrc-range:222-333");
+  });
+
+  it("says nothing for a section that declares no SSRC", () => {
+    // A RESERVED section carries no track, so it has no SSRC to state — and a rejected one
+    // (port 0) has nothing either.
+    const sdp = ["v=0", "t=0 0", "m=video 9 UDP/TLS/RTP/SAVPF 107", "a=mid:1", "a=inactive", ""].join(
+      "\r\n",
+    );
+    expect(toMsSdp(sdp)).not.toContain("x-ssrc-range");
+  });
+
+  it("never states one twice", () => {
+    // An SDP that already carries the line — one of ours, sent back through — keeps the one
+    // it has: two ranges on a section is not the same SDP.
+    const sdp = [
+      "v=0",
+      "t=0 0",
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+      "a=mid:0",
+      "a=x-ssrc-range:9-9",
+      "a=ssrc:111 cname:a",
+      "",
+    ].join("\r\n");
+    const out = lines(toMsSdp(sdp)).filter((l) => l.startsWith("a=x-ssrc-range:"));
+    expect(out).toEqual(["a=x-ssrc-range:9-9"]);
+  });
+});

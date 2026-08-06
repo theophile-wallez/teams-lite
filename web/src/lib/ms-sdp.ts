@@ -234,11 +234,17 @@ function splitLines(sdp: string): { lines: string[]; ending: string } {
 /**
  * Rewrite a browser's offer or answer into what the calling service reads.
  *
- * Two changes, both of them the client's own: every media line's profile becomes
- * `RTP/SAVP`, and a media line with no `a=label:` gets one — from `labels` when the caller
- * has an offer to echo, and from the section's kind otherwise. Everything else — the codecs,
- * the fingerprint, the candidates, the ICE credentials — travels exactly as the browser
- * wrote it.
+ * Three changes, all of them the client's own: every media line's profile becomes
+ * `RTP/SAVP`, a media line with no `a=label:` gets one — from `labels` when the caller has an
+ * offer to echo, and from the section's kind otherwise — and each section states the SSRCs it
+ * carries as `a=x-ssrc-range`. Everything else — the codecs, the fingerprint, the candidates,
+ * the ICE credentials — travels exactly as the browser wrote it.
+ *
+ * The range is ADDED beside `a=ssrc:` rather than replacing it, which is what the captured
+ * client offer shows (§ 2.5: "ADDED (the `a=ssrc:` line stays too)"). Audio is accepted
+ * without it, so it is not what makes a section work — but the service declares one on every
+ * section of its OWN offers, and a send section it must allocate a channel for is the place
+ * that would notice. It costs one line per section.
  *
  * `labels` is what makes a shared screen possible at all: it and a camera are both
  * `m=video`, so an answer built from kinds alone labels somebody's screen `main-video` and
@@ -251,7 +257,14 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
   // its start: `a=label` may already be there, and stating it twice is not the same SDP.
   // Its mid is read on the way through, because the override is keyed by mid and an
   // `a=mid:` line comes after the `m=` line it belongs to.
-  let section: { kind: string; hasLabel: boolean; mid: string | null } | null = null;
+  let section: {
+    kind: string;
+    hasLabel: boolean;
+    mid: string | null;
+    /** Every SSRC the section declares, for the range below. */
+    ssrcs: number[];
+    hasSsrcRange: boolean;
+  } | null = null;
 
   const closeSection = () => {
     if (!section) return;
@@ -260,6 +273,13 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
     const label =
       (section.mid ? labels?.get(section.mid) : undefined) ?? MEDIA_LABELS[section.kind];
     if (label && !section.hasLabel) out.push(`a=label:${label}`);
+    // The SSRCs the section carries, stated the service's own way. `a=ssrc:` stays exactly
+    // where the browser wrote it — the client ADDS this line rather than replacing them.
+    if (section.ssrcs.length > 0 && !section.hasSsrcRange) {
+      const low = Math.min(...section.ssrcs);
+      const high = Math.max(...section.ssrcs);
+      out.push(`a=x-ssrc-range:${low}-${high}`);
+    }
     section = null;
   };
 
@@ -267,7 +287,7 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
     const media = readMediaLine(line);
     if (media) {
       closeSection();
-      section = { kind: media.kind, hasLabel: false, mid: null };
+      section = { kind: media.kind, hasLabel: false, mid: null, ssrcs: [], hasSsrcRange: false };
       out.push(withProfile(media, MS_PROFILE));
       continue;
     }
@@ -279,6 +299,12 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
     }
     if (section && line.startsWith("a=mid:")) section.mid = line.slice("a=mid:".length).trim();
     if (section && line.startsWith("a=label:")) section.hasLabel = true;
+    if (section && line.startsWith("a=x-ssrc-range:")) section.hasSsrcRange = true;
+    if (section && line.startsWith("a=ssrc:")) {
+      // `a=ssrc:<id> <attribute>` — one id, repeated once per attribute it carries.
+      const id = Number.parseInt(line.slice("a=ssrc:".length), 10);
+      if (Number.isFinite(id) && !section.ssrcs.includes(id)) section.ssrcs.push(id);
+    }
     if (line.startsWith("a=candidate:")) {
       out.push(candidateToMs(line));
       continue;

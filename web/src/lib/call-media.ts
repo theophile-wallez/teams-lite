@@ -278,7 +278,9 @@ export async function startCallMedia(options: CallMediaOptions): Promise<CallMed
   // here and the offer must release every capture, not only the microphone.
   const remoteAudio = new RemoteAudio();
   const remoteVideo = new RemoteVideoTracks();
-  const senders = new LocalSenders();
+  // A CONFERENCE filters the video codecs it offers and a one-to-one does not, which is the
+  // client's own split — so the kind is decided once, here, and every section follows it.
+  const senders = new LocalSenders(!options.oneToOne);
   try {
     pc.addEventListener("track", (event) => {
       const [remote] = event.streams;
@@ -444,6 +446,37 @@ class RemoteAudio {
 const RESERVED_KINDS: readonly SendKind[] = ["camera", "screen"];
 
 /**
+ * The video codecs a CONFERENCE offers, in the client's own order.
+ *
+ * `allowedVideoCodecsMultiparty: [{video/H264}, {video/AV1}, {video/rtx}]` with
+ * `filterCodecsInSdpMultiparty: true` — so the offer a real client sends into a meeting or a
+ * group call carries these three and nothing else, while Chrome's own offer also carries VP8,
+ * VP9 and every payload it can decode. A ONE-TO-ONE is filtered by neither
+ * (`allowedVideoCodecs: []`, `filterCodecsInSdp: false`), which is why this is not applied
+ * there: the client lets Chrome's whole list travel on a two-party call.
+ *
+ * `rtx` is in the list and has to stay: it is retransmission for the codecs above it, and a
+ * video stream without it loses a frame to every dropped packet.
+ */
+const CONFERENCE_VIDEO_CODECS = ["video/h264", "video/av1", "video/rtx"];
+
+/**
+ * The codecs to offer a conference, picked out of what this browser can do.
+ *
+ * Pure, so the order and the omissions are unit-tested: `setCodecPreferences` takes the list
+ * in the order it will appear on the wire, and a browser's own list is longer and differently
+ * ordered on every machine. An empty answer means "say nothing" — a browser holding none of
+ * them cannot send a picture this service reads whatever this app asks for.
+ */
+export function conferenceVideoCodecs(
+  available: readonly RTCRtpCodec[],
+): RTCRtpCodec[] {
+  return CONFERENCE_VIDEO_CODECS.flatMap((mimeType) =>
+    available.filter((codec) => codec.mimeType.toLowerCase() === mimeType),
+  );
+}
+
+/**
  * Which capture, if any, a section carrying this label is for — the whole decision
  * {@link LocalSenders.adopt} makes about an incoming offer.
  *
@@ -520,6 +553,14 @@ export function sectionIsStopped(
  * see {@link sectionIsStopped}.
  */
 class LocalSenders {
+  /**
+   * Whether this call is a CONFERENCE — a meeting, or a group chat's call.
+   *
+   * It decides one thing: which video codecs a section offers (see
+   * {@link CONFERENCE_VIDEO_CODECS}). The client filters them there and nowhere else.
+   */
+  constructor(private readonly conference: boolean) {}
+
   private live = new Map<SendKind, { transceiver: RTCRtpTransceiver; stream: MediaStream }>();
   /** Sections of a kind that was switched off. Kept so switching it on reuses one, and so
    *  its LABEL survives: the section is still in the SDP, and relabelling it would describe
@@ -553,7 +594,43 @@ class LocalSenders {
   reserve(pc: RTCPeerConnection): void {
     for (const kind of RESERVED_KINDS) {
       if (this.live.has(kind) || this.idle.has(kind)) continue;
-      this.idle.set(kind, pc.addTransceiver("video", { direction: "inactive" }));
+      this.idle.set(kind, this.addVideoSection(pc, { direction: "inactive" }));
+    }
+  }
+
+  /**
+   * Add one video section, offering the codecs this call's kind offers.
+   *
+   * Every section this app sends on comes through here, so the codec list cannot be forgotten
+   * on one of the two paths — which is the class of bug the reserved sections were added for.
+   */
+  private addVideoSection(pc: RTCPeerConnection, init: RTCRtpTransceiverInit): RTCRtpTransceiver {
+    const transceiver = pc.addTransceiver("video", init);
+    this.restrictCodecs(transceiver);
+    return transceiver;
+  }
+
+  /**
+   * Offer a CONFERENCE the three video codecs a real client offers it, in its own order.
+   *
+   * A browser offers everything it can decode — VP8, VP9, AV1, H.264 — and the service is
+   * given a section it did not ask for in a list it does not use. Its own offers carry
+   * `H264/90000` alone, and the client filters its outgoing list to match on every multiparty
+   * call. This is the one place that list is applied, and a browser that refuses the call
+   * keeps its own preferences: a section offering too much is better than no section.
+   */
+  private restrictCodecs(transceiver: RTCRtpTransceiver): void {
+    if (!this.conference) return;
+    const capabilities = RTCRtpReceiver.getCapabilities?.("video");
+    if (!capabilities || typeof transceiver.setCodecPreferences !== "function") return;
+    const wanted = conferenceVideoCodecs(capabilities.codecs);
+    // Nothing to say when the browser has none of them — H.264 is the one that matters, and a
+    // browser without it cannot send a picture this service reads whatever we ask for.
+    if (wanted.length === 0) return;
+    try {
+      transceiver.setCodecPreferences(wanted);
+    } catch {
+      // A browser that refuses the list keeps its own, which is what happened before this.
     }
   }
 
@@ -594,7 +671,11 @@ class LocalSenders {
       reuse.direction = "sendonly";
       this.live.set(kind, { transceiver: reuse, stream });
     } else {
-      const transceiver = pc.addTransceiver(track, { direction: "sendonly", streams: [stream] });
+      const transceiver = this.addVideoSection(pc, {
+        direction: "sendonly",
+        streams: [stream],
+      });
+      await transceiver.sender.replaceTrack(track);
       this.live.set(kind, { transceiver, stream });
     }
     this.notify();

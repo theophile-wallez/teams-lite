@@ -1055,6 +1055,25 @@ attempt cost.
   one-to-one, which is the path that works today. `cd web && bun run call-live` is what
   proves it — the offer's own m-lines are in its digest, and the journal now names what the
   answer granted per section (`calling::media_sections`).
+- **Two more of the client's own differences are now sent, and they are the CONFERENCE's
+  candidates.** The only reachable test target is a group chat, which is multiparty — so the
+  multiparty half of the client's config is what matters there, and it says two things this
+  app was not doing:
+
+  - **`allowedVideoCodecsMultiparty: [{video/H264},{video/AV1},{video/rtx}]` with
+    `filterCodecsInSdpMultiparty: true`.** A real client's multiparty offer carries those
+    three; Chrome's carries VP8, VP9, AV1, H.264, red and ulpfec, VP8 first. The service's own
+    video sections are `H264/90000` alone. `setCodecPreferences` now applies the client's list
+    on a conference and nothing on a one-to-one, which is where its own
+    `allowedVideoCodecs: []` / `filterCodecsInSdp: false` leave Chrome's list alone.
+  - **`a=x-ssrc-range` per section**, added beside `a=ssrc:` as § 2.5's capture shows. Audio is
+    accepted without it, which is the control experiment that says it is not required in
+    general — but the service declares one on every section it offers, and a SEND section it
+    must allocate a channel for is where an omission would tell.
+
+  Both are copies of the client rather than inventions, and neither is verified: the next
+  share attempt is what says. The journal names the answer's sections
+  (`calling::media_sections`), so the outcome is one line either way.
 - Three specific unknowns remain, and the refusal above narrowed none of them:
   - **Whether a `contentSharing` session is needed at all.** § 10.4 says the client opens one,
     with six links and a presenter. But no participant in the measured roster carried a

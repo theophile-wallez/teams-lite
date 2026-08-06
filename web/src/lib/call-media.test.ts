@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { reservedKindFor, sectionIsStopped } from "./call-media";
+import { conferenceVideoCodecs, reservedKindFor, sectionIsStopped } from "./call-media";
 import { rejectedLabels, SHARING_LABEL } from "./ms-sdp";
 
 // A section the far side DROPPED. The service can reject a section this app offered, and the
@@ -73,5 +73,59 @@ describe("reservedKindFor", () => {
     for (const label of ["main-audio", "data", "x-data", "applicationsharing-audio", "", undefined]) {
       expect(reservedKindFor(label)).toBeUndefined();
     }
+  });
+});
+
+// The codecs a CONFERENCE offers. A browser offers everything it can decode — VP8, VP9, AV1,
+// H.264 — and the real client filters its multiparty offer down to three
+// (`allowedVideoCodecsMultiparty` with `filterCodecsInSdpMultiparty: true`), while its own
+// offers carry `H264/90000` alone. A one-to-one is filtered by neither.
+
+describe("conferenceVideoCodecs", () => {
+  const codec = (mimeType: string): RTCRtpCodec => ({ mimeType, clockRate: 90_000 });
+  // What Chrome really hands back, in roughly its own order.
+  const chrome = [
+    codec("video/VP8"),
+    codec("video/rtx"),
+    codec("video/VP9"),
+    codec("video/AV1"),
+    codec("video/H264"),
+    codec("video/red"),
+    codec("video/ulpfec"),
+  ];
+
+  it("offers the client's three, in the client's order", () => {
+    // H.264 FIRST: it is the codec the service's own video sections use, so it must be the
+    // one a section leads with rather than the one buried under VP8.
+    expect(conferenceVideoCodecs(chrome).map((c) => c.mimeType)).toEqual([
+      "video/H264",
+      "video/AV1",
+      "video/rtx",
+    ]);
+  });
+
+  it("keeps rtx, because retransmission is not optional", () => {
+    // Dropping it would cost a frame per lost packet on a stream nobody can ask to repeat.
+    expect(conferenceVideoCodecs(chrome).some((c) => c.mimeType === "video/rtx")).toBe(true);
+  });
+
+  it("drops everything the client does not offer a conference", () => {
+    const offered = conferenceVideoCodecs(chrome).map((c) => c.mimeType);
+    for (const dropped of ["video/VP8", "video/VP9", "video/red", "video/ulpfec"]) {
+      expect(offered).not.toContain(dropped);
+    }
+  });
+
+  it("matches a codec whatever case the browser spells it in", () => {
+    // Chrome writes `video/H264`, the client's own table `video/H264`, and a browser is free
+    // to write either. A case-sensitive compare would silently offer nothing at all.
+    expect(conferenceVideoCodecs([codec("VIDEO/h264")]).length).toBe(1);
+  });
+
+  it("says nothing rather than something when the browser has none of them", () => {
+    // An empty list must never be handed to `setCodecPreferences`: it would offer no video
+    // codec at all, which is worse than offering too many.
+    expect(conferenceVideoCodecs([codec("video/VP8")])).toEqual([]);
+    expect(conferenceVideoCodecs([])).toEqual([]);
   });
 });
