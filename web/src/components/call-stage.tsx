@@ -41,6 +41,7 @@ import {
   clampMiniPosition,
   miniHomePosition,
   miniSize,
+  shareTakeoverHint,
   type CallStagePanel,
   type StageLayout,
   type StageParticipant,
@@ -343,6 +344,10 @@ function FullStage(props: {
                 testId="call-share"
                 pressed={sending.sharing}
                 label={sending.sharing ? "Stop sharing the screen" : "Share the screen"}
+                // What the press costs while a colleague presents: a meeting shows one screen
+                // at a time, so this one takes theirs down. It is said and not asked, because
+                // Teams asks nobody and they can take it straight back.
+                title={sending.sharing ? undefined : shareTakeoverHint(participants)}
                 icon={ComputerScreenShareIcon}
                 onClick={() => void controller.setScreenShareOn(!sending.sharing)}
               />

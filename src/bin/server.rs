@@ -4411,12 +4411,15 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // one. The client asks first (`startContentSharingAsync`), POSTing a `contentSharing`
         // blob to the `addModality` link, and only then offers the section.
         //
+        // "One at a time" is a rule about the MEETING, never a reason to refuse the user: the
+        // session changes hands, and the service takes the old share down (see below).
+        //
         // It is an `OUTWARD_METHODS` entry because it announces to everybody in the meeting
         // that this endpoint is about to show them something, and because the section that
         // follows carries whatever is on the user's screen.
         "call_start_sharing" => {
             let call_id = param_str(params, "call_id")?;
-            let (local, callbacks, url, correlation_id) = {
+            let (local, callbacks, url, correlation_id, displacing) = {
                 let plane = ctx.calling.lock().unwrap();
                 let call = plane
                     .call
@@ -4432,23 +4435,21 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 if call.sharing.is_some() {
                     anyhow::bail!("call_start_sharing: this call already holds a sharing session");
                 }
-                // NEVER take the role from somebody who is presenting. A meeting shows one
-                // screen at a time, and asking for the session while a colleague is sharing
-                // takes it off them: measured 2026-08-06 against a real share, the service
-                // granted us the role and then offered their `applicationsharing-video` section
-                // at PORT 0 — so their screen stopped arriving and nothing of ours went out.
-                // Changing hands is what `takeControl` is for, and this app does not offer it.
-                if let Some(sharer) = call
-                    .roster
-                    .iter()
-                    .find(|member| member.streams.iter().any(calling::RosterStream::is_shared_screen))
-                {
-                    anyhow::bail!(
-                        "call_start_sharing: {} is sharing their screen — a meeting shows one at \
-                         a time, and taking it from them is not something this app does",
-                        sharer.display_name
-                    );
-                }
+                // A share TAKES the role off whoever holds it, and that is the feature rather
+                // than an accident. Measured 2026-08-06 against a colleague's real share: the
+                // service granted the role — `role = "presenter"` in our own roster entry — and
+                // then offered their `applicationsharing-video` section at PORT 0, so their
+                // screen stopped arriving. That IS what "a meeting shows one screen at a time"
+                // means, and it is what real Teams does when somebody presses Share while a
+                // colleague presents: the new share displaces the old one, and no client asks
+                // first. This handler used to REFUSE while anybody else was sharing, which cost
+                // the user the one action they came for in the very state they wanted it in.
+                //
+                // Whether it takes one is only READ, for the journal: the service does the
+                // displacing, and nothing here posts at a colleague's session.
+                let displacing = call.roster.iter().any(|member| {
+                    member.streams.iter().any(calling::RosterStream::is_shared_screen)
+                });
                 let url = call.links.add_modality().map(str::to_string).context(
                     "call_start_sharing: this call has no addModality link — the service names \
                      it on the conversation",
@@ -4458,8 +4459,17 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     call.callbacks.clone(),
                     url,
                     uuid::Uuid::new_v4().to_string(),
+                    displacing,
                 )
             };
+            if displacing {
+                // One line, and no name in it: a colleague's name is theirs, and what this
+                // record is for is that a share of theirs stopped because of a press here.
+                eprintln!(
+                    "[calling] asking for the sharing session while somebody else presents — \
+                     the service takes their share down, as it does for every Teams client"
+                );
+            }
             let payload = calling::content_sharing_payload(&local, &callbacks, &correlation_id);
             // The reservation goes in FIRST, so the frame that grants the session has somewhere
             // to land: it can arrive before this POST has even answered.
@@ -10732,12 +10742,18 @@ mod tests {
             stop.contains("content_sharing_leave_payload"),
             "a share that cannot be given back is not one this app would start"
         );
-        // And it never takes the role off somebody who is presenting. Measured against a real
-        // share: the service granted us the role and then offered THEIR screen at port 0, so
-        // their picture stopped and nothing of ours went out.
+        // And a colleague who is presenting is never a REFUSAL. The session changes hands —
+        // measured against a real share: the service granted us the role and then offered
+        // their screen at port 0 — which is what every Teams client does when somebody
+        // presses Share while another person presents. A roster this handler read to say no
+        // took the one action the user came for away in the state they wanted it in.
         assert!(
-            start.contains("is_shared_screen"),
-            "a share must not take the presenter role from a colleague who holds it"
+            !start.contains("is sharing their screen"),
+            "a colleague's share is displaced by the service, never refused here"
+        );
+        assert!(
+            start.contains("displacing"),
+            "the journal says when a press here takes a colleague's share down"
         );
     }
 

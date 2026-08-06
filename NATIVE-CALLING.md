@@ -1171,10 +1171,23 @@ attempt cost.
 
   - **Taking the content-sharing session TAKES THE ROLE off whoever is presenting.** The
     service grants it — `role = "presenter"` in our own roster entry, `can_stop=true` — and then
-    the sharer's section comes back at port 0. Their screen stops arriving and nothing of ours
-    goes out. A meeting shows ONE screen, `takeControl` is how it changes hands, and this app
-    does not offer that: `call_start_sharing` now refuses while anybody else is sharing, named,
-    and a test pins it.
+    the sharer's section comes back at port 0, so their screen stops arriving.
+
+    **That is the takeover, and it is the FEATURE.** A meeting shows ONE screen, and this is how
+    it changes hands: real Teams cuts the old presenter off the moment somebody else presses
+    Share, and asks nobody first. `call_start_sharing` REFUSED it for a day — read here as
+    collateral damage — and what that cost was the one action the user came for in the very state
+    they wanted it in. It allows it now, says whose screen the press stops before the press
+    (`shareTakeoverHint`), writes one journal line when it displaces somebody, and a Rust test
+    pins that the roster is never read to say no. `takeControl` is a link on our OWN session's
+    answer and is still not posted to: nothing measured says it moves a share between endpoints.
+
+    Nothing of OURS going out is a separate, older fact and it is unchanged: a section this app
+    offers is rejected across nine live joins, at every mid, in every direction, **with the
+    presenter session granted and without it** (the paragraph above). So the takeover costs the
+    old presenter their picture and does not yet buy the user theirs — which is the one thing to
+    know before pressing it against a real meeting. The mechanism left is
+    `updateMediaDescriptions`, below.
   - **Reserving video sections in the join offer poisons the layout.** The service rejects them
     and from then on echoes the rejected slots instead of adding the live section it adds to an
     audio-only join. So it cost the RECEIVE path and bought nothing. Reverted: the join offers

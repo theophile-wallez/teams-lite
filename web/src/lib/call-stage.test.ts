@@ -18,6 +18,7 @@ import {
   initialCallStagePanel,
   miniHomePosition,
   miniSize,
+  shareTakeoverHint,
 } from "./call-stage";
 import type { ActiveCall, PublishingParticipant } from "./call";
 import type { LocalVideo, RemoteVideo } from "./call-media";
@@ -265,6 +266,42 @@ describe("who is in the call", () => {
       sharing: false,
     });
     expect(rows[1]?.key).toBe("name:Guest");
+  });
+});
+
+describe("what pressing Share costs", () => {
+  const rows = (self: { camera: boolean; sharing: boolean }, others: PublishingParticipant[]) =>
+    callStageParticipants(
+      call({
+        others: others.map((_, index) => `Person ${index}`),
+        other_mris: others.map((person) => person.mri),
+        publishing: others,
+      }),
+      self,
+    );
+
+  /** A meeting shows one screen at a time, so a share here takes the one that is up. It is
+   *  said before the press and never asked twice: Teams asks nobody, and the colleague it
+   *  displaced can take it straight back. */
+  it("names the colleague whose screen the press would stop", () => {
+    const hint = shareTakeoverHint(
+      rows({ camera: false, sharing: false }, [publishing("8:orgid:liam", { sharing: true })]),
+    );
+    expect(hint).toBe("Share the screen — this stops the screen Person 0 is sharing");
+  });
+
+  it("says nothing when nobody else is sharing one", () => {
+    expect(
+      shareTakeoverHint(
+        rows({ camera: false, sharing: false }, [publishing("8:orgid:ava", { camera: true })]),
+      ),
+    ).toBeUndefined();
+  });
+
+  /** The user's own share is not a share this press takes: it is the one it would stop, and
+   *  the control says so in its own label. */
+  it("says nothing about the user's own screen", () => {
+    expect(shareTakeoverHint(rows({ camera: false, sharing: true }, []))).toBeUndefined();
   });
 });
 

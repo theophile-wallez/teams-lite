@@ -1033,6 +1033,11 @@ const SHARE_HOLD_MS = 12_000;
  *
  * It stops the share on the way out. A meeting left with a presenter who is showing a blank
  * headless screen is exactly the silent participant this file exists not to be.
+ *
+ * And it TAKES the meeting's one sharing session: a press here stops whatever screen is up,
+ * which on the measurement setup is the user's own share from real Teams. That is the feature
+ * (AGENTS.md § Video in a meeting), so it is stated rather than guarded — the run is theirs,
+ * in their own meeting, and they take the share straight back from Teams.
  */
 async function shareTheScreen(
   page: Page,

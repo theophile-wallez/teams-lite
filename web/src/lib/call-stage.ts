@@ -250,6 +250,27 @@ export function callStageParticipants(
   return rows;
 }
 
+/**
+ * What pressing Share COSTS right now, or undefined when it costs nothing.
+ *
+ * A meeting shows one screen at a time, so a share TAKES the role off whoever holds it and
+ * the service stops their picture — which is what every Teams client does, and what this app
+ * does rather than refusing the press. It is one click either way: Teams asks nobody, and the
+ * colleague whose share it displaced can take it straight back, so there is nothing here to
+ * arm. The words before the press are where that fact belongs, exactly as they are for a
+ * recording nobody on the call is told about (`RECORD_HINT`).
+ *
+ * The FIRST presenter names it: a meeting has one, and a roster that briefly carries two is
+ * one this sentence should not turn into a list.
+ */
+export function shareTakeoverHint(
+  participants: readonly StageParticipant[],
+): string | undefined {
+  const presenter = participants.find((row) => !row.you && row.sharing);
+  if (!presenter) return undefined;
+  return `Share the screen — this stops the screen ${presenter.name} is sharing`;
+}
+
 /** The one sentence about the people who cannot hear the user yet, or "" when nobody is
  *  waiting. A meeting states this; a call has no lobby at all. */
 export function callStageLobbyLabel(call: ActiveCall): string {

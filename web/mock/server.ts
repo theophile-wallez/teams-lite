@@ -3271,7 +3271,7 @@ const MOCK_RENEGOTIATION_OFFER = [
  * Both are reachable nowhere else: the page's own simulated camera is never rejected, and the
  * service that rejects one is a real tenant.
  */
-function mockSectionRejection(label: string): string {
+function mockSectionRejection(label: string, mid = "2"): string {
   return [
     "v=0",
     "o=- 0 0 IN IP4 127.0.0.1",
@@ -3283,11 +3283,13 @@ function mockSectionRejection(label: string): string {
     "a=mid:0",
     "a=label:main-audio",
     "a=sendrecv",
-    // Port 0: the rejection. The mid is the one the page's own section was given.
+    // Port 0: the rejection. The mid defaults to the one the page's own section was given,
+    // and a section of the SERVICE's own — a colleague's screen, at the measured mid 3 —
+    // names its own.
     "m=video 0 RTP/SAVP 107",
     "c=IN IP4 0.0.0.0",
     "a=rtpmap:107 H264/90000",
-    "a=mid:2",
+    `a=mid:${mid}`,
     `a=label:${label}`,
     "a=inactive",
     "",
@@ -3367,6 +3369,44 @@ function endMockCall(reason: string): void {
   mockCall = { ...mockCall, phase: "ended", end_reason: reason, can_accept: false, can_hangup: false };
   broadcastMockCall();
   mockCall = null;
+}
+
+/**
+ * Take the share off whoever holds it, which is what the service does the moment this endpoint
+ * is granted the sharing session.
+ *
+ * Measured 2026-08-06 against a colleague's real share: the role was granted, and their
+ * `applicationsharing-video` section came straight back at PORT 0. A meeting shows one screen at
+ * a time, and this is how it changes hands — for a Teams client and now for this app too.
+ *
+ * BOTH halves are reproduced, because the surface reads them in two places: the ROSTER says who
+ * is sharing (the People panel, and the sentence the Share control carries before it is
+ * pressed), and the SECTION is what carries the picture the stage draws.
+ *
+ * Nothing goes out while this page is sending a screen of its own: the two share one label, so
+ * the zeroed section would then read as its own capture being dropped. A takeover happens before
+ * any capture of ours exists, so that state cannot be one this stands for.
+ */
+function takeMockShareFromPresenter(callId: string): void {
+  if (!mockCall || mockCall.sending.includes("screen")) return;
+  const presenting = mockCall.publishing.some((person) =>
+    person.streams.some((stream) => stream.shared_screen),
+  );
+  if (!presenting) return;
+  mockCall = {
+    ...mockCall,
+    publishing: mockCall.publishing.map((person) => ({
+      ...person,
+      streams: person.streams.filter((stream) => !stream.shared_screen),
+    })),
+  };
+  broadcastMockCall();
+  broadcast("call_media", {
+    call_id: callId,
+    // Their section, at the mid the mock's own renegotiation gave it.
+    sdp: mockSectionRejection("applicationsharing-video", "3"),
+    kind: "offer",
+  });
 }
 
 /** An inert answer SDP. The page's simulated media ignores it; it exists so the
@@ -6456,6 +6496,9 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       }
       mockSharingSession = `mock-sharing-${callId}`;
       mockSharingOrder.push("start_sharing");
+      // And the session CHANGES HANDS: a meeting shows one screen at a time, so granting it
+      // here takes the old presenter's share down.
+      takeMockShareFromPresenter(callId);
       return { call_id: callId, can_stop: true };
     }
 

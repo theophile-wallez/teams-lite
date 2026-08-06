@@ -737,6 +737,63 @@ test.describe("Joining a meeting", () => {
   });
 
   /**
+   * A share while a COLLEAGUE is presenting: the session changes hands, and theirs stops.
+   *
+   * A meeting shows one screen at a time, and that is a rule about the meeting rather than a
+   * reason to refuse the user: measured 2026-08-06 against a colleague's real share, the
+   * service granted this endpoint the role and offered their `applicationsharing-video`
+   * section straight back at PORT 0. It is what every Teams client does, so it is what this
+   * app does — it used to REFUSE the press, which took the one action the user came for away
+   * in the very state they wanted it in.
+   *
+   * One click, and no arming: Teams asks nobody, and the colleague can take it straight back.
+   * What the app owes them is the sentence BEFORE the press, which is what the control carries.
+   */
+  test("takes the share off a colleague who holds it, and says so before the press", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+    await calendarEvent(page, "ev-overlap-a").click();
+    await page.locator('[data-testid="meeting-join-here"]').click();
+
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    // Their screen, on the stage: the state this press is about.
+    const theirs = page.locator('[data-testid="call-video-frame"][data-sharing="true"]');
+    await expect(theirs).toHaveCount(1, { timeout: 10_000 });
+
+    // What the press COSTS, in the control's own words and naming the person it costs it to.
+    const share = page.locator('[data-testid="call-share"]');
+    await expect(share).toHaveAttribute("title", /this stops the screen Liam Nguyen is sharing/);
+
+    await share.click();
+    await expect(share).toHaveAttribute("aria-pressed", "true");
+    // Their picture goes, because the service zeroes their section — and the ROSTER says so
+    // too, which is the half a reader sees when they never subscribed to the picture.
+    await expect(theirs).toHaveCount(0);
+    await expect(page.locator('[data-testid="call-video-local"][data-kind="screen"]')).toBeVisible();
+    await page.locator('[data-testid="call-stage-people"]').click();
+    await expect(
+      page.locator('[data-testid="call-stage-participant"] [aria-label="Sharing a screen"]'),
+    ).toHaveCount(1);
+    // The one row that says it is the user's own: the share moved, it did not double.
+    await expect(
+      page.locator(
+        '[data-testid="call-stage-participant"][data-you="true"] [aria-label="Sharing a screen"]',
+      ),
+    ).toHaveCount(1);
+
+    // And nothing FAILED: the press is not a refusal any more, so there is no notice at all.
+    await expect(page.locator('[data-testid="call-notice"]')).toHaveCount(0);
+    // The control says only what it does now — the cost is spent, so the sentence is gone.
+    await expect(share).toHaveAttribute("title", "Stop sharing the screen");
+
+    await page.locator('[data-testid="call-hangup"]').first().click();
+  });
+
+  /**
    * A capture the meeting never ACCEPTS: the section rejected in the answer to the very offer
    * that added it. This is what a screen share really met on this tenant.
    *

@@ -1803,7 +1803,21 @@ joins alone and waits for an offer. Six rules hold it together, and
   `contentSharing` blob to the conversation's `addModality` link and setting `isPresenter` on
   the answer. So `call_start_sharing` and `call_stop_sharing` are `OUTWARD_METHODS` entries
   either side of the media offer, and the automation hook blocks a script that names either.
-  Five rules, each pinned by a test:
+  Six rules, each pinned by a test:
+  - **"One at a time" is a rule about the MEETING, never a reason to refuse the user.** The
+    session CHANGES HANDS: measured 2026-08-06 against a colleague's real share, the service
+    granted this endpoint the role — `role = "presenter"` in our own roster entry — and offered
+    their `applicationsharing-video` section straight back at PORT 0, so their screen stopped.
+    That is what every Teams client does when somebody presses Share while another person
+    presents, and it is what this app does. `call_start_sharing` REFUSED it for a day, named,
+    which took the one action the user came for away in the very state they wanted it in. It is
+    ONE press either way — Teams asks nobody, and the colleague can take it straight back — so
+    what the app owes them is the sentence BEFORE it: `shareTakeoverHint` names whose screen the
+    press stops, on the control itself, the way `RECORD_HINT` carries what a recording costs.
+    The backend reads the roster only to write one journal line, and posts at nobody else's
+    session; the mock reproduces both halves the service publishes — their stream leaves the
+    roster, and their section comes back zeroed — so the whole takeover is reviewable with no
+    tenant.
   - **The session is asked for BEFORE the section is offered, and before the capture.** The
     order is the client's own, and it is the one rule of this feature no screen can show — a
     page that offered the media first looks exactly right and shares nothing. `web/mock/server.ts`

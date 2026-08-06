@@ -1147,6 +1147,17 @@ export function simulatedCallMedia(options: { answering: boolean }): CallMedia {
       // the stand-in reads the same fact off the wire: a rejected section, by its label.
       releaseRejected(sdp, "dropped");
       const rejected = rejectedLabels(sdp);
+      // A section the offer ZEROES is one the far side has taken away, and a picture already
+      // drawn from it has to go with it: it is how a colleague's share ends, including when
+      // this endpoint took the meeting's sharing session off them. Live, the browser ends that
+      // track and the tile follows; the stand-in has no track, so it reads the same fact off
+      // the wire — by the LABEL, exactly as it reads a capture of its own being dropped.
+      for (let at = media.remoteVideo.length - 1; at >= 0; at -= 1) {
+        const video = media.remoteVideo[at]!;
+        if (!rejected.has(video.label)) continue;
+        for (const track of video.stream.getTracks()) track.stop();
+        media.remoteVideo.splice(at, 1);
+      }
       for (const [mid, label] of labelsByMid(sdp)) {
         // Only the sections that carry a PICTURE. The offer labels its audio and its data
         // sections too, and a stand-in that made a tile for those drew an empty rectangle

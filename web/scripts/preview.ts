@@ -1570,6 +1570,11 @@ if (import.meta.main) {
       // 7. SENDING. The camera and the screen, each one click, each one the consent for that
       //    action. Nothing is opened here either: against the mock the preview is a canvas,
       //    so no camera light comes on and no picker appears.
+      //
+      //    The share TAKES the meeting's one sharing session, so the colleague's screen
+      //    captured in step 6 is gone from these shots — the service zeroes their section the
+      //    moment the role changes hands, which is what real Teams does too. What is left is
+      //    their camera as a tile and the user's own screen as the corner preview.
       await shot(`${out}-send-off-light.png`, '[data-testid="call-stage"] header');
       await page.locator('[data-testid="call-camera"]').click();
       await page.waitForSelector('[data-testid="call-video-local"][data-kind="camera"]');
