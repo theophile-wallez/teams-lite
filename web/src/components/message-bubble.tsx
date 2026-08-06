@@ -545,8 +545,8 @@ function MessageBubbleImpl(props: {
     parsed.quote ? (
       <div
         className={cn(
-          "my-1 rounded-lg border-l-2 px-2.5 py-1.5",
-          mine ? "border-sender-name-mine bg-quote-mine" : "border-sender-name bg-quote-incoming",
+          "my-1 rounded-lg px-2.5 py-1.5",
+          mine ? "bg-quote-mine" : "bg-quote-incoming",
         )}
       >
         {/* A forward carries no author at all — Teams sends the forwarded content
