@@ -68,14 +68,19 @@ import { RichNodes } from "./rich-content";
 //     it tells the GitLab instance nothing, and it is what makes a colleague here the same
 //     colleague as in a chat (see `personFace`).
 //
-// The Changes section — the diff itself — is `gitlab-changes.tsx`, and it is deliberately a
-// module of its own: what draws it is `@pierre/trees` and `@pierre/diffs` behind a lazy
-// import, because Shiki carries a grammar per language and must never sit on the path of a
-// chat. A review comment still keeps the file and line it hangs on (`note.position`), and the
-// page names that file, so a comment on a line this page does not show is never a comment
-// about nothing.
+// The Changes section states what changed and opens the DIFF, which is a page of its own at
+// `/mr/<id>/diff` (`gitlab-changes.tsx` for the summary, `gitlab-diff-page.tsx` for the page).
+// Nothing on THIS page carries a highlighter: reviewing code is somewhere a reader goes, so
+// Shiki is behind that route rather than on the path of every merge request anybody opens. A
+// review comment still keeps the file and line it hangs on (`note.position`), and this page
+// names that file, so a comment on a line the diff does not show is never one about nothing.
 
-export function GitLabPane(props: { onBack?: () => void }) {
+export function GitLabPane(props: {
+  onBack?: () => void;
+  /** Open this merge request's DIFF, which is a route and a full-screen page of its own (see
+   *  `gitlab-diff-page.tsx`). The shell navigates; this pane only asks. */
+  onOpenDiff?: () => void;
+}) {
   const open = useAppState((s) => s.openMergeRequest);
   const detail = useAppState((s) => s.gitlabDetail);
   const loading = useAppState((s) => s.gitlabDetailLoading);
@@ -156,7 +161,7 @@ export function GitLabPane(props: { onBack?: () => void }) {
               <PipelinePanel />
               <ApprovalPanel />
               <ActionPanel detail={detail} />
-              <ChangesPanel detail={detail} />
+              <ChangesPanel detail={detail} onOpenDiff={props.onOpenDiff ?? (() => {})} />
               <DiscussionPanel />
             </>
           )}

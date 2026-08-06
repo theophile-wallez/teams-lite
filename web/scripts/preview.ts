@@ -474,7 +474,11 @@ export async function openMergeRequestAt(page: Page, index: number): Promise<str
  *  grammar for the file's own language. A shot taken before both is a shot of the
  *  "Highlighting…" placeholder. */
 export async function openChanges(page: Page): Promise<void> {
-  await page.locator('[data-testid="gitlab-changes"]').scrollIntoViewIfNeeded();
+  await page.locator('[data-testid="gitlab-review-changes"]').scrollIntoViewIfNeeded();
+  await page.locator('[data-testid="gitlab-review-changes"]').click();
+  await page.waitForSelector('[data-testid="gitlab-diff-page"]', {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
   await page.waitForSelector('[data-testid="gitlab-diff-patch"]', {
     timeout: APP_READY_TIMEOUT_MS,
   });
@@ -488,13 +492,15 @@ export async function openChanges(page: Page): Promise<void> {
  *  The tree renders inside a shadow root, and Playwright's CSS engine pierces an open one — so
  *  this drives the row a reader would press rather than the store behind it. `data-item-path`
  *  is `@pierre/trees`' own attribute per row; the WAIT is on this app's own heading, which is
- *  what proves the click reached the section rather than only the tree.
+ *  what proves the click reached the page rather than only the tree.
  *
  *  What is asserted afterwards is always the app's own `[data-testid]`s. Reaching further into
  *  a vendor's markup would be a test of their release notes. */
 export async function pickDiffFile(page: Page, path: string): Promise<void> {
   await page.locator(`[data-item-path="${path}"]`).first().click();
-  await page.waitForSelector(`[data-testid="gitlab-changes-file"][data-path="${path}"]`, {
+  // The PANE's own statement of what it holds, which is present whatever draws the file's name
+  // — pierre's header over a patch, this app's over a sentence.
+  await page.waitForSelector(`[data-testid="gitlab-diff-pane"][data-path="${path}"]`, {
     timeout: APP_READY_TIMEOUT_MS,
   });
   // A file whose language the highlighter has not loaded yet resolves one more grammar.
@@ -1905,55 +1911,68 @@ if (import.meta.main) {
       async ({ page, shot, setTheme }) => {
         await openGitLabTab(page);
         await openMergeRequestAt(page, 0);
-        const changes = '[data-testid="gitlab-changes"]';
+
+        // The way IN, on the merge-request page: what changed in one line, and the press that
+        // opens the diff. Nothing on that page carries a highlighter any more.
+        await page.locator('[data-testid="gitlab-changes"]').scrollIntoViewIfNeeded();
+        await shot(`${out}-entry-light.png`, '[data-testid="gitlab-changes"]');
+
         await openChanges(page);
 
-        // The section whole: the tree beside the patch, in both themes. This is where the CSS
-        // seam is checked — both renderers live in a shadow root and follow the app's own
-        // `color-scheme` rather than the OS's (see app.css § the merge-request DIFF).
-        await shot(`${out}-light.png`, changes);
+        // The PAGE: the whole screen, the changed files down the left, one of them read on the
+        // right. Both themes, because this is where the CSS seam is checked — both renderers
+        // live in a shadow root and follow the app's own `color-scheme` rather than the OS's
+        // (see app.css § the merge-request DIFF).
+        await shot(`${out}-light.png`);
         await setTheme("dark");
-        await shot(`${out}-dark.png`, changes);
+        await shot(`${out}-dark.png`);
         await setTheme("light");
 
-        // SPLIT, which is the layout the section only offers where it fits.
+        // SPLIT, the layout the page offers only where two columns of code fit.
         await page.locator('[data-testid="gitlab-diff-layout-split"]').click();
         await page.waitForTimeout(500);
-        await shot(`${out}-split-light.png`, changes);
+        await shot(`${out}-split-light.png`);
         await page.locator('[data-testid="gitlab-diff-layout-unified"]').click();
         await page.waitForTimeout(300);
 
-        // The three files with NO patch, each of which says something different. Picked by
-        // path out of the tree rather than by clicking a row: the row is inside a shadow
-        // root, and the point of these three shots is the SENTENCE under the file.
+        // The three files with NO patch, each of which says something different. The shot is
+        // the PATCH column, because the point of these three is the sentence in place of code.
         for (const [name, path] of [
           ["rename", "src/server/drain.ts"],
           ["binary", "docs/diagrams/rollout.png"],
           ["collapsed", "bun.lock"],
         ] as const) {
           await pickDiffFile(page, path);
-          await shot(`${out}-${name}-light.png`, changes);
+          await shot(`${out}-${name}-light.png`, '[data-testid="gitlab-diff-pane"]');
         }
 
-        // The expanded read: the control names the count and what it costs, and pressing it
-        // hands over the patches GitLab withheld.
-        await shot(`${out}-expand-light.png`, '[data-testid="gitlab-changes-expand"]');
-        await page.locator('[data-testid="gitlab-changes-expand"]').click();
+        // The expanded read: the control names the count and what it costs, at the foot of the
+        // files column because that is a fact about that list.
+        await shot(`${out}-expand-light.png`, '[data-testid="gitlab-diff-files"]');
+        await page.locator('[data-testid="gitlab-diff-expand"]').click();
         await page.waitForSelector('[data-testid="gitlab-diff-patch"]', { timeout: 15_000 });
         await page.waitForTimeout(600);
-        await shot(`${out}-expanded-light.png`, changes);
+        await shot(`${out}-expanded-light.png`);
 
-        // And on a PHONE, where the tree sits above the diff and split cannot apply at all.
-        await pickDiffFile(page, "src/server/health.ts");
+        // And on a PHONE, where the page is one column at a time. It opens on whichever column
+        // the reader was IN — a patch here, because they had picked a file on the wide screen,
+        // which is the right answer: narrowing a window must not take away what was being read.
+        // Back is then how the files are reached, and a pick is how a file is.
         await page.setViewportSize({ width: 390, height: 844 });
-        await page.waitForTimeout(500);
-        await shot(`${out}-mobile-light.png`);
+        await page.waitForTimeout(600);
+        await page.locator('[data-testid="gitlab-diff-back"]').click();
+        await page.waitForSelector('[data-testid="gitlab-diff-page"][data-column="files"]');
+        await page.waitForTimeout(400);
+        await shot(`${out}-mobile-files-light.png`);
+        await pickDiffFile(page, "src/server/health.ts");
+        await shot(`${out}-mobile-patch-light.png`);
         await page.setViewportSize(VIEWPORT);
 
         console.log(
-          `[preview] wrote ${out}-{light,dark}.png, ${out}-split-light.png, ` +
-            `${out}-{rename,binary,collapsed}-light.png, ${out}-expand-light.png, ` +
-            `${out}-expanded-light.png and ${out}-mobile-light.png`,
+          `[preview] wrote ${out}-entry-light.png, ${out}-{light,dark}.png, ` +
+            `${out}-split-light.png, ${out}-{rename,binary,collapsed}-light.png, ` +
+            `${out}-expand-light.png, ${out}-expanded-light.png and ` +
+            `${out}-mobile-{files,patch}-light.png`,
         );
       },
       { deviceScaleFactor: dpr },

@@ -8,22 +8,26 @@ import {
   formatDiffStat,
   type DiffLayout,
   type GitLabDiff,
-  type GitLabDiffFile,
 } from "~/lib/gitlab-diff";
 import type { ResolvedTheme } from "~/lib/appearance";
 import { FILE_TREE_ICONS } from "~/lib/tree-icons";
 
-// The two halves of the Changes section that need a renderer: the file TREE, and one file's
-// DIFF. This module is the whole of this app's contact with `@pierre/trees` and
-// `@pierre/diffs`, and it is reached only through `lazy(() => import(…))` from
-// `gitlab-changes.tsx`.
+// The two halves of the diff page that need a renderer: the file TREE, and one file's PATCH.
+// This module is the whole of this app's contact with `@pierre/trees` and `@pierre/diffs`, and
+// it is reached only through `lazy(() => import(…))` from `gitlab-diff-page.tsx`.
 //
 // **The lazy boundary is load-bearing.** `@pierre/diffs` is built on Shiki, which resolves a
 // TextMate grammar per language as a dynamic import — so the chunk behind this file is 728 KB
 // of its own, plus one chunk per language a reader actually opens. It must never sit on the
 // path of a chat: the emoji picker draws the same line for the same reason
-// (`web/src/components/emoji-picker.tsx`), and every pure decision the section makes lives in
+// (`web/src/components/emoji-picker.tsx`), and every pure decision the page makes lives in
 // `web/src/lib/gitlab-diff.ts` so it is testable and renderable without any of this.
+//
+// **The two halves are exported apart, and neither knows where the other is.** The PAGE owns
+// the layout — a full-height column of files beside a full-height patch on a wide screen, one
+// then the other on a phone — because that is a decision about the page and not about a
+// renderer. A component here that wrapped both in a flex row would own a layout it cannot see
+// the constraints of, which is exactly what it did while the diff was a panel.
 //
 // Four things about the pair are worth knowing before touching either:
 //
@@ -48,36 +52,30 @@ import { FILE_TREE_ICONS } from "~/lib/tree-icons";
 //     is a mutation of it rather than a new tree — which is what keeps the reader's folds and
 //     their scroll position across the expanded read.
 
-/** The tree of changed files, and the file the reader picked out of it. */
-export default function GitLabDiffView(props: {
-  diff: GitLabDiff;
-  file: GitLabDiffFile | null;
-  layout: DiffLayout;
-  theme: ResolvedTheme;
-  onPick: (path: string) => void;
-}) {
-  return (
-    <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-start">
-      <DiffFileTree
-        diff={props.diff}
-        selected={props.file?.path ?? null}
-        onPick={props.onPick}
-      />
-      <div className="min-w-0 flex-1">
-        {props.file?.patch ? (
-          <FilePatch patch={props.file.patch} layout={props.layout} theme={props.theme} />
-        ) : null}
-      </div>
-    </div>
-  );
-}
+/** The one thing this app adds to pierre's file header. Hoisted out of the component so the
+ *  slot it is handed to is a stable function across renders. */
+const renderGeneratedChip = () => (
+  <span
+    data-testid="gitlab-diff-generated"
+    className="rounded bg-element px-1.5 py-px text-[10px] text-text-faint"
+  >
+    generated
+  </span>
+);
 
-/** One file's patch, highlighted.
+/** One file's patch, highlighted, filling whatever box the page gives it.
  *
  *  The patch is COMPLETE — the backend writes the `diff --git` header GitLab never sends (see
  *  `gitlab_mr::unified_patch`) — so the renderer learns the file, its language and what
  *  happened to it from the patch itself and needs nothing told to it. */
-function FilePatch(props: { patch: string; layout: DiffLayout; theme: ResolvedTheme }) {
+export function DiffFilePatch(props: {
+  patch: string;
+  layout: DiffLayout;
+  theme: ResolvedTheme;
+  /** GitLab's own `generated_file`. Drawn in pierre's header slot — never used to HIDE a
+   *  file, because a generated file is where a surprising change hides. */
+  generated: boolean;
+}) {
   const options = useMemo(
     () => ({
       diffStyle: props.layout,
@@ -98,23 +96,37 @@ function FilePatch(props: { patch: string; layout: DiffLayout; theme: ResolvedTh
       // layout is for, and this app is read on a phone where nearly every line would wrap.
       overflow: "scroll" as const,
       enableLineSelection: true,
+      // Pierre's own file header is KEPT, and this app draws none of its own over a patch: it
+      // already names the file, states the stat, shows both names of a renamed one, and it is
+      // sticky inside the scroller. Two headers naming one file three centimetres apart is
+      // what the first capture of this page showed. `disableFileHeader: true` was the other
+      // way round and it collapses the container to nothing, so this is the one that works.
       stickyHeader: true,
     }),
     [props.layout, props.theme],
   );
   return (
-    <div data-testid="gitlab-diff-patch" className="min-w-0 overflow-hidden rounded-xl">
-      <PatchDiff patch={props.patch} options={options} />
+    <div data-testid="gitlab-diff-patch" className="min-w-0">
+      <PatchDiff
+        patch={props.patch}
+        options={options}
+        // What pierre's header cannot know: GitLab's own `generated_file`. It goes in the slot
+        // their header publishes for exactly this, rather than becoming a second header. It is
+        // the REACT prop rather than an `options` key — the options object's own callback
+        // returns a DOM node, and this app has React ones.
+        renderHeaderMetadata={props.generated ? renderGeneratedChip : undefined}
+      />
     </div>
   );
 }
 
 /** The changed files as a tree, tinted by what happened to each.
  *
- *  Bounded and scrolling: it sits inside a page that already scrolls, and a 149-file merge
- *  request would otherwise push the diff below the fold before a reader could read a line of
- *  it. That is the rule the agent transcript already follows. */
-function DiffFileTree(props: {
+ *  It fills the height its host gives it and scrolls itself — `h-full` rather than a fixed
+ *  height, because on the diff page the host is a full-height column. The tree VIRTUALIZES its
+ *  rows, so it measures its own box before drawing any: a box with only a `max-height`
+ *  measures zero, which drew an empty column the width of a tree. */
+export function DiffFileTree(props: {
   diff: GitLabDiff;
   selected: string | null;
   onPick: (path: string) => void;
@@ -137,11 +149,22 @@ function DiffFileTree(props: {
   const statsRef = useRef(stats);
   statsRef.current = stats;
 
+  // The one path this component selected ITSELF, waiting to be recognised when it comes back
+  // out as a change. Lighting the current row is a UI reflection; a reader pressing a row is a
+  // navigation — and pierre reports both through the same callback, off a store subscription
+  // that can fire a tick later, so a synchronous "we are reflecting" flag would miss it.
+  //
+  // Without this the page could not be left on a narrow screen: Back showed the files, mounting
+  // the tree reflected the selection, the reflection came back as a pick, and the patch took the
+  // screen again in the same frame. It is consumed ONCE, so a reader really pressing the row of
+  // the file already open is still a press.
+  const reflected = useRef<string | null>(null);
+
   const { model } = useFileTree({
     paths,
     gitStatus,
     // A diff is a handful of directories: opening them all is what a reviewer would do
-    // first, and a tree of closed folders hides the very thing the section is for.
+    // first, and a tree of closed folders hides the very thing the page is for.
     initialExpansion: "open",
     // `src/main/java/com/acme` as one row rather than four empty ones. A diff's tree is deep
     // and narrow, and the empty levels are the part nobody reads.
@@ -156,8 +179,14 @@ function DiffFileTree(props: {
     renaming: false,
     onSelectionChange: (selected) => {
       const path = selected[0];
+      if (!path) return;
+      // Our own reflection coming back — see `reflected`. Consumed once.
+      if (path === reflected.current) {
+        reflected.current = null;
+        return;
+      }
       // A DIRECTORY row is a fold, not a file: picking one must not clear the diff under it.
-      if (path && statsRef.current.has(path)) onPick.current(path);
+      if (statsRef.current.has(path)) onPick.current(path);
     },
     renderRowDecoration: ({ item }) => {
       if (item.kind !== "file") return null;
@@ -173,23 +202,16 @@ function DiffFileTree(props: {
     model.setGitStatus(gitStatus);
   }, [model, paths, gitStatus]);
 
-  // The selection the SECTION decided, reflected into the tree. It is not always the reader's
-  // own click: with nothing picked, `selectDiffFile` chooses the first file that has something
-  // to read, and the row for it has to be the lit one.
+  // The selection the PAGE decided, reflected into the tree. It is not always the reader's own
+  // press: with nothing picked, `selectDiffFile` chooses the first file that has something to
+  // read, and the row for it has to be the lit one.
   useEffect(() => {
     if (!props.selected) return;
+    // Already lit — nothing to reflect, and nothing that would come back as a change.
+    if (model.getSelectedPaths().includes(props.selected)) return;
+    reflected.current = props.selected;
     model.getItem(props.selected)?.select();
   }, [model, props.selected]);
 
-  return (
-    <FileTree
-      model={model}
-      data-testid="gitlab-diff-tree"
-      // An explicit HEIGHT rather than a max: the tree virtualizes its rows, so it measures
-      // its own box before it draws any — and a box with only a `max-height` measures zero,
-      // which draws an empty column the width of a tree. The height is what bounds it, and
-      // `overflow-auto` is what makes a 149-file merge request scroll inside it.
-      className="h-48 w-full shrink-0 overflow-auto rounded-xl md:h-[30rem] md:w-64"
-    />
-  );
+  return <FileTree model={model} data-testid="gitlab-diff-tree" className="h-full w-full" />;
 }

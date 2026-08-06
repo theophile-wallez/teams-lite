@@ -67,12 +67,24 @@ Environment:
  * second face of a terminal UI, so both spellings are in people's shells and in
  * their scripts. The web app is the only face now, which is what makes `--web` a
  * no-op rather than a removal.
+ *
+ * **Anything else is REFUSED, rather than ignored**, and that is a bug fix rather than
+ * strictness. `teams` has no subcommands, so an argv this parser did not recognise used to
+ * leave a bare launch — and a script that meant a DIFFERENT `teams` (another one on the
+ * PATH, or an older one with subcommands) started the whole app instead: it took the
+ * default port with a second web server, that server had no token of its own to serve so
+ * it handed its pages the token FILE of a backend that no longer existed — every send and
+ * every update refused, on the door a phone reaches through — and it never printed the
+ * JSON its caller was blocking on, so the caller hung for a day. A command that cannot do
+ * what it was asked has to say so.
  */
 export function parseArgs(argv: string[]): LaunchOptions {
   const options: LaunchOptions = { ...DEFAULTS };
+  const unknown: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--dev" || arg === "--web-dev") options.dev = true;
+    else if (arg === "--web") continue; // the old spelling of "serve the web app": all we do
     else if (arg === "--help" || arg === "-h") options.help = true;
     else if (arg === "--no-open") options.open = false;
     else if (arg === "--open") options.open = true;
@@ -80,6 +92,15 @@ export function parseArgs(argv: string[]): LaunchOptions {
     else if (arg?.startsWith("--port=")) options.port = Number(arg.slice(7)) || DEFAULTS.port;
     else if (arg === "--host" || arg === "-H") options.host = argv[++i] ?? DEFAULTS.host;
     else if (arg?.startsWith("--host=")) options.host = arg.slice(7) || DEFAULTS.host;
+    else if (arg !== undefined) unknown.push(arg);
+  }
+  // Not while `--help` was asked for: printing the usage is what that flag is for, and it
+  // is also what somebody reaches for after a refusal.
+  if (unknown.length > 0 && !options.help) {
+    throw new Error(
+      `unknown ${unknown.length === 1 ? "argument" : "arguments"}: ${unknown.join(" ")}. ` +
+        "`teams` takes options only — it has no subcommands.",
+    );
   }
   // Honor env overrides so scripting stays flexible.
   if (process.env.TEAMS_WEB_PORT) options.port = Number(process.env.TEAMS_WEB_PORT) || options.port;

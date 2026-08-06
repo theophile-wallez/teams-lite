@@ -1218,6 +1218,35 @@ attempt cost.
   service accepts the answer. **A TILE has still not been seen**, because the second participant
   had left by the time the last refusal was fixed — that is one more run with somebody sharing,
   and nothing else.
+- **A colleague's shared screen is now NEGOTIATED, ANSWERED, DRAWN and SUBSCRIBED TO — and no
+  RTP arrives.** Four fixes got there, each one measured live against the pinned meeting with the
+  user sharing from real Teams, and each one had never been exercised before:
+
+  1. **The extension ids** (above): Chrome refused the service's own offer, so the section never
+     reached a `track` event.
+  2. **The answer is left alone** (above): with § 2.5's additions on it the service answered
+     `SdpParsingFailure` and ended the call.
+  3. **A rejected section is a STUB** (`Kn(e) = e.port === 0`), with a `c=` line, because the RFC
+     asks for one per media description when the session level has none.
+  4. **`publishing` filters by ENDPOINT, not by mri.** The user's other device is the same
+     account, so their screen read as ours and nothing was ever asked for. With the endpoint as
+     the discriminator the request goes out:
+     `[calling] subscribed: source=212 on mid=3 seq=1 (modern=true)`.
+
+  What the app draws now: the stage's content is the shared-screen tile, named
+  `Théophile WALLEZ is sharing`. What it does not show is a picture:
+  `getStats` reports `bytesReceived: 0` over 36 s while our own audio flows out, and the service
+  reports no error at any step.
+
+  **So the last open question in the receive path is why an ACCEPTED subscription delivers no
+  RTP.** What is already eliminated: the section (negotiated, `recvonly`, H.264 first), the mid
+  (the service's own 3), the source id (212, from the roster), the `streamMsid` (our own receive
+  stream's, per § 10.2), the link (`applyChannelParameters`, the modern one), and the fmtp (the
+  full-screen `max-fs=8160;max-mbps=245000;max-fps=3000` rather than a tile's). What has not been
+  tried: `mdRequestId` (the roster states one per stream, `0`), `subStreamIndex`, the older
+  `controlVideoStreaming` spelling, and the `a=x-source` / `a=x-source-streamid` attributes this
+  dialect's grammar carries — any of which could be what names a source in the SDP rather than
+  only in the request.
 - Three specific unknowns remain, and the refusal above narrowed none of them:
   - **Whether a `contentSharing` session is needed at all.** § 10.4 says the client opens one,
     with six links and a presenter. But no participant in the measured roster carried a

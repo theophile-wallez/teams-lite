@@ -1383,19 +1383,27 @@ impl CallSession {
             // it. The source ids in here are the only addresses a subscription has, and the
             // roster is the only place they exist (NATIVE-CALLING.md § 10.2).
             //
-            // Ours are excluded with us: subscribing to our own camera would draw the
-            // user's own face as a colleague's tile, and the local preview never leaves the
-            // page anyway.
+            // THIS ENDPOINT's own streams are excluded, and nothing else is. Subscribing to
+            // our own camera would draw the user's own face as a colleague's tile, and the
+            // local preview never leaves the page anyway — but the discriminator has to be the
+            // ENDPOINT and not the person: one account joined from a laptop and a phone has two
+            // endpoints under one mri. Excluding by mri hid a screen the user was really
+            // sharing from their other device — the section was negotiated and the tile drawn,
+            // and nothing was ever subscribed to (measured 2026-08-06).
             "publishing": self
-                .others()
+                .roster
                 .iter()
-                .map(|m| {
-                    json!({
-                        "mri": m.mri,
-                        "name": m.display_name,
-                        "streams": m.streams.iter().map(calling::RosterStream::json)
-                            .collect::<Vec<_>>(),
-                    })
+                .filter_map(|m| {
+                    let streams: Vec<Value> = m
+                        .streams
+                        .iter()
+                        .filter(|s| s.endpoint_id != self.local.endpoint_id)
+                        .map(calling::RosterStream::json)
+                        .collect();
+                    if streams.is_empty() {
+                        return None;
+                    }
+                    Some(json!({ "mri": m.mri, "name": m.display_name, "streams": streams }))
                 })
                 .collect::<Vec<_>>(),
             // What the user may do next, decided HERE rather than in the page: the
@@ -5049,6 +5057,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 calling::SourceRequest { mid, source_id, stream_msid, fmt_params };
             let payload = calling::source_request_payload(&request, sequence, modern);
             ctx.post_call_signal(&url, &payload).await?;
+            // What was ASKED for. The service sends a meeting's video only to a client that
+            // asks, so a subscription that never goes out is a tile that never fills — and it
+            // left no trace on this machine at all.
+            eprintln!(
+                "[calling] subscribed: source={} on mid={} seq={} (modern={modern})",
+                request.source_id, request.mid, sequence
+            );
             Ok(json!({ "call_id": call_id, "source_id": source_id }))
         }
 

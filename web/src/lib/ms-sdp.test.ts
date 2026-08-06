@@ -76,12 +76,32 @@ describe("toMsSdp", () => {
     expect(out).not.toContain("a=rtcp:9 IN IP4 0.0.0.0");
   });
 
-  it("states a=rtcp on an offer and never on an answer", () => {
-    // The client's own `rtcpTransform`: `{port}` on an offer, deleted on an answer. Which one
-    // it is, is read off the setup role — an answer states the role it TOOK.
+  it("states a=rtcp on an offer and leaves an ANSWER alone", () => {
+    // The client's own `rtcpTransform` writes `{port}` on an offer. An answer is left exactly as
+    // the browser wrote it, additions and all: one carrying them was refused by the service
+    // three times over (`SdpParsingFailure`), and the capture § 2.5 measured is an OFFER.
     expect(toMsSdp(CHROME_OFFER)).toContain("a=rtcp:51234");
     const answer = CHROME_OFFER.replace("a=setup:actpass", "a=setup:active");
-    expect(toMsSdp(answer)).not.toContain("a=rtcp:");
+    const out = toMsSdp(answer);
+    expect(out).toContain("a=rtcp:9 IN IP4 0.0.0.0");
+    expect(out).not.toContain("b=CT:4000");
+    // What an answer still does: the profile, the label and the SSRC range.
+    expect(out).toContain("RTP/SAVP");
+    expect(out).toContain("a=label:main-audio");
+  });
+
+  it("reads an offer by its actpass, not by a section's own role", () => {
+    // One rejected section carrying `a=setup:active` was enough to make a whole OFFER read as an
+    // answer, and every rewrite stood down with it.
+    const withRejected = [
+      CHROME_OFFER,
+      "m=x-data 0 UDP/TLS/RTP/SAVPF 0",
+      "c=IN IP4 0.0.0.0",
+      "a=setup:active",
+      "a=mid:4",
+      "",
+    ].join("\r\n");
+    expect(toMsSdp(withRejected)).toContain("b=CT:4000");
   });
 
   it("gives every live section one fingerprint, and never two", () => {
@@ -139,8 +159,11 @@ describe("toMsSdp", () => {
     const at = out.findIndex((line) => line.startsWith("m=x-data"));
     expect(at).toBeGreaterThan(-1);
     expect(out[at]).toBe("m=x-data 0 RTP/SAVP 34");
-    // Its mid and its label, and NOTHING else — the section ends where the description does.
+    // A connection line, its mid and its label — and nothing else. The `c=` is required: the
+    // RFC asks for one per media description when the session level has none, and a browser's
+    // SDP has none. Without it the service refused the whole answer (`SdpParsingFailure`).
     expect(out.slice(at + 1).filter((line) => line !== "")).toEqual([
+      "c=IN IP4 0.0.0.0",
       "a=mid:4",
       "a=label:data",
     ]);
