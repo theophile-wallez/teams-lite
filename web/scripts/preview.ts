@@ -1999,8 +1999,11 @@ if (import.meta.main) {
         await page.locator('[data-testid="gitlab-merge-cancel"]').click();
 
         // The conversation: a standalone comment, a thread with a code comment on it and the
-        // user's own reply in it, and the box that posts under their name.
+        // user's own reply in it, and the box that posts under their name. The first comment
+        // also carries a pasted PICTURE and a badge on somebody else's host, so this says the
+        // one that can be drawn is drawn and the other stays a link (see `gitlab-upload.ts`).
         await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
+        await page.locator('[data-testid="gitlab-note"] [data-testid="message-image"]').first().waitFor();
         await shot(`${out}-comments-light.png`);
 
         // The DESCRIPTION's own fold, which is how every long one opens: eight lines, the last
@@ -2021,6 +2024,19 @@ if (import.meta.main) {
         await descriptionToggle.click();
         await page.waitForTimeout(400);
         await shot(`${out}-description-open-light.png`, description);
+
+        // The PICTURE the description ends with — a screenshot pasted into it, drawn from
+        // bytes the BACKEND fetched, because GitLab serves an upload to a token and answers a
+        // browser 404 (measured). Both themes, and the picture itself cropped: what is worth
+        // reading here is that a body which used to print `![image.png](/uploads/…)` as text
+        // now shows the picture, at the size its own attribute block asked for.
+        const picture = '[data-testid="gitlab-description"] [data-testid="message-image"]';
+        await page.locator(picture).waitFor();
+        await page.locator(picture).scrollIntoViewIfNeeded();
+        await shot(`${out}-description-picture-light.png`, picture);
+        await setTheme("dark");
+        await shot(`${out}-description-picture-dark.png`, description);
+        await setTheme("light");
 
         // The DESCRIPTION on a phone, which is the width its markdown has to survive: the
         // fixture's 3-column table and its fenced command lines are both wider than 390px, so
@@ -2065,6 +2081,7 @@ if (import.meta.main) {
             `${out}-pages-{light,dark,mobile-light}.png, ` +
             `${out}-commits-{light,dark}.png, ${out}-pipelines-light.png, ` +
             `${out}-merge-armed-light.png, ${out}-comments-light.png, ` +
+            `${out}-description-picture-{light,dark}.png, ` +
             `${out}-description-mobile-light.png, ` +
             `${out}-long-title-{light,mobile-light}.png, ` +
             `${out}-blocked-{light,dark}.png and ${out}-dark.png`,

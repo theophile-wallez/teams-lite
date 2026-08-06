@@ -205,15 +205,62 @@ test.describe.serial("the GitLab merge-request page", () => {
     // it, nothing at all.
     await expect(description.locator("hr")).toHaveCount(1);
 
-    // And NOTHING in it is fetched: the promise the whole page is built on holds for a body
-    // written by somebody outside this app.
-    await expect(description.locator("img")).toHaveCount(0);
+    // A pasted SCREENSHOT is a picture, and the promise the whole page is built on still holds:
+    // its bytes came through the backend, so what the browser holds is a local blob and it
+    // asked GitLab for nothing (see `gitlab-upload.ts`).
+    const picture = description.locator('[data-testid="message-image"]');
+    await expect(picture).toHaveCount(1);
+    await expect(picture).toHaveAttribute("src", /^blob:/);
+    await expect(description).not.toContainText("/uploads/");
+    await expect(description).not.toContainText("width=777");
 
     // A comment is the same markdown, because a review quotes code as often as a description
     // does.
     await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
     const note = page.locator('[data-testid="gitlab-note"]').filter({ hasText: "MEDIUM" });
     await expect(note.locator("pre")).toContainText("sleep {{ .Values.drain }}");
+  });
+
+  test("draws a pasted screenshot, and leaves an image on another host a link", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
+    const note = page.locator('[data-testid="gitlab-note"]').filter({ hasText: "Two replicas" });
+
+    // The upload is drawn, at the size the author's own attribute block asked for — and it
+    // holds that room before the bytes arrive, so the words around it do not move when they do.
+    const picture = note.locator('[data-testid="message-image"]');
+    await expect(picture).toHaveCount(1);
+    await expect(picture).toHaveAttribute("src", /^blob:/);
+    await expect(picture).toHaveAttribute("width", "420");
+
+    // The badge on somebody ELSE's host stays a link. Fetching it would tell that host the
+    // user read this page, which is the read receipt a mail body is stripped of.
+    const address = "https://img.shields.io/badge/build-passing-green.svg";
+    await expect(note.locator(`a[href="${address}"]`)).toContainText("build status");
+    // The badge itself is never drawn — the link's own favicon chip, which every link in this
+    // app wears, is a different picture from a different host.
+    await expect(note.locator(`img[src="${address}"]`)).toHaveCount(0);
+  });
+
+  test("a picture that cannot be read costs the picture and nothing else", async ({ page }) => {
+    await setMergeRequestControl(page, {
+      refuse_upload: "GitLab no longer holds this picture, or the token cannot see it",
+    });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await page.locator('[data-testid="gitlab-description-toggle"]').click();
+    const description = page.locator('[data-testid="gitlab-description"]');
+
+    // The picture says it is missing, by the name the author gave it — and every word of the
+    // description is still there, which is the contract the diff's own failure already holds.
+    await expect(description.locator('[data-testid="message-image-error"]')).toContainText(
+      "deploy-topology.png",
+    );
+    await expect(description.locator("h2").first()).toHaveText("What changes");
+    await expect(description.locator("table")).toHaveCount(1);
   });
 
   test("says why a merge request cannot be merged, instead of refusing after the click", async ({

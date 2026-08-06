@@ -10,6 +10,7 @@ import {
   type DiffThread,
 } from "~/lib/gitlab-diff-comment";
 import { parseGitLabMarkdown } from "~/lib/gitlab-markdown";
+import { gitLabMarkdownOptions } from "~/lib/gitlab-upload";
 import { personFace } from "~/lib/tracker-people";
 import { cn } from "~/lib/utils";
 import type { GitLabNote } from "~/lib/gitlab-mr";
@@ -285,7 +286,13 @@ function DiffNote(props: { note: GitLabNote; discussionId: string }) {
   const note = props.note;
   const controller = useController();
   const busy = useAppState((s) => s.gitlabDiffCommentBusy);
-  const nodes = useMemo(() => parseGitLabMarkdown(note.body), [note.body]);
+  // The pictures in a review comment are uploads of the merge request's own project, and the
+  // open merge request is the one this diff belongs to (see `gitLabMarkdownOptions`).
+  const project = useAppState((s) => s.openMergeRequest?.projectPath);
+  const nodes = useMemo(
+    () => parseGitLabMarkdown(note.body, gitLabMarkdownOptions(project)),
+    [note.body, project],
+  );
   const author = useMemo(() => personFace(note.author), [note.author]);
   const [armed, setArmed] = useState(false);
   // `null` while the comment is being read; a string while it is being REWRITTEN. It starts as

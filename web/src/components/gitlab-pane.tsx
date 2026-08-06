@@ -19,6 +19,7 @@ import {
 import { noteWasEdited, threadResolution, threadResolveAction } from "~/lib/gitlab-diff-comment";
 import { parseGitLabMarkdown } from "~/lib/gitlab-markdown";
 import { defaultGrouping, graphSummary, pipelineGraph } from "~/lib/gitlab-pipeline-graph";
+import { gitLabMarkdownOptions } from "~/lib/gitlab-upload";
 import {
   DESCRIPTION_COLLAPSED_PX,
   DESCRIPTION_FADE_PX,
@@ -425,8 +426,14 @@ function StateBadge(props: { detail: MergeRequestDetail }) {
  *    which is the state a page should open in. */
 function MergeRequestDescription(props: { detail: MergeRequestDetail }) {
   const nodes = useMemo(
-    () => parseGitLabMarkdown(props.detail.description ?? ""),
-    [props.detail.description],
+    // The project is what makes a pasted screenshot a picture rather than a link nobody can
+    // follow: an upload path names no project of its own (see `gitLabMarkdownOptions`).
+    () =>
+      parseGitLabMarkdown(
+        props.detail.description ?? "",
+        gitLabMarkdownOptions(props.detail.project_path),
+      ),
+    [props.detail.description, props.detail.project_path],
   );
   const reduce = useReducedMotion();
   const [open, setOpen] = useState(false);
@@ -991,7 +998,13 @@ function NoteBubble(props: { note: GitLabNote }) {
   const note = props.note;
   const controller = useController();
   const acting = useAppState((s) => s.gitlabActing);
-  const nodes = useMemo(() => parseGitLabMarkdown(note.body), [note.body]);
+  // A comment's own pictures are uploads of the merge request's project, exactly as the
+  // description's are — and the open merge request IS the one these comments belong to.
+  const project = useAppState((s) => s.openMergeRequest?.projectPath);
+  const nodes = useMemo(
+    () => parseGitLabMarkdown(note.body, gitLabMarkdownOptions(project)),
+    [note.body, project],
+  );
   const author = useMemo(() => personFace(note.author), [note.author]);
   const deleting = acting === `delete:${note.id}`;
   const [armed, setArmed] = useState(false);

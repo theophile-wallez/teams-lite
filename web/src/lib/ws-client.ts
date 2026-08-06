@@ -934,6 +934,23 @@ export class Backend {
     return this.request<{ content_type: string; data_base64: string }>("fetch_media", { url });
   }
 
+  /** Fetch one picture a merge request's description or comment points at — a screenshot
+   *  somebody pasted, which GitLab keeps as a project upload. It travels through the backend
+   *  because GitLab serves an upload to a session or a token and answers a browser 404
+   *  (measured), and because nothing on that page may be fetched by the browser at all. The
+   *  upload is named by its three parts, never by a URL: the backend spells the endpoint. */
+  gitlabUpload(upload: {
+    project: string;
+    secret: string;
+    filename: string;
+  }): Promise<{ content_type: string; data_base64: string }> {
+    return this.request<{ content_type: string; data_base64: string }>("gitlab_mr_upload", {
+      project_path: upload.project,
+      secret: upload.secret,
+      filename: upload.filename,
+    });
+  }
+
   /** Fetch a real profile photo — a person (`kind: "user"`, `id` = their MRI) or a
    *  Teams "team" group (`kind: "team"`, `id` = its AAD group id) — through the
    *  backend, which holds the credentials the browser lacks. `found` is false when

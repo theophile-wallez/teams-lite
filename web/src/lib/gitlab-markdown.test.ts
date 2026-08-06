@@ -4,6 +4,7 @@
 // what must NOT happen to them.
 import { describe, it, expect } from "vitest";
 import { parseGitLabMarkdown } from "./gitlab-markdown";
+import { gitLabMarkdownOptions } from "./gitlab-upload";
 import type { RichNode } from "./rich-text";
 
 /** The plain text of a tree, so an assertion can say what a block READS as. */
@@ -228,10 +229,86 @@ describe("parseGitLabMarkdown — what it deliberately does NOT do", () => {
     expect(text([link!])).toBe("the graph");
   });
 
-  it("leaves a GitLab upload's relative address as text, since it would answer 401", () => {
-    const nodes = parseGitLabMarkdown("![shot](/uploads/abc/shot.png)");
+  it("leaves a GitLab upload's relative address as text when no project is named", () => {
+    // With no project there is no upload to fetch, so the address stays the words it is —
+    // which is honest: a browser asking GitLab for it is answered 404.
+    const nodes = parseGitLabMarkdown("![shot](/uploads/9f3c1e77a4bd42f0b6e5c8d31a7b04e2/shot.png)");
     expect(find(nodes, "a")).toHaveLength(0);
     expect(find(nodes, "img")).toHaveLength(0);
+    expect(find(nodes, "gitlabImage")).toHaveLength(0);
+  });
+
+  it("draws a pasted screenshot as a picture, at the size the author asked for", () => {
+    const nodes = parseGitLabMarkdown(
+      "before\n\n![shot.png](/uploads/9f3c1e77a4bd42f0b6e5c8d31a7b04e2/shot.png){width=777 height=312}\n\nafter",
+      gitLabMarkdownOptions("group/sub/app"),
+    );
+    const [picture] = find(nodes, "gitlabImage");
+    expect(picture!.attrs).toMatchObject({
+      project: "group/sub/app",
+      secret: "9f3c1e77a4bd42f0b6e5c8d31a7b04e2",
+      filename: "shot.png",
+      alt: "shot.png",
+      width: 777,
+      height: 312,
+    });
+    // The attribute block is markup: printed, it would read as something the author typed.
+    expect(text(nodes)).not.toContain("width=777");
+    expect(text(nodes)).not.toContain("{");
+    // Nothing the browser would fetch, here or anywhere: the bytes come over the socket.
+    expect(find(nodes, "img")).toHaveLength(0);
+  });
+
+  it("keeps an image on somebody ELSE's host a link, even with a project to hand", () => {
+    // Fetching it would tell that host the user read this page — the read receipt a mail
+    // body is stripped of. Measured: every image in a comment on the tenant was one of these.
+    const nodes = parseGitLabMarkdown(
+      "![build status](https://img.shields.io/badge/build-passing-green.svg)",
+      gitLabMarkdownOptions("group/sub/app"),
+    );
+    expect(find(nodes, "gitlabImage")).toHaveLength(0);
+    expect(find(nodes, "img")).toHaveLength(0);
+    expect(find(nodes, "a")[0]!.attrs.href).toBe(
+      "https://img.shields.io/badge/build-passing-green.svg",
+    );
+  });
+
+  it("draws no picture for an address that is not an upload of this project", () => {
+    for (const source of [
+      "![doc](/docs/diagram.png)",
+      "![shot](/uploads/shot.png)",
+      "![shot](/uploads/not-a-secret/shot.png)",
+      "![shot](/uploads/9f3c1e77a4bd42f0b6e5c8d31a7b04e2/sub/shot.png)",
+    ]) {
+      expect(find(parseGitLabMarkdown(source, gitLabMarkdownOptions("app")), "gitlabImage")).toEqual(
+        [],
+      );
+    }
+  });
+
+  it("keeps a picture out of code, exactly as it keeps an emoji out of one", () => {
+    const fenced = parseGitLabMarkdown(
+      "```\n![shot.png](/uploads/9f3c1e77a4bd42f0b6e5c8d31a7b04e2/shot.png)\n```",
+      gitLabMarkdownOptions("app"),
+    );
+    expect(find(fenced, "gitlabImage")).toHaveLength(0);
+    const inline = parseGitLabMarkdown(
+      "write `![shot.png](/uploads/9f3c1e77a4bd42f0b6e5c8d31a7b04e2/shot.png)` to paste one",
+      gitLabMarkdownOptions("app"),
+    );
+    expect(find(inline, "gitlabImage")).toHaveLength(0);
+  });
+
+  it("names a picture by its file when the author left no alt text", () => {
+    const nodes = parseGitLabMarkdown(
+      "![](/uploads/9f3c1e77a4bd42f0b6e5c8d31a7b04e2/screen%20shot%20(2).png)",
+      gitLabMarkdownOptions("app"),
+    );
+    const [picture] = find(nodes, "gitlabImage");
+    // The name is decoded, because the backend encodes it again when it spells the endpoint.
+    expect(picture!.attrs.filename).toBe("screen shot (2).png");
+    expect(picture!.attrs.alt).toBe("screen shot (2).png");
+    expect(picture!.attrs.width).toBeUndefined();
   });
 
   it("refuses a scheme that is not a link", () => {

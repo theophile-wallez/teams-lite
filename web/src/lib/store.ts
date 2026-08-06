@@ -99,6 +99,7 @@ import {
   type MeetingAddress,
 } from "./call";
 import { callStageTitle } from "./call-stage";
+import { uploadKey, type UploadRef } from "./gitlab-upload";
 import {
   simulatedCallMedia,
   startCallMedia,
@@ -4428,6 +4429,14 @@ export class TeamsController {
    *  The returned object URL stays valid until the controller is disposed. */
   loadMedia(url: string): Promise<string> {
     return this.loadBlob(url, () => this.backend.fetchMedia(url));
+  }
+
+  /** Resolve one picture a GitLab description or comment points at to a local blob object URL,
+   *  fetching the bytes through the backend (see `gitlab-upload.ts` for why they cannot come
+   *  any other way). Shares the media cache, so its LRU order and byte budget cover a merge
+   *  request full of screenshots exactly as they cover a chat full of images. */
+  loadGitLabUpload(upload: UploadRef): Promise<string> {
+    return this.loadBlob(uploadKey(upload), () => this.backend.gitlabUpload(upload));
   }
 
   /** Resolve one mail attachment to a local blob object URL, for downloading or

@@ -687,8 +687,8 @@ graph's), and `web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw i
 
 **The split between the two backend modules is the whole safety story**, and it is the one
 in § The trackers: reading a tracker is what the feature is for, and writing to one is the
-user's own click. The five reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`, `_diff`)
-are open like every other read; the six writes (`gitlab_mr_merge`, `_comment`,
+user's own click. The six reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`, `_diff`,
+`_upload`) are open like every other read; the six writes (`gitlab_mr_merge`, `_comment`,
 `_edit_comment`, `_delete_comment`, `_resolve_thread`, `_set_state`) are `OUTWARD_METHODS`
 entries — the write token, refused read-only, and the automation hook refuses a command line, a
 script or a cargo example that names their endpoints. `_comment` covers three shapes of ONE act
@@ -744,12 +744,11 @@ reader that the dialog means nothing. Eight more rules hold the page together:
   nothing requests it — an avatar on a private instance answers 401 without a session — and
   the description and every comment go through the app's own markdown parser
   (`parseGitLabMarkdown`), never GitLab's rendered HTML, which would bring remote references
-  with it. An IMAGE is the sharp case and it is handled in the parser: a `![alt](url)` becomes
-  the LINK its alt text names, never an `<img>`, so a description written by somebody outside
-  this app cannot make the page fetch anything either. A real FACE **is** drawn, and it is a
+  with it. A real FACE **is** drawn, and it is a
   TEAMS read: it goes through the backend's own `fetch_avatar` like every other avatar in this
   app, it tells the GitLab instance nothing, and it is what § A GitLab user who is also a
-  colleague is about.
+  colleague is about. A PICTURE somebody pasted is drawn the same way — through the backend
+  (§ A pasted PICTURE), which is the rule rather than an exception to it.
 - **The list can never ask for merged merge requests.** `ListScope` and `ListState` are
   closed Rust sets and `merged` is not among them, so the page's whole promise is enforced by
   the type rather than by a filter somebody could widen.
@@ -939,6 +938,69 @@ a `---` disappeared. Four things follow, and each is pinned by a test:
   so a wide table and a long fenced line scroll INSIDE it. Without that the article widens
   and takes the page's own controls off a phone's screen — `bun run preview -- --out /tmp/mr
   --gitlab` captures it at 390px for that reason.
+
+### A pasted PICTURE is drawn, and its bytes come through the backend
+
+An author pastes a screenshot into a description or a comment and GitLab writes
+`![image.png](/uploads/<secret>/image.png){width=777 height=312}`. The page used to print that
+whole line as TEXT — a relative address is not a link a browser could follow, so the parser left
+it the characters it is — which made the most useful part of a review invisible. It is a picture
+now: `web/src/lib/gitlab-upload.ts` decides WHICH upload one is, `gitlab_mr::fetch_upload` gets
+the bytes, and `web/src/components/gitlab-image.tsx` draws them through the chat image's own
+component, so the loading box, the failure sentence and the lightbox are the ones this app
+already has.
+
+**It is the sixth READ and nothing more** — no gate of its own, because it publishes nothing and
+writes nothing (`gitlab_mr_upload`, open like every other read of this page). What it needed
+instead is the measured fact, and `examples/merge_request_image_recon.rs` is where every rule
+below comes from — READ-ONLY, over the 40 newest open merge requests, printing counts, statuses
+and shapes and never an upload path, because a path IS the whole authorization to read that file:
+
+    cargo run --example merge_request_image_recon
+
+Measured 2026-08-06 on `git.sia.partners` (18.6.4-ee), and each rule is pinned by a test:
+
+- **The bytes come from GitLab's own API route, and from nothing else.** The web path the
+  markdown writes answers **404** three ways — the `PRIVATE-TOKEN` header, `?private_token=`,
+  and no credential at all — while `GET /api/v4/projects/:id/uploads/:secret/:filename` answers
+  200 with the picture (104 KB at 777x312, and the attribute block claimed exactly that). So
+  the browser could never have drawn it whatever this app did, and a request built from the
+  markdown's own address would be a broken picture on every merge request that carries one.
+- **The upload is named by PRIMITIVES**, never by a URL a client assembled: the project,
+  GitLab's own secret, the filename (`gitlab_mr::UploadRef::parse` checks each part — a hex
+  secret, and a filename that is one path segment). The endpoint is spelled from
+  `gitlab::api_base`, so the token still reaches one host, and no client can aim it at
+  something other than one upload of one project. It is the rail `gitlab_diff_anchor` already
+  holds for a comment's position.
+- **The bytes must SNIFF as a raster image** (`sender_icon::image_kind`, never SVG) under a cap
+  (`MAX_UPLOAD_BYTES`, the composer's own per-picture ceiling, checked against the length GitLab
+  publishes before the bytes are read). This instance answers an upload
+  `application/octet-stream`, so the claimed type says nothing at all.
+- **An image on somebody ELSE's host stays a LINK.** Measured: every image in a description was
+  a project upload, and every image in a comment was an absolute URL elsewhere — a badge, a
+  screenshot host. Fetching one would tell that host the user read this page, which is the read
+  receipt § Mail strips out of every body. The rule is the parser's
+  (`markdown-inline.ts`): an image becomes a picture only where the caller can name one whose
+  bytes come through the backend, and a card passes no resolver at all, so a connector card's
+  images are links exactly as before.
+- **GitLab's `{width=… height=…}` block is CONSUMED, and it holds the picture's room.** Printed,
+  it reads as something the author typed beside their screenshot; used, it is what stops the
+  words around a picture from moving when the bytes land. A value this app cannot turn into
+  pixels — a percentage, a unit — is dropped rather than guessed at.
+- **A picture that cannot be read costs the PICTURE and nothing else.** The words around it stay
+  drawn and the failure names the file, which is the contract the diff's own failure already
+  holds. `parseGitLabMarkdown` also keeps one out of a fence and out of an inline code span, exactly
+  as it keeps a heading's hashes out of them.
+
+`web/mock/server.ts` reproduces the whole flow with no GitLab and no token (`mockUploads`, which
+draws a real PNG at the size the markdown claims, plus `refuse_upload` on the `{kind:"gitlab_mr"}`
+hook — a spec MUST clear it). `cd web && bun run preview -- --out /tmp/mr --gitlab` captures the
+picture in a description in both themes and the comment that carries one beside a link, and
+`web/e2e/gitlab.spec.ts` pins every rule above. **The READ is verified live through this app's own
+function**: the recon's fifth attempt is `gitlab_mr::fetch_upload` itself, and on 2026-08-06 it
+answered `image/png · 104 097 bytes · 777x312` for a real description's screenshot. What is still
+untested is the pairing — one open of a real merge request in the user's own app, where the page
+asks for that picture over the socket.
 
 **Performance is a durable cache plus one live read**, and three measured facts shaped it:
 
@@ -1566,7 +1628,9 @@ user. Two independent mechanisms enforce that split:
   `toggleTeamSection` from the same file. For the merge-request page — its tab strip at rest
   and current, the list, the page, its own sub-header of four pages in both themes and at a
   phone's width, the page that holds nothing yet,
-  the merge armed, the comments, the description folded and opened, the description at a phone's
+  the merge armed, the comments — one of which carries a pasted PICTURE beside an image on
+  another host — the description folded and opened, the picture the description ends with in
+  both themes, the description at a phone's
   width, a 150-character title at both widths and a blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt` /
   `openMergeRequestPage` from the same file. For its DIFF PAGE — the way in, the page in both themes, the split layout,
@@ -3015,7 +3079,7 @@ user's. What changes is only what is asked.
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
   and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
-  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its five reads (the DIFF
+  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its six reads (the DIFF
   among them, whose unified patch this app writes over GitLab's bare hunks) in
   `src/gitlab_mr.rs` over a durable response cache, what each CI job WAITS FOR in
   `src/gitlab_ci_graph.rs` (the one GraphQL read in this app, and query-only by construction —
