@@ -220,7 +220,7 @@ type ReplyTo = {
   after: string;
 };
 
-/** The optional single image accepted by `send`. The shape mirrors the web and
+/** One image of the `images` list accepted by `send`. The shape mirrors the web and
  *  Rust protocol. The mock validates it instead of accepting a partial object,
  *  so protocol drift fails a test instead of producing a misleading echo. */
 type SendImage = {
@@ -231,12 +231,17 @@ type SendImage = {
   height?: number;
 };
 
+/** How many pictures one message carries — `teams_send::MAX_IMAGES`. Mirrored so the
+ *  refusal is reachable with no tenant. */
+const MAX_SEND_IMAGES = 10;
+
 type CapturedSend = {
   conversation: string;
   text: string;
   reply_to?: ReplyTo;
   content_html?: string;
-  image?: SendImage;
+  /** Every picture the message carries, in the order the composer sent them. */
+  images?: SendImage[];
   /** Who the body's mention spans name, by the itemid each span carries. What a spec
    *  asserts on to prove a mention actually left the composer. */
   mentions?: OutboundMention[];
@@ -4353,9 +4358,18 @@ function parseReplyTo(value: unknown): ReplyTo | undefined {
   };
 }
 
-/** Parse the optional image payload strictly. Images are one-at-a-time by design. */
-function parseSendImage(value: unknown): SendImage | undefined {
-  if (value === undefined || value === null) return undefined;
+/** Parse the optional `images` list the way the real backend does: every entry a whole
+ *  image, and at most `MAX_SEND_IMAGES` of them (`teams_send::MAX_IMAGES`). */
+function parseSendImages(value: unknown): SendImage[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error("invalid images param");
+  if (value.length > MAX_SEND_IMAGES) throw new Error("too many images in one message");
+  return value.map(parseSendImage);
+}
+
+/** Parse one image of that list strictly, so protocol drift fails a test instead of
+ *  producing a misleading echo. */
+function parseSendImage(value: unknown): SendImage {
   const o = asObject(value);
   if (typeof o.name !== "string" || o.name.length === 0) {
     throw new Error("invalid image param: name");
@@ -5478,7 +5492,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const replyTo = parseReplyTo(input.reply_to);
       const rawHtml = input.content_html;
       const contentHtml = typeof rawHtml === "string" && rawHtml.length > 0 ? rawHtml : undefined;
-      const image = parseSendImage(input.image);
+      const images = parseSendImages(input.images);
       const mentions = parseSendMentions(input.mentions);
       if (TEST_HOOKS) {
         capturedSends.push({
@@ -5486,20 +5500,20 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
           text,
           ...(replyTo ? { reply_to: replyTo } : {}),
           ...(contentHtml ? { content_html: contentHtml } : {}),
-          ...(image ? { image } : {}),
+          ...(images.length > 0 ? { images } : {}),
           ...(mentions.length > 0 ? { mentions } : {}),
         });
         if (testSendError) throw new Error(testSendError);
         if (testSendDelayMs > 0) {
           return new Promise((resolve) => {
             setTimeout(() => {
-              scheduleSendEcho(id, text, replyTo, contentHtml, image, mentions);
+              scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions);
               resolve({ sent: true });
             }, testSendDelayMs);
           });
         }
       }
-      scheduleSendEcho(id, text, replyTo, contentHtml, image, mentions);
+      scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions);
       return { sent: true };
     }
 
@@ -6616,7 +6630,7 @@ function scheduleSendEcho(
   text: string,
   replyTo: ReplyTo | undefined,
   contentHtml?: string,
-  image?: SendImage,
+  images: SendImage[] = [],
   mentions?: OutboundMention[],
 ): void {
   setTimeout(() => {
@@ -6624,7 +6638,7 @@ function scheduleSendEcho(
     if (!t) return;
     const seq = nextSeq(t.messages);
     const body = composeContent(text, replyTo, contentHtml);
-    const imageHtml = image ? sentImageContent(image) : "";
+    const imageHtml = images.map(sentImageContent).join("");
     const msg: ChatMessage = {
       id: `${convId}#${seq}`,
       conversation_id: convId,

@@ -2581,9 +2581,24 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Ceiling on ONE request frame read off a UI socket, and the same number the relay in
+/// web/server.ts uses for the traffic it forwards. tungstenite's own defaults are 16 MiB
+/// per frame and 64 MiB per message, which a send carrying pictures walks straight into:
+/// a single 10 MiB image is already 13.4 MiB once base64-encoded, and a message's whole
+/// allowance (`teams_send::MAX_IMAGES_TOTAL_BYTES`, 30 MiB) is 40 MiB. A frame over the
+/// limit is a protocol error, so the connection would be DROPPED rather than the send
+/// refused with a sentence — which is the failure the caps in `teams_send::parse_images`
+/// exist to state.
+const MAX_REQUEST_BYTES: usize = 128 * 1024 * 1024;
+
 /// Handle one UI connection: answer requests + forward broadcast events.
 async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTracker) -> Result<()> {
-    let ws = tokio_tungstenite::accept_async(stream).await?;
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(MAX_REQUEST_BYTES),
+        max_frame_size: Some(MAX_REQUEST_BYTES),
+        ..Default::default()
+    };
+    let ws = tokio_tungstenite::accept_async_with_config(stream, Some(config)).await?;
     let _client_lease = clients.connect();
     let (mut write, mut read) = ws.split();
     let mut events_rx = ctx.events.subscribe();
@@ -3352,7 +3367,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .get("content_html")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            let image = params.get("image").map(teams_send::parse_image).transpose()?;
+            // Every picture the composer holds, in the order the user pasted them. The
+            // count and the combined size are refused here, before anything is uploaded.
+            let images = params
+                .get("images")
+                .map(teams_send::parse_images)
+                .transpose()?
+                .unwrap_or_default();
             // Who the message @mentions. The body carries an index per mention and this
             // list says who each index names, so Teams notifies them (see
             // `teams_send::Mention`). Validated before anything leaves this machine.
@@ -3372,7 +3393,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let text = text.clone();
                     let reply_to = reply_to.clone();
                     let content_html = content_html.clone();
-                    let image = image.clone();
+                    let images = images.clone();
                     let mentions = mentions.clone();
                     async move {
                         let ic3 = tokens.get(IC3_SCOPE).await?;
@@ -3384,7 +3405,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             &text,
                             reply_to.as_ref(),
                             content_html.as_deref(),
-                            image.as_ref(),
+                            &images,
                             &mentions,
                         )
                         .await
@@ -8388,7 +8409,7 @@ async fn agent_send(
                 "",
                 Some(&reply_to),
                 Some(&html),
-                None,
+                &[],
                 // An agent's answer mentions nobody: it is a reply, and a machine must
                 // not be able to notify a colleague.
                 &[],

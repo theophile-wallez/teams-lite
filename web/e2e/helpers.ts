@@ -146,13 +146,14 @@ export type CapturedSend = {
   /** Who the body's mention spans name, by the itemid each span carries. Present only
    *  when the message @mentions somebody. */
   mentions?: { itemid: number; mri: string; display_name: string }[];
-  image?: {
+  /** Every picture the message carried, in the order the composer sent them. */
+  images?: {
     name: string;
     content_type: string;
     data_base64: string;
     width?: number;
     height?: number;
-  };
+  }[];
 };
 
 /** Configure the mock's next sends. Always reset the control after a failure test,

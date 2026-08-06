@@ -149,16 +149,19 @@ describe("Backend request/response", () => {
     backend.close();
   });
 
-  it("frames a send request with raw image data and dimensions", async () => {
+  it("frames a send request with raw image data and dimensions, in the order given", async () => {
     const { backend, socket } = await connected();
 
-    const promise = backend.send("c1", "caption", undefined, undefined, {
-      name: "capture.png",
-      contentType: "image/png",
-      width: 640,
-      height: 480,
-      dataBase64: "aGVsbG8=",
-    });
+    const promise = backend.send("c1", "caption", undefined, undefined, [
+      {
+        name: "capture.png",
+        contentType: "image/png",
+        width: 640,
+        height: 480,
+        dataBase64: "aGVsbG8=",
+      },
+      { name: "second.png", contentType: "image/png", width: 8, height: 8, dataBase64: "d29ybGQ=" },
+    ]);
 
     const frame = JSON.parse(socket.sent[0]!) as {
       id: number;
@@ -169,13 +172,16 @@ describe("Backend request/response", () => {
     expect(frame.params).toEqual({
       conversation: "c1",
       text: "caption",
-      image: {
-        name: "capture.png",
-        content_type: "image/png",
-        width: 640,
-        height: 480,
-        data_base64: "aGVsbG8=",
-      },
+      images: [
+        {
+          name: "capture.png",
+          content_type: "image/png",
+          width: 640,
+          height: 480,
+          data_base64: "aGVsbG8=",
+        },
+        { name: "second.png", content_type: "image/png", width: 8, height: 8, data_base64: "d29ybGQ=" },
+      ],
     });
 
     socket.simulateMessage(JSON.stringify({ id: frame.id, result: { sent: true } }));

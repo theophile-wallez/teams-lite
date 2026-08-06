@@ -4823,14 +4823,14 @@ export class TeamsController {
   async sendDraft(
     text: string,
     html?: string,
-    image?: SendImage,
+    images: SendImage[] = [],
     mentions?: OutboundMention[],
   ): Promise<boolean> {
     const id = this.get().openId;
     if (!id) return false;
     const clean = text.trim();
     const richHtml = html?.trim() || undefined;
-    if (!clean && !richHtml && !image) return false;
+    if (!clean && !richHtml && images.length === 0) return false;
 
     const submittedDraft = this.draftCache.get(id) ?? this.get().draft;
     const reply = this.get().replyingTo;
@@ -4839,7 +4839,7 @@ export class TeamsController {
       : undefined;
 
     try {
-      await this.backend.send(id, clean, replyTo, richHtml, image, mentions);
+      await this.backend.send(id, clean, replyTo, richHtml, images, mentions);
     } catch (e) {
       // Both surfaces, and each has its reader. The status line keeps the RAW failure,
       // which is what a developer reads off a screenshot; the composer gets one sentence

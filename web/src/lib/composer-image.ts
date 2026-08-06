@@ -1,5 +1,10 @@
 export const COMPOSER_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 
+/** How many pictures one message carries. The same ceiling as the backend's
+ *  `teams_send::MAX_IMAGES`, which is what actually refuses an eleventh — this is the
+ *  half that says so before the user presses Send. */
+export const COMPOSER_IMAGE_MAX_COUNT = 10;
+
 export const COMPOSER_IMAGE_TYPES = [
   "image/png",
   "image/jpeg",
@@ -10,6 +15,9 @@ export const COMPOSER_IMAGE_TYPES = [
 export type ComposerImageType = (typeof COMPOSER_IMAGE_TYPES)[number];
 
 export type ComposerImage = {
+  /** Identity for the pending list: two pastes of one screenshot are two pictures, so
+   *  neither the name nor the bytes can tell them apart. */
+  id: number;
   name: string;
   contentType: ComposerImageType;
   width: number;
@@ -18,7 +26,7 @@ export type ComposerImage = {
   previewUrl: string;
 };
 
-export type SendImage = Omit<ComposerImage, "previewUrl">;
+export type SendImage = Omit<ComposerImage, "previewUrl" | "id">;
 
 const ACCEPTED_TYPES = new Set<string>(COMPOSER_IMAGE_TYPES);
 
@@ -63,6 +71,8 @@ function readDimensions(url: string): Promise<{ width: number; height: number }>
   });
 }
 
+let nextImageId = 0;
+
 export async function loadComposerImage(file: File): Promise<ComposerImage> {
   const validation = imageFileError(file);
   if (validation) throw new Error(validation);
@@ -74,6 +84,7 @@ export async function loadComposerImage(file: File): Promise<ComposerImage> {
   if (markerIndex < 0) throw new Error("Could not encode the image.");
 
   return {
+    id: ++nextImageId,
     name: file.name || "Pasted image",
     contentType: file.type as ComposerImageType,
     width: dimensions.width,

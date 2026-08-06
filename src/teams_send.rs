@@ -24,6 +24,17 @@ use crate::teams::Session;
 
 pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_IMAGE_DIMENSION: u32 = 16_384;
+
+/// How many images one message may carry. A product rule rather than a protocol one:
+/// Teams takes more, and this bounds what one send makes this app upload — and what a
+/// mis-paste can put in front of the thread.
+pub const MAX_IMAGES: usize = 10;
+
+/// Ceiling on the images of ONE message, added up. Each is already capped at
+/// [`MAX_IMAGE_BYTES`]; this bounds the whole request, which arrives as a single
+/// base64 JSON frame over the local socket — so it must stay well under the WebSocket
+/// read limits in src/bin/server.rs and the relay's own frame cap in web/server.ts.
+pub const MAX_IMAGES_TOTAL_BYTES: usize = 30 * 1024 * 1024;
 const MAX_IMAGE_NAME_BYTES: usize = 255;
 const AMS_CLIENT_VERSION: &str = "1415/26061118216";
 const AMS_IMAGE_TYPE: &str = "http://schema.skype.com/AMSImage";
@@ -187,10 +198,36 @@ pub fn new_client_message_id() -> String {
     ms.to_string()
 }
 
-/// Parse and validate the optional image object carried by the existing send RPC.
-/// Decoding happens after a conservative encoded-length check, so an oversized
-/// client value cannot allocate an unbounded decoded buffer.
-pub fn parse_image(value: &Value) -> Result<ImageUpload> {
+/// Parse and validate the optional `images` list carried by the send RPC.
+///
+/// A message carries as many pictures as the user pasted, in the order they picked
+/// them, and both ceilings are enforced here rather than at the composer: the client is
+/// what a mis-paste happens in, and the bytes are what this machine then uploads.
+pub fn parse_images(value: &Value) -> Result<Vec<ImageUpload>> {
+    let list = value.as_array().context("images must be a list")?;
+    anyhow::ensure!(
+        list.len() <= MAX_IMAGES,
+        "a message carries at most {MAX_IMAGES} images"
+    );
+    let mut out: Vec<ImageUpload> = Vec::with_capacity(list.len());
+    let mut total = 0usize;
+    for entry in list {
+        let image = parse_image(entry)?;
+        total += image.bytes.len();
+        anyhow::ensure!(
+            total <= MAX_IMAGES_TOTAL_BYTES,
+            "those images add up to more than {} MiB",
+            MAX_IMAGES_TOTAL_BYTES / (1024 * 1024)
+        );
+        out.push(image);
+    }
+    Ok(out)
+}
+
+/// Parse and validate one image object out of that list. Decoding happens after a
+/// conservative encoded-length check, so an oversized client value cannot allocate an
+/// unbounded decoded buffer.
+fn parse_image(value: &Value) -> Result<ImageUpload> {
     let params: ImageParams = serde_json::from_value(value.clone()).context("invalid image")?;
     anyhow::ensure!(!params.name.is_empty(), "image name must not be empty");
     anyhow::ensure!(
@@ -310,7 +347,7 @@ pub async fn send_message(
     text: &str,
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
-    image: Option<&ImageUpload>,
+    images: &[ImageUpload],
     mentions: &[Mention],
 ) -> Result<Sent> {
     let chat = session
@@ -322,17 +359,20 @@ pub async fn send_message(
         urlencoding::encode(conversation_id)
     );
     let cmid = new_client_message_id();
-    let ams_image = match image {
-        Some(image) => Some(upload_image(http, session, ic3, conversation_id, image).await?),
-        None => None,
-    };
+    // In the order the user picked them, one upload at a time: the message body names
+    // them in that order, and a failure here happens before the message POST — so
+    // nothing is posted and what did upload is an unreferenced AMS blob.
+    let mut ams_images = Vec::with_capacity(images.len());
+    for image in images {
+        ams_images.push(upload_image(http, session, ic3, conversation_id, image).await?);
+    }
     let body = build_body(
         &cmid,
         text,
         &session.self_name,
         reply_to,
         content_html,
-        ams_image.as_ref(),
+        &ams_images,
         mentions,
     )?;
 
@@ -672,7 +712,7 @@ fn message_content(
     text: &str,
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
-    image: Option<&AmsImage>,
+    images: &[AmsImage],
 ) -> String {
     let text = text.trim();
     let content_html = content_html.map(trim_message_html);
@@ -692,10 +732,7 @@ fn message_content(
         escape_html(text)
     };
 
-    match image {
-        Some(image) => format!("{body}{}", image_markup(image)),
-        None => body,
-    }
+    images.iter().fold(body, |body, image| format!("{body}{}", image_markup(image)))
 }
 
 fn image_markup(image: &AmsImage) -> String {
@@ -758,10 +795,10 @@ fn build_body(
     self_name: &str,
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
-    image: Option<&AmsImage>,
+    images: &[AmsImage],
     mentions: &[Mention],
 ) -> Result<serde_json::Value> {
-    let content = message_content(text, reply_to, content_html, image);
+    let content = message_content(text, reply_to, content_html, images);
     let mut body = json!({
         "clientmessageid": client_message_id,
         "content": content,
@@ -769,8 +806,8 @@ fn build_body(
         "contenttype": "text",
         "imdisplayname": self_name,
     });
-    if let Some(image) = image {
-        body["amsreferences"] = json!([image.id]);
+    if !images.is_empty() {
+        body["amsreferences"] = json!(images.iter().map(|i| &i.id).collect::<Vec<_>>());
     }
     attach_mentions(&mut body, &content, mentions)?;
     Ok(body)
@@ -1020,7 +1057,7 @@ mod tests {
             "Me",
             None,
             Some("<p><strong>Rich</strong> text</p>"),
-            Some(&image),
+            std::slice::from_ref(&image),
             &[],
         )
         .unwrap();
@@ -1035,6 +1072,61 @@ mod tests {
                 "alt=\"a &amp; b.png\" width=\"640\" height=\"480\"></p>"
             )
         );
+    }
+
+    // A message carries as many pictures as the user pasted: one `<img>` per image, in
+    // the order they were picked, and every AMS id in `amsreferences` — the field was
+    // already an array, so nothing about the Teams shape is invented here.
+    #[test]
+    fn several_images_each_get_their_markup_and_their_ams_reference() {
+        let image = |n: u32| AmsImage {
+            id: format!("id-{n}"),
+            src: format!("https://ams.example/{n}"),
+            name: format!("shot-{n}.png"),
+            width: None,
+            height: None,
+        };
+        let images = [image(1), image(2), image(3)];
+        let body = build_body("9", "", "Me", None, Some("<p>three shots</p>"), &images, &[]).unwrap();
+        assert_eq!(body["amsreferences"], json!(["id-1", "id-2", "id-3"]));
+        let content = body["content"].as_str().unwrap();
+        assert!(content.starts_with("<p>three shots</p>"));
+        assert_eq!(content.matches("<img itemtype=").count(), 3);
+        let order: Vec<usize> = ["shot-1.png", "shot-2.png", "shot-3.png"]
+            .iter()
+            .map(|name| content.find(name).unwrap())
+            .collect();
+        assert!(order[0] < order[1] && order[1] < order[2], "kept in order");
+    }
+
+    #[test]
+    fn parses_an_image_list_and_refuses_more_than_the_ceiling() {
+        let bytes = image_bytes("image/png");
+        let one = image_value("image/png", &bytes);
+        let list = |count: usize| Value::Array(vec![one.clone(); count]);
+
+        assert!(parse_images(&json!([])).unwrap().is_empty());
+        assert_eq!(parse_images(&list(MAX_IMAGES)).unwrap().len(), MAX_IMAGES);
+        assert!(parse_images(&list(MAX_IMAGES + 1)).is_err());
+        // A list is a list: the single object the RPC used to take is not one.
+        assert!(parse_images(&one).is_err());
+        // One bad entry refuses the whole message rather than silently dropping a
+        // picture the user watched themselves add.
+        assert!(parse_images(&json!([one.clone(), { "name": "x.svg", "content_type": "image/svg+xml", "data_base64": "AQ==" }])).is_err());
+    }
+
+    #[test]
+    fn refuses_images_that_add_up_past_the_total_ceiling() {
+        // Each one is inside MAX_IMAGE_BYTES; enough of them are not, and a request this
+        // app cannot hold has to be refused with a sentence rather than by the socket.
+        let each = MAX_IMAGES_TOTAL_BYTES / 4 + 1;
+        assert!(each <= MAX_IMAGE_BYTES, "each is a legal image on its own");
+        let mut bytes = vec![7; each];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let value = image_value("image/png", &bytes);
+        let list = |count: usize| Value::Array(vec![value.clone(); count]);
+        assert_eq!(parse_images(&list(3)).unwrap().len(), 3);
+        assert!(parse_images(&list(4)).is_err());
     }
 
     #[test]
@@ -1054,7 +1146,7 @@ mod tests {
             width: None,
             height: None,
         };
-        let content = message_content("reply text", Some(&reply), None, Some(&image));
+        let content = message_content("reply text", Some(&reply), None, std::slice::from_ref(&image));
         assert!(content.starts_with("<blockquote itemscope"));
         assert!(content.contains("</blockquote><p>reply text</p>"));
         assert!(content.ends_with("alt=\"screen.png\"></p>"));
@@ -1124,7 +1216,7 @@ mod tests {
 
     #[test]
     fn body_has_required_fields() {
-        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None, None, &[]).unwrap();
+        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None, &[], &[]).unwrap();
         assert_eq!(b["clientmessageid"], "12345");
         assert_eq!(b["content"], "hi &lt;there&gt;");
         assert_eq!(b["messagetype"], "RichText/Html");
@@ -1135,13 +1227,13 @@ mod tests {
     #[test]
     fn rich_content_html_is_forwarded_as_content() {
         let html = "<p>hi <strong>bold</strong> <a href=\"https://x\">link</a></p>";
-        let b = build_body("9", "", "Me", None, Some(html), None, &[]).unwrap();
+        let b = build_body("9", "", "Me", None, Some(html), &[], &[]).unwrap();
         assert_eq!(b["content"], html);
     }
 
     #[test]
     fn empty_rich_content_html_falls_back_to_plain() {
-        let b = build_body("9", "plain", "Me", None, Some(""), None, &[]).unwrap();
+        let b = build_body("9", "plain", "Me", None, Some(""), &[], &[]).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
@@ -1155,7 +1247,7 @@ mod tests {
             before: String::new(),
             after: String::new(),
         };
-        let content = message_content("", Some(&reply), Some("<p><em>rich</em> reply</p>"), None);
+        let content = message_content("", Some(&reply), Some("<p><em>rich</em> reply</p>"), &[]);
         assert!(content.starts_with("<blockquote itemscope"));
         assert!(content.ends_with("</blockquote><p><em>rich</em> reply</p>"));
     }
@@ -1171,7 +1263,7 @@ mod tests {
             after: "new <reply>".into(),
         };
 
-        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None, None, &[]).unwrap();
+        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None, &[], &[]).unwrap();
 
         assert_eq!(
             b["content"],
@@ -1197,7 +1289,7 @@ mod tests {
             after: "Second line".into(),
         };
 
-        let content = message_content("First lineSecond line", Some(&reply), None, None);
+        let content = message_content("First lineSecond line", Some(&reply), None, &[]);
 
         assert!(content.starts_with("<p>First line</p><blockquote"));
         assert!(content.ends_with("</blockquote><p>Second line</p>"));
@@ -1225,10 +1317,10 @@ mod tests {
 
     #[test]
     fn plain_text_is_trimmed_before_it_goes_out() {
-        let b = build_body("1", "  hi there\n\n", "Me", None, None, None, &[]).unwrap();
+        let b = build_body("1", "  hi there\n\n", "Me", None, None, &[], &[]).unwrap();
         assert_eq!(b["content"], "hi there");
         // A body of whitespace only becomes empty rather than a blank message.
-        let b = build_body("1", " \n\t ", "Me", None, None, None, &[]).unwrap();
+        let b = build_body("1", " \n\t ", "Me", None, None, &[], &[]).unwrap();
         assert_eq!(b["content"], "");
         // An edit trims the same way.
         let b = build_edit_body("\n updated \n", None, "Me", &[]).unwrap();
@@ -1256,13 +1348,13 @@ mod tests {
 
     #[test]
     fn html_body_is_trimmed_on_send_and_on_edit() {
-        let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), None, &[]).unwrap();
+        let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), &[], &[]).unwrap();
         assert_eq!(b["content"], "<p>hi</p>");
         let b = build_edit_body("", Some(" <p>answer</p><p></p>"), "Me", &[]).unwrap();
         assert_eq!(b["content"], "<p>answer</p>");
         // An html body of spacers only falls back to the plain text, as an empty
         // one already did.
-        let b = build_body("9", "plain", "Me", None, Some("<p><br></p>"), None, &[]).unwrap();
+        let b = build_body("9", "plain", "Me", None, Some("<p><br></p>"), &[], &[]).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
@@ -1276,7 +1368,7 @@ mod tests {
             before: "  before \n".into(),
             after: "\n after  ".into(),
         };
-        let content = message_content("", Some(&reply), None, None);
+        let content = message_content("", Some(&reply), None, &[]);
         assert!(content.starts_with("<p>before</p><blockquote"));
         assert!(content.ends_with("</blockquote><p>after</p>"));
     }
@@ -1298,7 +1390,7 @@ mod tests {
             display_name: "John".into(),
         }];
         let html = mention_html(0, "John");
-        let body = build_body("9", "", "Me", None, Some(&html), None, &mentions).unwrap();
+        let body = build_body("9", "", "Me", None, Some(&html), &[], &mentions).unwrap();
         assert_eq!(body["content"], html, "the span stays in the body verbatim");
         // `properties.mentions` is a JSON-encoded STRING — the shape the read path
         // decodes and the shape the tenant accepted.
@@ -1318,7 +1410,7 @@ mod tests {
 
     #[test]
     fn a_message_with_no_mention_carries_no_properties() {
-        let body = build_body("9", "hi", "Me", None, None, None, &[]).unwrap();
+        let body = build_body("9", "hi", "Me", None, None, &[], &[]).unwrap();
         assert!(body.get("properties").is_none());
     }
 
@@ -1332,8 +1424,8 @@ mod tests {
             display_name: "John".into(),
         }];
         let html = mention_html(0, "John");
-        assert!(build_body("9", "", "Me", None, Some(&html), None, &mentions).is_err());
-        assert!(build_body("9", "plain text", "Me", None, None, None, &mentions).is_err());
+        assert!(build_body("9", "", "Me", None, Some(&html), &[], &mentions).is_err());
+        assert!(build_body("9", "plain text", "Me", None, None, &[], &mentions).is_err());
     }
 
     #[test]
@@ -1346,7 +1438,7 @@ mod tests {
             display_name: "John".into(),
         }];
         let html = mention_html(0, "John");
-        let sent = build_body("9", "", "Me", None, Some(&html), None, &mentions).unwrap();
+        let sent = build_body("9", "", "Me", None, Some(&html), &[], &mentions).unwrap();
         let edited = build_edit_body("", Some(&html), "Me", &mentions).unwrap();
         assert_eq!(edited["properties"], sent["properties"]);
         assert_eq!(edited["content"], html);

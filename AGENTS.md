@@ -103,6 +103,47 @@
   only in a conversation the user opted in, and the sandbox channel is the only one
   opted in out of the box.
 
+## Pictures in a message (up to ten, and the ceilings are a set)
+
+A message carries as many pictures as the user pasted — the clipboard's images in one
+paste, several pastes one after another, or a multi-file pick — previewed above the field
+and uploaded by the backend as part of the same `send` (`teams_send::send_message`, over
+`parse_images`; the composer's half is `web/src/components/composer.tsx` and
+`web/src/lib/composer-image.ts`). It needs no gate of its own: `send` is already an
+`OUTWARD_METHODS` entry and the pictures ride in its params, exactly as a mention does.
+The second paste used to REPLACE the first, which made a message meant to carry three
+screenshots carry the last one.
+
+- **THREE ceilings, and they are one set.** Ten pictures per message
+  (`teams_send::MAX_IMAGES`, mirrored by `COMPOSER_IMAGE_MAX_COUNT` and by the mock), 10
+  MiB each (`MAX_IMAGE_BYTES`), 30 MiB for all of them (`MAX_IMAGES_TOTAL_BYTES`) — and
+  the socket's own read limit above every one of them (`MAX_REQUEST_BYTES` in
+  src/bin/server.rs, the number the relay in web/server.ts already used). That last one is
+  why they move together: tungstenite's defaults are 16 MiB per frame and one 10 MiB image
+  is 13.4 MiB once base64-encoded, so a send carrying two of them was already over the
+  limit — and a frame over the limit is a PROTOCOL error, which drops the connection
+  instead of refusing the send with a sentence. Raise a count without raising that and the
+  failure stops being something the user can read.
+- **The composer states the count, the backend enforces it.** A batch that crosses ten
+  keeps the ten that fit and says so beside the pictures, so the eleventh is refused before
+  a send rather than by one. One bad file in a batch costs that file and nothing else.
+- **One AMS upload per picture, in the order they were added**, and that order is what the
+  body's `<img>` tags carry. `amsreferences` was ALREADY an array, so nothing about the
+  Teams shape is invented here. An upload that fails happens before the message POST, so
+  nothing is posted and what did upload is an unreferenced blob.
+- **A send takes back exactly the pictures that left**, matched by the id the pending list
+  keys on — the rule `removeSentWords` follows for the words. Clearing the box would erase
+  a screenshot pasted while the request was travelling; clearing nothing would leave the
+  ones that left sitting there, so the next Enter posts them twice.
+- **Several are drawn SMALLER than one.** Ten thumbnails at the height a single one gets is
+  a composer that has eaten the conversation.
+- `cd web && bun run preview -- --out /tmp/pics --compose-images` captures the row in both
+  themes and the sentence a full box earns; `web/e2e/composer-images.spec.ts` pins every
+  rule above. That spec deliberately does NOT send its ten-picture message: one mock
+  process serves the whole run, and a message ten pictures tall is shared state — it makes
+  the deep-link scroll in `notifications.spec.ts` time out, which is a fragility of the
+  virtualized history worth its own look and NOT something a test should hide.
+
 ## The local agent (`@claude` in a thread)
 
 The user can summon a coding agent that runs on this machine from any Teams client —

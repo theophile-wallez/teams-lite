@@ -39,6 +39,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/mr --gitlab       # the merge-request page
 //   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
 //   bun run web/scripts/preview.ts --out /tmp/img --image       # the picture lightbox
+//   bun run web/scripts/preview.ts --out /tmp/pics --compose-images # several pending images
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
 //   bun run web/scripts/preview.ts --out /tmp/del --delete      # delete: menu, confirm, placeholder
 //   bun run web/scripts/preview.ts --out /tmp/preview --scrolled # history scrolled up (jump button)
@@ -2038,6 +2039,36 @@ if (import.meta.main) {
         `[preview] wrote ${out}-thread-light.png, ${out}-open-light.png, ` +
           `${out}-zoomed-light.png and ${out}-small-{light,dark}.png`,
       );
+    });
+    process.exit(0);
+  }
+
+  // The composer holding several pictures at once: the row of thumbnails above the
+  // field, each with its own size and its own remove button, and the sentence an
+  // eleventh earns. The files are this app's own icons, so nothing is fetched and the
+  // three pixel sizes under them differ — which is the part a reviewer reads.
+  if (args.includes("--compose-images")) {
+    const icons = [
+      "public/icons/icon-192.png",
+      "public/icons/apple-touch-icon-180.png",
+      "public/icons/icon-512.png",
+    ];
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openFirstConversation(page);
+      const input = page.locator('[data-testid="composer-image-input"]');
+      await input.setInputFiles(icons);
+      const previews = page.locator('[data-testid="composer-image-preview"]');
+      await previews.nth(icons.length - 1).waitFor();
+      await typeInComposer(page, "Three shots of the same icon");
+      await shot(`${out}-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-dark.png`);
+      await setTheme("light");
+      // The ceiling, stated where the pictures are. The batch keeps the ten that fit.
+      await input.setInputFiles(Array.from({ length: 8 }, () => icons[0]!));
+      await page.locator('[data-testid="composer-image-error"]').waitFor();
+      await shot(`${out}-full-light.png`);
+      console.log(`[preview] wrote ${out}-{light,dark}.png and ${out}-full-light.png`);
     });
     process.exit(0);
   }

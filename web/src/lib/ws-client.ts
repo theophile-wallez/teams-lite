@@ -537,7 +537,7 @@ export class Backend {
     text: string,
     replyTo?: ReplyTo,
     contentHtml?: string,
-    image?: SendImage,
+    images: SendImage[] = [],
     mentions?: OutboundMention[],
   ): Promise<{ sent: boolean }> {
     return this.writeRequest<{ sent: boolean }>("send", {
@@ -548,15 +548,18 @@ export class Backend {
       // Who the message @mentions. The body's mention spans carry only an index; this
       // list is what tells Teams whom each index names, so they are notified.
       mentions: mentions && mentions.length > 0 ? mentions : undefined,
-      image: image
-        ? {
-            name: image.name,
-            content_type: image.contentType,
-            width: image.width,
-            height: image.height,
-            data_base64: image.dataBase64,
-          }
-        : undefined,
+      // The pictures the message carries, in the order the composer holds them: that is
+      // the order the backend uploads them in, and the order they appear in the body.
+      images:
+        images.length > 0
+          ? images.map((image) => ({
+              name: image.name,
+              content_type: image.contentType,
+              width: image.width,
+              height: image.height,
+              data_base64: image.dataBase64,
+            }))
+          : undefined,
     });
   }
   edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {
