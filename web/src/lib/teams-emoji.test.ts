@@ -150,4 +150,17 @@ describe("customReactionArt", () => {
     expect(customReactionArt("tlcustom-shipit-0-weu-d1-abc")).toBeNull();
     expect(customReactionArt("tlcustom-")).toBeNull();
   });
+
+  it("refuses a key that would make the reader's browser fetch a stranger's server", () => {
+    // The key above is one WE minted, which proves nothing about an inbound one: a key is
+    // written by whoever reacted, and Teams accepts an arbitrary long one. Drawing this
+    // would issue the request as the bubble rendered — a tracking pixel arriving as a
+    // reaction, in an app that strips them out of mail bodies.
+    expect(customReactionArt("tlcustom-https://evil.example/p.png")).toBeNull();
+    expect(customReactionArt("tlcustom-https://evil.example/p.png?who=reader")).toBeNull();
+    // A look-alike host is not the proxy's either.
+    expect(customReactionArt("tlcustom-https://skype.com.evil.example/p.png")).toBeNull();
+    // And the legitimate key still draws, so the rail refuses hosts rather than reactions.
+    expect(customReactionArt(`tlcustom-${OBJECT_URL}`)).toEqual({ src: OBJECT_URL });
+  });
 });

@@ -112,11 +112,17 @@ pub fn custom_reaction_key(object_url: &str) -> String {
 /// The art URL a custom reaction key names, or `None` when the key is not one of ours —
 /// which is how Microsoft's own keys (`like`, `yes-tone2`) stay untouched.
 ///
-/// The `https://` check is what makes the answer trustworthy rather than merely
-/// prefixed: it is also the shape of every key this app has ever minted.
+/// The host check is what makes the answer trustworthy rather than merely prefixed. A key
+/// is written by whoever REACTED, and the service accepts anything short enough (a
+/// 289-character one, measured in examples/custom_emoji_reaction_probe.rs), so a colleague
+/// could name `https://evil.example/p.png?who=…` and have every reader's browser fetch it
+/// as the message drew — the tracking pixel `mail_html` strips out of a mail body, arriving
+/// through a reaction instead. Only a URL the authenticated media path would carry is art
+/// this app draws; `web/src/lib/teams-emoji.ts` refuses the same keys with the port of
+/// `mediaNeedsProxy`, which is what keeps the browser from making that request.
 pub fn custom_reaction_art_url(key: &str) -> Option<&str> {
     key.strip_prefix(CUSTOM_REACTION_PREFIX)
-        .filter(|url| url.starts_with("https://"))
+        .filter(|url| crate::teams_media::is_allowed_media_url(url))
 }
 
 /// Every distinct `:name:` code in `html`'s text runs, outside tags, outside
@@ -471,5 +477,18 @@ mod tests {
             "the old name-first shape names no art, so it resolves to none"
         );
         assert_eq!(custom_reaction_art_url("tlcustom-"), None, "no URL at all");
+
+        // A key nobody here minted. Whoever reacted wrote it, so it can name any host —
+        // and a reader's browser must never be sent to one on the strength of a reaction.
+        assert_eq!(
+            custom_reaction_art_url("tlcustom-https://evil.example/p.png?who=reader"),
+            None,
+            "a stranger's server is not art this app draws"
+        );
+        assert_eq!(
+            custom_reaction_art_url("tlcustom-http://eu-api.asm.skype.com/v1/objects/0-b/views/imgo"),
+            None,
+            "plain http, so not the authenticated media path either"
+        );
     }
 }
