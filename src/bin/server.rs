@@ -4027,6 +4027,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     Ok(json!({
                         "call_id": call_id,
                         "ice_servers": ctx.call_ice_servers().await,
+                        // Whether this call is between exactly TWO people, which decides how
+                        // the page negotiates a camera and a screen: the real client reserves
+                        // both sections in the first offer of a one-to-one and adds them
+                        // mid-call in a conference (NATIVE-CALLING.md § 10.8). The kind is
+                        // decided here — the ring list is what says how many people it
+                        // reaches — so the page is told rather than guessing from an id.
+                        "one_to_one": kind == CallKind::Call,
                     }))
                 }
             }
@@ -10184,6 +10191,41 @@ mod tests {
                  landing on that side of the emit would look like a live call."
             );
         }
+    }
+
+    /// A one-to-one call negotiates the CAMERA and the SCREEN with the call itself, and a
+    /// conference does not — so `call_prepare` has to say which kind it reserved.
+    ///
+    /// It is the real client's own split (`addModalities`: `numVideoChannels` is 1 and both
+    /// modalities are forced inactive at the first negotiation of a one-to-one, while a
+    /// conference offers audio alone). This app added the section mid-call in every case, and
+    /// the service answered a real screen share by zeroing its port — see
+    /// NATIVE-CALLING.md § 10.8. The page cannot work the kind out for itself: the RING LIST
+    /// is what says how many people a call reaches, and only the backend fetches it.
+    #[test]
+    fn call_prepare_says_whether_the_call_is_one_to_one() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        // The LAST occurrence is the handler: the name is spelled earlier in this file too,
+        // in the gate list that decides which methods need the write token.
+        let handler = code.rsplit("\"call_prepare\" => {").next().expect("call_prepare");
+        let handler = handler.split("\"call_place\" => {").next().expect("the next arm");
+        assert!(
+            handler.contains("\"one_to_one\": kind == CallKind::Call"),
+            "call_prepare no longer states whether the call is a one-to-one. The page \
+             reserves the camera and screen sections in the first offer for that case only, \
+             and it has no other way to know: a conversation id does not say how many \
+             people a call rings."
+        );
+        // And it is stated for a CHAT call only. A meeting join reserves nothing, exactly as
+        // the client's own conference path offers audio alone.
+        assert_eq!(
+            handler.matches("\"one_to_one\"").count(),
+            1,
+            "`one_to_one` is answered more than once in call_prepare. A meeting and an \
+             answered call must not claim it: the reservation belongs to the one shape the \
+             client reserves for."
+        );
     }
 
     /// "Ready" must mean a call could start RIGHT NOW: registered, and the socket up.

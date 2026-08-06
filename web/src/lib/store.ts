@@ -1887,6 +1887,7 @@ export class TeamsController {
   private async openCallMedia(options: {
     iceServers: RTCIceServer[];
     remoteOffer?: string;
+    oneToOne?: boolean;
   }): Promise<CallMedia> {
     // Every callback below is wired ONCE, for the stand-in as much as for the real thing: the
     // mock is where this surface is reviewed, and a bridge the mock path skipped is a rule no
@@ -1896,6 +1897,7 @@ export class TeamsController {
       : await startCallMedia({
           iceServers: options.iceServers,
           remoteOffer: options.remoteOffer,
+          oneToOne: options.oneToOne,
           onConnectionStateChange: (state) => {
             if (state === "failed") {
               console.error("[call] the media transport failed");
@@ -2027,7 +2029,13 @@ export class TeamsController {
     try {
       const prepared = await this.backend.callPrepare({ conversation: conversationId });
       callId = prepared.call_id;
-      const media = await this.openCallMedia({ iceServers: prepared.ice_servers });
+      const media = await this.openCallMedia({
+        iceServers: prepared.ice_servers,
+        // A one-to-one negotiates the camera and the screen up front, the way the real
+        // client does. The backend decides it: the ring list is what says how many people
+        // the call reaches.
+        oneToOne: prepared.one_to_one === true,
+      });
       // The user hung up while the microphone was opening: the reservation went back with
       // their click, so the offer must not go out and nothing is said.
       if (!this.adoptCallMedia(media, attempt)) return;

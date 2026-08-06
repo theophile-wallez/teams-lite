@@ -212,6 +212,16 @@ export type CallMedia = {
 export type CallMediaOptions = {
   iceServers: RTCIceServer[];
   remoteOffer?: string;
+  /**
+   * Whether this call is between exactly TWO people, which decides whether the sections a
+   * camera and a screen go out on are negotiated NOW (see {@link LocalSenders.reserve}).
+   *
+   * It is the real client's own split: `numVideoChannels` is `1` on a one-to-one and its
+   * `addModalities` forces both modalities inactive at the first negotiation, while a
+   * CONFERENCE offers audio alone and adds a section when somebody turns a capture on.
+   * Defaults to false, which is the behaviour this app already had.
+   */
+  oneToOne?: boolean;
   /** Called when the transport state changes, so the UI can say a call dropped. */
   onConnectionStateChange?: (state: RTCPeerConnectionState) => void;
 };
@@ -289,7 +299,15 @@ export async function startCallMedia(options: CallMediaOptions): Promise<CallMed
     if (options.remoteOffer) {
       await pc.setRemoteDescription({ type: "offer", sdp: fromMsSdp(options.remoteOffer) });
       await pc.setLocalDescription(await pc.createAnswer());
+      // Their offer already holds the sections a camera and a screen go out on — the real
+      // client puts them in every first offer — so ours are ADOPTED from it rather than added
+      // later. Read from the offer as it arrived, because the labels are what name them.
+      senders.adopt(pc, labelsByMid(options.remoteOffer));
     } else {
+      // The sections a capture will need, negotiated NOW while nothing is being sent — on a
+      // one-to-one, which is where the client reserves them and where a section added later
+      // was refused. A conference offers audio alone, exactly as the client does.
+      if (options.oneToOne) senders.reserve(pc);
       await pc.setLocalDescription(await pc.createOffer());
     }
     await waitForIceGathering(pc);
@@ -297,8 +315,17 @@ export async function startCallMedia(options: CallMediaOptions): Promise<CallMed
     const localSdp = pc.localDescription?.sdp;
     if (!localSdp) throw new Error("the browser produced no SDP");
     // Out through the service's own spelling. The service refuses a browser's transport
-    // profile outright (`UnrecognizedTransportProfile`), so this is not a nicety.
-    return liveCallMedia(pc, stream, remoteAudio, remoteVideo, senders, toMsSdp(localSdp));
+    // profile outright (`UnrecognizedTransportProfile`), so this is not a nicety — and the
+    // reserved sections travel with their own labels, since `applicationsharing-video` is
+    // not derivable from an `m=video` line.
+    return liveCallMedia(
+      pc,
+      stream,
+      remoteAudio,
+      remoteVideo,
+      senders,
+      toMsSdp(localSdp, senders.labels()),
+    );
   } catch (error) {
     // Never leave the microphone open behind a failure: the browser would keep showing
     // the recording indicator for a call that does not exist.
@@ -412,6 +439,23 @@ class RemoteAudio {
   }
 }
 
+/** The kinds whose section is negotiated up front, in the order the client lists them: a
+ *  camera, then a screen (see {@link LocalSenders.reserve}). */
+const RESERVED_KINDS: readonly SendKind[] = ["camera", "screen"];
+
+/**
+ * Which capture, if any, a section carrying this label is for — the whole decision
+ * {@link LocalSenders.adopt} makes about an incoming offer.
+ *
+ * The LABEL is the only thing that answers it: a camera and a screen are both `m=video`, and
+ * the service reads that label rather than the kind. A section labelled anything else —
+ * `main-audio`, `data`, or a name this app has not heard of — is not ours to send on, and
+ * claiming one would put the user's screen on a section the far side described otherwise.
+ */
+export function reservedKindFor(label: string | undefined): SendKind | undefined {
+  return RESERVED_KINDS.find((kind) => SEND_LABELS[kind] === label);
+}
+
 /** The service's own label for each kind this app can send. It is not derivable from the
  *  m-line — both are `m=video` — and it is what the service reads to tell them apart. */
 const SEND_LABELS: Record<SendKind, string> = {
@@ -489,6 +533,48 @@ class LocalSenders {
   /** Called when the BROWSER ends a capture by itself — the "Stop sharing" bar it draws over
    *  every screen share, which no click of ours passes through. */
   onEndedByBrowser?: (kind: SendKind) => void;
+
+  /**
+   * Negotiate the sections a capture will need, before anything is being sent.
+   *
+   * **This is what the real client does, and the reason a screen share was refused without
+   * it.** Its own `addModalities` forces `video` and `sharing` to `inactive` on the first
+   * negotiation of a one-to-one call, so every section exists from the very first offer — a
+   * captured audio-only join carries `a=group:BUNDLE 0 1 … 12`, twelve sections of which
+   * carry nothing. This app offered one audio section and then asked the service to accept a
+   * NEW `applicationsharing-video` mid-call; the service answered by zeroing its port, and
+   * the user's share never went anywhere (NATIVE-CALLING.md § 10.8).
+   *
+   * So a capture is an ACTIVATION from here on: {@link start} finds the section already
+   * negotiated and swaps a track into it, which is the reinviteless shape the client's own
+   * `removeSender` reads. `inactive` is what makes that safe — a reserved section publishes
+   * nothing about the user, and no camera or screen is opened until they ask.
+   */
+  reserve(pc: RTCPeerConnection): void {
+    for (const kind of RESERVED_KINDS) {
+      if (this.live.has(kind) || this.idle.has(kind)) continue;
+      this.idle.set(kind, pc.addTransceiver("video", { direction: "inactive" }));
+    }
+  }
+
+  /**
+   * Take over the sections an INCOMING offer already carries, by the label each one states.
+   *
+   * The far side is a real Teams client, so its offer holds the same layout {@link reserve}
+   * builds — there is nothing to add, and adding one anyway is what the service refuses. A
+   * section is claimed only when its label names one of ours and nothing holds that kind yet:
+   * this runs once, at the start of a call, and a second claim would take a section a live
+   * capture is using.
+   */
+  adopt(pc: RTCPeerConnection, labels: Map<string, string>): void {
+    for (const transceiver of pc.getTransceivers()) {
+      const mid = transceiver.mid;
+      if (!mid || sectionIsStopped(transceiver)) continue;
+      const kind = reservedKindFor(labels.get(mid));
+      if (!kind || this.live.has(kind) || this.idle.has(kind)) continue;
+      this.idle.set(kind, transceiver);
+    }
+  }
 
   async start(pc: RTCPeerConnection, kind: SendKind): Promise<void> {
     const stream = await openCapture(kind);

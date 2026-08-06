@@ -5868,6 +5868,9 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return {
         call_id: reserved,
         ice_servers: [{ urls: ["stun:mock.invalid:3478"] }],
+        // The same split the Rust backend publishes: a 1:1 negotiates the camera and the
+        // screen up front, a group adds them when somebody turns one on.
+        one_to_one: !group,
       };
     }
 

@@ -999,6 +999,62 @@ attempt cost.
   - **The next attempt is worth making, and it is the user's own click.** What it needs is a
     live call, the journal open, and the `[calling] the offer was answered at once:` line —
     which now says which section came back REJECTED and whether the audio came back with it.
+- **The CAUSE was then found in the client's own code, and it is the section LAYOUT.**
+  `addModalities` in `calling-pluginless-779e39a54b8bcd49.js`, verbatim:
+
+  ```js
+  addModalities(e){const t=this.mediaManager.isEmpty();
+    !this.isMultiparty && t && !this.isPstnCall &&
+      (e.video = e.video || "inactive", e.sharing = e.sharing || "inactive"),
+    …
+    for (const i of sy) {
+      if (this.mediaManager.getMediaEntitiesByModality(i)[0] || !e[i]) continue;
+      let n; switch (i) {
+        case D.MODALITY.video:   n = this.numVideoChannels; break;
+        case D.MODALITY.sharing: n = this.numVbssChannels;  break;
+        default:                 n = 1;                      break; }
+      times(n, s => { const o = this.mediaManager.createMediaEntity(i);
+        o.setExtension("reinviteless", t && this.reinvitelessContext.maxStreamsForModality[i] > s);
+        this.createTransceiverForEntity(o) }) } }
+  ```
+
+  Read with `this.numVideoChannels = this.isMultiparty && config.numVideoChannelsGvc || 1`,
+  `numVbssChannels = 1`, and `createTransceiver` → `{direction: "inactive"}`, it says four
+  things — and every one of them was news:
+
+  - **On a ONE-TO-ONE the sections exist before anybody shares.** `isMultiparty` is false and
+    the media manager is empty, so `video` and `sharing` are forced to `inactive` and one
+    transceiver of each is created — in the FIRST offer. Turning a share on is then an
+    ACTIVATION of a section the service already answered, which is why `StartScreenSharing`
+    is decorated `waitFor: "_UpdateMediaDescriptions"` and not `_RenegotiateOutgoing`:
+    `executeNegotiation`'s own branch posts to the `updateMediaDescriptions` link when no new
+    SDP is needed.
+  - **This app did the opposite.** It offered one audio section and asked the service to
+    accept a NEW `applicationsharing-video` on the `mediaRenegotiation` link. That is what
+    was refused, and the refusal shape fits: the request is accepted and the SECTION is
+    zeroed.
+  - **A CONFERENCE really does add sections mid-call**, which is why receiving works and why
+    the meeting path was never suspect: with `isMultiparty` true the two lines above do not
+    run, `e.video` / `e.sharing` are absent on an audio join, and no video entity is created
+    until somebody asks for one. So this app's existing behaviour is right for a meeting and
+    wrong for a one-to-one — the two need different code, and `call_prepare` now says which
+    kind it reserved (`one_to_one`).
+  - **The 13-section BUNDLE of § 2.5 is a MEETING's**, not every call's:
+    `numVideoChannelsGvc` is what makes it thirteen. A one-to-one is three — audio,
+    `main-video`, `applicationsharing-video` — which is exactly what `LocalSenders.reserve`
+    now offers.
+
+  **What is built from that reading**: `reserve` on the offer path of a one-to-one, `adopt`
+  on the answer path (an incoming offer from a real client already holds the layout, so the
+  sections are claimed from it BY LABEL rather than added), and the activation is the
+  renegotiation this app already had — the section is no longer new, which is the whole
+  point. `updateMediaDescriptions` is NOT implemented: it is the client's optimisation for
+  the same activation, and one thing at a time.
+
+  **It is UNVERIFIED against the tenant**, and it changes the first offer of every
+  one-to-one, which is the path that works today. `cd web && bun run call-live` is what
+  proves it — the offer's own m-lines are in its digest, and the journal now names what the
+  answer granted per section (`calling::media_sections`).
 - Three specific unknowns remain, and the refusal above narrowed none of them:
   - **Whether a `contentSharing` session is needed at all.** § 10.4 says the client opens one,
     with six links and a presenter. But no participant in the measured roster carried a

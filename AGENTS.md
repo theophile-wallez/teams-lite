@@ -1478,6 +1478,28 @@ joins alone and waits for an offer. Six rules hold it together, and
     already takes, since nothing is being sent.
   - **The sentence says the call is still there** (`renegotiationRefusedMessage`). That half is
     load-bearing: the share stopping and an error arriving both say the opposite.
+- **The sections a camera and a screen go out on are negotiated with the CALL, not when
+  somebody presses share — on a ONE-TO-ONE.** That is the real client's own shape and it is
+  why a screen share was refused without it: its `addModalities` forces both modalities
+  `inactive` at the first negotiation of a one-to-one (`numVideoChannels` is 1 there), so
+  every section exists in the FIRST offer and turning a share on ACTIVATES one the service
+  already answered. This app offered one audio section and asked the service to accept a new
+  `applicationsharing-video` mid-call; the service zeroed its port and nothing was ever
+  shown. NATIVE-CALLING.md § 10.8 holds the client's code and the four things it settles.
+  Four rules, and each is pinned by a test:
+  - **A CONFERENCE is the opposite, and its behaviour is unchanged.** With `isMultiparty` the
+    client creates no video entity until one is asked for, so a meeting adds the section
+    mid-call exactly as this app always did. One reaction for both is what was wrong.
+  - **The backend says WHICH** (`call_prepare`'s `one_to_one`), because the RING LIST is what
+    says how many people a call reaches and only the backend fetches it. A conversation id
+    does not answer it, and a backend too old to say reads as `false` — the older behaviour.
+  - **An INCOMING offer is ADOPTED, never added to** (`LocalSenders.adopt`). The far side is a
+    real client, so its offer already holds the layout: the sections are claimed from it BY
+    LABEL (`reservedKindFor`), and a section labelled anything else is never claimed — putting
+    the user's screen on a section the far side described otherwise is the one thing this must
+    not do.
+  - **A reserved section publishes NOTHING.** It is `inactive` and carries no track, so no
+    camera and no screen is opened until the user asks: the consent gate is untouched.
 - **A capture the meeting never ACCEPTED is not one it dropped, and the advice is the whole
   difference.** A section rejected in the answer to the very offer that added it never carried
   anything, so "Share it again" sends the user into the identical refusal — which is what

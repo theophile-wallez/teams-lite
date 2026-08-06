@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { sectionIsStopped } from "./call-media";
+import { reservedKindFor, sectionIsStopped } from "./call-media";
 import { rejectedLabels, SHARING_LABEL } from "./ms-sdp";
 
 // A section the far side DROPPED. The service can reject a section this app offered, and the
@@ -50,5 +50,28 @@ describe("rejectedLabels", () => {
   it("finds nothing in an ordinary offer", () => {
     const sdp = ["v=0", "t=0 0", section("3481", "main-video")].join("\r\n");
     expect(rejectedLabels(sdp).size).toBe(0);
+  });
+});
+
+// The sections a camera and a screen go out on are negotiated with the CALL, not added when
+// somebody presses share: the real client's `addModalities` forces both modalities inactive at
+// the first negotiation of a one-to-one, and this app's screen share was refused by the service
+// for adding one mid-call instead (NATIVE-CALLING.md § 10.8). An INCOMING offer already holds
+// that layout, so the sections are adopted from it — and which one is which is a question only
+// the label answers.
+
+describe("reservedKindFor", () => {
+  it("reads a screen and a camera off their labels", () => {
+    // Both are `m=video`: the kind cannot tell them apart, and the service reads the label.
+    expect(reservedKindFor(SHARING_LABEL)).toBe("screen");
+    expect(reservedKindFor("main-video")).toBe("camera");
+  });
+
+  it("claims nothing else, whatever the section is", () => {
+    // The service labels its audio and its data sections too, and it names sections this app
+    // has never heard of. Sending a screen on one of those would describe the wrong stream.
+    for (const label of ["main-audio", "data", "x-data", "applicationsharing-audio", "", undefined]) {
+      expect(reservedKindFor(label)).toBeUndefined();
+    }
   });
 });

@@ -133,6 +133,15 @@ export type CallPreparation = {
   ice_servers: RTCIceServer[];
   /** The caller's SDP offer. Present only when answering. */
   offer_sdp?: string;
+  /**
+   * Whether this call is between exactly two people.
+   *
+   * It decides how a camera and a screen are negotiated, and the difference is the real
+   * client's own: it reserves both sections in the FIRST offer of a one-to-one and adds them
+   * mid-call in a conference. A backend too old to say it reads as `false`, which is the
+   * behaviour this app already had.
+   */
+  one_to_one?: boolean;
 };
 
 /** The `call_media` event: the far side's SDP, which is the frame that turns a call
