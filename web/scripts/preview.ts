@@ -1898,8 +1898,27 @@ if (import.meta.main) {
       await page.waitForSelector('[data-testid="linear-link-card"]');
       await page.waitForTimeout(600);
       await shot(`${out}-linear-dark.png`);
+      // A PHONE, which is where these are usually read, and the width every line of
+      // a card has to shrink to: the seeded long-shape link — a deep group path, a
+      // branch named after its ticket — is the one that says whether it does. The
+      // thread is opened FIRST and the viewport narrowed after, because below `md`
+      // the chat list is the page and the conversation covers it.
+      await setTheme("light");
+      for (const provider of ["linear", "gitlab"] as const) {
+        await page.setViewportSize(VIEWPORT);
+        await page.waitForTimeout(300);
+        await openConversation(page, provider === "linear" ? "Linear Links" : "GitLab Links");
+        await page.waitForSelector(`[data-testid="${provider}-link-card"]`);
+        await page.waitForTimeout(600);
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(400);
+        await shot(`${out}-${provider}-mobile-light.png`);
+      }
+      await page.setViewportSize(VIEWPORT);
+      await page.waitForTimeout(400);
       console.log(
-        `[preview] wrote ${out}-{linear,gitlab}-light.png and ${out}-{gitlab,linear}-dark.png`,
+        `[preview] wrote ${out}-{linear,gitlab}-light.png, ${out}-{gitlab,linear}-dark.png and ` +
+          `${out}-{linear,gitlab}-mobile-light.png`,
       );
     });
     process.exit(0);

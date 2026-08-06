@@ -1,4 +1,4 @@
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, expect, type Locator, type Page } from "@playwright/test";
 
 // A test fixture that tracks browser console errors and page errors, so specs
 // can assert the app runs clean. Favicon 404s and the React devtools notice are
@@ -642,6 +642,26 @@ export async function fetchTestCalendar(page: Page): Promise<{
   const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/calendar`);
   expect(res.ok()).toBeTruthy();
   return res.json();
+}
+
+/**
+ * Assert a tracker preview card fits the width it was given, in both directions:
+ * its own box stays inside the conversation pane, and its text stays inside its box.
+ * The two are independent failures — a card wider than the pane runs off the side of
+ * a phone, and one whose lines cannot shrink spills its badges past its own edge —
+ * and a long project path, branch or team name is what provokes either.
+ */
+export async function expectCardFitsItsPane(card: Locator, pane: Locator): Promise<void> {
+  const cardBox = await card.boundingBox();
+  const paneBox = await pane.boundingBox();
+  expect(cardBox).not.toBeNull();
+  expect(paneBox).not.toBeNull();
+  // A hair of tolerance for sub-pixel layout, and none for a real overflow.
+  expect(cardBox!.x + cardBox!.width).toBeLessThanOrEqual(paneBox!.x + paneBox!.width + 1);
+  expect(cardBox!.x).toBeGreaterThanOrEqual(paneBox!.x - 1);
+
+  const overflow = await card.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
 }
 
 /** Filter out benign console noise so `consoleErrors` only holds real problems. */

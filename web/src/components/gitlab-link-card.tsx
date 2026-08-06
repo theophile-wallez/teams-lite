@@ -146,6 +146,14 @@ const MAX_LABELS = 4;
  *
  * The card spans its container: alongside text it fills the bubble's width so it
  * lines up with the message body, and on its own the bubble's cap sizes it.
+ *
+ * Every line of it is free to SHRINK, and that is what makes it fit a phone. Each
+ * one holds text with no break in it — a nested group path, a branch name, a label —
+ * so a span left at its natural width raises the whole card's min-content above the
+ * screen: the card then either ran off the side (on its own, where nothing but
+ * `max-w-md` capped it) or spilled its badges out of the bubble that held it. Hence
+ * `min-w-0` on each truncating span, so it may ellipsize, and `break-words` on the
+ * prose, whose longest token is somebody else's to choose.
  */
 export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
   const meta = props.metadata;
@@ -208,24 +216,24 @@ export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
           </div>
 
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-text-faint">
-            <span className="truncate">{meta.project_path}</span>
+            <span className="min-w-0 truncate">{meta.project_path}</span>
             {meta.reference && (
               <>
                 <span aria-hidden>·</span>
-                <span className="font-medium text-text-dim">{meta.reference}</span>
+                <span className="shrink-0 font-medium text-text-dim">{meta.reference}</span>
               </>
             )}
             {meta.author_name && (
               <>
                 <span aria-hidden>·</span>
-                <span className="truncate">{meta.author_name}</span>
+                <span className="min-w-0 truncate">{meta.author_name}</span>
               </>
             )}
           </div>
 
           {meta.source_branch && meta.target_branch && (
             <div className="flex items-center gap-1 text-[11px] text-text-faint">
-              <code className="rounded bg-element px-1 py-0.5 font-mono text-[10px] text-text-dim">
+              <code className="min-w-0 truncate rounded bg-element px-1 py-0.5 font-mono text-[10px] text-text-dim">
                 {meta.source_branch}
               </code>
               <HugeiconsIcon
@@ -233,27 +241,27 @@ export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
                 className="size-3 shrink-0"
                 strokeWidth={1.6}
               />
-              <code className="rounded bg-element px-1 py-0.5 font-mono text-[10px] text-text-dim">
+              <code className="min-w-0 truncate rounded bg-element px-1 py-0.5 font-mono text-[10px] text-text-dim">
                 {meta.target_branch}
               </code>
             </div>
           )}
 
           {meta.description && (
-            <p className="line-clamp-2 text-xs text-text-dim">{meta.description}</p>
+            <p className="line-clamp-2 break-words text-xs text-text-dim">{meta.description}</p>
           )}
 
           {(labels.length > 0 || meta.milestone) && (
             <div className="flex flex-wrap items-center gap-1 pt-0.5">
               {meta.milestone && (
-                <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                <span className="min-w-0 truncate rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
                   {meta.milestone}
                 </span>
               )}
               {labels.slice(0, MAX_LABELS).map((label) => (
                 <span
                   key={label}
-                  className="rounded bg-element px-1.5 py-0.5 text-[10px] text-text-dim"
+                  className="min-w-0 truncate rounded bg-element px-1.5 py-0.5 text-[10px] text-text-dim"
                 >
                   {label}
                 </span>

@@ -87,6 +87,10 @@ const MAX_LABELS = 3;
  *
  * The card spans its container: alongside text it fills the bubble's width so it
  * lines up with the message body, and on its own the bubble's cap sizes it.
+ *
+ * Every line of it is free to SHRINK, for the reason GitLabLinkCard's own comment
+ * gives: the source line below is a run of unbreakable names, and one left at its
+ * natural width raises the card's min-content past a phone's screen.
  */
 export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
   const meta = props.metadata;
@@ -177,11 +181,15 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-text-faint">
             <LinearLogo title="Linear" className="size-3 shrink-0" />
             {context.map((part, index) => (
-              <span key={`${part}-${index}`} className="flex items-center gap-1.5">
-                {index > 0 && <span aria-hidden>·</span>}
+              <span key={`${part}-${index}`} className="flex min-w-0 items-center gap-1.5">
+                {index > 0 && (
+                  <span aria-hidden className="shrink-0">
+                    ·
+                  </span>
+                )}
                 <span
                   className={cn(
-                    "truncate",
+                    "min-w-0 truncate",
                     // The identifier is the handle people speak in ("ENG-123"),
                     // so it reads a step stronger than the rest of the line.
                     part === meta.identifier && "font-medium text-text-dim",
@@ -201,12 +209,12 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
                 strokeWidth={1.6}
                 aria-hidden
               />
-              <span className="truncate">Sub-issue of {meta.parent}</span>
+              <span className="min-w-0 truncate">Sub-issue of {meta.parent}</span>
             </div>
           )}
 
           {meta.description && (
-            <p className="line-clamp-2 text-xs text-text-dim">{meta.description}</p>
+            <p className="line-clamp-2 break-words text-xs text-text-dim">{meta.description}</p>
           )}
 
           {percent !== null && (
@@ -237,7 +245,7 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
               {due && (
                 <span
                   data-testid="linear-due"
-                  className="rounded bg-element px-1.5 py-0.5 text-[10px] font-medium text-text-dim"
+                  className="shrink-0 rounded bg-element px-1.5 py-0.5 text-[10px] font-medium text-text-dim"
                 >
                   {due}
                 </span>
@@ -247,7 +255,7 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
                 return (
                   <span
                     key={label.name}
-                    className="flex items-center gap-1 rounded bg-element px-1.5 py-0.5 text-[10px] text-text-dim"
+                    className="flex min-w-0 items-center gap-1 rounded bg-element px-1.5 py-0.5 text-[10px] text-text-dim"
                   >
                     {labelColor && (
                       <span
@@ -256,7 +264,7 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
                         aria-hidden
                       />
                     )}
-                    {label.name}
+                    <span className="min-w-0 truncate">{label.name}</span>
                   </span>
                 );
               })}

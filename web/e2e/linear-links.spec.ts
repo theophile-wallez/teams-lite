@@ -1,4 +1,4 @@
-import { test, expect, gotoApp, realErrors } from "./helpers";
+import { test, expect, expectCardFitsItsPane, gotoApp, realErrors } from "./helpers";
 import type { Page } from "@playwright/test";
 
 /** Open a conversation by name via the command palette — robust to sidebar
@@ -16,6 +16,10 @@ async function openByPalette(page: Page, name: string): Promise<void> {
 const ISSUE_HREF = "https://linear.app/acme/issue/ENG-1/show-linear-links-as-cards";
 const PROJECT_HREF = "https://linear.app/acme/project/chat-integrations-a05573177921";
 const DOCUMENT_HREF = "https://linear.app/acme/document/link-previews-ebc85c4d4d74";
+/** The seeded issue whose title, team and project are as long as a real workspace's
+ *  (mirrors LONG_LINEAR_ISSUE in the mock) — the card a phone's width has to hold. */
+const LONG_ISSUE_HREF =
+  "https://linear.app/acme/issue/ENG-247/freeze-every-action-on-an-archived-trace";
 
 test.describe("Linear rich link previews", () => {
   test("renders cards for an issue, a project, and a document", async ({
@@ -26,9 +30,10 @@ test.describe("Linear rich link previews", () => {
     await openByPalette(page, "Linear Links");
 
     const cards = page.locator('[data-testid="linear-link-card"]');
-    // Four seeded links (issue + project + document in sentences, plus a bare
-    // issue) → four cards, populated by the backend `enrich_link`.
-    await expect.poll(() => cards.count(), { timeout: 10_000 }).toBe(4);
+    // Five seeded links (issue + project + document in sentences, plus a bare
+    // issue and the long-shape one) → five cards, populated by the backend
+    // `enrich_link`.
+    await expect.poll(() => cards.count(), { timeout: 10_000 }).toBe(5);
 
     const issue = page.locator(`[data-testid="linear-link-card"][href="${ISSUE_HREF}"]`);
     await expect(issue).toHaveAttribute("data-kind", "issue");
@@ -53,7 +58,7 @@ test.describe("Linear rich link previews", () => {
     // tracker a card came from — GitLab's card shares this frame on purpose. It is
     // named for a screen reader, and it renders even on a document, whose source
     // line carries nothing else.
-    await expect(cards.locator('[data-testid="linear-logo"]')).toHaveCount(4);
+    await expect(cards.locator('[data-testid="linear-logo"]')).toHaveCount(5);
     await expect(document.getByRole("img", { name: "Linear" })).toHaveCount(1);
 
     expect(realErrors(consoleErrors)).toEqual([]);
@@ -107,8 +112,8 @@ test.describe("Linear rich link previews", () => {
     // The bare-link message renders with no bubble chrome (data-link-only), and
     // holds the integration card.
     const linkOnly = page.locator('[data-testid="message"][data-link-only="true"]');
-    await expect(linkOnly).toHaveCount(1);
-    await expect(linkOnly.locator('[data-testid="linear-link-card"]')).toHaveCount(1);
+    await expect(linkOnly).toHaveCount(2);
+    await expect(linkOnly.locator('[data-testid="linear-link-card"]')).toHaveCount(2);
 
     // A message that has surrounding text keeps its bubble (not link-only).
     const issueCard = page.locator(`[data-testid="linear-link-card"][href="${ISSUE_HREF}"]`);
@@ -123,14 +128,46 @@ test.describe("Linear rich link previews", () => {
     await openByPalette(page, "GitLab Links");
     await expect
       .poll(() => page.locator('[data-testid="gitlab-link-card"]').count(), { timeout: 10_000 })
-      .toBe(4);
+      .toBe(5);
     await expect(page.locator('[data-testid="linear-link-card"]')).toHaveCount(0);
 
     await openByPalette(page, "Linear Links");
     await expect
       .poll(() => page.locator('[data-testid="linear-link-card"]').count(), { timeout: 10_000 })
-      .toBe(4);
+      .toBe(5);
     await expect(page.locator('[data-testid="gitlab-link-card"]')).toHaveCount(0);
+  });
+});
+
+// The same rule as GitLab's card, because the two share one frame on purpose: the
+// context line (identifier · team · project · owner) is unbreakable text, so a card
+// that cannot shrink it runs off the side of a phone with its state pill.
+test.describe("Linear card at phone width", () => {
+  // A phone's viewport, and only the viewport — see the GitLab spec's twin of this.
+  test.use({ viewport: { width: 412, height: 915 } });
+
+  test("the long-shape card fits the conversation, state pill and all", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Linear Links");
+
+    const card = page.locator(`[data-testid="linear-link-card"][href="${LONG_ISSUE_HREF}"]`);
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("ENG-247");
+    await expect(card.locator('[data-testid="linear-state"]')).toBeVisible();
+
+    await expectCardFitsItsPane(card, page.locator('[data-testid="message-pane"]'));
+  });
+
+  test("every card in the thread fits, not only the long one", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Linear Links");
+
+    const pane = page.locator('[data-testid="message-pane"]');
+    const cards = page.locator('[data-testid="linear-link-card"]');
+    await expect.poll(() => cards.count(), { timeout: 10_000 }).toBe(5);
+    for (let i = 0; i < 5; i += 1) {
+      await expectCardFitsItsPane(cards.nth(i), pane);
+    }
   });
 });
 
@@ -181,6 +218,6 @@ test.describe.serial("Linear settings", () => {
     await openByPalette(page, "Linear Links");
     await expect
       .poll(() => page.locator('[data-testid="linear-link-card"]').count(), { timeout: 10_000 })
-      .toBe(4);
+      .toBe(5);
   });
 });

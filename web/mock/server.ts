@@ -1732,6 +1732,20 @@ function seedGitLabSamples(): void {
     },
     180_000,
   );
+  // The same shape again, at the length real merge requests reach (see
+  // LONG_GITLAB_PATH): the card has to fit a phone, so every line of it must be
+  // free to shrink.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        `<a href="https://gitlab.com/${LONG_GITLAB_PATH}/-/merge_requests/6">` +
+        `https://gitlab.com/${LONG_GITLAB_PATH}/-/merge_requests/6</a>`,
+      is_self: false,
+    },
+    240_000,
+  );
 
   const conv: Conversation = {
     id: convId,
@@ -1817,6 +1831,19 @@ function seedLinearSamples(): void {
       is_self: true,
     },
     180_000,
+  );
+  // The same shape at the length a real workspace reaches (see LONG_LINEAR_ISSUE):
+  // this card shares its frame with GitLab's, so it has to fit a phone the same way.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        `<a href="https://linear.app/acme/issue/${LONG_LINEAR_ISSUE}/freeze-every-action-on-an-archived-trace">` +
+        `https://linear.app/acme/issue/${LONG_LINEAR_ISSUE}/freeze-every-action-on-an-archived-trace</a>`,
+      is_self: false,
+    },
+    240_000,
   );
 
   const conv: Conversation = {
@@ -3379,12 +3406,19 @@ function parseGitLabUrl(url: string, host: string): ParsedGitLab | null {
   return { kind: "project", project_path: segments.join("/") };
 }
 
+/** The one seeded project whose every field is as long as a real one's: a deeply
+ *  nested group path, a branch named after its ticket, a sentence for a title. The
+ *  other fixtures are short enough to fit any width, so they said nothing about a
+ *  phone — and a card whose text cannot shrink is what ran off the side of one. */
+const LONG_GITLAB_PATH = "acme/platform/infrastructure/dlq-to-dynamodb-lambda";
+
 /** Deterministic metadata for a parsed GitLab URL — canned, but varied by iid so
  *  the UI shows realistic, distinct cards without any tenant. */
 function mockGitLabMetadata(url: string): Record<string, unknown> | null {
   const parsed = parseGitLabUrl(url, mockSettings.gitlab_host || "gitlab.com");
   if (!parsed) return null;
   const { project_path } = parsed;
+  const long = project_path === LONG_GITLAB_PATH;
 
   if (parsed.kind === "merge_request") {
     const iid = parsed.iid!;
@@ -3396,14 +3430,16 @@ function mockGitLabMetadata(url: string): Record<string, unknown> | null {
       provider: "gitlab",
       kind: "merge_request",
       url,
-      title: `Add rich link previews for GitLab (!${iid})`,
+      title: long
+        ? `feat: add better testing and error handling to the replay lambda (!${iid})`
+        : `Add rich link previews for GitLab (!${iid})`,
       project_path,
       reference: `!${iid}`,
       state,
       draft: iid % 5 === 0,
-      author_name: "Ada Lovelace",
-      source_branch: "feat/gitlab-rich-links",
-      target_branch: "main",
+      author_name: long ? "Clément DELBARRE" : "Ada Lovelace",
+      source_branch: long ? "feature/error-handling-and-test" : "feat/gitlab-rich-links",
+      target_branch: long ? "master" : "main",
       labels: ["frontend", "enhancement"],
       milestone: "v1.0",
       description: "Render GitLab links in chat as rich cards with title, state, and author.",
@@ -3526,6 +3562,11 @@ function parseLinearUrl(url: string): ParsedLinear | null {
   return /^[0-9a-f]{8,36}$/.test(slugId) ? { kind, id: slugId } : null;
 }
 
+/** The Linear twin of LONG_GITLAB_PATH: the one seeded issue whose title, team and
+ *  project are as long as a real workspace's, since that context line is what a
+ *  phone-width card has to shrink. */
+const LONG_LINEAR_ISSUE = "ENG-247";
+
 /** Deterministic metadata for a parsed Linear URL — canned, but varied by the
  *  issue number so the UI shows realistic, distinct cards without any workspace.
  *  Returns null when no key is configured, matching the real module: Linear has no
@@ -3536,6 +3577,7 @@ function mockLinearMetadata(url: string): Record<string, unknown> | null {
 
   if (parsed.kind === "issue") {
     const number = Number(parsed.id.split("-").pop());
+    const long = parsed.id === LONG_LINEAR_ISSUE;
     // One issue per state category, so every icon and tint is exercised.
     const states = [
       { name: "Backlog", type: "backlog", color: "#bec2c8" },
@@ -3550,16 +3592,18 @@ function mockLinearMetadata(url: string): Record<string, unknown> | null {
       kind: "issue",
       url,
       identifier: parsed.id,
-      title: `Show Linear links as rich cards (${parsed.id})`,
-      team: "Engineering",
+      title: long
+        ? `Freeze every action on an archived trace, replay included (${parsed.id})`
+        : `Show Linear links as rich cards (${parsed.id})`,
+      team: long ? "Platform infrastructure" : "Engineering",
       state: state.name,
       state_type: state.type,
       state_color: state.color,
-      assignee_name: "Ada Lovelace",
+      assignee_name: long ? "Clément DELBARRE" : "Ada Lovelace",
       // ENG-1 is urgent, ENG-2 high, the rest unbadged — see `badgedPriority`.
       priority: number % 5,
       priority_label: ["No priority", "Urgent", "High", "Medium", "Low"][number % 5],
-      project: "Chat integrations",
+      project: long ? "Dead-letter queue replay pipeline" : "Chat integrations",
       ...(number % 3 === 0 ? { parent: "ENG-100" } : {}),
       labels: [
         { name: "frontend", color: "#bb87fc" },

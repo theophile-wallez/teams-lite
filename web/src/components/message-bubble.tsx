@@ -694,7 +694,14 @@ function MessageBubbleImpl(props: {
         style={{ x: messageGestures.x, touchAction: "pan-y" }}
         {...messageGestures.handlers}
         className={cn(
-          "relative text-sm leading-relaxed",
+          // `min-w-0` is what keeps a bubble inside the row it sits in. Every width
+          // below is a MAXIMUM, so a bubble is otherwise sized by its content — and a
+          // flex item's automatic minimum is its content's min-content width, which
+          // for a tracker card is the longest group path or branch it holds. On a
+          // phone that floor was above the screen: the card kept its 28rem and its
+          // state and pipeline badges were cut off at the edge. With the floor gone
+          // the bubble shrinks to the row and the card's own lines shrink with it.
+          "relative min-w-0 text-sm leading-relaxed",
           // Media- and link-only messages drop the standard bubble chrome; the
           // link card / atelier mat / recording card (below) becomes the surface.
           // A link card gets a tighter max width; the mat is capped at the usual
