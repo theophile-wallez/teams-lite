@@ -500,6 +500,38 @@ html[data-virtual-keyboard-open] .composer-shell {
   }
 }
 
+/* The bubble's own edge catching the light while a run is going (see
+   components/ui/shine-border.tsx). It says the same thing the breathing mark does, in
+   the one place that covers the whole message: a reader who has scrolled the signature
+   out of the top of a long answer still sees which bubble is being written into.
+
+   Only the BACKGROUND moves. The element is masked down to the bubble's hairline and the
+   gradient slides across it, so the box never changes size — which is what lets it run
+   inside a virtualized history without moving the conversation. */
+.shine-border {
+  animation: teams-shine-border var(--shine-duration, 6s) linear infinite;
+  will-change: background-position;
+}
+@keyframes teams-shine-border {
+  0% {
+    background-position: 0% 0%;
+  }
+  50% {
+    background-position: 100% 100%;
+  }
+  100% {
+    background-position: 0% 0%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Held still, the sweep is a smear of colour over one corner rather than a light
+     travelling round an edge — so it is not drawn at all, and the bubble keeps the
+     static hairline it already has. */
+  .shine-border {
+    display: none;
+  }
+}
+
 /* The caret at the end of an answer that is still arriving. It rides the body's last
    block as a pseudo-element, which is what puts it after the final word instead of on
    a line of its own — no marker element in the text, nothing to strip out on copy. */

@@ -15,6 +15,7 @@ import { agentDisplayName, type AgentBackendName } from "~/lib/agent-message";
 import { cn } from "~/lib/utils";
 import { AgentCoin } from "./agent-logo";
 import { RichContent } from "./rich-content";
+import { ShineBorder } from "./ui/shine-border";
 
 /**
  * The agent's reply, as this app draws it.
@@ -753,8 +754,14 @@ export function AgentPendingBubble(props: {
         initial={reduce ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.98 }}
         animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0, scale: 1 }}
         transition={{ duration: 0.24, ease: [0.2, 0.65, 0.3, 0.9] }}
-        className="max-w-[76%] rounded-2xl bg-bubble-incoming px-3.5 py-2 text-sm leading-relaxed text-bubble-incoming-foreground shadow-card ring-1 ring-inset ring-primary/15"
+        className="relative max-w-[76%] rounded-2xl bg-bubble-incoming px-3.5 py-2 text-sm leading-relaxed text-bubble-incoming-foreground shadow-card ring-1 ring-inset ring-primary/15"
       >
+        {/* The same edge the posted message's bubble lights while a run writes into it
+            (see the mount in message-bubble.tsx). This row is replaced by that bubble the
+            moment Teams echoes the placeholder back, and a light that started only then
+            would draw attention to a swap the user is not meant to see. */}
+        {agentRunIsLive(props.run) ? <ShineBorder data-testid="agent-shine" /> : null}
+
         {/* The same shape a real bubble has, down to the signature sitting inside it —
             this row is replaced by the posted message the moment it arrives, and a
             different layout would make that swap visible. */}

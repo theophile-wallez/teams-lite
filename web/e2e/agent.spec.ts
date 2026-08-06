@@ -206,6 +206,31 @@ test.describe("The local agent's answer", () => {
     });
     await expect(bubble).toHaveAttribute("data-mine", "false");
 
+    // The bubble's own edge catches the light while the run writes into it. It is inside
+    // the bubble and takes its radius, so it is the message's own hairline rather than a
+    // box around it — and its box is measured against the bubble's, because a shine that
+    // laid out at any other size would be a second, misaligned ring.
+    const shine = bubble.locator('[data-testid="agent-shine"]');
+    await expect(shine).toHaveCount(1);
+    const rings = await page.evaluate(`(() => {
+      const el = document.querySelector('[data-testid="agent-shine"]');
+      const box = (n) => { const r = n.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; };
+      return JSON.stringify({
+        shine: box(el),
+        bubble: box(el.closest('[data-testid="message"]')),
+        radius: getComputedStyle(el).borderTopLeftRadius,
+        parentRadius: getComputedStyle(el.closest('[data-testid="message"]')).borderTopLeftRadius,
+      });
+    })()`);
+    const ring = JSON.parse(rings) as {
+      shine: number[];
+      bubble: number[];
+      radius: string;
+      parentRadius: string;
+    };
+    expect(ring.shine).toEqual(ring.bubble);
+    expect(ring.radius).toBe(ring.parentRadius);
+
     // A tool call is named while it runs, which is the whole point of streaming the run
     // rather than only the text. `.first()` is the run's FIRST call: every call keeps its
     // row (see the transcript test below), so the list only ever grows.
@@ -242,6 +267,9 @@ test.describe("The local agent's answer", () => {
     await expect(page.locator('[data-testid="agent-status"]')).toHaveCount(0, {
       timeout: 20_000,
     });
+    // And the light goes with it: nothing is arriving into that bubble any more, and an
+    // edge that kept moving would promise a word that is never coming.
+    await expect(page.locator('[data-testid="agent-shine"]')).toHaveCount(0);
     // The signature names both halves of the authorship: the CLI that wrote the words,
     // and the account they went out under.
     const signature = page.locator('[data-testid="agent-signature"]');

@@ -61,6 +61,7 @@ import {
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
+import { ShineBorder } from "./ui/shine-border";
 import { FileAttachment, MediaImage, RecordingAttachment } from "./media-image";
 import { GitLabLinkCard } from "./gitlab-link-card";
 import { LinearLinkCard } from "./linear-link-card";
@@ -468,6 +469,12 @@ function MessageBubbleImpl(props: {
   // answer.
   const bare = !isDeleted && !agent && (linkOnly || imageOnly || recordingOnly || cardOnly);
 
+  // A run is writing into this message right now. It is read from the RUN and never from
+  // the stored body: a reply that stopped mid-answer says so (`agent.pending`), but
+  // nothing is arriving into it any more, and every indicator here is about words on
+  // their way.
+  const streaming = !!props.agentRun && agentRunIsLive(props.agentRun);
+
   // Only label the first message of a same-author run; continuations are clearly
   // from the same person. A message with no sender (e.g. a meeting recording,
   // whose only author hint is a bare contacts URL the backend drops) shows no
@@ -725,6 +732,12 @@ function MessageBubbleImpl(props: {
           setMenuOpen(true);
         }}
       >
+        {/* The bubble's own hairline catches the light for as long as the answer is being
+            written into it. It says what the breathing mark says, in the one place that
+            covers the whole message: on a long answer the signature scrolls out of the
+            top of the bubble, and the edge is still there to say which message is live. */}
+        {streaming ? <ShineBorder data-testid="agent-shine" /> : null}
+
         {!props.editing && !inert ? (
           <motion.span
             aria-hidden

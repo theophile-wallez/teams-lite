@@ -105,7 +105,7 @@ the answer so far, the phase, the tool in flight, and the TRANSCRIPT — the mod
 reasoning and every tool call, interleaved in the order they happened (`agent::Step`). The
 web UI renders it word by word under the CLI's own mark (`web/src/components/agent-reply.tsx`
 and `agent-logo.tsx`, over `web/src/lib/agent-run.ts` and `agent-markdown.ts` — a port
-of the Rust markdown subset, pinned to it case for case by its tests). Six rules hold
+of the Rust markdown subset, pinned to it case for case by its tests). Seven rules hold
 that surface together:
 
 - **The stream is an overlay on the posted message, never a message of its own.** The
@@ -129,6 +129,20 @@ that surface together:
   through their account and a colleague sees their name on it — but they did not write
   it, and putting it beside the things they did write is the one place this app would be
   lying to the person it belongs to.
+- **The bubble's own EDGE says a run is live** (`ShineBorder`, in
+  `web/src/components/ui/shine-border.tsx` after magicui's component of that name, drawn
+  from `.shine-border` in `web/src/styles/app.css`). It is the hairline the agent's bubble
+  already wears, with a light travelling round it — the same fact the breathing mark carries,
+  in the one place that covers the whole message: on a long answer the signature scrolls out
+  of the top of the bubble and the edge is still there to say which message is being written
+  into. Four things hold it, and `web/e2e/agent.spec.ts` pins each: it is drawn from the
+  RUN and never from the stored body, so a reply that stopped mid-answer keeps its static
+  ring (nothing is arriving into it, and a moving edge would promise a word that is never
+  coming); it goes when the run does, like every other part of the overlay; only the
+  BACKGROUND moves — the element is masked down to the ring and the gradient slides across
+  it, so a message in a virtualized history is never re-laid-out by it; and it is not drawn
+  at all under `prefers-reduced-motion`, because held still the sweep is a smear of colour
+  over one corner rather than a light going round an edge.
 - **The work is a transcript: it is OPEN for the whole run, and folded once the run ENDS.**
   The reasoning streams into a panel above the answer, at the pace the answer is revealed
   at, with a row per tool call in place — so a reader watches the run being worked out. It
