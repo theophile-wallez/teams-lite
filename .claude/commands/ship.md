@@ -14,7 +14,7 @@ You are on a feature branch inside a worktree. Drive this to completion autonomo
 
 2. **Commit the open work.** Stage the files of the task and write a conventional-commit message. No AI attribution, no `Co-Authored-By` line. The tree must be clean before the merge.
 
-3. **Run the project's checks — this is the gate.** Match their scope to the scope of your change; `AGENTS.md` § Tests is the authority, and this is its short form:
+3. **Run the project's checks — this is the gate.** Match their scope to the scope of your change; `AGENTS.md` § Git workflow is the authority, and this is its short form:
    - Backend (`src/`, Rust): `cargo test`.
    - Web app (`web/`): `bun run test` and `bun run typecheck`; add `bun run test:e2e` when behavior or a flow changes.
    - The `teams` command (`launcher/`): `bun test` and `bun run typecheck`.

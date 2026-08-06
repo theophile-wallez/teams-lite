@@ -3630,6 +3630,23 @@ and `the_store_opens_before_sign_in_and_a_broken_sign_in_is_not_fatal` pins it.
   and report what failed.
 - This is a convention the agent follows, not an enforced guarantee — the
   authoritative check that keeps `master` green belongs in CI or a pre-push hook.
+- **`/ship` is that whole sequence in one command** (`.claude/commands/ship.md`):
+  commit the open work, run the checks above as the gate, fast-forward `master` onto
+  the rebased branch, push, then clean up. It refuses to run from the main checkout,
+  and it never squashes, never force-pushes `master` and never touches a third branch.
+  Two things about it are worth knowing before it is used:
+  - **The gate is the only thing between a commit and three people's Teams client.**
+    A push to `master` republishes the rolling `latest` release, so the update button
+    offers that commit to every install and the always-on service re-stages itself from
+    the checkout (see § Updating the app from inside it and § The always-on service).
+    `master` is not a staging area here — a red check is where the command stops.
+  - **A worktree under `~/.t3/worktrees/` is KEPT, and its build artifacts are pruned
+    instead.** T3 Code owns that directory and re-spawns the agent with the same working
+    directory on every turn, so removing it kills the thread on the next message. The
+    merge and the push are the point; the cleanup is not. What the kept worktree does
+    give up is its build cache (`.claude/scripts/prune-worktree-artifacts.sh`) — twenty
+    of them once filled a 98 GB disk with 53 GB of `target/` alone — so the next build
+    in it is a cold one.
 
 ## Working style (MANDATORY)
 
