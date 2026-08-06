@@ -240,3 +240,36 @@ export const SPLIT_MIN_WIDTH = 900;
 export function effectiveDiffLayout(preferred: DiffLayout, width: number): DiffLayout {
   return width < SPLIT_MIN_WIDTH ? "unified" : preferred;
 }
+
+// ---- the page's own two columns ---------------------------------------------
+
+/** Which of the page's two columns is on screen, when only one can be.
+ *
+ *  `files` is the tree, `patch` is the file it picked. On a wide screen the question does not
+ *  arise — both are up — and `diffPageColumns` says so. */
+export type DiffColumn = "files" | "patch";
+
+/** Where the page stops being two columns and becomes one page then another.
+ *
+ *  The app's own `md` breakpoint, and deliberately the same number: below it every surface in
+ *  this app is a list that a detail takes the screen from (see `paneOpen` in
+ *  `components/app.tsx`), and a diff is a list of files and one file. A tree beside a patch at
+ *  390 px is a 120 px column of truncated paths next to eight characters of code. */
+export const DIFF_COLUMNS_MIN_WIDTH = 768;
+
+/** What the page draws at this width: both columns, or the one named.
+ *
+ *  Returning the pair rather than a boolean is what keeps the decision in one place — the
+ *  header's Back control, the tree's own visibility and the patch's are three readings of one
+ *  answer, and three `width >=` comparisons would eventually disagree. */
+export function diffPageColumns(
+  width: number,
+  column: DiffColumn,
+): { files: boolean; patch: boolean; narrow: boolean } {
+  // Width 0 is the first paint, before anything is measured. It resolves to the FILES column
+  // alone, which is the honest opening state of a page whose subject the reader has not picked
+  // yet — and never to a patch drawn at a width nothing has measured.
+  const narrow = width < DIFF_COLUMNS_MIN_WIDTH;
+  if (!narrow) return { files: true, patch: true, narrow };
+  return { files: column === "files", patch: column === "patch", narrow };
+}

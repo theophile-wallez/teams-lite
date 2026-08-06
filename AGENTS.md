@@ -675,11 +675,11 @@ real GitLab project**: doing that is the user's own click, in their own app.
 ## The GitLab page (a sidebar of merge requests, and the four writes it offers)
 
 The sidebar's fifth tab is GitLab: the merge requests that are **not merged**, and one of
-them in full — its description, its live pipeline, its approvals, its **diff** and its
-comments — with the actions GitLab's own page offers. `src/gitlab_mr.rs` holds every READ,
-`src/gitlab_mr_write.rs` the four writes, `web/src/lib/gitlab-mr.ts` the pure decisions the
-surface is built from (`gitlab-diff.ts` the diff's own), and
-`web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
+them in full — its description, its live pipeline, its approvals, its comments — with the actions
+GitLab's own page offers, and its **diff** on a full-screen page of its own (§ The DIFF is a PAGE).
+`src/gitlab_mr.rs` holds every READ, `src/gitlab_mr_write.rs` the four writes,
+`web/src/lib/gitlab-mr.ts` the pure decisions the surface is built from (`gitlab-diff.ts` the
+diff's own), and `web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
 
 **The split between the two backend modules is the whole safety story**, and it is the one
 in § The trackers: reading a tracker is what the feature is for, and writing to one is the
@@ -884,15 +884,58 @@ a `---` disappeared. Four things follow, and each is pinned by a test:
   nothing. Its interval (6 s) sits ABOVE the backend's 5 s window on purpose: below it, every
   poll would be served the same cached answer and the panel would look frozen.
 
-### The DIFF (a tree of files, and one of them read in full)
+### The DIFF is a PAGE of its own (`/mr/<id>/diff`)
 
-The Changes section is the diff: the changed files as a TREE on the left, one of them
-highlighted on the right. It is the one part of this app drawn by somebody else's renderer —
+The diff takes the WHOLE screen: the changed files down an inner left sidebar, one of them read
+on the right. It is the one part of this app drawn by somebody else's renderer —
 **`@pierre/trees`** for the tree ([trees.software](https://trees.software)) and
 **`@pierre/diffs`** for the patch ([diffs.com](https://diffs.com), Shiki underneath) — and the
 seam is where all the care is. `src/gitlab_mr.rs` holds the read and WRITES the patch,
-`web/src/lib/gitlab-diff.ts` every pure decision, `web/src/components/gitlab-changes.tsx` the
-section, and `gitlab-diff-view.tsx` the whole of this app's contact with either package.
+`web/src/lib/gitlab-diff.ts` every pure decision, `web/src/components/gitlab-diff-page.tsx` the
+page, `gitlab-changes.tsx` the one-line summary and the way in on the merge request above it,
+and `gitlab-diff-view.tsx` the whole of this app's contact with either package.
+
+**It is a page rather than a panel, and that shape is the point.** The diff was a section inside
+the merge request's scrolling article first, and that was wrong twice over: a 149-file tree and a
+900-line patch have no room inside a column that also carries a description, a pipeline, the
+actions and a conversation — and it put Shiki on the path of every merge request anybody opened,
+whether or not they meant to read code. Five rules follow, and `web/e2e/gitlab.spec.ts` pins
+each:
+
+- **A ROUTE, never a piece of state** (`routes/_app.mr.$mergeRequestId.diff.tsx`, which makes the
+  merge-request route a layout with an `index` and a `diff` child). Three things come with the
+  URL and none is available to a `useState`: it survives a reload, it can be sent to a colleague,
+  and the browser's own Back leaves it. The shell draws it INSTEAD of the sidebar and the pane
+  (`onDiffRoute` in `components/app.tsx`) rather than over them, so there is no overlay to
+  dismiss and no third column competing with its own two.
+- **Each column scrolls ITSELF, and the page never scrolls.** The header stays, the tree keeps
+  its place while a patch is read, and a file picked after ten minutes of scrolling does not put
+  the reader back at the top of anything. That is what the `h-full` / `min-h-0` chain down both
+  columns is for.
+- **A narrow screen is ONE column at a time** (`diffPageColumns`, at the app's own `md`
+  breakpoint): the files, then the file, with the header's own Back between them — the
+  list-then-detail shape every other surface in this app takes below `md`. It OPENS on the files,
+  because that is the question a diff asks first. Narrowing a window mid-read keeps the PATCH,
+  because taking away what somebody is reading is the one thing a resize must not do.
+- **ONE header names the file, and it is pierre's over a patch.** Theirs is inside the scroller,
+  sticky, and it already shows both names of a renamed file — the first capture of this page had
+  two headers three centimetres apart saying the same thing. What theirs cannot know, GitLab's
+  own `generated_file`, goes into the `renderHeaderMetadata` slot they publish for it (the REACT
+  prop — the `options` key of that name returns a DOM node). A file with NO patch has no header
+  of theirs at all, so the page draws its own over the sentence that stands in for the code.
+  `disableFileHeader: true` was tried the other way round and collapses their container to
+  nothing.
+- **The PANE states which file it holds** (`data-path` on `gitlab-diff-pane`), whatever draws
+  that file's name. One place to read "what is on screen" from — the sentinel discipline the
+  composer already follows for its conversation, and what every test and capture waits on.
+
+**A reflection is not a press, and that is what made the page reachable on a phone.** Lighting
+the row of the file already shown is a UI reflection; a reader pressing a row is a navigation —
+and pierre reports both through one `onSelectionChange`, off a store subscription that can fire a
+tick later. So the tree remembers the one path it selected itself and consumes it once
+(`reflected` in `gitlab-diff-view.tsx`); a synchronous flag would miss it. Without that guard
+Back showed the files, mounting the tree reflected the selection, the reflection came back as a
+press, and the patch took the screen again in the same frame — the files were unreachable.
 
 **Every fact below was measured against the real instance** by
 `examples/merge_request_diff_recon.rs` — READ-ONLY, over 508 files on the 25 newest open merge
@@ -929,7 +972,7 @@ So four of the five states a file arrives in have NO patch, and each says someth
 because the reader's next move differs. That is `diffFileState`, and it is why the section's
 decisions are pure and testable without loading a megabyte of highlighter to make them.
 
-Seven more rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
+Seven more rules hold the RENDERERS, and `web/e2e/gitlab.spec.ts` pins each:
 
 - **The renderer is a LAZY chunk, and that is load-bearing.** `@pierre/diffs` carries Shiki,
   which resolves a TextMate grammar per language as a dynamic import — measured at a 728 KB
@@ -959,33 +1002,36 @@ Seven more rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
   chevron is the DOWN one, because pierre rotates it `-90deg` on a collapsed row.
 - **The tree model is created ONCE and mutated.** A new diff — the expanded read, another merge
   request — is `resetPaths` + `setGitStatus` on the one model, which is what keeps the reader's
-  folds and their scroll position across it. It needs an explicit HEIGHT rather than a
-  `max-height`: it virtualizes its rows, so it measures its box before drawing any, and a box
-  with only a max measures zero — which drew an empty column the width of a tree.
+  folds and their scroll position across it. It virtualizes its rows, so it measures its own box
+  before drawing any: a box with only a `max-height` measures zero, which drew an empty column
+  the width of a tree. On the page it takes `h-full` and the COLUMN bounds it.
 - **A narrow screen is always UNIFIED** (`effectiveDiffLayout`, `SPLIT_MIN_WIDTH`). Split needs
   two columns of code and this app is read from a phone, where 390px is two columns of eight
   characters. The preference is kept and persisted per browser; it simply cannot apply there,
   and the toggle is not drawn at all — a control that changes nothing reads as a bug.
-- **A diff that cannot be read costs THIS panel and nothing else** — the contract the comments
-  already hold. And the way out to GitLab's own `/diffs` stays whatever this page can draw: a
-  file GitLab will not expand, a merge request past 100 files and a review comment on a line
-  this page does not show are all reasons a reader still wants theirs.
+- **A diff that cannot be read costs the Changes PANEL and nothing else** on the merge request —
+  the contract the comments already hold — and no press is offered into an empty page. On the diff
+  page itself the failure IS the whole screen, because there is no other content to fall back on,
+  and it offers the one thing left. The way out to GitLab's own `/diffs` stays whatever this app
+  can draw: a file GitLab will not expand, a merge request past 100 files and a review comment on
+  a line the page does not show are all reasons a reader still wants theirs.
 
-The diff is read WITH the page, as a fifth parallel read, because reviewing code is what a
-merge-request page is for — never behind a click. It is cached for 120 s (`GITLAB_DIFF_TTL`,
-the longest window on the page: a diff moves only when somebody pushes, and it is the biggest
-read), under the merge request's own prefix so a write forgets it, and per DEPTH so the
-expanded answer a reader paid for is never replaced by the plain one.
+The READ still happens with the merge request, as a fifth parallel read, even though the diff is
+a page away: the summary needs it to say "7 files · +27 −10", and the press then opens a page that
+paints at once rather than one that starts by waiting. It is cached for 120 s
+(`GITLAB_DIFF_TTL`, the longest window on the page: a diff moves only when somebody pushes, and
+it is the biggest read), under the merge request's own prefix so a write forgets it, and per
+DEPTH so the expanded answer a reader paid for is never replaced by the plain one.
 
-A `DiffNote` still keeps the file and line it hangs on (`note.position`), and the page names
-that file — so a comment on a line this section does not show is never a comment about nothing.
+A `DiffNote` still keeps the file and line it hangs on (`note.position`), and the merge-request
+page names that file — so a comment on a line the diff does not show is never one about nothing.
 
 `web/mock/server.ts` reproduces every state with no GitLab and no token (`mockDiffFiles`,
 which holds a patch, a pure rename, a binary file, a file GitLab collapsed and a generated one
 over several languages, plus `refuse_diff` on the `{kind:"gitlab_mr"}` hook — a spec MUST clear
-it). `cd web && bun run preview -- --out /tmp/diff --diff` captures the section in both themes,
-the split layout, all three files with no patch, the expand control and what it hands over, and
-the whole thing at a phone's width. **No diff has been rendered from the real instance yet**:
+it). `cd web && bun run preview -- --out /tmp/diff --diff` captures the way in on the merge
+request, the page in both themes, the split layout, all three files with no patch, the expand
+control and what it hands over, and both of its columns at a phone's width. **No diff has been rendered from the real instance yet**:
 the reads are measured (above) and the surface is pinned against the mock, so what is untested
 is the pairing — one open of a real merge request in the user's own app.
 
@@ -1126,9 +1172,9 @@ user. Two independent mechanisms enforce that split:
   and current, the list, the page,
   the merge armed, the comments, the description at a phone's width and a blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt`
-  from the same file. For its DIFF — the tree beside the patch in both themes, the split
-  layout, each of the three files with no patch, the expand control and what it hands over,
-  and the whole section at a phone's width:
+  from the same file. For its DIFF PAGE — the way in, the page in both themes, the split layout,
+  each of the three files with no patch, the expand control and what it hands over, and both of
+  its columns at a phone's width:
   `bun run preview -- --out /tmp/diff --diff`, or `openChanges` / `pickDiffFile` from the same
   file. For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /

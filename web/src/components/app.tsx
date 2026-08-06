@@ -11,6 +11,7 @@ import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
 import { CallBar } from "./call-bar";
 import { CallStageProvider, useCallStage } from "./call-stage-context";
+import { GitLabDiffPage } from "./gitlab-diff-page";
 import { IncomingCallBanner } from "./incoming-call-banner";
 import { AppToaster } from "./app-toaster";
 import { Splash } from "./splash";
@@ -85,6 +86,10 @@ function AppInner() {
   // settings surface instead of a conversation; the sidebar stays put.
   const matchRoute = useMatchRoute();
   const onSettings = !!matchRoute({ to: "/settings" });
+  // The DIFF of a merge request is a page of its own — two columns, the changed files and one
+  // of them — so it takes the whole screen rather than the detail pane: a third column of chat
+  // rows beside it would leave neither of its own two enough room (see gitlab-diff-page.tsx).
+  const onDiffRoute = !!matchRoute({ to: "/mr/$mergeRequestId/diff" });
 
   // Below the `md` breakpoint the UI is single-pane: the conversation list is the
   // home screen and a conversation (or Settings) takes the screen over it as a
@@ -122,6 +127,12 @@ function AppInner() {
   const goToMergeRequest = useCallback(
     (id: string) => {
       void navigate({ to: "/mr/$mergeRequestId", params: { mergeRequestId: id } });
+    },
+    [navigate],
+  );
+  const goToMergeRequestDiff = useCallback(
+    (id: string) => {
+      void navigate({ to: "/mr/$mergeRequestId/diff", params: { mergeRequestId: id } });
     },
     [navigate],
   );
@@ -302,48 +313,64 @@ function AppInner() {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
-      <div className="relative flex min-h-0 flex-1">
-        <ConversationList
-          selectedIndex={selectedIndex}
-          onSelect={setSelectedIndex}
-          onOpenPalette={() => setPaletteOpen(true)}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onOpenSettingsPage={goToSettings}
-          settingsActive={onSettings}
-        />
-        {/* The detail pane. On mobile it is a full-screen overlay parked off the
-            right edge until `paneOpen`, then flush over the conversation list — the
-            `translate-x` switches with no transition, so one page replaces the other
-            at once; at `md` and up it collapses into a static second column that is
-            always visible, so the desktop two-pane layout is unchanged. */}
-        <div
-          data-testid="detail-pane"
-          data-open={paneOpen ? "true" : undefined}
-          className={cn(
-            "absolute inset-0 z-20 flex bg-background",
-            "md:static md:z-auto md:flex-1 md:translate-x-0",
-            paneOpen ? "translate-x-0" : "translate-x-full",
-          )}
-        >
-          {/* Which surface the detail pane shows. Settings wins; then a merge request —
-              either one addressed by the URL, or the GitLab tab's own empty state; then
-              the calendar when its tab is up; then a mail, on the same two conditions.
-              Each tab owning its own empty state is what stops switching sections from
-              leaving another section's empty state on the right. */}
-          {onSettings ? (
-            <SettingsPane onBack={goToList} />
-          ) : onMergeRequestRoute ||
-            (sidebarTab === "gitlab" && !routeConversationId && !routeMailId) ? (
-            <GitLabPane onBack={goToList} />
-          ) : sidebarTab === "calendar" && !routeConversationId && !routeMailId ? (
-            <CalendarPane onBack={() => controller.setSidebarTab("chats")} />
-          ) : routeMailId || (sidebarTab === "mail" && !routeConversationId) ? (
-            <MailPane onBack={goToList} />
-          ) : (
-            <MessagePane onBack={goToList} />
-          )}
+      {/* The DIFF is the one surface that takes the whole screen rather than the detail pane.
+          It is two columns of its own — the changed files and one of them read in full — and a
+          third column of chat rows beside them would leave neither enough room. Everything
+          else stays mounted below it in the tree, so leaving the diff costs no re-read: the
+          merge request the reader came from is still open in the controller. */}
+      {onDiffRoute ? (
+        <div className="flex min-h-0 flex-1">
+          <GitLabDiffPage
+            onBack={() => (mergeRequestId ? goToMergeRequest(mergeRequestId) : goToList())}
+          />
         </div>
-      </div>
+      ) : (
+        <div className="relative flex min-h-0 flex-1">
+          <ConversationList
+            selectedIndex={selectedIndex}
+            onSelect={setSelectedIndex}
+            onOpenPalette={() => setPaletteOpen(true)}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSettingsPage={goToSettings}
+            settingsActive={onSettings}
+          />
+          {/* The detail pane. On mobile it is a full-screen overlay parked off the
+              right edge until `paneOpen`, then flush over the conversation list — the
+              `translate-x` switches with no transition, so one page replaces the other
+              at once; at `md` and up it collapses into a static second column that is
+              always visible, so the desktop two-pane layout is unchanged. */}
+          <div
+            data-testid="detail-pane"
+            data-open={paneOpen ? "true" : undefined}
+            className={cn(
+              "absolute inset-0 z-20 flex bg-background",
+              "md:static md:z-auto md:flex-1 md:translate-x-0",
+              paneOpen ? "translate-x-0" : "translate-x-full",
+            )}
+          >
+            {/* Which surface the detail pane shows. Settings wins; then a merge request —
+                either one addressed by the URL, or the GitLab tab's own empty state; then
+                the calendar when its tab is up; then a mail, on the same two conditions.
+                Each tab owning its own empty state is what stops switching sections from
+                leaving another section's empty state on the right. */}
+            {onSettings ? (
+              <SettingsPane onBack={goToList} />
+            ) : onMergeRequestRoute ||
+              (sidebarTab === "gitlab" && !routeConversationId && !routeMailId) ? (
+              <GitLabPane
+                onBack={goToList}
+                onOpenDiff={() => mergeRequestId && goToMergeRequestDiff(mergeRequestId)}
+              />
+            ) : sidebarTab === "calendar" && !routeConversationId && !routeMailId ? (
+              <CalendarPane onBack={() => controller.setSidebarTab("chats")} />
+            ) : routeMailId || (sidebarTab === "mail" && !routeConversationId) ? (
+              <MailPane onBack={goToList} />
+            ) : (
+              <MessagePane onBack={goToList} />
+            )}
+          </div>
+        </div>
+      )}
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />

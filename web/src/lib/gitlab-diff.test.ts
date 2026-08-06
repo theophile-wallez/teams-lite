@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   canExpandDiff,
+  DIFF_COLUMNS_MIN_WIDTH,
   diffFileNotice,
   diffFilePaths,
   diffFileState,
+  diffPageColumns,
   diffSummary,
   diffTotals,
   diffTreeGitStatus,
@@ -191,5 +193,28 @@ describe("the layout", () => {
 
   it("never widens a unified choice", () => {
     expect(effectiveDiffLayout("unified", 1400)).toBe("unified");
+  });
+});
+
+describe("the page's two columns", () => {
+  it("draws both on a wide screen, whichever the reader is in", () => {
+    for (const column of ["files", "patch"] as const) {
+      expect(diffPageColumns(1400, column)).toEqual({ files: true, patch: true, narrow: false });
+    }
+    expect(diffPageColumns(DIFF_COLUMNS_MIN_WIDTH, "files").narrow).toBe(false);
+  });
+
+  it("draws ONE at a time below the app's own breakpoint", () => {
+    // The list-then-detail shape every other surface in this app takes below `md`: a tree
+    // beside a patch at 390px is a column of truncated paths next to eight characters of code.
+    expect(diffPageColumns(390, "files")).toEqual({ files: true, patch: false, narrow: true });
+    expect(diffPageColumns(390, "patch")).toEqual({ files: false, patch: true, narrow: true });
+    expect(diffPageColumns(DIFF_COLUMNS_MIN_WIDTH - 1, "files").narrow).toBe(true);
+  });
+
+  it("opens on the FILES before anything is measured", () => {
+    // Width 0 is the first paint. A page whose subject the reader has not picked yet opens on
+    // the list of files, and never on a patch drawn at a width nothing measured.
+    expect(diffPageColumns(0, "files")).toEqual({ files: true, patch: false, narrow: true });
   });
 });
