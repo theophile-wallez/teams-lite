@@ -711,7 +711,7 @@ of the undo it cannot have. Each is pinned by a test:
   worked.
 
 The other three are ordinary gated writes because each is REVERSIBLE from the same page: a
-comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen. Five
+comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen. Six
 more rules hold the page together:
 
 - **A comment is deleted only when it is the USER'S OWN**, and whose it is comes from
@@ -733,6 +733,22 @@ more rules hold the page together:
 - **The list can never ask for merged merge requests.** `ListScope` and `ListState` are
   closed Rust sets and `merged` is not among them, so the page's whole promise is enforced by
   the type rather than by a filter somebody could widen.
+- **A long TITLE is shortened by the header and wrapped by the page, and widens neither.** An
+  author here writes the summary and then every ticket the branch closes, so a title runs to
+  150 characters — and `truncate` shortens NOTHING while its container is free to grow: a
+  flex item may not shrink below its own content, and a one-line title is one unbreakable
+  line as wide as its words. The whole detail column grew to that width, which put the
+  article, the Merge button and the reload off the right of the screen — on a phone, where
+  that column is the only one there is, and on a desktop alike. The fix is `min-w-0` on the
+  shell's `detail-pane` (`components/app.tsx`), which is the link ABOVE every pane: each pane
+  already declares its own, so a long mail subject and a long chat title were one fixture
+  away from the same failure. The heading below keeps the title in FULL over as many lines as
+  it takes, with `break-words` for what a title carries besides words — a branch name, a URL,
+  a bracketed list of tickets is one token, and a token wider than the article scrolls the
+  page sideways. A fixture carries a title that length (!297), the capture is
+  `${out}-long-title-{light,mobile-light}.png`, and `web/e2e/gitlab.spec.ts` measures the
+  boxes against the WINDOW — on this page and on the diff's own header — because what broke
+  was the geometry and only the geometry says it is mended.
 - **The TAB wears the tanuki in two spellings, and the section's own state picks.** A section
   that merges under the user's GitLab account has to say GitLab (see `GitLabLogo`) — but this
   is the one place that mark stands in a row of the app's own glyphs, and a strip of tabs says
@@ -1054,7 +1070,8 @@ watchable — and the `{kind:"gitlab_mr"}` test hook arms a refusal, a machine w
 and the reset a spec MUST call afterwards. `cd web && bun run preview -- --out /tmp/mr
 --gitlab` captures the tab strip in both of its states (pass `--dpr 4`: the tanuki is 17px),
 the list, the page, the merge armed, the comments, the description at a
-phone's width and a blocked merge in both themes; `web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
+phone's width, a 150-character title at both widths and a blocked merge in both themes;
+`web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
 run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
 is the user's own click, in their own app.
 
@@ -1170,7 +1187,8 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
   `toggleTeamSection` from the same file. For the merge-request page — its tab strip at rest
   and current, the list, the page,
-  the merge armed, the comments, the description at a phone's width and a blocked merge:
+  the merge armed, the comments, the description at a phone's width, a 150-character title at
+  both widths and a blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt`
   from the same file. For its DIFF PAGE — the way in, the page in both themes, the split layout,
   each of the three files with no patch, the expand control and what it hands over, and both of

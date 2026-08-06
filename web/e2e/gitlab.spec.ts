@@ -455,6 +455,56 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(page.locator('[data-testid="gitlab-pane-empty"]')).toBeVisible();
   });
 
+  test("a long title is shortened in the header and wrapped in the page, and widens neither", async ({
+    page,
+  }) => {
+    // !297's title lists every ticket its branch closes, which is the length an author on the
+    // tenant really writes. A title that long used to grow the whole column to its own width:
+    // `truncate` shortens nothing while its container is free to grow, so the article and
+    // every control on it went off the right of the screen.
+    await openGitLab(page);
+    await openMergeRequest(page, 297);
+
+    const pane = page.locator('[data-testid="gitlab-pane"]');
+    const title = page.locator('[data-testid="gitlab-title"]');
+    const heading = page.locator('[data-testid="gitlab-heading"]');
+
+    for (const width of [1200, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      // The pane is measured against the WINDOW rather than against its own class list: what
+      // broke was the geometry, and only the geometry says it is mended.
+      const paneBox = (await pane.boundingBox())!;
+      expect(paneBox.x + paneBox.width).toBeLessThanOrEqual(width + 1);
+
+      // The header keeps ONE line and ends in an ellipsis — it is shortened, so it holds more
+      // than it draws.
+      const headerLine = (await title.boundingBox())!;
+      expect(headerLine.height).toBeLessThan(30);
+      expect(headerLine.x + headerLine.width).toBeLessThanOrEqual(paneBox.x + paneBox.width + 1);
+      const shortened = await title.evaluate((el) => el.scrollWidth > el.clientWidth);
+      expect(shortened).toBe(true);
+
+      // The heading holds the title in FULL, over as many lines as that takes, and stays
+      // inside the pane while it does.
+      const headingBox = (await heading.boundingBox())!;
+      expect(headingBox.height).toBeGreaterThan(headerLine.height);
+      expect(headingBox.x + headingBox.width).toBeLessThanOrEqual(paneBox.x + paneBox.width + 1);
+      await expect(heading).toContainText("ACME-3351");
+    }
+    await page.setViewportSize({ width: 1200, height: 900 });
+
+    // The DIFF page names the merge request it belongs to in the same one line, and it is a
+    // whole screen of two columns: a header that grew would take the file tree with it.
+    await page.goto("/mr/acme%2Finfrastructure!297/diff");
+    const diffPage = page.locator('[data-testid="gitlab-diff-page"]');
+    await expect(diffPage).toBeVisible();
+    const diffBox = (await diffPage.boundingBox())!;
+    expect(diffBox.x + diffBox.width).toBeLessThanOrEqual(1201);
+    const diffTitle = (await page.locator('[data-testid="gitlab-diff-title"]').boundingBox())!;
+    expect(diffTitle.height).toBeLessThan(30);
+    expect(diffTitle.x + diffTitle.width).toBeLessThanOrEqual(1201);
+  });
+
   // ---- the DIFF, which is a page of its own -------------------------------
   //
   // `/mr/<id>/diff` — the whole screen, the changed files down the left, one of them read on

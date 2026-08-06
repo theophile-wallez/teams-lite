@@ -338,12 +338,19 @@ function AppInner() {
               right edge until `paneOpen`, then flush over the conversation list — the
               `translate-x` switches with no transition, so one page replaces the other
               at once; at `md` and up it collapses into a static second column that is
-              always visible, so the desktop two-pane layout is unchanged. */}
+              always visible, so the desktop two-pane layout is unchanged.
+
+              `min-w-0` is what makes every pane inside it able to SHORTEN a long line. A
+              flex item may not shrink below its own content by default, and a `truncate`d
+              title is one unbreakable line as wide as its words — so a merge request whose
+              title lists every ticket it closes grew this column past the window, which
+              pushed the article and its controls off the right of the screen. Each pane
+              already declares its own `min-w-0`; this is the link above them. */}
           <div
             data-testid="detail-pane"
             data-open={paneOpen ? "true" : undefined}
             className={cn(
-              "absolute inset-0 z-20 flex bg-background",
+              "absolute inset-0 z-20 flex min-w-0 bg-background",
               "md:static md:z-auto md:flex-1 md:translate-x-0",
               paneOpen ? "translate-x-0" : "translate-x-full",
             )}
