@@ -3434,6 +3434,16 @@ and `the_store_opens_before_sign_in_and_a_broken_sign_in_is_not_fatal` pins it.
   in-progress session can't leave `master` in a broken state and parallel
   sessions never collide. Create it with a branch off `master`, for example:
   `git worktree add .worktrees/<task-name> -b <branch> master`.
+- **A branch lands on `master` as ONE commit — always SQUASH.** `git merge --squash
+  <branch>` locally, `gh pr merge --squash` for a pull request; never a merge commit,
+  and never a plain fast-forward that replays the branch's own history. A worktree's
+  work-in-progress is a fix, a rename and an "actually no"; `master` is the record of
+  what shipped — and it is also what the release notes are built from, since
+  `src/changelog.rs` groups conventional commits into every release body (see
+  § Updating the app from inside it). So each intermediate commit that reaches `master`
+  becomes a line somebody reads in the app's own changelog. The squashed subject is
+  the one the whole branch deserves, conventional-commit style, with the branch's own
+  subjects dropped rather than piled into the body.
 - Once the branch is merged into `master`, delete its worktree to keep the
   checkout clean: `git worktree remove .worktrees/<task-name>` (and prune the
   branch once it is no longer needed).
