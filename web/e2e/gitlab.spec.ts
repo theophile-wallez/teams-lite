@@ -110,11 +110,10 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(page.locator('[data-testid="gitlab-target-branch"]')).toHaveText("main");
     await expect(page.locator('[data-testid="gitlab-state"]')).toHaveText("Open");
 
-    // The description is MARKDOWN through the app's own renderer, so its bold is bold
-    // rather than asterisks — and no remote reference comes with it.
-    await expect(page.locator('[data-testid="gitlab-pane"] strong').first()).toHaveText(
-      "two replicas",
-    );
+    // The description is GitLab's own MARKDOWN through the app's own renderer, so its bold is
+    // bold rather than asterisks — and no remote reference comes with it.
+    const description = page.locator('[data-testid="gitlab-description"]');
+    await expect(description.locator("strong").first()).toHaveText("two replicas");
 
     // The pipeline is grouped into GitLab's own stages, in GitLab's own order.
     const stages = page.locator('[data-testid="gitlab-stage"]');
@@ -129,6 +128,52 @@ test.describe.serial("the GitLab merge-request page", () => {
     const unit = page.locator('[data-testid="gitlab-job"]').filter({ hasText: "unit" });
     await expect(unit).toHaveAttribute("data-status", "running");
     await expect(unit).toHaveAttribute("data-status", "success", { timeout: 20_000 });
+  });
+
+  test("draws the description as the markdown GitLab holds, not as its source", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    const description = page.locator('[data-testid="gitlab-description"]');
+
+    // A heading is a heading, and its hashes are gone. Measured on the tenant: 32 of the 36
+    // descriptions with words in them carry one (see examples/merge_request_markdown_recon.rs).
+    await expect(description.locator("h2").first()).toHaveText("What changes");
+    await expect(description).not.toContainText("## What changes");
+
+    // A pipe table is a real table — 24 of those 36 hold one, and printed as source it is a
+    // wall of pipes with the |---| row missing.
+    const table = description.locator("table");
+    await expect(table).toHaveCount(1);
+    await expect(table.locator("th")).toHaveCount(3);
+    await expect(table.locator("tbody tr")).toHaveCount(3);
+    await expect(description).not.toContainText("| -------- |");
+
+    // A fenced block keeps its own lines, and nothing inside it was parsed as markdown.
+    const code = description.locator("pre");
+    await expect(code).toHaveCount(1);
+    await expect(code).toContainText("helmfile -e staging apply --selector name=web");
+    await expect(description).not.toContainText("```");
+
+    // A task list says which box is ticked, and a sub-bullet sits inside its own parent.
+    await expect(description.getByText("☑ staging")).toBeVisible();
+    await expect(description.getByText("☐ production, one cluster at a time")).toBeVisible();
+    await expect(description.locator("ul ul li")).toHaveCount(2);
+
+    // A thematic break is a rule rather than three characters — or, as the card parser read
+    // it, nothing at all.
+    await expect(description.locator("hr")).toHaveCount(1);
+
+    // And NOTHING in it is fetched: the promise the whole page is built on holds for a body
+    // written by somebody outside this app.
+    await expect(description.locator("img")).toHaveCount(0);
+
+    // A comment is the same markdown, because a review quotes code as often as a description
+    // does.
+    await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
+    const note = page.locator('[data-testid="gitlab-note"]').filter({ hasText: "MEDIUM" });
+    await expect(note.locator("pre")).toContainText("sleep {{ .Values.drain }}");
   });
 
   test("says why a merge request cannot be merged, instead of refusing after the click", async ({

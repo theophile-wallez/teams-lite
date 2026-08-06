@@ -1808,6 +1808,18 @@ if (import.meta.main) {
       await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
       await shot(`${out}-comments-light.png`);
 
+      // The DESCRIPTION on a phone, which is the width its markdown has to survive: the
+      // fixture's 3-column table and its fenced command lines are both wider than 390px, so
+      // this says whether they scroll inside the description or widen the page and take the
+      // Merge button off screen (see `gitlab-markdown.ts`, and the renderer's own `table`
+      // and `pre` cases).
+      await page.locator('[data-testid="gitlab-description"]').scrollIntoViewIfNeeded();
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(400);
+      await shot(`${out}-description-mobile-light.png`);
+      await page.setViewportSize(VIEWPORT);
+      await page.waitForTimeout(400);
+
       // A merge request GitLab will not merge: the button is disabled and the reason is on
       // it, rather than a refusal arriving after the click.
       await openMergeRequestAt(page, 1);
@@ -1820,7 +1832,8 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-list-light.png, ${out}-light.png, ` +
           `${out}-merge-armed-light.png, ${out}-comments-light.png, ` +
-          `${out}-blocked-{light,dark}.png and ${out}-dark.png`,
+          `${out}-description-mobile-light.png, ${out}-blocked-{light,dark}.png and ` +
+          `${out}-dark.png`,
       );
     });
     process.exit(0);

@@ -656,11 +656,46 @@ more rules hold the page together:
 - **Nothing on this page is fetched by the browser.** Faces are tinted initials — GitLab's
   `avatar_url` travels and nothing requests it, since an avatar on a private instance answers
   401 without a session — and the description and every comment go through the app's own
-  markdown subset (`parseCardMarkdown`), never GitLab's rendered HTML, which would bring
-  remote references with it.
+  markdown parser (`parseGitLabMarkdown`), never GitLab's rendered HTML, which would bring
+  remote references with it. An IMAGE is the sharp case and it is handled in the parser: a
+  `![alt](url)` becomes the LINK its alt text names, never an `<img>`, so a description
+  written by somebody outside this app cannot make the page fetch anything either.
 - **The list can never ask for merged merge requests.** `ListScope` and `ListState` are
   closed Rust sets and `merged` is not among them, so the page's whole promise is enforced by
   the type rather than by a filter somebody could widen.
+
+**The markdown is real GFM, and its subset is MEASURED rather than guessed**
+(`web/src/lib/gitlab-markdown.ts`, over the shared inline scanner in `markdown-inline.ts`).
+GitLab hands us what the author typed, and this app renders it — so the parser has to cover
+what the authors on this instance write. `examples/merge_request_markdown_recon.rs` counts
+that, READ-ONLY, over the 40 newest open merge requests (measured 2026-08-06: of the 36
+descriptions with words in them, 32 hold a heading, 32 inline code, 29 emphasis, 28 a bullet,
+24 a **table**, 19 a **fenced block**, 18 a task list, 16 a numbered item, 14 a thematic
+break, 10 a nested bullet). It used to go through `parseCardMarkdown`, which makes ONE BLOCK
+PER LINE — the right rule for a card, which arrives pre-flattened, and the wrong one here: a
+heading kept its hashes, a table came out as a wall of pipes with its `|---|` row silently
+dropped, a fenced block became one paragraph per line with the markdown inside it parsed, and
+a `---` disappeared. Four things follow, and each is pinned by a test:
+
+- **The inline half is shared, the block half is not** (`markdown-inline.ts`, used by both
+  `card-markdown.ts` and `gitlab-markdown.ts`). What `**bold**` and `[label](url)` mean is
+  the same everywhere; how a line becomes a block is exactly what these two surfaces disagree
+  about. Two copies of the emphasis scanner would drift apart at the first `snake_case`
+  somebody reports.
+- **The three constructs measured at ZERO decide as much as the others.** Indented code is
+  NOT a block — every four-space line in that sample was a list item's own continuation or
+  the inside of a fence, so the rule would draw sub-bullets as grey slabs and no author asked
+  for it; raw HTML and an HTML comment stay the author's literal text, because parsing HTML
+  here would be the second renderer this page exists to avoid. Do not add a rule the recon
+  cannot find an author for — run it again instead.
+- **A list's content is parsed by the same function**, which is what makes a sub-list, or a
+  fence inside a bullet, work with no rule apiece. A task list's state is a glyph in the
+  item's own words (`☑`/`☐`): the renderer has no checkbox, and a description here is read,
+  never ticked.
+- **The description names itself** (`data-testid="gitlab-description"`) and carries `min-w-0`,
+  so a wide table and a long fenced line scroll INSIDE it. Without that the article widens
+  and takes the page's own controls off a phone's screen — `bun run preview -- --out /tmp/mr
+  --gitlab` captures it at 390px for that reason.
 
 **Performance is a durable cache plus one live read**, and three measured facts shaped it:
 
@@ -709,8 +744,8 @@ above rather than trusting this paragraph.
 pipeline that advances one step per read, which is what makes "the panel follows the run"
 watchable — and the `{kind:"gitlab_mr"}` test hook arms a refusal, a machine with no token,
 and the reset a spec MUST call afterwards. `cd web && bun run preview -- --out /tmp/mr
---gitlab` captures the list, the page, the merge armed, the comments and a blocked merge in
-both themes; `web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
+--gitlab` captures the list, the page, the merge armed, the comments, the description at a
+phone's width and a blocked merge in both themes; `web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
 run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
 is the user's own click, in their own app.
 
@@ -822,7 +857,7 @@ user. Two independent mechanisms enforce that split:
   `openCalendarView` / `openFirstEvent`. For the team → channel tree:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
   `toggleTeamSection` from the same file. For the merge-request page — the list, the page,
-  the merge armed, the comments and a blocked merge:
+  the merge armed, the comments, the description at a phone's width and a blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt`
   from the same file. For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /

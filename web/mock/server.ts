@@ -3690,11 +3690,31 @@ const mockMergeRequests: MockMergeRequest[] = [
     project_path: "acme/webapp",
     iid: 596,
     title: "✨ HA replicas + PodDisruptionBudgets for the user-facing APIs",
+    // Real GitLab markdown, in the shape the authors on the tenant actually write it —
+    // measured by `examples/merge_request_markdown_recon.rs`: a heading in 32 of 36
+    // descriptions, a table in 24, a fenced block in 19, a task list in 18, a nested bullet
+    // in 10. It is deliberately every one of those at once, because this fixture is what
+    // makes `parseGitLabMarkdown` reviewable with no GitLab and no token.
     description:
-      "Adds **two replicas** and a PodDisruptionBudget to every user-facing API.\n\n" +
-      "- `web`, `api` and `worker` go to two replicas\n" +
-      "- a `preStop` hook drains connections\n\n" +
-      "Rolling this out needs one `helmfile apply` per cluster.",
+      "## What changes\n\n" +
+      "Adds **two replicas** and a PodDisruptionBudget to every user-facing API,\n" +
+      "so a node drain can never take the last pod of one.\n\n" +
+      "| Service  | Replicas | Budget |\n" +
+      "| -------- | -------- | ------ |\n" +
+      "| `web`    | 2        | 1      |\n" +
+      "| `api`    | 2        | 1      |\n" +
+      "| `worker` | 2        | 1      |\n\n" +
+      "### How to roll it out\n\n" +
+      "```sh\n" +
+      "helmfile -e staging apply --selector name=web\n" +
+      "kubectl get pdb -n user-facing\n" +
+      "```\n\n" +
+      "- a `preStop` hook drains connections\n" +
+      "  - 10s for `web`, which holds websockets\n" +
+      "  - 2s everywhere else\n\n" +
+      "---\n\n" +
+      "- [x] staging\n" +
+      "- [ ] production, one cluster at a time",
     state: "opened",
     draft: false,
     author: MOCK_GITLAB_ADA,
@@ -3746,7 +3766,15 @@ const mockMergeRequests: MockMergeRequest[] = [
           {
             id: 69_852,
             author: MOCK_GITLAB_BOT,
-            body: "🟡 **MEDIUM**: the `preStop` command interpolates a Helm value into a shell string.",
+            // A review comment quotes code as often as a description does, so the same
+            // markdown runs on both surfaces.
+            body:
+              "🟡 **MEDIUM**: the `preStop` command interpolates a Helm value into a shell string.\n\n" +
+              "```yaml\n" +
+              "preStop:\n" +
+              "  exec:\n" +
+              "    command: [\"sh\", \"-c\", \"sleep {{ .Values.drain }}\"]\n" +
+              "```",
             system: false,
             created_at: agoIso(70),
             resolvable: true,

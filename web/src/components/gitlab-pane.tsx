@@ -16,7 +16,7 @@ import {
   TimeQuarterIcon,
   XVariableCircleIcon,
 } from "@hugeicons/core-free-icons";
-import { parseCardMarkdown } from "~/lib/card-markdown";
+import { parseGitLabMarkdown } from "~/lib/gitlab-markdown";
 import {
   conversationDiscussions,
   formatJobDuration,
@@ -294,21 +294,25 @@ function StateBadge(props: { detail: MergeRequestDetail }) {
   );
 }
 
-/** The description, as markdown through the app's own renderer.
+/** The description, as GitLab's own markdown through the app's own renderer — headings,
+ *  tables, fenced code, task lists and all (see `gitlab-markdown.ts`, whose subset is
+ *  measured against what the authors on this instance really write).
  *
  *  Never GitLab's rendered HTML: that would bring remote images and links with it, and
  *  this app's whole promise about a body is that drawing it makes no request. */
 function MergeRequestDescription(props: { detail: MergeRequestDetail }) {
   const nodes = useMemo(
-    () => parseCardMarkdown(props.detail.description ?? ""),
+    () => parseGitLabMarkdown(props.detail.description ?? ""),
     [props.detail.description],
   );
   if (!props.detail.description) return null;
   return (
-    <RichNodes
-      nodes={nodes}
-      className="text-[13px] leading-relaxed text-text-dim"
-    />
+    // `min-w-0` is the description's own rail: a wide table or a long fenced line must scroll
+    // inside it (the renderer's `table` and `pre` cases both say so) rather than widen the
+    // article and push the page's own controls off a phone's screen.
+    <div data-testid="gitlab-description" className="min-w-0">
+      <RichNodes nodes={nodes} className="text-[13px] leading-relaxed text-text-dim" />
+    </div>
   );
 }
 
@@ -802,13 +806,14 @@ function DiscussionThread(props: { discussion: GitLabDiscussion }) {
   );
 }
 
-/** One comment. Its body is markdown through the app's own renderer, and the user's OWN
- *  comment carries the one thing that takes it back. */
+/** One comment. Its body is the same GitLab markdown the description is (a review comment
+ *  quotes code as often as a description does), and the user's OWN comment carries the one
+ *  thing that takes it back. */
 function NoteBubble(props: { note: GitLabNote }) {
   const note = props.note;
   const controller = useController();
   const acting = useAppState((s) => s.gitlabActing);
-  const nodes = useMemo(() => parseCardMarkdown(note.body), [note.body]);
+  const nodes = useMemo(() => parseGitLabMarkdown(note.body), [note.body]);
   const deleting = acting === `delete:${note.id}`;
   const [armed, setArmed] = useState(false);
 
