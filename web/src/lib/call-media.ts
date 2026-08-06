@@ -358,11 +358,31 @@ async function openCapture(kind: SendKind): Promise<MediaStream> {
 }
 
 /**
+ * Whether the far side has DROPPED a section, so nothing here may touch it again.
+ *
+ * The service can reject a section this app offered — a rejected m-line in its answer, or an
+ * offer of its own that leaves it out — and the browser then STOPS that transceiver: it
+ * carries nothing, it loses its mid, and every setter on it throws `InvalidStateError`. So a
+ * stopped section is read as ABSENT: never written to, never handed back for reuse, and a
+ * capture turned on again gets a new one. It used to be written to, and the browser's own
+ * sentence about an object the user has never heard of — "The transceiver is stopped" —
+ * reached them as the report of a camera they had just switched off.
+ */
+export function sectionIsStopped(
+  transceiver: Pick<RTCRtpTransceiver, "direction" | "currentDirection">,
+): boolean {
+  // Both halves, because the spec states the stop in `currentDirection` while a browser's
+  // own `direction` getter reports it too, and either one saying so is the answer.
+  return transceiver.currentDirection === "stopped" || transceiver.direction === "stopped";
+}
+
+/**
  * What this page is sending, and the transceivers it goes out on.
  *
  * A transceiver is REUSED per kind: a camera turned off and on again takes the section it
  * already had, because every added section is one more m-line the far side must accept and
- * the count would otherwise only grow.
+ * the count would otherwise only grow. A section the far side dropped is the one exception —
+ * see {@link sectionIsStopped}.
  */
 class LocalSenders {
   private live = new Map<SendKind, { transceiver: RTCRtpTransceiver; stream: MediaStream }>();
@@ -382,7 +402,7 @@ class LocalSenders {
     // The browser's own bar stops a share without telling this app anything. Without this the
     // meeting would keep a section carrying nothing while the button still said on.
     track.addEventListener("ended", () => this.onEndedByBrowser?.(kind));
-    const reuse = this.live.get(kind)?.transceiver ?? this.idle.get(kind);
+    const reuse = this.reusable(kind);
     if (reuse) {
       this.idle.delete(kind);
       await reuse.sender.replaceTrack(track);
@@ -395,6 +415,26 @@ class LocalSenders {
     this.notify();
   }
 
+  /** A section of this kind to take back, if there is one that still carries anything.
+   *
+   *  A stopped one is forgotten rather than reused, so a rejected section cannot be written
+   *  to and the dead ones cannot pile up. */
+  private reusable(kind: SendKind): RTCRtpTransceiver | undefined {
+    const held = this.live.get(kind)?.transceiver ?? this.idle.get(kind);
+    if (!held) return undefined;
+    if (!sectionIsStopped(held)) return held;
+    this.idle.delete(kind);
+    return undefined;
+  }
+
+  /** The kinds whose section the far side has DROPPED. Read after a remote description is
+   *  applied: it is the only moment a transceiver of ours can be stopped. */
+  stoppedKinds(): SendKind[] {
+    return [...this.live]
+      .filter(([, held]) => sectionIsStopped(held.transceiver))
+      .map(([kind]) => kind);
+  }
+
   /** Stop one, and say whether there was anything to stop. */
   async stop(kind: SendKind): Promise<boolean> {
     const held = this.live.get(kind);
@@ -403,9 +443,13 @@ class LocalSenders {
     // must not depend on any of it.
     for (const track of held.stream.getTracks()) track.stop();
     this.live.delete(kind);
-    this.idle.set(kind, held.transceiver);
-    await held.transceiver.sender.replaceTrack(null).catch(() => {});
-    held.transceiver.direction = "inactive";
+    // A section the far side already dropped is neither kept for reuse nor written to: both
+    // would throw, and the throw used to reach the user as the browser's own words.
+    if (!sectionIsStopped(held.transceiver)) {
+      this.idle.set(kind, held.transceiver);
+      await held.transceiver.sender.replaceTrack(null).catch(() => {});
+      held.transceiver.direction = "inactive";
+    }
     this.notify();
     return true;
   }
@@ -536,6 +580,7 @@ function liveCallMedia(
       // the answer arrived twice, and applying it again rolls the call back.
       if (pc.signalingState !== "have-local-offer") return;
       await pc.setRemoteDescription({ type: "answer", sdp: fromMsSdp(sdp) });
+      releaseDroppedSections();
     },
     async answerRemoteOffer(sdp: string): Promise<string | null> {
       const run = negotiating.then(async () => {
@@ -554,7 +599,11 @@ function liveCallMedia(
         return answer ? toMsSdp(answer, labels) : null;
       });
       negotiating = run.catch(() => {});
-      return run;
+      const answer = await run;
+      // Their offer can leave a section of OURS out. It is read once the offer is applied and
+      // outside the queue above, because taking a capture down enqueues an offer of its own.
+      releaseDroppedSections();
+      return answer;
     },
     setMuted(muted: boolean): void {
       for (const track of stream.getAudioTracks()) track.enabled = !muted;
@@ -613,6 +662,21 @@ function liveCallMedia(
     });
     negotiating = run.catch(() => {});
     return run;
+  }
+
+  /**
+   * Release every capture whose section the far side DROPPED.
+   *
+   * A rejected section is the worst shape this surface has: the camera light stays on, the
+   * preview keeps moving and the button still says the meeting can see it, while nothing is
+   * being sent at all. It is the browser's own "Stop sharing" from the other end — this app
+   * did not ask for it either — so it ends down the same path, which releases the capture and
+   * hands the caller the offer that tells the service.
+   */
+  function releaseDroppedSections(): void {
+    for (const kind of senders.stoppedKinds()) {
+      void media.stopSending(kind).then((offer) => media.onSendingEnded?.(kind, offer));
+    }
   }
 
   remoteVideo.onChange = (videos) => media.onRemoteVideoChange?.(videos);

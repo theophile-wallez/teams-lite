@@ -1145,6 +1145,15 @@ joins alone and waits for an offer. Six rules hold it together, and
   browser reported on its `track` events, which exist only after the answer is applied).
   Neither half can do it alone. A screen takes a section before a camera does: it is the
   thing somebody deliberately put on screen to be read.
+- **A section the far side DROPPED is read as absent** (`sectionIsStopped` in
+  `web/src/lib/call-media.ts`). The service can reject a section this app offered, and the
+  browser then STOPS that transceiver: it loses its mid, it carries nothing, and every setter
+  on it throws. So a stopped one is never written to and never reused — switching the camera
+  off wrote `direction` on it and handed the user the browser's own sentence, "The transceiver
+  is stopped", as the report of a click that had worked. And the capture behind it is
+  RELEASED, down the same path the browser's own "Stop sharing" takes: a camera whose light
+  stays on under a button that says the meeting can see it, while nothing is sent, is the
+  mirror of the failure that path already exists for.
 - **A failure here NEVER ends the call.** Audio is already up and untouched, so a
   renegotiation that cannot be answered or a subscription the service refuses costs one tile
   — and the service offers again. Ending a working call because a screen could not be drawn
