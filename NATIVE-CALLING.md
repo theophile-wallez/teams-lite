@@ -400,9 +400,10 @@ Two things the backend does on its own, and neither is a decision about a call:
   invalidates a live call's links, and only that ends the call.
 
 The browser half is two files: `web/src/lib/call.ts` (pure state model) and
-`call-media.ts` (the microphone, one `RTCPeerConnection`, the remote audio element). The
-UI is `call-bar.tsx` (ringing and in-call, one component), `call-button.tsx` (a 1:1
-header) and the Settings switch.
+`call-media.ts` (the microphone, one `RTCPeerConnection`, the remote audio element). The UI
+is `call-bar.tsx` (a RINGING call, and the notice a call leaves behind), `call-stage.tsx`
+(the PAGE a live call takes over, and the window it folds into, over `lib/call-stage.ts`),
+`call-video.tsx` (one picture), `call-button.tsx` (a 1:1 header) and the Settings switch.
 
 A meeting is joined rather than placed, and it is the same plane. The join link comes in
 two shapes and `calling::MeetingJoin` reads both: the long
@@ -469,13 +470,13 @@ the thing that refused it rather than guessed:
 5. the leave body, which is not a `callEnd`.
 
 `cd web && bun run join-live` is what closes that loop without the user: it drives the
-live app against the one authorized meeting, reports the call bar and the page's own
-console, and hangs up on every path out. Everything BEFORE the browser is still
-`examples/meeting_join_probe.rs`; everything after it needs that script.
+live app against the one authorized meeting, reports what the app says about the call and
+the page's own console, and hangs up on every path out. Everything BEFORE the browser is
+still `examples/meeting_join_probe.rs`; everything after it needs that script.
 
 **And the media really flows.** `bun run join-live` reports the peer connection's own
-`getStats()`, because "connected" on the call bar only means the answer was applied —
-DTLS can still fail and ICE can still find no path, and the bar would look identical:
+`getStats()`, because a "connected" phase only means the answer was applied — DTLS can
+still fail and ICE can still find no path, and the page would look identical:
 
 ```
 media: connected/connected via prflx/udp -> relay/udp
@@ -669,10 +670,10 @@ their screen:
 
 **`calling::roster_in_frame` reads none of this and returns `None` on every real frame.** It
 looks for `/rosterUpdate/participants` as an ARRAY, and its test invented that shape — so a
-joined meeting has never named anybody, and the call bar has always said "In the meeting"
-where it should say who is in it. That is a shipped bug this recon found, it is fixed
-separately from any video work, and it is also step one of every feature below: the MSI has
-nowhere else to come from.
+joined meeting has never named anybody, and the app has always said "In the meeting" where
+it should say who is in it. That is a shipped bug this recon found, it is fixed separately
+from any video work, and it is also step one of every feature below: the MSI has nowhere
+else to come from.
 
 To see that stream, the client picks one of ITS OWN receive video sections and asks the
 service to put that source on it. Two spellings, and the client sends both because the
@@ -870,7 +871,10 @@ The user's four asks, ordered by what each one really needs on top of the audio 
   tile. `RemoteAudio` is the pattern to follow, and it is already the right shape.
 - `web/src/lib/call.ts`, `call-bar.tsx` — a call bar becomes a call SURFACE: a tile grid, a
   shared-screen stage, and per-tile state. This is the largest piece of the work by volume,
-  and it is entirely ours: no protocol in it.
+  and it is entirely ours: no protocol in it. **Built** — `call-stage.tsx` over the pure
+  `lib/call-stage.ts`: a full-screen page with the share on the stage and the faces as tiles,
+  a draggable folded window it morphs into, and panels for the roster and the meeting's chat
+  (AGENTS.md § A call is a page).
 - `web/mock/server.ts` — a mock roster with MSIs, and synthesized video, so the whole
   surface stays reviewable with nothing leaving the machine. Without this half the UI can
   only be seen in a real meeting, which is the one place it must not be debugged.
@@ -923,9 +927,9 @@ so the whole path is reviewable with no tenant.
 
 Sending is built too: `calling::media_offer_payload` and the `call_offer_media` RPC, over
 `LocalSenders` in `web/src/lib/call-media.ts` (one reused transceiver per kind, the labels
-restated on every offer) and the two toggles in `call-bar.tsx`. It POSTs a `mediaNegotiation`
-to the `mediaRenegotiation` link the acceptance named, declaring `Video` for a camera and
-`ScreenSharer` for a screen.
+restated on every offer) and the two toggles in the page's header (`call-stage.tsx`). It POSTs
+a `mediaNegotiation` to the `mediaRenegotiation` link the acceptance named, declaring `Video`
+for a camera and `ScreenSharer` for a screen.
 
 **It has never been sent to the tenant.** Everything above is the client's own shape and the
 mock's reproduction of it; § 10.8 says what that leaves open.
@@ -933,8 +937,8 @@ mock's reproduction of it; § 10.8 says what that leaves open.
 ### 10.8 What is still open
 
 - **The roster fix is pinned but not SEEN.** The measured shape is in the tests and the
-  driver reads a real frame with it, but the call bar still says "In the meeting" rather than
-  a name — correctly, and for a reason worth writing down: the only other participant in the
+  driver reads a real frame with it, but the page still says "In the meeting" rather than a
+  name — correctly, and for a reason worth writing down: the only other participant in the
   test meeting is the USER'S OWN second device. One person, two endpoints, one mri, so
   `CallSession::others` excludes them and an empty list is the honest answer.
   `participantCounts` says `totalParticipants: 2` beside it, which is the count of endpoints

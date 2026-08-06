@@ -1326,7 +1326,8 @@ if (import.meta.main) {
   }
 
   // Audio calling: the switch that is the consent, the button in a 1:1 header, a call
-  // ringing with a working Answer, and the bar while it is up.
+  // ringing with a working Answer, the PAGE it becomes once answered — its people, its
+  // chat, its picture — and the window that page folds into and is dragged around in.
   //
   // Nothing here registers anything or opens a microphone. The mock reproduces the
   // signaling and the page uses `simulatedCallMedia` because the backend announced
@@ -1366,37 +1367,65 @@ if (import.meta.main) {
       await shot(`${out}-ringing-card-dark.png`, '[data-testid="call-bar"]');
       await setTheme("light");
 
-      // 5. Answered: the bar, the duration, mute.
+      // 5. Answered: the CALL AS A PAGE — the header, the time, the controls, and the card
+      //    with the person in the middle of it. This is the whole surface, so the shot is
+      //    the page rather than a crop.
       await page.locator('[data-testid="call-answer"]').click();
-      await page.waitForSelector('[data-testid="call-bar"][data-phase="connected"]');
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="full"]');
       await page.waitForTimeout(1100);
-      await shot(`${out}-connected-card-light.png`, '[data-testid="call-bar"]');
-      await page.locator('[data-testid="call-mute"]').click();
+      await shot(`${out}-stage-light.png`);
+      await shot(`${out}-stage-header-light.png`, '[data-testid="call-stage"] header');
+      await page.locator('[data-testid="call-mute"]').first().click();
       await page.waitForSelector('[data-testid="call-mute"][aria-pressed="true"]');
-      await shot(`${out}-muted-card-light.png`, '[data-testid="call-bar"]');
+      await shot(`${out}-stage-muted-light.png`, '[data-testid="call-stage"] header');
       await setTheme("dark");
-      await shot(`${out}-connected-card-dark.png`, '[data-testid="call-bar"]');
-      await page.locator('[data-testid="call-hangup"]').click();
+      await shot(`${out}-stage-dark.png`);
+      await setTheme("light");
+
+      // 5a. FOLDED. The same element, morphed into a window the user drags out of the way
+      //     — so the shot after the drag is the proof that the position is the window's own
+      //     and that expanding returns from exactly there.
+      await page.locator('[data-testid="call-stage-minimize"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="mini"]');
+      await page.waitForTimeout(600);
+      await shot(`${out}-mini-light.png`, '[data-testid="call-stage"]');
+      await shot(`${out}-mini-page-light.png`);
+      const folded = await page.locator('[data-testid="call-stage"]').boundingBox();
+      if (folded) {
+        await page.mouse.move(folded.x + folded.width / 2, folded.y + 12);
+        await page.mouse.down();
+        await page.mouse.move(240, 160, { steps: 24 });
+        await page.mouse.up();
+        await page.waitForTimeout(600);
+        await shot(`${out}-mini-dragged-light.png`);
+      }
+      await setTheme("dark");
+      await shot(`${out}-mini-dark.png`, '[data-testid="call-stage"]');
+      await setTheme("light");
+      // And back, from where it was dropped.
+      await page.locator('[data-testid="call-stage-expand"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="full"]');
+      await page.waitForTimeout(600);
+      await page.locator('[data-testid="call-hangup"]').first().click();
+      await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
 
       // 5b. A GROUP chat: the same button, and a label that says it rings everybody. Then
-      //     the bar, which names the CONVERSATION and fills in who picked up.
+      //     the stage, which names the CONVERSATION and fills in who picked up.
       await openConversation(page, "Platform Team");
       await shot(`${out}-group-button-light.png`, '[data-testid="message-pane"] header');
       await page.locator('[data-testid="call-button"]').click();
-      await page.waitForSelector('[data-testid="call-bar"]');
-      await shot(`${out}-group-dialing-light.png`, '[data-testid="call-bar"]');
-      await page.waitForSelector('[data-testid="call-bar"][data-phase="connected"]');
+      await page.waitForSelector('[data-testid="call-stage"]');
+      await shot(`${out}-group-dialing-light.png`);
+      await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
       await page.waitForSelector('[data-testid="call-phase"]:has-text("With")');
-      await shot(`${out}-group-card-light.png`, '[data-testid="call-bar"]');
-      await setTheme("dark");
-      await shot(`${out}-group-card-dark.png`, '[data-testid="call-bar"]');
-      await setTheme("light");
-      await page.locator('[data-testid="call-hangup"]').click();
-      await page.waitForSelector('[data-testid="call-bar"]', { state: "detached" });
+      await shot(`${out}-group-stage-light.png`);
+      await page.locator('[data-testid="call-hangup"]').first().click();
+      await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
 
       // 5c. A MEETING chat, which is the other thing a chat header can offer: Join, from the
       //     thread itself, with no calendar and no link. The meeting the thread was minted
-      //     for is the one action it gets.
+      //     for is the one action it gets — and once joined, that thread's own chat is the
+      //     panel beside the picture.
       await openConversation(page, "Design Sync");
       await shot(`${out}-meeting-chat-light.png`, '[data-testid="message-pane"] header');
       // The control on its own. It is a 20px glyph and whether it reads as a MEETING rather
@@ -1407,15 +1436,34 @@ if (import.meta.main) {
       await shot(`${out}-meeting-chat-dark.png`, '[data-testid="message-pane"] header');
       await setTheme("light");
       await page.locator('[data-testid="meeting-join-here"]').click();
-      await page.waitForSelector('[data-testid="call-bar"][data-phase="connected"]');
-      await shot(`${out}-meeting-chat-card-light.png`, '[data-testid="call-bar"]');
-      await page.locator('[data-testid="call-hangup"]').click();
-      await page.waitForSelector('[data-testid="call-bar"]', { state: "detached" });
+      await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
+      await page.waitForTimeout(600);
+      await shot(`${out}-meeting-chat-stage-light.png`);
 
-      // 6. A meeting: the Join button beside the link out, the lobby, then the roster.
+      // 5d. The two panels. People is the roster the service reports; Chat is the meeting
+      //     thread's own conversation, which is why opening it opens that conversation in
+      //     the app underneath.
+      await page.locator('[data-testid="call-stage-people"]').click();
+      await page.waitForSelector('[data-testid="call-stage-people-panel"]');
+      await page.waitForTimeout(500);
+      await shot(`${out}-people-light.png`);
+      await shot(`${out}-people-panel-light.png`, '[data-testid="call-stage-panel"]');
+      await page.locator('[data-testid="call-stage-chat-toggle"]').click();
+      await page.waitForSelector('[data-testid="call-stage-transcript"]');
+      await page.waitForTimeout(500);
+      await shot(`${out}-chat-light.png`);
+      await shot(`${out}-chat-panel-light.png`, '[data-testid="call-stage-panel"]');
+      await setTheme("dark");
+      await shot(`${out}-chat-dark.png`);
+      await setTheme("light");
+      await page.locator('[data-testid="call-hangup"]').first().click();
+      await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
+
+      // 6. A meeting from the CALENDAR: the Join button beside the link out, the lobby,
+      //    then the roster.
       //
       // Back to the root first: the calendar pane only shows when no conversation is in
-      // the URL, and step 3 opened one (see app.tsx).
+      // the URL, and the steps above opened several (see app.tsx).
       await page.goto(WEB_ORIGIN, { waitUntil: "domcontentloaded" });
       await page.waitForSelector('[data-testid="conversation-row"]');
       await openCalendarTab(page);
@@ -1432,17 +1480,14 @@ if (import.meta.main) {
       await shot(`${out}-meeting-actions-light.png`, '[data-testid="calendar-event-details"]');
       await page.locator('[data-testid="meeting-join-here"]').click();
       await page.waitForSelector('[data-testid="call-phase"]:has-text("Waiting")');
-      await shot(`${out}-meeting-lobby-light.png`, '[data-testid="call-bar"]');
-      await page.waitForSelector('[data-testid="call-bar"][data-phase="connected"]');
+      await shot(`${out}-meeting-lobby-light.png`);
+      await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
       await page.waitForSelector('[data-testid="call-phase"]:has-text("others")');
-      await shot(`${out}-meeting-card-light.png`, '[data-testid="call-bar"]');
-      await setTheme("dark");
-      await shot(`${out}-meeting-card-dark.png`, '[data-testid="call-bar"]');
-      await setTheme("light");
+      await shot(`${out}-meeting-stage-light.png`);
 
       // 7. And the PICTURE. The mock's service renegotiates right after the roster, the
-      //    page answers and subscribes, and the tiles appear — a shared screen on the
-      //    stage and a camera under it. Nothing here opens a camera: the streams come
+      //    page answers and subscribes, and the shared screen takes the whole content with
+      //    the camera as a tile under it. Nothing here opens a camera: the streams come
       //    from a canvas (`simulatedCallMedia`).
       await page.waitForSelector('[data-testid="call-video-frame"][data-sharing="true"]');
       await page.waitForTimeout(400);
@@ -1455,24 +1500,34 @@ if (import.meta.main) {
       // 8. SENDING. The camera and the screen, each one click, each one the consent for that
       //    action. Nothing is opened here either: against the mock the preview is a canvas,
       //    so no camera light comes on and no picker appears.
-      await shot(`${out}-send-off-light.png`, '[data-testid="call-bar"]');
+      await shot(`${out}-send-off-light.png`, '[data-testid="call-stage"] header');
       await page.locator('[data-testid="call-camera"]').click();
       await page.waitForSelector('[data-testid="call-video-local"][data-kind="camera"]');
       await page.waitForSelector('[data-testid="call-camera"][aria-pressed="true"]');
       await page.locator('[data-testid="call-share"]').click();
       await page.waitForSelector('[data-testid="call-video-local"][data-kind="screen"]');
       await page.waitForTimeout(400);
-      await shot(`${out}-send-on-light.png`, '[data-testid="call-bar"]');
+      await shot(`${out}-send-on-light.png`, '[data-testid="call-stage"] header');
       await shot(`${out}-sending-light.png`, '[data-testid="call-video"]');
+      await shot(`${out}-sending-page-light.png`);
+      // Folded, with a screen on the wire: the window carries the picture rather than the
+      // avatar, which is what makes it worth 208 pixels of somebody's screen.
+      await page.locator('[data-testid="call-stage-minimize"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="mini"]');
+      await page.waitForTimeout(600);
+      await shot(`${out}-mini-video-light.png`, '[data-testid="call-stage"]');
       await setTheme("dark");
-      await shot(`${out}-sending-dark.png`, '[data-testid="call-video"]');
+      await shot(`${out}-sending-dark.png`, '[data-testid="call-stage"]');
       await setTheme("light");
 
       // 9. And what the app SAYS when one of those is refused. It is a transient notice
       //    (web/src/lib/notice.ts), so the page shot is the one that matters: it shows the
-      //    notice above the card rather than over the button that hangs up. The refusal is
-      //    armed through the mock's own hook — the simulated camera never refuses, and the
-      //    service that would is a real tenant.
+      //    notice clear of the header every control sits in. The refusal is armed through the
+      //    mock's own hook — the simulated camera never refuses, and the service that would
+      //    is a real tenant.
+      await page.locator('[data-testid="call-stage-expand"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="full"]');
+      await page.waitForTimeout(600);
       await emit({ kind: "call_media", refuse: true });
       await page.locator('[data-testid="call-camera"]').click();
       await page.waitForSelector('[data-testid="call-notice"]');
@@ -1482,17 +1537,20 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-notice-card-dark.png`, '[data-testid="call-notice"]');
       await setTheme("light");
-      await page.locator('[data-testid="call-hangup"]').click();
+      await page.locator('[data-testid="call-hangup"]').first().click();
 
       console.log(
         `[preview] wrote ${out}-off-light.png, ${out}-settings-{light,on-light,on-dark}.png, ` +
           `${out}-button-light.png, ${out}-ringing-{light,card-light,card-dark}.png and ` +
-          `${out}-{connected-card-light,muted-card-light,connected-card-dark}.png and ` +
-          `${out}-group-{button-light,dialing-light,card-light,card-dark}.png and ` +
-          `${out}-meeting-chat-{light,dark,icon,card-light}.png and ` +
-          `${out}-meeting-{actions-light,lobby-light,card-light,card-dark}.png and ` +
+          `${out}-stage-{light,header-light,muted-light,dark}.png and ` +
+          `${out}-mini-{light,page-light,dragged-light,dark,video-light}.png and ` +
+          `${out}-group-{button-light,dialing-light,stage-light}.png and ` +
+          `${out}-meeting-chat-{light,dark,icon,stage-light}.png and ` +
+          `${out}-{people-light,people-panel-light,chat-light,chat-panel-light,chat-dark}.png and ` +
+          `${out}-meeting-{actions-light,lobby-light,stage-light}.png and ` +
           `${out}-video-{light,page-light,dark}.png and ` +
-          `${out}-send-{off-light,on-light}.png and ${out}-sending-{light,dark}.png and ` +
+          `${out}-send-{off-light,on-light}.png and ` +
+          `${out}-sending-{light,page-light,dark}.png and ` +
           `${out}-notice-{light,card-light,card-dark}.png`,
       );
     });

@@ -12,9 +12,10 @@ import {
 } from "./helpers";
 
 // Audio calling: the switch that is the consent, the button that places a call, the
-// ringing card with a working Answer, and the bar while the call is up
-// (web/src/components/call-bar.tsx and call-button.tsx, over web/src/lib/call.ts and
-// call-media.ts — and src/calling.rs for the protocol).
+// ringing card with a working Answer, and the PAGE the call becomes once it is up
+// (web/src/components/call-bar.tsx, call-stage.tsx and call-button.tsx, over
+// web/src/lib/call.ts, call-stage.ts and call-media.ts — and src/calling.rs for the
+// protocol).
 //
 // Nothing here registers anything with Teams, rings anybody, or opens a microphone. The
 // mock reproduces the SIGNALING and the page pairs it with `simulatedCallMedia`, which it
@@ -24,7 +25,10 @@ import {
 //   * calling is OFF until the user turns it on, and the button says so;
 //   * what a conversation offers is decided by the conversation: ring the person, ring the
 //     whole group, or JOIN the meeting the thread was minted for;
-//   * the ringing card can be answered, declined and muted;
+//   * the ringing card can be answered and declined, and a live call is muted from its
+//     own page;
+//   * a call that is up takes the screen, folds into a window that is dragged, and comes
+//     back from where it was left;
 //   * one call at a time.
 //
 // Every test ends by resetting the mock, because one mock process serves the whole run
@@ -75,17 +79,17 @@ test.describe("Audio calling", () => {
     await expect(button).toHaveAttribute("aria-label", /everybody in Platform Team/);
 
     await button.click();
-    const bar = page.locator('[data-testid="call-bar"]');
-    await expect(bar).toBeVisible();
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toBeVisible();
     // The CONVERSATION is named, not a person: a group of five has no one name, and the
     // roster is what answers "who" — once somebody picks up.
     await expect(page.locator('[data-testid="call-peer"]')).toContainText("Platform Team");
     await expect(page.locator('[data-testid="call-phase"]')).toContainText("Calling…");
-    await expect(bar).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
     await expect(page.locator('[data-testid="call-phase"]')).toContainText(/With /);
 
-    await page.locator('[data-testid="call-hangup"]').click();
-    await expect(bar).toHaveCount(0);
+    await page.locator('[data-testid="call-hangup"]').first().click();
+    await expect(stage).toHaveCount(0);
   });
 
   /** The meeting in the chat list is JOINED, from the thread itself — no calendar, and no
@@ -123,15 +127,15 @@ test.describe("Audio calling", () => {
     await expect(join).not.toHaveAttribute("data-join-url", /./);
 
     await join.click();
-    const bar = page.locator('[data-testid="call-bar"]');
-    await expect(bar).toBeVisible();
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toBeVisible();
     // The thread's own name is the meeting's title — the backend reads it from the store
     // rather than the page minting a second spelling of it.
     await expect(page.locator('[data-testid="call-peer"]')).toContainText("Design Sync");
-    await expect(bar).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
 
-    await page.locator('[data-testid="call-hangup"]').click();
-    await expect(bar).toHaveCount(0);
+    await page.locator('[data-testid="call-hangup"]').first().click();
+    await expect(stage).toHaveCount(0);
   });
 
   /** Notes is the one chat with nobody in it, so it offers neither. */
@@ -151,20 +155,23 @@ test.describe("Audio calling", () => {
     await page.locator('[data-testid="call-button"]').click();
 
     // Dialling first: the user has to see that the call is going out before it is
-    // answered, because the microphone opens at that moment.
-    const bar = page.locator('[data-testid="call-bar"]');
-    await expect(bar).toBeVisible();
+    // answered, because the microphone opens at that moment. It is already the page —
+    // everything after the ring is the stage's, and the ring is the only offer.
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toBeVisible();
+    await expect(stage).toHaveAttribute("data-mode", "full");
     await expect(page.locator('[data-testid="call-peer"]')).toContainText("Ava Thompson");
-    // Then the far side picks up and its SDP arrives, and the bar counts the duration
+    // Then the far side picks up and its SDP arrives, and the page counts the duration
     // from the backend's own clock.
-    await expect(bar).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
     await expect(page.locator('[data-testid="call-duration"]')).toContainText(/^\d+:\d\d$/);
 
-    // While a call is up the button is refused rather than starting a second one.
+    // While a call is up the button is refused rather than starting a second one. It is
+    // behind the stage, so the assertion is about the control rather than about a click.
     await expect(page.locator('[data-testid="call-button"]')).toBeDisabled();
 
-    await page.locator('[data-testid="call-hangup"]').click();
-    await expect(bar).toHaveCount(0);
+    await page.locator('[data-testid="call-hangup"]').first().click();
+    await expect(stage).toHaveCount(0);
     // An ending the user caused says nothing back at them: they were there.
     await expect(page.locator('[data-testid="call-notice"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="call-button"]')).toBeEnabled();
@@ -188,18 +195,21 @@ test.describe("Audio calling", () => {
     // one call, one of them saying it cannot be answered, is the app arguing with itself.
     await expect(page.locator('[data-testid="incoming-call-banner"]')).toHaveCount(0);
 
+    // Answering hands the call to the page: the card is the offer, and the offer is over.
     await page.locator('[data-testid="call-answer"]').click();
-    await expect(bar).toHaveAttribute("data-phase", "connected");
+    await expect(bar).toHaveCount(0);
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toHaveAttribute("data-phase", "connected");
 
-    const mute = page.locator('[data-testid="call-mute"]');
+    const mute = page.locator('[data-testid="call-mute"]').first();
     await expect(mute).toHaveAttribute("aria-pressed", "false");
     await mute.click();
     await expect(mute).toHaveAttribute("aria-pressed", "true");
     await mute.click();
     await expect(mute).toHaveAttribute("aria-pressed", "false");
 
-    await page.locator('[data-testid="call-hangup"]').click();
-    await expect(bar).toHaveCount(0);
+    await page.locator('[data-testid="call-hangup"]').first().click();
+    await expect(stage).toHaveCount(0);
   });
 
   test("declines a ringing call without opening the microphone", async ({ page }) => {
@@ -327,27 +337,35 @@ test.describe("Joining a meeting", () => {
     await expect(join).toContainText("Join here");
     await join.click();
 
-    const bar = page.locator('[data-testid="call-bar"]');
-    await expect(bar).toBeVisible();
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toBeVisible();
     // The meeting's own title, not a person: a meeting is not somebody.
     await expect(page.locator('[data-testid="call-peer"]')).toContainText("Architecture guild");
     // The lobby is its own state, and the user is told nobody has let them in yet.
     await expect(page.locator('[data-testid="call-phase"]')).toContainText("Waiting to be let in");
     // Nothing to answer: a meeting is joined, never offered.
     await expect(page.locator('[data-testid="call-answer"]')).toHaveCount(0);
+    // And no chat: this meeting was joined from a LINK, which names no thread at all — the
+    // service resolves one from the code and never tells us, so there is nothing behind a
+    // tab and no tab is drawn.
+    await expect(page.locator('[data-testid="call-stage-chat-toggle"]')).toHaveCount(0);
 
-    // Admitted, then the roster arrives and the bar says who is there.
-    await expect(bar).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    // Admitted, then the roster arrives and the page says who is there.
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
     await expect(page.locator('[data-testid="call-phase"]')).toContainText(/With \d+ others|With /, {
       timeout: 10_000,
     });
 
-    // While a meeting is up, nothing else can start: one microphone.
+    // While a meeting is up, nothing else can start: one microphone. The calendar is behind
+    // the page now, so this is the user's own way back to it — fold the call, and the button
+    // over there says no.
+    await page.locator('[data-testid="call-stage-minimize"]').click();
+    await expect(stage).toHaveAttribute("data-mode", "mini");
     await calendarEvent(page, "ev-overlap-a").click();
     await expect(page.locator('[data-testid="meeting-join-here"]')).toBeDisabled();
 
-    await page.locator('[data-testid="call-hangup"]').click();
-    await expect(bar).toHaveCount(0);
+    await page.locator('[data-testid="call-hangup"]').first().click();
+    await expect(stage).toHaveCount(0);
   });
 
   /**
@@ -372,16 +390,19 @@ test.describe("Joining a meeting", () => {
     await openCalendarView(page, "day");
     await calendarEvent(page, "ev-overlap-a").click();
     await page.locator('[data-testid="meeting-join-here"]').click();
-    await expect(page.locator('[data-testid="call-bar"]')).toHaveAttribute(
+    await expect(page.locator('[data-testid="call-stage"]')).toHaveAttribute(
       "data-phase",
       "connected",
       { timeout: 10_000 },
     );
 
-    // Nothing is drawn until there is something to draw: the stage exists only when a
-    // stream does, which is the same rule the agent transcript follows.
-    const stage = page.locator('[data-testid="call-video"]');
-    await expect(stage).toBeVisible({ timeout: 10_000 });
+    // Nothing is drawn until there is something to draw: the picture region exists only when
+    // a stream does, which is the same rule the agent transcript follows. Before that the
+    // page carries the avatar card, and the two never share the room — which is the half that
+    // can be asserted without racing the stream that is already on its way.
+    const pictures = page.locator('[data-testid="call-video"]');
+    await expect(pictures).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('[data-testid="call-stage-avatar"]')).toHaveCount(0);
 
     // A SHARED SCREEN, named after the person the subscription asked for — the section
     // itself never says whose picture it carries.
@@ -412,10 +433,10 @@ test.describe("Joining a meeting", () => {
       .evaluateAll((nodes) => nodes.every((node) => (node as HTMLVideoElement).muted));
     expect(muted).toBe(true);
 
-    // Leaving takes the picture with it: a element left holding a stopped stream shows its
+    // Leaving takes the picture with it: an element left holding a stopped stream shows its
     // last frame for good, which reads as a call that is still up.
-    await page.locator('[data-testid="call-hangup"]').click();
-    await expect(stage).toHaveCount(0);
+    await page.locator('[data-testid="call-hangup"]').first().click();
+    await expect(pictures).toHaveCount(0);
   });
 
   /**
@@ -438,7 +459,7 @@ test.describe("Joining a meeting", () => {
     // call that is not established, so a button there would report a refusal the user could
     // do nothing about.
     await expect(page.locator('[data-testid="call-camera"]')).toHaveCount(0);
-    await expect(page.locator('[data-testid="call-bar"]')).toHaveAttribute(
+    await expect(page.locator('[data-testid="call-stage"]')).toHaveAttribute(
       "data-phase",
       "connected",
       { timeout: 10_000 },
@@ -477,7 +498,7 @@ test.describe("Joining a meeting", () => {
     await expect(page.locator('[data-testid="call-video-local"][data-kind="screen"]')).toBeVisible();
 
     // Leaving takes every preview with it, and releases every capture.
-    await page.locator('[data-testid="call-hangup"]').click();
+    await page.locator('[data-testid="call-hangup"]').first().click();
     await expect(page.locator('[data-testid="call-video-local"]')).toHaveCount(0);
   });
 
@@ -485,9 +506,9 @@ test.describe("Joining a meeting", () => {
    * A capture the service REFUSES, mid-call. Two things about it, and the card this notice
    * replaced got both wrong: it was drawn only while no call was live, so a mid-call
    * refusal was the one failure nobody was ever told about — and wherever the reason goes
-   * now, it must not land on the card that holds Hang up.
+   * now, it must not land on the controls the user acts with.
    */
-  test("says why a capture was refused, above the call rather than over it", async ({ page }) => {
+  test("says why a capture was refused, clear of the controls it is about", async ({ page }) => {
     await page.goto("/");
     await page.locator('[data-testid="open-settings"]').click();
     await page.locator('[data-testid="calling-toggle"]').click();
@@ -498,8 +519,8 @@ test.describe("Joining a meeting", () => {
     await calendarEvent(page, "ev-overlap-a").click();
     await page.locator('[data-testid="meeting-join-here"]').click();
 
-    const bar = page.locator('[data-testid="call-bar"]');
-    await expect(bar).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
     const camera = page.locator('[data-testid="call-camera"]');
     await expect(camera).toBeVisible();
 
@@ -512,8 +533,9 @@ test.describe("Joining a meeting", () => {
     // for whoever holds the socket, and it reads as a fault code here (lib/call-failure.ts).
     await expect(notice).not.toContainText("call_offer_media");
 
-    // WHERE it lands, measured rather than read off a class list: the notice comes to rest
-    // ABOVE the whole call stack, so its bottom edge is at or over that stack's top one.
+    // WHERE it lands, measured rather than read off a class list. The promise is that a
+    // notice never covers the controls it is about; the call's own controls are the page's
+    // header, so the notice has to come to rest wholly below it.
     //
     // Measured once, and FIRST, because a notice does not stay: it slides in, waits out
     // `ERROR_NOTICE_MS` and slides back out, so a box read late is one of a notice leaving
@@ -521,20 +543,186 @@ test.describe("Joining a meeting", () => {
     await expect(notice).toHaveAttribute("data-mounted", "true");
     await page.waitForTimeout(NOTICE_SETTLE_MS);
     const noticeBox = await notice.boundingBox();
-    const stackBox = await page.locator('[data-testid="call-video"]').boundingBox();
+    const headerBox = await stage.locator("header").boundingBox();
     expect(noticeBox).toBeTruthy();
-    expect(stackBox).toBeTruthy();
-    expect(noticeBox!.y + noticeBox!.height).toBeLessThanOrEqual(stackBox!.y + 1);
+    expect(headerBox).toBeTruthy();
+    expect(noticeBox!.y).toBeGreaterThanOrEqual(headerBox!.y + headerBox!.height);
 
     // The meeting is untouched: a picture that could not go out is no reason to end it, and
     // the capture was released rather than left running behind a button that says off.
-    await expect(bar).toHaveAttribute("data-phase", "connected");
+    await expect(stage).toHaveAttribute("data-phase", "connected");
     await expect(camera).toHaveAttribute("aria-pressed", "false");
     await expect(page.locator('[data-testid="call-video-local"]')).toHaveCount(0);
 
     // And the click after it works: ONE refusal, so the surface is seen recovering.
     await camera.click();
     await expect(camera).toHaveAttribute("aria-pressed", "true");
-    await page.locator('[data-testid="call-hangup"]').click();
+    await page.locator('[data-testid="call-hangup"]').first().click();
   });
 });
+
+/**
+ * The call as a PAGE, and as the window that page folds into
+ * (web/src/components/call-stage.tsx, over web/src/lib/call-stage.ts).
+ *
+ * What is pinned here is the shape of the surface rather than the signaling — the joins
+ * above already prove that. The two shapes are ONE element, so the geometry is measured
+ * rather than assumed: a fold that re-mounted the call would drop the picture and the
+ * microphone with it.
+ */
+test.describe("The call's own page", () => {
+  test.afterEach(async ({ page }) => {
+    await resetCall(page);
+  });
+
+  test("takes the screen, folds into a window that is dragged, and comes back from there", async ({
+    page,
+  }) => {
+    await joinTheMeetingChat(page);
+    const stage = page.locator('[data-testid="call-stage"]');
+    const viewport = page.viewportSize()!;
+
+    // The page IS the screen: a call is what the user is doing for as long as it runs.
+    await expect(stage).toHaveAttribute("data-mode", "full");
+    const full = (await stage.boundingBox())!;
+    expect(Math.round(full.width)).toBe(viewport.width);
+    expect(Math.round(full.height)).toBe(viewport.height);
+
+    // Folded: a window, wholly on screen and clear of every edge.
+    await page.locator('[data-testid="call-stage-minimize"]').click();
+    await expect(stage).toHaveAttribute("data-mode", "mini");
+    await expect(page.locator('[data-testid="call-stage-expand"]')).toBeVisible();
+    await settle(page);
+    const mini = (await stage.boundingBox())!;
+    // Its own width on a desktop, and a 16:9 picture plus the control bar under it —
+    // whatever the width, because a picture that is not 16:9 is one with black edges.
+    expect(Math.round(mini.width)).toBe(320);
+    expect(Math.round(mini.height)).toBe(Math.round((320 * 9) / 16) + 44);
+    expect(mini.x).toBeGreaterThanOrEqual(8);
+    expect(mini.y).toBeGreaterThanOrEqual(8);
+    expect(mini.x + mini.width).toBeLessThanOrEqual(viewport.width - 8);
+    expect(mini.y + mini.height).toBeLessThanOrEqual(viewport.height - 8);
+
+    // The app behind it is usable again, which is the whole point of folding: the
+    // conversation's own composer is back, and there is exactly one of it.
+    await expect(page.locator('[data-testid="composer-shell"]')).toHaveCount(1);
+
+    // Dragged by its picture, and it stays where it was dropped.
+    await dragStage(page, mini, { x: 300, y: 200 });
+    const dropped = (await stage.boundingBox())!;
+    expect(dropped.x).toBeLessThan(mini.x - 100);
+    expect(dropped.y).toBeLessThan(mini.y - 100);
+
+    // And back to the page. It is the SAME element throughout — nothing was re-mounted, so
+    // the call it names has not changed.
+    const callId = await stage.getAttribute("data-call-id");
+    await page.locator('[data-testid="call-stage-expand"]').click();
+    await expect(stage).toHaveAttribute("data-mode", "full");
+    await settle(page);
+    expect(await stage.getAttribute("data-call-id")).toBe(callId);
+    expect(Math.round((await stage.boundingBox())!.width)).toBe(viewport.width);
+  });
+
+  /** Escape gives back what the last click took. It never ends the call: the one action on
+   *  this surface that cannot be undone is the one a stray keystroke must not reach. */
+  test("closes the panel on Escape, then folds — and never hangs up", async ({ page }) => {
+    await joinTheMeetingChat(page);
+    const stage = page.locator('[data-testid="call-stage"]');
+
+    await page.locator('[data-testid="call-stage-people"]').click();
+    await expect(page.locator('[data-testid="call-stage-panel"]')).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator('[data-testid="call-stage-panel"]')).toHaveCount(0);
+    await expect(stage).toHaveAttribute("data-mode", "full");
+
+    await page.keyboard.press("Escape");
+    await expect(stage).toHaveAttribute("data-mode", "mini");
+    // Still in the call, which is the half that matters.
+    await expect(stage).toHaveAttribute("data-phase", "connected");
+  });
+
+  test("says who is in the meeting, and what each of them is sending", async ({ page }) => {
+    await joinTheMeetingChat(page);
+    await page.locator('[data-testid="call-stage-people"]').click();
+    const rows = page.locator('[data-testid="call-stage-participant"]');
+    // The roster the service reported, plus the user themselves — who is always in it and
+    // always first: a meeting they are alone in still holds one person.
+    await expect(rows).toHaveCount(4, { timeout: 10_000 });
+    await expect(rows.first()).toHaveAttribute("data-you", "true");
+    await expect(rows.first()).toContainText("You");
+    await expect(page.locator('[data-testid="call-stage-people-panel"]')).toContainText("· 4");
+
+    // What somebody is sending comes from the ROSTER's own streams: the mock gives the first
+    // person a camera and the second a screen, and both are stated whether or not this page
+    // has subscribed to either.
+    await expect(rows.nth(1)).toContainText("Ava Thompson");
+    await expect(rows.nth(1).locator('[aria-label="Camera on"]')).toHaveCount(1);
+    await expect(rows.nth(2).locator('[aria-label="Sharing a screen"]')).toHaveCount(1);
+
+    // Naming the tab again closes it, like every other toggle in this app.
+    await page.locator('[data-testid="call-stage-people"]').click();
+    await expect(page.locator('[data-testid="call-stage-panel"]')).toHaveCount(0);
+  });
+
+  /**
+   * The meeting's chat, beside the picture — and the ONE composer.
+   *
+   * The panel adds no second composer: it takes the app's own, which is what carries the
+   * live sentinel a sanctioned driver proves its target with. Two of them would give that
+   * question two answers, so the count is the assertion.
+   */
+  test("puts the meeting's chat beside the picture, and keeps one composer", async ({ page }) => {
+    await joinTheMeetingChat(page);
+    const composer = page.locator('[data-testid="composer-shell"]');
+    const thread = await composer.getAttribute("data-conversation-id");
+    expect(thread).toMatch(/^19:meeting_/);
+
+    await page.locator('[data-testid="call-stage-chat-toggle"]').click();
+    await expect(page.locator('[data-testid="call-stage-transcript"]')).toBeVisible();
+    // One composer, and it is the MEETING's: the panel renders the app's own thread, so the
+    // sentinel still names exactly the conversation the words would go to.
+    await expect(composer).toHaveCount(1);
+    await expect(composer).toHaveAttribute("data-conversation-id", thread!);
+    // The words really can be written here — the send itself stays the user's own Enter.
+    await expect(page.locator('[data-testid="composer-send"]')).toBeVisible();
+
+    // Closing the panel hands the composer straight back to the conversation behind it.
+    await page.locator('[data-testid="call-stage-chat-toggle"]').click();
+    await expect(page.locator('[data-testid="call-stage-transcript"]')).toHaveCount(0);
+    await expect(composer).toHaveCount(1);
+    await expect(composer).toHaveAttribute("data-conversation-id", thread!);
+  });
+});
+
+/** Join the meeting the chat list holds. It is the one call in the mock that has a roster,
+ *  a picture and a thread of its own — which is everything this page draws. */
+async function joinTheMeetingChat(page: import("@playwright/test").Page): Promise<void> {
+  await gotoApp(page);
+  await turnCallingOn(page);
+  await openConversationNamed(page, "Design Sync");
+  await page.locator('[data-testid="meeting-join-here"]').click();
+  await expect(page.locator('[data-testid="call-stage"]')).toHaveAttribute(
+    "data-phase",
+    "connected",
+    { timeout: 10_000 },
+  );
+}
+
+/** Drag the folded window by its picture — never by its bar, where the controls are. */
+async function dragStage(
+  page: import("@playwright/test").Page,
+  from: { x: number; y: number; width: number },
+  to: { x: number; y: number },
+): Promise<void> {
+  await page.mouse.move(from.x + from.width / 2, from.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 20 });
+  await page.mouse.up();
+  await settle(page);
+}
+
+/** Let the stage's morph finish. The two shapes are one animated element, so a geometry
+ *  read mid-flight is a reading of the transition rather than of the result. */
+async function settle(page: import("@playwright/test").Page): Promise<void> {
+  await page.waitForTimeout(700);
+}

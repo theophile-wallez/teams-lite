@@ -9,12 +9,14 @@ import { SettingsPane } from "./settings-pane";
 import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
 import { CallBar } from "./call-bar";
+import { CallStageProvider, useCallStage } from "./call-stage-context";
 import { IncomingCallBanner } from "./incoming-call-banner";
 import { AppToaster } from "./app-toaster";
 import { Splash } from "./splash";
 import { useChatSections } from "./use-chat-sections";
 import { TooltipProvider } from "./ui/tooltip";
 import { Button } from "./ui/button";
+import { callStageIsUp } from "~/lib/call-stage";
 import { hasModifier } from "~/lib/platform";
 import { cn } from "~/lib/utils";
 import { installVirtualKeyboardState } from "~/lib/virtual-keyboard";
@@ -23,7 +25,13 @@ export function App() {
   return (
     <ControllerProvider>
       <TooltipProvider delayDuration={300}>
-        <AppInner />
+        {/* Which shape the live call is in, and which of its panels is open. It sits above
+            the whole shell because two surfaces read it: the call itself, and the message
+            pane — which gives up its composer while the call's chat panel holds it (see
+            `useCallOwnsComposer`). */}
+        <CallStageProvider>
+          <AppInner />
+        </CallStageProvider>
       </TooltipProvider>
     </ControllerProvider>
   );
@@ -43,6 +51,10 @@ function AppInner() {
   const mailMessages = useAppState((s) => s.mailMessages);
   const openMailId = useAppState((s) => s.openMailId);
   const { chats: visibleChats } = useChatSections();
+  // Whether a live call is drawn over the whole app right now (see call-stage.tsx).
+  const callStage = useCallStage();
+  const liveCall = useAppState((s) => s.callStatus.call);
+  const callHasTheScreen = callStage.mode === "full" && callStageIsUp(liveCall);
 
   // The URL is the source of truth for what is open. `/` means nothing; `/c/<id>` a
   // conversation; `/m/<id>` a mail. `strict: false` lets this shell read either
@@ -147,6 +159,12 @@ function AppInner() {
       // Dialogs own their own keys while open.
       if (paletteOpen || settingsOpen) return;
 
+      // A full-screen call owns the screen, so neither dialog is OPENED behind it: both are
+      // modal and trap the keyboard, and one opened under an opaque surface would take every
+      // keystroke somewhere nobody can see. Folding the call away (Escape, or the control in
+      // its header) hands the shortcuts straight back.
+      if (callHasTheScreen && hasModifier(e)) return;
+
       // Every shortcut takes Ctrl or Cmd, so the Mac keystroke works as typed.
       if (hasModifier(e) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
@@ -208,6 +226,7 @@ function AppInner() {
       goToConversation,
       goToMail,
       goToList,
+      callHasTheScreen,
     ],
   );
 

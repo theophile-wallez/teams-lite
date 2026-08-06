@@ -26,6 +26,7 @@ import { reviewRequest, type MergeRequestLink } from "~/lib/merge-request";
 import { useAppState, useController } from "./controller-context";
 import { AgentMenu } from "./agent-menu";
 import { CallButton } from "./call-button";
+import { useCallOwnsComposer } from "./call-stage-context";
 import { AgentPendingBubble } from "./agent-reply";
 import { Avatar, conversationFallback, conversationPhoto, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
@@ -117,6 +118,8 @@ export function MessagePane(props: { onBack?: () => void }) {
   // scrolling past it.
   const agentTranscripts = useAppState((s) => s.agentTranscripts);
   const agentTranscriptsOpen = useAppState((s) => s.agentTranscriptsOpen);
+  // Whether a live call's chat panel is holding this app's one composer right now.
+  const callOwnsComposer = useCallOwnsComposer();
   // Our own display name, read off the newest message of ours. The agent's signature
   // names the account its answer went out under, and a run that has not been echoed
   // back yet has no message of its own to read it from.
@@ -832,7 +835,11 @@ export function MessagePane(props: { onBack?: () => void }) {
       )}
 
       <TypingIndicator />
-      <Composer focusToken={focusToken} agentAnswer={agentAnswer} />
+      {/* There is ONE composer in this app, and while a call has this thread open in its
+          own chat panel that panel is where it lives (see `useCallOwnsComposer`). Nothing
+          is hidden by handing it over: the stage is full-screen at that moment, so this
+          pane is not on screen at all. */}
+      {!callOwnsComposer && <Composer focusToken={focusToken} agentAnswer={agentAnswer} />}
     </section>
   );
 }

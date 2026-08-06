@@ -151,30 +151,30 @@ function silentWav(seconds: number): Buffer {
   return buffer;
 }
 
-/** One reading of the call bar, as the app itself renders it. */
+/** One reading of the live call, as the app itself renders it. */
 export type CallBarState = {
-  /** `dialing` | `connecting` | `connected` | `ended`, from the bar's own attribute. */
+  /** `dialing` | `connecting` | `connected` | `ended`, from the surface's own attribute. */
   phase: string | null;
-  /** What the bar says under the title — "Joining…", "Waiting to be let in…", a timer. */
+  /** What it says under the title — "Joining…", "Waiting to be let in…", a timer. */
   detail: string;
-  /** The notice that replaces the bar when a call ends, when there is one. */
+  /** The notice that is left behind when a call ends, when there is one. */
   notice: string;
 };
 
 export type JoinLiveSession = {
   meeting: string;
   url: string;
-  /** Read the call bar now. */
+  /** Read what the app says about the call now. */
   callBar: () => Promise<CallBarState>;
-  /** Wait until the bar reaches one of `phases`, or the timeout expires. */
+  /** Wait until it reaches one of `phases`, or the timeout expires. */
   waitForPhase: (phases: string[], timeoutMs?: number) => Promise<CallBarState>;
-  /** Every distinct bar state seen since the click, in order. */
+  /** Every distinct state seen since the click, in order. */
   timeline: () => CallBarState[];
   /** Screenshot the page or one element. */
   shot: (path: string, selector?: string) => Promise<void>;
-  /** What the MEDIA is actually doing — the half the call bar cannot show. */
+  /** What the MEDIA is actually doing — the half no surface can show. */
   mediaStats: () => Promise<MediaStats | null>;
-  /** What the SERVICE said, digested — the half neither the bar nor `getStats` shows. */
+  /** What the SERVICE said, digested — the half neither the page nor `getStats` shows. */
   signals: () => Promise<SignalDigest>;
 };
 
@@ -573,9 +573,18 @@ async function assertPinnedMeeting(
   );
 }
 
-/** Read the call bar as the app renders it. */
+/**
+ * Read the live call as the app renders it.
+ *
+ * TWO surfaces carry the state, and this reads whichever is up: the PAGE a live call takes
+ * over (`call-stage`, which is every phase of a join) and the card a RINGING call is offered
+ * on (`call-bar`, which a join never reaches). Both state the phase in the same attribute,
+ * so this asks for the stage first and falls back — a driver that knew only one of them
+ * would report `phase: null` through a whole working join.
+ */
 async function readCallBar(page: Page): Promise<CallBarState> {
-  const bar = page.locator('[data-testid="call-bar"]').first();
+  const stage = page.locator('[data-testid="call-stage"]').first();
+  const bar = (await stage.count()) ? stage : page.locator('[data-testid="call-bar"]').first();
   if (!(await bar.count())) {
     const notice = await page
       .locator('[data-testid="call-notice"]')
@@ -593,7 +602,7 @@ async function readCallBar(page: Page): Promise<CallBarState> {
   return { phase, detail: oneLine(detail), notice: "" };
 }
 
-/** Poll the bar until it reaches one of `phases`, recording every change on the way. */
+/** Poll until the call reaches one of `phases`, recording every change on the way. */
 async function waitForPhase(
   page: Page,
   phases: string[],

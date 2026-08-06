@@ -919,8 +919,9 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
 The app takes and places one-to-one **audio** calls, by doing what the real Teams WEB
 client does: `src/calling.rs` is the signaling plane, the browser carries the media
 (`web/src/lib/call-media.ts`), and `NATIVE-CALLING.md` is the protocol map every line of
-both was written from — read it before touching either. Video is RECEIVED and never sent:
-see § Seeing video below, and NATIVE-CALLING.md § 10 for the protocol it rests on.
+both was written from — read it before touching either. What the user SEES of a live call is
+§ A call is a page; video is received and sent, which is § Video in a meeting and
+NATIVE-CALLING.md § 10 for the protocol it rests on.
 
 **The backend signals; the page carries the audio.** That split is not an implementation
 detail: the tokens must never reach a browser, and a microphone is only reachable from
@@ -981,10 +982,10 @@ call does — this side never handles RTP, and the page never learns a Teams URL
     group call is NOT asked for twice: it is one click, exactly like a 1:1, and the words
     carry the difference.
   - **A group call names the CONVERSATION where a 1:1 names the person** (`CallKind::Group`,
-    empty `peer_mri`): five people have no one name, so the bar draws the group mark rather
-    than a face seeded from nothing, and says who is there from the roster once somebody
-    picks up. It has no lobby — that state is a meeting's, and reading one into a call would
-    show a state that cannot end.
+    empty `peer_mri`): five people have no one name, so the surface draws the group mark
+    rather than a face seeded from nothing, and says who is there from the roster once
+    somebody picks up. It has no lobby — that state is a meeting's, and reading one into a
+    call would show a state that cannot end.
   - An INCOMING group call is still named after its CALLER: they are who the user decides
     about, and everybody else arrives on the roster.
   - **It is unverified against the tenant**, like the 1:1 call and for the same reason: a
@@ -1007,10 +1008,12 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   - **It leaves on its own.** `NOTICE_MS` for a report of something that happened,
     `ERROR_NOTICE_MS` for a failure — longer, because that is the one the user may have to
     act on. Nothing here ever waits to be dismissed.
-  - **It sits ABOVE the call, never over it.** The call bar measures its own stack into
-    `--notice-inset-bottom` (the base inset is in `styles/app.css`), so a sentence about a
-    refused camera stacks over the card instead of over the button that hangs up — and both
-    clear the composer, for the reason the call bar already clears it.
+  - **It never lands on the controls it is about.** The ringing card measures its own stack
+    into `--notice-inset-bottom` (the base inset is in `styles/app.css`), so a sentence stacks
+    over that card instead of over Answer — and both clear the composer, for the reason the
+    card already clears it. A live call needs no reservation: its controls are the page's own
+    header, at the top (see § A call is a page), and the spec measures the notice against that
+    header rather than trusting the inset.
   - **A new attempt takes the old reason back, and a `call_state` frame never does.** Those
     frames arrive all through a call — a roster, a renegotiation, a camera going on — so
     clearing there erased a refusal a beat after it appeared. The dismiss lives where an
@@ -1052,11 +1055,12 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   microphone**, and the page pairs it with `simulatedCallMedia` because that backend
   announces itself as a mock. That is what makes this surface reviewable with nothing
   leaving the machine: `cd web && bun run preview -- --out /tmp/call --call` captures the
-  switch, the button, the ring, the bar and the notice, and `web/e2e/calling.spec.ts` pins
-  every rule above. A MID-CALL failure is reachable only through that mock's
-  `{kind:"call_media", refuse:true}` test hook, which refuses the NEXT capture and only that
-  one: the page's simulated camera never refuses, and the service that would is a real
-  tenant. A spec must reset afterwards — `call_invite {reset:true}` clears it with the rest.
+  switch, the button, the ring, the page, the window it folds into and the notice, and
+  `web/e2e/calling.spec.ts` pins every rule above. A MID-CALL failure is reachable only
+  through that mock's `{kind:"call_media", refuse:true}` test hook, which refuses the NEXT
+  capture and only that one: the page's simulated camera never refuses, and the service that
+  would is a real tenant. A spec must reset afterwards — `call_invite {reset:true}` clears it
+  with the rest.
 - **There is no sanctioned live call.** Unlike a send, a call has NO pre-authorized
   target: the sandbox chat is a group thread, and ringing it would ring real people. A
   live test is the user's own click, on their own machine, to somebody who agreed to it
@@ -1064,10 +1068,11 @@ call does — this side never handles RTP, and the page never learns a Teams URL
 
 ## Video in a meeting — received, and sent
 
-A meeting draws the pictures other people put into it — a colleague's shared SCREEN on a
+A meeting draws the pictures other people put into it — a colleague's shared SCREEN on the
 stage, their CAMERA as a tile beside it — and it can put the user's own camera and screen
-into the meeting (`web/src/components/call-video.tsx` and the two toggles in `call-bar.tsx`,
-over `callVideo` / `callLocalVideo`).
+into the meeting (`web/src/components/call-video.tsx` draws one picture, `call-stage.tsx`
+decides where each one goes and carries the two toggles, over `callVideo` /
+`callLocalVideo`).
 
 **Sending is the sharper half, and the split in the gates says so.** Receiving publishes
 nothing about the user; sending puts their face — or whatever else is on their screen — in
@@ -1141,6 +1146,95 @@ joins alone and waits for an offer. Six rules hold it together, and
 after the roster with the measured labels and mids, and `simulatedCallMedia` answers with
 streams captured from a blank canvas — so `cd web && bun run preview -- --out /tmp/call --call`
 shows the stage and the tiles with nothing leaving the machine.
+
+## A call is a PAGE, and it folds into a window
+
+A live call takes the whole screen (`web/src/components/call-stage.tsx`, over the pure
+`web/src/lib/call-stage.ts`): a header that names it and holds every control, one card with
+the picture — or the person — in the middle of it, and a side panel for the people and for
+the meeting's own chat. It used to be a card in the corner, which was the right shape for a
+two-minute audio call and the wrong one for the thing this app grew into: a shared screen
+does not fit in 26rem, and "who is in this meeting" does not fit in a line.
+
+**A RINGING call is not the page.** It is an offer — nothing is connected and no microphone
+is open — so it stays the card beside the conversation (`call-bar.tsx`, `callStageIsUp`):
+taking the screen for something the user may decline would be the app deciding for them.
+Everything after they answer is the page's, dialling included, because the microphone opens
+there.
+
+**The two shapes are ONE element, and that is the whole design.** Nothing is unmounted
+between them, so the video keeps playing, the roster keeps arriving and the microphone is
+never touched by a fold. Four rules hold the motion up, and `web/e2e/calling.spec.ts`
+measures the geometry rather than trusting it:
+
+- **The geometry is animated, not the layout.** `x` / `y` / `width` / `height` are motion
+  values on one `position: fixed` box, and the content is ordinary flex that re-flows into
+  whatever size the box has at that frame. So no part of it is ever a stretched picture of
+  another size — at 40% of the way the stage genuinely IS 40% of the way, which is what makes
+  it read as one object moving instead of as a window being resized. `STAGE_MORPH_SECONDS`
+  (0.42) on a strong ease-out, because the movement crosses most of a screen.
+- **The two contents crossfade over that movement**, quicker than it and led by it: a page's
+  header and a small window's bar are different things and neither can be the other. They
+  overlap on purpose — a `mode="wait"` swap would leave the box empty for the one moment the
+  user is watching it.
+- **The window is dragged with the same motion values**, so a window dropped in a corner
+  expands FROM that corner and folds back TO it. Every drop is CLAMPED
+  (`clampMiniPosition`) and so is every viewport change: a window left where it no longer
+  fits would take the hang-up button off screen with it.
+- **Its SIZE is a share of a narrow screen** (`miniSize`, pinned by `web/e2e/mobile.spec.ts`).
+  This app is read from a phone, and 320px over a 412px viewport is not a call folded away —
+  it is the app with a hole punched in it, which is the one thing folding exists to avoid. The
+  height is 16:9 plus the control bar at every width, because a picture that is not 16:9 is a
+  picture with black edges.
+- **There is no close.** The stage is drawn for every live call, folded or not, because a
+  call this app holds and shows nowhere is a microphone the user cannot find the off switch
+  for. Escape closes the open panel, then folds — and never hangs up, since that is the one
+  action here nothing takes back.
+
+What the page itself decides:
+
+- **A shared SCREEN takes the whole content, and faces give way to it.** A screen is text
+  and it is the only thing in a call a tile is too small for; a face reads at any size. The
+  user's own camera is a TILE among the others (it is what they look like to the meeting),
+  and their own SCREEN is a corner preview that never becomes the content — a mirror of one's
+  own screen inside itself is a hall of mirrors, but the only way to know what the meeting is
+  seeing is to see it too. `callStageLayout` decides all of it in one place, and
+  `call-video.tsx` draws one picture without knowing where it goes.
+- **A call with no picture draws the PERSON**, centred, with what the call is doing under
+  them. Most calls are that.
+- **The header carries the time twice** — how long the call has been going, and the clock time
+  it started at — because they answer different questions, and somebody who joined late is
+  asking the second one.
+- **The People panel counts the user themselves, first.** A meeting they are alone in still
+  holds one person. What each person is sending is read from the ROSTER's own streams, never
+  from the sections this page happens to have subscribed to: a camera is on for the meeting
+  whether or not this machine asked to see it.
+- **The CHAT panel is the app's own thread, in a column.** Opening it navigates the app
+  underneath to that conversation, so the history, the drafts, the live feed and the read
+  state are the ones the conversation already has — there is no second history loader, and a
+  message sent from the panel goes out through the same composer under the same consent.
+  Two things follow:
+  - **It is offered only where there IS a thread** (`callStageChatConversation`): a meeting
+    joined from a calendar LINK names none — the service resolves one from the code and never
+    tells us — and a conversation this app does not hold has nothing behind a tab.
+  - **Opening it MARKS THAT THREAD READ**, because it opens the conversation exactly as
+    clicking its row in the sidebar does (see § Sending messages on `mark_read`). That is why
+    it is behind the user's own click and no panel is open by default — nothing on this page
+    opens a conversation on its own.
+- **There is ONE composer in this app, and the panel TAKES it rather than adding a second**
+  (`useCallOwnsComposer`). It carries the live sentinel `sandbox-live.ts` proves its target
+  with (`data-conversation-id`), so two of them would give that question two answers — the
+  spec asserts the count. Nothing is hidden by the handover: the panel only holds it while
+  the stage is FULL, and a full stage covers the message pane completely.
+- **A message is read here and acted on there.** No reactions, no edit, no delete, no "…"
+  menu in the panel: a call's side column is for following what is being said and saying
+  something back, and everything else is one fold away in the conversation itself, where it
+  has the room its menus need. The transcript is bounded (`TRANSCRIPT_MESSAGES`) and not
+  virtualized for the same reason — mounting a whole backlog beside a live video stage would
+  cost the call frames.
+
+`cd web && bun run preview -- --out /tmp/call --call` captures the page, both panels, the
+folded window, the drag and the picture in both themes.
 
 ## Joining a meeting (the calendar stays read-only)
 
@@ -1237,8 +1331,9 @@ the other** (`meeting_address` in `src/bin/server.rs`, `MeetingAddress` in
   (`ConnectedForRosterOnly`), and the UI says "Waiting to be let in…" rather than
   "Connecting…" — the one thing they have to know is that nobody has admitted them yet.
 - **The roster is what "who" means in a meeting.** `rosterUpdate` frames replace the list
-  wholesale, we are dropped from it (`CallSession::others`), and the bar names one or two
-  people and counts a crowd. A meeting's title stands where a call names a person.
+  wholesale, we are dropped from it (`CallSession::others`), and the header names one or two
+  people and counts a crowd — the People panel is where every name is (see § A call is a
+  page). A meeting's title stands where a call names a person.
 - **Several voices, several audio elements.** Teams sends a meeting's voices as separate
   streams, so `call-media.ts` keeps one `<audio>` per remote stream and drops each when
   its stream ends. A single element would play one person and silently drop the rest.
