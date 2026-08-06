@@ -4544,7 +4544,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
             }
             ctx.emit_call_state();
-            eprintln!("[calling] offered media: modalities={modalities:?} sending={sending:?}");
+            eprintln!(
+                "[calling] offered media: modalities={modalities:?} sending={sending:?} \
+                 sections={}",
+                calling::media_sections(&offer.blob).join(" | ")
+            );
             // The ANSWER may be in this response or arrive on our `mediaAnswer` callback —
             // the service has done both for other negotiations. Handing back whichever is
             // here lets the page apply it without waiting for a frame that may not come.

@@ -1116,6 +1116,45 @@ attempt cost.
   **Still unverified**: the POST has never been accepted or refused by the tenant. If it is
   refused it will say so with a subCode, which is more than the section's silent rejection ever
   did.
+- **The whole of the client's transform is now sent, and the service PARSES it — which is the
+  first thing it ever explained.** Driven by `bun run join-live -- --share`, which grew the step
+  that presses the stage's own control and the instrument that reads OUR OWN offer back
+  (`readLocalOffer`, off `setLocalDescription` as it is applied — reading `localDescription`
+  afterwards reads the last one, and a rejected section has been taken down by then).
+  Implemented from § 2.5's own diff, in `web/src/lib/ms-sdp.ts`:
+
+  - **`b=CT:4000`, and its POSITION is load-bearing.** After `t=` the service refuses the whole
+    description by name: `SdpParsingError … Line 5: Unexpected field 'b' found. The field may be
+    undefined or in the wrong order.` The grammar puts a session bandwidth before `t=`, and so
+    does the capture. That refusal is the only one this service has ever spelled out, and it
+    proves the SDP is parsed strictly and named precisely when it is wrong — so the next mistake
+    will say what it is.
+  - **The bundle's real transport, per section.** A browser writes the address on the section
+    that carries candidates and `9` / `IN IP4 0.0.0.0` on every other; the client copies the real
+    port and `c=` onto each (`transformBundle`).
+  - **`a=rtcp:<port>` on an offer, deleted on an answer** (the client's `rtcpTransform`), the
+    session **fingerprint copied onto every live section**, and **`a=msid-semantic: WMS *`**.
+
+  And these, from the client's code rather than the capture: the conference codec list, the
+  SSRC range (0-wide, because `getSsrcRangeForIndex` is `or(direction) && simulcast ? … : 0` and
+  simulcast is off), the content-sharing session, and the section LAYOUT — cameras before the
+  screen, so a conference's sharing section is the fourth m-line at the service's own mid 3.
+
+  **Every video section is still rejected, and audio goes through the same transform and is
+  accepted.** Measured across nine live joins, with each of these eliminated one at a time:
+  mid 1 and mid 3; `inactive`, `recvonly` and `sendonly`; at the join and mid-call; with the
+  presenter session granted (`role = "presenter"` in the roster, `can_stop=true`) and without.
+
+  **What has NEVER been true in any of those runs: somebody else in the meeting.** Every one was
+  joined alone — no other roster entry, and no `mediaRenegotiation` from the service, which is
+  its own signal that it has something to negotiate. § 10.3a already measured that: of five
+  joins, the four that got a renegotiation had a SECOND endpoint and the one that joined an empty
+  meeting got none in 30 s. A conference SFU refusing to allocate a video channel with no
+  receiver in the meeting fits every measurement above, and it is the one hypothesis this
+  machine cannot test by itself — the second install (`--released`, the front this driver grew
+  for exactly that) is refused writes by its own write lock, so it cannot join.
+
+  **So the next measurement needs a second participant in the meeting, and nothing else.**
 - Three specific unknowns remain, and the refusal above narrowed none of them:
   - **Whether a `contentSharing` session is needed at all.** § 10.4 says the client opens one,
     with six links and a presenter. But no participant in the measured roster carried a

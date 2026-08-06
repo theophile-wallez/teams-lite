@@ -56,6 +56,16 @@ export const SANDBOX_PATH = `/c/${encodeURIComponent(SANDBOX_THREAD)}`;
  */
 export const TAILNET_ORIGIN = "https://theophile-remote.taild26c06.ts.net:8443";
 export const LOCAL_ORIGIN = "http://127.0.0.1:19440";
+/**
+ * The RELEASED build's own front, which runs beside the staged pair on this machine
+ * (AGENTS.md § Running the released build beside the staged one).
+ *
+ * It is a second INSTALL, not a second target: both doors open the same account and the same
+ * conversations, and every rail in these drivers is about WHICH conversation is typed into or
+ * called. What it buys is a second calling ENDPOINT — the service sees two devices — which is
+ * the only way this machine can put somebody else in a meeting.
+ */
+export const RELEASED_ORIGIN = "http://127.0.0.1:19442";
 
 export const SANDBOX_URL = `${TAILNET_ORIGIN}${SANDBOX_PATH}`;
 export const SANDBOX_URL_LOCAL = `${LOCAL_ORIGIN}${SANDBOX_PATH}`;

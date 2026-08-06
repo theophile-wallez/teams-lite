@@ -202,8 +202,50 @@ function withoutExtras(fields: string[]): string[] {
   return out;
 }
 
+/** The session bandwidth the captured client offer states (`b=CT:4000`, § 2.5). */
+const SESSION_BANDWIDTH_KBPS = 4000;
+
+/**
+ * The port and `c=` line the BUNDLE really runs on: the first section that carries candidates.
+ *
+ * A browser writes the real address on that section alone and `9` / `IN IP4 0.0.0.0` on every
+ * other one; the client copies the real pair onto each, so a service reading a section's own
+ * transport finds one. Nothing is returned when no section carries a candidate — there is then
+ * nothing truer to copy, and a placeholder is better than an invention.
+ */
+function bundleTransport(lines: string[]): { port: string; connection: string } | null {
+  let port: string | null = null;
+  let connection: string | null = null;
+  let candidates = false;
+  for (const line of lines) {
+    const media = readMediaLine(line);
+    if (media) {
+      if (candidates && port && connection) break;
+      port = media.port;
+      connection = null;
+      candidates = false;
+      continue;
+    }
+    if (line.startsWith("c=")) connection = line.slice(2).trim();
+    if (line.startsWith("a=candidate:")) candidates = true;
+  }
+  if (!candidates || !port || !connection || port === "0" || port === "9") return null;
+  return { port, connection };
+}
+
+/**
+ * Whether this description is an ANSWER, which is what decides `a=rtcp:`.
+ *
+ * An answer states the setup role it TOOK — `active` or `passive` — while an offer offers
+ * `actpass`. It is the one signal inside the blob itself, and this module is only ever handed
+ * the blob.
+ */
+function isAnswer(lines: string[]): boolean {
+  return lines.some((line) => line === "a=setup:active" || line === "a=setup:passive");
+}
+
 /** One `m=` line, split into the pieces this module cares about. */
-type MediaLine = { kind: string; head: string; profile: string; tail: string };
+type MediaLine = { kind: string; head: string; port: string; profile: string; tail: string };
 
 /** Read an `m=` line, or nothing when the line is not one. */
 function readMediaLine(line: string): MediaLine | null {
@@ -213,12 +255,17 @@ function readMediaLine(line: string): MediaLine | null {
   const match = /^m=(\S+) (\S+) (\S+)(.*)$/.exec(line);
   const [, kind, port, profile, tail] = match ?? [];
   if (!kind || !port || !profile) return null;
-  return { kind, head: `m=${kind} ${port}`, profile, tail: tail ?? "" };
+  return { kind, head: `m=${kind} ${port}`, port, profile, tail: tail ?? "" };
 }
 
 /** Write an `m=` line back with a different profile. */
 function withProfile(media: MediaLine, profile: string): string {
   return `${media.head} ${profile}${media.tail}`;
+}
+
+/** Write it back with the service's profile and the port the bundle really runs on. */
+function withPort(media: MediaLine, port: string): string {
+  return `m=${media.kind} ${port} ${MS_PROFILE}${media.tail}`;
 }
 
 /** Split an SDP into its lines, keeping the line ending the sender used.
@@ -253,6 +300,14 @@ function splitLines(sdp: string): { lines: string[]; ending: string } {
 export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
   const { lines, ending } = splitLines(sdp);
   const out: string[] = [];
+  // The session's own fingerprint, and the transport the BUNDLE really runs on. A browser
+  // writes candidates on the first section only and gives every other one the placeholder
+  // `9` / `IN IP4 0.0.0.0`; the client copies the real port and `c=` line onto each
+  // (`transformBundle`) and copies the session fingerprint onto every live section. Both are
+  // read before anything is written, because they live above the sections that need them.
+  const fingerprint = lines.find((line) => line.startsWith("a=fingerprint:"));
+  const transport = bundleTransport(lines);
+  const answering = isAnswer(lines);
   // The section being read, so a label can be added at its end rather than guessed at
   // its start: `a=label` may already be there, and stating it twice is not the same SDP.
   // Its mid is read on the way through, because the override is keyed by mid and an
@@ -288,9 +343,27 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
     if (media) {
       closeSection();
       section = { kind: media.kind, hasLabel: false, mid: null, ssrcs: [], hasSsrcRange: false };
-      out.push(withProfile(media, MS_PROFILE));
+      // A REJECTED section keeps its own port: zero is the whole statement, and the client
+      // describes no transport for one either.
+      const rejected = media.port === "0";
+      out.push(
+        rejected || !transport ? withProfile(media, MS_PROFILE) : withPort(media, transport.port),
+      );
+      if (!rejected && transport) {
+        out.push(`c=${transport.connection}`);
+        // `a=rtcp:<port>` on an OFFER and nothing on an answer — the client's own
+        // `rtcpTransform`. A browser writes `a=rtcp:9 IN IP4 0.0.0.0`, which names a
+        // placeholder rather than the port the section really runs on.
+        if (!answering) out.push(`a=rtcp:${transport.port}`);
+      }
+      if (!rejected && fingerprint) out.push(fingerprint);
       continue;
     }
+    // The lines just replaced: a browser's own `c=` restates the placeholder and its
+    // `a=rtcp:` names one too, and the session fingerprint is now stated per section, so a
+    // section's own copy would state it twice.
+    if (section && transport && (line.startsWith("c=") || line.startsWith("a=rtcp:"))) continue;
+    if (section && fingerprint && line.startsWith("a=fingerprint:")) continue;
     // A trailing empty line ends the last section without belonging to it.
     if (line === "") {
       closeSection();
@@ -305,6 +378,23 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
       const id = Number.parseInt(line.slice("a=ssrc:".length), 10);
       if (Number.isFinite(id) && !section.ssrcs.includes(id)) section.ssrcs.push(id);
     }
+    // The session's own two lines, in the client's spelling. `WMS *` is what it writes where
+    // a browser writes `WMS` with no token, and `b=CT` is the session bandwidth it adds — a
+    // video section the service must allocate for is where an absence would tell.
+    if (!section && line.startsWith("a=msid-semantic:")) {
+      out.push("a=msid-semantic: WMS *");
+      continue;
+    }
+    // BEFORE `t=`, which is where the grammar puts a session bandwidth and where the captured
+    // client offer has it. After it, the service refuses the whole description by name:
+    // `SdpParsingError … Unexpected field 'b' found. The field may be undefined or in the wrong
+    // order.` — measured 2026-08-06, and the first thing this service ever explained.
+    if (!section && line.startsWith("t=")) {
+      out.push(`b=CT:${SESSION_BANDWIDTH_KBPS}`);
+      out.push(line);
+      continue;
+    }
+    if (!section && line.startsWith("b=")) continue;
     if (line.startsWith("a=candidate:")) {
       out.push(candidateToMs(line));
       continue;

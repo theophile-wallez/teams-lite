@@ -49,7 +49,7 @@ import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { findChromium, openCalendarView } from "./preview";
-import { LOCAL_ORIGIN, TAILNET_ORIGIN } from "./sandbox-live";
+import { LOCAL_ORIGIN, RELEASED_ORIGIN, TAILNET_ORIGIN } from "./sandbox-live";
 
 /**
  * The one meeting this script may ever join: the user's own, authorized out loud for
@@ -163,9 +163,22 @@ function silentWav(seconds: number): Buffer {
 export const PEER_CONNECTION_PROBE = `(() => {
   const Native = window.RTCPeerConnection;
   if (!Native) return;
+  window.__tlOffers = [];
   const Wrapped = function (...args) {
     const pc = new Native(...args);
     window.__tlPc = pc;
+    // Every description this side APPLIES, kept at the moment it is applied. Reading
+    // \`localDescription\` afterwards reads the LAST one, and a section the far side rejected
+    // has been taken down by then — which made a rejected offer look like a rejected section
+    // and cost two runs. Held as raw SDP; the driver digests it into shapes.
+    const setLocal = pc.setLocalDescription.bind(pc);
+    pc.setLocalDescription = function (description) {
+      return setLocal(description).then((result) => {
+        const applied = pc.localDescription;
+        if (applied) window.__tlOffers.push({ type: applied.type, sdp: applied.sdp });
+        return result;
+      });
+    };
     return pc;
   };
   Wrapped.prototype = Native.prototype;
@@ -239,6 +252,8 @@ export type JoinLiveSession = {
    * `--use-fake-ui-for-media-stream` accepts it with no picker.
    */
   share: (holdMs?: number) => Promise<{ pressed: boolean; sending: string[] }>;
+  /** OUR OWN offer, section by section — see {@link readLocalOffer}. */
+  localOffer: () => Promise<string[]>;
 };
 
 /**
@@ -367,9 +382,18 @@ export type MediaStats = {
  */
 export async function withJoinLive<T>(
   body: (session: JoinLiveSession) => Promise<T>,
-  opts: { front?: "tailnet" | "local"; tone?: boolean; from?: "calendar" | "chat" } = {},
+  opts: {
+    front?: "tailnet" | "local" | "released";
+    tone?: boolean;
+    from?: "calendar" | "chat";
+  } = {},
 ): Promise<T> {
-  const origin = opts.front === "local" ? LOCAL_ORIGIN : TAILNET_ORIGIN;
+  const origin =
+    opts.front === "local"
+      ? LOCAL_ORIGIN
+      : opts.front === "released"
+        ? RELEASED_ORIGIN
+        : TAILNET_ORIGIN;
   const url = origin;
   await assertFrontIsServing(origin);
 
@@ -449,6 +473,7 @@ export async function withJoinLive<T>(
       mediaStats: () => readMediaStats(page as Page),
       signals: () => readSignals(page as Page),
       share: (holdMs = SHARE_HOLD_MS) => shareTheScreen(page as Page, holdMs),
+      localOffer: () => readLocalOffer(page as Page),
     };
     return await body(session);
   } finally {
@@ -659,6 +684,64 @@ export async function waitForPhase(
 }
 
 /** Ask the peer connection what the media is really doing. */
+/**
+ * OUR OWN offer, section by section — the one artefact none of this ever looked at.
+ *
+ * Every measurement so far read what the SERVICE sent. When a section is rejected with no word
+ * about why, the next question is what was actually offered, and that lives in the browser's
+ * own `localDescription`.
+ *
+ * It prints the SHAPE, under the discipline the rest of this file follows: the m-line, the mid,
+ * the label, the direction, the codec names and whether an SSRC range is stated. No candidate,
+ * no fingerprint, no ICE credential.
+ */
+export async function readLocalOffer(page: Page): Promise<string[]> {
+  return (await page.evaluate(`(() => {
+    const applied = window.__tlOffers || [];
+    const out = [];
+    for (let i = 0; i < applied.length; i += 1) {
+      out.push("--- our " + applied[i].type + " #" + (i + 1));
+      out.push.apply(out, sections(applied[i].sdp));
+    }
+    return out;
+
+    function sections(sdp) {
+    const out = [];
+    let section = null;
+    const flush = () => { if (section) out.push(section); section = null; };
+    const DIRECTIONS = ["a=sendonly", "a=recvonly", "a=sendrecv", "a=inactive"];
+    // Split on the newline's CODE, never on an escape: this whole function is injected as the
+    // text of a template literal, so a "\\n" in it would arrive as a real newline inside a
+    // string literal and the injected source would not parse. It cost two runs.
+    for (const raw of sdp.split(String.fromCharCode(10))) {
+      const line = raw.trim();
+      if (line.startsWith("m=")) {
+        flush();
+        const parts = line.slice(2).split(" ");
+        section = parts[0] + " port=" + parts[1] + " " + parts[2];
+      } else if (!section) {
+        continue;
+      } else if (line.startsWith("a=mid:")) {
+        section += " mid=" + line.slice(6).trim();
+      } else if (line.startsWith("a=label:")) {
+        section += " label=" + line.slice(8).trim();
+      } else if (DIRECTIONS.indexOf(line) >= 0) {
+        section += " " + line.slice(2);
+      } else if (line.startsWith("a=rtpmap:")) {
+        const codec = (line.split(" ")[1] || "").split("/")[0];
+        if (codec && !section.includes(" " + codec)) section += " " + codec;
+      } else if (line.startsWith("a=x-ssrc-range:")) {
+        section += " x-ssrc-range";
+      } else if (line.startsWith("a=ssrc:")) {
+        if (!section.includes(" ssrc")) section += " ssrc";
+      }
+    }
+    flush();
+    return out;
+    }
+  })()`)) as string[];
+}
+
 export async function readMediaStats(page: Page): Promise<MediaStats | null> {
   // Source text rather than a closure, for the same reason as the init script above: this
   // file is typed for node, and `RTCPeerConnection` does not exist here.
@@ -958,6 +1041,9 @@ async function shareTheScreen(
   await page.waitForTimeout(holdMs);
   const sending = await readSending(page);
   console.log(`  the backend says this endpoint sends: ${sending.join(", ") || "(nothing)"}`);
+  // What WE offered, which is the half every earlier run was blind to.
+  console.log("  our own offer, section by section:");
+  for (const line of await readLocalOffer(page)) console.log(`      ${line}`);
   // And off again, through the app's own control, so the session is given back the way a
   // user's own press gives it back.
   if ((await share.getAttribute("aria-pressed")) === "true") {
@@ -1006,7 +1092,16 @@ export function oneLine(text: string): string {
 
 if (import.meta.main) {
   const argv = process.argv.slice(2);
-  const front = argv.includes("--local") ? "local" : "tailnet";
+  // WHICH INSTALL drives, never which meeting. `--released` is the second install on this
+  // machine (AGENTS.md § Running the released build beside the staged one): it holds a calling
+  // endpoint of its own, so running it beside `--local` puts TWO devices in the meeting — which
+  // is what the service needs before it offers anybody's video at all (§ 10.3a), and the only
+  // second participant this machine can produce.
+  const front = argv.includes("--released")
+    ? "released"
+    : argv.includes("--local")
+      ? "local"
+      : "tailnet";
   const tone = argv.includes("--tone");
   // WHERE the join is started from. The same meeting either way — the flag chooses which
   // surface's button is proved and pressed, never which meeting.

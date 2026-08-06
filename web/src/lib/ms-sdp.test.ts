@@ -34,14 +34,116 @@ describe("toMsSdp", () => {
     expect(out).not.toContain("UDP/TLS/RTP/SAVPF");
   });
 
-  it("changes nothing else about the blob", () => {
+  it("keeps what is the browser's to say", () => {
     const out = toMsSdp(CHROME_OFFER).split("\r\n");
-    const untouched = CHROME_OFFER.split("\r\n").filter((line) => !line.startsWith("m="));
-    // Every line that is not an `m=` line survives, in order. The codecs, the
-    // fingerprint, the candidates and the ICE credentials are the browser's own.
+    // The codecs, the fingerprint, the candidates and the ICE credentials are the browser's
+    // own and travel exactly as it wrote them. What this module replaces, it replaces because
+    // the captured client offer does (§ 2.5): the transport profile, the `c=` line, `a=rtcp:`
+    // and `a=msid-semantic:`.
+    const ours = ["m=", "c=", "a=rtcp:", "a=msid-semantic:", "b="];
+    const untouched = CHROME_OFFER.split("\r\n").filter(
+      (line) => !ours.some((prefix) => line.startsWith(prefix)),
+    );
     for (const line of untouched) expect(out).toContain(line);
     expect(out).toContain("a=fingerprint:sha-256 AB:CD:EF:00:11:22:33:44");
     expect(out).toContain("a=candidate:1 1 udp 2113937151 192.0.2.10 51234 typ host");
+  });
+
+  // The rest of the captured client's own transform (§ 2.5). Audio is accepted without ANY of
+  // it, which is why none of it was here — and then every video section this app offered was
+  // rejected with no word about why, at two different mids, with the label, the codec list,
+  // the SSRC range and the presenter session all in place. So the offer is made to look like
+  // the one the service is known to accept, and what remains is measured rather than argued.
+
+  it("states the transport the bundle really runs on, per section", () => {
+    // A browser writes the address on the section that carries candidates and `9` /
+    // `IN IP4 0.0.0.0` on every other. The client copies the real pair onto each, so a
+    // service reading a section's own transport finds one rather than a placeholder.
+    const bundled = [
+      CHROME_OFFER,
+      "m=video 9 UDP/TLS/RTP/SAVPF 107",
+      "c=IN IP4 0.0.0.0",
+      "a=rtcp:9 IN IP4 0.0.0.0",
+      "a=mid:1",
+      "a=sendonly",
+      "",
+    ].join("\r\n");
+    const out = toMsSdp(bundled).split("\r\n");
+    expect(out).toContain("m=video 51234 RTP/SAVP 107");
+    expect(out.filter((line) => line === "c=IN IP4 192.0.2.10").length).toBe(2);
+    // The placeholder is gone, in both places it appeared.
+    expect(out).not.toContain("c=IN IP4 0.0.0.0");
+    expect(out).not.toContain("a=rtcp:9 IN IP4 0.0.0.0");
+  });
+
+  it("states a=rtcp on an offer and never on an answer", () => {
+    // The client's own `rtcpTransform`: `{port}` on an offer, deleted on an answer. Which one
+    // it is, is read off the setup role — an answer states the role it TOOK.
+    expect(toMsSdp(CHROME_OFFER)).toContain("a=rtcp:51234");
+    const answer = CHROME_OFFER.replace("a=setup:actpass", "a=setup:active");
+    expect(toMsSdp(answer)).not.toContain("a=rtcp:");
+  });
+
+  it("gives every live section one fingerprint, and never two", () => {
+    // The client copies the session's onto each section. A section that already carried one
+    // must not end up with both, and the count is what says so.
+    const two = [
+      CHROME_OFFER,
+      "m=video 9 UDP/TLS/RTP/SAVPF 107",
+      "c=IN IP4 0.0.0.0",
+      "a=mid:1",
+      "a=sendonly",
+      "",
+    ].join("\r\n");
+    const out = toMsSdp(two).split("\r\n");
+    expect(out.filter((line) => line.startsWith("a=fingerprint:")).length).toBe(2);
+    // One per section, in the section it belongs to. Split on the `m=` lines and check each
+    // half: a count alone would pass with both fingerprints on one section.
+    const starts = out.flatMap((line, index) => (line.startsWith("m=") ? [index] : []));
+    expect(starts.length).toBe(2);
+    for (let i = 0; i < starts.length; i += 1) {
+      const section = out.slice(starts[i]!, starts[i + 1] ?? out.length);
+      expect(section.filter((line) => line.startsWith("a=fingerprint:")).length).toBe(1);
+    }
+  });
+
+  it("states the session's own bandwidth and stream token", () => {
+    const out = toMsSdp(CHROME_OFFER);
+    expect(out).toContain("b=CT:4000");
+    // BEFORE `t=`, which is where the grammar puts it. After it the service refuses the whole
+    // description: "Unexpected field 'b' found. The field may be undefined or in the wrong
+    // order." — the first thing it ever explained, and it cost one live join to hear.
+    const lines = out.split("\r\n");
+    expect(lines.indexOf("b=CT:4000")).toBeLessThan(lines.findIndex((l) => l.startsWith("t=")));
+    // A browser writes `a=msid-semantic: WMS` with no token.
+    expect(out).toContain("a=msid-semantic: WMS *");
+  });
+
+  it("leaves a REJECTED section its own port and describes no transport for it", () => {
+    // Zero is the whole statement. Giving it the bundle's port would claim a transport for a
+    // stream that does not exist.
+    const withRejected = [
+      CHROME_OFFER,
+      "m=video 0 UDP/TLS/RTP/SAVPF 107",
+      "c=IN IP4 0.0.0.0",
+      "a=mid:1",
+      "a=inactive",
+      "",
+    ].join("\r\n");
+    const out = toMsSdp(withRejected);
+    expect(out).toContain("m=video 0 RTP/SAVP 107");
+    expect(out).not.toContain("m=video 51234");
+  });
+
+  it("says nothing new when no section carries a candidate", () => {
+    // A description gathered with no candidates at all: there is nothing truer to copy, so the
+    // placeholder stays rather than being replaced by an invention.
+    const bare = ["v=0", "t=0 0", "m=audio 9 UDP/TLS/RTP/SAVPF 111", "c=IN IP4 0.0.0.0", ""].join(
+      "\r\n",
+    );
+    const out = toMsSdp(bare);
+    expect(out).toContain("m=audio 9 RTP/SAVP 111");
+    expect(out).toContain("c=IN IP4 0.0.0.0");
   });
 
   it("names the media line the way the client does", () => {

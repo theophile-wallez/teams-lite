@@ -306,10 +306,19 @@ export async function startCallMedia(options: CallMediaOptions): Promise<CallMed
       // later. Read from the offer as it arrived, because the labels are what name them.
       senders.adopt(pc, labelsByMid(options.remoteOffer));
     } else {
-      // The sections a capture will need, negotiated NOW while nothing is being sent — on a
-      // one-to-one, which is where the client reserves them and where a section added later
-      // was refused. A conference offers audio alone, exactly as the client does.
-      if (options.oneToOne) senders.reserve(pc);
+      // The sections a capture will need, negotiated NOW while nothing is being sent — on
+      // EVERY call this app places or joins.
+      //
+      // A conference was left out of this at first, on a reading of the client's
+      // `addModalities` that its own capture disproves: § 2.5's is a MEETING join, audio only,
+      // and it carries `a=group:BUNDLE 0 1 … 12` — thirteen sections, twelve of them empty. So
+      // a real client pre-negotiates the layout there too, and the `!isMultiparty` line only
+      // supplies a DEFAULT for a media state the join did not state. Measured against the
+      // tenant: every video section this app added mid-call was rejected — at mid 1, and again
+      // at the service's own mid 3 with the label, the codecs, the SSRC range and the presenter
+      // session all in place. A section the first offer never carried is one this service will
+      // not have.
+      senders.reserve(pc);
       await pc.setLocalDescription(await pc.createOffer());
     }
     await waitForIceGathering(pc);
@@ -446,6 +455,37 @@ class RemoteAudio {
 const RESERVED_KINDS: readonly SendKind[] = ["camera", "screen"];
 
 /**
+ * How many CAMERA channels a conference's layout puts before its sharing one.
+ *
+ * The service's own renegotiation offers `applicationsharing-video` at **mid 3**, with 1 and 2
+ * left for `main-video` (NATIVE-CALLING.md § 10.3a) — and the client's `addModalities` explains
+ * the gap: it creates `numVideoChannels` video entities and only then its `numVbssChannels`
+ * sharing one, so a conference's sharing section is always the fourth m-line. This app offered
+ * one at **mid 1**, a slot the service keeps for a camera, and it was rejected with no word
+ * about why — measured 2026-08-06 with the label, the codecs, the SSRC range and the presenter
+ * session all in place.
+ *
+ * A one-to-one has ONE video channel (`numVideoChannels = isMultiparty && … || 1`), so its
+ * sharing section is the third m-line, which is what a two-party layout already produced.
+ */
+const CONFERENCE_CAMERA_CHANNELS = 2;
+
+/**
+ * The direction a RESERVED section is offered in: `recvonly`, which is what the captured
+ * client offer states (§ 2.5's own audio section is `a=recvonly`).
+ *
+ * `inactive` was the first reading of `createTransceiver`'s `{direction: "inactive"}` — and it
+ * is what the client passes the BROWSER, before its own `setDirections` runs over the media
+ * state and before the section reaches the wire. Measured 2026-08-06: every `inactive` video
+ * section this app offered was answered with a zeroed port, and a section the service has
+ * zeroed is never revived — the browser recycles it and the next offer is refused again.
+ *
+ * It publishes nothing either way: `recvonly` says this endpoint has a slot it could receive
+ * on, and no camera and no screen is opened until the user asks.
+ */
+const RESERVED_DIRECTION: RTCRtpTransceiverDirection = "recvonly";
+
+/**
  * The video codecs a CONFERENCE offers, in the client's own order.
  *
  * `allowedVideoCodecsMultiparty: [{video/H264}, {video/AV1}, {video/rtx}]` with
@@ -570,6 +610,14 @@ class LocalSenders {
    *  really carried a picture can be told from one that never did. Cleared per kind when it
    *  is switched off, because the next section is negotiated again from nothing. */
   private accepted = new Set<SendKind>();
+  /** Sections that exist only to hold the mids the service's layout keeps for a camera. They
+   *  never carry a track and are never handed out — they are numbering, not capture. */
+  private padding: RTCRtpTransceiver[] = [];
+  /** Whether the layout has been built. Once per call: the mids are what the far side knows
+   *  the sections by, so a second pass would renumber them. */
+  private reserved = false;
+  /** The mid each kind's section had when it was taken down, so its label outlives it. */
+  private dropped = new Map<SendKind, string>();
   onChange?: (videos: LocalVideo[]) => void;
   /** Called when the BROWSER ends a capture by itself — the "Stop sharing" bar it draws over
    *  every screen share, which no click of ours passes through. */
@@ -592,9 +640,21 @@ class LocalSenders {
    * nothing about the user, and no camera or screen is opened until they ask.
    */
   reserve(pc: RTCPeerConnection): void {
-    for (const kind of RESERVED_KINDS) {
-      if (this.live.has(kind) || this.idle.has(kind)) continue;
-      this.idle.set(kind, this.addVideoSection(pc, { direction: "inactive" }));
+    if (this.reserved) return;
+    this.reserved = true;
+    // The CAMERA channels first, then the screen — the client's own order, and what puts a
+    // conference's sharing section on the mid the service keeps for one. The channels beyond
+    // the first carry nothing and are never handed out: their whole job is to occupy the slots
+    // between the audio section and the screen's.
+    const cameras = this.conference ? CONFERENCE_CAMERA_CHANNELS : 1;
+    for (let channel = 0; channel < cameras; channel += 1) {
+      const transceiver = this.addVideoSection(pc, { direction: RESERVED_DIRECTION });
+      const free = !this.live.has("camera") && !this.idle.has("camera");
+      if (channel === 0 && free) this.idle.set("camera", transceiver);
+      else this.padding.push(transceiver);
+    }
+    if (!this.live.has("screen") && !this.idle.has("screen")) {
+      this.idle.set("screen", this.addVideoSection(pc, { direction: RESERVED_DIRECTION }));
     }
   }
 
@@ -654,6 +714,12 @@ class LocalSenders {
   }
 
   async start(pc: RTCPeerConnection, kind: SendKind): Promise<void> {
+    // The whole LAYOUT, before the first capture of the call goes out. On a one-to-one this
+    // already happened at the first negotiation; in a conference the client adds no video
+    // section until one is asked for, and this is that moment — so the sections are still
+    // created in the client's own order and the screen still lands on the mid the service
+    // keeps for one.
+    this.reserve(pc);
     const stream = await openCapture(kind);
     // A capture that is starting has not been accepted by anybody yet, even when it takes
     // back a section the far side once agreed to: the direction changed, so the section is
@@ -730,7 +796,9 @@ class LocalSenders {
     for (const track of held.stream.getTracks()) track.stop();
     this.live.delete(kind);
     // A section the far side already dropped is neither kept for reuse nor written to: both
-    // would throw, and the throw used to reach the user as the browser's own words.
+    // would throw, and the throw used to reach the user as the browser's own words. Its LABEL
+    // is remembered even so, because the section is still written down in every later offer.
+    if (held.transceiver.mid) this.dropped.set(kind, held.transceiver.mid);
     if (!sectionIsStopped(held.transceiver)) {
       this.idle.set(kind, held.transceiver);
       await held.transceiver.sender.replaceTrack(null).catch(() => {});
@@ -750,6 +818,13 @@ class LocalSenders {
     for (const [kind, transceiver] of this.idle) {
       if (transceiver.mid) out.set(transceiver.mid, SEND_LABELS[kind]);
     }
+    // A camera slot is a camera slot even while it holds nothing: the far side reads the label
+    // of every section, and one left unnamed is described by its KIND instead — which sent a
+    // screen's own slot out as `main-video` the moment the section was dropped.
+    for (const transceiver of this.padding) {
+      if (transceiver.mid) out.set(transceiver.mid, SEND_LABELS.camera);
+    }
+    for (const [kind, mid] of this.dropped) out.set(mid, SEND_LABELS[kind]);
     return out;
   }
 
@@ -772,6 +847,8 @@ class LocalSenders {
     this.live.clear();
     this.idle.clear();
     this.accepted.clear();
+    this.padding = [];
+    this.dropped.clear();
   }
 }
 
