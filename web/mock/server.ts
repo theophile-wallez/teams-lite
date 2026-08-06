@@ -6860,6 +6860,16 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       mockRefusesNextMedia = true;
       return Response.json({ ok: true, refuse: true }, { status: 200 });
     }
+    // End the live call the way the SERVICE does, with a reason of its own choosing — the
+    // one this exists for being `CallEndReasonNobodyReachable`, a call that rang nothing
+    // because the callee has no client signed in. Measured against the tenant by
+    // `web/scripts/call-live.ts`, and reachable nowhere else: the mock rings no devices, so
+    // the only way to review what the app SAYS about it is to say it here.
+    if (body.kind === "call_end" && typeof body.reason === "string") {
+      if (!mockCall) return Response.json({ ok: false, error: "no call" }, { status: 409 });
+      endMockCall(body.reason);
+      return Response.json({ ok: true, reason: body.reason }, { status: 200 });
+    }
     // Take a capture AWAY from the page, the way the service does it: one offer that rejects
     // the section. Nothing is armed — the drop happens now, on the live call — so there is
     // nothing for a later spec to inherit.

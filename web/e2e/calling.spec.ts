@@ -1,9 +1,11 @@
 import { expect } from "@playwright/test";
+import { CALL_END_UNREACHABLE } from "../src/lib/call";
 import {
   calendarEvent,
   disableCalling,
   dropCallCapture,
   emitCallInvite,
+  endCallWithReason,
   gotoApp,
   holdCallStart,
   openCalendarTab,
@@ -189,6 +191,34 @@ test.describe("Audio calling", () => {
     await expect(stage).toHaveCount(0);
     // An ending the user caused says nothing back at them: they were there.
     await expect(page.locator('[data-testid="call-notice"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="call-button"]')).toBeEnabled();
+  });
+
+  /**
+   * A call that rang NOTHING: the person has no client signed in, so the service invites
+   * nobody and ends the conversation a beat later.
+   *
+   * It is the ending the user cannot tell from a fault of this app's — measured against the
+   * tenant, the call dies two seconds after they press it — and all they were told was "The
+   * call ended.", five times in a row. So the sentence has to name the person and the cause.
+   */
+  test("says a call rang nothing, and whose devices were not there", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationNamed(page, "Ava Thompson");
+    await page.locator('[data-testid="call-button"]').click();
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toBeVisible();
+
+    await endCallWithReason(page, CALL_END_UNREACHABLE);
+
+    const notice = page.locator('[data-testid="call-notice"]');
+    await expect(notice).toContainText("Ava Thompson could not be reached");
+    await expect(notice).toContainText("no device of theirs is signed in");
+    // The service's own words never reach the user: "addParticipantFailure" and a sub-code
+    // are written for whoever holds the socket (lib/call-failure.ts makes the same promise).
+    await expect(notice).not.toContainText(/addParticipant|subCode|endpoint/);
+    // And the call is gone, so the next one can be placed.
+    await expect(stage).toHaveCount(0);
     await expect(page.locator('[data-testid="call-button"]')).toBeEnabled();
   });
 

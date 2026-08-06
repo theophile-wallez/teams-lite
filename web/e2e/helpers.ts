@@ -323,6 +323,21 @@ export async function refuseNextCallMedia(page: Page): Promise<void> {
 }
 
 /**
+ * End the live call the way the SERVICE ends one, with its own reason.
+ *
+ * The reason this exists for is a call that rang NOTHING — the callee has no client signed in
+ * — because the mock rings no devices and a real one needs a colleague who is offline. What it
+ * exercises is the sentence: an ending the user did not choose has to say why, or a call that
+ * stops two seconds after they pressed call reads as this app dropping it.
+ */
+export async function endCallWithReason(page: Page, reason: string): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_end", reason },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
  * Have the MEETING drop a capture the page is sending, the way the service does it: one
  * offer that rejects the section.
  *

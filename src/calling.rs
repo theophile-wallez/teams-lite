@@ -549,6 +549,92 @@ pub fn call_ended_from_frame(frame: &Value) -> Option<CallEnded> {
     Some(CallEnded { call_id, code, phrase })
 }
 
+/// The name this app gives an ending the service reported as "no callee endpoints were
+/// found": the person has no client signed in, so nothing could ring and the call was over
+/// before it began.
+///
+/// It follows the `CallEndReason…` spelling every other explained ending uses, because the
+/// page maps a NAME to a sentence — the service's own phrase is prose, and a sentence keyed
+/// on prose breaks the day it is reworded.
+pub const END_REASON_UNREACHABLE: &str = "CallEndReasonNobodyReachable";
+
+/// The service could not ring anybody it was asked to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteFailed {
+    /// The service's own sentence, kept verbatim for the journal.
+    pub phrase: String,
+    /// Whether it says the callee has no endpoint at all — nothing of theirs to ring, as
+    /// opposed to a device that rang and refused.
+    pub no_endpoints: bool,
+}
+
+/// Sub-codes the service uses for "there was nothing to ring". Measured on this tenant, on a
+/// one-to-one call to somebody with no client signed in.
+const NO_ENDPOINT_SUB_CODES: [i64; 2] = [10037, 5205];
+
+/// Read an `addParticipantFailure` frame — the service saying the invitation reached nobody.
+///
+/// **It is the only frame that names the CAUSE.** Measured, in order, on a call to somebody
+/// with no client signed in:
+///
+/// ```text
+/// /conversation/addParticipantFailure/  code 480 subCode 10037 "No callee endpoints were found."
+///                                      code 580 subCode 5205  "Audio-video modality controller …"
+/// /call/end/                            code 0   subCode 5003  "Removing modality controller …"
+/// /conversation/conversationEnd/        code 0   subCode 5013  "This conversation has ended as
+///                                                              no one else has joined …"
+/// ```
+///
+/// `call_ended_from_frame` reads the third of those, whose phrase names the SYMPTOM. So this
+/// is read first and remembered, or the only thing the user is ever told about an unreachable
+/// colleague is "The call ended." — which is what happened, and it read as this app dropping
+/// the call two seconds in.
+///
+/// The frame is recognised by the callback path it was POSTed to, because its body carries no
+/// wrapper naming it; the reason is then found wherever it sits, since the service nests one
+/// per participant and one for the modality controller.
+pub fn invite_failed(url: &str, body: &Value) -> Option<InviteFailed> {
+    if !url.contains("addParticipantFailure") {
+        return None;
+    }
+    let mut phrase = String::new();
+    let mut no_endpoints = false;
+    walk_failure(body, &mut phrase, &mut no_endpoints);
+    Some(InviteFailed { phrase, no_endpoints })
+}
+
+/// The first `phrase` at any depth, and whether any sub-code (or any phrase) says there was
+/// nothing to ring. Both halves are read, because a sub-code is a stable key and a phrase is
+/// what a reader of the journal understands.
+fn walk_failure(value: &Value, phrase: &mut String, no_endpoints: &mut bool) {
+    match value {
+        Value::Object(map) => {
+            if let Some(text) = map.get("phrase").and_then(Value::as_str) {
+                if phrase.is_empty() {
+                    *phrase = text.to_string();
+                }
+                if text.to_lowercase().contains("no callee endpoints") {
+                    *no_endpoints = true;
+                }
+            }
+            if let Some(code) = map.get("subCode").and_then(Value::as_i64) {
+                if NO_ENDPOINT_SUB_CODES.contains(&code) {
+                    *no_endpoints = true;
+                }
+            }
+            for child in map.values() {
+                walk_failure(child, phrase, no_endpoints);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                walk_failure(item, phrase, no_endpoints);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Read the far side's SDP answer out of a `mediaAnswer` frame, or `None` when the
 /// frame is something else. This is what turns a ringing outgoing call into audio.
 pub fn media_answer_from_frame(frame: &Value) -> Option<MediaContent> {
@@ -2003,6 +2089,56 @@ mod tests {
         assert_eq!(end.call_id, "c1");
         assert!(call_ended_from_frame(&json!({ "conversationEnd": {} })).is_some());
         assert!(call_ended_from_frame(&json!({ "callNotification": {} })).is_none());
+    }
+
+    /// The frame that names the CAUSE of a call that ends two seconds in, in the shape the
+    /// tenant really sends it (`web/scripts/call-live.ts` measured this one).
+    #[test]
+    fn an_invitation_that_reached_nobody_is_read_and_told_apart() {
+        let url = "https://pub.trouter.example/v4/f/x/callAgent/a/b/conversation/\
+                   addParticipantFailure/";
+        let failed = invite_failed(
+            url,
+            &json!({
+                "participantInfos": [{
+                    "code": 480,
+                    "subCode": 10037,
+                    "reason": "clientError",
+                    "phrase": "No callee endpoints were found."
+                }],
+                "participants": { "8:orgid:x": { "code": 580, "subCode": 5205 } }
+            }),
+        )
+        .expect("a failed invitation");
+        assert!(failed.no_endpoints);
+        assert_eq!(failed.phrase, "No callee endpoints were found.");
+
+        // A device that rang and refused is NOT this: somebody was reachable, and the
+        // ending's own phrase is the honest thing to report.
+        let refused = invite_failed(
+            url,
+            &json!({ "participantInfos": [{ "code": 486, "subCode": 10004, "phrase": "Busy here." }] }),
+        )
+        .expect("a failed invitation");
+        assert!(!refused.no_endpoints);
+        assert_eq!(refused.phrase, "Busy here.");
+
+        // And it is recognised by its own callback path, never by a body shape another
+        // frame could share.
+        assert!(invite_failed("…/conversation/rosterUpdate/", &json!({ "phrase": "x" })).is_none());
+    }
+
+    /// The name of that ending is a CONTRACT with the page: the backend states it and
+    /// `web/src/lib/call.ts` turns it into the sentence the user reads. Two spellings of one
+    /// name would leave the user with "The call ended." and no way to notice why.
+    #[test]
+    fn the_page_knows_the_name_of_an_unreachable_ending() {
+        let call_ts = include_str!("../web/src/lib/call.ts");
+        assert!(
+            call_ts.contains(END_REASON_UNREACHABLE),
+            "web/src/lib/call.ts must name {END_REASON_UNREACHABLE}, or an unreachable \
+             colleague is reported as \"The call ended.\""
+        );
     }
 
     #[test]

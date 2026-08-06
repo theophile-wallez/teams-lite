@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   UNKNOWN_CALL_STATUS,
   callDurationLabel,
+  CALL_END_UNREACHABLE,
   callEndLabel,
   callPhaseLabel,
   callNamesAConversation,
@@ -240,6 +241,24 @@ describe("what the bar says", () => {
     );
     // A code we have never seen still says something rather than nothing.
     expect(callEndLabel(call({ end_reason: "code 486" }))).toBe("The call ended.");
+  });
+
+  /** A call that rang NOTHING — nobody's client is signed in. Measured against the tenant:
+   *  the service invites nobody and ends the conversation two seconds later, which is
+   *  indistinguishable from this app dropping the call unless the sentence says otherwise. */
+  it("names the person a call could not reach, and the cause", () => {
+    const ended = callEndLabel(
+      call({ end_reason: CALL_END_UNREACHABLE, peer: "Gabriel CRETI", kind: "call" }),
+    );
+    expect(ended).toMatch(/Gabriel CRETI could not be reached/);
+    expect(ended).toMatch(/no device of theirs is signed in/);
+    // Never the service's own words: a sub-code and `addParticipantFailure` are written for
+    // whoever holds the socket.
+    expect(ended).not.toMatch(/endpoint|subCode|addParticipant/i);
+    // A group and a meeting have no one person to name, so they say it of everybody.
+    expect(callEndLabel(call({ end_reason: CALL_END_UNREACHABLE, kind: "group" }))).toMatch(
+      /Nobody could be reached/,
+    );
   });
 });
 

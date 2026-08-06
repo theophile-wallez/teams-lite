@@ -306,6 +306,15 @@ export function callDurationLabel(call: ActiveCall | null, nowMs: number): strin
   return hours > 0 ? `${hours}:${pad(minutes)}:${pad(rest)}` : `${minutes}:${pad(rest)}`;
 }
 
+/**
+ * The backend's name for a call that rang nothing, because the callee has no client signed
+ * in — `calling::END_REASON_UNREACHABLE`, spelled once here.
+ *
+ * The pair is pinned from the Rust side (`the_page_knows_the_name_of_an_unreachable_ending`),
+ * because two spellings of it would silently put the user back in front of "The call ended."
+ */
+export const CALL_END_UNREACHABLE = "CallEndReasonNobodyReachable";
+
 /** Why the call is over, in one short line — or "" when there is nothing worth saying.
  *
  *  The service's own phrases are machine words ("CallEndReasonHangup"), and the ordinary
@@ -318,6 +327,15 @@ export function callEndLabel(call: ActiveCall | null): string {
     case "CallEndReasonHangup":
     case "CallEndReasonDeclined":
       return "";
+    // The service could not ring anybody: nothing of theirs is signed in (`calling::
+    // END_REASON_UNREACHABLE`, and `calling::invite_failed` for how it is known). It reads
+    // exactly like this app dropping the call after two seconds, which is what it looked
+    // like to the user until the reason was carried this far — so it names the person and
+    // it names the cause, and it never says a device rang.
+    case CALL_END_UNREACHABLE:
+      return call.kind === "group" || call.kind === "meeting"
+        ? "Nobody could be reached: none of their devices is signed in."
+        : `${call.peer || "They"} could not be reached: no device of theirs is signed in.`;
     case "CallEndReasonPlaceFailed":
       return "The call could not be placed.";
     case "CallEndReasonAcceptFailed":

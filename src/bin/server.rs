@@ -1245,6 +1245,10 @@ struct CallSession {
     connected_at_ms: Option<i64>,
     /// Why it ended, for the line the UI shows afterwards.
     end_reason: Option<String>,
+    /// True once the service said the invitation reached no endpoint at all — the callee has
+    /// no client signed in. It is set from the frame that names the CAUSE and read by the
+    /// ending, which names only the symptom (`calling::invite_failed`).
+    unreachable: bool,
     /// Where to answer the media offer the service last made us, if it is still open.
     ///
     /// The service renegotiates unprompted and names the link on the frame itself, so this
@@ -3762,6 +3766,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     muted: false,
                     connected_at_ms: None,
                     end_reason: None,
+            unreachable: false,
                     renegotiation_answer_link: None,
                     source_request_sequence: 0,
                     sending: Vec::new(),
@@ -3911,6 +3916,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         muted: false,
                         connected_at_ms: None,
                         end_reason: None,
+            unreachable: false,
                         renegotiation_answer_link: None,
                         source_request_sequence: 0,
                         sending: Vec::new(),
@@ -8105,6 +8111,24 @@ impl Ctx {
             return;
         }
 
+        // The invitation reached NOBODY. It is the only frame that says so, it arrives a beat
+        // before the ending, and the ending's own phrase names the symptom instead — so the
+        // cause is remembered here and preferred below. Without it the user is told "The call
+        // ended." two seconds after they pressed call, which reads as this app dropping it.
+        if let Some(failed) = calling::invite_failed(&frame.url, &frame.body) {
+            eprintln!(
+                "[calling] the invitation reached nobody: {} (no endpoints: {})",
+                failed.phrase, failed.no_endpoints
+            );
+            if failed.no_endpoints {
+                let mut plane = self.calling.lock().unwrap();
+                if let Some(call) = plane.call.as_mut() {
+                    call.unreachable = true;
+                }
+            }
+            return;
+        }
+
         if let Some(ended) = calling::call_ended_from_frame(&frame.body) {
             let reason = if ended.phrase.is_empty() {
                 format!("code {}", ended.code)
@@ -8345,6 +8369,7 @@ impl Ctx {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            unreachable: false,
             renegotiation_answer_link: None,
             source_request_sequence: 0,
             sending: Vec::new(),
@@ -8368,25 +8393,34 @@ impl Ctx {
     /// runs when the SERVICE ended it, when the connection moved, or after our own
     /// hangup has already gone out.
     async fn end_call_locally(&self, reason: &str) {
-        let had_call = {
+        let ending = {
             let mut plane = self.calling.lock().unwrap();
             match plane.call.as_mut() {
                 Some(call) if call.phase != CallPhase::Ended => {
                     call.phase = CallPhase::Ended;
-                    call.end_reason = Some(reason.to_string());
-                    true
+                    // A call that rang NOBODY ends with a phrase about the symptom ("no one
+                    // else has joined"), and the cause arrived on its own frame a beat
+                    // earlier. The cause wins wherever we have it.
+                    let stated = if call.unreachable {
+                        calling::END_REASON_UNREACHABLE.to_string()
+                    } else {
+                        reason.to_string()
+                    };
+                    call.end_reason = Some(stated.clone());
+                    Some(stated)
                 }
-                _ => false,
+                _ => None,
             }
         };
-        if !had_call {
+        let Some(stated) = ending else {
             return;
-        }
+        };
         // EVERY ending passes through here, so this is the one place that can state why.
         // The page says "The call ended." and the reason was nowhere on this machine, so a
         // call that stopped a second after it started could not be told from one the
-        // service refused — the same blind spot a refused write had before it said so.
-        eprintln!("[calling] the call is over: {reason}");
+        // service refused — the same blind spot a refused write had before it said so. The
+        // service's own words are kept beside ours: they are what a journal is read for.
+        eprintln!("[calling] the call is over: {stated} (the service said: {reason})");
         // One emit with the ending in it, then the slot is free. The UI needs that
         // frame to stop holding the microphone, so the drop cannot be folded into it.
         self.emit_call_state();
@@ -9602,6 +9636,7 @@ mod tests {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            unreachable: false,
             renegotiation_answer_link: None,
             source_request_sequence: 0,
             sending: Vec::new(),
@@ -9652,6 +9687,7 @@ mod tests {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            unreachable: false,
             renegotiation_answer_link: None,
             source_request_sequence: 0,
             sending: Vec::new(),

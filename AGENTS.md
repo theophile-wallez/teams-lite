@@ -1219,6 +1219,17 @@ call does — this side never handles RTP, and the page never learns a Teams URL
     of `send-failure.ts`): the RPC name the backend opens every refusal with is dropped, the
     socket's `not connected` becomes what it costs the call, and a failure that carried no
     words at all — the service answers `400` with an empty body — still says something.
+  - **A call that rang NOTHING says whose devices were not there.** Measured against the
+    tenant: calling somebody with no client signed in is accepted, answered with an SDP, and
+    then ended two seconds later — and the only frame that names the CAUSE is
+    `addParticipantFailure` (`code 480 subCode 10037`, "No callee endpoints were found."),
+    which arrives a beat before the ending whose own phrase names the symptom ("no one else
+    has joined the group call"). So `calling::invite_failed` reads it, the session remembers
+    it (`unreachable`), and the ending is stated as `calling::END_REASON_UNREACHABLE` — a NAME
+    rather than the service's prose, because `callEndLabel` turns names into sentences and a
+    Rust test pins the two spellings together. Without it the user pressed call, watched it
+    die two seconds later, and was told "The call ended." — five times in a row, which reads
+    as this app dropping their calls.
   - **Only a CALL comes through here.** A failed send stays at the composer and an approval
     stays in the menu it was clicked in (§ Sending messages, § The trackers), and the write
     lock, a broken sign-in and a pending update keep their banners and their row: each of
