@@ -1831,6 +1831,22 @@ joins alone and waits for an offer. Six rules hold it together, and
     a section the browser had REJECTED: this app sent Chrome's whole description for it, and the
     client's own transform writes a stub — `m=<kind> 0 RTP/SAVP 34` with its mid and its label and
     nothing else (`Kn(e) = e.port === 0`). With the stub, the call survives the renegotiation.
+- **A stream is filtered by the ENDPOINT that publishes it, never by the person.** One account
+  joined from a laptop and a phone has two endpoints under one mri, so `call_state.publishing`
+  excludes THIS endpoint's own streams (`RosterStream.endpoint_id`, the roster's own key for the
+  device) rather than everything the user publishes. Excluding by mri hid a screen the user was
+  really sharing from their other device: the section was negotiated and the tile drawn, and
+  nothing was ever subscribed to, because the stream read as ours. Drawing this endpoint's own
+  camera as a colleague's tile is still the thing that must never happen, and the endpoint is
+  what says so.
+- **Everything § 2.5 measured applies to an OFFER, and an ANSWER is left as the browser wrote
+  it.** The capture IS an offer, and an answer carrying the same additions was refused three
+  times over — `SdpParsingFailure`, each one ending the call a second after the answer went out.
+  So an answer gets the transport profile, the labels and the SSRC range, and nothing else. The
+  client draws the same kind of distinction in its own `rtcpTransform`, so direction-dependence
+  is the shape of this transform rather than an exception to it — and `isAnswer` reads the
+  ABSENCE of `a=setup:actpass`, because scanning for a role was fooled by one rejected section
+  that carried its own.
 - **Every section states its SSRCs as `a=x-ssrc-range`**, added beside the browser's own
   `a=ssrc:` lines rather than replacing them — which is what the captured client offer does
   (NATIVE-CALLING.md § 2.5) and what the service does on every section of its own. Audio is

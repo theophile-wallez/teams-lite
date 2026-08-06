@@ -1643,6 +1643,14 @@ pub fn lobby_state_in_frame(frame: &Value) -> Option<LobbyState> {
 /// move between joins — so one is never cached across calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterStream {
+    /// The ENDPOINT this stream is published from — the roster's own key for the device.
+    ///
+    /// It is what tells this machine's own publishing from everybody else's, and an mri cannot:
+    /// one person joined from a laptop and a phone has two endpoints under one mri, so excluding
+    /// by person hides a screen their other device is really sharing. Measured 2026-08-06: the
+    /// user shared from real Teams on the same account, the section was negotiated and the tile
+    /// drawn, and nothing was ever subscribed to because the stream read as ours.
+    pub endpoint_id: String,
     /// `main-audio` / `main-video` / `applicationsharing-video` / `data`. The label is the
     /// wire name, and the only thing that tells a shared screen from a camera.
     pub label: String,
@@ -1780,22 +1788,31 @@ pub fn roster_in_frame(frame: &Value) -> Option<RosterUpdate> {
 /// describe — is its normalized form and never travels, so both are read: one pointer each,
 /// and the one that finds nothing costs nothing.
 fn streams_of(person: &Value) -> Vec<RosterStream> {
-    let endpoints = match person.get("endpoints") {
-        Some(Value::Object(map)) => map.values().collect::<Vec<_>>(),
-        // The client's own shape, in case another tenant sends it.
-        Some(Value::Array(items)) => items.iter().collect(),
+    let endpoints: Vec<(String, &Value)> = match person.get("endpoints") {
+        // Keyed by endpoint id, which is the key itself — and the only thing that says which
+        // device a stream comes from.
+        Some(Value::Object(map)) => map.iter().map(|(id, e)| (id.clone(), e)).collect(),
+        // The client's own shape, in case another tenant sends it. No key, so no endpoint: an
+        // empty id can never match ours, which keeps such a stream visible rather than hidden.
+        Some(Value::Array(items)) => items.iter().map(|e| (String::new(), e)).collect(),
         _ => return Vec::new(),
     };
     endpoints
         .into_iter()
-        .flat_map(|endpoint| {
+        .flat_map(|(endpoint_id, endpoint)| {
             // `endpointDetails` is itself an array of endpoints in that other shape, so a
             // single level of either is handled without a second walk.
             let under_call = endpoint.pointer("/call/mediaStreams").and_then(Value::as_array);
             let bare = endpoint.get("mediaStreams").and_then(Value::as_array);
-            under_call.or(bare).map(Vec::as_slice).unwrap_or_default().iter()
+            under_call
+                .or(bare)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .map(move |stream| (endpoint_id.clone(), stream))
+                .collect::<Vec<_>>()
         })
-        .filter_map(|stream| {
+        .filter_map(|(endpoint_id, stream)| {
             // A stream with no source id cannot be subscribed to, so it is not one this app
             // has any use for.
             let source_id = stream.get("sourceId").and_then(Value::as_i64)?;
@@ -1814,6 +1831,7 @@ fn streams_of(person: &Value) -> Vec<RosterStream> {
                     .unwrap_or_default()
                     .to_string(),
                 server_muted: stream.get("serverMuted").and_then(Value::as_bool).unwrap_or(false),
+                endpoint_id,
             })
         })
         .collect()

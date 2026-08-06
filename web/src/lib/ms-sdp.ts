@@ -278,6 +278,10 @@ function withoutExtras(fields: string[]): string[] {
  */
 const STUB_PAYLOAD = "34";
 
+/** The connection a stub states. It carries nothing, so the placeholder every browser writes
+ *  for a section with no transport is the truthful value. */
+const STUB_CONNECTION = "IN IP4 0.0.0.0";
+
 /** The session bandwidth the captured client offer states (`b=CT:4000`, § 2.5). */
 const SESSION_BANDWIDTH_KBPS = 4000;
 
@@ -317,7 +321,11 @@ function bundleTransport(lines: string[]): { port: string; connection: string } 
  * the blob.
  */
 function isAnswer(lines: string[]): boolean {
-  return lines.some((line) => line === "a=setup:active" || line === "a=setup:passive");
+  // Read off the ABSENCE of `actpass`, not the presence of a role. An offer offers `actpass`;
+  // an answer states the role it took. Scanning for `active` instead was fooled by a section
+  // that carried one of its own — one rejected section was enough to make a whole offer read as
+  // an answer, and every rewrite below then stood down.
+  return !lines.some((line) => line === "a=setup:actpass");
 }
 
 /** One `m=` line, split into the pieces this module cares about. */
@@ -369,6 +377,14 @@ function splitLines(sdp: string): { lines: string[]; ending: string } {
  * section of its OWN offers, and a send section it must allocate a channel for is the place
  * that would notice. It costs one line per section.
  *
+ * **Everything measured out of § 2.5's capture applies to an OFFER and not to an answer**, and
+ * that split is measured too: the capture IS an offer, and an ANSWER carrying the same additions
+ * was refused — `SdpParsingFailure`, three runs, each ending the call a second after the answer
+ * went out. So an answer goes out as it always did: the transport profile, the labels and the
+ * SSRC range, and nothing else. The client makes the same kind of distinction in its own
+ * `rtcpTransform` (`a=rtcp` on an offer, deleted on an answer), so direction-dependence is the
+ * shape of this transform rather than an exception to it.
+ *
  * `labels` is what makes a shared screen possible at all: it and a camera are both
  * `m=video`, so an answer built from kinds alone labels somebody's screen `main-video` and
  * describes the wrong stream on the section it was handed.
@@ -416,6 +432,12 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
     // the call a second after the answer went out — measured 2026-08-06.
     if (section.rejected) {
       out.push(`m=${section.kind} 0 ${MS_PROFILE} ${STUB_PAYLOAD}`);
+      // A `c=` line, because the RFC requires one per media description when the session level
+      // has none — and a browser's SDP has none, it writes the connection per section. A stub
+      // without it is a description a strict parser refuses whole, which is what
+      // `SdpParsingFailure` was: the answer went out and the call ended a second later. The
+      // placeholder is the honest value: the section carries nothing.
+      out.push(`c=${STUB_CONNECTION}`);
       if (section.mid) out.push(`a=mid:${section.mid}`);
       if (label) out.push(`a=label:${label}`);
       section = null;
@@ -450,11 +472,12 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
       };
       // A REJECTED section keeps its own port: zero is the whole statement, and the client
       // describes no transport for one either.
-      const rejected = media.port === "0";
+      // Every rewrite below belongs to an OFFER; an answer keeps the shape it always had.
+      const rejected = !answering && media.port === "0";
       section.rejected = rejected;
       // A rejected section is written from nothing at close (see `closeSection`), so it needs
       // none of this. A live one takes the transport the BUNDLE really runs on.
-      placed = !rejected && transport !== null;
+      placed = !answering && !rejected && transport !== null;
       if (rejected) continue;
       section.lines.push(placed ? withPort(media, transport!.port) : withProfile(media, MS_PROFILE));
       if (placed && transport) {
@@ -464,12 +487,12 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
         // placeholder rather than the port the section really runs on.
         if (!answering) section.lines.push(`a=rtcp:${transport.port}`);
       }
-      if (fingerprint) section.lines.push(fingerprint);
+      if (!answering && fingerprint) section.lines.push(fingerprint);
       continue;
     }
     // The lines just replaced, and ONLY where a replacement was really written.
     if (section && placed && (line.startsWith("c=") || line.startsWith("a=rtcp:"))) continue;
-    if (section && fingerprint && line.startsWith("a=fingerprint:")) continue;
+    if (!answering && section && fingerprint && line.startsWith("a=fingerprint:")) continue;
     // A trailing empty line ends the last section without belonging to it.
     if (line === "") {
       closeSection();
@@ -487,7 +510,7 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
     // The session's own two lines, in the client's spelling. `WMS *` is what it writes where
     // a browser writes `WMS` with no token, and `b=CT` is the session bandwidth it adds — a
     // video section the service must allocate for is where an absence would tell.
-    if (!section && line.startsWith("a=msid-semantic:")) {
+    if (!answering && !section && line.startsWith("a=msid-semantic:")) {
       out.push("a=msid-semantic: WMS *");
       continue;
     }
@@ -495,12 +518,12 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
     // client offer has it. After it, the service refuses the whole description by name:
     // `SdpParsingError … Unexpected field 'b' found. The field may be undefined or in the wrong
     // order.` — measured 2026-08-06, and the first thing this service ever explained.
-    if (!section && line.startsWith("t=")) {
+    if (!answering && !section && line.startsWith("t=")) {
       out.push(`b=CT:${SESSION_BANDWIDTH_KBPS}`);
       out.push(line);
       continue;
     }
-    if (!section && line.startsWith("b=")) continue;
+    if (!answering && !section && line.startsWith("b=")) continue;
     // A rejected section keeps nothing of its own.
     if (section?.rejected) continue;
     const push = (text: string) => (section ? section.lines.push(text) : out.push(text));
