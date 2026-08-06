@@ -1652,6 +1652,23 @@ button says what it costs before it is pressed.
   keeps the inode it started from — overwriting the bytes of a running executable is how a
   process gets a `SIGBUS` — and the next start gets the new build
   (`update::install_binary`, pinned by an inode assertion).
+- **A NEW BINARY IS A NEW BACKEND AND A NEW WEB BUNDLE, and neither is told apart by its
+  SIZE.** The release asset is one file that CARRIES both: the launcher unpacks the Rust
+  backend to `~/.cache/teams-lite/server` and the web app to `.../web`, keeps what is
+  already there when it is the asset this binary holds, and used to decide that on the byte
+  COUNT. A Rust release binary's size is decided by section alignment, so three consecutive
+  builds weighed exactly 17 432 216 bytes — the update installed the new launcher, the
+  launcher kept the backend it had extracted two commits earlier, and the BACKEND is the
+  process that compares its own build with the release. So the app offered the same update
+  for ever: download, apply, restart, `Update available`, again — with a new UI in front of
+  an old backend, where a new RPC answers `unknown method`. An asset is identified by its
+  CONTENT now (`assetId` in `launcher/src/embedded-cache.ts`, stamped beside the extracted
+  copy), every failure to read that stamp extracts again, and the backend is moved into
+  place by a RENAME for the same reason `update::install_binary` is — the released unit and
+  a `teams` the user typed share one cache path, so this machine may be running the file
+  being replaced. `launcher/src/embedded-cache.test.ts` pins each half, and scans both
+  extractors so a size comparison — which reads as a sensible optimisation — cannot come
+  back.
 - **What is downloaded is checked before it can be installed**: the byte count must match
   the size the release published, and the first four bytes must be an ELF header. Neither
   alone is enough — a captive portal's login page is the wrong shape, and a cut-off

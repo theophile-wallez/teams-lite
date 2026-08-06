@@ -3,9 +3,16 @@
 // kill it on exit. One command starts everything.
 
 import { spawn, type Subprocess } from "bun";
-import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+import {
+  assetId,
+  cachedAssetIsCurrent,
+  replaceFile,
+  stampCachedAsset,
+} from "./embedded-cache";
 
 /// Where a normal, send-capable backend listens.
 const DEFAULT_PORT = 19420;
@@ -47,10 +54,11 @@ export function repoRoot(): string {
   return join(import.meta.dir, "..", "..");
 }
 
-/// Extract the embedded backend to a stable cache path and return it. We only
-/// rewrite the file when it is missing or its size differs from the embedded
-/// copy, so upgrades (a newer `teams` binary) transparently refresh it while
-/// normal launches are a cheap stat().
+/// Extract the embedded backend to a stable cache path and return it. The copy already
+/// there is kept only when it IS the asset this binary carries — same bytes, not merely
+/// the same byte count (see embedded-cache.ts, which says what that cost). An upgrade
+/// therefore refreshes it, and an ordinary launch pays one hash of bytes it had to read
+/// anyway.
 async function extractEmbeddedBackend(): Promise<string> {
   const { default: bunfsPath } = await import("./embedded-backend");
   const bytes = new Uint8Array(await Bun.file(bunfsPath).arrayBuffer());
@@ -58,15 +66,12 @@ async function extractEmbeddedBackend(): Promise<string> {
   const dir = join(homedir(), ".cache", "teams-lite");
   mkdirSync(dir, { recursive: true });
   const dest = join(dir, "server");
+  const stamp = join(dir, ".server-id");
+  const id = assetId(bytes);
 
-  let upToDate = false;
-  try {
-    upToDate = statSync(dest).size === bytes.byteLength;
-  } catch {
-    upToDate = false;
-  }
-  if (!upToDate) {
-    writeFileSync(dest, bytes);
+  if (!existsSync(dest) || !cachedAssetIsCurrent(stamp, id)) {
+    replaceFile(dest, bytes, 0o755);
+    stampCachedAsset(stamp, id);
   }
   chmodSync(dest, 0o755);
   return dest;
