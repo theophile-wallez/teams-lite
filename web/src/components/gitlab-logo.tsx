@@ -74,10 +74,11 @@ export function GitLabLogo(props: { className?: string; title?: string }) {
  * its neighbours take. Nothing is recoloured — the mark is either GitLab's or it is the
  * app's own line, and there is no third, half-tinted spelling of it.
  *
- * The geometry is GitLab's, unchanged: the contour is their own first path, and the four
- * creases are the edges where their three fills meet — the upper pair from each ear's inner
- * base to the centre, the lower pair from there to the sides. Without them the silhouette
- * reads as a shield rather than as the tanuki.
+ * The geometry is GitLab's, unchanged: the contour is their own first path and nothing else.
+ * The four creases where their three fills meet were drawn here at first, and they are not
+ * in: at 17px the two of them cross in the middle of the mark and read as a pair of bars
+ * over it rather than as the folds they are. The silhouette alone — two ears, the sides, the
+ * bottom tip — is the tanuki, and it is one line, which is the point of this spelling.
  */
 export function GitLabLogoOutline(props: { className?: string; title?: string }) {
   return (
@@ -104,8 +105,6 @@ export function GitLabLogoOutline(props: { className?: string; title?: string })
         strokeLinejoin="round"
       >
         <path d={TANUKI_CONTOUR} />
-        <path d="M 132.58,185.84 L 190,229.25 L 247.41,185.84" />
-        <path d="M 153.43,256.89 L 190,229.25 L 226.46,256.89" />
       </g>
     </svg>
   );

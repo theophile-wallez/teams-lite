@@ -694,8 +694,10 @@ more rules hold the page together:
   hovers with its four neighbours — and GitLab's three fills once the section IS current,
   where every other tab takes the accent. Nothing is recoloured: the mark is either GitLab's
   or it is the app's own line, and there is no third, half-tinted spelling of it. The geometry
-  is theirs in both, the creases included, and the two boxes are one size in one place, so the
-  swap changes the ink and never the target. `web/e2e/gitlab.spec.ts` measures that.
+  is theirs in both — the outline is their own contour path, and only that one: the four
+  creases their fills meet along cross in the middle of a 17px mark and read as bars over it.
+  The two boxes are one size in one place, so the swap changes the ink and never the target.
+  `web/e2e/gitlab.spec.ts` measures that.
 
 **The markdown is real GFM, and its subset is MEASURED rather than guessed**
 (`web/src/lib/gitlab-markdown.ts`, over the shared inline scanner in `markdown-inline.ts`).
