@@ -2538,6 +2538,22 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   `update` holds the `try-restart` until the agent is quiet — bounded, then it proceeds
   (see § The local agent for the other half, which closes what a restart did leave
   behind). `--now` skips the wait and is the user's: the hook refuses it.
+- **And it waits BEFORE it stages, because staging alone breaks the running app.** The web
+  bundle is a DIRECTORY of hashed chunks and the SSR handler imports them off disk as the
+  routes are asked for, so a `dist/` replaced under the live web server leaves it holding a
+  module graph whose files are gone: the process stays up and every page dies. It reached
+  the user on 2026-08-06 — an `update` staged, then held its restart for a 40-minute
+  `@claude` run, and their phone was served Bun's own "fetch(req) did not return a Response
+  object" page for all of it. So the order is build (which touches nothing live), wait,
+  stage, restart, and `update::tests::the_installer_waits_before_it_replaces_a_live_artifact`
+  pins it. The other half is in the app: `renderWithSsr` in `web/server.ts` never hands Bun
+  an object it refuses to serve — it tells a REPLACED bundle from an SSR fault by the build
+  stamp on disk (`bundleWasReplaced`) and answers 503 or 500 accordingly, because the
+  reader's next move differs and "we are updating" about a real fault sends them reloading
+  for ever. Neither half replaces the other: `install` stages without restarting anything.
+  Note what Bun's own refusal cost — srvx's `NodeResponse` passes `instanceof Response` and
+  is still refused, so the test is the CONSTRUCTOR, and the cause is read out of the refused
+  body rather than dumped as a wall of getters.
 - **It is not the only install on this machine.** `teams-lite-app.service` runs the
   RELEASED build beside it, on 19422/19442, and the same script owns that unit — see
   § Running the released build beside the staged one for what keeps the two apart.

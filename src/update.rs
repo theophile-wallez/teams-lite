@@ -1175,14 +1175,33 @@ mod tests {
     ///
     /// The test reads the script, like the one above: the wait lives on the other side
     /// of the process boundary, and no Rust test would see it go missing.
+    /// The body of one subcommand of the installer script.
+    ///
+    /// Scoped rather than searched whole, because every name these tests look for also
+    /// appears in the script's own prose and in its other subcommands: `stage_artifacts` is
+    /// a definition and an `install` step, and `try-restart` is named in the header comment
+    /// that explains why the wait exists. A whole-file `find` matched that comment and
+    /// failed a test about the order of the code underneath it.
+    fn installer_subcommand(name: &str) -> &'static str {
+        let installer = include_str!("../bin/teams-lite-service.sh");
+        installer
+            .split_once(&format!("\n{name}() {{"))
+            .unwrap_or_else(|| panic!("bin/teams-lite-service.sh defines {name}"))
+            .1
+            .split("\ncmd_")
+            .next()
+            .expect("a subcommand body ends at the next one")
+    }
+
     #[test]
     fn the_installer_waits_for_the_agent_before_it_restarts() {
         let installer = include_str!("../bin/teams-lite-service.sh");
+        let update = installer_subcommand("cmd_update");
 
-        let restart = installer
+        let restart = update
             .find("try-restart")
-            .expect("bin/teams-lite-service.sh restarts the units");
-        let wait = installer.find("|| wait_for_quiet_agent").expect(
+            .expect("`update` restarts the units");
+        let wait = update.find("|| wait_for_quiet_agent").expect(
             "`update` must wait for a quiet agent, or a restart freezes a reply mid-answer",
         );
         assert!(wait < restart, "the wait must come BEFORE the restart, not after it");
@@ -1196,6 +1215,49 @@ mod tests {
         assert!(
             installer.contains(r#"[ "$wait_for_agent" = no ]"#),
             "`update --now` must be able to skip the wait"
+        );
+    }
+
+    /// And it must wait before it STAGES, not merely before it restarts.
+    ///
+    /// The other half of the same failure, found on 2026-08-06. Staging looks like the
+    /// harmless step and is not: the web bundle is a directory of hashed chunks, and the
+    /// SSR handler imports them off disk as the routes are asked for. Replaced under the
+    /// running web server, its next lazy import names a file that is gone — the process
+    /// stays up and the app is dead. `update` staged, then held its restart for 19 minutes
+    /// for a live `@claude` run, and the user's phone was served Bun's own "fetch(req) did
+    /// not return a Response object" page for the whole wait.
+    ///
+    /// So the order is build (which touches nothing live), wait, stage, restart: a bundle
+    /// and the process serving it are out of step for the seconds a `try-restart` takes.
+    /// `renderWithSsr` in web/server.ts answers honestly inside those seconds, and neither
+    /// half replaces the other — `install` stages without restarting anything at all.
+    #[test]
+    fn the_installer_waits_before_it_replaces_a_live_artifact() {
+        let update = installer_subcommand("cmd_update");
+
+        let wait = update.find("|| wait_for_quiet_agent").expect(
+            "`update` must wait for a quiet agent, or a restart freezes a reply mid-answer",
+        );
+        let stage = update
+            .find("stage_artifacts")
+            .expect("`update` stages what it built");
+        assert!(
+            wait < stage,
+            "the wait must come BEFORE staging: replacing the web bundle under the \
+             running server breaks the app for the whole wait, not just for the restart"
+        );
+
+        // The build is the one step that belongs on the far side of the wait: it writes
+        // into the checkout, so it touches nothing the running service reads — and a
+        // minute of compiling inside the wait would be a minute added to every update.
+        let build = update
+            .find("build_artifacts")
+            .expect("`update` builds before it stages");
+        assert!(
+            build < wait,
+            "building must stay BEFORE the wait: it touches no staged artifact, and \
+             moving it after would add its whole duration to every update"
         );
     }
 }
