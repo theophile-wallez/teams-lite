@@ -25,7 +25,9 @@ import {
   DESCRIPTION_FONT_PX,
   DESCRIPTION_LINE_HEIGHT,
   conversationDiscussions,
+  descriptionFoldSeconds,
   descriptionIsFoldable,
+  mergeRequestId,
   mergeVerdict,
   pipelineIsLive,
   stateChangeFor,
@@ -94,14 +96,11 @@ import { RichNodes } from "./rich-content";
  *  a time, so one id is enough. */
 const DESCRIPTION_BOX_ID = "gitlab-description-box";
 
-/** The description's fold, on the transcript panel's own curve and timings
- *  (`agent-reply.tsx`): one strong ease-out, and a close SHORTER than the open — opening is
- *  the reader asking to read something, closing is the app getting out of their way. The
- *  numbers are that panel's, because two disclosures on one screen must not move at two
- *  different speeds. */
+/** The description's fold takes the transcript panel's own curve (`agent-reply.tsx`), because
+ *  two disclosures on one screen must not move on two different ones. Its DURATION is
+ *  `descriptionFoldSeconds`, which is the half that depends on the document rather than on the
+ *  control — a strong ease-out over a distance nothing here knows in advance. */
 const FOLD_EASE = [0.23, 1, 0.32, 1] as const;
-const FOLD_OPEN_SECONDS = 0.26;
-const FOLD_CLOSE_SECONDS = 0.18;
 
 export function GitLabPane(props: {
   onBack?: () => void;
@@ -211,7 +210,14 @@ export function GitLabPane(props: {
             ) : (
               <>
                 <MergeRequestHeader detail={detail} />
-                <MergeRequestDescription detail={detail} />
+                {/* Keyed by the merge request, so ANOTHER one is a fresh mount: the fold is the
+                    state a page opens in, and a reader who opened one description must not find
+                    the next one already open. This pane is not re-created when the open merge
+                    request changes — its detail is simply replaced. */}
+                <MergeRequestDescription
+                  key={mergeRequestId({ projectPath: detail.project_path, iid: detail.iid })}
+                  detail={detail}
+                />
                 <PipelinePanel onOpenPipeline={props.onOpenPipeline ?? (() => {})} />
                 <ApprovalPanel />
                 <ActionPanel detail={detail} />
@@ -418,6 +424,14 @@ function MergeRequestDescription(props: { detail: MergeRequestDetail }) {
   );
   const reduce = useReducedMotion();
   const [open, setOpen] = useState(false);
+  // Whether the reader has pressed the control, and whether a press is travelling right now.
+  // Both exist for one rule: **the fold on MOUNT is a state, not a movement.** Opening the page
+  // used to play a collapse nobody asked for — the box was held at the fold by a CSS clamp until
+  // the words were measured, and the measurement then dropped that clamp and handed Motion the
+  // whole document's height to come down from. So the height is animated by a PRESS and by
+  // nothing else, and the clamp is lifted only while a press is travelling.
+  const [everPressed, setEverPressed] = useState(false);
+  const [animating, setAnimating] = useState(false);
   // What the words really take, watched rather than read once: a table re-flows when the
   // window narrows, and a description that fitted at 1200px overruns at 390px.
   const [contentHeight, setContentHeight] = useState(0);
@@ -434,9 +448,20 @@ function MergeRequestDescription(props: { detail: MergeRequestDetail }) {
 
   const foldable = descriptionIsFoldable(contentHeight);
   const folded = foldable && !open;
-  const motionEase = reduce
-    ? { duration: 0 }
-    : { duration: open ? FOLD_OPEN_SECONDS : FOLD_CLOSE_SECONDS, ease: FOLD_EASE };
+  // The ceiling is on before anything is measured too — that is what makes the first paint the
+  // folded window rather than the whole document. A description shorter than the window is
+  // clamped by nothing, so the unmeasured case costs it nothing.
+  const clamped = !animating && (folded || contentHeight === 0);
+  // The distance the box really travels decides how long it takes (see
+  // `descriptionFoldSeconds`): a description on this instance is a whole document, and a
+  // fixed duration over a thousand pixels is a jump cut rather than a movement.
+  const motionEase =
+    reduce || !everPressed
+      ? { duration: 0 }
+      : {
+          duration: descriptionFoldSeconds(contentHeight - DESCRIPTION_COLLAPSED_PX, open),
+          ease: FOLD_EASE,
+        };
 
   return (
     // `min-w-0` is the description's own rail: a wide table or a long fenced line must scroll
@@ -451,17 +476,20 @@ function MergeRequestDescription(props: { detail: MergeRequestDetail }) {
         id={DESCRIPTION_BOX_ID}
         className="relative min-w-0 overflow-hidden"
         initial={false}
-        // Until the words are measured the ceiling is a plain CSS clamp, at exactly the height
-        // the fold holds — so the FIRST paint is already the folded window and nothing moves
-        // when the measurement lands. It is dropped in the same render that hands the height
-        // over, because a clamp left on would hold an opened description shut. A description
-        // shorter than the window is clamped by nothing and keeps its own height throughout.
-        style={contentHeight > 0 ? undefined : { maxHeight: DESCRIPTION_COLLAPSED_PX }}
+        // A plain CSS ceiling at exactly the height the fold holds, so the FIRST paint is
+        // already the folded window — before the words are measured, and on the server. It is
+        // lifted for one thing only: while a press is TRAVELLING, because a clamp left on would
+        // clip the very movement it is there to make unnecessary. Lifting it on the measurement
+        // instead is what played a collapse on open: the box painted at the whole document's
+        // height for the frame between React dropping the clamp and Motion writing the fold.
+        // A description shorter than the window is clamped by nothing, at every moment.
+        style={clamped ? { maxHeight: DESCRIPTION_COLLAPSED_PX } : { maxHeight: "none" }}
         // `auto` rather than the measured number: only Motion knows what it measures to, and
         // leaving the box at `auto` afterwards is what lets a re-flow inside an OPEN
         // description size it without a second animation.
         animate={{ height: folded ? DESCRIPTION_COLLAPSED_PX : "auto" }}
         transition={{ height: motionEase }}
+        onAnimationComplete={() => setAnimating(false)}
       >
         {/* The type is set HERE, from the constants the fold is derived from, so "eight lines"
             means eight of these lines. The blocks inside space themselves with a top margin
@@ -489,13 +517,20 @@ function MergeRequestDescription(props: { detail: MergeRequestDetail }) {
         )}
       </motion.div>
       {foldable && (
+        // CENTRED, because the control belongs to the whole width it opens rather than to the
+        // first word of the line above it — and because the words either side of it are the
+        // reader's own document, which a control tucked against its left edge reads as part of.
         <button
           type="button"
           data-testid="gitlab-description-toggle"
           aria-expanded={open}
           aria-controls={DESCRIPTION_BOX_ID}
-          onClick={() => setOpen((was) => !was)}
-          className="mt-1 flex items-center gap-1 rounded text-[12px] font-medium text-text-dim transition-colors hover:text-foreground"
+          onClick={() => {
+            setEverPressed(true);
+            setAnimating(true);
+            setOpen((was) => !was);
+          }}
+          className="mx-auto mt-1.5 flex w-fit items-center gap-1 rounded text-[12px] font-medium text-text-dim transition-colors hover:text-foreground"
         >
           <motion.span
             className="flex shrink-0 items-center"

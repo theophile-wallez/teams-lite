@@ -557,6 +557,30 @@ export const DESCRIPTION_COLLAPSED_PX = Math.round(DESCRIPTION_LINE_PX * DESCRIP
 /** The height of the gradient over the foot of a folded description, in px. */
 export const DESCRIPTION_FADE_PX = Math.round(DESCRIPTION_LINE_PX * DESCRIPTION_LINES_FADED);
 
+/** The fold's own motion, in seconds. One strong ease-out carries it (`FOLD_EASE` in
+ *  `gitlab-pane.tsx`, the transcript panel's curve), and the DURATION is the part this file
+ *  decides, because it depends on the document rather than on the control.
+ *
+ *  A description here is a whole document: measured on the tenant, opening one travels well
+ *  over a thousand pixels, and a fixed 0.26 s over that distance is 100 px a frame — a jump
+ *  cut with an easing curve on it, which is exactly what "I see no animation" looks like. So
+ *  the duration grows with the distance and is CLAMPED at both ends: a short reveal stays
+ *  brisk, a long one stays readable, and nothing takes longer than half a second because a
+ *  disclosure the reader is waiting on is worse than one they did not see. */
+export const FOLD_MIN_SECONDS = 0.26;
+export const FOLD_MAX_SECONDS = 0.52;
+/** Seconds per pixel travelled: 1 000 px adds a quarter of a second. */
+export const FOLD_SECONDS_PER_PX = 0.00025;
+/** A close is shorter than the open, everywhere in this app: opening is the reader asking to
+ *  read something, closing is the app getting out of their way. */
+export const FOLD_CLOSE_RATIO = 0.7;
+
+export function descriptionFoldSeconds(distance: number, opening: boolean): number {
+  const travel = Number.isFinite(distance) ? Math.max(0, distance) : 0;
+  const open = Math.min(FOLD_MAX_SECONDS, FOLD_MIN_SECONDS + travel * FOLD_SECONDS_PER_PX);
+  return opening ? open : open * FOLD_CLOSE_RATIO;
+}
+
 /** Whether a description of this height is worth folding at all.
  *
  *  Two states are deliberately NOT collapsible, and each is a control that would read as a

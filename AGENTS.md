@@ -773,13 +773,32 @@ reader that the dialog means nothing. Eight more rules hold the page together:
     overruns by less than a single line, are both left whole: a click that reveals half a line
     from under a gradient covering three costs the reader more than it saves — the rule the
     split-layout toggle already follows, that a control which changes nothing reads as a bug.
-  - **The two states are ONE movement**, on the transcript panel's own curve and timings
-    (`FOLD_EASE`, and a close shorter than the open): the height carries it, the gradient and
-    the label are quicker and led by it, and the chevron turns on the same curve. Two
-    disclosures on one screen must not move at two different speeds.
-  - **The fold is the reader's from then on.** Nothing re-folds a description they opened; a
-    merge request they walk away from and come back to is a fresh mount, and folds again,
-    because that is the state a page should open in.
+  - **A PRESS is the only thing that moves this box.** The fold on mount is a STATE, and it used
+    to be drawn as a movement: the box was held at the window by a CSS ceiling until the words
+    were measured, and the measurement then lifted that ceiling and handed Motion the whole
+    document's height to come down from — so opening a merge request played a collapse nobody
+    asked for. It reached the user. Three things hold it shut, and `web/e2e/gitlab.spec.ts`
+    measures the box on every frame of an open rather than trusting any of them: the height is
+    animated only once the reader has pressed (`everPressed`), the ceiling is lifted only while
+    a press is TRAVELLING (`animating`, given back by `onAnimationComplete`), and it is ON
+    before anything is measured — which is what makes the first paint the window rather than the
+    document. A description shorter than the window is clamped by nothing at any moment.
+  - **The two states are ONE movement**, on the transcript panel's own curve (`FOLD_EASE`) with
+    a close shorter than the open: the height carries it, the gradient and the label are quicker
+    and led by it, and the chevron turns on the same curve. Two disclosures on one screen must
+    not move at two different speeds.
+  - **The DURATION is the distance, not a constant** (`descriptionFoldSeconds`, clamped between
+    `FOLD_MIN_SECONDS` and `FOLD_MAX_SECONDS`). A description here is a whole document, and a
+    fixed 0.26 s over a thousand pixels is 100 px a frame — a jump cut with an easing curve on
+    it. Under `prefers-reduced-motion` there is no movement at all, which is the one state in
+    which this control has no transition: a reader who sees an instant fold has asked for one.
+  - **The control is CENTRED under the words it opens**, because it belongs to the whole width
+    rather than to the first word of the line above it — and a control tucked against the left
+    edge of somebody's document reads as part of the document.
+  - **The fold is the reader's from then on.** Nothing re-folds a description they opened, and
+    ANOTHER merge request opens folded: this pane is not re-created when the open merge request
+    changes, so the description is keyed by it (`mergeRequestId`) — without that key a reader
+    who opened one description found the next one already open.
 - **A long TITLE is shortened by the header and wrapped by the page, and widens neither.** An
   author here writes the summary and then every ticket the branch closes, so a title runs to
   150 characters — and `truncate` shortens NOTHING while its container is free to grow: a

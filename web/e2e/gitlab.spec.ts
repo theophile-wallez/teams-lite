@@ -269,9 +269,32 @@ test.describe.serial("the GitLab merge-request page", () => {
     const foldedTail = (await tail.boundingBox())!;
     expect(foldedTail.y).toBeGreaterThan(folded.y + folded.height);
 
+    // The press is a MOVEMENT, not a swap: the box is caught between the two heights while it
+    // travels. Sampled off the box's own inline height, because that is what Motion drives —
+    // and this is the one assertion that fails if the fold ever becomes an instant jump.
+    const travel = page.evaluate(() => {
+      const box = document.getElementById("gitlab-description-box")!;
+      const seen: number[] = [];
+      const started = performance.now();
+      return new Promise<number[]>((resolve) => {
+        const tick = () => {
+          seen.push(box.getBoundingClientRect().height);
+          if (performance.now() - started < 400) requestAnimationFrame(tick);
+          else resolve(seen);
+        };
+        requestAnimationFrame(tick);
+      });
+    });
+    await toggle.click();
+    const heights = await travel;
+    const shut = heights[0]!;
+    const wide = heights.at(-1)!;
+    expect(wide).toBeGreaterThan(shut + 40);
+    const between = heights.filter((h) => h > shut + 8 && h < wide - 8);
+    expect(between.length).toBeGreaterThan(3);
+
     // The press opens it: the same control the other way round, and that last line is now
     // inside the box. Measured after the motion settles rather than during it.
-    await toggle.click();
     await expect(toggle).toHaveText("Show less");
     await expect(description).not.toHaveAttribute("data-folded", "true");
     await expect(async () => {
@@ -291,12 +314,59 @@ test.describe.serial("the GitLab merge-request page", () => {
       expect(again.height).toBeLessThan(240);
     }).toPass();
 
+    // Walking away and coming back FOLDS again — the fold is the state a page opens in, and
+    // this pane is not re-created when the open merge request changes, so the description is
+    // keyed by it (see `mergeRequestId` on the mount).
+    await toggle.click();
+    await expect(description).not.toHaveAttribute("data-folded", "true");
+    await page.locator('[data-testid="tab-gitlab"]').click();
+    await openMergeRequest(page, 63);
+    await openMergeRequest(page, 596);
+    await expect(page.locator('[data-testid="gitlab-description"]')).toHaveAttribute(
+      "data-folded",
+      "true",
+    );
+
     // A description that already fits keeps NO control: there is nothing behind it, and a
     // click that reveals nothing reads as a bug (!595's own is one sentence).
     await page.locator('[data-testid="tab-gitlab"]').click();
     await openMergeRequest(page, 595);
     await expect(page.locator('[data-testid="gitlab-description"]')).toBeVisible();
     await expect(page.locator('[data-testid="gitlab-description-toggle"]')).toHaveCount(0);
+  });
+
+  test("opens already folded — the fold is not an animation the reader watches", async ({
+    page,
+  }) => {
+    // The page OPENS folded, and getting there is not a movement: a description that unrolled
+    // and then rolled itself up is the reader watching the app make up its mind. It used to do
+    // exactly that — the box was clamped by CSS until the words were measured, and the
+    // measurement handed Motion its natural height to travel down FROM. So the height is only
+    // ever animated by a PRESS (`everPressed` in gitlab-pane.tsx).
+    await openGitLab(page);
+    const sampled = page.evaluate(() => {
+      const seen: number[] = [];
+      const started = performance.now();
+      return new Promise<number[]>((resolve) => {
+        const tick = () => {
+          const box = document.getElementById("gitlab-description-box");
+          if (box) seen.push(box.getBoundingClientRect().height);
+          if (performance.now() - started < 900) requestAnimationFrame(tick);
+          else resolve(seen);
+        };
+        requestAnimationFrame(tick);
+      });
+    });
+    await openMergeRequest(page, 596);
+    const heights = await sampled;
+    expect(heights.length).toBeGreaterThan(3);
+    // The box is NEVER taller than the fold, on any frame it was on screen for. That is the
+    // whole assertion: a collapse the reader watches starts at the document's own height (400px
+    // and up on this fixture) and comes down, so one sample over the window would catch it.
+    expect(Math.max(...heights)).toBeLessThan(200);
+    // And it settles without travelling: two heights at most — the one before layout and the
+    // fold — where an animation would leave a dozen.
+    expect(new Set(heights.map(Math.round)).size).toBeLessThanOrEqual(2);
   });
 
   test("the merge asks twice, and says what the second click costs", async ({ page }) => {

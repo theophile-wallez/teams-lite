@@ -5,7 +5,11 @@ import {
   DESCRIPTION_FONT_PX,
   DESCRIPTION_LINE_HEIGHT,
   DESCRIPTION_LINE_PX,
+  FOLD_CLOSE_RATIO,
+  FOLD_MAX_SECONDS,
+  FOLD_MIN_SECONDS,
   conversationDiscussions,
+  descriptionFoldSeconds,
   descriptionIsFoldable,
   formatJobDuration,
   isNotMerged,
@@ -381,5 +385,31 @@ describe("the description's fold", () => {
     // A real document — a summary, a table and a fenced block — is folded.
     expect(descriptionIsFoldable(DESCRIPTION_COLLAPSED_PX + DESCRIPTION_LINE_PX * 2)).toBe(true);
     expect(descriptionIsFoldable(900)).toBe(true);
+  });
+});
+
+describe("the fold's own motion", () => {
+  it("the duration grows with the distance the box travels, and is clamped at both ends", () => {
+    // A description barely over the window: the shortest open there is, never shorter.
+    expect(descriptionFoldSeconds(0, true)).toBe(FOLD_MIN_SECONDS);
+    expect(descriptionFoldSeconds(-500, true)).toBe(FOLD_MIN_SECONDS);
+    // A whole document — measured on the tenant, this is the common case — takes longer,
+    // because a thousand pixels in a quarter of a second is a jump cut with a curve on it.
+    expect(descriptionFoldSeconds(400, true)).toBeGreaterThan(FOLD_MIN_SECONDS);
+    expect(descriptionFoldSeconds(2000, true)).toBe(FOLD_MAX_SECONDS);
+    // And never longer than the ceiling: a disclosure the reader waits on is worse than one
+    // they did not notice.
+    expect(descriptionFoldSeconds(20_000, true)).toBe(FOLD_MAX_SECONDS);
+  });
+
+  it("a close is shorter than the open it undoes", () => {
+    for (const distance of [0, 300, 900, 5000]) {
+      expect(descriptionFoldSeconds(distance, false)).toBeCloseTo(
+        descriptionFoldSeconds(distance, true) * FOLD_CLOSE_RATIO,
+      );
+      expect(descriptionFoldSeconds(distance, false)).toBeLessThan(
+        descriptionFoldSeconds(distance, true),
+      );
+    }
   });
 });
