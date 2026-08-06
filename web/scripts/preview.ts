@@ -1387,6 +1387,10 @@ if (import.meta.main) {
       //     for is the one action it gets.
       await openConversation(page, "Design Sync");
       await shot(`${out}-meeting-chat-light.png`, '[data-testid="message-pane"] header');
+      // The control on its own. It is a 20px glyph and whether it reads as a MEETING rather
+      // than as the handset next door is the whole of this row, so `--dpr` is worth passing
+      // when this shot is the one being judged.
+      await shot(`${out}-meeting-chat-icon.png`, '[data-testid="meeting-join-here"]');
       await setTheme("dark");
       await shot(`${out}-meeting-chat-dark.png`, '[data-testid="message-pane"] header');
       await setTheme("light");
@@ -1458,7 +1462,7 @@ if (import.meta.main) {
           `${out}-button-light.png, ${out}-ringing-{light,card-light,card-dark}.png and ` +
           `${out}-{connected-card-light,muted-card-light,connected-card-dark}.png and ` +
           `${out}-group-{button-light,dialing-light,card-light,card-dark}.png and ` +
-          `${out}-meeting-chat-{light,dark,card-light}.png and ` +
+          `${out}-meeting-chat-{light,dark,icon,card-light}.png and ` +
           `${out}-meeting-{actions-light,lobby-light,card-light,card-dark}.png and ` +
           `${out}-video-{light,page-light,dark}.png and ` +
           `${out}-send-{off-light,on-light}.png and ${out}-sending-{light,dark}.png`,

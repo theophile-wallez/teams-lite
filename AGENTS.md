@@ -945,10 +945,19 @@ call does — this side never handles RTP, and the page never learns a Teams URL
     one `<audio>` per remote stream). `call_prepare` resolves the list ONCE and keeps it on
     the session (`ring`), because `call_place` is a second round trip and a list rebuilt
     there could disagree with the one the user was shown.
-  - a **MEETING chat** — a thread Teams minted FOR a meeting — offers **Join here**
-    instead, addressed by that thread (see § Joining a meeting). It offers no ring:
-    joining and ringing everybody invited answer the same question, and only one of them is
-    what the thread is for.
+  - a **MEETING chat** — a thread Teams minted FOR a meeting — JOINS instead, addressed by
+    that thread (see § Joining a meeting). It offers no ring: joining and ringing everybody
+    invited answer the same question, and only one of them is what the thread is for.
+  - **All three wear ONE control, in one box** (`MeetingJoinButton shape="icon"`, the call
+    button's own 36px square and its own handset). A header is a row of controls the user
+    aims at, so a chat that changed their size or shape would move the target between two
+    conversations — and the labelled blue pill the calendar keeps would read as a fourth kind
+    of thing here. The handset is not a claim that the click rings anybody: it says "start
+    talking to the people in this conversation, here", which is what both actions do. WHICH
+    action it is lives in the tooltip, in the label a screen reader gets, and in the row's own
+    "Meeting chat" subtitle — and `web/e2e/calling.spec.ts` measures the two boxes against
+    each other rather than trusting the class list. A glyph that tried to say "join" was
+    measured and rejected: `MeetingRoomIcon` reads as a bare panel at 20px.
   - **`MAX_GROUP_CALL_PEOPLE` (20) is the ceiling**, and it is a product rule rather than a
     protocol one: every name in that list is a device buzzing in somebody's pocket, and a
     mis-click on a 60-person thread cannot be taken back. Above it the user still has real
@@ -1092,9 +1101,10 @@ shows the stage and the tiles with nothing leaving the machine.
 ## Joining a meeting (the calendar stays read-only)
 
 A calendar event with a Teams link offers **Join here** beside the link that opens real
-Teams (`web/src/components/meeting-join-button.tsx`) — and so does the HEADER of the
-meeting's own chat, which is where a meeting is usually noticed. It joins with a microphone
-and nothing else, so both actions exist and neither replaces the other: a meeting whose
+Teams (`web/src/components/meeting-join-button.tsx`) — and the HEADER of the meeting's own
+chat offers the same join, as the icon control every other chat's header carries (see
+§ Audio calls for why one shape). A meeting is usually noticed in the chat list, which is
+why both surfaces exist. It joins with a microphone and nothing else, so a meeting whose
 point is a shared screen is still one to open in Teams.
 
 **Two ADDRESSES, because the user reaches a meeting from two places, and neither covers

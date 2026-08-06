@@ -42,7 +42,12 @@ export function CallButton(props: { conversationId: string }) {
   // A meeting is joined rather than rung, and the Join button carries its own rails,
   // including the address it states for a driver to prove before it clicks.
   const meeting = meetingAddressOf(conversation);
-  if (action === "join" && meeting) return <MeetingJoinButton meeting={meeting} />;
+  // Drawn as an ICON, because this is a chat header: every other conversation puts one
+  // control of that exact shape here, and a header whose controls change size between two
+  // chats moves the thing the user is aiming at. The glyph carries the difference.
+  if (action === "join" && meeting) {
+    return <MeetingJoinButton meeting={meeting} shape="icon" />;
+  }
 
   const ready = canPlaceCall(status);
   const reason = callUnavailableReason(status);

@@ -27,7 +27,15 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
  * calling is off it stays, disabled, with the reason in its tooltip — that is the case
  * the user can fix, and Settings is where they fix it.
  */
-export function MeetingJoinButton(props: { meeting: MeetingAddress; subject?: string }) {
+export function MeetingJoinButton(props: {
+  meeting: MeetingAddress;
+  subject?: string;
+  /** How it is drawn. `pill` is the labelled primary button a calendar event's details
+   *  panel puts beside its link out, where words are what tell the two apart. `icon` is the
+   *  bare glyph a CHAT HEADER takes, because that header already holds one control of that
+   *  exact shape in every other conversation — see {@link ./call-button}. */
+  shape?: "pill" | "icon";
+}) {
   const controller = useController();
   const status = useAppState((s) => s.callStatus);
   const { meeting } = props;
@@ -40,10 +48,12 @@ export function MeetingJoinButton(props: { meeting: MeetingAddress; subject?: st
 
   const ready = canJoinMeeting(status);
   const reason = meetingUnavailableReason(status);
+  const icon = props.shape === "icon";
   const button = (
     <button
       type="button"
       data-testid="meeting-join-here"
+      data-shape={icon ? "icon" : "pill"}
       // WHICH meeting this button joins, in the page's own state — one attribute per shape
       // of address, and never both.
       //
@@ -57,10 +67,28 @@ export function MeetingJoinButton(props: { meeting: MeetingAddress; subject?: st
       disabled={!ready}
       aria-label={ready ? "Join this meeting with audio" : reason}
       onClick={() => void controller.joinMeeting(meeting, props.subject)}
-      className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
+      className={
+        icon
+          ? // The call button's own box, to the pixel: this is one row of header controls, and
+            // a conversation the user walks into must not move the controls of the one they
+            // came from.
+            "grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          : "flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
+      }
     >
-      <HugeiconsIcon icon={CallIcon} className="size-3.5" strokeWidth={1.8} />
-      Join here
+      {/* The HANDSET in both shapes, and in a chat header the same one the call button
+          wears. It is not a claim that this rings anybody: it says "start talking to the
+          people in this conversation, here", which is what both actions do. A glyph that
+          tried to say "join" instead was measured and rejected — `MeetingRoomIcon` reads as
+          a bare panel at 20px, which is worse than a mark somebody already knows. What the
+          click really does is in the tooltip and in the label a screen reader gets, and the
+          row itself already says "Meeting chat" under the title. */}
+      <HugeiconsIcon
+        icon={CallIcon}
+        className={icon ? "size-5" : "size-3.5"}
+        strokeWidth={icon ? 1.6 : 1.8}
+      />
+      {!icon && "Join here"}
     </button>
   );
 

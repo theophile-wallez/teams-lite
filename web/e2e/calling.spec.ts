@@ -93,12 +93,26 @@ test.describe("Audio calling", () => {
   test("joins the meeting a meeting chat was opened for", async ({ page }) => {
     await gotoApp(page);
     await turnCallingOn(page);
+    // The header control of an ordinary chat first, so the box the meeting's own must match
+    // is measured rather than assumed.
+    await openConversationNamed(page, "Platform Team");
+    const callBox = await page.locator('[data-testid="call-button"]').boundingBox();
+
     await openConversationNamed(page, "Design Sync");
     // No ring here, and the Join button states WHICH meeting it joins — the thread — so a
     // driver can prove its target before an outward click.
     await expect(page.locator('[data-testid="call-button"]')).toHaveCount(0);
     const join = page.locator('[data-testid="meeting-join-here"]');
     await expect(join).toBeEnabled();
+    // It is the SAME control other chats have, to the pixel: this is one row of header
+    // controls, and walking into a meeting chat must not move the thing the user is aiming
+    // at. The words live in the tooltip and in the label a screen reader gets.
+    await expect(join).toHaveAttribute("data-shape", "icon");
+    await expect(join).toHaveAttribute("aria-label", /Join this meeting/);
+    const joinBox = await join.boundingBox();
+    expect(joinBox?.width).toBe(callBox?.width);
+    expect(joinBox?.height).toBe(callBox?.height);
+    expect(joinBox?.x).toBe(callBox?.x);
     const conversationId = await page
       .locator('[data-testid="composer-shell"]')
       .getAttribute("data-conversation-id");
@@ -288,6 +302,10 @@ test.describe("Joining a meeting", () => {
     // prove its target for is one it must not make. One shape at a time, never both.
     await expect(join).toHaveAttribute("data-join-url", /meetup-join/);
     await expect(join).not.toHaveAttribute("data-meeting-thread", /./);
+    // A calendar event's panel keeps the LABELLED button: it sits beside a link that opens
+    // real Teams, and there the words are what tell the two apart.
+    await expect(join).toHaveAttribute("data-shape", "pill");
+    await expect(join).toContainText("Join here");
     await join.click();
 
     const bar = page.locator('[data-testid="call-bar"]');
