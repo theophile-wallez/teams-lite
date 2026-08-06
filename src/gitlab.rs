@@ -258,13 +258,21 @@ pub async fn fetch_metadata(
     Ok(Some(build_metadata(&resource, &body, url)))
 }
 
+/// The origin of one GitLab instance, and the ONE place a configured host becomes an
+/// address. [`api_base`] is this plus the REST prefix, and the pipeline graph's own read
+/// is this plus its own path (see [`crate::gitlab_ci_graph`]) — so whichever API a
+/// request speaks, the token reaches one host and the pinning is stated once.
+pub(crate) fn origin(gitlab_host: &str) -> String {
+    format!("https://{}", gitlab_host.trim())
+}
+
 /// The REST API root of one GitLab instance. Built from the configured host and
 /// nothing else, which is the host pinning: every request this crate makes to
 /// GitLab — the reads here and the one approval write in
 /// [`crate::gitlab_approval`] — goes through this function, so the token can only
 /// ever reach the host the user configured.
 pub(crate) fn api_base(gitlab_host: &str) -> String {
-    format!("https://{}/api/v4", gitlab_host.trim())
+    format!("{}/api/v4", origin(gitlab_host))
 }
 
 /// Percent-encode a project path for use as a single GitLab API path segment.

@@ -355,6 +355,13 @@ pub struct Job {
     pub web_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
+    /// The names of the jobs this one waits for, and the one field here GitLab's REST API
+    /// does not answer: it is filled in afterwards by [`crate::gitlab_ci_graph`] over
+    /// GraphQL, and stays empty whenever that read cannot be made. So an empty list means
+    /// "nothing is known to be waited for", never "this job starts immediately" — the
+    /// graph reads it as the former and groups by stage when no job carries one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
 }
 
 /// One comment.
@@ -1233,6 +1240,9 @@ fn job_from_json(value: &serde_json::Value) -> Option<Job> {
         duration: value.get("duration").and_then(serde_json::Value::as_f64),
         web_url: str_field(value, "web_url"),
         finished_at: str_field(value, "finished_at"),
+        // Never on a REST job row — measured, and re-measured by
+        // `examples/pipeline_needs_recon.rs`. `gitlab_ci_graph::attach_needs` fills it.
+        needs: Vec::new(),
     })
 }
 

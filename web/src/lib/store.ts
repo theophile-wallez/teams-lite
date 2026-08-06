@@ -568,6 +568,10 @@ export type AppState = {
   /** Its comments, and its pipeline with jobs. */
   gitlabNotes: GitLabDiscussionList | null;
   gitlabPipeline: GitLabPipelineView | null;
+  /** Why the pipeline could not be read, when nothing of it is on screen. The PANEL can fall
+   *  back on the rest of the page, but the pipeline PAGE is that read and nothing else — so a
+   *  failure it never stated would be "Reading the pipeline…" for ever. */
+  gitlabPipelineError: string | null;
   /** What it CHANGED, for the Changes section. Read with the page, like the four above:
    *  reviewing the diff is what a merge-request page is for, so it is never behind a click.
    *  The RENDERER is lazy (see gitlab-diff-view.tsx) because Shiki carries a grammar per
@@ -845,6 +849,7 @@ function initialState(): AppState {
     gitlabApproval: null,
     gitlabNotes: null,
     gitlabPipeline: null,
+    gitlabPipelineError: null,
     gitlabDiff: null,
     gitlabDiffLoading: false,
     gitlabDiffError: null,
@@ -1502,7 +1507,7 @@ export class TeamsController {
         }
       } else if (d.kind === "pipeline") {
         const view = d as unknown as GitLabPipelineView;
-        this.set({ gitlabPipeline: view });
+        this.set({ gitlabPipeline: view, gitlabPipelineError: null });
         // A refresh that arrived from somewhere else still decides whether this page keeps
         // polling: a pipeline that finished must stop the timer, and one that started must
         // arm it.
@@ -3269,6 +3274,7 @@ export class TeamsController {
       gitlabDetail: null,
       gitlabNotes: null,
       gitlabPipeline: null,
+      gitlabPipelineError: null,
       gitlabApproval: null,
       gitlabDiff: null,
       gitlabDiffError: null,
@@ -3387,6 +3393,7 @@ export class TeamsController {
       // The pipeline is deliberately NOT cached across opens: a stale CI badge is the one
       // piece of this page that would be read as current when it is minutes old.
       gitlabPipeline: null,
+      gitlabPipelineError: null,
       gitlabApproval: null,
       // A comment being written belongs to one line of one file, so opening another merge
       // request — or leaving this one — takes it away rather than carrying it over to a line
@@ -3774,12 +3781,17 @@ export class TeamsController {
     try {
       const view = await this.backend.gitlabMergeRequestPipeline(key, refresh);
       if (!sameMergeRequest(this.get().openMergeRequest, key)) return;
-      this.set({ gitlabPipeline: view });
+      this.set({ gitlabPipeline: view, gitlabPipelineError: null });
       if (pipelineIsLive(view)) this.schedulePipelinePoll(key);
       else this.stopPipelinePolling();
-    } catch {
-      // A pipeline that cannot be read leaves the panel as it stands and stops polling:
-      // hammering a refusal would earn the token a rate limit.
+    } catch (e) {
+      // A pipeline that cannot be read leaves whatever is on screen as it stands and stops
+      // polling: hammering a refusal would earn the token a rate limit. The REASON is kept for
+      // the surface that has nothing else to draw — the pipeline page — and a page still
+      // holding a pipeline keeps it rather than replacing a run with a sentence.
+      if (sameMergeRequest(this.get().openMergeRequest, key) && !this.get().gitlabPipeline) {
+        this.set({ gitlabPipelineError: errText(e) });
+      }
       this.stopPipelinePolling();
     }
   }
@@ -3806,6 +3818,7 @@ export class TeamsController {
       gitlabDetailError: null,
       gitlabNotes: null,
       gitlabPipeline: null,
+      gitlabPipelineError: null,
       gitlabApproval: null,
       gitlabDiff: null,
       gitlabDiffLoading: false,

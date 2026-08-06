@@ -5,7 +5,6 @@ import {
   Alert02Icon,
   ArrowDown01Icon,
   ArrowRight01Icon,
-  CheckmarkCircle02Icon,
   ChevronLeftIcon,
   Delete02Icon,
   Edit02Icon,
@@ -13,14 +12,13 @@ import {
   Link01Icon,
   Loading02Icon,
   Message01Icon,
-  PlayIcon,
   RefreshIcon,
   Tick02Icon,
-  TimeQuarterIcon,
   XVariableCircleIcon,
 } from "@hugeicons/core-free-icons";
 import { noteWasEdited, threadResolution, threadResolveAction } from "~/lib/gitlab-diff-comment";
 import { parseGitLabMarkdown } from "~/lib/gitlab-markdown";
+import { defaultGrouping, graphSummary, pipelineGraph } from "~/lib/gitlab-pipeline-graph";
 import {
   DESCRIPTION_COLLAPSED_PX,
   DESCRIPTION_FADE_PX,
@@ -28,21 +26,15 @@ import {
   DESCRIPTION_LINE_HEIGHT,
   conversationDiscussions,
   descriptionIsFoldable,
-  formatJobDuration,
   mergeVerdict,
   pipelineIsLive,
-  pipelineStages,
-  pipelineTone,
-  stageTone,
   stateChangeFor,
   systemNotes,
   unresolvedThreadCount,
   type GitLabDiscussion,
-  type GitLabJob,
   type GitLabNote,
   type GitLabPerson,
   type MergeRequestDetail,
-  type PipelineTone,
 } from "~/lib/gitlab-mr";
 import { personFace } from "~/lib/tracker-people";
 import { cn } from "~/lib/utils";
@@ -56,6 +48,8 @@ import {
   useMergeRequestPage,
 } from "./gitlab-mr-pages";
 import { Panel } from "./gitlab-panel";
+import { GitLabPipelinePage } from "./gitlab-pipeline-page";
+import { PipelineGraphView, PipelineStatusBadge } from "./gitlab-pipeline-graph";
 import { RichNodes } from "./rich-content";
 
 // The merge-request page. It occupies the same slot as `MessagePane` and `MailPane`, so the
@@ -114,6 +108,9 @@ export function GitLabPane(props: {
   /** Open this merge request's DIFF, which is a route and a full-screen page of its own (see
    *  `gitlab-diff-page.tsx`). The shell navigates; this pane only asks. */
   onOpenDiff?: () => void;
+  /** Open its PIPELINE, on the same terms and for the same reason: a graph is as wide as the
+   *  run it draws (see `gitlab-pipeline-page.tsx`). */
+  onOpenPipeline?: () => void;
 }) {
   const open = useAppState((s) => s.openMergeRequest);
   const detail = useAppState((s) => s.gitlabDetail);
@@ -185,9 +182,15 @@ export function GitLabPane(props: {
           same subject, a different page of it. */}
       <MergeRequestPageStrip current={page} />
 
-      {/* A page this app does not read yet says so and offers GitLab's own, rather than being
-          drawn blank — which reads as a read that failed. */}
-      {page !== "overview" ? (
+      {/* PIPELINES is a page of this pane, and it is the pipeline GRAPH (see
+          `gitlab-pipeline-page.tsx`). It is drawn here rather than over the whole screen
+          because it is one of the four pages of a merge request, and the header above it
+          already says which merge request that is. */}
+      {page === "pipelines" ? (
+        <GitLabPipelinePage />
+      ) : page !== "overview" ? (
+        /* A page this app does not read yet says so and offers GitLab's own, rather than being
+           drawn blank — which reads as a read that failed. */
         <UnbuiltMergeRequestPage page={page} webUrl={detail?.web_url} />
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6">
@@ -209,7 +212,7 @@ export function GitLabPane(props: {
               <>
                 <MergeRequestHeader detail={detail} />
                 <MergeRequestDescription detail={detail} />
-                <PipelinePanel />
+                <PipelinePanel onOpenPipeline={props.onOpenPipeline ?? (() => {})} />
                 <ApprovalPanel />
                 <ActionPanel detail={detail} />
                 <ChangesPanel detail={detail} onOpenDiff={props.onOpenDiff ?? (() => {})} />
@@ -514,15 +517,39 @@ function MergeRequestDescription(props: { detail: MergeRequestDetail }) {
   );
 }
 
-/** The live pipeline: its status, and its jobs grouped into GitLab's own stages.
+/** The live pipeline, drawn as the GRAPH it is — compact, and with the way into its own page.
  *
  *  THE live half of this page. The store polls it while anything is in flight and stops the
- *  moment nothing is, so a finished pipeline costs nothing (see `loadPipeline`). */
-function PipelinePanel() {
+ *  moment nothing is, so a finished pipeline costs nothing (see `loadPipeline`).
+ *
+ *  It used to be a list of stages, each with its jobs under it. What that shape cannot say is
+ *  the one thing a reader of a red pipeline asks — WHICH job is holding the rest up — because a
+ *  list has no room for the dependencies between its rows. So the panel draws the graph a
+ *  glance needs and the PAGE draws the one a reader works in (`gitlab-pipeline-page.tsx`): the
+ *  same split, and the same reason, as the Changes panel and the diff page above it. */
+function PipelinePanel(props: { onOpenPipeline: () => void }) {
   const view = useAppState((s) => s.gitlabPipeline);
-  const stages = useMemo(() => pipelineStages(view?.jobs), [view?.jobs]);
+  const error = useAppState((s) => s.gitlabPipelineError);
+  const jobs = view?.jobs ?? [];
   const live = pipelineIsLive(view);
+  // The panel has no controls of its own: it shows the pipeline in the shape its own author
+  // wrote (dependencies where they exist, stages otherwise) and hands the choice to the page.
+  // A row of controls above a 96-pixel graph would be more control than graph.
+  const graph = useMemo(() => pipelineGraph(view, defaultGrouping(jobs)), [view, jobs]);
 
+  if (error && !view) {
+    return (
+      <Panel title="Pipeline" testId="gitlab-pipeline">
+        <p
+          data-testid="gitlab-pipeline-error"
+          className="flex items-start gap-1.5 text-[12px] text-destructive"
+        >
+          <HugeiconsIcon icon={Alert02Icon} className="mt-px size-3.5 shrink-0" strokeWidth={1.8} />
+          {error}
+        </p>
+      </Panel>
+    );
+  }
   if (!view) {
     return (
       <Panel title="Pipeline" testId="gitlab-pipeline">
@@ -550,7 +577,7 @@ function PipelinePanel() {
       data-live={live ? "true" : undefined}
       right={
         <div className="flex items-center gap-2">
-          <StatusChip status={view.pipeline.status} testId="gitlab-pipeline-status" />
+          <PipelineStatusBadge status={view.pipeline.status} jobs={jobs} />
           {/* Says that the panel is following the run, so a reader knows the page is not
               simply stale. */}
           {live && (
@@ -571,117 +598,29 @@ function PipelinePanel() {
         </div>
       }
     >
-      {stages.length === 0 ? (
+      {jobs.length === 0 ? (
         <p className="text-[12px] text-text-faint">This pipeline has no jobs yet.</p>
       ) : (
-        <div className="flex flex-col gap-2.5">
-          {stages.map((stage, index) => (
-            <div key={`${stage.name}:${index}`} data-testid="gitlab-stage" data-stage={stage.name}>
-              <div className="mb-1 flex items-center gap-1.5">
-                <ToneDot tone={stageTone(stage)} />
-                <span className="text-[11px] font-medium text-text-dim">{stage.name}</span>
-              </div>
-              <ul className="flex flex-col gap-1 pl-3.5">
-                {stage.jobs.map((job) => (
-                  <JobRow key={job.id} job={job} />
-                ))}
-              </ul>
-            </div>
-          ))}
+        <div className="flex flex-col gap-2">
+          <PipelineGraphView graph={graph} showNeeds density="compact" />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="gitlab-pipeline-open"
+              data-cuelume-press=""
+              onClick={props.onOpenPipeline}
+              className="flex items-center gap-1.5 self-start rounded-lg bg-element px-3 py-1.5 text-[12px] font-medium text-text-dim transition-colors hover:text-foreground"
+            >
+              <HugeiconsIcon icon={ArrowRight01Icon} className="size-3.5" strokeWidth={1.8} />
+              Open the pipeline
+            </button>
+            <p data-testid="gitlab-pipeline-summary" className="text-[11px] text-text-faint">
+              {graphSummary(view, graph)}
+            </p>
+          </div>
         </div>
       )}
     </Panel>
-  );
-}
-
-/** One CI job: its name, what it did, and how long it took. */
-function JobRow(props: { job: GitLabJob }) {
-  const job = props.job;
-  const duration = formatJobDuration(job.duration);
-  return (
-    <li data-testid="gitlab-job" data-status={job.status} className="flex items-center gap-2">
-      <ToneDot tone={pipelineTone(job.status)} />
-      {job.web_url ? (
-        <a
-          href={job.web_url}
-          target="_blank"
-          rel="noreferrer"
-          className="min-w-0 truncate text-[12px] text-text-dim underline-offset-2 hover:text-foreground hover:underline"
-        >
-          {job.name}
-        </a>
-      ) : (
-        <span className="min-w-0 truncate text-[12px] text-text-dim">{job.name}</span>
-      )}
-      {/* A job allowed to fail says so, because a red mark on something nobody has to fix
-          is a red mark that teaches people to ignore red. */}
-      {job.allow_failure && job.status === "failed" && (
-        <span className="shrink-0 text-[10px] text-text-faint">(allowed to fail)</span>
-      )}
-      <span className="ml-auto shrink-0 text-[11px] tabular-nums text-text-faint">
-        {duration || job.status}
-      </span>
-    </li>
-  );
-}
-
-/** A dot in one of the four tones. Colour is never the only signal: every row that carries
- *  one also states its status in words (the job's own status or its duration, the stage's
- *  jobs below it), so the panel reads without colour vision. */
-function ToneDot(props: { tone: PipelineTone }) {
-  const tone =
-    props.tone === "success"
-      ? "bg-primary"
-      : props.tone === "failed"
-        ? "bg-destructive"
-        : props.tone === "running"
-          ? "bg-primary/60 animate-pulse"
-          : "bg-text-faint/40";
-  return (
-    <span
-      data-testid="gitlab-tone"
-      data-tone={props.tone}
-      aria-hidden
-      className={cn("size-2 shrink-0 rounded-full", tone)}
-    />
-  );
-}
-
-/** A status as GitLab spells it, in the tone it means. */
-function StatusChip(props: { status: string; testId?: string }) {
-  const tone = pipelineTone(props.status);
-  const icon =
-    tone === "success"
-      ? CheckmarkCircle02Icon
-      : tone === "failed"
-        ? XVariableCircleIcon
-        : tone === "running"
-          ? Loading02Icon
-          : props.status === "manual"
-            ? PlayIcon
-            : TimeQuarterIcon;
-  return (
-    <span
-      data-testid={props.testId}
-      data-status={props.status}
-      data-tone={tone}
-      className={cn(
-        "flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium",
-        tone === "success"
-          ? "bg-primary/12 text-primary"
-          : tone === "failed"
-            ? "bg-destructive/12 text-destructive"
-            : "bg-element text-text-dim",
-      )}
-    >
-      <HugeiconsIcon
-        icon={icon}
-        className={cn("size-3", tone === "running" && "animate-spin")}
-        strokeWidth={1.8}
-        aria-hidden
-      />
-      {props.status}
-    </span>
   );
 }
 

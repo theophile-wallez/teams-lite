@@ -37,6 +37,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/cal --calendar     # the Calendar surface
 //   bun run web/scripts/preview.ts --out /tmp/chan --channels    # the team → channel tree
 //   bun run web/scripts/preview.ts --out /tmp/mr --gitlab       # the merge-request page
+//   bun run web/scripts/preview.ts --out /tmp/pipe --pipeline    # its pipeline graph
 //   bun run web/scripts/preview.ts --out /tmp/diff --diff       # the Changes section
 //   bun run web/scripts/preview.ts --out /tmp/dc --diff-comment # a comment on a diff line
 //   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
@@ -485,6 +486,36 @@ export async function openMergeRequestPage(
   await page.waitForSelector(`[data-testid="gitlab-mr-pages"][data-page="${name}"]`, {
     timeout: APP_READY_TIMEOUT_MS,
   });
+}
+
+/** Open the PIPELINE page of the open merge request, and wait for its graph.
+ *
+ *  The wait is on the graph's own container rather than on the route: the page paints from the
+ *  read the merge request already made, so what a capture has to wait for is the cards being
+ *  laid out and the curves being MEASURED off them (see `useEdgePaths` — the paths exist only
+ *  after a layout pass). */
+export async function openPipelinePage(page: Page): Promise<void> {
+  await page.locator('[data-testid="gitlab-pipeline-open"]').scrollIntoViewIfNeeded();
+  await page.locator('[data-testid="gitlab-pipeline-open"]').click();
+  await page.waitForSelector('[data-testid="gitlab-pipeline-page"]', {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+  await page.waitForSelector('[data-testid="gitlab-pipeline-job"]', {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+  // One frame past the layout, so the curves are drawn on the cards rather than at nothing.
+  await page.waitForTimeout(300);
+}
+
+/** Group the pipeline graph by `stage` or by `needs`, through the control a reader presses. */
+export async function setPipelineGrouping(page: Page, grouping: "stage" | "needs"): Promise<void> {
+  await page
+    .locator(`[data-testid="gitlab-pipeline-grouping"] [data-value="${grouping}"]`)
+    .click();
+  await page.waitForSelector(`[data-testid="gitlab-pipeline-graph"][data-grouping="${grouping}"]`, {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+  await page.waitForTimeout(250);
 }
 
 /** Scroll the Changes section into view and wait for its diff to be drawn.
@@ -1945,7 +1976,8 @@ if (import.meta.main) {
         await setTheme("dark");
         await shot(`${out}-commits-dark.png`);
         await setTheme("light");
-        // And the Pipelines one names where a running pipeline is already followed.
+        // And the Pipelines one is BUILT: it holds the graph, which has a capture of its own
+        // (`--pipeline`). This one only says the strip really opens it.
         await openMergeRequestPage(page, "pipelines");
         await shot(`${out}-pipelines-light.png`);
 
@@ -2036,6 +2068,91 @@ if (import.meta.main) {
             `${out}-description-mobile-light.png, ` +
             `${out}-long-title-{light,mobile-light}.png, ` +
             `${out}-blocked-{light,dark}.png and ${out}-dark.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
+  // The PIPELINE: the compact graph the Overview draws, and the Pipelines page it opens —
+  // grouped by dependency and by stage, the curves lit and off, one job pointed at, and both on
+  // a phone. Nothing here reaches GitLab: the mock's own pipeline declares `needs` (see
+  // `MOCK_LIVE_PIPELINE_JOBS`), which is what makes the whole surface reviewable.
+  if (args.includes("--pipeline")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        await openGitLabTab(page);
+        await openMergeRequestAt(page, 0);
+
+        // The PANEL first: a look at the run, in the shape the pipeline's own author wrote.
+        await page.locator('[data-testid="gitlab-pipeline"]').scrollIntoViewIfNeeded();
+        await page.waitForTimeout(300);
+        await shot(`${out}-panel-light.png`, '[data-testid="gitlab-pipeline"]');
+        await setTheme("dark");
+        await shot(`${out}-panel-dark.png`, '[data-testid="gitlab-pipeline"]');
+        await setTheme("light");
+
+        // The PAGE, grouped by dependency — which is what the mock's pipeline declares, so it
+        // is what the page opens on.
+        await openPipelinePage(page);
+        await shot(`${out}-needs-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-needs-dark.png`);
+        await setTheme("light");
+
+        // ONE JOB pointed at: everything it waits for and everything waiting on it stays lit,
+        // and the rest of the graph goes faint.
+        await page.locator('[data-testid="gitlab-pipeline-job"][data-name="🧪 unit"]').hover();
+        await page.waitForTimeout(300);
+        await shot(`${out}-focused-light.png`);
+
+        // The same run grouped by STAGE, with the curves still lit: the dependencies are a fact
+        // about the pipeline rather than about the grouping.
+        await page.mouse.move(4, 4);
+        await setPipelineGrouping(page, "stage");
+        await shot(`${out}-stage-light.png`);
+
+        // And with them off, which is the plain stage view.
+        await page.locator('[data-testid="gitlab-pipeline-needs-toggle"]').click();
+        await page.waitForSelector('[data-testid="gitlab-pipeline-graph"][data-needs="hidden"]');
+        await page.waitForTimeout(250);
+        await shot(`${out}-stage-plain-light.png`);
+        await page.locator('[data-testid="gitlab-pipeline-needs-toggle"]').click();
+
+        // The JOBS list, which is the view a phone reads better — durations down one column.
+        await page.locator('[data-testid="gitlab-pipeline-view"] [data-value="jobs"]').click();
+        await page.waitForSelector('[data-testid="gitlab-pipeline-jobs"]');
+        await shot(`${out}-jobs-light.png`);
+        await page.locator('[data-testid="gitlab-pipeline-view"] [data-value="graph"]').click();
+        await page.waitForSelector('[data-testid="gitlab-pipeline-graph"]');
+
+        // A PHONE: the graph scrolls sideways inside its own box, and the header's controls stay
+        // on screen — the failure this width exists to catch.
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(400);
+        await shot(`${out}-mobile-light.png`);
+        await page.setViewportSize(VIEWPORT);
+        await page.waitForTimeout(400);
+
+        // A pipeline that FAILED, which is where the four colours are told apart: red for the
+        // test that blocks the merge, orange for the review nobody has to fix, neutral for the
+        // deploy that will never run now.
+        await openGitLabTab(page);
+        await openMergeRequestAt(page, 1);
+        await openPipelinePage(page);
+        // The pointer is left wherever the press was, and a card under it IS hovered — which
+        // would capture the graph half-dimmed rather than as a reader first meets it.
+        await page.mouse.move(4, 4);
+        await page.waitForTimeout(250);
+        await shot(`${out}-failed-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-failed-dark.png`);
+
+        console.log(
+          `[preview] wrote ${out}-panel-{light,dark}.png, ${out}-needs-{light,dark}.png, ` +
+            `${out}-focused-light.png, ${out}-stage-light.png, ${out}-stage-plain-light.png, ` +
+            `${out}-jobs-light.png, ${out}-mobile-light.png and ${out}-failed-{light,dark}.png`,
         );
       },
       { deviceScaleFactor: dpr },

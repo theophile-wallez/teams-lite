@@ -136,6 +136,12 @@ function AppInner() {
     },
     [navigate],
   );
+  const goToMergeRequestPipeline = useCallback(
+    (id: string) => {
+      void navigate({ to: "/mr/$mergeRequestId/pipelines", params: { mergeRequestId: id } });
+    },
+    [navigate],
+  );
   const goToList = useCallback(() => {
     void navigate({ to: "/" });
   }, [navigate]);
@@ -367,6 +373,7 @@ function AppInner() {
               <GitLabPane
                 onBack={goToList}
                 onOpenDiff={() => mergeRequestId && goToMergeRequestDiff(mergeRequestId)}
+                onOpenPipeline={() => mergeRequestId && goToMergeRequestPipeline(mergeRequestId)}
               />
             ) : sidebarTab === "calendar" && !routeConversationId && !routeMailId ? (
               <CalendarPane onBack={() => controller.setSidebarTab("chats")} />

@@ -114,7 +114,8 @@ use teams_lite::{
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
 use teams_lite::{
-    gitlab, gitlab_approval, gitlab_mr, gitlab_mr_write, link_preview, tracker_people,
+    gitlab, gitlab_approval, gitlab_ci_graph, gitlab_mr, gitlab_mr_write, link_preview,
+    tracker_people,
 };
 
 /// The port the user's own backend owns: what the `teams` command and the web app
@@ -6827,8 +6828,24 @@ impl GitLabRead {
             Self::Notes { project_path, iid } => {
                 json!(gitlab_mr::fetch_discussions(&ctx.http, host, token, project_path, *iid).await?)
             }
+            // The pipeline is TWO reads, and the second one cannot fail the first. GitLab's
+            // REST jobs endpoint carries no `needs`, so the graph's dependency mode is read
+            // over GraphQL afterwards (`gitlab_ci_graph`) and attached to the jobs in place.
+            // A GitLab that will not answer it costs that one mode and leaves the graph
+            // grouped by stage.
             Self::Pipeline { project_path, iid } => {
-                json!(gitlab_mr::fetch_pipeline(&ctx.http, host, token, project_path, *iid).await?)
+                let mut view =
+                    gitlab_mr::fetch_pipeline(&ctx.http, host, token, project_path, *iid).await?;
+                gitlab_ci_graph::attach_needs(
+                    &ctx.http,
+                    host,
+                    token,
+                    project_path,
+                    *iid,
+                    &mut view,
+                )
+                .await;
+                json!(view)
             }
             Self::Diff { project_path, iid, depth } => {
                 json!(

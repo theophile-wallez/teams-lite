@@ -35,13 +35,13 @@ describe("the pages of a merge request", () => {
     }
   });
 
-  it("names exactly the two pages that hold nothing yet", () => {
+  it("names exactly the one page that holds nothing yet", () => {
     expect(unbuiltMergeRequestPage("overview")).toBeNull();
     expect(unbuiltMergeRequestPage("diffs")).toBeNull();
+    // PIPELINES is built: it draws the head pipeline as the graph of its jobs (see
+    // `gitlab-pipeline-page.tsx`), so it says nothing about being missing.
+    expect(unbuiltMergeRequestPage("pipelines")).toBeNull();
     expect(unbuiltMergeRequestPage("commits")).toMatch(/not read here yet/);
-    // The pipelines one points at the page that DOES follow a running pipeline, so a reader
-    // after a job in flight is never left at a page that cannot answer them.
-    expect(unbuiltMergeRequestPage("pipelines")).toMatch(/Overview/);
   });
 
   it("builds GitLab's own address from the merge request's own URL", () => {

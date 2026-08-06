@@ -682,8 +682,8 @@ GitLab's own page offers, and its **diff** on a full-screen page of its own (§ 
 One merge request is FOUR pages, named by a sub-header (§ The four PAGES of a merge request).
 `src/gitlab_mr.rs` holds every READ, `src/gitlab_mr_write.rs` the six writes,
 `web/src/lib/gitlab-mr.ts` the pure decisions the surface is built from (`gitlab-diff.ts` the
-diff's own, and `gitlab-mr-pages.ts` the page set's), and
-`web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
+diff's own, `gitlab-mr-pages.ts` the page set's, and `gitlab-pipeline-graph.ts` the pipeline
+graph's), and `web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
 
 **The split between the two backend modules is the whole safety story**, and it is the one
 in § The trackers: reading a tracker is what the feature is for, and writing to one is the
@@ -947,16 +947,17 @@ a `---` disappeared. Four things follow, and each is pinned by a test:
   nothing. Its interval (6 s) sits ABOVE the backend's 5 s window on purpose: below it, every
   poll would be served the same cached answer and the panel would look frozen.
 
-### The four PAGES of a merge request (a sub-header, and two that hold nothing yet)
+### The four PAGES of a merge request (a sub-header, and one that holds nothing yet)
 
 One merge request is four surfaces, exactly as GitLab's own is: **Overview**, **Commits**,
 **Pipelines**, **Diffs** — named by a sub-header under the header that says WHICH merge
 request. `web/src/lib/gitlab-mr-pages.ts` holds the set and every pure fact about it,
-`web/src/components/gitlab-mr-pages.tsx` draws the strip and the two pages that hold nothing,
-and the four routes are the files under `web/src/routes/_app.mr.$mergeRequestId*`. Commits and
-Pipelines are deliberately EMPTY today: the strip and the routes came first, so the reads can
-be added one page at a time without moving anything the reader has learned. Six rules hold it,
-and `web/e2e/gitlab.spec.ts` pins each:
+`web/src/components/gitlab-mr-pages.tsx` draws the strip and the page that holds nothing, and
+the four routes are the files under `web/src/routes/_app.mr.$mergeRequestId*`. **Pipelines is
+the pipeline GRAPH** (§ The pipeline is a GRAPH); COMMITS is deliberately empty today, which is
+the shape this strip was built for — the strip and the routes came first, so the reads are added
+one page at a time without moving anything the reader has learned. Six rules hold it, and
+`web/e2e/gitlab.spec.ts` pins each:
 
 - **Every page is a ROUTE, never a piece of state.** Three things follow and none is available
   to a `useState`: a page survives a reload, it can be sent to a colleague, and the browser's
@@ -977,8 +978,8 @@ and `web/e2e/gitlab.spec.ts` pins each:
 - **A page that holds nothing SAYS so, and offers GitLab's own for it**
   (`unbuiltMergeRequestPage`, `gitlabPageUrl` — built from the merge request's own `web_url`,
   never from the configured host and an assembled path). Drawn blank it would read as a read
-  that failed. The Pipelines one names the OVERVIEW, which already follows the pipeline in
-  flight, so a reader after a running job is never left at a page that cannot answer them.
+  that failed. Only COMMITS says it today, and the sentence names the page rather than the app:
+  a reader is told what is missing, not that something went wrong.
 - **It wears the app's own tab idiom and is a `nav`, not the `Tabs` primitive.**
   `TabsTrigger` points `aria-controls` at a panel in the same document, and three of these
   four are places rather than panels — the Diffs one replaces the whole screen. So it is
@@ -988,7 +989,8 @@ and `web/e2e/gitlab.spec.ts` pins each:
   this page).
 
 `cd web && bun run preview -- --out /tmp/mr --gitlab` captures the strip in both themes, the
-two empty pages, and the strip at a phone's width (`openMergeRequestPage` is its helper).
+page that holds nothing, and the strip at a phone's width (`openMergeRequestPage` is its
+helper); the Pipelines one has its own capture under § The pipeline is a GRAPH.
 
 ### The DIFF is a PAGE of its own (`/mr/<id>/diff`)
 
@@ -1165,6 +1167,145 @@ a blocked merge in both themes;
 `web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
 run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
 is the user's own click, in their own app.
+
+### The pipeline is a GRAPH, and it is the Pipelines page (`/mr/<id>/pipelines`)
+
+A pipeline is drawn the way GitLab's own page draws it: columns of job cards with a curve from
+each job to the ones that wait for it. The Overview holds a compact one — a LOOK at the run,
+with the press that opens the page — and **the Pipelines page** (§ The four PAGES) holds the one
+a reader works in, drawn in the pane under the header that names the merge request and the
+sub-header that names its pages. So the page draws no header of its own: a third row saying
+either would be this app stating one thing twice.
+`web/src/lib/gitlab-pipeline-graph.ts` holds every pure decision (which card is in which
+column, which cards a curve joins, what pointing at one answers),
+`web/src/components/gitlab-pipeline-graph.tsx` draws it, `gitlab-pipeline-page.tsx` is the page,
+and the panel's half is `PipelinePanel` in `gitlab-pane.tsx`.
+
+It replaced a list of stages with the jobs under each. What that shape cannot say is the one
+thing a reader of a red pipeline asks — WHICH job is holding the rest up — because a list has no
+room for the dependencies between its rows.
+
+**FOUR COLOURS, and they are a closed vocabulary** (`PipelineTone`, `jobTone`, `jobsTone` in
+`web/src/lib/gitlab-mr.ts`): **green** when the work is done, **red** when it failed and somebody
+has to fix it, **ORANGE** for a failure nobody has to fix (a job GitLab reports `failed` with
+`allow_failure` set — and the stage, column or pipeline that carries one), and **neutral** for
+everything not finished, which is most states GitLab has. `running` is a fifth NAME and not a
+fifth colour: it takes the neutral ink and says it is moving with MOTION, because a fifth hue in
+a wall of cards would cost the three that mean something their meaning. Two rules travel with
+it: a group's tone is `jobsTone` — one rule for a stage, a column and a whole pipeline, so a
+reader never learns two, and RUNNING still wins over everything in it because the group has not
+finished having its say; and the badge over a run reads the JOBS beside the status, since GitLab
+calls a pipeline `success` while a job allowed to fail sits red inside it and flat green over a
+red job is the one thing it must not say.
+
+**Colour is never the only signal.** Every card carries its own glyph and states its status or
+its duration in words, every dot names its tone in its `title`, an allowed failure says so on
+the card, and the page's legend spells out the tones that run really holds — only those, because
+a legend naming four states when the run has two is a legend nobody reads. The glyph is chosen
+from the STATUS rather than the tone, so only a job that is really `running` turns: `running` as
+a tone means "worth polling" and covers a job that has not started, and a spinner on one of
+those says something false. A `manual` job wears the play mark it is started with, and a
+`skipped` one the mark of something that will never run.
+
+**The dependencies are a fact about the pipeline, not about the grouping**, which is why there
+are two controls and not one. `Group by Stage | Dependencies` decides the COLUMNS —
+`stage` is GitLab's own order, `needs` is dependency DEPTH, where a job sits one column right of
+the deepest job it waits for — and `Show dependencies` decides whether the curves are drawn. So
+"grouped by stage, with the dependencies lit" is a reading a stage view cannot otherwise give.
+The dependency grouping is what a pipeline that declares one OPENS on (`defaultGrouping`): that
+is the shape its author wrote, and a stage view flattens it away — `🤖 opencode review` in the
+`test` stage waiting for nothing starts with the lint rather than after it. The grouping is
+deliberately NOT remembered across merge requests: a preference kept from another one would open
+this pipeline on a mode it may not even have.
+
+Eight rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
+
+- **A ROUTE, never a piece of state** — the rule all four pages hold. It survives a reload, it
+  can be sent to whoever is asking why CI is red, and the browser's own Back leaves it. It is
+  reached from the strip and from the Overview's own press, and both land on the one URL: a
+  second address for one surface is a second thing to keep in step.
+- **The GEOMETRY is measured, never computed** (`useEdgePaths`). A card's height depends on the
+  font, the length of the job's own name and the width the reader gave the window, so the SVG
+  sits inside the scrolling content, sized to it, and every path is re-derived off the cards'
+  real boxes whenever anything moves (`ResizeObserver` on the scroller AND on the cards). A
+  layout that predicted those boxes would be a second opinion about where a card is, and the
+  wrong one on the first long job name.
+- **It scrolls SIDEWAYS, and the page around it never scrolls.** Measured on this tenant: 4
+  columns deep by dependency, 8 stages wide by stage. A graph that widened its container would
+  take a phone's whole layout — the sub-header and the controls included — off the screen with
+  it, which is what the 390px capture and the spec's own measurement exist to catch.
+- **Pointing at a card answers "what is this waiting for, and what waits for it"**
+  (`relatedNodes`), followed the whole way through rather than one step — "what is holding this
+  up" is a chain — by drawing everything else faint. It is an ENHANCEMENT and never the only way
+  to read the graph, because there is no hover on a phone.
+- **A control is drawn only where it changes something.** A pipeline whose jobs declare no
+  dependency the graph can draw gets neither the grouping nor the toggle, and asking for the
+  dependency layout on one answers a STAGE layout — a single column holding every job is not a
+  graph, and the reader asked to see structure. `canGroupByNeeds` resolves the names for that
+  reason: a `needs` naming a bridge is a dependency nothing can be drawn for.
+- **NOTHING here writes.** GitLab's own graph puts a RETRY on every card; this app reads
+  trackers, and the writes it offers are elsewhere behind their own consent gates
+  (§ The trackers). A card is a link to the job in GitLab and holds no control at all — the spec
+  counts the buttons inside the graph and expects none.
+- **JOBS are a second view of one read, not a second surface.** The graph answers "what is the
+  shape of this run"; the list answers "what took four minutes", down one column with no
+  sideways scroll — which is the better one on a phone. The old stage list therefore still
+  exists, on the page rather than deleted.
+- **A read that FAILED says so** (`gitlabPipelineError`). The Overview's panel can fall back on
+  the rest of the page, so it draws one line; the PAGE is that read and nothing else, so a
+  failure it never stated would be "Reading the pipeline…" for ever — it names the reason and
+  offers GitLab's own pipelines (through `gitlabPageUrl`, so there is one spelling of that
+  address), which is the one thing left.
+
+**`needs` is read over GraphQL, because GitLab's REST answer does not carry it**
+(`src/gitlab_ci_graph.rs`, attached to the REST `PipelineView` in the `gitlab_mr_pipeline`
+handler). It is a READ and it carries the read path's rails — the three `src/linear.rs` carries,
+for the same reasons:
+
+- **HOST PINNING.** The endpoint is `gitlab::origin` plus `GRAPHQL_PATH`, built from the
+  configured host and nothing else. `api_base` is that same origin plus the REST prefix, so a
+  configured host becomes an address in ONE place whichever API a request speaks.
+- **QUERIES ONLY, and the BODY is what is guarded.** A GraphQL request is a POST whether it reads
+  or writes, so the verb says nothing: every request goes through `run_query`, a test scans the
+  module's own source for `mutation`, and a second scans the whole crate to keep `/api/graphql`
+  out of every other file — those modules are scanned for every verb but GET, and a POST hiding
+  in one is a write those scans cannot see.
+- **BEST-EFFORT, and it can never cost the panel.** A GitLab too old for the field, a token
+  GraphQL refuses, an instance with it switched off, a network failure: each costs the dependency
+  MODE and nothing else (`attach_needs` writes one journal line and leaves the jobs as they were),
+  and the graph is grouped by stage. So an empty `needs` means "nothing is known to be waited
+  for" and never "this job starts immediately" — which is why the grouping is OFFERED rather than
+  assumed.
+- **A dependency is matched by job NAME**, both in the backend and again in the page. `needs:` is
+  declared per name in `.gitlab-ci.yml`, so every retry of a job shares one set — and the REST
+  read and the GraphQL one are two requests, so a push between them can show them two different
+  head pipelines. A name means the same thing across both; an id would not, and matching on one
+  would silently draw no edges at all. Where two cards carry one name (a retried job) the NEWEST
+  is the end of the curve, and a name no card carries is dropped on both sides: an edge to a card
+  that is not on screen is an edge to nothing, and the page COUNTS what it dropped
+  (`graphSummary`) rather than looking complete.
+
+**Every one of those facts is MEASURED** by `examples/pipeline_needs_recon.rs` — READ-ONLY, over
+the 25 newest open merge requests, printing counts and field NAMES and never anybody's job:
+
+    cargo run --example pipeline_needs_recon
+
+Measured 2026-08-06 on `git.sia.partners`: a REST job row carries 25 fields and `needs` is not
+among them; of 25 pipelines holding 143 jobs, **21 declare dependencies and 0 refused the
+query**; 96 jobs carry a `needs`, 142 edges in all, of which **9 name a job the REST read did not
+carry** (a bridge — the count the summary states); the longest dependency chain is **4** deep and
+the stage counts run from 1 to 8. Run it again rather than widening the parse on a hunch.
+
+`web/mock/server.ts` reproduces the whole surface with no GitLab and no token: its live pipeline
+declares `needs` (`MOCK_LIVE_PIPELINE_JOBS`, whose shape is deliberate — a job the rest waits
+for, two that fan out from it, one that waits for NOTHING in a later stage, one allowed to fail
+and a manual deploy), the failed fixture holds red, orange and skipped together, and `!63`
+declares no dependencies at all, which is the pipeline that must offer no controls. `cd web &&
+bun run preview -- --out /tmp/pipe --pipeline` captures the panel in both themes, the page under
+both groupings, the curves off, one job pointed at, the jobs list, a phone's width and the failed
+run in both themes. **The graph has never been drawn from the real instance**: the reads are
+measured above and the surface is pinned against the mock, so what is untested is the pairing —
+one open of a real merge request in the user's own app.
 
 ### A comment on a diff LINE (a press on a line number, or a drag over several)
 
@@ -1392,7 +1533,7 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
   `toggleTeamSection` from the same file. For the merge-request page — its tab strip at rest
   and current, the list, the page, its own sub-header of four pages in both themes and at a
-  phone's width, the two pages that hold nothing yet,
+  phone's width, the page that holds nothing yet,
   the merge armed, the comments, the description folded and opened, the description at a phone's
   width, a 150-character title at both widths and a blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt` /
@@ -2818,8 +2959,10 @@ user's. What changes is only what is asked.
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
   `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its five reads (the DIFF
   among them, whose unified patch this app writes over GitLab's bare hunks) in
-  `src/gitlab_mr.rs` over a durable response cache and its six writes in
-  `src/gitlab_mr_write.rs`, plus who a person on EITHER tracker is in the user's own Teams
+  `src/gitlab_mr.rs` over a durable response cache, what each CI job WAITS FOR in
+  `src/gitlab_ci_graph.rs` (the one GraphQL read in this app, and query-only by construction —
+  see § The pipeline is a GRAPH) and its six writes in `src/gitlab_mr_write.rs`, plus who a
+  person on EITHER tracker is in the user's own Teams
   (`src/tracker_people.rs`, see § A tracker user who is also a colleague) — plus the approval
   those trackers got first, and its undo (`src/gitlab_approval.rs`, see § The trackers),
   the local agent that answers an `@claude`

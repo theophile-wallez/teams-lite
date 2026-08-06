@@ -230,9 +230,11 @@ describe("pipelines", () => {
   it("a stage's tone reads the jobs that count", () => {
     expect(stageTone({ name: "t", jobs: [job(), job({ id: 2 })] })).toBe("success");
     expect(stageTone({ name: "t", jobs: [job({ status: "failed" })] })).toBe("failed");
-    // A job allowed to fail never turns a stage red — that is what allowing it means.
+    // A job allowed to fail never turns a stage red — that is what allowing it means — and
+    // it does not leave the stage plain green either: ORANGE is the answer to "it passed,
+    // with something broken in it".
     expect(stageTone({ name: "t", jobs: [job(), job({ id: 2, status: "failed", allow_failure: true })] })).toBe(
-      "idle",
+      "warning",
     );
     // Running wins over everything: the stage has not finished having its say.
     expect(stageTone({ name: "t", jobs: [job({ status: "failed" }), job({ id: 2, status: "running" })] })).toBe(

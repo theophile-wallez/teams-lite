@@ -6,7 +6,7 @@
 // route rather than a piece of state: it survives a reload, it can be sent to a colleague,
 // and the browser's own Back leaves it.
 //
-// Two of the four hold nothing yet. That is stated here rather than decided in a component,
+// ONE of the four holds nothing yet. That is stated here rather than decided in a component,
 // so "which pages are built" is one testable fact, and so the sentence a reader gets names
 // what is missing and offers the one thing left — GitLab's own page for it, which is the
 // contract every other read failure on this surface holds (see `DiffFailure`).
@@ -54,12 +54,8 @@ export const MERGE_REQUEST_PAGES: readonly MergeRequestPageEntry[] = [
   {
     page: "pipelines",
     label: "Pipelines",
-    hint: "Every pipeline that has run for this merge request",
+    hint: "The head pipeline, drawn as the graph of its jobs",
     gitlabPath: "/pipelines",
-    // Says where the pipeline the reader is probably after already is: the Overview polls
-    // the one in flight, so this page holding nothing costs them nothing today.
-    unbuilt:
-      "The pipelines of this merge request are not read here yet. The Overview follows the one in flight.",
   },
   {
     page: "diffs",

@@ -81,6 +81,12 @@ export type GitLabJob = {
   duration?: number;
   web_url?: string;
   finished_at?: string;
+  /** The NAMES of the jobs this one waits for. Absent from GitLab's REST answer and filled
+   *  in by the backend over GraphQL (`src/gitlab_ci_graph.rs`), so an empty list means
+   *  "nothing is known to be waited for" — a pipeline ordered by its stages alone, or an
+   *  instance whose GraphQL could not be read — and never "this job starts immediately".
+   *  That is why the graph OFFERS the dependency grouping only where some job carries one. */
+  needs?: string[];
 };
 
 /** Mirrors `gitlab_mr::PipelineView`. */
@@ -271,10 +277,21 @@ export const ACTIVE_JOB_STATES: ReadonlySet<string> = new Set([
   "scheduled",
 ]);
 
-/** What a status means, reduced to the four things a badge can say. Keeps every colour
- *  decision in one place: a component that mapped strings itself would drift the moment
- *  GitLab adds a state. */
-export type PipelineTone = "running" | "success" | "failed" | "idle";
+/** What a status means, reduced to the things a badge can say. Keeps every colour decision
+ *  in one place: a component that mapped strings itself would drift the moment GitLab adds
+ *  a state.
+ *
+ *  FOUR COLOURS, and they are a closed vocabulary: **green** when the work is done
+ *  (`success`), **red** when it failed and somebody has to fix it (`failed`), **orange** for
+ *  a warning — something failed that nobody has to fix (`jobTone` on an `allow_failure` job,
+ *  and a stage or pipeline that carries one) — and **neutral** for everything not done yet,
+ *  which is most states GitLab has.
+ *
+ *  `running` is a fifth NAME and not a fifth colour: it takes the neutral ink and says it is
+ *  moving with MOTION instead (a turning glyph, a breathing ring). A running job is an
+ *  undone one, and giving it a colour of its own would put five hues in a row of cards where
+ *  the whole point is that green, orange and red are the three that mean something. */
+export type PipelineTone = "running" | "success" | "warning" | "failed" | "idle";
 
 export function pipelineTone(status: string | null | undefined): PipelineTone {
   if (!status) return "idle";
@@ -284,6 +301,17 @@ export function pipelineTone(status: string | null | undefined): PipelineTone {
   // `canceled`, `skipped`, `manual`, `scheduled`, and anything GitLab adds next: neither
   // good news nor bad, and never mistaken for either.
   return "idle";
+}
+
+/** What one JOB means, which is the status plus the one thing a status cannot say.
+ *
+ *  A job GitLab reports `failed` while `allow_failure` is set is the ORANGE case: it really
+ *  failed, and the pipeline is going ahead regardless, so nobody has to act. Painting it red
+ *  beside a failure that does block the merge is what teaches a reader to ignore red — the
+ *  reason the list beside this already said "(allowed to fail)" in words. */
+export function jobTone(job: Pick<GitLabJob, "status" | "allow_failure">): PipelineTone {
+  if (job.status === "failed" && job.allow_failure) return "warning";
+  return pipelineTone(job.status);
 }
 
 /** Whether a pipeline is still moving on its own, i.e. worth re-reading.
@@ -318,15 +346,28 @@ export function pipelineStages(jobs: GitLabJob[] | null | undefined): PipelineSt
   return stages;
 }
 
-/** The worst thing that happened in a stage, for its own badge. A stage is red when any
- *  job that COUNTS failed, running while any job runs, and green only when nothing is
- *  either. A job allowed to fail never turns a stage red — that is what allowing it
- *  means. */
-export function stageTone(stage: PipelineStage): PipelineTone {
-  if (stage.jobs.some((job) => ACTIVE_JOB_STATES.has(job.status))) return "running";
-  if (stage.jobs.some((job) => job.status === "failed" && !job.allow_failure)) return "failed";
-  if (stage.jobs.every((job) => job.status === "success")) return "success";
+/** The worst thing that happened in a group of jobs — a stage, a graph column, or a whole
+ *  pipeline — for its own badge.
+ *
+ *  RUNNING wins over everything, because the group has not finished having its say — that
+ *  rule is older than this function and is kept. Then red if any job that COUNTS failed,
+ *  then ORANGE when the only failure was one allowed to fail, then green when everything
+ *  finished well, and neutral for a group that has not started. A job allowed to fail never
+ *  turns its group red — that is what allowing it means — but it does not leave the group
+ *  plain green either, because "it passed" and "it passed with something broken in it" are
+ *  different answers to the one question a reader asks here. */
+export function jobsTone(jobs: readonly GitLabJob[]): PipelineTone {
+  if (jobs.some((job) => ACTIVE_JOB_STATES.has(job.status))) return "running";
+  if (jobs.some((job) => job.status === "failed" && !job.allow_failure)) return "failed";
+  if (jobs.some((job) => jobTone(job) === "warning")) return "warning";
+  if (jobs.length > 0 && jobs.every((job) => job.status === "success")) return "success";
   return "idle";
+}
+
+/** The tone of one stage. `jobsTone` over its own jobs — one rule for a stage, a column and
+ *  a pipeline, so a reader never has to learn two. */
+export function stageTone(stage: PipelineStage): PipelineTone {
+  return jobsTone(stage.jobs);
 }
 
 /** A job's duration as a person reads it: "1m 12s", "4s", or nothing when it has not run. */

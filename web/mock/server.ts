@@ -3902,6 +3902,12 @@ type MockJob = {
   status: string;
   allow_failure: boolean;
   duration?: number;
+  /** What this job WAITS FOR, by name — the field GitLab's REST jobs endpoint does not carry
+   *  and the backend reads over GraphQL instead (`src/gitlab_ci_graph.rs`). It is here because
+   *  the graph's dependency grouping and its curves exist only where a pipeline declares one,
+   *  so a mock without it could only ever show half the surface. Measured on the real
+   *  instance: 21 of 25 pipelines declare dependencies, and the deepest chain is 4 columns. */
+  needs?: string[];
 };
 
 type MockPipeline = {
@@ -4051,6 +4057,32 @@ function agoIso(minutes: number): string {
 
 let mockNoteId = 90_000;
 
+/** The live pipeline as it is SEEDED, so the test hook can put it back — one mock process
+ *  serves the whole run and every read of it moves it on, so without this the second spec to
+ *  look at a running pipeline would find it finished. It is also the fixture the whole GRAPH is
+ *  reviewed against.
+ *
+ *  Its shape is deliberate, and every job in it is there for a state the graph has to draw:
+ *  a build the rest waits for, TWO jobs that wait for it (so a curve fans out), one job that
+ *  waits for NOTHING in a later stage (`🤖 opencode review` — which is the whole point of the
+ *  dependency grouping: it starts at once, and a stage view hides that), one allowed to fail,
+ *  and a manual deploy waiting on a person. It is the shape of the pipeline in GitLab's own
+ *  documentation for `needs:`, which is what the reference design for this surface shows. */
+const MOCK_LIVE_PIPELINE_JOBS: MockJob[] = [
+  { id: 1, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 42.5 },
+  { id: 2, name: "🧪 unit", stage: "test", status: "running", allow_failure: false, needs: ["🔎 lint"] },
+  { id: 3, name: "🧪 e2e", stage: "test", status: "created", allow_failure: false, needs: ["🔎 lint"] },
+  { id: 4, name: "🤖 opencode review", stage: "test", status: "created", allow_failure: true },
+  {
+    id: 5,
+    name: "🚀 deploy staging",
+    stage: "deploy",
+    status: "manual",
+    allow_failure: false,
+    needs: ["🧪 unit", "🧪 e2e"],
+  },
+];
+
 /** The seeded merge requests, newest activity first — the order GitLab answers in. */
 const mockMergeRequests: MockMergeRequest[] = [
   {
@@ -4103,13 +4135,7 @@ const mockMergeRequests: MockMergeRequest[] = [
       id: 190_933,
       status: "running",
       live: true,
-      jobs: [
-        { id: 1, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 42.5 },
-        { id: 2, name: "🧪 unit", stage: "test", status: "running", allow_failure: false },
-        { id: 3, name: "🧪 e2e", stage: "test", status: "created", allow_failure: false },
-        { id: 4, name: "🤖 opencode review", stage: "test", status: "created", allow_failure: true },
-        { id: 5, name: "🚀 deploy staging", stage: "deploy", status: "manual", allow_failure: false },
-      ],
+      jobs: MOCK_LIVE_PIPELINE_JOBS.map((job) => ({ ...job })),
     },
     discussions: [
       {
@@ -4254,10 +4280,37 @@ const mockMergeRequests: MockMergeRequest[] = [
     pipeline: {
       id: 190_901,
       status: "failed",
+      // RED and ORANGE in one pipeline, which is the pair the tones exist to tell apart: the
+      // unit test failed and blocks the merge, the review failed and nobody has to fix it. The
+      // deploy was SKIPPED, because a job that will never run now is neither of those.
       jobs: [
         { id: 11, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 38 },
-        { id: 12, name: "🧪 unit", stage: "test", status: "failed", allow_failure: false, duration: 121.4 },
-        { id: 13, name: "🤖 opencode review", stage: "test", status: "failed", allow_failure: true, duration: 300.8 },
+        {
+          id: 12,
+          name: "🧪 unit",
+          stage: "test",
+          status: "failed",
+          allow_failure: false,
+          duration: 121.4,
+          needs: ["🔎 lint"],
+        },
+        {
+          id: 13,
+          name: "🤖 opencode review",
+          stage: "test",
+          status: "failed",
+          allow_failure: true,
+          duration: 300.8,
+          needs: ["🔎 lint"],
+        },
+        {
+          id: 14,
+          name: "🚀 deploy staging",
+          stage: "deploy",
+          status: "skipped",
+          allow_failure: false,
+          needs: ["🧪 unit"],
+        },
       ],
     },
     discussions: [],
@@ -4347,16 +4400,6 @@ const mockMergeRequests: MockMergeRequest[] = [
   },
 ];
 
-/** The live pipeline as it is SEEDED, so the test hook can put it back. One mock process
- *  serves the whole run and every read of it moves it on, so without this the second spec to
- *  look at a running pipeline would find it finished. */
-const MOCK_LIVE_PIPELINE_JOBS: MockJob[] = [
-  { id: 1, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 42.5 },
-  { id: 2, name: "🧪 unit", stage: "test", status: "running", allow_failure: false },
-  { id: 3, name: "🧪 e2e", stage: "test", status: "created", allow_failure: false },
-  { id: 4, name: "🤖 opencode review", stage: "test", status: "created", allow_failure: true },
-  { id: 5, name: "🚀 deploy staging", stage: "deploy", status: "manual", allow_failure: false },
-];
 
 /** Put the live pipeline back where it started. */
 function resetMockLivePipeline(): void {

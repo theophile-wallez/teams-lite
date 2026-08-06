@@ -146,17 +146,20 @@ test.describe.serial("the GitLab merge-request page", () => {
     const description = page.locator('[data-testid="gitlab-description"]');
     await expect(description.locator("strong").first()).toHaveText("two replicas");
 
-    // The pipeline is grouped into GitLab's own stages, in GitLab's own order.
-    const stages = page.locator('[data-testid="gitlab-stage"]');
-    await expect(stages).toHaveCount(3);
-    await expect(stages.nth(0)).toHaveAttribute("data-stage", "check");
-    await expect(stages.nth(2)).toHaveAttribute("data-stage", "deploy");
+    // The pipeline is a GRAPH, in the shape its own author wrote: the mock's fixture declares
+    // `needs`, so the panel groups by dependency and `🤖 opencode review` — which waits for
+    // nothing — starts in the first column beside the lint it comes after by stage.
+    const graph = page.locator('[data-testid="gitlab-pipeline-graph"]');
+    await expect(graph).toHaveAttribute("data-grouping", "needs");
+    const columns = graph.locator('[data-testid="gitlab-pipeline-column"]');
+    await expect(columns).toHaveCount(3);
+    await expect(columns.nth(0).locator('[data-testid="gitlab-pipeline-job"]')).toHaveCount(2);
 
     // And it is LIVE: the panel says it is following, and a job that was running turns
     // green on its own — the mock advances one step per read, so this is the poll working
     // rather than a still picture.
     await expect(page.locator('[data-testid="gitlab-pipeline-live"]')).toBeVisible();
-    const unit = page.locator('[data-testid="gitlab-job"]').filter({ hasText: "unit" });
+    const unit = graph.locator('[data-testid="gitlab-pipeline-job"][data-name="🧪 unit"]');
     await expect(unit).toHaveAttribute("data-status", "running");
     await expect(unit).toHaveAttribute("data-status", "success", { timeout: 20_000 });
   });
@@ -680,20 +683,18 @@ test.describe.serial("the GitLab merge-request page", () => {
     expect(page.url()).not.toMatch(/\/commits$/);
   });
 
-  test("the Pipelines page says where a running pipeline is already followed", async ({ page }) => {
+  test("the Pipelines page holds the GRAPH, and the Overview keeps its own", async ({ page }) => {
     await openGitLab(page);
     await openMergeRequest(page, 596);
     await pageTab(page, "pipelines").click();
 
-    // It holds nothing yet, so what it owes the reader is where to look instead — and the
-    // Overview polls the pipeline in flight.
-    const unbuilt = page.locator('[data-testid="gitlab-mr-unbuilt"]');
-    await expect(unbuilt).toHaveAttribute("data-page", "pipelines");
-    await expect(unbuilt).toContainText("Overview");
-    await expect(page.locator('[data-testid="gitlab-mr-unbuilt-link"]')).toHaveAttribute(
-      "href",
-      /\/pipelines$/,
-    );
+    // It is BUILT: the head pipeline drawn as the graph of its jobs. So it says nothing about
+    // being missing, and the way out to GitLab is the page's own link rather than a stand-in.
+    await expect(page.locator('[data-testid="gitlab-pipeline-page"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-mr-unbuilt"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="gitlab-pipeline-link"]')).toBeVisible();
+    // One page at a time: nothing of the Overview is left behind it.
+    await expect(page.locator('[data-testid="gitlab-heading"]')).toHaveCount(0);
 
     // Back to the Overview from the strip itself, which is the way a reader takes.
     await pageTab(page, "overview").click();
@@ -1257,6 +1258,191 @@ test.describe.serial("the GitLab merge-request page", () => {
     // a composer left open over unrelated code would name a line it is not about.
     await pickFile(page, "charts/user-facing/values.yaml");
     await expect(page.locator('[data-testid="gitlab-diff-composer"]')).toHaveCount(0);
+  });
+
+  // ---- the pipeline is a GRAPH, and a page of its own ----------------------
+  //
+  // The panel draws a look at the run; `/mr/<id>/pipeline` is where it is read. Everything
+  // below runs against the mock's own pipelines, whose fixture declares `needs` (see
+  // `MOCK_LIVE_PIPELINE_JOBS`) — the field GitLab's REST answer does not carry and the backend
+  // reads over GraphQL, without which half of this surface could not exist.
+
+  /** Open the Pipelines page of the open merge request, through the Overview's own press.
+   *
+   *  The strip reaches it too (the test above takes that way); this is the other one, and the
+   *  press beside the compact graph is what a reader looking at a run in flight uses. */
+  async function openPipeline(page: Page) {
+    await page.locator('[data-testid="gitlab-pipeline-open"]').click();
+    await expect(page.locator('[data-testid="gitlab-pipeline-page"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-pipeline-job"]').first()).toBeVisible();
+  }
+
+  test("opens the graph as a ROUTE, and the browser's own Back leaves it", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openPipeline(page);
+
+    // A URL, so it survives a reload and can be sent to whoever is asking why CI is red — and
+    // it is the page the strip names, not a second address for one surface.
+    expect(page.url()).toMatch(/\/pipelines$/);
+    await expect(page.locator('[data-testid="gitlab-mr-pages"]')).toHaveAttribute(
+      "data-page",
+      "pipelines",
+    );
+    await page.reload();
+    await expect(page.locator('[data-testid="gitlab-pipeline-page"]')).toBeVisible();
+
+    await page.goBack();
+    await expect(page.locator('[data-testid="gitlab-heading"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-pipeline-page"]')).toHaveCount(0);
+  });
+
+  test("groups by dependency, regroups by stage, and keeps the curves either way", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openPipeline(page);
+    const graph = page.locator('[data-testid="gitlab-pipeline-graph"]');
+    const columns = graph.locator('[data-testid="gitlab-pipeline-column"]');
+
+    // It OPENS on the dependency grouping, because that is the shape the pipeline declares —
+    // and a dependency column is a level, so it carries no stage name.
+    await expect(graph).toHaveAttribute("data-grouping", "needs");
+    await expect(columns.first()).not.toHaveAttribute("data-stage", /.+/);
+    // `🤖 opencode review` waits for nothing, so it starts at once even though its STAGE comes
+    // after the lint's. That is the whole reason this grouping exists.
+    const review = graph.locator('[data-testid="gitlab-pipeline-job"][data-name="🤖 opencode review"]');
+    await expect(columns.nth(0).locator('[data-testid="gitlab-pipeline-job"]')).toHaveCount(2);
+    await expect(review).toBeVisible();
+
+    // A curve per declared dependency, both of whose ends are cards.
+    const edges = graph.locator('[data-testid="gitlab-pipeline-edge"]');
+    await expect(edges).toHaveCount(4);
+
+    // Regrouped by STAGE the columns are named and counted, and the curves are STILL there:
+    // the dependencies are a fact about the pipeline rather than about the grouping.
+    await page.locator('[data-testid="gitlab-pipeline-grouping"] [data-value="stage"]').click();
+    await expect(graph).toHaveAttribute("data-grouping", "stage");
+    await expect(columns.nth(0)).toHaveAttribute("data-stage", "check");
+    await expect(columns.nth(2)).toHaveAttribute("data-stage", "deploy");
+    await expect(edges).toHaveCount(4);
+
+    // And the second control takes them away, which is the plain stage view.
+    await page.locator('[data-testid="gitlab-pipeline-needs-toggle"]').click();
+    await expect(graph).toHaveAttribute("data-needs", "hidden");
+    await expect(edges).toHaveCount(0);
+  });
+
+  test("answers what one job waits for, and what waits on it", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openPipeline(page);
+    const graph = page.locator('[data-testid="gitlab-pipeline-graph"]');
+    const job = (name: string) =>
+      graph.locator(`[data-testid="gitlab-pipeline-job"][data-name="${name}"]`);
+
+    // Nothing pointed at: the whole graph is at full weight. The pointer is moved off first
+    // deliberately — pressing "Open the pipeline" leaves it wherever that button was, and a
+    // card that lands under it IS hovered, which is the behaviour rather than a fault.
+    await page.mouse.move(4, 4);
+    await expect(graph).not.toHaveAttribute("data-focused", /.+/);
+    await expect(job("🤖 opencode review")).toHaveAttribute("data-related", "true");
+
+    // Pointing at the unit test lights its own chain — the lint it waits for, and the deploy
+    // that waits on it — and takes the weight off everything else.
+    await job("🧪 unit").hover();
+    await expect(job("🧪 unit")).toHaveAttribute("data-related", "true");
+    await expect(job("🔎 lint")).toHaveAttribute("data-related", "true");
+    await expect(job("🚀 deploy staging")).toHaveAttribute("data-related", "true");
+    await expect(job("🤖 opencode review")).toHaveAttribute("data-related", "false");
+    // The curves of that chain are lit and the rest are not — counted rather than looked at,
+    // because a horizontal `<path>` has no box for a visibility check to measure. The unit test
+    // waits for the lint and the deploy waits for the unit: two of the four.
+    await expect(
+      graph.locator('[data-testid="gitlab-pipeline-edge"][data-related="true"]'),
+    ).toHaveCount(2);
+    await expect(
+      graph.locator('[data-testid="gitlab-pipeline-edge"][data-related="false"]'),
+    ).toHaveCount(2);
+  });
+
+  test("tells the four tones apart, and offers nothing that writes", async ({ page }) => {
+    await openGitLab(page);
+    // !595 failed: the unit test blocks the merge, the review failed and nobody has to fix it,
+    // and the deploy will never run now. Three answers, three colours, one pipeline.
+    await openMergeRequest(page, 595);
+    await openPipeline(page);
+    const graph = page.locator('[data-testid="gitlab-pipeline-graph"]');
+    const job = (name: string) =>
+      graph.locator(`[data-testid="gitlab-pipeline-job"][data-name="${name}"]`);
+
+    await expect(job("🔎 lint")).toHaveAttribute("data-tone", "success");
+    await expect(job("🧪 unit")).toHaveAttribute("data-tone", "failed");
+    // ORANGE, not red: a red mark on something nobody has to fix teaches a reader to ignore
+    // red. The card says so in words too, because colour is never the only signal.
+    await expect(job("🤖 opencode review")).toHaveAttribute("data-tone", "warning");
+    await expect(job("🤖 opencode review")).toContainText("allowed to fail");
+    await expect(job("🚀 deploy staging")).toHaveAttribute("data-tone", "idle");
+    // The pipeline's own badge reads the JOBS, so a run holding a red job is never plain green.
+    await expect(page.locator('[data-testid="gitlab-pipeline-status"]')).toHaveAttribute(
+      "data-tone",
+      "failed",
+    );
+
+    // GitLab's own graph puts a RETRY on every card. This app reads trackers: a card is a link
+    // to the job and nothing else, so there is no control inside one at all.
+    await expect(graph.locator("button")).toHaveCount(0);
+    await expect(job("🧪 unit")).toHaveAttribute("target", "_blank");
+  });
+
+  test("drops the controls where they would change nothing, and lists the jobs instead", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    // !63's pipeline declares no dependencies at all, which is a real and common shape.
+    await openMergeRequest(page, 63);
+    await openPipeline(page);
+    const graph = page.locator('[data-testid="gitlab-pipeline-graph"]');
+
+    await expect(graph).toHaveAttribute("data-grouping", "stage");
+    // No grouping to choose and no curves to light, so neither control is drawn: one that
+    // changes nothing on screen reads as a bug.
+    await expect(page.locator('[data-testid="gitlab-pipeline-grouping"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="gitlab-pipeline-needs-toggle"]')).toHaveCount(0);
+
+    // The JOBS view is always there, because it answers the other question — what took how
+    // long — and it is the one a phone reads better.
+    await page.locator('[data-testid="gitlab-pipeline-view"] [data-value="jobs"]').click();
+    await expect(page.locator('[data-testid="gitlab-pipeline-jobs"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-pipeline-job-row"]')).toHaveCount(2);
+    await expect(page.locator('[data-testid="gitlab-pipeline-job-row"]').first()).toContainText(
+      "30s",
+    );
+  });
+
+  test("scrolls the graph sideways and never the page", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openPipeline(page);
+
+    // A pipeline is wider than a phone, so the GRAPH scrolls and the page around it does not:
+    // a graph that widened its container would take the sub-header and the controls off the
+    // screen with it.
+    const graph = page.locator('[data-testid="gitlab-pipeline-graph"]');
+    const box = await graph.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.width).toBeLessThanOrEqual(390);
+    const scrollable = await graph.evaluate((el) => el.scrollWidth > el.clientWidth);
+    expect(scrollable).toBe(true);
+    const pageWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(pageWidth).toBeLessThanOrEqual(390);
+    // And the strip and the controls are still whole, which is what that failure would cost.
+    await expect(page.locator('[data-testid="gitlab-mr-pages"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-pipeline-view"]')).toBeVisible();
+
+    await page.setViewportSize({ width: 1280, height: 900 });
   });
 
   test("merges, and the merge request leaves the list for good", async ({ page }) => {
