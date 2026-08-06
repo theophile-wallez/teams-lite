@@ -196,9 +196,14 @@ function MergeRequestHeader(props: { detail: MergeRequestDetail }) {
         )}
       </div>
 
+      {/* The title in full: it is what the reader came for, so it WRAPS rather than being
+          shortened here — the header above already carries the one-line spelling of it.
+          `break-words` is for what a title carries besides words: a branch name, a URL or a
+          bracketed list of tickets is one long token, and a token wider than the article
+          would otherwise scroll the page sideways. */}
       <h1
         data-testid="gitlab-heading"
-        className="text-lg font-semibold leading-snug text-foreground"
+        className="break-words text-lg font-semibold leading-snug text-foreground"
       >
         {detail.title}
       </h1>

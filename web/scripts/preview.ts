@@ -1882,17 +1882,33 @@ if (import.meta.main) {
         // it, rather than a refusal arriving after the click.
         await openMergeRequestAt(page, 1);
         await shot(`${out}-blocked-light.png`);
-
         await setTheme("dark");
         await shot(`${out}-blocked-dark.png`);
+        await setTheme("light");
+
+        // A LONG title — the fixture's own, which is the length an author on the tenant
+        // writes when they list every ticket a branch closes. The header shortens it to one
+        // line and the heading wraps, and neither widens the page: the whole layout used to
+        // grow to the title's own width, which pushed the article and its controls off the
+        // right of the screen. On a phone too, where the page is the only column there is.
+        await openMergeRequestAt(page, 2);
+        await shot(`${out}-long-title-light.png`);
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(400);
+        await shot(`${out}-long-title-mobile-light.png`);
+        await page.setViewportSize(VIEWPORT);
+        await page.waitForTimeout(400);
+
+        await setTheme("dark");
         await openMergeRequestAt(page, 0);
         await shot(`${out}-dark.png`);
         console.log(
           `[preview] wrote ${out}-tabs-{rest,current}-{light,dark}.png, ` +
             `${out}-list-light.png, ${out}-light.png, ` +
             `${out}-merge-armed-light.png, ${out}-comments-light.png, ` +
-            `${out}-description-mobile-light.png, ${out}-blocked-{light,dark}.png and ` +
-            `${out}-dark.png`,
+            `${out}-description-mobile-light.png, ` +
+            `${out}-long-title-{light,mobile-light}.png, ` +
+            `${out}-blocked-{light,dark}.png and ${out}-dark.png`,
         );
       },
       { deviceScaleFactor: dpr },

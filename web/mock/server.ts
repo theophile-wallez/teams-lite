@@ -3965,7 +3965,15 @@ const mockMergeRequests: MockMergeRequest[] = [
   {
     project_path: "acme/infrastructure",
     iid: 297,
-    title: "feat: lambda policy update",
+    // A title the length the authors on the tenant really write, and the shape they write it
+    // in: a summary followed by every ticket the branch closes. It is a fixture rather than a
+    // curiosity — a title this long used to widen the whole detail column, because `truncate`
+    // shortens nothing while its container is free to grow (see the `min-w-0` on the shell's
+    // own `detail-pane` in web/src/components/app.tsx).
+    title:
+      "✨ feat(batch): scalable batch actions system - phase 1 " +
+      "[ACME-3346 ACME-3343 ACME-3348 ACME-3354 ACME-3353 ACME-3359 ACME-3341 " +
+      "ACME-3357 ACME-3340 ACME-3345 ACME-3347 ACME-3342 ACME-3360 ACME-3351]",
     description: "Widens the forwarder's policy to the new bucket.",
     state: "opened",
     draft: true,
