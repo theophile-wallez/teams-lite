@@ -17,6 +17,7 @@ import {
   type Channel,
   type ChatMessage,
   type Conversation,
+  type ReactionPick,
 } from "~/lib/protocol";
 import type { AgentAnswer } from "~/lib/agent-answer";
 import { agentAuthorship } from "~/lib/agent-message";
@@ -589,8 +590,8 @@ export function MessagePane(props: { onBack?: () => void }) {
     await controller.editMessage(m.id, text);
   }, [controller]);
 
-  const doReact = useCallback((m: ChatMessage, key: string) => {
-    void controller.reactToMessage(m.id, key);
+  const doReact = useCallback((m: ChatMessage, pick: ReactionPick) => {
+    void controller.reactToMessage(m.id, pick);
   }, [controller]);
 
   const doCancelEdit = useCallback(() => setEditingId(null), []);

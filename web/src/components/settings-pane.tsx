@@ -23,6 +23,7 @@ import { pushBlockerMessage } from "~/lib/push";
 import { cn } from "~/lib/utils";
 import { AiProvidersSettings } from "./ai-providers-settings";
 import { CallRecordingsSettings } from "./call-recordings-settings";
+import { CustomEmojiSettings } from "./custom-emoji-settings";
 import { MaintenanceSettings } from "./maintenance-settings";
 import { RenamedPeopleSettings } from "./renamed-people-settings";
 import { useAppState, useController } from "./controller-context";
@@ -84,6 +85,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
           <SenderIconSettings />
           <AlwaysAvailableSettings />
           <CallRecordingsSettings />
+          <CustomEmojiSettings />
           <RenamedPeopleSettings />
           <NotificationSettings />
           <AppearanceSettings />

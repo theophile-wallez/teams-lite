@@ -643,6 +643,9 @@ type ConvState = {
 const store = new Map<string, ConvState>();
 /** Insertion order preserved so the seed is reproducible; sidebar sorts by time. */
 const order: string[] = [];
+/** The conversations whose sidebar time never moves again, so their place in that sort is a
+ *  constant for the whole run. Filled by {@link addFixtureConversation}, which says why. */
+const frozenSidebarTime = new Set<string>();
 
 /** A channel mirrors ConvState but tracks a `Channel` summary instead of a
  *  `Conversation`; its messages reuse the shared pipeline (see {@link threadFor}). */
@@ -804,7 +807,11 @@ function systemEventSidebarLabel(event: SystemEvent): string {
 function recomputeSummary(cs: ConvState): void {
   const last = cs.messages.at(-1);
   if (!last) return;
-  cs.conv.last_message_time = last.compose_time;
+  // A FIXTURE thread keeps the time its seed gave it, whatever a spec posts into it, so its
+  // place in the sidebar is a constant for the whole run — see `addFixtureConversation` for
+  // what that protects. Everything else about the summary still follows the newest message:
+  // what breaks other specs is the ORDER, not the words in the row.
+  if (!frozenSidebarTime.has(cs.conv.id)) cs.conv.last_message_time = last.compose_time;
   cs.conv.last_message_preview = last.system_event
     ? systemEventSidebarLabel(last.system_event)
     : previewOf(last.content);
@@ -1892,9 +1899,19 @@ function pusher(convId: string, base: number, messages: ChatMessage[]) {
   };
 }
 
-/** Register a fixture conversation from an already-built message list. Dated in the
- *  past by its caller so it never sorts to the top of the sidebar; specs reach it
- *  by name through the command palette. */
+/** Register a fixture conversation from an already-built message list. Dated in the past by
+ *  its caller so it never sorts to the top of the sidebar; specs reach it by name through
+ *  the command palette.
+ *
+ *  And it STAYS down there, because its sidebar time is frozen at what the seed computed
+ *  (`frozenSidebarTime`). One mock process serves the whole run and the sidebar sorts by
+ *  recency, so a spec that SENDS into its own fixture would otherwise make that fixture
+ *  conversation number 0 for every spec that follows — and ~90 places open
+ *  `openConversationAt(page, 0)` meaning "a chat I can send into". `custom-emoji.spec.ts`
+ *  sends six messages into its thread and did exactly that, which turned reactions.spec.ts
+ *  red. Freezing it here rather than cleaning up afterwards is what makes the promise above
+ *  hold for what a spec does as well as for what the seed wrote: there is no discipline for
+ *  the next feature fixture to remember. */
 function addFixtureConversation(convId: string, name: string, messages: ChatMessage[]): void {
   const conv: Conversation = {
     id: convId,
@@ -1913,7 +1930,10 @@ function addFixtureConversation(convId: string, name: string, messages: ChatMess
     draft: "",
   };
   const cs: ConvState = { conv, messages, participants: [PEOPLE[0]!] };
+  // The seed's own date first, then the freeze — in that order, or the row would keep the
+  // zero above and a sidebar built for review would show 1970 under every fixture.
   recomputeSummary(cs);
+  frozenSidebarTime.add(convId);
   store.set(convId, cs);
   order.push(convId);
 }
@@ -2380,8 +2400,45 @@ function seedAgentSandbox(): void {
     },
     121_000,
   );
-
   addFixtureConversation(convId, "Agent Sandbox", messages);
+}
+
+/** A thread of its own for CUSTOM EMOJI: a colleague's message carrying real inline emoji
+ *  markup, with its own art URL.
+ *
+ *  Its own thread on purpose. This fixture used to be the newest message of the agent
+ *  sandbox, which is a conversation three other spec files already assert on — and the emoji
+ *  feature has no business changing what those see, nor what a deep link into a seeded
+ *  thread has to scroll past. `custom-emoji.spec.ts` sends here too, so the six messages it
+ *  posts land where nothing else looks — and, because this is a fixture, they do not move
+ *  the thread in the sidebar either (see `addFixtureConversation`). */
+function seedCustomEmojiThread(): void {
+  const convId = "19:custom-emoji-demo@thread.v2";
+  const base = Date.now() - 21 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const other = PEOPLE[1]!;
+
+  push(
+    { sender: other.name, sender_mri: other.mri, content: "Shipping the emoji pack today.", is_self: false },
+    0,
+  );
+  // The inbound half of the feature: the art travels inside the message, so it is drawn
+  // from THIS `src` and never from the reader's own pack.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        '<p>Got it <img itemtype="http://schema.skype.com/Emoji" itemid="shipit" ' +
+        `alt=":shipit:" src="https://eu-api.asm.skype.com/v1/objects/0-${EMOJI_OBJECT}-inbound/views/imgo" ` +
+        'width="20" height="20"> — thanks!</p>',
+      is_self: false,
+    },
+    60_000,
+  );
+
+  addFixtureConversation(convId, "Custom Emoji", messages);
 }
 
 /** A thread where a MERGE REQUEST is being asked about — the state the two rows a message
@@ -2526,6 +2583,125 @@ function personOverrideView(mri: string): {
 }
 
 // ---------------------------------------------------------------------------
+// Custom emoji — the mock pack, seeded with three emoji so Task 6's render
+// path is exercised with nothing leaving the machine.
+// ---------------------------------------------------------------------------
+
+type CustomEmojiEntry = {
+  name: string;
+  alias_of: string;
+  content_type: string;
+  width: number;
+  height: number;
+  source: string;
+  added_ms: number;
+  data_base64: string;
+};
+
+const customEmojiPack = new Map<string, CustomEmojiEntry>();
+
+/** The AMS object id an emoji's art hangs off, in the mock's own hosted-content URLs. Its
+ *  own word so `mockMedia` can tell a glyph from a picture and answer with glyph-shaped
+ *  bytes — a message's emoji is drawn from ITS OWN src, never from the pack, so those bytes
+ *  are the only ones a bubble ever shows. */
+const EMOJI_OBJECT = "mock-emoji";
+
+/** The mock's AMS object URL for one emoji's art. ONE spelling, because a message's
+ *  inline `src` and a custom reaction's key have to name the same object — that is what
+ *  makes the chip and the glyph in the words above it the same picture. */
+function emojiObjectUrl(name: string): string {
+  return `https://eu-api.asm.skype.com/v1/objects/0-${EMOJI_OBJECT}-${name}/views/imgo`;
+}
+
+function seedCustomEmoji(): void {
+  const now = Date.now();
+  customEmojiPack.set("shipit", {
+    name: "shipit",
+    alias_of: "",
+    content_type: "image/png",
+    width: 20,
+    height: 20,
+    source: "mock",
+    added_ms: now - 1000,
+    data_base64: solidPng(20, 20, hslToRgb(180, 0.72, 0.52)).toString("base64"),
+  });
+  customEmojiPack.set("partyparrot", {
+    name: "partyparrot",
+    alias_of: "",
+    content_type: "image/gif",
+    width: 20,
+    height: 20,
+    source: "mock",
+    added_ms: now - 500,
+    data_base64: solidGif(20, hslToRgb(270, 0.72, 0.52)),
+  });
+  customEmojiPack.set("ship", {
+    name: "ship",
+    alias_of: "shipit",
+    content_type: "",
+    width: 0,
+    height: 0,
+    source: "mock",
+    added_ms: now,
+    data_base64: "",
+  });
+}
+
+/**
+ * Encode a one-colour GIF, so the `image/gif` half of the pack is a REAL GIF.
+ *
+ * It has to decode: the page turns these bytes into a Blob of the type the pack DECLARES,
+ * so art whose bytes disagree with its type draws nowhere — and every emoji surface then
+ * captures as a broken image while every test that only counts elements still passes.
+ *
+ * Written out by hand beside {@link solidPng}, and for the same reason: this file takes no
+ * dependency beyond the Bun runtime. The LZW is deliberately the dumbest stream that is
+ * still valid — a CLEAR before every pixel, which holds the dictionary at its initial size
+ * so no code ever has to widen. Wasteful, and a few hundred bytes for a glyph.
+ */
+function solidGif(size: number, rgb: [number, number, number]): string {
+  const CLEAR = 4;
+  const END = 5;
+  const codes: number[] = [];
+  for (let i = 0; i < size * size; i++) codes.push(CLEAR, 1);
+  codes.push(END);
+  // 3-bit codes, packed least-significant bit first, as GIF wants them.
+  const bytes: number[] = [];
+  let acc = 0;
+  let filled = 0;
+  for (const code of codes) {
+    acc |= code << filled;
+    filled += 3;
+    while (filled >= 8) {
+      bytes.push(acc & 0xff);
+      acc >>= 8;
+      filled -= 8;
+    }
+  }
+  if (filled > 0) bytes.push(acc & 0xff);
+  // The image data travels in sub-blocks of at most 255 bytes, each led by its length.
+  const blocks: number[] = [];
+  for (let i = 0; i < bytes.length; i += 255) {
+    const chunk = bytes.slice(i, i + 255);
+    blocks.push(chunk.length, ...chunk);
+  }
+  return Buffer.from([
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, // "GIF89a"
+    size & 0xff, size >> 8, size & 0xff, size >> 8, // logical screen, size × size
+    0x80, 0x00, 0x00, // a global colour table of two entries
+    0x00, 0x00, 0x00, // colour 0, unused
+    rgb[0], rgb[1], rgb[2], // colour 1, every pixel
+    0x2c, 0x00, 0x00, 0x00, 0x00, // image descriptor, at the origin
+    size & 0xff, size >> 8, size & 0xff, size >> 8,
+    0x00, // no local colour table, not interlaced
+    0x02, // LZW minimum code size
+    ...blocks,
+    0x00, // end of the image data
+    0x3b, // trailer
+  ]).toString("base64");
+}
+
+// ---------------------------------------------------------------------------
 // Mock hosted content — stands in for the Rust media proxy (`fetch_media`).
 // ---------------------------------------------------------------------------
 
@@ -2543,6 +2719,28 @@ function hashString(s: string): number {
 function mockMedia(url: string): { content_type: string; data_base64: string } {
   if (url.endsWith("/views/avatar_fullsize")) return mockGroupPicture(url);
   if (url.includes("mock-img-small")) return mockSmallPng(url);
+  // A custom emoji travels as hosted content like any inline image, but it is a GLYPH:
+  // the 320×200 picture below would draw it as a flat bar sized to the text, which says
+  // nothing about the size a capture is meant to show. Square, and its own hue per code.
+  if (url.includes(EMOJI_OBJECT)) {
+    // The object the URL names, when the pack holds it: an emoji uploaded FROM the pack
+    // (a send's inline art, a custom reaction's key) really is those bytes, so a chip and
+    // the glyph above it must be the same picture. Anything else — a colleague's own
+    // `:shipit:`, which is exactly what the inbound fixture carries — is its own art, and
+    // gets its own hue.
+    const object = url.split(`0-${EMOJI_OBJECT}-`)[1]?.split("/")[0] ?? "";
+    const asked = customEmojiPack.get(object);
+    const entry = asked?.alias_of ? customEmojiPack.get(asked.alias_of) : asked;
+    if (entry?.data_base64) {
+      return { content_type: entry.content_type, data_base64: entry.data_base64 };
+    }
+    return {
+      content_type: "image/png",
+      data_base64: solidPng(20, 20, hslToRgb(hashString(url) % 360, 0.72, 0.52)).toString(
+        "base64",
+      ),
+    };
+  }
   const hue = hashString(url) % 360;
   const label = (url.split("/").filter(Boolean).pop() ?? "media").slice(0, 24);
   const svg =
@@ -5832,11 +6030,22 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return { deleted: true };
     }
 
+    // React, mirroring the Rust `react` including the half that makes a custom emoji
+    // reaction work: `emoji` names one of the user's own, and the KEY is minted here from
+    // the object its art was uploaded to — a page can never mint it, because the object
+    // does not exist until the backend has made it. `key` carries an existing reaction
+    // verbatim, which is how one is toggled back off with no second upload.
     case "react": {
       const id = requireString(params, "conversation");
       const messageId = requireString(params, "message_id");
-      const key = requireString(params, "key");
-      const on = reactMessage(id, messageId, key);
+      const picked = asObject(params).emoji;
+      const key =
+        typeof picked === "string" && picked
+          ? `tlcustom-${emojiObjectUrl(picked)}`
+          : requireString(params, "key");
+      // A pick is always an ADD: its key names one upload, so it can never be the key
+      // already on the message.
+      const on = reactMessage(id, messageId, key, typeof picked === "string" && Boolean(picked));
       return { reacted: on };
     }
 
@@ -6073,6 +6282,183 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         ? o.mris.filter((m): m is string => typeof m === "string")
         : [requireString(params, "mri")];
       return { presences: mris.map(mockPresence) };
+    }
+
+    // ---- custom emoji ------------------------------------------------------
+
+    case "custom_emoji": {
+      const emoji = [...customEmojiPack.values()].map((e) => ({
+        name: e.name,
+        alias_of: e.alias_of,
+        content_type: e.content_type,
+        width: e.width,
+        height: e.height,
+        source: e.source,
+        added_ms: e.added_ms,
+      }));
+      return { emoji };
+    }
+
+    case "custom_emoji_image": {
+      const name = requireString(params, "name");
+      const asked = customEmojiPack.get(name);
+      // An alias holds no art of its own: follow ONE hop to its target, exactly as
+      // `Store::custom_emoji_art` does. Without it `:ship:` draws nothing anywhere the
+      // pack's own art is shown — the composer chip, the suggestion row, the settings list.
+      const entry = asked?.alias_of ? customEmojiPack.get(asked.alias_of) : asked;
+      if (!entry || entry.alias_of || !entry.data_base64) {
+        return { content_type: "", data_base64: "" };
+      }
+      return { content_type: entry.content_type, data_base64: entry.data_base64 };
+    }
+
+    case "custom_emoji_export": {
+      const emoji = [...customEmojiPack.values()].map((e) => ({
+        name: e.name,
+        alias_of: e.alias_of,
+        content_type: e.content_type,
+        data_base64: e.data_base64,
+        width: e.width,
+        height: e.height,
+      }));
+      return { emoji };
+    }
+
+    case "custom_emoji_add": {
+      const name = requireString(params, "name");
+      const source = requireString(params, "source");
+      const o = asObject(params);
+      const alias_of = typeof o.alias_of === "string" ? o.alias_of : "";
+      const url = typeof o.url === "string" ? o.url : "";
+      const media_url = typeof o.media_url === "string" ? o.media_url : "";
+      const content_type = typeof o.content_type === "string" ? o.content_type : "";
+      const data_base64 = typeof o.data_base64 === "string" ? o.data_base64 : "";
+      const width = typeof o.width === "number" ? o.width : 20;
+      const height = typeof o.height === "number" ? o.height : 20;
+
+      const existing = Array.from(customEmojiPack.values());
+      if (existing.some((e) => e.name === name || e.alias_of === name)) {
+        throw new Error("If your emoji name is taken, choose another.");
+      }
+
+      if (alias_of) {
+        customEmojiPack.set(name, {
+          name,
+          alias_of,
+          content_type: "",
+          width: 0,
+          height: 0,
+          source,
+          added_ms: Date.now(),
+          data_base64: "",
+        });
+      } else if (url) {
+        let host = "";
+        try {
+          const parsed = new URL(url);
+          host = parsed.hostname;
+        } catch {
+          throw new Error("URL has no host");
+        }
+        const domain = registrableDomain(host);
+        const hue = hashString(url) % 360;
+        const png = solidPng(20, 20, hslToRgb(hue, 0.72, 0.52));
+        customEmojiPack.set(name, {
+          name,
+          alias_of: "",
+          content_type: "image/png",
+          width: 20,
+          height: 20,
+          source: `url:${domain}`,
+          added_ms: Date.now(),
+          data_base64: png.toString("base64"),
+        });
+      } else if (media_url) {
+        const hue = hashString(media_url) % 360;
+        const png = solidPng(20, 20, hslToRgb(hue, 0.72, 0.52));
+        customEmojiPack.set(name, {
+          name,
+          alias_of: "",
+          content_type: "image/png",
+          width: 20,
+          height: 20,
+          source: "message",
+          added_ms: Date.now(),
+          data_base64: png.toString("base64"),
+        });
+      } else if (data_base64) {
+        const bytes = Buffer.from(data_base64, "base64");
+        const allowed = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+        let detected_type = "";
+        if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+          detected_type = "image/png";
+        } else if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+          detected_type = "image/jpeg";
+        } else if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+          detected_type = "image/gif";
+        } else if (
+          bytes[0] === 0x52 &&
+          bytes[1] === 0x49 &&
+          bytes[2] === 0x46 &&
+          bytes[3] === 0x46 &&
+          bytes[8] === 0x57 &&
+          bytes[9] === 0x45 &&
+          bytes[10] === 0x42 &&
+          bytes[11] === 0x50
+        ) {
+          detected_type = "image/webp";
+        }
+        if (!detected_type || !allowed.includes(detected_type)) {
+          throw new Error("an emoji must be a PNG, JPEG, GIF or WebP image");
+        }
+        if (bytes.length > 128 * 1024) {
+          throw new Error("an emoji must be 128 KB or smaller");
+        }
+        customEmojiPack.set(name, {
+          name,
+          alias_of: "",
+          content_type: detected_type,
+          width,
+          height,
+          source,
+          added_ms: Date.now(),
+          data_base64,
+        });
+      } else {
+        throw new Error("exactly one source must be present");
+      }
+      broadcast("custom_emoji_changed", {});
+      return { added: true };
+    }
+
+    case "custom_emoji_remove": {
+      const name = requireString(params, "name");
+      const removed = customEmojiPack.delete(name);
+      if (removed) broadcast("custom_emoji_changed", {});
+      return { removed };
+    }
+
+    case "custom_emoji_import": {
+      const o = asObject(params);
+      const emoji = Array.isArray(o.emoji) ? o.emoji : [];
+      let added = 0;
+      for (const e of emoji) {
+        if (typeof e === "object" && e && typeof e.name === "string") {
+          customEmojiPack.set(e.name, {
+            name: e.name,
+            alias_of: typeof e.alias_of === "string" ? e.alias_of : "",
+            content_type: typeof e.content_type === "string" ? e.content_type : "",
+            width: typeof e.width === "number" ? e.width : 20,
+            height: typeof e.height === "number" ? e.height : 20,
+            source: "import",
+            added_ms: Date.now(),
+            data_base64: typeof e.data_base64 === "string" ? e.data_base64 : "",
+          });
+          added++;
+        }
+      }
+      if (added > 0) broadcast("custom_emoji_changed", {});
+      return { added };
     }
 
     // ---- push notifications ------------------------------------------------
@@ -6889,7 +7275,8 @@ function editMessage(convId: string, messageId: string, text: string): void {
   if (!t) return;
   const msg = t.messages.find((m) => m.id === messageId);
   if (!msg) return;
-  const content = escapeHtml(text);
+  let content = escapeHtml(text);
+  content = substituteCustomEmoji(content);
   if (msg.content === content) return; // no-op edit: nothing to broadcast
   msg.content = content;
   t.recompute();
@@ -6916,7 +7303,12 @@ function deleteMessage(convId: string, messageId: string): void {
  *  backend's `react`: Teams keeps one reaction per user, so clicking our current
  *  emotion removes it and any other key replaces it. Returns the resulting on/off
  *  (whether we now react with `key`). */
-function reactMessage(convId: string, messageId: string, key: string): boolean {
+function reactMessage(
+  convId: string,
+  messageId: string,
+  key: string,
+  alwaysOn = false,
+): boolean {
   const t = threadFor(convId);
   if (!t) return false;
   const msg = t.messages.find((m) => m.id === messageId);
@@ -6928,7 +7320,10 @@ function reactMessage(convId: string, messageId: string, key: string): boolean {
     .map((r) => (r.mine ? { ...r, count: r.count - 1, mine: false } : r))
     .filter((r) => r.count > 0);
   const wasMineKey = list.find((r) => r.mine)?.key;
-  const on = wasMineKey !== key; // same key => toggle off
+  // Same key => toggle off. `alwaysOn` is what a PICK from the pack does: the real
+  // backend uploads the art and mints a key that names that one object, so a pick can
+  // never land on the key already there.
+  const on = alwaysOn || wasMineKey !== key;
 
   let next = withoutMine;
   if (on) {
@@ -6945,6 +7340,96 @@ function reactMessage(convId: string, messageId: string, key: string): boolean {
 
 /** ~150ms after a `send`, echo the message back as the backend's trouter would,
  *  then clear the draft (matches src/bin/server.rs behavior on a successful send). */
+/** Substitute each `:code:` in `html` with custom emoji markup, the same way the Rust
+ *  backend does in `custom_emoji::substitute_codes`. A code the pack holds becomes
+ *  `<img itemtype="http://schema.skype.com/Emoji" ... >`, a code it does not hold stays
+ *  text. Skips `<code>`, `<pre>`, and reply quotes — the three regions the backend skips. */
+function substituteCustomEmoji(html: string): string {
+  const pack = Array.from(customEmojiPack.values());
+  const names = new Map(pack.map((e) => [e.name, e]));
+  const aliases = new Map(pack.filter((e) => e.alias_of).map((e) => [e.name, e.alias_of]));
+
+  let out = "";
+  let pos = 0;
+  let skipDepth = { code: 0, pre: 0, blockquote: 0 };
+
+  while (pos < html.length) {
+    const tagStart = html.indexOf("<", pos);
+    if (tagStart === -1) {
+      out += substituteInText(html.slice(pos), names, aliases, skipDepth);
+      break;
+    }
+
+    out += substituteInText(html.slice(pos, tagStart), names, aliases, skipDepth);
+
+    const tagEnd = html.indexOf(">", tagStart);
+    if (tagEnd === -1) {
+      out += html.slice(tagStart);
+      break;
+    }
+
+    const tag = html.slice(tagStart, tagEnd + 1);
+    out += tag;
+    pos = tagEnd + 1;
+
+    const tagContent = html.slice(tagStart + 1, tagEnd).trim();
+    const isClosing = tagContent.startsWith("/");
+    const tagName = (isClosing ? tagContent.slice(1) : tagContent).split(/\s/)[0]?.toLowerCase();
+
+    if (tagName === "code" || tagName === "pre" || tagName === "blockquote") {
+      skipDepth[tagName as keyof typeof skipDepth] += isClosing ? -1 : 1;
+      if (skipDepth[tagName as keyof typeof skipDepth] < 0) skipDepth[tagName as keyof typeof skipDepth] = 0;
+    }
+  }
+  return out;
+}
+
+function substituteInText(
+  text: string,
+  names: Map<string, CustomEmojiEntry>,
+  aliases: Map<string, string>,
+  skipDepth: { code: number; pre: number; blockquote: number },
+): string {
+  if (skipDepth.code > 0 || skipDepth.pre > 0 || skipDepth.blockquote > 0) return text;
+
+  let out = "";
+  let pos = 0;
+  const bytes = text.split("");
+
+  while (pos < bytes.length) {
+    if (bytes[pos] === ":") {
+      const start = pos;
+      pos++;
+      let name = "";
+      while (pos < bytes.length && bytes[pos] !== ":") {
+        const c = bytes[pos];
+        if (c && /[a-z0-9_+\-]/.test(c)) {
+          name += c;
+          pos++;
+        } else {
+          break;
+        }
+      }
+      if (pos < bytes.length && bytes[pos] === ":" && name) {
+        pos++;
+        const target = aliases.get(name) || name;
+        const emoji = names.get(target);
+        if (emoji) {
+          out += `<img itemtype="http://schema.skype.com/Emoji" itemid="${name}" alt=":${name}:" src="${emojiObjectUrl(name)}" width="20" height="20">`;
+        } else {
+          out += text.slice(start, pos);
+        }
+      } else {
+        out += text.slice(start, pos);
+      }
+    } else {
+      out += bytes[pos];
+      pos++;
+    }
+  }
+  return out;
+}
+
 function scheduleSendEcho(
   convId: string,
   text: string,
@@ -6957,7 +7442,7 @@ function scheduleSendEcho(
     const t = threadFor(convId);
     if (!t) return;
     const seq = nextSeq(t.messages);
-    const body = composeContent(text, replyTo, contentHtml);
+    const body = substituteCustomEmoji(composeContent(text, replyTo, contentHtml));
     const imageHtml = images.map(sentImageContent).join("");
     const msg: ChatMessage = {
       id: `${convId}#${seq}`,
@@ -7830,6 +8315,13 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       for (const mri of affected) broadcast("person_override_changed", { mri });
       return Response.json({ ok: true, cleared: affected.length }, { status: 200 });
     }
+    if (body.kind === "custom_emoji" && body.clear === true) {
+      const cleared = customEmojiPack.size;
+      customEmojiPack.clear();
+      seedCustomEmoji();
+      broadcast("custom_emoji_changed", {});
+      return Response.json({ ok: true, cleared }, { status: 200 });
+    }
     if (body.kind === "read_receipt") {
       // Clear all injected read positions — lets a serial E2E suite reset the
       // shared mock between specs so "seen by" avatars never leak across tests.
@@ -8354,6 +8846,8 @@ seedForwardedMessages();
 seedPlainTextSamples();
 seedAgentSandbox();
 seedMergeRequestReview();
+seedCustomEmojiThread();
+seedCustomEmoji();
 // Seed channels LAST so the chat seed's PRNG sequence (and thus the Chats list
 // the existing specs assert on) is left completely unchanged.
 seedChannels();

@@ -32,6 +32,7 @@ import type {
   CalendarViewResult,
   Channel,
   Conversation,
+  CustomEmoji,
   GitLabApprovalResult,
   LinkMetadataResult,
   MailBody as MailBodyResult,
@@ -43,6 +44,7 @@ import type {
   PersonOverride,
   PersonProfile,
   PresenceResult,
+  ReactionPick,
   ReadReceiptsResult,
   ReplyTo,
   SettingsPatch,
@@ -584,14 +586,21 @@ export class Backend {
     });
   }
   /** React to a message with an emoji (Teams "emotion"), or toggle ours off.
-   *  `key` is the emotion (e.g. "like", "heart"). The backend toggles — clicking
-   *  our current reaction removes it — and re-broadcasts the message, so state
-   *  reconciles via the `message` event; `reacted` is the resulting on/off. */
-  react(conversation: string, messageId: string, key: string): Promise<{ reacted: boolean }> {
+   *  The pick is either an emotion key (e.g. "like", "heart", or an existing custom
+   *  reaction verbatim) or one of the user's own emoji by name, whose key the backend
+   *  mints once it has uploaded the art (see {@link ReactionPick}). The backend
+   *  toggles — clicking our current reaction removes it — and re-broadcasts the
+   *  message, so state reconciles via the `message` event; `reacted` is the resulting
+   *  on/off. */
+  react(
+    conversation: string,
+    messageId: string,
+    pick: ReactionPick,
+  ): Promise<{ reacted: boolean }> {
     return this.writeRequest<{ reacted: boolean }>("react", {
       conversation,
       message_id: messageId,
-      key,
+      ...pick,
     });
   }
   /** Mark a conversation or channel read up to its newest message — what the app
@@ -1015,6 +1024,70 @@ export class Backend {
    *  absent from `presences`. */
   presence(mris: string[]): Promise<PresenceResult> {
     return this.request<PresenceResult>("presence", { mris });
+  }
+
+  // ---- custom emoji --------------------------------------------------------
+
+  /** The user's custom emoji pack, without the art bytes (those are fetched per name
+   *  through {@link customEmojiImage}). */
+  customEmoji(): Promise<{ emoji: CustomEmoji[] }> {
+    return this.request<{ emoji: CustomEmoji[] }>("custom_emoji");
+  }
+
+  /** The art for one custom emoji, or empty strings when there is none. */
+  customEmojiImage(name: string): Promise<{ content_type: string; data_base64: string }> {
+    return this.request<{ content_type: string; data_base64: string }>("custom_emoji_image", {
+      name,
+    });
+  }
+
+  /** The pack with its art, for export. */
+  customEmojiExport(): Promise<{
+    emoji: Array<{
+      name: string;
+      alias_of: string;
+      content_type: string;
+      data_base64: string;
+      width: number;
+      height: number;
+    }>;
+  }> {
+    return this.request("custom_emoji_export");
+  }
+
+  /** Add one emoji to the pack. Exactly one of `alias_of`, `url`, `media_url` or
+   *  `data_base64` must be present. Returns `{ added: true }` on success, or throws
+   *  with the backend's own reason. */
+  customEmojiAdd(params: {
+    name: string;
+    alias_of?: string;
+    content_type?: string;
+    data_base64?: string;
+    width?: number;
+    height?: number;
+    url?: string;
+    media_url?: string;
+    source: string;
+  }): Promise<{ added: boolean }> {
+    return this.writeRequest<{ added: boolean }>("custom_emoji_add", params);
+  }
+
+  /** Remove one emoji from the pack. Returns `{ removed: true }` when it existed,
+   *  `false` when it was already gone. */
+  customEmojiRemove(name: string): Promise<{ removed: boolean }> {
+    return this.writeRequest<{ removed: boolean }>("custom_emoji_remove", { name });
+  }
+
+  /** Import a pack of emoji, adding all that pass. Returns the count added. */
+  customEmojiImport(emoji: Array<{
+    name: string;
+    alias_of: string;
+    content_type: string;
+    data_base64: string;
+    width: number;
+    height: number;
+  }>): Promise<{ added: number }> {
+    return this.writeRequest<{ added: number }>("custom_emoji_import", { emoji });
   }
 
   // ---- mail (read-only) ---------------------------------------------------

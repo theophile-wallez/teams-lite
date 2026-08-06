@@ -67,6 +67,17 @@ struct AmsImage {
     height: Option<u32>,
 }
 
+/// One custom emoji being sent.
+///
+/// The bytes are uploaded to Teams' AMS service, and the code in the message body is
+/// substituted with the inline emoji markup pointing at the uploaded object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmojiArt {
+    pub name: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
 /// One @mention carried by an outbound message.
 ///
 /// A Teams mention lives in two places at once, and both are needed: the body holds an
@@ -348,6 +359,7 @@ pub async fn send_message(
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
     images: &[ImageUpload],
+    emoji_ids: &[String],
     mentions: &[Mention],
 ) -> Result<Sent> {
     let chat = session
@@ -373,6 +385,7 @@ pub async fn send_message(
         reply_to,
         content_html,
         &ams_images,
+        emoji_ids,
         mentions,
     )?;
 
@@ -407,17 +420,20 @@ fn sent_message_id(body: &str) -> String {
         .unwrap_or_default()
 }
 
-async fn upload_image(
+/// Upload one object to Teams' AMS service: the two-request dance every emoji and every
+/// attachment photo uses. Returns the object id.
+pub async fn upload_ams_object(
     http: &reqwest::Client,
     session: &Session,
     ic3: &str,
     conversation_id: &str,
-    image: &ImageUpload,
-) -> Result<AmsImage> {
+    name: &str,
+    bytes: &[u8],
+) -> Result<String> {
     anyhow::ensure!(!ic3.is_empty(), "missing IC3 token");
     let ams = ams_endpoint(session)?;
     let create_url = format!("{ams}/v1/objects/");
-    let create_body = build_ams_create_body(conversation_id, &image.name);
+    let create_body = build_ams_create_body(conversation_id, name);
     let response = http
         .post(&create_url)
         .bearer_auth(ic3)
@@ -426,21 +442,21 @@ async fn upload_image(
         .json(&create_body)
         .send()
         .await
-        .context("create AMS image object")?;
+        .context("create AMS object")?;
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
         anyhow::bail!(
-            "create AMS image object -> {status}: {}",
+            "create AMS object -> {status}: {}",
             text.chars().take(160).collect::<String>()
         );
     }
-    let response: Value = response.json().await.context("parse AMS image object")?;
+    let response: Value = response.json().await.context("parse AMS object")?;
     let id = response
         .get("id")
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
-        .context("AMS image object response had no id")?;
+        .context("AMS object response had no id")?;
     validate_ams_id(id)?;
 
     let upload_url = format!("{ams}/v1/objects/{id}/content/imgpsh");
@@ -450,26 +466,113 @@ async fn upload_image(
         .header("x-ms-migration", "True")
         .header("x-ms-client-version", AMS_CLIENT_VERSION)
         .header("content-type", "application/octet-stream")
-        .body(image.bytes.clone())
+        .body(bytes.to_vec())
         .send()
         .await
-        .context("upload AMS image content")?;
+        .context("upload AMS content")?;
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
         anyhow::bail!(
-            "upload AMS image content -> {status}: {}",
+            "upload AMS content -> {status}: {}",
             text.chars().take(160).collect::<String>()
         );
     }
 
+    Ok(id.to_string())
+}
+
+/// Upload one object and return the URL its bytes are served from — the `views/imgo`
+/// view an inline emoji's `src` and a custom reaction's key both point at.
+pub async fn upload_ams_object_url(
+    http: &reqwest::Client,
+    session: &Session,
+    ic3: &str,
+    conversation_id: &str,
+    name: &str,
+    bytes: &[u8],
+) -> Result<String> {
+    let id = upload_ams_object(http, session, ic3, conversation_id, name, bytes).await?;
+    Ok(ams_object_url(ams_endpoint(session)?, &id))
+}
+
+/// The one spelling of an AMS object's view URL, so an emoji's `src`, an image
+/// attachment's and a custom reaction key can never disagree about it.
+fn ams_object_url(ams: &str, id: &str) -> String {
+    format!("{ams}/v1/objects/{}/views/imgo", urlencoding::encode(id))
+}
+
+async fn upload_image(
+    http: &reqwest::Client,
+    session: &Session,
+    ic3: &str,
+    conversation_id: &str,
+    image: &ImageUpload,
+) -> Result<AmsImage> {
+    let id = upload_ams_object(http, session, ic3, conversation_id, &image.name, &image.bytes).await?;
+    let src = ams_object_url(ams_endpoint(session)?, &id);
     Ok(AmsImage {
-        id: id.to_string(),
-        src: format!("{ams}/v1/objects/{id}/views/imgo"),
+        id,
+        src,
         name: image.name.clone(),
         width: image.width,
         height: image.height,
     })
+}
+
+/// Resolve custom emoji codes in an outbound message: upload each distinct emoji's art
+/// to Teams' AMS, then substitute the `:code:` with the inline emoji markup pointing at
+/// the uploaded object. Returns the rewritten HTML and the AMS object ids for
+/// `amsreferences`.
+///
+/// The upload is injected rather than called here, so the loop below — the dedupe, the
+/// order the ids come out in, and the substitution that follows — is the one the tests
+/// drive too. A second copy of it written inside a test would stay green after the
+/// shipped one lost its dedupe.
+pub async fn resolve_custom_emoji(
+    http: &reqwest::Client,
+    session: &Session,
+    ic3: &str,
+    conversation_id: &str,
+    html: &str,
+    art: &[EmojiArt],
+) -> Result<(String, Vec<String>)> {
+    rewrite_custom_emoji(ams_endpoint(session)?, html, art, |name, bytes| async move {
+        upload_ams_object(http, session, ic3, conversation_id, &name, &bytes).await
+    })
+    .await
+}
+
+/// Substitute every code in `html` with the markup for the object its art was uploaded
+/// to, uploading each distinct code exactly once. `upload` takes the emoji's name and
+/// bytes and answers with the AMS object id.
+async fn rewrite_custom_emoji<F, Fut>(
+    ams: &str,
+    html: &str,
+    art: &[EmojiArt],
+    upload: F,
+) -> Result<(String, Vec<String>)>
+where
+    F: Fn(String, Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let codes = crate::custom_emoji::codes_in_body(html);
+    let mut uploaded: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut ids = Vec::new();
+
+    for code in codes {
+        if uploaded.contains_key(&code) {
+            continue;
+        }
+        if let Some(emoji) = art.iter().find(|e| e.name == code) {
+            let id = upload(emoji.name.clone(), emoji.bytes.clone()).await?;
+            uploaded.insert(code, ams_object_url(ams, &id));
+            ids.push(id);
+        }
+    }
+
+    let rewritten = crate::custom_emoji::substitute_codes(html, &|name| uploaded.get(name).cloned());
+    Ok((rewritten, ids))
 }
 
 fn ams_endpoint(session: &Session) -> Result<&str> {
@@ -796,6 +899,7 @@ fn build_body(
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
     images: &[AmsImage],
+    emoji_ids: &[String],
     mentions: &[Mention],
 ) -> Result<serde_json::Value> {
     let content = message_content(text, reply_to, content_html, images);
@@ -806,8 +910,14 @@ fn build_body(
         "contenttype": "text",
         "imdisplayname": self_name,
     });
-    if !images.is_empty() {
-        body["amsreferences"] = json!(images.iter().map(|i| &i.id).collect::<Vec<_>>());
+    // One list for both kinds of AMS object the body can name: the emoji art the
+    // codes were substituted with, then the images the user attached. Teams reads it
+    // as a set of references, so the order is only this app's own — emoji first,
+    // because a `:code:` sits inside the sentence the images follow.
+    let mut ams_refs = emoji_ids.to_vec();
+    ams_refs.extend(images.iter().map(|image| image.id.clone()));
+    if !ams_refs.is_empty() {
+        body["amsreferences"] = json!(ams_refs);
     }
     attach_mentions(&mut body, &content, mentions)?;
     Ok(body)
@@ -1059,6 +1169,7 @@ mod tests {
             Some("<p><strong>Rich</strong> text</p>"),
             std::slice::from_ref(&image),
             &[],
+            &[],
         )
         .unwrap();
         assert_eq!(body["amsreferences"], json!(["0-weu-d1-image"]));
@@ -1087,7 +1198,7 @@ mod tests {
             height: None,
         };
         let images = [image(1), image(2), image(3)];
-        let body = build_body("9", "", "Me", None, Some("<p>three shots</p>"), &images, &[]).unwrap();
+        let body = build_body("9", "", "Me", None, Some("<p>three shots</p>"), &images, &[], &[]).unwrap();
         assert_eq!(body["amsreferences"], json!(["id-1", "id-2", "id-3"]));
         let content = body["content"].as_str().unwrap();
         assert!(content.starts_with("<p>three shots</p>"));
@@ -1216,7 +1327,7 @@ mod tests {
 
     #[test]
     fn body_has_required_fields() {
-        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None, &[], &[]).unwrap();
+        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None, &[], &[], &[]).unwrap();
         assert_eq!(b["clientmessageid"], "12345");
         assert_eq!(b["content"], "hi &lt;there&gt;");
         assert_eq!(b["messagetype"], "RichText/Html");
@@ -1227,13 +1338,13 @@ mod tests {
     #[test]
     fn rich_content_html_is_forwarded_as_content() {
         let html = "<p>hi <strong>bold</strong> <a href=\"https://x\">link</a></p>";
-        let b = build_body("9", "", "Me", None, Some(html), &[], &[]).unwrap();
+        let b = build_body("9", "", "Me", None, Some(html), &[], &[], &[]).unwrap();
         assert_eq!(b["content"], html);
     }
 
     #[test]
     fn empty_rich_content_html_falls_back_to_plain() {
-        let b = build_body("9", "plain", "Me", None, Some(""), &[], &[]).unwrap();
+        let b = build_body("9", "plain", "Me", None, Some(""), &[], &[], &[]).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
@@ -1263,7 +1374,7 @@ mod tests {
             after: "new <reply>".into(),
         };
 
-        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None, &[], &[]).unwrap();
+        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None, &[], &[], &[]).unwrap();
 
         assert_eq!(
             b["content"],
@@ -1317,10 +1428,10 @@ mod tests {
 
     #[test]
     fn plain_text_is_trimmed_before_it_goes_out() {
-        let b = build_body("1", "  hi there\n\n", "Me", None, None, &[], &[]).unwrap();
+        let b = build_body("1", "  hi there\n\n", "Me", None, None, &[], &[], &[]).unwrap();
         assert_eq!(b["content"], "hi there");
         // A body of whitespace only becomes empty rather than a blank message.
-        let b = build_body("1", " \n\t ", "Me", None, None, &[], &[]).unwrap();
+        let b = build_body("1", " \n\t ", "Me", None, None, &[], &[], &[]).unwrap();
         assert_eq!(b["content"], "");
         // An edit trims the same way.
         let b = build_edit_body("\n updated \n", None, "Me", &[]).unwrap();
@@ -1348,13 +1459,13 @@ mod tests {
 
     #[test]
     fn html_body_is_trimmed_on_send_and_on_edit() {
-        let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), &[], &[]).unwrap();
+        let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), &[], &[], &[]).unwrap();
         assert_eq!(b["content"], "<p>hi</p>");
         let b = build_edit_body("", Some(" <p>answer</p><p></p>"), "Me", &[]).unwrap();
         assert_eq!(b["content"], "<p>answer</p>");
         // An html body of spacers only falls back to the plain text, as an empty
         // one already did.
-        let b = build_body("9", "plain", "Me", None, Some("<p><br></p>"), &[], &[]).unwrap();
+        let b = build_body("9", "plain", "Me", None, Some("<p><br></p>"), &[], &[], &[]).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
@@ -1390,7 +1501,7 @@ mod tests {
             display_name: "John".into(),
         }];
         let html = mention_html(0, "John");
-        let body = build_body("9", "", "Me", None, Some(&html), &[], &mentions).unwrap();
+        let body = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions).unwrap();
         assert_eq!(body["content"], html, "the span stays in the body verbatim");
         // `properties.mentions` is a JSON-encoded STRING — the shape the read path
         // decodes and the shape the tenant accepted.
@@ -1410,7 +1521,7 @@ mod tests {
 
     #[test]
     fn a_message_with_no_mention_carries_no_properties() {
-        let body = build_body("9", "hi", "Me", None, None, &[], &[]).unwrap();
+        let body = build_body("9", "hi", "Me", None, None, &[], &[], &[]).unwrap();
         assert!(body.get("properties").is_none());
     }
 
@@ -1424,8 +1535,8 @@ mod tests {
             display_name: "John".into(),
         }];
         let html = mention_html(0, "John");
-        assert!(build_body("9", "", "Me", None, Some(&html), &[], &mentions).is_err());
-        assert!(build_body("9", "plain text", "Me", None, None, &[], &mentions).is_err());
+        assert!(build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions).is_err());
+        assert!(build_body("9", "plain text", "Me", None, None, &[], &[], &mentions).is_err());
     }
 
     #[test]
@@ -1438,7 +1549,7 @@ mod tests {
             display_name: "John".into(),
         }];
         let html = mention_html(0, "John");
-        let sent = build_body("9", "", "Me", None, Some(&html), &[], &mentions).unwrap();
+        let sent = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions).unwrap();
         let edited = build_edit_body("", Some(&html), "Me", &mentions).unwrap();
         assert_eq!(edited["properties"], sent["properties"]);
         assert_eq!(edited["content"], html);
@@ -1519,5 +1630,70 @@ mod tests {
         let b = build_reaction_body("heart", 0);
         assert_eq!(b["emotions"]["key"], "heart");
         assert_eq!(b["emotions"]["value"], 0);
+    }
+
+    // ---- custom emoji ------------------------------------------------------
+
+    fn art_of(name: &str) -> EmojiArt {
+        EmojiArt {
+            name: name.to_string(),
+            content_type: "image/png".to_string(),
+            bytes: vec![1, 2, 3],
+        }
+    }
+
+    /// Drive the SHIPPED loop with a stub upload, and report every name it asked for.
+    /// The whole point is that no test re-implements `rewrite_custom_emoji`: a copy would
+    /// keep passing after the real one lost its `contains_key` guard and uploaded the
+    /// same art twice.
+    async fn rewrite_with_stub_upload(
+        html: &str,
+        art: &[EmojiArt],
+    ) -> (String, Vec<String>, Vec<String>) {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let (html, ids) = rewrite_custom_emoji("https://ams.example", html, art, |name, _bytes| {
+            asked.borrow_mut().push(name.clone());
+            async move { Ok(format!("0-{name}")) }
+        })
+        .await
+        .expect("the stub upload never fails");
+        (html, ids, asked.into_inner())
+    }
+
+    fn build_body_for_test_with_refs(refs: &[String]) -> Value {
+        build_body("1", "", "Me", None, None, &[], refs, &[]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_body_with_no_code_is_untouched_and_references_nothing() {
+        let (html, refs, uploads) = rewrite_with_stub_upload("<p>hello</p>", &[]).await;
+        assert_eq!(html, "<p>hello</p>");
+        assert!(refs.is_empty());
+        assert!(uploads.is_empty(), "nothing to upload, so nothing was uploaded");
+    }
+
+    #[tokio::test]
+    async fn each_distinct_code_uploads_once_and_lands_in_amsreferences() {
+        let art = [art_of("shipit"), art_of("party")];
+        let (html, refs, uploads) =
+            rewrite_with_stub_upload("<p>:shipit: :party: :shipit:</p>", &art).await;
+        assert_eq!(uploads, vec!["shipit", "party"], "twice in one body is ONE upload");
+        assert_eq!(refs.len(), 2, "twice in one body is one object");
+        assert_eq!(html.matches("itemid=\"shipit\"").count(), 2, "both occurrences are drawn");
+    }
+
+    #[tokio::test]
+    async fn the_body_carries_every_reference_it_names() {
+        let art = [art_of("shipit")];
+        let (html, refs, _) = rewrite_with_stub_upload("<p>:shipit:</p>", &art).await;
+        for id in &refs {
+            assert!(html.contains(id.as_str()), "an amsreference no body names is a leak");
+        }
+    }
+
+    #[test]
+    fn build_body_takes_many_amsreferences() {
+        let body = build_body_for_test_with_refs(&["0-a".into(), "0-b".into()]);
+        assert_eq!(body["amsreferences"], json!(["0-a", "0-b"]));
     }
 }

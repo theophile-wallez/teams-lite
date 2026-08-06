@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import type { Editor } from "@tiptap/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -21,6 +21,8 @@ import { agentCandidatesFor, type OutboundMention } from "~/lib/mentions";
 import { copyableMessageText } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
+import type { CustomEmoji } from "~/lib/custom-emoji";
+import { unicodeShortcodes } from "~/lib/emoji-shortcodes";
 
 // TipTap (ProseMirror) is heavy, so it stays off the critical bundle and arrives as
 // its own chunk. Both imports name the same module, so the format bar costs nothing
@@ -107,6 +109,7 @@ export function Composer(props: {
     () => agentCandidatesFor(agentStatus, openId),
     [agentStatus, openId],
   );
+  const [customEmojiPack, setCustomEmojiPack] = useState<CustomEmoji[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [toolbarOpen, setToolbarOpen] = useState(false);
   // The editor owns its content, so it registers a submit callback here, reports
@@ -142,6 +145,16 @@ export function Composer(props: {
       /* ignore */
     }
   }, []);
+
+  // Load custom emoji pack and keep it fresh.
+  const loadPack = useCallback(() => {
+    controller.loadCustomEmoji().then(setCustomEmojiPack).catch(() => setCustomEmojiPack([]));
+  }, [controller]);
+
+  useEffect(() => {
+    loadPack();
+    return controller.onCustomEmojiChange(loadPack);
+  }, [controller, loadPack]);
 
   imagesRef.current = images;
 
@@ -434,6 +447,8 @@ export function Composer(props: {
                 props.agentAnswer?.conversation === openId ? props.agentAnswer : null
               }
               onMentionQuery={() => void controller.ensureMentionCandidates()}
+              customEmojiPack={customEmojiPack}
+              unicodeShortcodes={unicodeShortcodes}
             />
           </Suspense>
 

@@ -35,11 +35,20 @@ import {
   type MentionOption,
   type OutboundMention,
 } from "~/lib/mentions";
+import {
+  emojiQueryBefore,
+  emojiSuggestions,
+  insertedEmojiName,
+  type CustomEmoji,
+  type EmojiSuggestion,
+} from "~/lib/custom-emoji";
 import { serializeTeamsMessage } from "~/lib/rich-text";
 import { cn } from "~/lib/utils";
 import { AgentTagNode } from "./agent-tag-extension";
 import { MentionNode } from "./mention-extension";
 import { MentionSuggestions } from "./mention-suggestions";
+import { CustomEmojiNode } from "./custom-emoji-extension";
+import { EmojiSuggestions } from "./emoji-suggestions";
 
 // The editor is deliberately restricted to the formatting Microsoft Teams
 // accepts in RichText/Html: bold, italic, underline, strikethrough, inline code,
@@ -68,6 +77,9 @@ const EXTENSIONS = [
   // Agent tags: the same shape of node for a thing that is not a person — it summons a
   // CLI on the backend's machine and serializes to the plain prefix that trigger reads.
   AgentTagNode,
+  // Custom emoji: an atomic inline node holding an emoji name, which serializes to the
+  // bare :name: text the backend substitutes. One Backspace removes it whole.
+  CustomEmojiNode,
 ];
 
 /** `useLayoutEffect` in the browser, `useEffect` on the server (where there is no
@@ -77,6 +89,10 @@ const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : us
 /** An "@…" being typed: what was typed, the document range it occupies (so picking
  *  somebody replaces exactly that text), and whether it opens the message. */
 type MentionQueryState = { query: string; from: number; to: number; atStart: boolean };
+
+/** A ":…" being typed: what was typed, the document range it occupies (so picking
+ *  an emoji replaces exactly that text). */
+type EmojiQueryState = { query: string; from: number; to: number };
 
 /** A message on its way out: the words it took, the range of the document they came from,
  *  and every change the document has taken since — so the words that LEFT can be taken out
@@ -159,6 +175,18 @@ function mentionQueryInEditor(editor: Editor): MentionQueryState | null {
   return { query: found.query, from: $from.start() + found.at, to: $from.pos, atStart };
 }
 
+/** The `:\u2026` the caret sits in, in document coordinates, or null when it sits in
+ *  ordinary text. The text is read from the caret's own block, so an emoji code can only
+ *  start at the beginning of a line or after a space (see `emojiQueryBefore`). */
+function emojiQueryInEditor(editor: Editor): EmojiQueryState | null {
+  const { $from, empty } = editor.state.selection;
+  if (!empty || !$from.parent.isTextblock) return null;
+  const before = $from.parent.textBetween(0, $from.parentOffset, undefined, "\ufffc");
+  const found = emojiQueryBefore(before);
+  if (!found) return null;
+  return { query: found.query, from: $from.start() + found.at, to: $from.pos };
+}
+
 /** Prompt for a URL and apply it as a link to the current selection. */
 function promptForLink(editor: Editor) {
   const previous = editor.getAttributes("link").href as string | undefined;
@@ -223,6 +251,10 @@ export function RichEditor(props: {
   agentAnswer?: AgentAnswer | null;
   /** Called the moment an "@…" starts, so the candidates can be fetched on demand. */
   onMentionQuery?: () => void;
+  /** The custom emoji pack this machine holds. */
+  customEmojiPack: readonly CustomEmoji[];
+  /** The Unicode emoji shortcodes (lazy-loaded). */
+  unicodeShortcodes: ReadonlyArray<readonly [string, string]>;
 }) {
   // The mention list, mirrored into a ref because `handleKeyDown` is created once with
   // the editor and would otherwise read the state of the first render forever.
@@ -251,6 +283,33 @@ export function RichEditor(props: {
     setActive(0);
   };
 
+  // The emoji list, mirrored into a ref for the same reason as mentions.
+  const [emoji, setEmoji] = useState<EmojiQueryState | null>(null);
+  const emojiRef = useRef<EmojiQueryState | null>(null);
+  const [emojiActiveIndex, setEmojiActiveIndex] = useState(0);
+  const emojiActiveIndexRef = useRef(0);
+  const emojiRankedRef = useRef<EmojiSuggestion[]>([]);
+  const emojiDismissedRef = useRef<string | null>(null);
+  // The pack and shortcodes, in refs so the suggestion logic reads the latest values.
+  const customEmojiPackRef = useRef(props.customEmojiPack);
+  const unicodeShortcodesRef = useRef(props.unicodeShortcodes);
+
+  customEmojiPackRef.current = props.customEmojiPack;
+  unicodeShortcodesRef.current = props.unicodeShortcodes;
+
+  const setEmojiState = (next: EmojiQueryState | null) => {
+    emojiRef.current = next;
+    setEmoji(next);
+  };
+  const setEmojiActive = (index: number) => {
+    emojiActiveIndexRef.current = index;
+    setEmojiActiveIndex(index);
+  };
+  const closeEmoji = () => {
+    setEmojiState(null);
+    setEmojiActive(0);
+  };
+
   /** Re-read the "@…" under the caret after anything that can move or change it. */
   const syncMentions = (editor: Editor) => {
     const found = mentionQueryInEditor(editor);
@@ -268,6 +327,21 @@ export function RichEditor(props: {
     props.onMentionQuery?.();
   };
 
+  /** Re-read the ":…" under the caret after anything that can move or change it. */
+  const syncEmoji = (editor: Editor) => {
+    const found = emojiQueryInEditor(editor);
+    if (!found) {
+      emojiDismissedRef.current = null;
+      if (emojiRef.current) closeEmoji();
+      return;
+    }
+    if (emojiDismissedRef.current === found.query) return;
+    emojiDismissedRef.current = null;
+    const previous = emojiRef.current;
+    setEmojiState(found);
+    if (!previous || previous.query !== found.query) setEmojiActive(0);
+  };
+
   const editor = useEditor({
     // TanStack Start renders on the server; ProseMirror needs the DOM, so defer
     // creation to the client to avoid a hydration mismatch.
@@ -279,14 +353,21 @@ export function RichEditor(props: {
       props.onEmptyChange?.(editor.isEmpty);
       props.onChangeText?.(editor.getText());
       syncMentions(editor);
+      syncEmoji(editor);
     },
-    onSelectionUpdate: ({ editor }) => syncMentions(editor),
+    onSelectionUpdate: ({ editor }) => {
+      syncMentions(editor);
+      syncEmoji(editor);
+    },
     // Follow the words of a message that is in flight through every change the document
     // takes while it travels, so the send that lands takes exactly those words out.
     onTransaction: ({ transaction }) => {
       if (transaction.docChanged) sentRef.current?.mapping.appendMapping(transaction.mapping);
     },
-    onBlur: () => closeMentions(),
+    onBlur: () => {
+      closeMentions();
+      closeEmoji();
+    },
     editorProps: {
       attributes: {
         // The field metrics come from the shared constant, so the placeholder the
@@ -296,8 +377,8 @@ export function RichEditor(props: {
       handleKeyDown: (_view, event) => {
         // The mention list owns the keyboard while it is open and has somebody to
         // offer, so Enter picks a person instead of sending a half-typed name.
-        const open = mentionRef.current !== null && rankedRef.current.length > 0;
-        if (open) {
+        const mentionOpen = mentionRef.current !== null && rankedRef.current.length > 0;
+        if (mentionOpen) {
           const count = rankedRef.current.length;
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
             event.preventDefault();
@@ -318,6 +399,30 @@ export function RichEditor(props: {
             event.stopPropagation();
             dismissedRef.current = mentionRef.current?.query ?? null;
             closeMentions();
+            return true;
+          }
+        }
+        // The emoji list owns the keyboard while it is open and has something to offer.
+        const emojiOpen = emojiRef.current !== null && emojiRankedRef.current.length > 0;
+        if (emojiOpen) {
+          const count = emojiRankedRef.current.length;
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            const step = event.key === "ArrowDown" ? 1 : -1;
+            setEmojiActive((emojiActiveIndexRef.current + step + count) % count);
+            return true;
+          }
+          if (event.key === "Enter" || event.key === "Tab") {
+            event.preventDefault();
+            const suggestion = emojiRankedRef.current[emojiActiveIndexRef.current];
+            if (suggestion) pickEmoji(suggestion);
+            return true;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            emojiDismissedRef.current = emojiRef.current?.query ?? null;
+            closeEmoji();
             return true;
           }
         }
@@ -348,6 +453,16 @@ export function RichEditor(props: {
     : [];
   rankedRef.current = ranked;
 
+  // The ranked emoji list this render shows. Kept in a ref as well, for `handleKeyDown`.
+  const rankedEmoji = emoji
+    ? emojiSuggestions(
+        emoji.query,
+        customEmojiPackRef.current,
+        unicodeShortcodesRef.current,
+      )
+    : [];
+  emojiRankedRef.current = rankedEmoji;
+
   /** Replace the typed "@…" with the thing that was picked: a mention of a person, or a
    *  tag summoning an agent. */
   const pick = (option: MentionOption) => {
@@ -368,9 +483,29 @@ export function RichEditor(props: {
       .run();
   };
 
+  /** Replace the typed ":…" with the picked emoji: a custom emoji chip or a Unicode
+   *  character. An alias serializes to its target, so the backend substitutes the right
+   *  art. */
+  const pickEmoji = (suggestion: EmojiSuggestion) => {
+    const state = emojiRef.current;
+    if (!editor || !state) return;
+    closeEmoji();
+    const { from, to } = state;
+    if (suggestion.kind === "unicode") {
+      editor.chain().insertContentAt({ from, to }, suggestion.native + " ").run();
+      return;
+    }
+    const target = insertedEmojiName(suggestion, customEmojiPackRef.current);
+    editor
+      .chain()
+      .insertCustomEmoji({ name: suggestion.name, target, from, to })
+      .run();
+  };
+
   const submit = () => {
     if (!editor) return;
     closeMentions();
+    closeEmoji();
     const { html, mentions } = serializeTeamsMessage(editor.getHTML());
     // A send while one is already out is refused by the composer, so what it answers says
     // nothing about the words in the field: the message in flight still owns them.
@@ -470,6 +605,16 @@ export function RichEditor(props: {
           activeIndex={activeIndex}
           onPick={pick}
           onActivate={setActive}
+        />
+      )}
+      {/* The emoji list, anchored to the field's own box (see EmojiSuggestions).
+          It is rendered only while a ":…" is being typed AND something matches it. */}
+      {emoji && (
+        <EmojiSuggestions
+          suggestions={rankedEmoji}
+          activeIndex={emojiActiveIndex}
+          onPick={pickEmoji}
+          onActivate={setEmojiActive}
         />
       )}
       {/* The select-to-format menu, for when the composer's format bar is closed.

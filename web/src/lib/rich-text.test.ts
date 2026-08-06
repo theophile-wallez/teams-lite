@@ -12,6 +12,7 @@ import {
   hasVisibleContent,
   isRelayedEmail,
   mergeAdjacentMentions,
+  nodeText,
   parseMessageBody,
   parsePlainText,
   parseRelayedEmail,
@@ -50,6 +51,18 @@ function findAll(nodes: RichNode[], tag: string): RichElement[] {
     out.push(...findAll(n.children, tag));
   }
   return out;
+}
+
+/** Find the first node matching a predicate, depth-first. */
+function findNode(nodes: RichNode[], predicate: (n: RichNode) => boolean): RichNode | undefined {
+  for (const n of nodes) {
+    if (predicate(n)) return n;
+    if (n.type === "element") {
+      const found = findNode(n.children, predicate);
+      if (found) return found;
+    }
+  }
+  return undefined;
 }
 
 describe("decodeEntities", () => {
@@ -571,6 +584,61 @@ describe("parseRichHtml — Teams emoji", () => {
 
   it("keeps an emoji as a character when the message is re-serialized to send", () => {
     expect(serializeTeamsHtml(EMOJI_MESSAGE)).toBe("<p>Il faut un espace 💡</p>");
+  });
+});
+
+describe("parseRichHtml — custom emoji", () => {
+  const EMOJI_IMG =
+    '<img itemtype="http://schema.skype.com/Emoji" itemid="shipit" alt=":shipit:" ' +
+    'src="https://eu-api.asm.skype.com/v1/objects/0-a/views/imgo" width="20" height="20">';
+
+  it("keeps a custom emoji as art, not as its alt text", () => {
+    const nodes = parseRichHtml(`<p>ship ${EMOJI_IMG}</p>`);
+    const emoji = findNode(nodes, (n) => n.type === "element" && n.tag === "customEmoji");
+    expect(emoji).toBeTruthy();
+    if (emoji?.type !== "element") throw new Error("unreachable");
+    expect(emoji.attrs.code).toBe(":shipit:");
+    expect(emoji.attrs.src).toContain("/v1/objects/0-a/views/imgo");
+  });
+
+  it("still collapses Teams' own emoji to its glyph", () => {
+    const teams =
+      '<img itemtype="http://schema.skype.com/Emoji" alt="🙂" ' +
+      'src="https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/smile/default/20_f.png">';
+    expect(nodeText(parseRichHtml(`<p>${teams}</p>`))).toBe("🙂");
+  });
+
+  it("collapses to its code when the art is not on an authenticated Teams host", () => {
+    // A message is a foreign document. An emoji `<img>` the browser fetched itself would
+    // tell that server the message was read, and this app makes no such request — so a
+    // src the media proxy would not carry is not art, it is the words it stands for.
+    for (const src of [
+      "https://evil.example/pixel.png",
+      "data:image/png;base64,iVBORw0KGgo=",
+    ]) {
+      const html = `<p><img itemtype="http://schema.skype.com/Emoji" itemid="shipit" alt=":shipit:" src="${src}" width="20" height="20"></p>`;
+      const nodes = parseRichHtml(html);
+      expect(findNode(nodes, (n) => n.type === "element" && n.tag === "customEmoji")).toBeUndefined();
+      expect(nodeText(nodes)).toBe(":shipit:");
+    }
+  });
+
+  it("is not a picture: never an img node, so it is never zoomable", () => {
+    const nodes = parseRichHtml(`<p>${EMOJI_IMG}</p>`);
+    expect(findNode(nodes, (n) => n.type === "element" && n.tag === "img")).toBeUndefined();
+  });
+
+  it("reads as its code in copyable text", () => {
+    expect(nodeText(parseRichHtml(`<p>a ${EMOJI_IMG}</p>`))).toBe("a :shipit:");
+  });
+
+  it("parse-then-serialize round trip keeps itemtype, width and height", () => {
+    const html = `<p>${EMOJI_IMG}</p>`;
+    const serialized = serializeTeamsHtml(html);
+    expect(serialized).toContain('itemtype="http://schema.skype.com/Emoji"');
+    expect(serialized).toContain('width="20"');
+    expect(serialized).toContain('height="20"');
+    expect(serialized).toContain('itemid="shipit"');
   });
 });
 

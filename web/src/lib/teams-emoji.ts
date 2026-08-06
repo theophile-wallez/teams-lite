@@ -13,6 +13,7 @@
 //     (`teamsReactionKey`), or the reaction would be meaningless to every other
 //     Teams client.
 
+import { mediaNeedsProxy } from "./protocol";
 import { TEAMS_EMOJI_CATALOG } from "./teams-emoji-catalog";
 
 /** Shown for a key no catalog entry, tone rule, or code point can explain — a
@@ -204,3 +205,37 @@ export const REACTION_PICKER: ReadonlyArray<{ key: string; emoji: string }> = [
   "sad",
   "angry",
 ].map((key) => ({ key, emoji: reactionEmoji(key) }));
+
+/** What marks a reaction key as one of the user's own emoji rather than one of
+ *  Microsoft's. A port of `custom_emoji::CUSTOM_REACTION_PREFIX`. */
+const CUSTOM_REACTION_PREFIX = "tlcustom-";
+
+/**
+ * The art a custom reaction key names — a full URL for the media proxy — or `null`
+ * when the key is not one of ours, which is how Microsoft's own keys stay untouched.
+ * A port of `custom_emoji::custom_reaction_art_url`.
+ *
+ * The key is `tlcustom-<objectUrl>` and carries no NAME: a name may hold digits and
+ * hyphens, an AMS id starts with one, and nothing in the name charset could separate
+ * them (see the Rust side for the whole argument). So a reader gets the ART, which is
+ * the half that must never be resolved locally — two people's `:shipit:` are two
+ * different pictures. The label a reader shows is theirs to resolve: the quick row
+ * knows the name it offered, and a chip says so neutrally.
+ *
+ * There is no key MINTED here on purpose. The URL names an AMS object that does not
+ * exist until the backend has uploaded the art, so the page names the emoji and the
+ * backend mints the key (`react` takes `emoji` for that).
+ *
+ * The URL must be one the media PROXY would carry, and that is a privacy rail rather
+ * than a tidiness one. An emotion key is written by whoever reacted — Teams accepts an
+ * arbitrary 289-character one, measured in examples/custom_emoji_reaction_probe.rs — so
+ * a colleague could react with `tlcustom-https://evil.example/p.png?who=…` and every
+ * reader's browser would fetch it as the bubble drew, which is the tracking pixel this
+ * app strips out of a mail body. A Teams-hosted URL goes through the backend instead,
+ * and anything else is not art we draw.
+ */
+export function customReactionArt(key: string): { src: string } | null {
+  if (!key.startsWith(CUSTOM_REACTION_PREFIX)) return null;
+  const src = key.slice(CUSTOM_REACTION_PREFIX.length);
+  return src.startsWith("https://") && mediaNeedsProxy(src) ? { src } : null;
+}

@@ -74,6 +74,18 @@ export type Reaction = {
   mine: boolean;
 };
 
+/**
+ * What a reaction surface hands the backend: one of Microsoft's own emotion keys, or
+ * one of the user's OWN emoji by name.
+ *
+ * The two are not interchangeable. A custom reaction's key is the URL of the AMS object
+ * its art was uploaded to, and that object does not exist until the backend has made it
+ * — so a page can never mint that key, it names the emoji instead. An EXISTING custom
+ * reaction travels back as `key`, verbatim, which is how one is toggled off without a
+ * second upload of the same picture.
+ */
+export type ReactionPick = { key: string } | { emoji: string };
+
 /** A call/meeting event, rendered as a centered line by `CallEventLine`. */
 export type CallSystemEvent = {
   kind: "call";
@@ -706,6 +718,18 @@ export type PersonPresence = {
 /** Result of the `presence` method: one entry per person the service answered
  *  for (a person it knows nothing about is simply absent). */
 export type PresenceResult = { presences: PersonPresence[] };
+
+/** One custom emoji entry from the pack (mirrors the Rust `CustomEmojiEntry` in
+ *  src/custom_emoji.rs). */
+export type CustomEmoji = {
+  name: string;
+  alias_of: string;
+  content_type: string;
+  width: number;
+  height: number;
+  source: string;
+  added_ms: number;
+};
 
 /** Wire shape of the `read_receipt` live event: one member's read position moved. */
 export type ReadReceiptSignal = ReadReceipt & { conversation_id: string };

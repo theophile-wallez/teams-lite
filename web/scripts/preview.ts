@@ -2518,6 +2518,116 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // Custom emoji: the picker, the Add Emoji dialog in both tabs, the `:` list mid-type, a
+  // bubble with an inline emoji, an emoji-only bubble drawn jumbo, and the Settings section.
+  // Both themes, because each surface must be reviewable. The mock seeds three emoji into
+  // the sandbox thread: :shipit: (PNG), :partyparrot: (GIF), and :ship: (an alias of shipit).
+  if (args.includes("--custom-emoji")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        // This feature's own thread, which carries the colleague's message with real inline
+        // emoji markup — and which no other capture or spec asserts on, so the two messages
+        // sent below perturb nothing (`seedCustomEmojiThread` in web/mock/server.ts).
+        await openConversation(page, "Custom Emoji");
+        await clearComposer(page);
+
+        // The `:` list mid-type: the pack's own emoji above the Unicode ones, which is the
+        // ordering the whole typeahead promises.
+        await typeInComposer(page, ":ship");
+        await page.waitForSelector('[data-testid="emoji-suggestions"]');
+        await shot(`${out}-typeahead-light.png`, '[data-testid="emoji-suggestions"]');
+        await setTheme("dark");
+        await shot(`${out}-typeahead-dark.png`, '[data-testid="emoji-suggestions"]');
+        await setTheme("light");
+        await clearComposer(page);
+
+        // A sent bubble with the art inline in the words, and one that is nothing BUT the
+        // art, which Slack draws jumbo — the two sizes side by side in one capture.
+        await typeInComposer(page, "shipping it :shipit: today", { send: true });
+        await typeInComposer(page, ":shipit:", { send: true });
+        await page.waitForSelector('[data-testid="message"] img[alt=":shipit:"]');
+        await shot(`${out}-bubbles-light.png`, '[data-testid="message-pane"]');
+        await setTheme("dark");
+        await shot(`${out}-bubbles-dark.png`, '[data-testid="message-pane"]');
+        await setTheme("light");
+
+        // The reaction row, whose top band is the user's own emoji — the one reaction
+        // surface where the art is the pack's rather than a message's, and the one that
+        // says out loud that no other Teams client draws it.
+        await openMessageActions(page);
+        const reactionRow = '[data-testid="menu-reaction-picker"]';
+        await page.waitForSelector(`${reactionRow} [data-testid="reaction-option-custom-shipit"] img`);
+        await shot(`${out}-reactions-light.png`, reactionRow);
+        await setTheme("dark");
+        await shot(`${out}-reactions-dark.png`, reactionRow);
+        await setTheme("light");
+
+        // The chip that row leaves on the message: the art the KEY names, fetched back
+        // through the media proxy — what every reader of the thread sees.
+        await page
+          .locator(`${reactionRow} [data-testid="reaction-option-custom-shipit"]`)
+          .click();
+        await page.waitForSelector('[data-testid^="reaction-chip-tlcustom-"] img');
+        await shot(`${out}-reaction-chip-light.png`, '[data-testid="message-pane"]');
+        await setTheme("dark");
+        await shot(`${out}-reaction-chip-dark.png`, '[data-testid="message-pane"]');
+        await setTheme("light");
+
+        // The emoji picker with custom emoji, reached through the same menu.
+        await openMessageActions(page);
+        await openReactionPicker(page);
+        // The pack's own category, which the picker only grows once the art has loaded — and
+        // it is the one surface this feature has that no unit test can reach (emoji-mart
+        // draws in a shadow root), so the capture waits for it and then opens it, rather
+        // than photographing whatever was on screen first.
+        const customCategory = page.locator(
+          '[data-testid="emoji-picker"] [aria-label="Custom"]',
+        );
+        await customCategory.waitFor();
+        await customCategory.click();
+        await page.waitForTimeout(300); // the grid scrolls to the category
+        await shot(`${out}-picker-light.png`, '[data-testid="emoji-picker"]');
+        await setTheme("dark");
+        await shot(`${out}-picker-dark.png`, '[data-testid="emoji-picker"]');
+        await setTheme("light");
+
+        // The Add Emoji row at the picker's foot, with the notice under it.
+        await page.locator('[data-testid="add-emoji"]').click();
+        await page.waitForSelector('[data-testid="add-emoji-dialog"]');
+        await shot(`${out}-add-upload-light.png`, '[data-testid="add-emoji-dialog"]');
+        await setTheme("dark");
+        await shot(`${out}-add-upload-dark.png`, '[data-testid="add-emoji-dialog"]');
+        await setTheme("light");
+
+        // The packs tab.
+        await page.locator('[data-testid="add-emoji-tab-packs"]').click();
+        await page.waitForTimeout(200);
+        await shot(`${out}-add-packs-light.png`, '[data-testid="add-emoji-dialog"]');
+        await setTheme("dark");
+        await shot(`${out}-add-packs-dark.png`, '[data-testid="add-emoji-dialog"]');
+        await setTheme("light");
+        await page.keyboard.press("Escape");
+        await page.keyboard.press("Escape");
+
+        // Settings › Custom emoji.
+        await openSettings(page);
+        const section = '[data-testid="custom-emoji-settings"]';
+        await page.locator(section).scrollIntoViewIfNeeded();
+        await shot(`${out}-settings-light.png`, section);
+        await setTheme("dark");
+        await shot(`${out}-settings-dark.png`, section);
+
+        console.log(
+          `[preview] wrote ` +
+            `${out}-{typeahead,bubbles,reactions,picker,add-upload,add-packs,` +
+            `reaction-chip,settings}-{light,dark}.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
   // The Settings surface: the integration sections at the top of the pane, in both
   // themes. Two of them are headed by a third party's own logo, which ships one file
   // per theme, so a capture of one theme proves only half of it.

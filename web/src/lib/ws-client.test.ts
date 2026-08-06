@@ -192,7 +192,7 @@ describe("Backend request/response", () => {
   it("frames a react request with conversation, message_id and key", async () => {
     const { backend, socket } = await connected();
 
-    const promise = backend.react("c1", "c1#5", "heart");
+    const promise = backend.react("c1", "c1#5", { key: "heart" });
 
     const frame = JSON.parse(socket.sent[0]!) as {
       id: number;

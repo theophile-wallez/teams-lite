@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
     println!("signed in as {} ({})", session.self_name, session.self_mri);
 
     // 1. Post the message this probe will remove. The ic3 token only uploads an
-    // image, and there is none here, so it stays empty.
+    // image or emoji, and there is none here, so it stays empty.
     let sent = teams_send::send_message(
         &http,
         &session,
@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
         "",
         None,
         Some("<p>delete probe — this message removes itself</p>"),
+        &[],
         &[],
         // A probe mentions nobody: a mention notifies the person it names.
         &[],

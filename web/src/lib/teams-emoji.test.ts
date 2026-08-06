@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
+import { mediaNeedsProxy } from "./protocol";
 import {
   appleEmojiUrl,
   canReactWith,
+  customReactionArt,
   emojiUnified,
   reactionEmoji,
   teamsReactionKey,
@@ -120,5 +122,45 @@ describe("Apple emoji images", () => {
 
   it("serves them from our own origin, never a CDN", () => {
     expect(appleEmojiUrl("🔥")).toBe("/emoji/apple/64/1f525.png");
+  });
+});
+
+describe("customReactionArt", () => {
+  const OBJECT_URL = "https://eu-api.asm.skype.com/v1/objects/0-weu-d1-abc/views/imgo";
+
+  it("hands back the whole URL the key carries", () => {
+    expect(customReactionArt(`tlcustom-${OBJECT_URL}`)).toEqual({ src: OBJECT_URL });
+  });
+
+  it("is a URL the media proxy will carry, so the art needs no second rail", () => {
+    const art = customReactionArt(`tlcustom-${OBJECT_URL}`);
+    expect(art).not.toBeNull();
+    expect(mediaNeedsProxy(art!.src)).toBe(true);
+  });
+
+  it("leaves Microsoft's own keys alone", () => {
+    expect(customReactionArt("like")).toBeNull();
+    expect(customReactionArt("yes-tone2")).toBeNull();
+    expect(reactionEmoji("like")).toBe("👍");
+  });
+
+  it("names no art for a key that carries no URL", () => {
+    // The shape this app used to mint: a NAME and an AMS id, with no host and no
+    // delimiter that a legal name could not contain (`blob-2`, `parrot-1`).
+    expect(customReactionArt("tlcustom-shipit-0-weu-d1-abc")).toBeNull();
+    expect(customReactionArt("tlcustom-")).toBeNull();
+  });
+
+  it("refuses a key that would make the reader's browser fetch a stranger's server", () => {
+    // The key above is one WE minted, which proves nothing about an inbound one: a key is
+    // written by whoever reacted, and Teams accepts an arbitrary long one. Drawing this
+    // would issue the request as the bubble rendered — a tracking pixel arriving as a
+    // reaction, in an app that strips them out of mail bodies.
+    expect(customReactionArt("tlcustom-https://evil.example/p.png")).toBeNull();
+    expect(customReactionArt("tlcustom-https://evil.example/p.png?who=reader")).toBeNull();
+    // A look-alike host is not the proxy's either.
+    expect(customReactionArt("tlcustom-https://skype.com.evil.example/p.png")).toBeNull();
+    // And the legitimate key still draws, so the rail refuses hosts rather than reactions.
+    expect(customReactionArt(`tlcustom-${OBJECT_URL}`)).toEqual({ src: OBJECT_URL });
   });
 });

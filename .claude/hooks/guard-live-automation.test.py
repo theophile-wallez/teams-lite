@@ -386,6 +386,23 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'person_overrides' }));\n"
     ),
+    # Custom emoji: writing the pack decides the art this app can post under the user's
+    # name, so a script that could plant it could post a picture nobody asked for.
+    "emoji-adder.ts": (
+        "// Adds an emoji to the pack through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'custom_emoji_add' }));\n"
+    ),
+    "emoji-importer.ts": (
+        "// Imports an emoji pack through the app's relay.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19440');\n"
+        "ws.send(JSON.stringify({ method: 'custom_emoji_import' }));\n"
+    ),
+    "emoji-reader.ts": (
+        "// Reads back the user's own pack, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19430');\n"
+        "ws.send(JSON.stringify({ method: 'custom_emoji' }));\n"
+    ),
     "token-thief.ts": (
         "// Fetches the write capability from the app's own server.\n"
         "const res = await fetch('http://127.0.0.1:19440/__write-token');\n"
@@ -523,6 +540,10 @@ def cases(tmp: Path):
         # writes is who this app says a message is from.
         ("BLOCK", PROJECT, f"bun run {tmp}/person-renamer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/person-refacer.ts"),
+        # Writing the emoji pack decides the art this app can post, so a script that could
+        # plant it could post a picture under the user's name on the next send.
+        ("BLOCK", PROJECT, f"bun run {tmp}/emoji-adder.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/emoji-importer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/self-updater.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/backend-restarter.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-backend-writer.ts"),
@@ -737,6 +758,8 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/agent-status-reader.ts"),
         # …and so is reading back the names and faces the user chose themselves.
         ("ALLOW", PROJECT, f"bun run {tmp}/person-override-reader.ts"),
+        # …and so is reading back the emoji pack the user built themselves.
+        ("ALLOW", PROJECT, f"bun run {tmp}/emoji-reader.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/update-checker.ts"),
         # Reading the call state names no write and reaches nobody.
         ("ALLOW", PROJECT, f"bun run {tmp}/call-status-reader.ts"),

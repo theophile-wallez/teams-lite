@@ -1,7 +1,13 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Picker from "@emoji-mart/react";
 import rawData from "@emoji-mart/data";
+import { renderToString } from "react-dom/server";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Add01Icon, MessageSquareDashedIcon } from "@hugeicons/core-free-icons";
+import type { ReactionPick } from "~/lib/protocol";
 import { appleEmojiUrlFromUnified, canReactWith, teamsReactionKey } from "~/lib/teams-emoji";
+import { useController } from "./controller-context";
+import { AddEmojiDialog } from "./add-emoji-dialog";
 
 // This module is the lazy chunk behind the "more reactions" button: emoji-mart
 // plus its 1.5 MB dataset must never sit on the critical path, so it is only ever
@@ -55,60 +61,153 @@ function reactableData(): EmojiMartData {
   };
 }
 
-/** What emoji-mart hands back on a pick (the fields we use). */
-type PickedEmoji = { native: string };
+/** What emoji-mart hands back on a pick (the fields we use). A custom emoji carries no
+ *  `native` — it is art, not a character — so `id` is what names it. */
+type PickedEmoji = { id?: string; native?: string };
 
 /**
  * The full emoji picker for reactions: emoji-mart in Apple mode, drawing its
  * images from our own origin, and reporting picks as Teams reaction keys so the
  * caller never has to know the difference between an emoji and an emotion key.
  *
- * `onPick` receives a key like `fire` or `yes-tone2`; a pick with no key is
- * impossible here because the dataset is pre-filtered to reactable emoji.
+ * `onPick` receives an emotion key like `fire` or `yes-tone2` for a Unicode emoji, and
+ * one of the user's own emoji BY NAME for a custom one — the backend mints that key from
+ * the art it uploads, so nothing here guesses it (see {@link ReactionPick}). A pick with
+ * neither is impossible: the dataset is pre-filtered to reactable emoji.
  */
 export default function EmojiPicker(props: {
-  onPick: (key: string) => void;
+  onPick: (pick: ReactionPick) => void;
   theme: "light" | "dark";
 }) {
+  const controller = useController();
   const data = useMemo(reactableData, []);
+  const [customEmoji, setCustomEmoji] = useState<Array<{ name: string; src: string }>>([]);
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+
+  // Load custom emoji pack and their URLs
+  useEffect(() => {
+    let alive = true;
+    async function load() {
+      const pack = await controller.loadCustomEmoji();
+      const emojiWithUrls = await Promise.all(
+        pack.map(async (e) => ({
+          name: e.name,
+          src: (await controller.customEmojiUrl(e.name)) || "",
+        })),
+      );
+      if (alive) setCustomEmoji(emojiWithUrls.filter((e) => e.src));
+    }
+    void load();
+    const unsubscribe = controller.onCustomEmojiChange(() => void load());
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, [controller]);
+
+  // The pack, in the shape emoji-mart's own `custom` prop takes.
+  //
+  // It has to be THAT prop and not a category merged into `data`: emoji-mart reads `data`
+  // once, on the first init, and ignores every later one (`if (!Data)` in its `init`) — so a
+  // pack that arrives a moment after the picker mounted, which is always, never appeared at
+  // all. A changed `custom` is one of the two props that rebuild its grid, and it is
+  // re-applied on every init, so the category shows up the moment the art has loaded.
+  const custom = useMemo(
+    () => [
+      {
+        id: "custom",
+        name: "Custom",
+        emojis: customEmoji.map((e) => ({
+          id: e.name,
+          name: e.name,
+          keywords: [e.name],
+          skins: [{ src: e.src }],
+        })),
+      },
+    ],
+    [customEmoji],
+  );
+
+  /** The codes the pack holds, so a pick can be told from a Unicode one by name. */
+  const customNames = useMemo(() => new Set(customEmoji.map((e) => e.name)), [customEmoji]);
+
+  const categoryIcons = useMemo(
+    () => ({
+      custom: renderToString(<HugeiconsIcon icon={MessageSquareDashedIcon} />),
+    }),
+    [],
+  );
 
   return (
-    <div
-      data-testid="emoji-picker"
-      // emoji-mart's palette, mapped onto ours (see --emoji-picker-* in
-      // theme.css). The custom properties inherit into its shadow root.
-      style={
-        {
-          "--rgb-background": "var(--emoji-picker-background)",
-          "--rgb-color": "var(--emoji-picker-color)",
-          "--rgb-accent": "var(--emoji-picker-accent)",
-          "--rgb-input": "var(--emoji-picker-input)",
-          "--font-family": "inherit",
-        } as React.CSSProperties
-      }
-    >
-      <Picker
-        data={data}
-        theme={props.theme}
-        set="apple"
-        // Apple images, served locally — never from a CDN (see appleEmojiUrl).
-        // Both hooks point home: `getImageURL` for the glyphs emoji-mart resolves
-        // itself, `getSpritesheetURL` so a sheet request could only ever be a
-        // local 404 rather than a silent trip to jsdelivr.
-        getImageURL={(_set: string, unified: string) => appleEmojiUrlFromUnified(unified)}
-        getSpritesheetURL={() => "/emoji/apple/64/spritesheet-unused.png"}
-        onEmojiSelect={(emoji: PickedEmoji) => {
-          const key = teamsReactionKey(emoji.native);
-          if (key) props.onPick(key);
-        }}
-        autoFocus
-        previewPosition="none"
-        skinTonePosition="search"
-        perLine={9}
-        emojiSize={22}
-        emojiButtonSize={32}
-        navPosition="top"
-      />
-    </div>
+    <>
+      <div
+        data-testid="emoji-picker"
+        // emoji-mart's palette, mapped onto ours (see --emoji-picker-* in
+        // theme.css). The custom properties inherit into its shadow root.
+        style={
+          {
+            "--rgb-background": "var(--emoji-picker-background)",
+            "--rgb-color": "var(--emoji-picker-color)",
+            "--rgb-accent": "var(--emoji-picker-accent)",
+            "--rgb-input": "var(--emoji-picker-input)",
+            "--font-family": "inherit",
+          } as React.CSSProperties
+        }
+      >
+        <Picker
+          data={data}
+          custom={custom}
+          theme={props.theme}
+          set="apple"
+          categoryIcons={categoryIcons}
+          // Apple images, served locally — never from a CDN (see appleEmojiUrl).
+          // Both hooks point home: `getImageURL` for the glyphs emoji-mart resolves
+          // itself, `getSpritesheetURL` so a sheet request could only ever be a
+          // local 404 rather than a silent trip to jsdelivr.
+          getImageURL={(_set: string, unified: string) => appleEmojiUrlFromUnified(unified)}
+          getSpritesheetURL={() => "/emoji/apple/64/spritesheet-unused.png"}
+          onEmojiSelect={(emoji: PickedEmoji) => {
+            // One of the user's own: named, not keyed — the reaction's key is the URL of
+            // the AMS object its art becomes, which the backend mints on the way out. This
+            // is the same action the quick row's own custom buttons carry out.
+            if (emoji.id && customNames.has(emoji.id)) {
+              props.onPick({ emoji: emoji.id });
+              return;
+            }
+            const key = emoji.native ? teamsReactionKey(emoji.native) : undefined;
+            if (key) props.onPick({ key });
+          }}
+          autoFocus
+          previewPosition="none"
+          skinTonePosition="search"
+          perLine={9}
+          emojiSize={22}
+          emojiButtonSize={32}
+          navPosition="top"
+        />
+        <button
+          type="button"
+          data-testid="add-emoji"
+          onClick={() => setAddDialogOpen(true)}
+          className="flex w-full items-center justify-center gap-2 border-t border-border bg-bg-primary py-2 text-sm text-text-primary hover:bg-bg-secondary"
+        >
+          <HugeiconsIcon icon={Add01Icon} strokeWidth={1.8} />
+          Add Emoji
+        </button>
+        {/* The same thing the quick row says above its own custom band, because this is
+            the other half of the same surface: the art is uploaded with the reaction, and
+            no other Teams client has a path to fetch it. Drawn only when the user HAS a
+            pack — with none there is no Custom category for the sentence to be about. */}
+        {customEmoji.length > 0 && (
+          <p
+            data-testid="custom-emoji-notice"
+            className="bg-bg-primary px-3 pb-2 text-center text-[11px] leading-tight text-text-dim"
+          >
+            Custom emoji are drawn in teams-lite only
+          </p>
+        )}
+      </div>
+      <AddEmojiDialog open={addDialogOpen} onClose={() => setAddDialogOpen(false)} />
+    </>
   );
 }

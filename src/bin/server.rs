@@ -107,8 +107,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_markdown, agent_models, agent_policy, auth, calendar, calling, mail, push,
-    push_policy, retry,
+    agent, agent_markdown, agent_models, agent_policy, auth, calendar, calling, custom_emoji,
+    mail, push, push_policy, retry,
     sender_icon, store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
@@ -133,7 +133,7 @@ const DEFAULT_PORT: u16 = 19420;
 /// busy_timeout, see `store::Store::open`).
 const READ_ONLY_PORT: u16 = 19430;
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
-const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) teams-lite/0.1";
+const UA: &str = teams_lite::USER_AGENT;
 /// Give the UI ample time to connect after the server becomes ready. Authentication
 /// happens before the listener binds, so this only covers local startup delays.
 const INITIAL_CLIENT_GRACE: Duration = Duration::from_secs(30);
@@ -347,6 +347,13 @@ const OUTWARD_METHODS: [&str; 21] = [
 /// misstates (see the local agent's signature line in AGENTS.md), so relabelling it is
 /// the user's own act and nothing that merely found this socket gets to perform it.
 /// Reading the overrides back stays open: it returns what the user themselves chose.
+///
+/// `custom_emoji_add`, `custom_emoji_remove` and `custom_emoji_import` are the three
+/// entries that write the custom emoji pack. They write only to the store, and they are
+/// gated because a client that could edit the pack could post pictures this machine never
+/// approved under the user's own name on the next send. Reading the pack back stays open:
+/// it returns what the user themselves put in.
+///
 /// `call_prepare` is the calling entry that posts nothing: it reserves the one call slot
 /// this machine has and hands the page the relay credentials its `RTCPeerConnection`
 /// needs. The credentials are why it is gated rather than open, because a client that
@@ -362,7 +369,7 @@ const OUTWARD_METHODS: [&str; 21] = [
 /// meanwhile. Nothing that merely found this socket gets to do that to the app the user is
 /// reading — and `update_check`, which only ASKS GitHub whether a newer build exists,
 /// deliberately stays open beside it: it changes nothing on this machine.
-const MACHINE_METHODS: [&str; 16] = [
+const MACHINE_METHODS: [&str; 19] = [
     "repair_broker",
     "restart_backend",
     "update_download",
@@ -379,6 +386,9 @@ const MACHINE_METHODS: [&str; 16] = [
     "agent_set_unrestricted",
     "set_person_name",
     "set_person_avatar",
+    "custom_emoji_add",
+    "custom_emoji_remove",
+    "custom_emoji_import",
 ];
 
 /// What a {@link MACHINE_METHODS} entry actually does to the machine, for its
@@ -416,6 +426,9 @@ fn machine_effect(method: &str) -> &'static str {
         }
         "set_person_name" | "set_person_avatar" => {
             "decides the name and the face this machine puts on a colleague's messages"
+        }
+        "custom_emoji_add" | "custom_emoji_remove" | "custom_emoji_import" => {
+            "decides which pictures this machine can post as emoji under the user's name"
         }
         "call_prepare" => {
             "reserves this machine's one call and hands out the media credentials it holds"
@@ -3248,7 +3261,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }
             anyhow::ensure!(sender_icons_enabled(&store)?, "sender icons are turned off");
 
-            let icon = sender_icon::fetch_icon(&ctx.http, &domain).await.unwrap_or(None);
+            let icon = sender_icon::fetch_icon(&domain).await.unwrap_or(None);
             store.put_sender_icon(&domain, icon.as_ref(), now_ms())?;
             Ok(sender_icon_json(icon.as_ref()))
         }
@@ -3374,6 +3387,270 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "saved": true }))
         }
 
+        // The custom emoji pack this machine holds. Returns the list without the art
+        // itself, so a picker can show what is available before asking for the bytes.
+        "custom_emoji" => {
+            let store = ctx.store()?;
+            let emoji = store.custom_emoji()?;
+            let list: Vec<Value> = emoji
+                .into_iter()
+                .map(|e| {
+                    json!({
+                        "name": e.name,
+                        "alias_of": e.alias_of,
+                        "content_type": e.content_type,
+                        "width": e.width,
+                        "height": e.height,
+                        "source": e.source,
+                        "added_ms": e.added_ms,
+                    })
+                })
+                .collect();
+            Ok(json!({ "emoji": list }))
+        }
+
+        // The art for one custom emoji, or empty strings when there is none.
+        "custom_emoji_image" => {
+            let name = param_str(params, "name")?;
+            let store = ctx.store()?;
+            let art = store.custom_emoji_art(&name)?;
+            match art {
+                Some((content_type, bytes)) => {
+                    let data_base64 =
+                        base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    Ok(json!({
+                        "content_type": content_type,
+                        "data_base64": data_base64,
+                    }))
+                }
+                None => Ok(json!({
+                    "content_type": "",
+                    "data_base64": "",
+                })),
+            }
+        }
+
+        // The full pack, with the art base64-encoded. This is what another machine
+        // imports, so a pack travels with its pictures.
+        "custom_emoji_export" => {
+            let store = ctx.store()?;
+            let emoji = store.custom_emoji()?;
+            let list: Vec<Value> = emoji
+                .into_iter()
+                .map(|e| {
+                    let data_base64 = if e.alias_of.is_empty() {
+                        store
+                            .custom_emoji_art(&e.name)
+                            .ok()
+                            .flatten()
+                            .map(|(_, bytes)| {
+                                base64::engine::general_purpose::STANDARD.encode(&bytes)
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    json!({
+                        "name": e.name,
+                        "alias_of": e.alias_of,
+                        "content_type": e.content_type,
+                        "data_base64": data_base64,
+                        "width": e.width,
+                        "height": e.height,
+                    })
+                })
+                .collect();
+            Ok(json!({ "emoji": list }))
+        }
+
+        // Add one custom emoji to the pack, or fail with a reason. The name must be
+        // free, the art must pass the type and size checks, and exactly one source
+        // must be present.
+        "custom_emoji_add" => {
+            let name = param_str(params, "name")?;
+            let source = param_str(params, "source")?;
+            anyhow::ensure!(
+                custom_emoji::is_valid_name(&name),
+                "an emoji name may hold lowercase letters, numbers, dashes and underscores"
+            );
+
+            let store = ctx.store()?;
+            let existing = store.custom_emoji()?;
+            let name_taken = existing.iter().any(|e| e.name == name || e.alias_of == name);
+            anyhow::ensure!(!name_taken, "If your emoji name is taken, choose another.");
+
+            let alias_of = params.get("alias_of").and_then(|v| v.as_str()).map(str::to_string);
+            let url = params.get("url").and_then(|v| v.as_str());
+            let media_url = params.get("media_url").and_then(|v| v.as_str());
+            let data_base64 = params.get("data_base64").and_then(|v| v.as_str());
+
+            let sources = [
+                alias_of.is_some(),
+                url.is_some(),
+                media_url.is_some(),
+                data_base64.is_some(),
+            ]
+            .iter()
+            .filter(|&&b| b)
+            .count();
+            anyhow::ensure!(sources == 1, "exactly one source must be present");
+
+            if let Some(alias) = alias_of.as_deref() {
+                store.set_custom_emoji(&name, None, Some(alias), &source, now_ms())?;
+            } else if let Some(url) = url {
+                let host = sender_icon::extract_host(url)
+                    .ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
+                let domain = sender_icon::registrable_domain(&host);
+                let media = sender_icon::fetch_raster(url, custom_emoji::MAX_CUSTOM_EMOJI_BYTES)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Could not fetch a raster image from that URL")
+                    })?;
+
+                let (content_type, width, height) = custom_emoji::measure_art(&media.bytes)?;
+
+                let source_with_domain = format!("url:{}", domain);
+                store.set_custom_emoji(
+                    &name,
+                    Some((content_type, &media.bytes, width, height)),
+                    None,
+                    &source_with_domain,
+                    now_ms(),
+                )?;
+            } else if let Some(media_url) = media_url {
+                anyhow::ensure!(
+                    teams_media::is_allowed_media_url(media_url),
+                    "Only Teams-hosted media URLs are allowed"
+                );
+
+                let session = ctx.session().await?;
+                let media =
+                    teams_media::fetch_media(&ctx.http, &session, media_url).await?;
+
+                let (content_type, width, height) = custom_emoji::measure_art(&media.bytes)?;
+
+                store.set_custom_emoji(
+                    &name,
+                    Some((content_type, &media.bytes, width, height)),
+                    None,
+                    "message",
+                    now_ms(),
+                )?;
+            } else if let Some(data) = data_base64 {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .context("emoji data is not valid base64")?;
+                // The type and the size are read from the BYTES, not from what the caller
+                // said about them: this is the path the Add Emoji dialog uses, so it was
+                // the one place the 512 px cap and the "never SVG" rule were a UI
+                // courtesy rather than a store invariant.
+                let (content_type, width, height) = custom_emoji::measure_art(&bytes)?;
+
+                store.set_custom_emoji(
+                    &name,
+                    Some((content_type, &bytes, width, height)),
+                    None,
+                    &source,
+                    now_ms(),
+                )?;
+            }
+
+            ctx.emit("custom_emoji_changed", json!({}));
+            Ok(json!({ "added": true }))
+        }
+
+        // Remove one custom emoji from the pack. Returns whether it existed.
+        "custom_emoji_remove" => {
+            let name = param_str(params, "name")?;
+            let store = ctx.store()?;
+            let removed = store.remove_custom_emoji(&name)?;
+            ctx.emit("custom_emoji_changed", json!({}));
+            Ok(json!({ "removed": removed }))
+        }
+
+        // Import a pack exported from another machine. Each entry is validated like
+        // `custom_emoji_add`; entries that fail are skipped, and the count of what was
+        // added is returned. A pack with one bad row still imports the rest.
+        "custom_emoji_import" => {
+            let emoji_list = params
+                .get("emoji")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow::anyhow!("emoji array is required"))?;
+
+            let store = ctx.store()?;
+            let mut added = 0;
+            let mut errors = Vec::new();
+
+            for entry in import_order(emoji_list) {
+                let name = entry
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("name is required"))?;
+
+                if !custom_emoji::is_valid_name(name) {
+                    errors.push(format!("{}: invalid name", name));
+                    continue;
+                }
+
+                let existing = store.custom_emoji()?;
+                if existing.iter().any(|e| e.name == name || e.alias_of == name) {
+                    errors.push(format!("{}: name taken", name));
+                    continue;
+                }
+
+                match import_entry(entry) {
+                    Some(ImportEntry::Alias(alias)) => {
+                        match store.set_custom_emoji(name, None, Some(alias), "import", now_ms()) {
+                            Ok(_) => added += 1,
+                            Err(e) => errors.push(format!("{}: {}", name, e)),
+                        }
+                    }
+                    Some(ImportEntry::Art(data)) => {
+                        let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+                            Ok(b) => b,
+                            Err(_) => {
+                                errors.push(format!("{}: invalid base64", name));
+                                continue;
+                            }
+                        };
+
+                        // A pack file is a file: the type and the size it states about a row
+                        // are as unchecked as anything else in it, so the bytes are measured.
+                        let measured = custom_emoji::measure_art(&bytes);
+                        let (content_type, width, height) = match measured {
+                            Ok(measured) => measured,
+                            Err(e) => {
+                                errors.push(format!("{}: {}", name, e));
+                                continue;
+                            }
+                        };
+
+                        match store.set_custom_emoji(
+                            name,
+                            Some((content_type, &bytes, width, height)),
+                            None,
+                            "import",
+                            now_ms(),
+                        ) {
+                            Ok(_) => added += 1,
+                            Err(e) => errors.push(format!("{}: {}", name, e)),
+                        }
+                    }
+                    // Neither art nor an alias: an export writes such a row for a name whose
+                    // picture it could not read back, and there is nothing here to write.
+                    None => {}
+                }
+            }
+
+            ctx.emit("custom_emoji_changed", json!({}));
+
+            if added == 0 && !errors.is_empty() {
+                anyhow::bail!("failed to import: {}", errors.join(", "));
+            }
+
+            Ok(json!({ "added": added }))
+        }
+
         // send a message
         "send" => {
             let conv = param_str(params, "conversation")?;
@@ -3398,6 +3675,31 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .map(teams_send::parse_mentions)
                 .transpose()?
                 .unwrap_or_default();
+
+            // Custom emoji: read the pack's art for each code in the outbound body, so
+            // the `:shipit:` codes become Teams' own inline emoji markup with the bytes
+            // uploaded to AMS. A failed upload propagates: the send fails, the composer
+            // shows it, and nothing is posted (CLAUDE.md § Sending messages and the brief
+            // § 5.4). The agent's answer passes an empty list, so its words are not our pack.
+            let (content_html, emoji_art) = if let Some(html) = content_html.as_ref() {
+                let codes = custom_emoji::codes_in_body(html);
+                let mut art = Vec::new();
+                if let Ok(store) = ctx.store() {
+                    for code in codes {
+                        if let Ok(Some((content_type, bytes))) = store.custom_emoji_art(&code) {
+                            art.push(teams_send::EmojiArt {
+                                name: code,
+                                content_type,
+                                bytes,
+                            });
+                        }
+                    }
+                }
+                (Some(html.clone()), art)
+            } else {
+                (None, Vec::new())
+            };
+
             let http = ctx.http.clone();
             let tokens = ctx.tokens.clone();
             let send_conv = conv.clone();
@@ -3410,9 +3712,23 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let reply_to = reply_to.clone();
                     let content_html = content_html.clone();
                     let images = images.clone();
+                    let emoji_art = emoji_art.clone();
                     let mentions = mentions.clone();
                     async move {
                         let ic3 = tokens.get(IC3_SCOPE).await?;
+                        let (rewritten_html, emoji_ids) = if !emoji_art.is_empty() {
+                            teams_send::resolve_custom_emoji(
+                                &http,
+                                &session,
+                                &ic3,
+                                &conv,
+                                content_html.as_deref().unwrap_or(""),
+                                &emoji_art,
+                            )
+                            .await?
+                        } else {
+                            (content_html.clone().unwrap_or_default(), Vec::new())
+                        };
                         teams_send::send_message(
                             &http,
                             &session,
@@ -3420,8 +3736,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             &conv,
                             &text,
                             reply_to.as_ref(),
-                            content_html.as_deref(),
+                            if rewritten_html.is_empty() {
+                                content_html.as_deref()
+                            } else {
+                                Some(&rewritten_html)
+                            },
                             &images,
+                            &emoji_ids,
                             &mentions,
                         )
                         .await
@@ -3446,38 +3767,80 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let conv = param_str(params, "conversation")?;
             let message_id = param_str(params, "message_id")?;
             let text = param_str(params, "text")?;
+
+            // Custom emoji: the edit path escapes the plain text, then runs the same
+            // substitution over it that a send does. So an emoji survives an edit.
+            let escaped = teams_send::escape_html(text.trim());
+            let codes = custom_emoji::codes_in_body(&escaped);
+            let mut emoji_art = Vec::new();
+            if let Ok(store) = ctx.store() {
+                for code in codes {
+                    if let Ok(Some((content_type, bytes))) = store.custom_emoji_art(&code) {
+                        emoji_art.push(teams_send::EmojiArt {
+                            name: code,
+                            content_type,
+                            bytes,
+                        });
+                    }
+                }
+            }
+
             let http = ctx.http.clone();
+            let tokens = ctx.tokens.clone();
             let edit_conv = conv.clone();
             let edit_id = message_id.clone();
             let edit_text = text.clone();
-            ctx.retry_on_auth(move |session, _csa| {
-                let http = http.clone();
-                let conv = edit_conv.clone();
-                let message_id = edit_id.clone();
-                let text = edit_text.clone();
-                async move {
-                    // A plain edit of the user's OWN message carries no mention: the
-                    // RPC takes text, and a mention needs a span the text has no way to
-                    // hold. The composer's mentions travel on the send.
-                    teams_send::edit_message(
-                        &http, &session, &conv, &message_id, &text, None, &[],
-                    )
-                    .await
-                }
-            })
-            .await?;
+            let final_html = ctx
+                .retry_on_auth(move |session, _csa| {
+                    let http = http.clone();
+                    let tokens = tokens.clone();
+                    let conv = edit_conv.clone();
+                    let message_id = edit_id.clone();
+                    let text = edit_text.clone();
+                    let emoji_art = emoji_art.clone();
+                    let escaped = teams_send::escape_html(text.trim());
+                    async move {
+                        let ic3 = tokens.get(IC3_SCOPE).await?;
+                        let (rewritten_html, _emoji_ids) = if !emoji_art.is_empty() {
+                            teams_send::resolve_custom_emoji(
+                                &http,
+                                &session,
+                                &ic3,
+                                &conv,
+                                &escaped,
+                                &emoji_art,
+                            )
+                            .await?
+                        } else {
+                            (escaped.clone(), Vec::new())
+                        };
+                        // A plain edit of the user's OWN message carries no mention: the
+                        // RPC takes text, and a mention needs a span the text has no way to
+                        // hold. The composer's mentions travel on the send.
+                        teams_send::edit_message(
+                            &http,
+                            &session,
+                            &conv,
+                            &message_id,
+                            &text,
+                            Some(&rewritten_html),
+                            &[],
+                        )
+                        .await?;
+                        Ok::<_, anyhow::Error>(rewritten_html)
+                    }
+                })
+                .await?;
 
             let (self_name, self_mri) = {
                 let session = ctx.session().await?;
                 (session.self_name.to_string(), session.self_mri.to_string())
             };
-            // `trim()` mirrors what the edit request itself sent (see
-            // `build_edit_body`), so the local row and the network agree.
-            let new_content = teams_send::escape_html(text.trim());
+            // Update the local row with the SAME body we sent (the rewritten html with
+            // emoji markup), so the row and the network agree — exactly what the comment
+            // above promised.
             if let Ok(store) = ctx.store() {
-                if let Some(updated) =
-                    store.update_message_content(&conv, &message_id, &new_content)?
-                {
+                if let Some(updated) = store.update_message_content(&conv, &message_id, &final_html)? {
                     ctx.emit("message", message_json(&updated, &self_name, &self_mri));
                 }
             }
@@ -3540,10 +3903,26 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // reaction removes it; any other key replaces it. After the network PUT we
         // optimistically update the local row and broadcast it (both clients merge
         // by id), so the reaction shows immediately without waiting for the echo.
+        //
+        // One of the user's OWN emoji arrives as `emoji` — the name in their pack —
+        // rather than as a key, because a custom key names the AMS object the art was
+        // uploaded to and that object does not exist until this handler has made it. So
+        // the page never guesses a key: it names the emoji, and the key is minted here
+        // from what the upload answered. `key` still carries an EXISTING custom
+        // reaction verbatim, which is how one is toggled back off without a second
+        // upload of the same picture.
         "react" => {
             let conv = param_str(params, "conversation")?;
             let message_id = param_str(params, "message_id")?;
-            let key = param_str(params, "key")?;
+            let picked_emoji = params
+                .get("emoji")
+                .and_then(|v| v.as_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string);
+            let key = match picked_emoji {
+                Some(_) => String::new(),
+                None => param_str(params, "key")?,
+            };
 
             let (self_name, self_mri) = {
                 let session = ctx.session().await?;
@@ -3556,12 +3935,44 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .ok()
                 .and_then(|store| store.get_message(&conv, &message_id).ok().flatten())
                 .and_then(|m| teams_lite::store::my_reaction_key(&m.reactions, &self_mri));
-            let on = current_key.as_deref() != Some(key.as_str());
+
+            // A custom emoji reaction uploads the art first, exactly as a send does, and
+            // the key is the object's own URL. Picking from the pack is always an ADD:
+            // the key names one upload, so it can never be the key already on the
+            // message — removing is done from the chip, which hands its key back.
+            let (reaction_key, on) = if let Some(name) = picked_emoji.as_deref() {
+                let (_content_type, bytes) = ctx
+                    .store()?
+                    .custom_emoji_art(name)?
+                    .with_context(|| format!("custom emoji not found: {name}"))?;
+                let ic3 = ctx.tokens.get(IC3_SCOPE).await?;
+                let http = ctx.http.clone();
+                let conv_clone = conv.clone();
+                let name_clone = name.to_string();
+                let object_url = ctx
+                    .retry_on_auth(move |session, _csa| {
+                        let http = http.clone();
+                        let conv = conv_clone.clone();
+                        let name = name_clone.clone();
+                        let bytes = bytes.clone();
+                        let ic3 = ic3.clone();
+                        async move {
+                            teams_send::upload_ams_object_url(
+                                &http, &session, &ic3, &conv, &name, &bytes,
+                            )
+                            .await
+                        }
+                    })
+                    .await?;
+                (custom_emoji::custom_reaction_key(&object_url), true)
+            } else {
+                (key.clone(), current_key.as_deref() != Some(key.as_str()))
+            };
 
             let http = ctx.http.clone();
             let react_conv = conv.clone();
             let react_id = message_id.clone();
-            let react_key = key.clone();
+            let react_key = reaction_key.clone();
             ctx.retry_on_auth(move |session, _csa| {
                 let http = http.clone();
                 let conv = react_conv.clone();
@@ -3579,7 +3990,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             if let Ok(store) = ctx.store() {
-                let key_arg = if on { Some(key.as_str()) } else { None };
+                let key_arg = if on { Some(reaction_key.as_str()) } else { None };
                 if let Some(updated) =
                     store.set_my_reaction(&conv, &message_id, &self_mri, key_arg, now_ms)?
                 {
@@ -6082,6 +6493,48 @@ fn param_str(params: &Value, key: &str) -> Result<String> {
         .with_context(|| format!("missing param: {key}"))
 }
 
+/// What one entry of an imported pack asks to be written: the art it carries, the name it
+/// aliases, or nothing at all.
+///
+/// It is a function of its own because `alias_of` is a plain string whose EMPTY value means
+/// "this row is art" — `custom_emoji_export` writes `""` on every picture — so a branch
+/// taken on `Some("")` sent every picture down the ALIAS path, where the store rightly
+/// refuses a row that is neither art nor an alias. A whole pack then imported nothing, and
+/// the round-trip test passed because it decided this for itself instead of asking here.
+/// One place reads that sentinel now: `import_order` asks the same question.
+#[derive(Debug, PartialEq, Eq)]
+enum ImportEntry<'a> {
+    Art(&'a str),
+    Alias(&'a str),
+}
+
+fn import_entry(entry: &Value) -> Option<ImportEntry<'_>> {
+    if let Some(alias) = nonempty_str(entry, "alias_of") {
+        return Some(ImportEntry::Alias(alias));
+    }
+    nonempty_str(entry, "data_base64").map(ImportEntry::Art)
+}
+
+/// A string field of `entry` that says something. An exported pack writes `""` for the half
+/// of a row it does not use, so "absent" and "empty" mean the same thing here.
+fn nonempty_str<'a>(entry: &'a Value, key: &str) -> Option<&'a str> {
+    entry.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+}
+
+/// A custom emoji pack's entries in the order they can be IMPORTED: art first, aliases
+/// second, each half in the order the file gave them.
+///
+/// An alias may only name art the pack already holds, and `custom_emoji_export` sorts by
+/// NAME — so `ship`, the alias of `shipit`, arrived first and was refused every time a
+/// pack was exported and read back in. The order the file lists them in is not something
+/// the importer can rely on either way, since another machine wrote it.
+fn import_order(entries: &[Value]) -> Vec<&Value> {
+    let (aliases, art): (Vec<&Value>, Vec<&Value>) = entries
+        .iter()
+        .partition(|entry| matches!(import_entry(entry), Some(ImportEntry::Alias(_))));
+    art.into_iter().chain(aliases).collect()
+}
+
 /// WHICH meeting a `call_prepare` / `call_join` is about, in either way one can be named.
 ///
 /// A meeting has two addresses and they come from two surfaces the user actually has:
@@ -8534,6 +8987,11 @@ async fn agent_send(
                 "",
                 Some(&reply_to),
                 Some(&html),
+                &[],
+                // An agent's answer carries no custom emoji: its words are not the
+                // user's pack, and an agent that turned text into art would upload
+                // bytes the user never chose to post — and re-upload them on every
+                // one-second edit as the answer streams.
                 &[],
                 // An agent's answer mentions nobody: it is a reply, and a machine must
                 // not be able to notify a colleague.
@@ -11373,6 +11831,123 @@ mod tests {
     }
 
     #[test]
+    fn writing_the_emoji_pack_is_gated_and_reading_it_is_not() {
+        for method in ["custom_emoji_add", "custom_emoji_remove", "custom_emoji_import"] {
+            assert_eq!(write_class(method), Some(WriteClass::Machine), "{method} must need the write token");
+            assert_ne!(machine_effect(method), "changes this machine", "{method} needs its own refusal text");
+        }
+        for method in ["custom_emoji", "custom_emoji_image", "custom_emoji_export"] {
+            assert_eq!(write_class(method), None, "{method} returns what the user themselves put in");
+        }
+    }
+
+    // A pack exported from one machine has to import into the next one WHOLE. It did not,
+    // twice, and each half of this test is one of them:
+    //
+    //   - the export sorts by name, an alias may only name art the pack already holds, and
+    //     `ship` sorts before `shipit` — so the seeded pack lost its own alias every time it
+    //     made the round trip, and the refusal blamed "an alias may not point at an alias"
+    //     for a target that simply was not there yet;
+    //   - and every ART row was refused, because the export writes `alias_of: ""` on one and
+    //     the handler read that as an alias. Nothing at all imported. This test was green
+    //     through it: it decided what each row meant for itself. So it goes through
+    //     `import_entry`, the decision the handler makes, and the rows it reads carry the
+    //     fields `custom_emoji_export` really writes — including the base64 art, which was
+    //     the field whose absence hid the bug.
+    #[test]
+    fn a_pack_survives_being_exported_and_read_back() {
+        // A 20x20 PNG as far as everything that reads one goes: the signature `measure_art`
+        // sniffs, and the IHDR dimensions it checks against the 512 px cap.
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&20u32.to_be_bytes());
+        png.extend_from_slice(&20u32.to_be_bytes());
+
+        let from = Store::open_in_memory().unwrap();
+        from.set_custom_emoji("shipit", Some(("image/png", &png, 20, 20)), None, "upload", 100)
+            .unwrap();
+        from.set_custom_emoji("ship", None, Some("shipit"), "upload", 101).unwrap();
+
+        // What `custom_emoji_export` writes out, in the order it writes it (by name, so the
+        // alias leads): every row carries both halves, and the one it does not use is `""`.
+        let exported: Vec<Value> = from
+            .custom_emoji()
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                let art = e.alias_of.is_empty();
+                json!({
+                    "name": e.name,
+                    "alias_of": e.alias_of,
+                    "content_type": e.content_type,
+                    "data_base64": if art {
+                        base64::engine::general_purpose::STANDARD.encode(&png)
+                    } else {
+                        String::new()
+                    },
+                })
+            })
+            .collect();
+        assert_eq!(exported[0]["name"], "ship", "the export leads with the alias");
+
+        // And what the import does with it: the real ordering, and the real per-row decision.
+        let into = Store::open_in_memory().unwrap();
+        for entry in import_order(&exported) {
+            let name = entry["name"].as_str().unwrap();
+            let written = match import_entry(entry) {
+                Some(ImportEntry::Alias(alias)) => {
+                    into.set_custom_emoji(name, None, Some(alias), "import", 200)
+                }
+                Some(ImportEntry::Art(data)) => {
+                    let bytes = base64::engine::general_purpose::STANDARD.decode(data).unwrap();
+                    let (content_type, width, height) =
+                        custom_emoji::measure_art(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+                    into.set_custom_emoji(
+                        name,
+                        Some((content_type, &bytes, width, height)),
+                        None,
+                        "import",
+                        200,
+                    )
+                }
+                None => panic!("{name} asked for nothing to be written"),
+            };
+            written.unwrap_or_else(|e| panic!("{name} was refused: {e}"));
+        }
+
+        assert_eq!(into.custom_emoji().unwrap().len(), 2, "both rows made the trip");
+        assert_eq!(
+            into.custom_emoji_art("ship").unwrap().unwrap().1,
+            png,
+            "the alias still resolves to its target's art"
+        );
+    }
+
+    // The two refusals are different problems and say so: a missing target is one the user
+    // adds, a chain is one they re-point. They used to share the second sentence.
+    #[test]
+    fn an_alias_says_which_refusal_it_earned() {
+        let store = Store::open_in_memory().unwrap();
+        let missing = store
+            .set_custom_emoji("ship", None, Some("shipit"), "import", 100)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("already holds"), "{missing}");
+        assert!(!missing.contains("point at an alias"), "{missing}");
+
+        store
+            .set_custom_emoji("shipit", Some(("image/png", &[1], 8, 8)), None, "upload", 101)
+            .unwrap();
+        store.set_custom_emoji("ship", None, Some("shipit"), "import", 102).unwrap();
+        let chained = store
+            .set_custom_emoji("s", None, Some("ship"), "import", 103)
+            .unwrap_err()
+            .to_string();
+        assert!(chained.contains("point at an alias"), "{chained}");
+    }
+
+    #[test]
     fn a_nickname_renames_the_sender_of_a_push_notification() {
         // The phone is the one surface the user cannot correct by looking again, so a
         // rename has to reach it. `push_live_message` gets the frame that just arrived
@@ -12168,6 +12743,84 @@ mod lifecycle_tests {
                 !handler.contains(named),
                 "the sender_icon handler names `{named}`. The request must carry the \
                  organisation's domain and nothing else."
+            );
+        }
+    }
+
+    // The two ways bytes reach the pack from the network must never cross, and the check
+    // has to be able to TELL them apart: read whole, the handler names both fetches and
+    // says nothing about which branch calls which — so sending a pasted `url` into
+    // `teams_media::fetch_media`, the exact mistake made once during this build, would
+    // still pass. So each branch is scanned on its own.
+    //
+    // A STRANGER's URL goes through `sender_icon::fetch_raster`, which carries every rail
+    // the sender-icon fetch does — public-IP-only resolution, a raster sniff on the bytes,
+    // a byte cap, no cookie or referrer. A TEAMS URL goes through the authenticated
+    // `teams_media::fetch_media`, which is host-allowlisted. Crossed over, a Teams URL
+    // simply fails, and a stranger's URL takes the user's token off-tenant.
+    #[test]
+    fn each_emoji_fetch_branch_names_its_own_path_and_not_the_other() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code
+            .split("\"custom_emoji_add\" =>")
+            .nth(1)
+            .expect("the custom_emoji_add handler")
+            .split("\"custom_emoji_remove\" =>")
+            .next()
+            .expect("the handler ends at the next arm");
+
+        // The branches, in the order the handler writes them: an alias, a stranger's URL,
+        // a Teams media URL, then raw bytes.
+        let url_branch = handler
+            .split("} else if let Some(url) = url {")
+            .nth(1)
+            .expect("the url branch")
+            .split("} else if let Some(media_url) = media_url {")
+            .next()
+            .expect("the url branch ends at the media_url one");
+        let media_branch = handler
+            .split("} else if let Some(media_url) = media_url {")
+            .nth(1)
+            .expect("the media_url branch")
+            .split("} else if let Some(data) = data_base64 {")
+            .next()
+            .expect("the media_url branch ends at the data one");
+
+        assert!(
+            url_branch.contains("fetch_raster"),
+            "a stranger's URL must reuse sender_icon's rails"
+        );
+        assert!(
+            !url_branch.contains("fetch_media") && !url_branch.contains("skypetoken"),
+            "a stranger's URL must never reach the authenticated path — that sends the \
+             user's token off-tenant"
+        );
+        assert!(
+            media_branch.contains("is_allowed_media_url") && media_branch.contains("fetch_media"),
+            "a Teams URL must be host-checked and fetched with the session credentials"
+        );
+        assert!(
+            !media_branch.contains("fetch_raster"),
+            "a Teams URL on the unauthenticated path simply fails"
+        );
+        assert!(!handler.contains("reqwest::get"), "no second, unrailed fetch");
+
+        // And whatever the bytes came from, they are measured rather than believed. The
+        // raw-bytes branch is in here because it is the one the dialog uses, and the one
+        // that read its width and height straight out of the params.
+        let data_branch = handler
+            .split("} else if let Some(data) = data_base64 {")
+            .nth(1)
+            .expect("the data_base64 branch");
+        assert!(
+            !data_branch.contains("\"width\"") && !data_branch.contains("\"height\""),
+            "the size of an emoji is read from its bytes, never from what a client said"
+        );
+        for (branch, name) in [(url_branch, "url"), (media_branch, "media_url"), (data_branch, "data_base64")] {
+            assert!(
+                branch.contains("measure_art"),
+                "the {name} branch must measure the bytes it fetched"
             );
         }
     }

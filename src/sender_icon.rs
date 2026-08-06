@@ -38,7 +38,10 @@
 //   - **The host must resolve to a PUBLIC address.** A hostile sender's domain can
 //     point at 127.0.0.1 or at 169.254.169.254, the cloud metadata endpoint, which
 //     would make this fetch an SSRF into the machine's own network. Every resolved
-//     address is checked before the request goes out.
+//     address is checked before the request goes out — and again on every REDIRECT, which
+//     is why this module fetches with a client of its own that follows none (see
+//     [`fetch_client`]). A hop the HTTP library took by itself is a host no rail here ever
+//     saw.
 //   - **The bytes must really be an image**, by magic number rather than by the
 //     content type the server claims, and under a size cap. SVG is refused: it is a
 //     document, not a bitmap, and nothing here needs one.
@@ -123,6 +126,20 @@ pub fn is_fetchable_domain(domain: &str) -> bool {
     tld.len() >= 2 && tld.bytes().all(|b| b.is_ascii_alphabetic())
 }
 
+/// Extract the host from a URL string, or `None` if the URL is malformed or has no
+/// host. This is a simple parser that covers the URLs this app fetches; it does not
+/// handle every RFC 3986 edge case.
+pub fn extract_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    let after_scheme = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let host_and_rest = after_scheme.split_once('/').map(|(h, _)| h).unwrap_or(after_scheme);
+    let host = host_and_rest.split_once(':').map(|(h, _)| h).unwrap_or(host_and_rest);
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_string())
+}
+
 /// The content type of `bytes`, read from its magic number — never from what the
 /// server said it was sending. `None` for anything that is not one of the raster
 /// formats a browser can draw in an `<img>`.
@@ -140,18 +157,196 @@ pub fn image_kind(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// Read the dimensions of a raster image from its bytes, or `None` if the format is not
+/// recognized or the header is malformed. This is a simple parser that covers the
+/// formats this app accepts; it reads only the header bytes needed to extract dimensions.
+pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    match bytes {
+        // PNG: width and height are at bytes 16-23 (big-endian)
+        [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..]
+            if bytes.len() >= 24 && &bytes[12..16] == b"IHDR" =>
+        {
+            let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+            let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+            Some((width, height))
+        }
+        // GIF: width and height are at bytes 6-9 (little-endian)
+        [b'G', b'I', b'F', b'8', ..] if bytes.len() >= 10 => {
+            let width = u32::from(u16::from_le_bytes([bytes[6], bytes[7]]));
+            let height = u32::from(u16::from_le_bytes([bytes[8], bytes[9]]));
+            Some((width, height))
+        }
+        // WebP: read the VP8/VP8L/VP8X chunk to get dimensions
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] if bytes.len() >= 30 => {
+            match &bytes[12..16] {
+                b"VP8 " if bytes.len() >= 30 => {
+                    let width = u32::from(u16::from_le_bytes([bytes[26], bytes[27]])) & 0x3FFF;
+                    let height = u32::from(u16::from_le_bytes([bytes[28], bytes[29]])) & 0x3FFF;
+                    Some((width, height))
+                }
+                b"VP8L" if bytes.len() >= 25 => {
+                    let bits = u32::from_le_bytes([bytes[21], bytes[22], bytes[23], bytes[24]]);
+                    let width = (bits & 0x3FFF) + 1;
+                    let height = ((bits >> 14) & 0x3FFF) + 1;
+                    Some((width, height))
+                }
+                b"VP8X" if bytes.len() >= 30 => {
+                    let width_minus_one =
+                        u32::from_le_bytes([bytes[24], bytes[25], bytes[26], 0]) & 0xFFFFFF;
+                    let height_minus_one =
+                        u32::from_le_bytes([bytes[27], bytes[28], bytes[29], 0]) & 0xFFFFFF;
+                    Some((width_minus_one + 1, height_minus_one + 1))
+                }
+                _ => None,
+            }
+        }
+        // JPEG: scan for SOF (Start of Frame) markers
+        [0xFF, 0xD8, 0xFF, ..] => {
+            let mut pos = 2;
+            while pos + 9 < bytes.len() {
+                if bytes[pos] != 0xFF {
+                    return None;
+                }
+                let marker = bytes[pos + 1];
+                pos += 2;
+                if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) {
+                    continue;
+                }
+                if pos + 2 > bytes.len() {
+                    return None;
+                }
+                let length = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+                if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 {
+                    if pos + 5 < bytes.len() {
+                        let height = u32::from(u16::from_be_bytes([bytes[pos + 3], bytes[pos + 4]]));
+                        let width = u32::from(u16::from_be_bytes([bytes[pos + 5], bytes[pos + 6]]));
+                        return Some((width, height));
+                    }
+                    return None;
+                }
+                pos += length;
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The client this module fetches with, built once. It is deliberately NOT the app's
+/// shared one, and the single difference is the point: it follows no redirects.
+///
+/// reqwest follows up to ten by default, and a hop is a host `ensure_public_host` never
+/// saw — a pasted URL answering `302 Location: http://169.254.169.254/latest/meta-data/`
+/// would have walked straight past every rail below and read the cloud metadata endpoint,
+/// which is precisely the SSRF this module exists to refuse. So the hops are taken here
+/// instead, one at a time, with every rail re-run on each. The app's shared client must
+/// keep following redirects — a Graph download link is a 302 (see src/teams_media.rs) —
+/// which is why this is a client of its own rather than a policy change over there.
+fn fetch_client() -> Result<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let client = reqwest::Client::builder()
+        .user_agent(crate::USER_AGENT)
+        .http1_only()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("build the image fetch client")?;
+    Ok(CLIENT.get_or_init(|| client))
+}
+
+/// How many hops a fetch will take. Following none at all was the other way to close the
+/// hole above and it would have cost real pictures: an apex `/favicon.ico` commonly 301s
+/// to `www`, and slackmojis' own download URL — the shape a user pastes into the emoji
+/// dialog — answers `302` with the image. Three is enough for those and short enough that
+/// a server bouncing a client around is refused rather than followed.
+const MAX_HOPS: usize = 3;
+
+/// The URL a response redirects to, or `None` when it is not a redirect this module
+/// follows. Absolute `https` only: a relative `Location` would need a URL joiner this
+/// module deliberately does not have, and no scheme but https is ever fetched here.
+///
+/// Split out from the fetch so the decision can be tested without a network — the whole
+/// point of it is what it refuses.
+fn hop_target(status: u16, location: Option<&str>) -> Option<&str> {
+    if !(300..400).contains(&status) {
+        return None;
+    }
+    location.filter(|target| target.starts_with("https://"))
+}
+
+/// Fetch a raster image from a URL, checking every rail: public-IP-only resolution,
+/// byte cap on the claimed and actual lengths, raster sniff on the bytes rather than
+/// the claimed type. Adds no cookie, referrer, or query of its own. Returns `Ok(None)`
+/// for a non-success status, a claimed or actual size over the cap, or bytes that are
+/// not a raster image.
+///
+/// This is the reusable core of `fetch_icon` and is shared by every caller that fetches
+/// an image from a URL a user supplied — the sender icon and the custom emoji URL
+/// source. Every rail here exists because of a specific attack or leak; read the module
+/// comment before weakening one.
+pub async fn fetch_raster(url: &str, max_bytes: usize) -> Result<Option<Media>> {
+    let mut url = url.to_string();
+    // One more pass than there are hops, because the last hop still has to be fetched.
+    for _ in 0..=MAX_HOPS {
+        let domain = extract_host(&url).ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
+
+        anyhow::ensure!(is_fetchable_domain(&domain), "refusing to fetch from {domain:?}");
+        ensure_public_host(&domain).await?;
+
+        let resp = fetch_client()?
+            .get(&url)
+            .timeout(FETCH_TIMEOUT)
+            .send()
+            .await
+            .context("request")?;
+
+        // A hop names a host of the server's choosing, so it goes back through the two
+        // rails above rather than being followed by the HTTP client.
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok());
+        if let Some(next) = hop_target(resp.status().as_u16(), location) {
+            url = next.to_string();
+            continue;
+        }
+
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        if resp.content_length().is_some_and(|len| len as usize > max_bytes) {
+            return Ok(None);
+        }
+        let bytes = resp.bytes().await.context("read body")?;
+        if bytes.len() > max_bytes {
+            return Ok(None);
+        }
+        let Some(content_type) = image_kind(&bytes) else {
+            return Ok(None);
+        };
+        return Ok(Some(Media {
+            content_type: content_type.to_string(),
+            bytes: bytes.to_vec(),
+        }));
+    }
+    // A chain longer than that is a server playing games, and there is no image at the end
+    // of it worth the requests.
+    Ok(None)
+}
+
 /// Fetch the icon of one domain, or `Ok(None)` when it serves none we can use — which
 /// is a normal answer for 7 senders in 18 and is cached like a found one.
 ///
 /// `domain` MUST already be a registrable domain; this re-validates defensively so a
 /// future caller's mistake cannot turn the request into an SSRF vector.
-pub async fn fetch_icon(http: &reqwest::Client, domain: &str) -> Result<Option<Media>> {
+pub async fn fetch_icon(domain: &str) -> Result<Option<Media>> {
     anyhow::ensure!(is_fetchable_domain(domain), "refusing to fetch an icon for {domain:?}");
-    ensure_public_host(domain).await?;
 
     for path in ICON_PATHS {
         let url = format!("https://{domain}{path}");
-        match fetch_image(http, &url).await {
+        match fetch_raster(&url, MAX_ICON_BYTES).await {
             Ok(Some(media)) => return Ok(Some(media)),
             // No icon at this path, or something the bytes say is not an image: try the
             // next one. A sender's server failing is not this app's error.
@@ -216,30 +411,6 @@ fn is_public(ip: IpAddr) -> bool {
     }
 }
 
-/// GET one URL and return it only if the bytes are an image within the cap. Sends no
-/// cookie, no referrer and nothing about the mail — the URL is the whole request.
-async fn fetch_image(http: &reqwest::Client, url: &str) -> Result<Option<Media>> {
-    let resp = http.get(url).timeout(FETCH_TIMEOUT).send().await.context("icon request")?;
-    if !resp.status().is_success() {
-        return Ok(None);
-    }
-    // Read with the cap in hand: `content-length` is the server's claim, so the body is
-    // also stopped by force.
-    if resp.content_length().is_some_and(|len| len as usize > MAX_ICON_BYTES) {
-        return Ok(None);
-    }
-    let bytes = resp.bytes().await.context("read icon body")?;
-    if bytes.len() > MAX_ICON_BYTES {
-        return Ok(None);
-    }
-    let Some(content_type) = image_kind(&bytes) else {
-        return Ok(None);
-    };
-    Ok(Some(Media {
-        content_type: content_type.to_string(),
-        bytes: bytes.to_vec(),
-    }))
-}
 
 #[cfg(test)]
 mod tests {
@@ -343,12 +514,49 @@ mod tests {
     fn a_hostile_domain_never_reaches_the_network() {
         // The validator is re-run inside `fetch_icon`, so a caller that forgot to check
         // cannot turn it into a request. No network is touched by this test.
-        let http = reqwest::Client::new();
         let refused = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(fetch_icon(&http, "127.0.0.1"));
+            .block_on(fetch_icon("127.0.0.1"));
         assert!(refused.is_err());
+    }
+
+    // A redirect used to be the one way past every rail above: the shared client followed
+    // up to ten of them, so a URL the user pasted could answer `302` and send this fetch
+    // wherever it liked — the cloud metadata endpoint included. The hops are this module's
+    // own now, which is only true while its client refuses to take them itself.
+    #[test]
+    fn a_redirect_is_a_hop_this_module_takes_itself() {
+        // Followed: an absolute https hop, which is how an apex favicon reaches `www` and
+        // how slackmojis' download URL reaches the image.
+        assert_eq!(
+            hop_target(302, Some("https://www.example.com/favicon.ico")),
+            Some("https://www.example.com/favicon.ico")
+        );
+        let cdn = "https://cdn.example.com/i.png";
+        assert_eq!(hop_target(301, Some(cdn)), Some(cdn));
+
+        // Refused: anything but https (the metadata endpoint speaks plain http), a relative
+        // target, and a response that is not a redirect at all.
+        assert_eq!(hop_target(302, Some("http://169.254.169.254/latest/meta-data/")), None);
+        assert_eq!(hop_target(302, Some("/favicon.ico")), None);
+        assert_eq!(hop_target(200, Some(cdn)), None);
+        assert_eq!(hop_target(302, None), None);
+
+        // And a hop that IS followed is checked like the first URL, by the same two rails:
+        // the string one refuses an address outright, and a NAME that points inside — a
+        // `metadata.…` host reads as an ordinary domain — is refused by `ensure_public_host`
+        // when it resolves, which is the rail the loop re-runs per hop.
+        assert!(!is_fetchable_domain("169.254.169.254"));
+        assert!(!is_public("169.254.169.254".parse().unwrap()));
+
+        // The rails are only reached if the client hands us the redirect rather than
+        // following it, and there is no way to ask a built client what its policy is.
+        let source = include_str!("sender_icon.rs");
+        assert!(
+            source.contains("redirect(reqwest::redirect::Policy::none())"),
+            "the fetch client must refuse to follow a redirect on its own"
+        );
     }
 }

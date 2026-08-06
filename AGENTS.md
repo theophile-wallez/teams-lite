@@ -2311,6 +2311,90 @@ mention whole. The chip is blue on a light blue wash in the composer and in the 
   `serializeTeamsMessage` in `web/src/lib/rich-text.ts`, which is where the outbound
   pair is made.
 
+## Custom emoji
+
+The user can upload, name and use custom emoji and GIFs, the way Slack does. `:shipit:`
+in the composer becomes the art in the message, and the art travels WITH the message —
+so a reader needs no pack to SEE an emoji, only to USE one. That is what makes this
+feature worth having: a local-only decoration would be a different, smaller feature.
+
+- **The code IS the wire format.** `:shipit:` reaches the wire as plain text, and the
+  BACKEND substitutes Teams' own inline-emoji markup for it (`custom_emoji::substitute_codes`,
+  called from the send path and the edit path in `src/teams_send.rs`). Two reasons that
+  shape follows, and both are load-bearing: the `edit` RPC sends plain text only, so an
+  emoji that lived in composer markup would be destroyed by every edit; and Slack renders a
+  hand-typed `:shipit:` too, so the autocomplete is a convenience rather than the mechanism.
+  The nearest precedent in this codebase is the agent tag — a chip in the composer, bare
+  text on the wire, read back by the backend.
+- **This was measured, not assumed.** Two probes established the shape against the real
+  tenant on 2026-08-05. `examples/custom_emoji_send_probe.rs` posted a message with two
+  inline `<img itemtype="http://schema.skype.com/Emoji">` images mid-sentence, and read it
+  back through this crate's own parser — and every attribute survived Teams' server-side
+  sanitizer: `itemtype`, `src`, `width`, `height`, and the inline positioning between the
+  words. Teams REWRITES the src host to `fr-prod.asyncgw.teams.microsoft.com`, so nothing
+  may key on the upload host, but `teams_media::is_allowed_media_url` already covers that
+  form. An AMS object can be re-referenced by a second message (200 OK), so the per-send
+  upload is a choice rather than a necessity. Stock Teams draws them at text size, so
+  parity is real. `examples/custom_emoji_reaction_probe.rs` PUT the emotion key this app
+  really mints — `tlcustom-<the AMS object URL>`, 116 characters — on a message in the
+  sandbox thread: 200 OK, read back in `properties.emotions` BYTE FOR BYTE, cleared with
+  `value: 0`, and a 289-character key is accepted too. The probes are pinned to the sandbox
+  channel const, and the run commands are verbatim:
+
+      . bin/broker-env.sh && teams_lite_export_broker_bus && \
+        cargo run --example custom_emoji_send_probe
+
+  and the same shape for `custom_emoji_reaction_probe`. Both are reversible writes to the
+  sandbox chat only, which § Sending messages pre-authorizes.
+- **A colleague's emoji is drawn from THEIR message's bytes, never from the reader's pack**
+  — and there is deliberately no client-side substitution of a code into art anywhere. Two
+  people may each have a `:shipit:` and they may be different pictures, so redrawing their
+  words with our art would be this app putting words in their mouth. It is the same rule
+  that stops a local nickname from rewriting the record of a Teams frame.
+- **Three regions are never substituted**: `<code>`, `<pre>`, and a reply quote. The first
+  two because Slack does not render an emoji in code either; the third because a quote
+  holds a colleague's own words and substituting our art into them would rewrite what they
+  wrote — the same reason `agent_policy` strips quoted blocks before reading a trigger.
+- **The writes are gated, and why.** `custom_emoji_add` / `custom_emoji_remove` /
+  `custom_emoji_import` are `MACHINE_METHODS` entries even though they write only to the
+  local store, because the pack decides what art this machine will post under the user's
+  name on the next send. The reads stay open. The automation hook blocks the three names
+  against a live port.
+- **The URL source is the one place this feature touches a stranger's server**, and it
+  reuses `src/sender_icon.rs`'s existing rails rather than copying them — public-IP-only
+  resolution (a hostile domain pointing at `169.254.169.254` would make this an SSRF into
+  the cloud metadata endpoint), a raster sniff on the bytes rather than the claimed content
+  type, a byte cap, no cookie or referrer of its own. A colleague's emoji lifted from a
+  message takes the OTHER path, `teams_media::fetch_media`, which is authenticated and
+  host-allowlisted. Say plainly that the two must never be confused: a Teams URL on the
+  unauthenticated path simply fails, and a stranger's URL on the authenticated one would
+  send the user's token off-tenant. That mistake was made once during the build and is
+  worth recording as the reason the rule is written down.
+- **Slack's limits, copied**: 128 KB, 512 px on a side, PNG/JPEG/GIF/WebP and never SVG,
+  and **nothing re-encodes** — so an over-limit image is refused with a reason rather than
+  scaled, because a GIF re-encode would kill the animation.
+- **A custom reaction's key IS the art's address**, and it carries nothing else:
+  `tlcustom-<objectUrl>`. The name cannot be in there — a name may hold digits and hyphens
+  (`blob-2`), an AMS id starts with one, and no character in the name charset could
+  separate the two, so a key spelling both could not be split back apart. Three things
+  follow, and each is pinned by `web/e2e/custom-emoji.spec.ts`: the PAGE never mints that
+  key (the object does not exist until the backend has uploaded the art, so `react` takes
+  `emoji` — the pack name — and mints the key from what the upload answered); a toggle-off
+  hands the EXISTING key back verbatim, with no upload and no re-mint; and a LABEL is
+  resolved locally or stated neutrally — the quick row knows the name it offered, a chip
+  says "custom emoji", because two people's `:shipit:` are two different pictures and the
+  art on the chip is theirs. Resolving a label from the reader's own pack is fine;
+  resolving ART locally never is.
+- **Custom art in a stock Teams REACTION row is impossible**, and this is the one place
+  Slack parity ends: their client renders a reaction from its own asset catalogue and has
+  no fetch path. Both halves of the reaction surface say so — the quick row's custom band
+  and the picker's own footer. What a stock client draws INSTEAD has never been observed,
+  on any run of the probe, so neither the UI nor the spec claims it: they say the art is
+  drawn in teams-lite and stop there.
+- One sentence worth including because it will save the next reader an hour: `alias_of` is
+  a plain string whose EMPTY value means "not an alias", so `??` is the wrong operator
+  against it. That mistake shipped a broken typeahead once in this build.
+
 ## Tagging an agent (the same "@", a different promise)
 
 That same list also offers the agent CLIs this machine can run, above the people
