@@ -119,7 +119,7 @@ pub fn codes_in_body(html: &str) -> Vec<String> {
     let mut codes = Vec::new();
     for segment in walk(html) {
         if let Segment::Text(text) = segment {
-            for code in codes_in_text(text) {
+            for (_, _, code) in code_spans_in_text(text) {
                 if seen.insert(code.clone()) {
                     codes.push(code);
                 }
@@ -289,11 +289,6 @@ fn find_close_tag(haystack: &[u8], tag: &str) -> Option<usize> {
         }
     }
     None
-}
-
-/// Every code in `text`, as owned strings. Used by `codes_in_body`.
-fn codes_in_text(text: &str) -> impl Iterator<Item = String> + '_ {
-    code_spans_in_text(text).map(|(_, _, name)| name)
 }
 
 /// Every code span in `text`: (start byte offset, end byte offset, name).
