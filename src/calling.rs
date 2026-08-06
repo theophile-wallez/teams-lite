@@ -751,17 +751,16 @@ impl ContentSharing {
     /// thing in its shape: it returns a deferred that the frame resolves, so it WAITS for this
     /// before it offers anything.
     pub fn from_frame(correlation_id: &str, frame: &Value) -> Option<Self> {
-        let links = ["/_decoded/links", "/links"].iter().find_map(|p| frame.pointer(p))?;
-        // The session's own way out. A frame that names none is not the grant.
-        let leave = links.get("leave").and_then(Value::as_str)?;
+        // Collected at every DEPTH rather than read off a pointer. The service names the
+        // frame's own body after its type and wraps it differently on different paths — the
+        // shape was guessed twice and missed twice — and the collector is the reader this crate
+        // already trusts for exactly that reason. It is safe HERE because nothing is merged
+        // into the call's links: one value is taken out, and the session keeps it.
+        let leave = Links::collect(frame).get(&["leave"])?.to_string();
         Some(Self {
             correlation_id: correlation_id.to_string(),
-            session_id: ["/_decoded/contentSharingSessionId", "/contentSharingSessionId"]
-                .iter()
-                .find_map(|p| frame.pointer(p))
-                .and_then(Value::as_str)
-                .map(String::from),
-            leave: Some(leave.to_string()),
+            session_id: session_id_in(frame),
+            leave: Some(leave),
         })
     }
 
@@ -787,6 +786,21 @@ impl ContentSharing {
                 .and_then(Value::as_str)
                 .map(String::from),
         }
+    }
+}
+
+/// Find `contentSharingSessionId` at any depth, which is where the service really puts it:
+/// on the grant's own frame, and on the roster's `contentSharing.sessionInformation`.
+fn session_id_in(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(id) = map.get("contentSharingSessionId").and_then(Value::as_str) {
+                return Some(id.to_string());
+            }
+            map.values().find_map(session_id_in)
+        }
+        Value::Array(items) => items.iter().find_map(session_id_in),
+        _ => None,
     }
 }
 
@@ -2432,6 +2446,38 @@ mod tests {
         // back is reported rather than remembered.
         let bare = ContentSharing::from_answer("corr-2", &json!({ "contentSharing": {} }));
         assert!(bare.leave.is_none());
+    }
+
+    /// The GRANT arrives on a frame, and its shape is not the one a pointer would guess.
+    ///
+    /// Measured 2026-08-06: the `addModality` POST answers `{}`, and the service POSTs
+    /// `addModalitySuccess` with the session's six links. A first reading looked for `/links`
+    /// at the top and found nothing, so the app offered its section with no presenter and the
+    /// service rejected it — which is why this reads at every depth instead.
+    #[test]
+    fn the_grant_is_read_out_of_its_frame_at_whatever_depth_it_arrives() {
+        // Named after its type, the way `mediaAnswer` is.
+        let named = json!({
+            "addModalitySuccess": {
+                "contentSharingSessionId": "cs-42",
+                "links": { "leave": "https://x/cs-leave", "takeControl": "https://x/tc" }
+            }
+        });
+        let session = ContentSharing::from_frame("corr", &named).expect("the grant");
+        assert_eq!(session.leave.as_deref(), Some("https://x/cs-leave"));
+        assert_eq!(session.session_id.as_deref(), Some("cs-42"));
+
+        // And at the top, which is the shape `contentSharingEnd` really has.
+        let flat = json!({ "links": { "leave": "https://x/flat" } });
+        assert_eq!(
+            ContentSharing::from_frame("corr", &flat).and_then(|s| s.leave).as_deref(),
+            Some("https://x/flat")
+        );
+
+        // A frame that names no way out is not the grant: this app never holds a session it
+        // could not give back.
+        assert!(ContentSharing::from_frame("corr", &json!({ "links": {} })).is_none());
+        assert!(ContentSharing::from_frame("corr", &json!({})).is_none());
     }
 
     /// A content type we cannot hand a browser must be refused rather than passed
