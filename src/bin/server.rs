@@ -273,6 +273,13 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// `sha` is not the branch's head, so the page can only ever merge the commit it drew —
 /// plus the second, explicit confirmation the UI asks for, exactly as it does before a
 /// message deletion.
+/// How long to wait for a meeting to grant a content-sharing session before offering the
+/// section anyway. One round trip on the calling plane, plus room for the frame behind it.
+const SHARING_GRANT_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+/// How often to look while waiting. Short enough that the share follows the grant closely, and
+/// long enough that the lock is not held in a spin.
+const SHARING_GRANT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 const OUTWARD_METHODS: [&str; 21] = [
     "send",
     "edit",
@@ -4420,24 +4427,31 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 )
             };
             let payload = calling::content_sharing_payload(&local, &callbacks, &correlation_id);
-            let response = ctx.post_call_signal(&url, &payload).await?;
-            // The answer's links are kept APART from the call's own: it carries a `leave` of
-            // its own, and `Links::collect` takes the deepest of a name — merged in, it would
-            // overwrite the link this app hangs the CALL up on.
-            let session = calling::ContentSharing::from_answer(&correlation_id, &response);
-            let can_stop = session.leave.is_some();
+            // The reservation goes in FIRST, so the frame that grants the session has somewhere
+            // to land: it can arrive before this POST has even answered.
             {
                 let mut plane = ctx.calling.lock().unwrap();
                 if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
-                    call.sharing = Some(session);
+                    call.sharing = Some(calling::ContentSharing {
+                        correlation_id: correlation_id.clone(),
+                        session_id: None,
+                        leave: None,
+                    });
                 }
             }
-            eprintln!(
-                "[calling] the meeting granted a sharing session: can_stop={can_stop} \
-                 links={:?}",
-                calling::Links::collect(&response).names()
-            );
-            Ok(json!({ "call_id": call_id, "can_stop": can_stop }))
+            let response = ctx.post_call_signal(&url, &payload).await?;
+            // The answer carries `{}` — measured — so the session is not in it. It is read off
+            // the `addModalitySuccess` FRAME, and this WAITS for that frame: the client's own
+            // `start` returns a deferred the frame resolves, and a section offered before the
+            // service has registered the presenter is a section it rejects.
+            let granted = ctx.await_sharing_session(&call_id).await;
+            if !granted {
+                eprintln!(
+                    "[calling] the meeting never granted the sharing session — answer links={:?}",
+                    calling::Links::collect(&response).names()
+                );
+            }
+            Ok(json!({ "call_id": call_id, "can_stop": granted }))
         }
 
         // Give the sharing session back.
@@ -8767,6 +8781,31 @@ impl Ctx {
             return;
         }
 
+        // The content-sharing session being GRANTED. It arrives here and not in the answer to
+        // the POST, which is `{}` — measured 2026-08-06 — so this is the moment this endpoint
+        // becomes the meeting's presenter, and `call_start_sharing` waits for it before the
+        // page offers a section. The links are kept on the session's own struct: merged into
+        // the call's, this frame's `leave` would overwrite the one a hangup posts to.
+        if frame.url.contains(calling::paths::CONVERSATION_ADD_MODALITY_SUCCESS) {
+            let mut plane = self.calling.lock().unwrap();
+            if let Some(call) = plane.call.as_mut().filter(|c| !c.ended()) {
+                let correlation = call
+                    .sharing
+                    .as_ref()
+                    .map(|s| s.correlation_id.clone())
+                    .unwrap_or_default();
+                if let Some(session) = calling::ContentSharing::from_frame(&correlation, &frame.body)
+                {
+                    eprintln!(
+                        "[calling] the meeting granted the sharing session: can_stop={}",
+                        session.leave.is_some()
+                    );
+                    call.sharing = Some(session);
+                }
+            }
+            return;
+        }
+
         // Everything below is about the call we are already in. A frame for any other
         // call is not ours to act on — a second call rings the user's other devices.
         let links = calling::Links::collect(&frame.body);
@@ -9069,6 +9108,38 @@ impl Ctx {
         }
         eprintln!("[calling] ringing: a call from {}", invite.caller_mri);
         self.emit_call_state();
+    }
+
+    /// Wait for the meeting to GRANT the sharing session, bounded.
+    ///
+    /// The grant arrives on the `addModalitySuccess` callback rather than in the answer to the
+    /// POST (measured 2026-08-06: the answer is `{}`), and the client's own `start` returns a
+    /// deferred that frame resolves — so a section offered before it lands is a section the
+    /// service has no presenter for. Polled rather than notified because the wait is one
+    /// request long and a channel per call would be a second thing to keep in step with the
+    /// call's own lifetime.
+    ///
+    /// It gives up rather than failing: the caller reports `can_stop: false`, the page still
+    /// offers its section, and the journal says the grant never came — which is a measurement
+    /// rather than an error, and it is how the next unknown gets named.
+    async fn await_sharing_session(&self, call_id: &str) -> bool {
+        for _ in 0..(SHARING_GRANT_WAIT.as_millis() / SHARING_GRANT_POLL.as_millis()) {
+            {
+                let plane = self.calling.lock().unwrap();
+                match plane.call.as_ref().filter(|c| c.id == call_id) {
+                    // Granted: the frame filled the way out in.
+                    Some(call) if call.sharing.as_ref().is_some_and(|s| s.leave.is_some()) => {
+                        return true;
+                    }
+                    // The call ended, or the share was given up while this was waiting.
+                    None => return false,
+                    Some(call) if call.sharing.is_none() => return false,
+                    Some(_) => {}
+                }
+            }
+            tokio::time::sleep(SHARING_GRANT_POLL).await;
+        }
+        false
     }
 
     /// Mark the call over locally and tell every client. Sends nothing: this is what
@@ -10535,11 +10606,23 @@ mod tests {
         // service adds a modality to an ongoing conversation and refuses one before that.
         assert!(start.contains("add_modality()"), "the session is asked for on `addModality`");
         assert!(start.contains("CallPhase::Connected"), "a modality needs a live conversation");
-        // The answer is read into its OWN struct. Merging it would overwrite the call's
-        // `leave` with the session's, so giving a share up would hang the call up.
+        // The GRANT is waited for. It arrives on the `addModalitySuccess` callback and not in
+        // the answer to the POST, and a section offered before the service has registered a
+        // presenter is a section it rejects (measured 2026-08-06).
         assert!(
-            start.contains("ContentSharing::from_answer") && !start.contains("links.merge"),
-            "the session's links must never be merged into the call's"
+            start.contains("await_sharing_session"),
+            "the section must not be offered before the meeting has granted the session"
+        );
+        // And the session's links never join the call's: merged in, this frame's `leave`
+        // would overwrite the one a hangup posts to, so giving a share up would end the call.
+        assert!(!start.contains("links.merge"), "the session's links stay on their own struct");
+        let frames = code
+            .split("CONVERSATION_ADD_MODALITY_SUCCESS")
+            .nth(1)
+            .expect("the grant frame is read");
+        assert!(
+            frames.contains("ContentSharing::from_frame"),
+            "the grant is read off its own frame"
         );
 
         let stop = code.rsplit("\"call_stop_sharing\" => {").next().expect("the stop handler");

@@ -169,6 +169,11 @@ function Stage(props: { call: ActiveCall }) {
       data-mode={mode}
       data-phase={call.phase}
       data-call-id={call.id}
+      // What the BACKEND says this endpoint sends, beside the phase and for the same reason:
+      // it is the one fact about a live call that a driver has to read out of the app's own
+      // state rather than out of a button, because a pressed button says what was ASKED for
+      // and this says what the service granted (see web/scripts/join-live.ts).
+      data-sending={call.sending.join(",")}
       role="region"
       aria-label={`${isMeeting(call) ? "Meeting" : "Call"}: ${callStageTitle(call)}`}
       // Dragging belongs to the small window alone: a page has nowhere to be dragged to.

@@ -225,6 +225,20 @@ export type JoinLiveSession = {
   mediaStats: () => Promise<MediaStats | null>;
   /** What the SERVICE said, digested — the half neither the page nor `getStats` shows. */
   signals: () => Promise<SignalDigest>;
+  /**
+   * Share the screen in the meeting this session already joined, and stop again.
+   *
+   * It takes no argument, for the reason nothing here does: the meeting is the pinned one
+   * and the button is the one the app drew on its own stage. What it exercises is the pair
+   * a screen share really is — the content-sharing session, then the media section — which
+   * cannot be reached from the mock (there is no service to grant one) and cannot be read
+   * from the app (the answer's rejection is drawn nowhere).
+   *
+   * The screen it captures is a HEADLESS browser's own, so nothing of the user's is shown
+   * to the meeting: `--auto-select-desktop-capture-source` picks that blank surface and
+   * `--use-fake-ui-for-media-stream` accepts it with no picker.
+   */
+  share: (holdMs?: number) => Promise<{ pressed: boolean; sending: string[] }>;
 };
 
 /**
@@ -288,6 +302,10 @@ const SKELETON_VALUES = new Set([
   "label",
   "isSharing",
   "capabilities",
+  // Whether this endpoint is the meeting's PRESENTER, which is the fact a screen share turns
+  // on. It is a state name (`presenter`, `viewer`) and never a person.
+  "role",
+  "modalityJoined",
 ]);
 
 /**
@@ -371,6 +389,11 @@ export async function withJoinLive<T>(
         "--use-fake-device-for-media-stream",
         "--use-fake-ui-for-media-stream",
         "--autoplay-policy=no-user-gesture-required",
+        // A SCREEN to share that is not the user's: this browser is headless, so its
+        // "entire screen" is the blank surface it renders into. Both flags together are
+        // what makes `getDisplayMedia` answer with no picker and no human in the loop.
+        "--auto-select-desktop-capture-source=Entire screen",
+        "--auto-accept-this-tab-capture",
         // Silence, unless the caller asked for the tone. See `fakeAudioArgs`.
         ...fakeAudioArgs(opts.tone === true),
       ],
@@ -425,6 +448,7 @@ export async function withJoinLive<T>(
       },
       mediaStats: () => readMediaStats(page as Page),
       signals: () => readSignals(page as Page),
+      share: (holdMs = SHARE_HOLD_MS) => shareTheScreen(page as Page, holdMs),
     };
     return await body(session);
   } finally {
@@ -905,6 +929,54 @@ function personName(person: Record<string, unknown>): string {
 }
 
 /** Leave the call, if one is up. Idempotent: nothing to do is not an error. */
+/** How long to hold a share before stopping it, so the service has time to answer and to
+ *  POST whatever it POSTs about the session. */
+const SHARE_HOLD_MS = 12_000;
+
+/**
+ * Press the stage's own Share control, hold, and press it again.
+ *
+ * The button is READ from the app's own stage rather than assumed, and the state it reports
+ * afterwards is the BACKEND's (`data-sending` on the stage, which is `call.sending`) — so
+ * "the meeting accepted it" is the service's answer travelling back rather than this
+ * script's opinion of a click.
+ *
+ * It stops the share on the way out. A meeting left with a presenter who is showing a blank
+ * headless screen is exactly the silent participant this file exists not to be.
+ */
+async function shareTheScreen(
+  page: Page,
+  holdMs: number,
+): Promise<{ pressed: boolean; sending: string[] }> {
+  const share = page.locator('[data-testid="call-share"]').first();
+  if ((await share.count()) === 0) {
+    console.log("  no Share control on the stage — the call is not carrying media yet");
+    return { pressed: false, sending: [] };
+  }
+  console.log("  pressing Share…");
+  await share.click();
+  await page.waitForTimeout(holdMs);
+  const sending = await readSending(page);
+  console.log(`  the backend says this endpoint sends: ${sending.join(", ") || "(nothing)"}`);
+  // And off again, through the app's own control, so the session is given back the way a
+  // user's own press gives it back.
+  if ((await share.getAttribute("aria-pressed")) === "true") {
+    await share.click();
+    await page.waitForTimeout(2_000);
+  }
+  return { pressed: true, sending };
+}
+
+/** What the BACKEND says this endpoint is sending, read off the stage's own attribute. */
+async function readSending(page: Page): Promise<string[]> {
+  const raw = await page
+    .locator('[data-testid="call-stage"]')
+    .first()
+    .getAttribute("data-sending")
+    .catch(() => null);
+  return raw ? raw.split(",").filter(Boolean) : [];
+}
+
 export async function hangUp(page: Page): Promise<void> {
   const button = page.locator('[data-testid="call-hangup"]').first();
   if (!(await button.count())) return;
@@ -941,13 +1013,21 @@ if (import.meta.main) {
   const from = argv.includes("--from-chat") ? "chat" : "calendar";
   const holdAt = argv.indexOf("--hold");
   const hold = holdAt >= 0 ? Number(argv[holdAt + 1]) : DEFAULT_HOLD_SECONDS;
+  // Whether to SHARE the screen once the meeting is up. It is a step this run takes, never a
+  // target it aims at: the meeting is the same constant either way.
+  const share = argv.includes("--share");
 
   await withJoinLive(
-    async ({ waitForPhase: wait, timeline, mediaStats: stats, signals }) => {
+    async (session) => {
+      const { waitForPhase: wait, timeline, mediaStats: stats, signals } = session;
       // First: does it get past "joining" at all? That is the acceptance and its answer.
       const state = await wait(["connected", "ended"], 45_000);
       if (state.phase === "connected") {
         console.log(`\n  CONNECTED. Holding ${hold}s to see whether it stays up.`);
+        // The SCREEN, if this run asked for one: pressed here rather than after the hold,
+        // because what is under test is the pair — the session, then the section — and both
+        // answers arrive within seconds.
+        if (share) await session.share();
         await wait(["ended"], hold * 1_000);
       }
       // What the MEDIA did, which is the half the bar cannot show. Bytes SENT prove our

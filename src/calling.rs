@@ -741,6 +741,30 @@ pub struct ContentSharing {
 }
 
 impl ContentSharing {
+    /// Read the session out of the `addModalitySuccess` FRAME, which is where it really
+    /// arrives.
+    ///
+    /// Measured 2026-08-06 with `bun run join-live -- --share`: the POST answers `{}` with no
+    /// links at all, and the service then POSTs to our own `addModalitySuccess` callback
+    /// carrying the session's six — `contentSharingController`, `leave`, `notificationLinks`,
+    /// `sync`, `takeControl`, `updateSessionState`. The client's own `start` says the same
+    /// thing in its shape: it returns a deferred that the frame resolves, so it WAITS for this
+    /// before it offers anything.
+    pub fn from_frame(correlation_id: &str, frame: &Value) -> Option<Self> {
+        let links = ["/_decoded/links", "/links"].iter().find_map(|p| frame.pointer(p))?;
+        // The session's own way out. A frame that names none is not the grant.
+        let leave = links.get("leave").and_then(Value::as_str)?;
+        Some(Self {
+            correlation_id: correlation_id.to_string(),
+            session_id: ["/_decoded/contentSharingSessionId", "/contentSharingSessionId"]
+                .iter()
+                .find_map(|p| frame.pointer(p))
+                .and_then(Value::as_str)
+                .map(String::from),
+            leave: Some(leave.to_string()),
+        })
+    }
+
     /// Read the session out of the answer to the `addModality` POST.
     ///
     /// Only two things are taken: the id the service named it, and the way out. The other
