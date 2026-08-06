@@ -3343,55 +3343,47 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     continue;
                 }
 
-                let alias_of = entry.get("alias_of").and_then(|v| v.as_str());
-                let data_base64 = entry.get("data_base64").and_then(|v| v.as_str());
-
-                if let Some(alias) = alias_of {
-                    if alias.is_empty() {
-                        match store.set_custom_emoji(name, None, None, "import", now_ms()) {
-                            Ok(_) => added += 1,
-                            Err(e) => errors.push(format!("{}: {}", name, e)),
-                        }
-                    } else {
-                        match store.set_custom_emoji(name, None, Some(alias), "import", now_ms())
-                        {
+                match import_entry(entry) {
+                    Some(ImportEntry::Alias(alias)) => {
+                        match store.set_custom_emoji(name, None, Some(alias), "import", now_ms()) {
                             Ok(_) => added += 1,
                             Err(e) => errors.push(format!("{}: {}", name, e)),
                         }
                     }
-                } else if let Some(data) = data_base64 {
-                    if data.is_empty() {
-                        continue;
-                    }
+                    Some(ImportEntry::Art(data)) => {
+                        let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+                            Ok(b) => b,
+                            Err(_) => {
+                                errors.push(format!("{}: invalid base64", name));
+                                continue;
+                            }
+                        };
 
-                    let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
-                        Ok(b) => b,
-                        Err(_) => {
-                            errors.push(format!("{}: invalid base64", name));
-                            continue;
+                        // A pack file is a file: the type and the size it states about a row
+                        // are as unchecked as anything else in it, so the bytes are measured.
+                        let measured = custom_emoji::measure_art(&bytes);
+                        let (content_type, width, height) = match measured {
+                            Ok(measured) => measured,
+                            Err(e) => {
+                                errors.push(format!("{}: {}", name, e));
+                                continue;
+                            }
+                        };
+
+                        match store.set_custom_emoji(
+                            name,
+                            Some((content_type, &bytes, width, height)),
+                            None,
+                            "import",
+                            now_ms(),
+                        ) {
+                            Ok(_) => added += 1,
+                            Err(e) => errors.push(format!("{}: {}", name, e)),
                         }
-                    };
-
-                    // A pack file is a file: the type and the size it states about a row
-                    // are as unchecked as anything else in it, so the bytes are measured.
-                    let (content_type, width, height) = match custom_emoji::measure_art(&bytes) {
-                        Ok(measured) => measured,
-                        Err(e) => {
-                            errors.push(format!("{}: {}", name, e));
-                            continue;
-                        }
-                    };
-
-                    match store.set_custom_emoji(
-                        name,
-                        Some((content_type, &bytes, width, height)),
-                        None,
-                        "import",
-                        now_ms(),
-                    ) {
-                        Ok(_) => added += 1,
-                        Err(e) => errors.push(format!("{}: {}", name, e)),
                     }
+                    // Neither art nor an alias: an export writes such a row for a name whose
+                    // picture it could not read back, and there is nothing here to write.
+                    None => {}
                 }
             }
 
@@ -5778,6 +5770,34 @@ fn param_str(params: &Value, key: &str) -> Result<String> {
         .with_context(|| format!("missing param: {key}"))
 }
 
+/// What one entry of an imported pack asks to be written: the art it carries, the name it
+/// aliases, or nothing at all.
+///
+/// It is a function of its own because `alias_of` is a plain string whose EMPTY value means
+/// "this row is art" — `custom_emoji_export` writes `""` on every picture — so a branch
+/// taken on `Some("")` sent every picture down the ALIAS path, where the store rightly
+/// refuses a row that is neither art nor an alias. A whole pack then imported nothing, and
+/// the round-trip test passed because it decided this for itself instead of asking here.
+/// One place reads that sentinel now: `import_order` asks the same question.
+#[derive(Debug, PartialEq, Eq)]
+enum ImportEntry<'a> {
+    Art(&'a str),
+    Alias(&'a str),
+}
+
+fn import_entry(entry: &Value) -> Option<ImportEntry<'_>> {
+    if let Some(alias) = nonempty_str(entry, "alias_of") {
+        return Some(ImportEntry::Alias(alias));
+    }
+    nonempty_str(entry, "data_base64").map(ImportEntry::Art)
+}
+
+/// A string field of `entry` that says something. An exported pack writes `""` for the half
+/// of a row it does not use, so "absent" and "empty" mean the same thing here.
+fn nonempty_str<'a>(entry: &'a Value, key: &str) -> Option<&'a str> {
+    entry.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+}
+
 /// A custom emoji pack's entries in the order they can be IMPORTED: art first, aliases
 /// second, each half in the order the file gave them.
 ///
@@ -5786,12 +5806,9 @@ fn param_str(params: &Value, key: &str) -> Result<String> {
 /// pack was exported and read back in. The order the file lists them in is not something
 /// the importer can rely on either way, since another machine wrote it.
 fn import_order(entries: &[Value]) -> Vec<&Value> {
-    let (aliases, art): (Vec<&Value>, Vec<&Value>) = entries.iter().partition(|entry| {
-        entry
-            .get("alias_of")
-            .and_then(|v| v.as_str())
-            .is_some_and(|alias| !alias.is_empty())
-    });
+    let (aliases, art): (Vec<&Value>, Vec<&Value>) = entries
+        .iter()
+        .partition(|entry| matches!(import_entry(entry), Some(ImportEntry::Alias(_))));
     art.into_iter().chain(aliases).collect()
 }
 
@@ -9691,44 +9708,85 @@ mod tests {
         }
     }
 
-    // A pack exported from one machine has to import into the next one WHOLE. It did not:
-    // the export sorts by name, an alias may only name art the pack already holds, and
-    // `ship` sorts before `shipit` — so the seeded pack lost its own alias every time it
-    // made the round trip, and the refusal blamed "an alias may not point at an alias"
-    // for a target that simply was not there yet.
+    // A pack exported from one machine has to import into the next one WHOLE. It did not,
+    // twice, and each half of this test is one of them:
+    //
+    //   - the export sorts by name, an alias may only name art the pack already holds, and
+    //     `ship` sorts before `shipit` — so the seeded pack lost its own alias every time it
+    //     made the round trip, and the refusal blamed "an alias may not point at an alias"
+    //     for a target that simply was not there yet;
+    //   - and every ART row was refused, because the export writes `alias_of: ""` on one and
+    //     the handler read that as an alias. Nothing at all imported. This test was green
+    //     through it: it decided what each row meant for itself. So it goes through
+    //     `import_entry`, the decision the handler makes, and the rows it reads carry the
+    //     fields `custom_emoji_export` really writes — including the base64 art, which was
+    //     the field whose absence hid the bug.
     #[test]
     fn a_pack_survives_being_exported_and_read_back() {
-        let png: &[u8] = &[0x89, 0x50, 0x4E, 0x47];
+        // A 20x20 PNG as far as everything that reads one goes: the signature `measure_art`
+        // sniffs, and the IHDR dimensions it checks against the 512 px cap.
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&20u32.to_be_bytes());
+        png.extend_from_slice(&20u32.to_be_bytes());
+
         let from = Store::open_in_memory().unwrap();
-        from.set_custom_emoji("shipit", Some(("image/png", png, 20, 20)), None, "upload", 100)
+        from.set_custom_emoji("shipit", Some(("image/png", &png, 20, 20)), None, "upload", 100)
             .unwrap();
         from.set_custom_emoji("ship", None, Some("shipit"), "upload", 101).unwrap();
 
-        // What `custom_emoji_export` writes out, in the order it writes it (by name, so
-        // the alias leads) — the only part of the RPC a unit test has to stand in for.
+        // What `custom_emoji_export` writes out, in the order it writes it (by name, so the
+        // alias leads): every row carries both halves, and the one it does not use is `""`.
         let exported: Vec<Value> = from
             .custom_emoji()
             .unwrap()
             .into_iter()
-            .map(|e| json!({ "name": e.name, "alias_of": e.alias_of, "content_type": e.content_type }))
+            .map(|e| {
+                let art = e.alias_of.is_empty();
+                json!({
+                    "name": e.name,
+                    "alias_of": e.alias_of,
+                    "content_type": e.content_type,
+                    "data_base64": if art {
+                        base64::engine::general_purpose::STANDARD.encode(&png)
+                    } else {
+                        String::new()
+                    },
+                })
+            })
             .collect();
         assert_eq!(exported[0]["name"], "ship", "the export leads with the alias");
 
-        // And what the import does with it, through the real ordering.
+        // And what the import does with it: the real ordering, and the real per-row decision.
         let into = Store::open_in_memory().unwrap();
         for entry in import_order(&exported) {
             let name = entry["name"].as_str().unwrap();
-            let alias = entry["alias_of"].as_str().unwrap();
-            let art = if alias.is_empty() { Some(("image/png", png, 20u32, 20u32)) } else { None };
-            let alias = (!alias.is_empty()).then_some(alias);
-            into.set_custom_emoji(name, art, alias, "import", 200)
-                .unwrap_or_else(|e| panic!("{name} was refused: {e}"));
+            let written = match import_entry(entry) {
+                Some(ImportEntry::Alias(alias)) => {
+                    into.set_custom_emoji(name, None, Some(alias), "import", 200)
+                }
+                Some(ImportEntry::Art(data)) => {
+                    let bytes = base64::engine::general_purpose::STANDARD.decode(data).unwrap();
+                    let (content_type, width, height) =
+                        custom_emoji::measure_art(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+                    into.set_custom_emoji(
+                        name,
+                        Some((content_type, &bytes, width, height)),
+                        None,
+                        "import",
+                        200,
+                    )
+                }
+                None => panic!("{name} asked for nothing to be written"),
+            };
+            written.unwrap_or_else(|e| panic!("{name} was refused: {e}"));
         }
 
         assert_eq!(into.custom_emoji().unwrap().len(), 2, "both rows made the trip");
         assert_eq!(
             into.custom_emoji_art("ship").unwrap().unwrap().1,
-            png.to_vec(),
+            png,
             "the alias still resolves to its target's art"
         );
     }
