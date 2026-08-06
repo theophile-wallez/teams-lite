@@ -168,6 +168,12 @@ test.describe.serial("the GitLab merge-request page", () => {
     await openMergeRequest(page, 596);
     const description = page.locator('[data-testid="gitlab-description"]');
 
+    // This fixture is a whole document, so the page folds it to eight lines — the fold is the
+    // subject of its own test below, and this one is about the MARKDOWN, so it asks for the
+    // rest before reading any of it.
+    await page.locator('[data-testid="gitlab-description-toggle"]').click();
+    await expect(description).not.toHaveAttribute("data-folded", "true");
+
     // A heading is a heading, and its hashes are gone. Measured on the tenant: 32 of the 36
     // descriptions with words in them carry one (see examples/merge_request_markdown_recon.rs).
     await expect(description.locator("h2").first()).toHaveText("What changes");
@@ -225,6 +231,69 @@ test.describe.serial("the GitLab merge-request page", () => {
     await openMergeRequest(page, 63);
     await expect(page.locator('[data-testid="gitlab-merge"]')).toBeDisabled();
     await expect(page.locator('[data-testid="gitlab-merge-hint"]')).toContainText("conflicts");
+  });
+
+  test("a long description opens folded to eight lines, and the reader owns it from then on", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    const description = page.locator('[data-testid="gitlab-description"]');
+    const toggle = page.locator('[data-testid="gitlab-description-toggle"]');
+    const fade = page.locator('[data-testid="gitlab-description-fade"]');
+
+    // It opens FOLDED, and the box is the fold rather than the document: eight lines of 13px
+    // over a 1.625 leading is 169px, and this fixture's own markdown is several times that.
+    await expect(description).toHaveAttribute("data-folded", "true");
+    await expect(toggle).toHaveText("Show more");
+    await expect(async () => {
+      const box = (await description.boundingBox())!;
+      expect(box.height).toBeLessThan(240);
+    }).toPass();
+    const folded = (await description.boundingBox())!;
+
+    // The gradient is over the FOOT of that window, inside it — three of the eight lines —
+    // so the words run out rather than being cut off by a rule.
+    const fadeBox = (await fade.boundingBox())!;
+    expect(fadeBox.height).toBeGreaterThan(50);
+    expect(fadeBox.height).toBeLessThan(80);
+    expect(fadeBox.y + fadeBox.height).toBeLessThanOrEqual(folded.y + folded.height + 1);
+
+    // The foot of the document is OUTSIDE that window while it is folded — clipped by the box
+    // rather than shown small — which is the fact the reader is pressing the control about.
+    const tail = description.getByText("☐ production, one cluster at a time");
+    const foldedTail = (await tail.boundingBox())!;
+    expect(foldedTail.y).toBeGreaterThan(folded.y + folded.height);
+
+    // The press opens it: the same control the other way round, and that last line is now
+    // inside the box. Measured after the motion settles rather than during it.
+    await toggle.click();
+    await expect(toggle).toHaveText("Show less");
+    await expect(description).not.toHaveAttribute("data-folded", "true");
+    await expect(async () => {
+      const box = (await description.boundingBox())!;
+      const openTail = (await tail.boundingBox())!;
+      expect(box.height).toBeGreaterThan(folded.height);
+      expect(openTail.y + openTail.height).toBeLessThanOrEqual(box.y + box.height + 1);
+    }).toPass();
+    // The gradient says nothing about an open description.
+    await expect(fade).toHaveCSS("opacity", "0");
+
+    // And it folds again, on the reader's own press.
+    await toggle.click();
+    await expect(description).toHaveAttribute("data-folded", "true");
+    await expect(async () => {
+      const again = (await description.boundingBox())!;
+      expect(again.height).toBeLessThan(240);
+    }).toPass();
+
+    // A description that already fits keeps NO control: there is nothing behind it, and a
+    // click that reveals nothing reads as a bug (!595's own is one sentence).
+    await page.locator('[data-testid="tab-gitlab"]').click();
+    await openMergeRequest(page, 595);
+    await expect(page.locator('[data-testid="gitlab-description"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-description-toggle"]')).toHaveCount(0);
   });
 
   test("the merge asks twice, and says what the second click costs", async ({ page }) => {

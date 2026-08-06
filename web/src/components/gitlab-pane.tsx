@@ -1,7 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { motion, useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert02Icon,
+  ArrowDown01Icon,
   ArrowRight01Icon,
   CheckmarkCircle02Icon,
   ChevronLeftIcon,
@@ -18,7 +20,12 @@ import {
 } from "@hugeicons/core-free-icons";
 import { parseGitLabMarkdown } from "~/lib/gitlab-markdown";
 import {
+  DESCRIPTION_COLLAPSED_PX,
+  DESCRIPTION_FADE_PX,
+  DESCRIPTION_FONT_PX,
+  DESCRIPTION_LINE_HEIGHT,
   conversationDiscussions,
+  descriptionIsFoldable,
   formatJobDuration,
   mergeVerdict,
   pipelineIsLive,
@@ -74,6 +81,19 @@ import { RichNodes } from "./rich-content";
 // Shiki is behind that route rather than on the path of every merge request anybody opens. A
 // review comment still keeps the file and line it hangs on (`note.position`), and this page
 // names that file, so a comment on a line the diff does not show is never one about nothing.
+
+/** The folded box, named so the control can say what it opens. One merge request is drawn at
+ *  a time, so one id is enough. */
+const DESCRIPTION_BOX_ID = "gitlab-description-box";
+
+/** The description's fold, on the transcript panel's own curve and timings
+ *  (`agent-reply.tsx`): one strong ease-out, and a close SHORTER than the open — opening is
+ *  the reader asking to read something, closing is the app getting out of their way. The
+ *  numbers are that panel's, because two disclosures on one screen must not move at two
+ *  different speeds. */
+const FOLD_EASE = [0.23, 1, 0.32, 1] as const;
+const FOLD_OPEN_SECONDS = 0.26;
+const FOLD_CLOSE_SECONDS = 0.18;
 
 export function GitLabPane(props: {
   onBack?: () => void;
@@ -331,19 +351,133 @@ function StateBadge(props: { detail: MergeRequestDetail }) {
  *  measured against what the authors on this instance really write).
  *
  *  Never GitLab's rendered HTML: that would bring remote images and links with it, and
- *  this app's whole promise about a body is that drawing it makes no request. */
+ *  this app's whole promise about a body is that drawing it makes no request.
+ *
+ *  **A long one is FOLDED to eight lines, and the last three of those fade out.** Measured on
+ *  the tenant, a description here is a whole document — a summary, a table of tickets, a
+ *  fenced command line and a task list (see `examples/merge_request_markdown_recon.rs`) — and
+ *  unfolded it pushed the pipeline, the Merge button and the conversation off the first
+ *  screen of every merge request anybody opened. Five rules hold the fold, and
+ *  `web/e2e/gitlab.spec.ts` pins each:
+ *
+ *  - **The window is a CONSTANT, so the first paint is already right**
+ *    ({@link DESCRIPTION_COLLAPSED_PX}, over the type this component sets itself). Measuring
+ *    first would draw the whole document and clip it a frame later, which is a jump the
+ *    reader watches — and it would do it again on every pass of the page.
+ *  - **The fade sits INSIDE the eight lines**, so what a folded description reads as is five
+ *    clear lines running out rather than eight lines cut off with a rule under them.
+ *  - **A description that is not really longer keeps NO control** ({@link
+ *    descriptionIsFoldable}): a click that reveals half a line, from under a gradient
+ *    covering three, is a control that costs more than it gives.
+ *  - **The two states are ONE movement.** The height carries it, the gradient and the label
+ *    are quicker than the height and led by it, and the chevron turns on the same curve —
+ *    the transcript panel's own rules (`agent-reply.tsx`), because two animations for one
+ *    press read as a stutter.
+ *  - **The button is the reader's from then on.** Nothing re-folds a description they opened;
+ *    a merge request they walk away from and come back to is a fresh mount and folds again,
+ *    which is the state a page should open in. */
 function MergeRequestDescription(props: { detail: MergeRequestDetail }) {
   const nodes = useMemo(
     () => parseGitLabMarkdown(props.detail.description ?? ""),
     [props.detail.description],
   );
+  const reduce = useReducedMotion();
+  const [open, setOpen] = useState(false);
+  // What the words really take, watched rather than read once: a table re-flows when the
+  // window narrows, and a description that fitted at 1200px overruns at 390px.
+  const [contentHeight, setContentHeight] = useState(0);
+  const content = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = content.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => setContentHeight(el.getBoundingClientRect().height));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [nodes]);
+
   if (!props.detail.description) return null;
+
+  const foldable = descriptionIsFoldable(contentHeight);
+  const folded = foldable && !open;
+  const motionEase = reduce
+    ? { duration: 0 }
+    : { duration: open ? FOLD_OPEN_SECONDS : FOLD_CLOSE_SECONDS, ease: FOLD_EASE };
+
   return (
     // `min-w-0` is the description's own rail: a wide table or a long fenced line must scroll
     // inside it (the renderer's `table` and `pre` cases both say so) rather than widen the
     // article and push the page's own controls off a phone's screen.
-    <div data-testid="gitlab-description" className="min-w-0">
-      <RichNodes nodes={nodes} className="text-[13px] leading-relaxed text-text-dim" />
+    <div
+      data-testid="gitlab-description"
+      data-folded={folded ? "true" : undefined}
+      className="min-w-0"
+    >
+      <motion.div
+        id={DESCRIPTION_BOX_ID}
+        className="relative min-w-0 overflow-hidden"
+        initial={false}
+        // Until the words are measured the ceiling is a plain CSS clamp, at exactly the height
+        // the fold holds — so the FIRST paint is already the folded window and nothing moves
+        // when the measurement lands. It is dropped in the same render that hands the height
+        // over, because a clamp left on would hold an opened description shut. A description
+        // shorter than the window is clamped by nothing and keeps its own height throughout.
+        style={contentHeight > 0 ? undefined : { maxHeight: DESCRIPTION_COLLAPSED_PX }}
+        // `auto` rather than the measured number: only Motion knows what it measures to, and
+        // leaving the box at `auto` afterwards is what lets a re-flow inside an OPEN
+        // description size it without a second animation.
+        animate={{ height: folded ? DESCRIPTION_COLLAPSED_PX : "auto" }}
+        transition={{ height: motionEase }}
+      >
+        {/* The type is set HERE, from the constants the fold is derived from, so "eight lines"
+            means eight of these lines. The blocks inside space themselves with a top margin
+            only (`BLOCK_SPACING`), so this box's own height is what the words really take. */}
+        <div
+          ref={content}
+          style={{ fontSize: DESCRIPTION_FONT_PX, lineHeight: DESCRIPTION_LINE_HEIGHT }}
+        >
+          <RichNodes nodes={nodes} className="text-text-dim" />
+        </div>
+        {/* The foot of the window, not a rule under it: the words themselves run out. It is
+            drawn only where there is something behind it, and it FADES rather than vanishing
+            — quicker than the box opens, so the last lines are legible while the height is
+            still travelling. */}
+        {foldable && (
+          <motion.div
+            aria-hidden
+            data-testid="gitlab-description-fade"
+            className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-b from-transparent to-background"
+            style={{ height: DESCRIPTION_FADE_PX }}
+            initial={false}
+            animate={{ opacity: folded ? 1 : 0 }}
+            transition={reduce ? { duration: 0 } : { duration: 0.14, ease: "linear" }}
+          />
+        )}
+      </motion.div>
+      {foldable && (
+        <button
+          type="button"
+          data-testid="gitlab-description-toggle"
+          aria-expanded={open}
+          aria-controls={DESCRIPTION_BOX_ID}
+          onClick={() => setOpen((was) => !was)}
+          className="mt-1 flex items-center gap-1 rounded text-[12px] font-medium text-text-dim transition-colors hover:text-foreground"
+        >
+          <motion.span
+            className="flex shrink-0 items-center"
+            initial={false}
+            animate={{ rotate: open ? 180 : 0 }}
+            transition={motionEase}
+          >
+            <HugeiconsIcon
+              icon={ArrowDown01Icon}
+              className="size-4"
+              strokeWidth={1.8}
+              aria-hidden
+            />
+          </motion.span>
+          {open ? "Show less" : "Show more"}
+        </button>
+      )}
     </div>
   );
 }

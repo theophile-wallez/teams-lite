@@ -715,7 +715,7 @@ of the undo it cannot have. Each is pinned by a test:
   worked.
 
 The other three are ordinary gated writes because each is REVERSIBLE from the same page: a
-comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen. Six
+comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen. Seven
 more rules hold the page together:
 
 - **A comment is deleted only when it is the USER'S OWN**, and whose it is comes from
@@ -737,6 +737,33 @@ more rules hold the page together:
 - **The list can never ask for merged merge requests.** `ListScope` and `ListState` are
   closed Rust sets and `merged` is not among them, so the page's whole promise is enforced by
   the type rather than by a filter somebody could widen.
+- **A long DESCRIPTION opens FOLDED to eight lines, and the last three of them fade out.**
+  Measured on the tenant, a description here is a whole document — a summary, a table of every
+  ticket the branch closes, a fenced command line and a task list (see
+  `examples/merge_request_markdown_recon.rs`) — and drawn whole it pushed the pipeline, the
+  Merge button and the conversation off the first screen of every merge request anybody opened.
+  `descriptionIsFoldable` and the three numbers above it are the pure half
+  (`web/src/lib/gitlab-mr.ts`), and `web/e2e/gitlab.spec.ts` pins each rule:
+  - **The window is a CONSTANT, and the first paint is already it.** Eight lines of the type
+    this surface sets itself (`DESCRIPTION_FONT_PX` over `DESCRIPTION_LINE_HEIGHT`, set from
+    those constants rather than from a class so the fold and the text it folds cannot
+    disagree), held before the words are measured by a plain CSS clamp AT that height.
+    Measuring first would draw the document and clip it a frame later, which is a jump the
+    reader watches — and it would do it again on every open of the page.
+  - **The fade sits INSIDE the eight**, over the last three, so a folded description reads as
+    five clear lines running out rather than as eight lines cut off by a rule. It runs to the
+    page's own background, and it is drawn only where there is something behind it.
+  - **A description that is not really longer keeps NO control.** One that fits, and one that
+    overruns by less than a single line, are both left whole: a click that reveals half a line
+    from under a gradient covering three costs the reader more than it saves — the rule the
+    split-layout toggle already follows, that a control which changes nothing reads as a bug.
+  - **The two states are ONE movement**, on the transcript panel's own curve and timings
+    (`FOLD_EASE`, and a close shorter than the open): the height carries it, the gradient and
+    the label are quicker and led by it, and the chevron turns on the same curve. Two
+    disclosures on one screen must not move at two different speeds.
+  - **The fold is the reader's from then on.** Nothing re-folds a description they opened; a
+    merge request they walk away from and come back to is a fresh mount, and folds again,
+    because that is the state a page should open in.
 - **A long TITLE is shortened by the header and wrapped by the page, and widens neither.** An
   author here writes the summary and then every ticket the branch closes, so a title runs to
   150 characters — and `truncate` shortens NOTHING while its container is free to grow: a
@@ -1073,8 +1100,9 @@ pipeline that advances one step per read, which is what makes "the panel follows
 watchable — and the `{kind:"gitlab_mr"}` test hook arms a refusal, a machine with no token,
 and the reset a spec MUST call afterwards. `cd web && bun run preview -- --out /tmp/mr
 --gitlab` captures the tab strip in both of its states (pass `--dpr 4`: the tanuki is 17px),
-the list, the page, the merge armed, the comments, the description at a
-phone's width, a 150-character title at both widths and a blocked merge in both themes;
+the list, the page, the merge armed, the comments, the description folded in both
+themes and opened, the description at a phone's width, a 150-character title at both widths and
+a blocked merge in both themes;
 `web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
 run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
 is the user's own click, in their own app.
@@ -1282,8 +1310,8 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
   `toggleTeamSection` from the same file. For the merge-request page — its tab strip at rest
   and current, the list, the page,
-  the merge armed, the comments, the description at a phone's width, a 150-character title at
-  both widths and a blocked merge:
+  the merge armed, the comments, the description folded and opened, the description at a phone's
+  width, a 150-character title at both widths and a blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt`
   from the same file. For its DIFF PAGE — the way in, the page in both themes, the split layout,
   each of the three files with no patch, the expand control and what it hands over, and both of

@@ -493,6 +493,43 @@ export function systemNotes(list: GitLabDiscussionList | null): GitLabNote[] {
     .flatMap((discussion) => discussion.notes);
 }
 
+/** The description's own type: 13px over a 1.625 leading, which is what makes "a line" a
+ *  NUMBER this file can reason about. The component sets both from these constants rather
+ *  than from a class, so the fold below and the text it folds cannot disagree. */
+export const DESCRIPTION_FONT_PX = 13;
+export const DESCRIPTION_LINE_HEIGHT = 1.625;
+
+/** How much of a long description is shown before the reader asks for the rest, and how
+ *  much of that window the fade covers. The fade sits INSIDE the eight, so a folded
+ *  description reads as five clear lines running out rather than as eight cut off. */
+export const DESCRIPTION_LINES_SHOWN = 8;
+export const DESCRIPTION_LINES_FADED = 3;
+
+/** One line of the description, in px. */
+export const DESCRIPTION_LINE_PX = DESCRIPTION_FONT_PX * DESCRIPTION_LINE_HEIGHT;
+
+/** The height a folded description takes, in px. It is a constant rather than a measurement
+ *  because the box has to be the right size on its FIRST paint: a description drawn whole
+ *  and then clipped a frame later is a jump the reader watches. */
+export const DESCRIPTION_COLLAPSED_PX = Math.round(DESCRIPTION_LINE_PX * DESCRIPTION_LINES_SHOWN);
+
+/** The height of the gradient over the foot of a folded description, in px. */
+export const DESCRIPTION_FADE_PX = Math.round(DESCRIPTION_LINE_PX * DESCRIPTION_LINES_FADED);
+
+/** Whether a description of this height is worth folding at all.
+ *
+ *  Two states are deliberately NOT collapsible, and each is a control that would read as a
+ *  bug. A description that already fits keeps no button — there is nothing behind it. And
+ *  one that overruns by less than a single line keeps none either: hiding half a line behind
+ *  a click, under a gradient covering three, costs the reader more than it saves.
+ *
+ *  `contentHeight` of 0 is the answer before anything is measured, and it reads as "do not
+ *  offer one yet": the fold itself is a constant, so nothing moves when the measurement
+ *  arrives — only the button and the gradient appear. */
+export function descriptionIsFoldable(contentHeight: number): boolean {
+  return contentHeight > DESCRIPTION_COLLAPSED_PX + DESCRIPTION_LINE_PX;
+}
+
 /** How many unresolved threads a merge request holds, for the header's own count. Counts
  *  THREADS rather than notes: five replies under one objection is one thing to settle. */
 export function unresolvedThreadCount(list: GitLabDiscussionList | null): number {

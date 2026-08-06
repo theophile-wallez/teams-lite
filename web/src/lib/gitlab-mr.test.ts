@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  DESCRIPTION_COLLAPSED_PX,
+  DESCRIPTION_FADE_PX,
+  DESCRIPTION_FONT_PX,
+  DESCRIPTION_LINE_HEIGHT,
+  DESCRIPTION_LINE_PX,
   conversationDiscussions,
+  descriptionIsFoldable,
   formatJobDuration,
   isNotMerged,
   isSystemOnly,
@@ -347,5 +353,31 @@ describe("comments", () => {
     expect(unresolvedThreadCount(settled)).toBe(0);
     expect(unresolvedThreadCount({ discussions: [conversation], truncated: false })).toBe(0);
     expect(unresolvedThreadCount(null)).toBe(0);
+  });
+});
+
+describe("the description's fold", () => {
+  it("the folded window and its fade are eight lines and three, of the type it sets", () => {
+    expect(DESCRIPTION_LINE_PX).toBeCloseTo(DESCRIPTION_FONT_PX * DESCRIPTION_LINE_HEIGHT);
+    expect(DESCRIPTION_COLLAPSED_PX).toBe(Math.round(DESCRIPTION_LINE_PX * 8));
+    expect(DESCRIPTION_FADE_PX).toBe(Math.round(DESCRIPTION_LINE_PX * 3));
+    // The fade covers part of the window rather than reaching past it: three of the eight.
+    expect(DESCRIPTION_FADE_PX).toBeLessThan(DESCRIPTION_COLLAPSED_PX);
+  });
+
+  it("only a description that is really longer earns a control", () => {
+    // Nothing measured yet — the fold is a constant, so the box is already the right size
+    // and only the button waits for the answer.
+    expect(descriptionIsFoldable(0)).toBe(false);
+    // Shorter than the window, and exactly the window: there is nothing behind a click.
+    expect(descriptionIsFoldable(DESCRIPTION_COLLAPSED_PX - 40)).toBe(false);
+    expect(descriptionIsFoldable(DESCRIPTION_COLLAPSED_PX)).toBe(false);
+    // Over by less than one line: a click that reveals half a line, from under a gradient
+    // covering three, costs the reader more than it saves.
+    expect(descriptionIsFoldable(DESCRIPTION_COLLAPSED_PX + DESCRIPTION_LINE_PX / 2)).toBe(false);
+    expect(descriptionIsFoldable(DESCRIPTION_COLLAPSED_PX + DESCRIPTION_LINE_PX)).toBe(false);
+    // A real document — a summary, a table and a fenced block — is folded.
+    expect(descriptionIsFoldable(DESCRIPTION_COLLAPSED_PX + DESCRIPTION_LINE_PX * 2)).toBe(true);
+    expect(descriptionIsFoldable(900)).toBe(true);
   });
 });

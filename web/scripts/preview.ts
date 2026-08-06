@@ -1922,12 +1922,32 @@ if (import.meta.main) {
         await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
         await shot(`${out}-comments-light.png`);
 
+        // The DESCRIPTION's own fold, which is how every long one opens: eight lines, the last
+        // three of them fading out, and one control under it. The fixture is a whole document —
+        // a heading, a table, a fenced block and a task list — so this is what the reader is
+        // handed before they ask for the rest. Both themes, because the gradient runs to the
+        // page's own background and a wrong token shows as a grey band over the words.
+        const description = '[data-testid="gitlab-description"]';
+        const descriptionBox = page.locator(description);
+        await descriptionBox.scrollIntoViewIfNeeded();
+        await shot(`${out}-description-folded-light.png`, description);
+        await setTheme("dark");
+        await shot(`${out}-description-folded-dark.png`, description);
+        await setTheme("light");
+
+        // And opened: the fade is gone, the control says the way back, and nothing else moved.
+        const descriptionToggle = page.locator('[data-testid="gitlab-description-toggle"]');
+        await descriptionToggle.click();
+        await page.waitForTimeout(400);
+        await shot(`${out}-description-open-light.png`, description);
+
         // The DESCRIPTION on a phone, which is the width its markdown has to survive: the
         // fixture's 3-column table and its fenced command lines are both wider than 390px, so
         // this says whether they scroll inside the description or widen the page and take the
         // Merge button off screen (see `gitlab-markdown.ts`, and the renderer's own `table`
-        // and `pre` cases).
-        await page.locator('[data-testid="gitlab-description"]').scrollIntoViewIfNeeded();
+        // and `pre` cases). It is captured OPEN — the click above left it so — because a table
+        // behind the fold says nothing about the width it needs.
+        await descriptionBox.scrollIntoViewIfNeeded();
         await page.setViewportSize({ width: 390, height: 844 });
         await page.waitForTimeout(400);
         await shot(`${out}-description-mobile-light.png`);
