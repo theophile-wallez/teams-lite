@@ -565,10 +565,14 @@ function MessageBubbleImpl(props: {
     let alive = true;
     controller.loadCustomEmoji().then((pack) => {
       if (alive) setCustomPack(pack);
+    }).catch(() => {
+      if (alive) setCustomPack([]);
     });
     const unsubscribe = controller.onCustomEmojiChange(() => {
       controller.loadCustomEmoji().then((pack) => {
         if (alive) setCustomPack(pack);
+      }).catch(() => {
+        if (alive) setCustomPack([]);
       });
     });
     return () => {

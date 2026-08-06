@@ -6327,18 +6327,33 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     case "custom_emoji_add": {
       const name = requireString(params, "name");
       const source = requireString(params, "source");
+
+      // Name shape check: mirrors custom_emoji::is_valid_name in src/custom_emoji.rs.
+      // 1..64 chars, first must be lowercase letter or digit, remaining may also be -, _, +.
+      if (
+        name.length === 0 ||
+        name.length > 64 ||
+        !/^[a-z0-9]/.test(name) ||
+        !/^[a-z0-9_+\-]+$/.test(name)
+      ) {
+        throw new Error("an emoji name may hold lowercase letters, numbers, dashes and underscores");
+      }
+
       const o = asObject(params);
       const alias_of = typeof o.alias_of === "string" ? o.alias_of : "";
       const url = typeof o.url === "string" ? o.url : "";
       const media_url = typeof o.media_url === "string" ? o.media_url : "";
-      const content_type = typeof o.content_type === "string" ? o.content_type : "";
       const data_base64 = typeof o.data_base64 === "string" ? o.data_base64 : "";
-      const width = typeof o.width === "number" ? o.width : 20;
-      const height = typeof o.height === "number" ? o.height : 20;
 
       const existing = Array.from(customEmojiPack.values());
       if (existing.some((e) => e.name === name || e.alias_of === name)) {
         throw new Error("If your emoji name is taken, choose another.");
+      }
+
+      // Exactly one source check: count the sources before handling any.
+      const sources = [alias_of, url, media_url, data_base64].filter((s) => s !== "").length;
+      if (sources !== 1) {
+        throw new Error("exactly one source must be present");
       }
 
       if (alias_of) {
@@ -6374,6 +6389,29 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
           data_base64: png.toString("base64"),
         });
       } else if (media_url) {
+        // Teams-hosted media URL check: mirrors teams_media::is_allowed_media_url.
+        // Only URLs on the backend's allowlist are accepted; this check prevents a
+        // hostile client from making the mock hand over synthesized art for a URL
+        // the backend would refuse.
+        const teamsMediaHosts = [
+          "api.asm.skype.com",
+          "api.flightproxy.teams.microsoft.com",
+          "teams.microsoft.com",
+          "statics.teams.cdn.office.net",
+          "asyncgw.teams.microsoft.com",
+        ];
+        let allowed = false;
+        try {
+          const parsed = new URL(media_url);
+          const host = parsed.hostname.toLowerCase();
+          allowed = teamsMediaHosts.some((base) => host === base || host.endsWith(`.${base}`));
+        } catch {
+          /* invalid URL */
+        }
+        if (!allowed) {
+          throw new Error("Only Teams-hosted media URLs are allowed");
+        }
+
         const hue = hashString(media_url) % 360;
         const png = solidPng(20, 20, hslToRgb(hue, 0.72, 0.52));
         customEmojiPack.set(name, {
@@ -6389,14 +6427,35 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       } else if (data_base64) {
         const bytes = Buffer.from(data_base64, "base64");
         const allowed = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+        // Magic-byte sniff: mirrors sender_icon::image_kind in src/sender_icon.rs.
+        // The GIF check requires 'GIF8' (four bytes) not just 'GIF' (three), because
+        // the backend's pattern requires it and this table must match exactly.
         let detected_type = "";
-        if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+        if (
+          bytes.length >= 8 &&
+          bytes[0] === 0x89 &&
+          bytes[1] === 0x50 &&
+          bytes[2] === 0x4e &&
+          bytes[3] === 0x47 &&
+          bytes[4] === 0x0d &&
+          bytes[5] === 0x0a &&
+          bytes[6] === 0x1a &&
+          bytes[7] === 0x0a
+        ) {
           detected_type = "image/png";
-        } else if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+        } else if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
           detected_type = "image/jpeg";
-        } else if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+        } else if (
+          bytes.length >= 4 &&
+          bytes[0] === 0x47 &&
+          bytes[1] === 0x49 &&
+          bytes[2] === 0x46 &&
+          bytes[3] === 0x38
+        ) {
           detected_type = "image/gif";
         } else if (
+          bytes.length >= 12 &&
           bytes[0] === 0x52 &&
           bytes[1] === 0x49 &&
           bytes[2] === 0x46 &&
@@ -6414,18 +6473,47 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         if (bytes.length > 128 * 1024) {
           throw new Error("an emoji must be 128 KB or smaller");
         }
+
+        // Dimension measurement: mirrors custom_emoji::measure_art, which reads them
+        // from the bytes. The mock measures width and height here instead of accepting
+        // what the client claimed, because the backend does the same and a check the
+        // mock skips is one no UI test can exercise. The dimension cap (512 px) is
+        // enforced, matching MAX_CUSTOM_EMOJI_DIMENSION.
+        let width = 0;
+        let height = 0;
+        if (detected_type === "image/png" && bytes.length >= 24) {
+          const ihdr = bytes.subarray(12, 16);
+          if (ihdr[0] === 0x49 && ihdr[1] === 0x48 && ihdr[2] === 0x44 && ihdr[3] === 0x52) {
+            width = (bytes[16]! << 24) | (bytes[17]! << 16) | (bytes[18]! << 8) | bytes[19]!;
+            height = (bytes[20]! << 24) | (bytes[21]! << 16) | (bytes[22]! << 8) | bytes[23]!;
+          }
+        } else if (detected_type === "image/gif" && bytes.length >= 10) {
+          width = bytes[6]! | (bytes[7]! << 8);
+          height = bytes[8]! | (bytes[9]! << 8);
+        } else if (detected_type === "image/jpeg") {
+          // JPEG dimension parsing is more complex; synthesize a plausible size for the mock.
+          width = 20;
+          height = 20;
+        } else if (detected_type === "image/webp") {
+          // WebP dimension parsing is more complex; synthesize a plausible size for the mock.
+          width = 20;
+          height = 20;
+        }
+
+        if (width > 512 || height > 512) {
+          throw new Error("an emoji must be 512 pixels or smaller on a side");
+        }
+
         customEmojiPack.set(name, {
           name,
           alias_of: "",
           content_type: detected_type,
-          width,
-          height,
+          width: width || 20,
+          height: height || 20,
           source,
           added_ms: Date.now(),
           data_base64,
         });
-      } else {
-        throw new Error("exactly one source must be present");
       }
       broadcast("custom_emoji_changed", {});
       return { added: true };
@@ -6442,23 +6530,143 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const o = asObject(params);
       const emoji = Array.isArray(o.emoji) ? o.emoji : [];
       let added = 0;
+      const errors: string[] = [];
+
       for (const e of emoji) {
-        if (typeof e === "object" && e && typeof e.name === "string") {
-          customEmojiPack.set(e.name, {
-            name: e.name,
-            alias_of: typeof e.alias_of === "string" ? e.alias_of : "",
-            content_type: typeof e.content_type === "string" ? e.content_type : "",
-            width: typeof e.width === "number" ? e.width : 20,
-            height: typeof e.height === "number" ? e.height : 20,
+        if (typeof e !== "object" || !e || typeof e.name !== "string") {
+          continue;
+        }
+
+        const name = e.name;
+
+        // Name shape check: same validation as custom_emoji_add.
+        if (
+          name.length === 0 ||
+          name.length > 64 ||
+          !/^[a-z0-9]/.test(name) ||
+          !/^[a-z0-9_+\-]+$/.test(name)
+        ) {
+          errors.push(`${name}: invalid name`);
+          continue;
+        }
+
+        const existing = Array.from(customEmojiPack.values());
+        if (existing.some((ex) => ex.name === name || ex.alias_of === name)) {
+          errors.push(`${name}: name taken`);
+          continue;
+        }
+
+        const alias_of = typeof e.alias_of === "string" ? e.alias_of : "";
+        const data_base64 = typeof e.data_base64 === "string" ? e.data_base64 : "";
+
+        if (alias_of && !data_base64) {
+          // Alias entry.
+          customEmojiPack.set(name, {
+            name,
+            alias_of,
+            content_type: "",
+            width: 0,
+            height: 0,
             source: "import",
             added_ms: Date.now(),
-            data_base64: typeof e.data_base64 === "string" ? e.data_base64 : "",
+            data_base64: "",
           });
           added++;
+        } else if (!alias_of && data_base64) {
+          // Art entry: validate bytes, type, size, and dimensions, exactly as custom_emoji_add does.
+          try {
+            const bytes = Buffer.from(data_base64, "base64");
+            const allowed = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+            let detected_type = "";
+            if (
+              bytes.length >= 8 &&
+              bytes[0] === 0x89 &&
+              bytes[1] === 0x50 &&
+              bytes[2] === 0x4e &&
+              bytes[3] === 0x47 &&
+              bytes[4] === 0x0d &&
+              bytes[5] === 0x0a &&
+              bytes[6] === 0x1a &&
+              bytes[7] === 0x0a
+            ) {
+              detected_type = "image/png";
+            } else if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+              detected_type = "image/jpeg";
+            } else if (
+              bytes.length >= 4 &&
+              bytes[0] === 0x47 &&
+              bytes[1] === 0x49 &&
+              bytes[2] === 0x46 &&
+              bytes[3] === 0x38
+            ) {
+              detected_type = "image/gif";
+            } else if (
+              bytes.length >= 12 &&
+              bytes[0] === 0x52 &&
+              bytes[1] === 0x49 &&
+              bytes[2] === 0x46 &&
+              bytes[3] === 0x46 &&
+              bytes[8] === 0x57 &&
+              bytes[9] === 0x45 &&
+              bytes[10] === 0x42 &&
+              bytes[11] === 0x50
+            ) {
+              detected_type = "image/webp";
+            }
+
+            if (!detected_type || !allowed.includes(detected_type)) {
+              errors.push(`${name}: not a valid image type`);
+              continue;
+            }
+
+            if (bytes.length > 128 * 1024) {
+              errors.push(`${name}: file too large`);
+              continue;
+            }
+
+            let width = 0;
+            let height = 0;
+            if (detected_type === "image/png" && bytes.length >= 24) {
+              const ihdr = bytes.subarray(12, 16);
+              if (ihdr[0] === 0x49 && ihdr[1] === 0x48 && ihdr[2] === 0x44 && ihdr[3] === 0x52) {
+                width = (bytes[16]! << 24) | (bytes[17]! << 16) | (bytes[18]! << 8) | bytes[19]!;
+                height = (bytes[20]! << 24) | (bytes[21]! << 16) | (bytes[22]! << 8) | bytes[23]!;
+              }
+            } else if (detected_type === "image/gif" && bytes.length >= 10) {
+              width = bytes[6]! | (bytes[7]! << 8);
+              height = bytes[8]! | (bytes[9]! << 8);
+            } else {
+              width = 20;
+              height = 20;
+            }
+
+            if (width > 512 || height > 512) {
+              errors.push(`${name}: dimensions too large`);
+              continue;
+            }
+
+            customEmojiPack.set(name, {
+              name,
+              alias_of: "",
+              content_type: detected_type,
+              width: width || 20,
+              height: height || 20,
+              source: "import",
+              added_ms: Date.now(),
+              data_base64,
+            });
+            added++;
+          } catch (err) {
+            errors.push(`${name}: ${err instanceof Error ? err.message : "validation failed"}`);
+          }
+        } else {
+          errors.push(`${name}: must have exactly one of alias_of or data_base64`);
         }
       }
+
       if (added > 0) broadcast("custom_emoji_changed", {});
-      return { added };
+      return { added, errors };
     }
 
     // ---- push notifications ------------------------------------------------

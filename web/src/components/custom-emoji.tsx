@@ -100,6 +100,8 @@ export function PackEmoji(props: { name: string; className?: string }) {
     let alive = true;
     void controller.customEmojiUrl(props.name).then((resolved) => {
       if (alive) setUrl(resolved);
+    }).catch(() => {
+      if (alive) setUrl(null);
     });
     return () => {
       alive = false;
