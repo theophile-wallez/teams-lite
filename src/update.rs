@@ -8,8 +8,13 @@
 // running?" If so, a newer build exists.
 //
 // It lives in the backend, not the UI, because the UI never touches the network
-// (local-first is enforced server-side). The server runs the check once at startup,
-// best-effort, and pushes an `update_available` event to the UI.
+// (local-first is enforced server-side). The server POLLS it — `spawn_release_poll`, every
+// RELEASE_CHECK_INTERVAL for the whole life of the process, best-effort — and pushes an
+// `update_available` event to the UI when the answer changes. It used to ask once at
+// startup, which meant an app left open for weeks never learned about anything published
+// after it booted: the only reliable way to be offered an update was to restart the app the
+// button exists to restart. The request is claimed through the store so it stays ONE per
+// machine (see `GITHUB_HOURLY_REQUESTS`, which is why that matters).
 //
 // The check's network call is deliberately unwrapped from the shared retry policy:
 // an update check is a nicety, not core function — a single attempt that fails
@@ -54,6 +59,20 @@ pub const ASSET_NAME: &str = "teams-linux-x64";
 /// never hold anything up, so this is short.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// What GitHub's REST API allows an UNAUTHENTICATED caller, per hour and per IP.
+///
+/// Measured against this repository on 2026-08-06, because the number decides how often
+/// the release may be polled: the response says `x-ratelimit-limit: 60`, and a conditional
+/// request buys nothing — an `If-None-Match` that answered `304` still moved
+/// `x-ratelimit-used` from 2 to 3 to 4 on three successive requests. So the budget is 60
+/// requests an hour for everything this app asks GitHub: the poll, the compare API behind
+/// the changelog, and the re-read before every download.
+///
+/// It is a shared budget per MACHINE (an IP), which is why the poll is claimed through the
+/// store rather than run per backend — see `Store::claim_release_check` and
+/// `RELEASE_CHECK_INTERVAL` in src/bin/server.rs.
+pub const GITHUB_HOURLY_REQUESTS: u32 = 60;
+
 /// How long the DOWNLOAD may take. Generous next to the check: it is 130 MB the user
 /// asked for and is watching a progress bar of, on whatever connection a phone-facing
 /// machine has. Long enough to be irrelevant on any working link, short enough that a
@@ -95,11 +114,37 @@ pub struct UpdateInfo {
 /// rolling tag that CI republishes on every push, so this size stops matching the file
 /// behind that URL the next time the project ships. Read it again before a download —
 /// never compare a transfer against a number an earlier check remembered.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Asset {
     pub url: String,
     pub size: u64,
 }
+
+/// The published `latest` release, as a fact about the REPOSITORY rather than about any
+/// one build: the commit it was made from, its page, and the binary on it.
+///
+/// It is separate from [`UpdateInfo`] because the two have different owners. This is what
+/// GitHub says and it is the same answer for every process on a machine — so it is read
+/// ONCE per machine and shared through the store (see `SETTING_RELEASE`), which is what
+/// keeps a two-minute poll inside GitHub's 60-requests-an-hour budget for an unauthenticated
+/// caller. `UpdateInfo` is the comparison against ONE build, which is local, free, and
+/// different for the staged pair and the released build running beside it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Release {
+    /// The commit the release was built from, full length and lowercase.
+    pub rev: String,
+    pub url: String,
+    pub asset: Option<Asset>,
+}
+
+/// Where the machine's last release read is kept, so every backend sharing this store
+/// learns what `latest` names without asking GitHub itself.
+pub const SETTING_RELEASE: &str = "release_latest";
+
+/// When the machine last ASKED (epoch ms). It is the claim as well as the record: the
+/// backend that moves it is the one that fetches, which is what makes the poll one
+/// request per machine rather than one per backend (see `Store::claim_release_check`).
+pub const SETTING_RELEASE_CHECKED_MS: &str = "release_checked_ms";
 
 /// The commit this binary was built from, or `None` for a dev build.
 ///
@@ -119,9 +164,27 @@ pub fn build_rev() -> Option<&'static str> {
 /// Returns `Ok(Some(info))` when the published `latest` release was built from a
 /// different commit, `Ok(None)` when up to date (or the remote commit could not
 /// be determined), and `Err` only on a network/HTTP failure the caller should
-/// swallow. The `http` client is reused from the backend (it already carries a
-/// User-Agent, which the GitHub API requires).
+/// swallow.
+///
+/// One request and one comparison, for the caller that needs both at once: a download,
+/// which must read the release again before it trusts a size. The repeating POLL uses the
+/// two halves apart — [`fetch_release`] once per machine, [`compare`] in every backend —
+/// because the request is the scarce half.
 pub async fn check(http: &reqwest::Client, current_rev: &str) -> Result<Option<UpdateInfo>> {
+    Ok(fetch_release(http).await?.as_ref().and_then(|r| compare(r, current_rev)))
+}
+
+/// Ask GitHub what the rolling `latest` release is now. The network half, and the only
+/// half that costs anything.
+///
+/// `Ok(None)` means GitHub answered but the release's commit could not be identified —
+/// never a guess, because a wrong answer here is a false alarm on every client. `Err` is a
+/// network or HTTP failure the caller swallows; the API answers `403` once this IP has
+/// spent its hour, which is why the poll is shared rather than made per backend.
+///
+/// The `http` client is reused from the backend (it already carries a User-Agent, which
+/// the GitHub API requires).
+pub async fn fetch_release(http: &reqwest::Client) -> Result<Option<Release>> {
     let api = format!("https://api.github.com/repos/{REPO}/releases/tags/latest");
     let resp = http
         .get(&api)
@@ -147,22 +210,28 @@ pub async fn check(http: &reqwest::Client, current_rev: &str) -> Result<Option<U
         .map(str::to_string)
         .unwrap_or_else(|| format!("https://github.com/{REPO}/releases/latest"));
 
-    let Some(latest) = parse_release_rev(target, notes) else {
+    let Some(rev) = parse_release_rev(target, notes) else {
         // We reached GitHub but couldn't identify the release's commit. Don't
         // guess — say "no update" rather than risk a false alarm.
         return Ok(None);
     };
 
-    if is_update(current_rev, &latest) {
-        Ok(Some(UpdateInfo {
-            current: short_rev(current_rev),
-            latest: short_rev(&latest),
-            url: html_url,
-            asset: parse_asset(body.get("assets")),
-        }))
-    } else {
-        Ok(None)
-    }
+    Ok(Some(Release { rev, url: html_url, asset: parse_asset(body.get("assets")) }))
+}
+
+/// Is this release a newer build than `current_rev`? The comparison half: pure, free, and
+/// answered per BACKEND, because two installs on one machine run different commits.
+///
+/// `None` means this build IS the release (or there is nothing to compare against, for a
+/// build made from source) — never a nag without a real comparison, which is
+/// [`is_update`]'s own rule.
+pub fn compare(release: &Release, current_rev: &str) -> Option<UpdateInfo> {
+    is_update(current_rev, &release.rev).then(|| UpdateInfo {
+        current: short_rev(current_rev),
+        latest: short_rev(&release.rev),
+        url: release.url.clone(),
+        asset: release.asset.clone(),
+    })
 }
 
 /// Read the commits between two builds — what the update would actually bring.
@@ -574,6 +643,55 @@ mod tests {
     #[test]
     fn is_update_same_commit_is_not_an_update() {
         assert!(!is_update(SHA_A, SHA_A));
+    }
+
+    /// The comparison is the FREE half, and it is per build.
+    ///
+    /// One machine runs two installs on one commit each, so the release is fetched once and
+    /// compared twice. Splitting it out is what lets the poll cost one request whatever the
+    /// number of backends — and it makes the answer testable with no network at all.
+    #[test]
+    fn a_release_is_compared_against_each_build_without_a_request() {
+        let release = Release {
+            rev: SHA_B.to_string(),
+            url: "https://github.com/o/r/releases/tag/latest".to_string(),
+            asset: Some(Asset { url: "https://example.invalid/teams".to_string(), size: 7 }),
+        };
+
+        // A build the release moved away from: an update, named by both short revs, and
+        // carrying the asset a download needs.
+        let info = compare(&release, SHA_A).expect("a different commit is an update");
+        assert_eq!(info.current, SHA_A[..7]);
+        assert_eq!(info.latest, SHA_B[..7]);
+        assert_eq!(info.url, release.url);
+        assert_eq!(info.asset, release.asset);
+
+        // The build the release IS — including its short form, which is what a stored
+        // `latest` from an older payload looks like. Never a nag against oneself.
+        assert!(compare(&release, SHA_B).is_none());
+        assert!(compare(&release, &SHA_B[..7]).is_none());
+        // And never a nag with nothing to compare against (a build made from source).
+        assert!(compare(&release, "").is_none());
+    }
+
+    /// A `Release` survives the store round trip, because that is how one backend's answer
+    /// reaches the others. An older shape must be readable or the poll would re-fetch
+    /// every pass; a shape it cannot read is treated as no answer, never guessed at.
+    #[test]
+    fn a_release_travels_through_the_store_as_json() {
+        let release = Release {
+            rev: SHA_A.to_string(),
+            url: "https://example.invalid/releases".to_string(),
+            asset: Some(Asset { url: "https://example.invalid/a".to_string(), size: 130 }),
+        };
+        let json = serde_json::to_string(&release).expect("a release serializes");
+        assert_eq!(serde_json::from_str::<Release>(&json).unwrap(), release);
+
+        // A release with no binary for this machine is a real state, not a parse failure:
+        // the notice stays a link.
+        let linkless = Release { asset: None, ..release };
+        let json = serde_json::to_string(&linkless).unwrap();
+        assert_eq!(serde_json::from_str::<Release>(&json).unwrap(), linkless);
     }
 
     #[test]

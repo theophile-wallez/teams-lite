@@ -439,6 +439,21 @@ const PRESENCE_HEARTBEAT: Duration = Duration::from_secs(120);
 /// arrives too often costs one request; one that arrives too late drops the call.
 const CALL_KEEPALIVE: Duration = Duration::from_secs(20);
 
+/// How often this MACHINE asks GitHub what the rolling `latest` release names.
+///
+/// Two minutes, so an app somebody left open on a phone offers a build within two minutes
+/// of CI publishing it — the check used to run once at startup, and an app that is never
+/// restarted never saw a release again.
+///
+/// The number is bounded from below by a MEASURED budget: GitHub allows an unauthenticated
+/// caller 60 requests an hour per IP, and a conditional request buys nothing (a `304` was
+/// measured still spending one). Two minutes is 30 an hour, which is half the budget — and
+/// it stays 30 however many backends this machine runs, because the fetch is claimed
+/// through the store (`Store::claim_release_check`). Shortening it eats the half that
+/// downloads and the compare API live on; a `403` there has no symptom except an update
+/// button that stops appearing.
+const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(120);
+
 /// The systemd unit that repairs the broker by restarting the Intune container.
 /// Never run `intune-container` from here: one unit keeps the rate limit in one
 /// place, counted across the health timer, this backend and the in-app button.
@@ -1074,8 +1089,8 @@ struct Ctx {
     events: broadcast::Sender<Value>,
     /// Everything known about a newer release: whether there is one, and how far the
     /// user has taken installing it. Cached rather than only broadcast, because a UI
-    /// connects at any moment — after the one-shot check fired, or in the middle of a
-    /// download it has to draw a progress bar for. See {@link UpdateSlot}.
+    /// connects at any moment — between two passes of the release poll, or in the middle of
+    /// a download it has to draw a progress bar for. See {@link UpdateSlot}.
     update: Arc<std::sync::Mutex<UpdateSlot>>,
     /// Mail folders the live poll watches (see `spawn_mail_sync`). Seeded with the
     /// inbox and extended whenever a UI opens a folder, so the poll costs one
@@ -1497,9 +1512,9 @@ impl Ctx {
     /// install can replace itself.
     ///
     /// The one place the `update_available` payload is spelled, because it is published
-    /// from two: the check at startup, and every download — which re-reads the release
-    /// first, and must correct the size the button draws its bar against when the answer
-    /// moved (see `refresh_release`).
+    /// from two: the release poll (see `Ctx::poll_release`), and every download — which
+    /// re-reads the release first, and must correct the size the button draws its bar
+    /// against when the answer moved (see `refresh_release`).
     fn publish_release(&self, info: &teams_lite::update::UpdateInfo) -> bool {
         // What the button needs beyond the two commits: how big the download is (so the
         // bar has a total from the first frame), and whether THIS install can replace
@@ -2375,8 +2390,9 @@ async fn main() -> Result<()> {
     clear_dead_agent_run_markers();
     spawn_agent_run_repair(ctx.clone());
 
-    // one-shot, best-effort: is a newer rolling `latest` build available?
-    spawn_update_check(ctx.clone());
+    // best-effort, and for the whole life of the process: has the rolling `latest` tag
+    // moved off this build? An app left open for weeks has to be able to notice.
+    spawn_release_poll(ctx.clone());
 
     eprintln!("[ok] server ws://{addr} — ready");
     // Read once at boot: a machine that answers a chat message with the user's own
@@ -6703,28 +6719,84 @@ fn spawn_presence_heartbeat(ctx: Ctx) {
     });
 }
 
-/// Check GitHub once, in the background, for a newer rolling `latest` release
-/// than the commit this binary was built from, and tell the UI if there is one.
+/// Watch the rolling `latest` release for the whole life of the process, and tell the UI
+/// when it names a commit this build is not.
 ///
-/// Best-effort by design: a dev build (no embedded commit), no network, or a
-/// rate-limited API all end the check quietly — it must never affect startup or
-/// the running app. On a hit we cache the payload (so UIs that connect later
-/// still learn about it, see `serve_conn`) and broadcast it to any UI already
-/// connected.
-fn spawn_update_check(ctx: Ctx) {
+/// **It repeats, and that is the feature.** It used to run exactly once, at startup, which
+/// meant an app left open — which is what this app is, on a phone, for weeks — never
+/// learned about anything CI published after it booted. The update button appeared only if
+/// a release happened to be newer at the moment the backend came up, so the usual way to
+/// see one was to restart the thing the button exists to restart.
+///
+/// Best-effort by design: a dev build (no embedded commit), no network, or a rate-limited
+/// API all end a pass quietly — it must never affect startup or the running app.
+fn spawn_release_poll(ctx: Ctx) {
     let Some(current) = teams_lite::update::build_rev() else {
         // Built from source: nothing meaningful to compare against, so we never
         // nag developers running a local build.
         return;
     };
     tokio::spawn(async move {
-        match teams_lite::update::check(&ctx.http, current).await {
-            Ok(Some(info)) => {
+        // `interval` fires its first tick immediately, so the startup check this replaces
+        // still happens at startup.
+        let mut ticks = tokio::time::interval(RELEASE_CHECK_INTERVAL);
+        loop {
+            ticks.tick().await;
+            ctx.poll_release(current).await;
+        }
+    });
+}
+
+impl Ctx {
+    /// One pass of the release watch: read what `latest` names, compare it with this
+    /// build, and publish only what CHANGED.
+    ///
+    /// Three rules, and each is pinned by a test:
+    ///
+    ///   * **One request per MACHINE, not per backend.** The answer is the same for every
+    ///     process here, so it is fetched under a claim and shared through the store
+    ///     ([`Store::claim_release_check`], which carries the measured budget this obeys).
+    ///     A backend that loses the claim still learns the new release on this same pass,
+    ///     because it reads the stored answer rather than its own.
+    ///   * **Silence unless something moved.** A client hears `update_available` when the
+    ///     release changes and never on a pass that found the same one, so a page open for
+    ///     a week is not sent one event every two minutes — and the journal keeps one line
+    ///     per release rather than 720 a day.
+    ///   * **A download owns the payload while it runs.** Every phase but `Idle` means the
+    ///     user has pressed something, and the asset a bar is drawn against is re-read by
+    ///     the download itself (`refresh_release`). A poll that overwrote it mid-transfer
+    ///     would move the total under the bar.
+    async fn poll_release(&self, current: &str) {
+        if !matches!(self.with_update(|slot| slot.phase), Ok(UpdatePhase::Idle)) {
+            return;
+        }
+        // A read-only backend never takes the claim: it is a screenshot backend, it cannot
+        // install anything, and holding the machine's slot would delay by up to one
+        // interval the discovery by the app that CAN act on it. It still reads the stored
+        // answer, so its UI says what the app's does.
+        if !read_only() && self.claim_release_read() {
+            match teams_lite::update::fetch_release(&self.http).await {
+                Ok(Some(release)) => self.remember_release(&release),
+                // GitHub answered and named no commit we could read: nothing to store, and
+                // the previous answer stands rather than being erased by an unreadable one.
+                Ok(None) => {}
+                // Reached-but-failed or offline. One line, never surfaced to the user —
+                // and never a reason to drop what we already knew.
+                Err(e) => eprintln!("[update] check skipped: {e}"),
+            }
+        }
+        let Some(release) = self.stored_release() else { return };
+        match teams_lite::update::compare(&release, current) {
+            Some(info) => {
+                let known = self.with_update(|slot| slot.latest.clone()).unwrap_or_default();
+                if known == info.latest {
+                    return;
+                }
                 // What it brings, before it is announced: the payload is spelled once, in
                 // `publish_release`, so the list has to be known by the time it runs or the
                 // first thing every client hears would carry no list.
-                ctx.learn_release_changes(&info).await;
-                let installable = ctx.publish_release(&info);
+                self.learn_release_changes(&info).await;
+                let installable = self.publish_release(&info);
                 eprintln!(
                     "[update] a newer build is available ({} -> {}){}",
                     info.current,
@@ -6736,14 +6808,52 @@ fn spawn_update_check(ctx: Ctx) {
                     }
                 );
             }
-            // Up to date, or the remote commit couldn't be identified: say nothing — and
-            // drop any build left in the cache, since being current is exactly what makes
-            // a downloaded one worthless (a successful update ends here).
-            Ok(None) => teams_lite::update::discard_downloads(),
-            // Reached-but-failed or offline: log once, never surface to the user.
-            Err(e) => eprintln!("[update] check skipped: {e}"),
+            // This build IS the release. Empty the row if it was offering one — the user
+            // updated on another install, or CI moved the tag back onto this commit — but
+            // stay SILENT when it was not, or an up-to-date app would be sent a null every
+            // two minutes.
+            //
+            // The discard is unconditional even so, and deliberately: being current is
+            // exactly what makes a downloaded build worthless, and the one left in the cache
+            // may have been downloaded by an EARLIER process, which this slot knows nothing
+            // about. Removing a directory that is not there costs one failed syscall.
+            None => {
+                if self.with_update(|slot| slot.available.is_some()).unwrap_or(false) {
+                    self.forget_release();
+                } else {
+                    teams_lite::update::discard_downloads();
+                }
+            }
         }
-    });
+    }
+
+    /// Take the machine's release-check slot, or find that another backend has it.
+    /// A store that cannot answer is read as "not ours", so a failure costs one pass
+    /// rather than turning the poll into a per-backend one.
+    fn claim_release_read(&self) -> bool {
+        let now = now_ms();
+        self.store()
+            .and_then(|store| {
+                store.claim_release_check(now, now - RELEASE_CHECK_INTERVAL.as_millis() as i64)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Write the machine's answer down, for every other backend's next pass.
+    fn remember_release(&self, release: &teams_lite::update::Release) {
+        if let (Ok(json), Ok(store)) = (serde_json::to_string(release), self.store()) {
+            let _ = store.set_setting(teams_lite::update::SETTING_RELEASE, &json);
+        }
+    }
+
+    /// The machine's last answer, whoever fetched it. `None` before the first successful
+    /// read, and on a stored value this build cannot parse — an older shape is treated as
+    /// no answer rather than guessed at.
+    fn stored_release(&self) -> Option<teams_lite::update::Release> {
+        let stored =
+            self.store().ok()?.get_setting(teams_lite::update::SETTING_RELEASE).ok()??;
+        serde_json::from_str(&stored).ok()
+    }
 }
 
 // ---- push notifications --------------------------------------------------------
@@ -9888,6 +9998,84 @@ mod tests {
             stale_ms >= 4 * AGENT_STREAM_KEEPALIVE.as_millis(),
             "{stale_ms} ms is under four keepalives"
         );
+    }
+
+    /// The release poll must fit inside GitHub's own hourly budget, with room to spare.
+    ///
+    /// The two numbers only mean something together: `GITHUB_HOURLY_REQUESTS` is what a
+    /// measurement said an unauthenticated caller gets per IP, and this interval is how
+    /// often this machine spends one. Half is the ceiling because the poll is not the only
+    /// thing that asks — the compare API behind the changelog, and the re-read before every
+    /// download attempt, come out of the same 60 — and a `403` costs the update button with
+    /// no visible symptom at all.
+    #[test]
+    fn the_release_poll_spends_at_most_half_of_githubs_hourly_budget() {
+        let per_hour = 3600 / RELEASE_CHECK_INTERVAL.as_secs();
+        assert!(
+            per_hour <= u64::from(teams_lite::update::GITHUB_HOURLY_REQUESTS) / 2,
+            "{per_hour} requests an hour leaves too little of GitHub's {} for the compare \
+             API and for downloads",
+            teams_lite::update::GITHUB_HOURLY_REQUESTS
+        );
+        // And it must stay a POLL: an interval measured in hours would be back to the
+        // startup-only check this replaced, where an app left open never saw a release.
+        assert!(
+            RELEASE_CHECK_INTERVAL <= Duration::from_secs(10 * 60),
+            "an app left open has to notice a release within minutes"
+        );
+    }
+
+    /// The poll asks once per MACHINE, and speaks only when something moved.
+    ///
+    /// Scanned rather than run, because the pass is a loop over the network and the store:
+    /// what has to hold is the ORDER of its guards, and each one costs something real if it
+    /// goes. The claim keeps two installs from spending the budget twice; the read-only
+    /// exclusion keeps a screenshot backend from holding the slot the app needs; the
+    /// phase check keeps a pass from moving the asset under a progress bar; and the
+    /// comparison against what is already published is what stops a page open for a week
+    /// from being sent an event every two minutes.
+    #[test]
+    fn the_release_poll_shares_one_request_and_speaks_only_on_a_change() {
+        let source = include_str!("server.rs");
+        let pass = source
+            .split("    async fn poll_release(")
+            .nth(1)
+            .expect("the poll's own pass")
+            .split("\n    /// Take the machine's release-check slot")
+            .next()
+            .expect("the pass ends before the next method");
+
+        for (needle, why) in [
+            (
+                "slot.phase",
+                "a pass must stand aside for a download: it owns the asset the bar is \
+                 drawn against",
+            ),
+            (
+                "!read_only() && self.claim_release_read()",
+                "the claim must be taken before the fetch, and never by a read-only \
+                 backend — it cannot install anything and would hold the machine's slot",
+            ),
+            (
+                "self.stored_release()",
+                "a backend that lost the claim must read the machine's answer, or it would \
+                 learn nothing until it won one",
+            ),
+            (
+                "known == info.latest",
+                "an unchanged release must be silent, or every client is sent an event \
+                 every interval for ever",
+            ),
+        ] {
+            assert!(pass.contains(needle), "{why} (looked for `{needle}`)");
+        }
+
+        // The fetch happens inside the claim, never beside it. Read positionally, because
+        // that ordering IS the budget: a fetch above the claim would spend a request per
+        // backend and the claim would only decide who writes the answer down.
+        let claim = pass.find("claim_release_read()").expect("the claim");
+        let fetch = pass.find("update::fetch_release(").expect("the fetch");
+        assert!(claim < fetch, "the request must happen under the claim, not beside it");
     }
 
     #[test]

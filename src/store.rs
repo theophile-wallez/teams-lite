@@ -3612,6 +3612,37 @@ impl Store {
         )? > 0)
     }
 
+    /// Claim the machine's next release check, so ONE backend asks GitHub and the others
+    /// read its answer.
+    ///
+    /// `true` means "you fetch"; `false` means another backend on this store asked recently
+    /// enough. The claim is the write itself — SQLite arbitrates, so there is no window
+    /// between reading the timestamp and taking it, exactly as [`Store::claim_once`] leans
+    /// on a primary key.
+    ///
+    /// It exists because of a measured budget, not a hunch: GitHub allows an
+    /// unauthenticated caller **60 requests an hour per IP**, and a conditional request
+    /// does not help — a `304` was measured on this repository still spending one. A
+    /// two-minute poll is 30 an hour, so one poll per machine leaves half the budget for
+    /// the compare API and for downloads, while a poll per BACKEND would spend the lot on
+    /// this machine's two installs and then fail `403` — with no symptom beyond an update
+    /// button that quietly stops appearing.
+    ///
+    /// Unlike a `push_deliveries` key this claim is a moving timestamp, because the thing
+    /// being claimed comes round again every interval.
+    pub fn claim_release_check(&self, now_ms: i64, not_asked_since_ms: i64) -> Result<bool> {
+        Ok(self.exec(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = ?2
+             WHERE CAST(settings.value AS INTEGER) <= ?3",
+            params![
+                crate::update::SETTING_RELEASE_CHECKED_MS,
+                now_ms.to_string(),
+                not_asked_since_ms
+            ],
+        )? > 0)
+    }
+
     /// Record a run as in flight, from the moment its placeholder is in the thread.
     ///
     /// Replaces any row on the same message: a re-registration is the same run saying
@@ -7259,6 +7290,35 @@ mod tests {
         // Pruned claims are re-claimable, which is fine: every policy refuses a
         // message that old anyway.
         assert!(s.claim_once("c1/m1", 2_000).unwrap());
+    }
+
+    #[test]
+    fn one_backend_an_interval_asks_github_what_latest_names() {
+        // Every backend on this machine polls, and GitHub allows 60 requests an hour per
+        // IP — so the REQUEST is claimed and the answer is shared. Without this the two
+        // installs here would spend the whole budget between them and then be refused,
+        // which looks exactly like an update button that stopped working.
+        let s = Store::open_in_memory().unwrap();
+        let interval = 120_000;
+        let now = 10_000_000;
+
+        // Nothing has ever asked: the first backend to arrive takes it.
+        assert!(s.claim_release_check(now, now - interval).unwrap());
+        // Its neighbours, in the same pass, are refused — one request, not three.
+        assert!(!s.claim_release_check(now, now - interval).unwrap());
+        assert!(!s.claim_release_check(now + 1, now + 1 - interval).unwrap());
+        // Inside the interval, still refused. The stored answer is what they read instead.
+        assert!(!s.claim_release_check(now + interval - 1, now - 1).unwrap());
+        // And it comes round: the claim is a moving timestamp, not a key taken for good.
+        assert!(s.claim_release_check(now + interval, now).unwrap());
+
+        // The winner's own timestamp is what the next pass is measured against, so a
+        // backend that crashed between claiming and fetching costs one interval and never
+        // the poll itself.
+        assert_eq!(
+            s.get_setting(crate::update::SETTING_RELEASE_CHECKED_MS).unwrap().as_deref(),
+            Some((now + interval).to_string().as_str())
+        );
     }
 
     fn a_run(message_id: &str, heartbeat_ms: i64) -> AgentRun {

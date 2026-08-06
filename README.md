@@ -115,10 +115,11 @@ The installer drops the binary in `~/.teams-lite/bin` (override with
 `TEAMS_LITE_HOME`) and links it onto your `PATH` when it can.
 
 **Staying up to date takes two clicks.** There is no version number — every push to
-master publishes a rolling `latest` build — so the app checks once at startup whether a
-newer commit is published and, if it is, offers it as a button at the bottom of the
-sidebar: press it to download the new build (it shows the progress), press it again to
-install it and restart onto it. Nothing downloads on its own, and re-running the
+master publishes a rolling `latest` build — so the app watches for a newer commit every
+two minutes and, when one is published, offers it as a button at the bottom of the sidebar:
+press it to download the new build (it shows the progress), press it again to install it
+and restart onto it. You do not have to restart the app to be offered an update, which is
+what it used to take. Nothing downloads on its own, and re-running the
 installer above still works exactly as before.
 
 The app itself is a [TanStack Start](https://tanstack.com/start) app (server-side

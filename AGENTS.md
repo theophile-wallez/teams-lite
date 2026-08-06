@@ -2105,9 +2105,41 @@ send-capable port they do not know is a hole in the guard.
 
 There is no version number: teams-lite ships as a ROLLING `latest` GitHub release, so a
 build IS the commit it was compiled from (`TEAMS_BUILD_REV`, baked by build.rs). The
-backend checks once at startup whether `latest` names a different commit and, if it does,
-the sidebar offers the update as a blue button above the status line
+backend WATCHES whether `latest` names a different commit and, when it does, the sidebar
+offers the update as a blue button above the status line
 (`web/src/components/update-button.tsx`, over the pure `web/src/lib/update.ts`).
+
+**The watch is a POLL, every two minutes, and one request per MACHINE**
+(`spawn_release_poll` / `Ctx::poll_release`, over `RELEASE_CHECK_INTERVAL`). It used to be a
+single check at startup, and that was wrong for the app this is: it runs for weeks on a
+phone, so nothing published after it booted was ever offered — the reliable way to be shown
+an update was to restart the app the button exists to restart. Four rules hold it, and each
+is pinned by a test:
+
+- **The budget is MEASURED, and it sets the floor on the interval.** GitHub allows an
+  unauthenticated caller **60 requests an hour per IP** (`update::GITHUB_HOURLY_REQUESTS`),
+  and a conditional request buys nothing — an `If-None-Match` answering `304` was measured
+  still spending one, so an ETag is not the way out. Two minutes is 30 an hour, half the
+  budget, and the other half belongs to the compare API behind the changelog and to the
+  re-read before every download.
+- **One request per machine, not per backend.** The answer is the same for every process
+  here, so the FETCH is claimed (`Store::claim_release_check`, a moving timestamp rather than
+  a `push_deliveries` key, because the thing being claimed comes round again) and the answer
+  is shared through the store (`update::SETTING_RELEASE`). A backend that loses the claim
+  reads that answer on the same pass, so it learns about a release just as quickly without
+  asking. This machine runs three send-capable backends: a poll per backend would spend the
+  whole budget and then be refused `403`, whose only symptom is an update button that stops
+  appearing. The split that makes it possible is `update::fetch_release` (the network half,
+  machine-wide) beside `update::compare` (pure, per build — two installs here run two
+  different commits).
+- **A read-only backend never takes the claim.** It cannot install anything, and holding the
+  machine's slot would delay by up to one interval the discovery by the app that can. It
+  still reads the stored answer, so its UI says what the app's does.
+- **Silence unless something moved.** `update_available` goes out when the release CHANGES
+  and never on a pass that found the same one, so a page open for a week is not sent an event
+  every two minutes and the journal keeps one line per release rather than 720 a day. A pass
+  also stands aside whenever the phase is not `Idle`: the user has pressed something, and the
+  asset a progress bar is drawn against is the download's own (`refresh_release`).
 
 **Every build publishes TWO releases, and each answers what the other cannot**
 (`.github/workflows/build.yml`). `build-<shortsha>` is immutable, one per commit, and kept
