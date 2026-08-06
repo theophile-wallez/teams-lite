@@ -5226,20 +5226,104 @@ function dispatch(method: string, params: unknown): unknown {
       const source = requireString(params, "source");
       const o = asObject(params);
       const alias_of = typeof o.alias_of === "string" ? o.alias_of : "";
+      const url = typeof o.url === "string" ? o.url : "";
+      const media_url = typeof o.media_url === "string" ? o.media_url : "";
       const content_type = typeof o.content_type === "string" ? o.content_type : "";
       const data_base64 = typeof o.data_base64 === "string" ? o.data_base64 : "";
       const width = typeof o.width === "number" ? o.width : 20;
       const height = typeof o.height === "number" ? o.height : 20;
-      customEmojiPack.set(name, {
-        name,
-        alias_of,
-        content_type,
-        width,
-        height,
-        source,
-        added_ms: Date.now(),
-        data_base64,
-      });
+
+      const existing = Array.from(customEmojiPack.values());
+      if (existing.some((e) => e.name === name || e.alias_of === name)) {
+        throw new Error("If your emoji name is taken, choose another.");
+      }
+
+      if (alias_of) {
+        customEmojiPack.set(name, {
+          name,
+          alias_of,
+          content_type: "",
+          width: 0,
+          height: 0,
+          source,
+          added_ms: Date.now(),
+          data_base64: "",
+        });
+      } else if (url) {
+        let host = "";
+        try {
+          const parsed = new URL(url);
+          host = parsed.hostname;
+        } catch {
+          throw new Error("URL has no host");
+        }
+        const domain = registrableDomain(host);
+        const hue = hashString(url) % 360;
+        const png = solidPng(20, 20, hslToRgb(hue, 0.72, 0.52));
+        customEmojiPack.set(name, {
+          name,
+          alias_of: "",
+          content_type: "image/png",
+          width: 20,
+          height: 20,
+          source: `url:${domain}`,
+          added_ms: Date.now(),
+          data_base64: png.toString("base64"),
+        });
+      } else if (media_url) {
+        const hue = hashString(media_url) % 360;
+        const png = solidPng(20, 20, hslToRgb(hue, 0.72, 0.52));
+        customEmojiPack.set(name, {
+          name,
+          alias_of: "",
+          content_type: "image/png",
+          width: 20,
+          height: 20,
+          source: "message",
+          added_ms: Date.now(),
+          data_base64: png.toString("base64"),
+        });
+      } else if (data_base64) {
+        const bytes = Buffer.from(data_base64, "base64");
+        const allowed = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+        let detected_type = "";
+        if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+          detected_type = "image/png";
+        } else if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+          detected_type = "image/jpeg";
+        } else if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+          detected_type = "image/gif";
+        } else if (
+          bytes[0] === 0x52 &&
+          bytes[1] === 0x49 &&
+          bytes[2] === 0x46 &&
+          bytes[3] === 0x46 &&
+          bytes[8] === 0x57 &&
+          bytes[9] === 0x45 &&
+          bytes[10] === 0x42 &&
+          bytes[11] === 0x50
+        ) {
+          detected_type = "image/webp";
+        }
+        if (!detected_type || !allowed.includes(detected_type)) {
+          throw new Error("an emoji must be a PNG, JPEG, GIF or WebP image");
+        }
+        if (bytes.length > 128 * 1024) {
+          throw new Error("an emoji must be 128 KB or smaller");
+        }
+        customEmojiPack.set(name, {
+          name,
+          alias_of: "",
+          content_type: detected_type,
+          width,
+          height,
+          source,
+          added_ms: Date.now(),
+          data_base64,
+        });
+      } else {
+        throw new Error("exactly one source must be present");
+      }
       broadcast("custom_emoji_changed", {});
       return { added: true };
     }
