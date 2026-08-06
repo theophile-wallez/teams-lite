@@ -4,6 +4,8 @@ import {
   gitlabPageUrl,
   MERGE_REQUEST_PAGES,
   mergeRequestPageEntry,
+  mergeRequestPagePanel,
+  mergeRequestPageTabId,
   unbuiltMergeRequestPage,
   type MergeRequestPage,
 } from "./gitlab-mr-pages";
@@ -74,5 +76,21 @@ describe("the pages of a merge request", () => {
     for (const page of pages) {
       expect(mergeRequestPageEntry(page).page).toBe(page);
     }
+  });
+
+  it("pairs every tab with the panel it really controls", () => {
+    // The strip is the app's own `Tabs` primitive, so each trigger points `aria-controls` at a
+    // panel id — and that id has to be the one the page's content carries, or the promise is a
+    // dangling reference. The two halves are spelled here so they cannot drift.
+    const pages: MergeRequestPage[] = ["overview", "commits", "pipelines", "diffs"];
+    const ids = new Set<string>();
+    for (const page of pages) {
+      const panel = mergeRequestPagePanel(page);
+      expect(panel.role).toBe("tabpanel");
+      expect(panel["aria-labelledby"]).toBe(mergeRequestPageTabId(page));
+      ids.add(panel.id);
+    }
+    // One id per page: two pages sharing one would point two tabs at one panel.
+    expect(ids.size).toBe(pages.length);
   });
 });

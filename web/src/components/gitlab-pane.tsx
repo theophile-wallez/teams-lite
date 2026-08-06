@@ -38,6 +38,7 @@ import {
   type GitLabPerson,
   type MergeRequestDetail,
 } from "~/lib/gitlab-mr";
+import { mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
 import { personFace } from "~/lib/tracker-people";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
@@ -192,7 +193,12 @@ export function GitLabPane(props: {
            drawn blank — which reads as a read that failed. */
         <UnbuiltMergeRequestPage page={page} webUrl={detail?.web_url} />
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6">
+        // The Overview's own content IS the panel the strip's first tab controls, so it
+        // carries that tab's id (see `mergeRequestPagePanel`).
+        <div
+          {...mergeRequestPagePanel("overview")}
+          className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6"
+        >
           <article className="mx-auto flex w-full max-w-3xl flex-col gap-5">
             {error && !detail ? (
               <p data-testid="gitlab-detail-error" className="text-[13px] text-destructive">

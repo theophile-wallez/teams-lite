@@ -999,13 +999,26 @@ one page at a time without moving anything the reader has learned. Six rules hol
   never from the configured host and an assembled path). Drawn blank it would read as a read
   that failed. Only COMMITS says it today, and the sentence names the page rather than the app:
   a reader is told what is missing, not that something went wrong.
-- **It wears the app's own tab idiom and is a `nav`, not the `Tabs` primitive.**
-  `TabsTrigger` points `aria-controls` at a panel in the same document, and three of these
-  four are places rather than panels — the Diffs one replaces the whole screen. So it is
-  buttons carrying `aria-current`, and the row SCROLLS sideways rather than widening: four
-  labels are wider than a 320 px phone, and a header that grows past its column takes the
-  page's own controls off the right of the screen (the lesson the long title already taught
-  this page).
+- **It IS the app's own `Tabs` primitive, and the tabs stand in the sub-header rather than in
+  a CARD** (`TabsList surface={false}`). A card floating inside a header row is two nested
+  surfaces for one thing, and the row already has its own bottom border. It is a PROP of the
+  primitive rather than a className the caller overrides, for two reasons: `shadow-chip` and
+  `shadow-none` both survive tailwind-merge — a project shadow is not a name it can resolve —
+  so the class list would carry a contradiction; and the choice decides how the CURRENT tab is
+  drawn as well, which is why it travels to the trigger by context. Inside a card the selected
+  tab is a raised tile (`bg-background` plus the shadow); with no card it is the accent wash,
+  because a raised tile needs something to be raised from. The row SCROLLS sideways rather
+  than widening: four labels are wider than a 320 px phone, and a header that grows past its
+  column takes the page's own controls off the right of the screen (the lesson the long title
+  already taught this page).
+- **`aria-controls` is kept TRUE, which is what using the primitive costs.** Every trigger
+  names a panel, so the CONTENT of each page carries that id (`mergeRequestPagePanel`, over
+  the constant base id both halves share) — the Overview's scroller, the Pipelines graph, the
+  page that holds nothing, and whatever the diff page can draw. It resolves inside one
+  document on all four, because
+  each page draws its own strip beside its own content, and a unit test pins the two spellings
+  together. A dangling `aria-controls` is what a `nav` of buttons was chosen to avoid before
+  the primitive was; wiring the panel is the better answer.
 
 `cd web && bun run preview -- --out /tmp/mr --gitlab` captures the strip in both themes, the
 page that holds nothing, and the strip at a phone's width (`openMergeRequestPage` is its

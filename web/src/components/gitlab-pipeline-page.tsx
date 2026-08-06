@@ -21,7 +21,7 @@ import {
   pipelineGraph,
   type PipelineGrouping,
 } from "~/lib/gitlab-pipeline-graph";
-import { gitlabPageUrl } from "~/lib/gitlab-mr-pages";
+import { gitlabPageUrl, mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
 import { cn } from "~/lib/utils";
 import { useAppState } from "./controller-context";
 import {
@@ -82,7 +82,10 @@ export function GitLabPipelinePage() {
   }, [groupable, grouping]);
 
   return (
+    // This page's own content IS the panel the strip's Pipelines tab controls, so it carries
+    // that tab's id — see `mergeRequestPagePanel`.
     <section
+      {...mergeRequestPagePanel("pipelines")}
       data-testid="gitlab-pipeline-page"
       data-view={tab}
       className="flex min-h-0 min-w-0 flex-1 flex-col"

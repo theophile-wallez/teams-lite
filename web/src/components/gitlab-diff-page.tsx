@@ -29,6 +29,7 @@ import {
   diffCommentsAvailable,
   diffThreadsFor,
 } from "~/lib/gitlab-diff-comment";
+import { mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
 import type { DiffAnnotation } from "./gitlab-diff-view";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
@@ -199,121 +200,126 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
           start on one line — this page is narrower in its gutters than the pane is. */}
       <MergeRequestPageStrip current="diffs" className="md:px-4" />
 
-      {error && !diff ? (
-        <DiffFailure error={error} webUrl={detail?.web_url} />
-      ) : !diff ? (
-        <DiffLoading label="Reading the changes…" />
-      ) : diff.files.length === 0 ? (
-        <p
-          data-testid="gitlab-diff-empty"
-          className="flex flex-1 items-center justify-center p-8 text-[13px] text-text-faint"
-        >
-          This merge request changes no files.
-        </p>
-      ) : (
-        <div className="flex min-h-0 flex-1">
-          {/* THE FILES. Its own column, its own scroll, and the expand control at its foot
-              because what GitLab withheld is a fact about this list. */}
-          {columns.files && (
-            <div
-              data-testid="gitlab-diff-files"
-              className={cn(
-                "flex min-h-0 flex-col",
-                columns.narrow ? "flex-1" : "w-72 shrink-0 border-r border-border-subtle",
-              )}
-            >
-              <div className="min-h-0 flex-1 overflow-hidden">
-                <Suspense fallback={<DiffLoading label="Loading the files…" />}>
-                  <DiffFileTree
-                    diff={diff}
-                    selected={file?.path ?? null}
-                    onPick={(picked) => {
-                      controller.setGitLabDiffFile(picked);
-                      // On a narrow screen a pick is a navigation: the file the reader chose
-                      // takes the screen, exactly as opening a chat does.
-                      setColumn("patch");
-                    }}
-                  />
-                </Suspense>
-              </div>
-              <DiffTruncation />
-              {expand && (
-                <div className="flex shrink-0 flex-col gap-1 border-t border-border-subtle p-3">
-                  <button
-                    type="button"
-                    data-testid="gitlab-diff-expand"
-                    disabled={loading}
-                    title={expand.hint}
-                    data-cuelume-press=""
-                    onClick={() => void controller.expandGitLabDiff()}
-                    className={cn(
-                      "flex items-center gap-1.5 self-start rounded-lg bg-element px-3 py-1.5 text-[12px] font-medium text-text-dim transition-colors hover:text-foreground",
-                      loading && "opacity-60",
-                    )}
-                  >
-                    <HugeiconsIcon
-                      icon={loading ? Loading02Icon : ArrowRight01Icon}
-                      className={cn("size-3.5", loading && "animate-spin")}
-                      strokeWidth={1.8}
-                    />
-                    {expand.label}
-                  </button>
-                  {/* The cost, before the press — the rule the update button follows for its
-                      130 MB. This read is measured at half a megabyte on a large merge
-                      request. */}
-                  <p data-testid="gitlab-diff-expand-hint" className="text-[11px] text-text-faint">
-                    {expand.hint}
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* THE PATCH. Its own column and its own scroll, so the tree beside it never moves
-              while a nine-hundred-line file is read. */}
-          {/* The pane STATES which file it holds, whatever draws that file's name — pierre's own
-              header over a patch, this app's over a sentence. One place to read "what is on
-              screen" from, which is the sentinel discipline the composer already follows for its
-              conversation. */}
-          {columns.patch && (
-            <div
-              data-testid="gitlab-diff-pane"
-              data-path={file?.path}
-              data-change={file?.change}
-              className="flex min-h-0 min-w-0 flex-1 flex-col"
-            >
-              {/* A file with a PATCH is named by pierre's own header, inside the scroller and
-                  sticky — see `DiffFilePatch`. One with no patch has no header of theirs at
-                  all, so this app draws one over the sentence that stands in for the code. */}
-              {file?.patch ? (
-                <div className="min-h-0 flex-1 overflow-auto">
-                  <Suspense fallback={<DiffLoading label="Highlighting…" />}>
-                    <DiffFilePatch
-                      patch={file.patch}
-                      layout={effective}
-                      theme={theme}
-                      generated={file.generated}
-                      commentable={commentable}
-                      selection={selection}
-                      onSelectionChange={(range) => controller.setGitLabDiffSelection(range)}
-                      onSelectionEnd={(range) => controller.openGitLabDiffComment(range)}
-                      annotations={annotations}
-                      renderAnnotation={renderDiffAnnotation}
+      {/* Whatever this page can draw of the diff is the PANEL the strip's Diffs tab controls,
+          so the id sits on the one element every branch below hangs off (see
+          `mergeRequestPagePanel`). */}
+      <div {...mergeRequestPagePanel("diffs")} className="flex min-h-0 flex-1 flex-col">
+        {error && !diff ? (
+          <DiffFailure error={error} webUrl={detail?.web_url} />
+        ) : !diff ? (
+          <DiffLoading label="Reading the changes…" />
+        ) : diff.files.length === 0 ? (
+          <p
+            data-testid="gitlab-diff-empty"
+            className="flex flex-1 items-center justify-center p-8 text-[13px] text-text-faint"
+          >
+            This merge request changes no files.
+          </p>
+        ) : (
+          <div className="flex min-h-0 flex-1">
+            {/* THE FILES. Its own column, its own scroll, and the expand control at its foot
+                because what GitLab withheld is a fact about this list. */}
+            {columns.files && (
+              <div
+                data-testid="gitlab-diff-files"
+                className={cn(
+                  "flex min-h-0 flex-col",
+                  columns.narrow ? "flex-1" : "w-72 shrink-0 border-r border-border-subtle",
+                )}
+              >
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <Suspense fallback={<DiffLoading label="Loading the files…" />}>
+                    <DiffFileTree
+                      diff={diff}
+                      selected={file?.path ?? null}
+                      onPick={(picked) => {
+                        controller.setGitLabDiffFile(picked);
+                        // On a narrow screen a pick is a navigation: the file the reader chose
+                        // takes the screen, exactly as opening a chat does.
+                        setColumn("patch");
+                      }}
                     />
                   </Suspense>
                 </div>
-              ) : (
-                file && (
-                  <div className="min-h-0 flex-1 overflow-auto">
-                    <FileHeading file={file} />
-                    <FileNotice file={file} />
+                <DiffTruncation />
+                {expand && (
+                  <div className="flex shrink-0 flex-col gap-1 border-t border-border-subtle p-3">
+                    <button
+                      type="button"
+                      data-testid="gitlab-diff-expand"
+                      disabled={loading}
+                      title={expand.hint}
+                      data-cuelume-press=""
+                      onClick={() => void controller.expandGitLabDiff()}
+                      className={cn(
+                        "flex items-center gap-1.5 self-start rounded-lg bg-element px-3 py-1.5 text-[12px] font-medium text-text-dim transition-colors hover:text-foreground",
+                        loading && "opacity-60",
+                      )}
+                    >
+                      <HugeiconsIcon
+                        icon={loading ? Loading02Icon : ArrowRight01Icon}
+                        className={cn("size-3.5", loading && "animate-spin")}
+                        strokeWidth={1.8}
+                      />
+                      {expand.label}
+                    </button>
+                    {/* The cost, before the press — the rule the update button follows for its
+                        130 MB. This read is measured at half a megabyte on a large merge
+                        request. */}
+                    <p data-testid="gitlab-diff-expand-hint" className="text-[11px] text-text-faint">
+                      {expand.hint}
+                    </p>
                   </div>
-                )
-              )}
-            </div>
-          )}
-        </div>
-      )}
+                )}
+              </div>
+            )}
+
+            {/* THE PATCH. Its own column and its own scroll, so the tree beside it never moves
+                while a nine-hundred-line file is read. */}
+            {/* The pane STATES which file it holds, whatever draws that file's name — pierre's own
+                header over a patch, this app's over a sentence. One place to read "what is on
+                screen" from, which is the sentinel discipline the composer already follows for its
+                conversation. */}
+            {columns.patch && (
+              <div
+                data-testid="gitlab-diff-pane"
+                data-path={file?.path}
+                data-change={file?.change}
+                className="flex min-h-0 min-w-0 flex-1 flex-col"
+              >
+                {/* A file with a PATCH is named by pierre's own header, inside the scroller and
+                    sticky — see `DiffFilePatch`. One with no patch has no header of theirs at
+                    all, so this app draws one over the sentence that stands in for the code. */}
+                {file?.patch ? (
+                  <div className="min-h-0 flex-1 overflow-auto">
+                    <Suspense fallback={<DiffLoading label="Highlighting…" />}>
+                      <DiffFilePatch
+                        patch={file.patch}
+                        layout={effective}
+                        theme={theme}
+                        generated={file.generated}
+                        commentable={commentable}
+                        selection={selection}
+                        onSelectionChange={(range) => controller.setGitLabDiffSelection(range)}
+                        onSelectionEnd={(range) => controller.openGitLabDiffComment(range)}
+                        annotations={annotations}
+                        renderAnnotation={renderDiffAnnotation}
+                      />
+                    </Suspense>
+                  </div>
+                ) : (
+                  file && (
+                    <div className="min-h-0 flex-1 overflow-auto">
+                      <FileHeading file={file} />
+                      <FileNotice file={file} />
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </section>
   );
 }

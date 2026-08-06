@@ -103,3 +103,38 @@ export function gitlabPageUrl(
 export function gitlabPageLinkLabel(page: MergeRequestPage): string {
   return `Open the ${mergeRequestPageEntry(page).label.toLowerCase()} in GitLab`;
 }
+
+// ---- the strip, and the panel each of its tabs really controls ---------------
+//
+// The sub-header is the app's own `Tabs` primitive, so every trigger points `aria-controls`
+// at a panel — and that promise is kept rather than left dangling: the CONTENT of the page is
+// given the id the trigger names. It resolves inside one document on all four pages, the
+// full-screen diff included, because each page draws its own strip beside its own content.
+//
+// The base id is a CONSTANT rather than React's own generated one, since the two halves are
+// drawn by different components (the strip in `MergeRequestPageStrip`, the panel by whichever
+// surface holds that page) and one merge request is on screen at a time.
+
+/** The id the four tabs and their panels hang off. */
+export const MERGE_REQUEST_PAGES_ID = "gitlab-mr-pages";
+
+/** What a tab's own element id is — the value `TabsTrigger` mints from the base id, spelled
+ *  here so a panel can point back at it. */
+export function mergeRequestPageTabId(page: MergeRequestPage): string {
+  return `${MERGE_REQUEST_PAGES_ID}-tab-${page}`;
+}
+
+/** The attributes the CONTENT of one page carries, so the tab above it really controls
+ *  something and a screen reader can name what it is looking at. Spread onto the element that
+ *  holds that page's content. */
+export function mergeRequestPagePanel(page: MergeRequestPage): {
+  id: string;
+  role: "tabpanel";
+  "aria-labelledby": string;
+} {
+  return {
+    id: `${MERGE_REQUEST_PAGES_ID}-panel-${page}`,
+    role: "tabpanel",
+    "aria-labelledby": mergeRequestPageTabId(page),
+  };
+}

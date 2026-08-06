@@ -691,9 +691,10 @@ test.describe.serial("the GitLab merge-request page", () => {
   // GitLab's own order, each one a route of its own (see lib/gitlab-mr-pages.ts). Two of the
   // four hold nothing yet and say so, which is what these tests hold them to.
 
-  /** The strip's own button for one page. */
+  /** The strip's own tab for one page. Each carries a testid of its own, because the strip is
+   *  the app's `Tabs` primitive and a trigger takes no data attribute of ours. */
   function pageTab(page: Page, name: string) {
-    return page.locator(`[data-testid="gitlab-mr-page"][data-page="${name}"]`);
+    return page.locator(`[data-testid="gitlab-mr-page-${name}"]`);
   }
 
   test("names the four pages of a merge request, and opens on the Overview", async ({ page }) => {
@@ -702,7 +703,7 @@ test.describe.serial("the GitLab merge-request page", () => {
 
     const strip = page.locator('[data-testid="gitlab-mr-pages"]');
     await expect(strip).toBeVisible();
-    await expect(page.locator('[data-testid="gitlab-mr-page"]')).toHaveText([
+    await expect(page.locator('[role="tab"][data-testid^="gitlab-mr-page-"]')).toHaveText([
       "Overview",
       "Commits",
       "Pipelines",
@@ -712,9 +713,21 @@ test.describe.serial("the GitLab merge-request page", () => {
     // Opening a merge request means its Overview, and the strip says which page that is —
     // to a reader and to a screen reader alike.
     await expect(strip).toHaveAttribute("data-page", "overview");
-    await expect(pageTab(page, "overview")).toHaveAttribute("aria-current", "page");
+    await expect(pageTab(page, "overview")).toHaveAttribute("aria-selected", "true");
     await expect(page.locator('[data-testid="gitlab-heading"]')).toBeVisible();
     expect(page.url()).toMatch(/\/mr\/[^/]+$/);
+
+    // The tabs stand in the sub-header itself rather than inside a card: the row is the only
+    // surface, and the wash sits on the current tab alone.
+    const list = page.locator('[role="tablist"][aria-label="Merge request pages"]');
+    await expect(list).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await expect(list).toHaveCSS("box-shadow", "none");
+
+    // And each tab really controls the page under it, which is what the primitive promises:
+    // `aria-controls` names an element that is there.
+    const controls = await pageTab(page, "overview").getAttribute("aria-controls");
+    expect(controls).toBeTruthy();
+    await expect(page.locator(`#${controls}`)).toBeVisible();
   });
 
   test("a page is a PLACE: its own URL, reloadable, and Back leaves it", async ({ page }) => {

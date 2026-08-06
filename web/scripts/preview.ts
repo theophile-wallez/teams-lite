@@ -482,7 +482,7 @@ export async function openMergeRequestPage(
   page: Page,
   name: "overview" | "commits" | "pipelines" | "diffs",
 ): Promise<void> {
-  await page.locator(`[data-testid="gitlab-mr-page"][data-page="${name}"]`).click();
+  await page.locator(`[data-testid="gitlab-mr-page-${name}"]`).click();
   await page.waitForSelector(`[data-testid="gitlab-mr-pages"][data-page="${name}"]`, {
     timeout: APP_READY_TIMEOUT_MS,
   });

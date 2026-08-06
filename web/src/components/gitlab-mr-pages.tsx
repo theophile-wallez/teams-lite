@@ -3,11 +3,14 @@ import {
   gitlabPageLinkLabel,
   gitlabPageUrl,
   MERGE_REQUEST_PAGES,
+  MERGE_REQUEST_PAGES_ID,
+  mergeRequestPagePanel,
   unbuiltMergeRequestPage,
   type MergeRequestPage,
 } from "~/lib/gitlab-mr-pages";
 import { cn } from "~/lib/utils";
 import { GitLabLogo } from "./gitlab-logo";
+import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 
 // The SUB-HEADER of a merge request: the four pages it has, under the header that names it.
 //
@@ -30,11 +33,19 @@ import { GitLabLogo } from "./gitlab-logo";
 //     with the one thing left: GitLab's own page for what is missing. A page drawn blank
 //     reads as a failed read.
 //
-// It wears the app's own tab idiom (the segmented pill of `ui/tabs.tsx`) rather than that
-// primitive itself: `TabsTrigger` points `aria-controls` at a panel in the same document, and
-// three of these four pages are places rather than panels — the Diffs one replaces the whole
-// screen. So it is a `nav` of buttons carrying `aria-current`, which is what a reader's
-// screen reader is owed here.
+// It IS the app's own `Tabs` primitive (`ui/tabs.tsx`), with two things about it worth stating:
+//
+//   - **The tabs sit in the sub-header itself, never in a card.** `TabsList`'s own surface —
+//     the `bg-card` pill with its shadow — is dropped here: a card floating inside a header row
+//     is two nested surfaces for one thing, and this row already has its own bottom border. The
+//     wash stays on the CURRENT tab, which is what it is for: saying which page is open.
+//   - **`aria-controls` is kept true.** Every trigger points at a panel id, so the CONTENT of
+//     each page carries it (`mergeRequestPagePanel`) — it resolves inside one document on all
+//     four, because each page draws its own strip beside its own content.
+//
+// The value is the URL and `onValueChange` NAVIGATES, so arrowing along the strip walks the
+// pages: automatic activation is the primitive's own behaviour, and it costs nothing here
+// because moving between the pages of an open merge request re-reads nothing.
 
 /** Which of the four pages the URL asks for. The router's own answer, so nothing here parses
  *  a pathname — and `overview` is the fallback, because `/mr/<id>` IS the overview. */
@@ -79,44 +90,43 @@ export function MergeRequestPageStrip(props: { current: MergeRequestPage; classN
     // The row scrolls sideways rather than widening: four labels are wider than a 320 px
     // phone, and a header that grows past its column takes the page's own controls off the
     // right of the screen (the `min-w-0` lesson the long title already taught this page).
+    //
+    // It states which page is current for a driver to read, because the strip is what every
+    // capture and every spec waits on — the sentinel discipline the composer already follows
+    // for its conversation.
     <div
+      data-testid="gitlab-mr-pages"
+      data-page={props.current}
       className={cn(
         "flex shrink-0 overflow-x-auto border-b border-border-subtle px-2 py-1.5 md:px-5 md:py-2",
         props.className,
       )}
     >
-      <nav
-        aria-label="Merge request pages"
-        data-testid="gitlab-mr-pages"
-        data-page={props.current}
-        className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-card p-1 shadow-chip"
+      <Tabs
+        id={MERGE_REQUEST_PAGES_ID}
+        value={props.current}
+        onValueChange={(value) => go(value as MergeRequestPage)}
+        className="min-w-0"
       >
-        {MERGE_REQUEST_PAGES.map((entry) => {
-          const current = entry.page === props.current;
-          return (
-            <button
+        {/* `surface={false}`: no card, so the tabs stand in the sub-header itself. The wash is
+            on the current tab alone, which is the one thing it has to say. */}
+        <TabsList aria-label="Merge request pages" surface={false} className="gap-0.5">
+          {MERGE_REQUEST_PAGES.map((entry) => (
+            <TabsTrigger
               key={entry.page}
-              type="button"
-              data-testid="gitlab-mr-page"
-              data-page={entry.page}
-              data-current={current ? "true" : undefined}
-              aria-current={current ? "page" : undefined}
+              value={entry.page}
+              data-testid={`gitlab-mr-page-${entry.page}`}
               title={entry.hint}
-              data-cuelume-toggle=""
-              onClick={() => go(entry.page)}
-              className={cn(
-                "shrink-0 rounded-md px-2 py-1 text-[12px] font-medium transition-colors md:px-3 md:py-1.5 md:text-[13px]",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                current
-                  ? "bg-background text-foreground shadow-chip"
-                  : "text-text-dim hover:text-foreground",
-              )}
+              // Natural widths rather than the equal quarters a sidebar strip takes: these are
+              // four words in a header, not a segmented control filling a column. How the
+              // CURRENT one is drawn follows `surface={false}` and is the primitive's own.
+              className="flex-none shrink-0 px-2 py-1 text-[12px] md:px-3 md:py-1.5 md:text-[13px]"
             >
               {entry.label}
-            </button>
-          );
-        })}
-      </nav>
+            </TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
     </div>
   );
 }
@@ -132,6 +142,7 @@ export function UnbuiltMergeRequestPage(props: { page: MergeRequestPage; webUrl?
   if (!notice) return null;
   return (
     <div
+      {...mergeRequestPagePanel(props.page)}
       data-testid="gitlab-mr-unbuilt"
       data-page={props.page}
       className="flex min-h-0 flex-1 items-center justify-center p-8"
