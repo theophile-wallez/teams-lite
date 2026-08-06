@@ -454,6 +454,22 @@ export async function setApprovalControl(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Arm what GitLab says about the merge-request PAGE's writes, through the mock's gated
+ *  test hook: a refusal sentence (`refuse`), a machine with no token (`no_token`), or a
+ *  clean slate (`clear`).
+ *
+ *  A spec MUST clear whatever it arms. One mock process serves the whole run, so a refusal
+ *  left behind turns every later merge on that surface into an error nobody armed. */
+export async function setMergeRequestControl(
+  page: Page,
+  body: { refuse?: string; no_token?: boolean; clear?: boolean },
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "gitlab_mr", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Set a reaction on an existing message through the mock's gated test hook
  *  (from someone else by default), then the mock re-broadcasts the message. */
 export async function emitReaction(

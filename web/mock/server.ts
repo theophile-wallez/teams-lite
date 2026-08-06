@@ -3592,6 +3592,450 @@ function mockApprovalResult(url: string): {
   };
 }
 
+// ---- the merge-request page (`gitlab_mr_*`) ---------------------------------
+//
+// The whole surface with no GitLab and no token: a list of merge requests that are not
+// merged, one of them in full, its comments and its LIVE pipeline — plus the four writes
+// (merge, comment, delete a comment, close/reopen), which move this in-memory state and
+// nothing else. That is what makes the page reviewable: `bun run preview -- --gitlab`
+// walks it, and web/e2e/gitlab.spec.ts holds the app to every rule it is built on.
+//
+// Two fixtures are deliberate and load-bearing:
+//
+//   - **The list rows carry NO pipeline**, exactly as the real endpoint answers (measured
+//     against the tenant — see src/gitlab_mr.rs). A mock that helpfully added one would hide
+//     the reason the sidebar shows `detailed_merge_status` instead.
+//   - **One pipeline is genuinely LIVE**: its jobs advance one step per read, so the poll,
+//     the "following" mark and a job turning green are all things a spec can watch happen
+//     rather than assert about a still picture.
+
+type MockGitLabPerson = { name: string; username: string };
+
+type MockJob = {
+  id: number;
+  name: string;
+  stage: string;
+  status: string;
+  allow_failure: boolean;
+  duration?: number;
+};
+
+type MockPipeline = {
+  id: number;
+  status: string;
+  jobs: MockJob[];
+  live?: boolean;
+  /** How many times this pipeline has been read. The FIRST read never advances it, so the
+   *  first paint shows the seeded state and every POLL after it shows something happening —
+   *  which is what makes "the panel follows the run" a thing a spec can watch. */
+  reads?: number;
+};
+
+type MockNote = {
+  id: number;
+  author: MockGitLabPerson;
+  body: string;
+  system: boolean;
+  created_at: string;
+  resolvable: boolean;
+  resolved: boolean;
+  mine: boolean;
+  position?: { new_path?: string; new_line?: number };
+};
+
+type MockDiscussion = { id: string; individual_note: boolean; notes: MockNote[] };
+
+type MockMergeRequest = {
+  project_path: string;
+  iid: number;
+  title: string;
+  description?: string;
+  state: "opened" | "closed" | "merged";
+  draft: boolean;
+  author: MockGitLabPerson;
+  reviewers: MockGitLabPerson[];
+  assignees: MockGitLabPerson[];
+  labels: string[];
+  source_branch: string;
+  target_branch: string;
+  detailed_merge_status: string;
+  sha: string;
+  changes_count: string;
+  upvotes: number;
+  updated_at: string;
+  created_at: string;
+  pipeline: MockPipeline | null;
+  discussions: MockDiscussion[];
+  merged_at?: string;
+  closed_at?: string;
+};
+
+/** The account this mock acts as, in GitLab's own shape. The same person the approval
+ *  fixtures name, so one identity runs through the whole surface. */
+const MOCK_GITLAB_ME: MockGitLabPerson = { name: "Théophile WALLEZ", username: "theophile" };
+const MOCK_GITLAB_ADA: MockGitLabPerson = { name: "Ada Lovelace", username: "ada" };
+const MOCK_GITLAB_GRACE: MockGitLabPerson = { name: "Grace Hopper", username: "grace" };
+const MOCK_GITLAB_BOT: MockGitLabPerson = { name: "review-bot", username: "review-bot" };
+
+/** Minutes ago as an ISO timestamp, so the fixtures read as recent work. */
+function agoIso(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
+
+let mockNoteId = 90_000;
+
+/** The seeded merge requests, newest activity first — the order GitLab answers in. */
+const mockMergeRequests: MockMergeRequest[] = [
+  {
+    project_path: "acme/webapp",
+    iid: 596,
+    title: "✨ HA replicas + PodDisruptionBudgets for the user-facing APIs",
+    description:
+      "Adds **two replicas** and a PodDisruptionBudget to every user-facing API.\n\n" +
+      "- `web`, `api` and `worker` go to two replicas\n" +
+      "- a `preStop` hook drains connections\n\n" +
+      "Rolling this out needs one `helmfile apply` per cluster.",
+    state: "opened",
+    draft: false,
+    author: MOCK_GITLAB_ADA,
+    reviewers: [MOCK_GITLAB_ME],
+    assignees: [MOCK_GITLAB_ADA],
+    labels: ["infra", "needs-review"],
+    source_branch: "feature/ha-replicas",
+    target_branch: "main",
+    // The one that CAN merge, so the merge flow is reviewable end to end.
+    detailed_merge_status: "mergeable",
+    sha: "e2607442e33693652508637a6a02eb9997d496ff",
+    changes_count: "11",
+    upvotes: 2,
+    updated_at: agoIso(4),
+    created_at: agoIso(2 * 24 * 60),
+    pipeline: {
+      id: 190_933,
+      status: "running",
+      live: true,
+      jobs: [
+        { id: 1, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 42.5 },
+        { id: 2, name: "🧪 unit", stage: "test", status: "running", allow_failure: false },
+        { id: 3, name: "🧪 e2e", stage: "test", status: "created", allow_failure: false },
+        { id: 4, name: "🤖 opencode review", stage: "test", status: "created", allow_failure: true },
+        { id: 5, name: "🚀 deploy staging", stage: "deploy", status: "manual", allow_failure: false },
+      ],
+    },
+    discussions: [
+      {
+        id: "d-596-1",
+        individual_note: true,
+        notes: [
+          {
+            id: 69_848,
+            author: MOCK_GITLAB_GRACE,
+            body: "Two replicas is right, but please check the `preStop` timing against the load balancer.",
+            system: false,
+            created_at: agoIso(90),
+            resolvable: false,
+            resolved: false,
+            mine: false,
+          },
+        ],
+      },
+      {
+        id: "d-596-2",
+        individual_note: false,
+        notes: [
+          {
+            id: 69_852,
+            author: MOCK_GITLAB_BOT,
+            body: "🟡 **MEDIUM**: the `preStop` command interpolates a Helm value into a shell string.",
+            system: false,
+            created_at: agoIso(70),
+            resolvable: true,
+            resolved: false,
+            mine: false,
+            position: { new_path: "charts/app/templates/deployment.yaml", new_line: 42 },
+          },
+          {
+            id: 69_853,
+            author: MOCK_GITLAB_ME,
+            body: "Quoted it in `2f91ac0`.",
+            system: false,
+            created_at: agoIso(65),
+            resolvable: true,
+            resolved: false,
+            mine: true,
+          },
+        ],
+      },
+      {
+        id: "d-596-3",
+        individual_note: true,
+        notes: [
+          {
+            id: 69_849,
+            author: MOCK_GITLAB_BOT,
+            body: "changed the description",
+            system: true,
+            created_at: agoIso(120),
+            resolvable: false,
+            resolved: false,
+            mine: false,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    project_path: "acme/webapp",
+    iid: 595,
+    title: "🔒 ci(helm): assert live image tags after helmfile apply",
+    description: "Checks the tags that are actually running after a deploy.",
+    state: "opened",
+    draft: false,
+    author: MOCK_GITLAB_ME,
+    reviewers: [MOCK_GITLAB_GRACE],
+    assignees: [MOCK_GITLAB_ME],
+    labels: ["ci"],
+    source_branch: "ci/assert-image-tags",
+    target_branch: "main",
+    detailed_merge_status: "not_approved",
+    sha: "8b1f0c6d2a7e4b5c9d3f1a2b3c4d5e6f70819234",
+    changes_count: "3",
+    upvotes: 0,
+    updated_at: agoIso(35),
+    created_at: agoIso(26 * 60),
+    pipeline: {
+      id: 190_901,
+      status: "failed",
+      jobs: [
+        { id: 11, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 38 },
+        { id: 12, name: "🧪 unit", stage: "test", status: "failed", allow_failure: false, duration: 121.4 },
+        { id: 13, name: "🤖 opencode review", stage: "test", status: "failed", allow_failure: true, duration: 300.8 },
+      ],
+    },
+    discussions: [],
+  },
+  {
+    project_path: "acme/infrastructure",
+    iid: 297,
+    title: "feat: lambda policy update",
+    description: "Widens the forwarder's policy to the new bucket.",
+    state: "opened",
+    draft: true,
+    author: MOCK_GITLAB_GRACE,
+    reviewers: [],
+    assignees: [],
+    labels: [],
+    source_branch: "feat/lambda-policy",
+    target_branch: "main",
+    detailed_merge_status: "draft_status",
+    sha: "cc11aa22bb33dd44ee55ff6677889900aabbccdd",
+    changes_count: "1",
+    upvotes: 0,
+    updated_at: agoIso(2 * 60),
+    created_at: agoIso(3 * 24 * 60),
+    pipeline: null,
+    discussions: [],
+  },
+  {
+    project_path: "acme/design-system",
+    iid: 63,
+    title: "Conflicting rename of the token scale",
+    state: "opened",
+    draft: false,
+    author: MOCK_GITLAB_ADA,
+    reviewers: [MOCK_GITLAB_ME],
+    assignees: [],
+    labels: ["design"],
+    source_branch: "refactor/token-scale",
+    target_branch: "main",
+    detailed_merge_status: "conflict",
+    sha: "1122334455667788990011223344556677889900",
+    changes_count: "24",
+    upvotes: 1,
+    updated_at: agoIso(6 * 60),
+    created_at: agoIso(5 * 24 * 60),
+    pipeline: {
+      id: 190_500,
+      status: "success",
+      jobs: [
+        { id: 21, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 30 },
+        { id: 22, name: "🧪 unit", stage: "test", status: "success", allow_failure: false, duration: 88 },
+      ],
+    },
+    discussions: [],
+  },
+  {
+    project_path: "acme/webapp",
+    iid: 594,
+    title: "🧰 ci(helm): assert live image tags after helmfile apply",
+    description: "Superseded by !595.",
+    state: "closed",
+    draft: false,
+    author: MOCK_GITLAB_ME,
+    reviewers: [],
+    assignees: [],
+    labels: ["ci"],
+    source_branch: "ci/assert-tags-first-try",
+    target_branch: "main",
+    detailed_merge_status: "not_open",
+    sha: "aa00bb11cc22dd33ee44ff5566778899aabbccdd",
+    changes_count: "3",
+    upvotes: 0,
+    updated_at: agoIso(20 * 60),
+    created_at: agoIso(30 * 60),
+    closed_at: agoIso(20 * 60),
+    pipeline: null,
+    discussions: [],
+  },
+];
+
+/** The live pipeline as it is SEEDED, so the test hook can put it back. One mock process
+ *  serves the whole run and every read of it moves it on, so without this the second spec to
+ *  look at a running pipeline would find it finished. */
+const MOCK_LIVE_PIPELINE_JOBS: MockJob[] = [
+  { id: 1, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 42.5 },
+  { id: 2, name: "🧪 unit", stage: "test", status: "running", allow_failure: false },
+  { id: 3, name: "🧪 e2e", stage: "test", status: "created", allow_failure: false },
+  { id: 4, name: "🤖 opencode review", stage: "test", status: "created", allow_failure: true },
+  { id: 5, name: "🚀 deploy staging", stage: "deploy", status: "manual", allow_failure: false },
+];
+
+/** Put the live pipeline back where it started. */
+function resetMockLivePipeline(): void {
+  const mr = mockMergeRequestFor("acme/webapp", 596);
+  if (!mr) return;
+  mr.pipeline = {
+    id: 190_933,
+    status: "running",
+    live: true,
+    reads: 0,
+    jobs: MOCK_LIVE_PIPELINE_JOBS.map((job) => ({ ...job })),
+  };
+}
+
+/** When set, every `gitlab_mr_*` WRITE fails with this sentence — the shape GitLab's own
+ *  refusal takes. Armed and cleared by the `{kind:"gitlab_mr"}` test hook, because the half
+ *  a page owns is that an outward action which failed is reported rather than swallowed. */
+let mockGitLabWriteRefusal: string | null = null;
+
+/** When true, the machine holds no GitLab token: the list answers empty and says so, which
+ *  is what the page's own notice is drawn from. Same hook. */
+let mockGitLabTokenMissing = false;
+
+function mockMergeRequestFor(projectPath: string, iid: number): MockMergeRequest | undefined {
+  return mockMergeRequests.find((mr) => mr.project_path === projectPath && mr.iid === iid);
+}
+
+/** GitLab's own `web_url` for one of these, on the configured host — so the page's approval
+ *  read (which is addressed by URL) lands on the same merge request. */
+function mockMergeRequestUrl(mr: MockMergeRequest): string {
+  const host = mockSettings.gitlab_host.trim() || "gitlab.com";
+  return `https://${host}/${mr.project_path}/-/merge_requests/${mr.iid}`;
+}
+
+/** One sidebar row. Deliberately WITHOUT a pipeline, like the real list endpoint. */
+function mockMergeRequestRow(mr: MockMergeRequest): Record<string, unknown> {
+  return {
+    project_path: mr.project_path,
+    iid: mr.iid,
+    reference: `!${mr.iid}`,
+    title: mr.title,
+    state: mr.state,
+    draft: mr.draft,
+    web_url: mockMergeRequestUrl(mr),
+    source_branch: mr.source_branch,
+    target_branch: mr.target_branch,
+    author: mr.author,
+    detailed_merge_status: mr.detailed_merge_status,
+    labels: mr.labels,
+    user_notes_count: mr.discussions.flatMap((d) => d.notes).filter((n) => !n.system).length,
+    upvotes: mr.upvotes,
+    downvotes: 0,
+    updated_at: mr.updated_at,
+    created_at: mr.created_at,
+  };
+}
+
+function mockMergeRequestDetail(mr: MockMergeRequest): Record<string, unknown> {
+  return {
+    ...mockMergeRequestRow(mr),
+    description: mr.description,
+    assignees: mr.assignees,
+    reviewers: mr.reviewers,
+    sha: mr.sha,
+    merge_status: mr.detailed_merge_status === "mergeable" ? "can_be_merged" : "cannot_be_merged",
+    has_conflicts: mr.detailed_merge_status === "conflict",
+    blocking_discussions_resolved: !mr.discussions.some((d) =>
+      d.notes.some((n) => n.resolvable && !n.resolved),
+    ),
+    squash: false,
+    should_remove_source_branch: true,
+    changes_count: mr.changes_count,
+    merged_at: mr.merged_at,
+    closed_at: mr.closed_at,
+    pipeline: mr.pipeline
+      ? { id: mr.pipeline.id, status: mr.pipeline.status, web_url: `${mockMergeRequestUrl(mr)}/pipelines` }
+      : undefined,
+  };
+}
+
+/** Advance a LIVE pipeline by one step, so a poll shows something happening: the first job
+ *  still in flight finishes, the next one starts, and the pipeline settles when none is
+ *  left. Called on every pipeline read of that merge request. */
+function advanceMockPipeline(pipeline: MockPipeline): void {
+  if (!pipeline.live) return;
+  const running = pipeline.jobs.find((job) => job.status === "running");
+  if (running) {
+    running.status = "success";
+    running.duration = 30 + running.id * 7;
+    const next = pipeline.jobs.find((job) => job.status === "created");
+    if (next) next.status = "running";
+    else {
+      pipeline.status = "success";
+      pipeline.live = false;
+    }
+    return;
+  }
+  const created = pipeline.jobs.find((job) => job.status === "created");
+  if (created) created.status = "running";
+  else {
+    pipeline.status = "success";
+    pipeline.live = false;
+  }
+}
+
+function mockPipelineView(mr: MockMergeRequest): Record<string, unknown> {
+  if (!mr.pipeline) return { jobs: [] };
+  const reads = mr.pipeline.reads ?? 0;
+  mr.pipeline.reads = reads + 1;
+  if (reads > 0) advanceMockPipeline(mr.pipeline);
+  return {
+    pipeline: {
+      id: mr.pipeline.id,
+      status: mr.pipeline.status,
+      web_url: `${mockMergeRequestUrl(mr)}/pipelines`,
+    },
+    jobs: mr.pipeline.jobs.map((job) => ({
+      ...job,
+      web_url: `${mockMergeRequestUrl(mr)}/jobs/${job.id}`,
+    })),
+  };
+}
+
+function mockDiscussionList(mr: MockMergeRequest): Record<string, unknown> {
+  return { discussions: mr.discussions, truncated: false };
+}
+
+/** Tell every open page that one merge request moved — the same `stale` frame the real
+ *  backend broadcasts after a write, which is what makes a second page follow. */
+function broadcastMockMergeRequest(mr: MockMergeRequest): void {
+  broadcast("gitlab_mr_updated", {
+    project_path: mr.project_path,
+    iid: mr.iid,
+    kind: "stale",
+  });
+}
+
 type LinearKind = "issue" | "project" | "document";
 type ParsedLinear = { kind: LinearKind; id: string };
 
@@ -5575,6 +6019,173 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return mockApprovalResult(url);
     }
 
+    // ---- the merge-request page --------------------------------------------
+    //
+    // Four reads, then four writes. The reads answer from the fixtures above; the writes
+    // move them and broadcast, so a second page follows exactly as it would against the
+    // real backend. Nothing here contacts GitLab, which is what makes the merge — the one
+    // irreversible action in this app — reviewable at all.
+
+    case "gitlab_mr_list": {
+      const o = asObject(params);
+      const scope = typeof o.scope === "string" ? o.scope : "all";
+      const state = typeof o.state === "string" ? o.state : "opened";
+      // The two closed sets the backend enforces. A mock that accepted anything would let
+      // a bug through that the real backend refuses.
+      if (!["all", "assigned", "mine", "reviewing"].includes(scope)) {
+        throw new Error(`unknown scope: ${scope}`);
+      }
+      if (!["opened", "closed"].includes(state)) {
+        throw new Error(`a merge-request list is opened or closed, not ${state}`);
+      }
+      if (mockGitLabTokenMissing) {
+        return { scope, state, items: [], truncated: false, token_set: false };
+      }
+      const items = mockMergeRequests
+        .filter((mr) => mr.state === state)
+        .filter((mr) => {
+          if (scope === "mine") return mr.author.username === MOCK_GITLAB_ME.username;
+          if (scope === "assigned") {
+            return mr.assignees.some((p) => p.username === MOCK_GITLAB_ME.username);
+          }
+          if (scope === "reviewing") {
+            return mr.reviewers.some((p) => p.username === MOCK_GITLAB_ME.username);
+          }
+          return true;
+        })
+        .map(mockMergeRequestRow);
+      return { scope, state, items, total: items.length, truncated: false, token_set: true };
+    }
+
+    case "gitlab_mr_detail": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      return mockMergeRequestDetail(mr);
+    }
+
+    case "gitlab_mr_notes": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      return mockDiscussionList(mr);
+    }
+
+    case "gitlab_mr_pipeline": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      return mockPipelineView(mr);
+    }
+
+    // MERGE. The one write in this app that no later call takes back — and the `sha` is
+    // what stands between it and landing a commit nobody read, so this mock checks it the
+    // way GitLab does: a mismatch is the 409 the page has to report.
+    case "gitlab_mr_merge": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const sha = requireString(params, "sha");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabWriteRefusal) throw new Error(mockGitLabWriteRefusal);
+      if (sha !== mr.sha) {
+        throw new Error(
+          "GitLab refused: the branch moved since this page read it, so nothing was merged — reload and look again",
+        );
+      }
+      if (mr.detailed_merge_status !== "mergeable") {
+        throw new Error(
+          "GitLab refused: it will not merge it yet — a pipeline, an approval, a conflict or an unresolved thread is in the way (405)",
+        );
+      }
+      mr.state = "merged";
+      mr.detailed_merge_status = "not_open";
+      mr.merged_at = new Date().toISOString();
+      mr.updated_at = mr.merged_at;
+      broadcastMockMergeRequest(mr);
+      return { merge: { state: "merged", merge_commit_sha: `merge-${mr.sha.slice(0, 8)}`, merged_at: mr.merged_at } };
+    }
+
+    // COMMENT — a new one, or a reply into a thread.
+    case "gitlab_mr_comment": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const body = requireString(params, "body");
+      const o = asObject(params);
+      const discussionId = typeof o.discussion_id === "string" ? o.discussion_id : null;
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabWriteRefusal) throw new Error(mockGitLabWriteRefusal);
+      if (body.trim() === "") throw new Error("an empty comment says nothing, so it is not posted");
+
+      const note: MockNote = {
+        id: ++mockNoteId,
+        author: MOCK_GITLAB_ME,
+        body: body.trim(),
+        system: false,
+        created_at: new Date().toISOString(),
+        resolvable: discussionId !== null,
+        resolved: false,
+        mine: true,
+      };
+      const thread = discussionId ? mr.discussions.find((d) => d.id === discussionId) : undefined;
+      if (discussionId && !thread) throw new Error("that thread is not on this merge request");
+      if (thread) thread.notes.push(note);
+      else mr.discussions.push({ id: `d-${mr.iid}-${note.id}`, individual_note: true, notes: [note] });
+      mr.updated_at = note.created_at;
+      broadcastMockMergeRequest(mr);
+      return { note: { ...note, discussion_id: thread?.id } };
+    }
+
+    // DELETE one of the user's OWN comments. The real backend re-reads whose it is before
+    // it deletes, and refuses a colleague's; this mock refuses the same way, so the rail is
+    // exercised rather than assumed.
+    case "gitlab_mr_delete_comment": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const noteId = requireNumber(params, "note_id");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabWriteRefusal) throw new Error(mockGitLabWriteRefusal);
+      const owner = mr.discussions
+        .flatMap((d) => d.notes)
+        .find((note) => note.id === noteId);
+      if (!owner) throw new Error("that comment is no longer on the merge request");
+      if (!owner.mine) {
+        throw new Error(
+          "that comment is somebody else's — this app only deletes what the user wrote themselves",
+        );
+      }
+      for (const discussion of mr.discussions) {
+        discussion.notes = discussion.notes.filter((note) => note.id !== noteId);
+      }
+      mr.discussions = mr.discussions.filter((discussion) => discussion.notes.length > 0);
+      broadcastMockMergeRequest(mr);
+      return { deleted: noteId };
+    }
+
+    // CLOSE or REOPEN — each other's undo.
+    case "gitlab_mr_set_state": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const change = requireString(params, "change");
+      if (change !== "close" && change !== "reopen") {
+        throw new Error('`change` must be "close" or "reopen"');
+      }
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabWriteRefusal) throw new Error(mockGitLabWriteRefusal);
+      mr.state = change === "close" ? "closed" : "opened";
+      mr.detailed_merge_status = change === "close" ? "not_open" : "not_approved";
+      mr.closed_at = change === "close" ? new Date().toISOString() : undefined;
+      mr.updated_at = new Date().toISOString();
+      broadcastMockMergeRequest(mr);
+      return { state: mr.state };
+    }
+
     // ---- mail (read-only) --------------------------------------------------
 
     case "mail_folders":
@@ -6529,6 +7140,27 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       mockApprovalsUnavailable = body.unavailable === true;
       return Response.json(
         { ok: true, refuse: mockApprovalRefusal, unavailable: mockApprovalsUnavailable },
+        { status: 200 },
+      );
+    }
+    // Arm what GitLab says about the merge-request PAGE's writes: a refusal sentence
+    // (`refuse`), a machine with no token at all (`no_token`), or a clean slate. The same
+    // contract the approval hook carries, and for the same reason — one mock process serves
+    // the whole run, so a spec MUST clear whatever it armed, or every later merge on this
+    // surface fails for no reason anybody can see.
+    if (body.kind === "gitlab_mr") {
+      if (body.clear === true) {
+        mockGitLabWriteRefusal = null;
+        mockGitLabTokenMissing = false;
+        // The live pipeline goes back to its first frame too: every read moves it on, so a
+        // spec that wants to WATCH it move has to start from a known one.
+        resetMockLivePipeline();
+        return Response.json({ ok: true, cleared: true }, { status: 200 });
+      }
+      mockGitLabWriteRefusal = typeof body.refuse === "string" ? body.refuse : null;
+      mockGitLabTokenMissing = body.no_token === true;
+      return Response.json(
+        { ok: true, refuse: mockGitLabWriteRefusal, no_token: mockGitLabTokenMissing },
         { status: 200 },
       );
     }

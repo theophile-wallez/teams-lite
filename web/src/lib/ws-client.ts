@@ -11,6 +11,17 @@ import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { CallPreparation, CallStatus, MeetingAddress } from "./call";
 import type { SendImage } from "./composer-image";
+import type {
+  GitLabDiscussionList,
+  GitLabPipelineView,
+  MergeOutcome,
+  MergeRequestDetail,
+  MergeRequestKey,
+  MergeRequestList,
+  MergeRequestScope,
+  MergeRequestState,
+  PostedNote,
+} from "./gitlab-mr";
 import type { OutboundMention } from "./mentions";
 import type {
   AddressPeopleResult,
@@ -1110,6 +1121,126 @@ export class Backend {
    *  GitLab reports afterwards, so the menu shows what really happened. */
   gitlabSetApproval(url: string, approved: boolean): Promise<GitLabApprovalResult> {
     return this.writeRequest<GitLabApprovalResult>("gitlab_set_approval", { url, approved });
+  }
+
+  // ---- the merge-request page ---------------------------------------------
+  //
+  // Four reads and four writes, and the split is the whole safety story of the page:
+  // reading a tracker is what it is for, and writing to one is the user's own click.
+  //
+  // Every read answers from the backend's durable cache first and refreshes behind the
+  // page (see `gitlab_cached` in src/bin/server.rs), so none of these is slow twice — and
+  // the fresh copy arrives as a `gitlab_list_updated` / `gitlab_mr_updated` event rather
+  // than by asking again. `refresh: true` is the user's own Reload: it waits for GitLab.
+
+  /** The merge requests that are NOT merged. `scope` and `state` are closed sets on the
+   *  backend, which is what stops this page ever asking for merged ones. */
+  gitlabMergeRequests(
+    scope: MergeRequestScope,
+    state: MergeRequestState,
+    refresh = false,
+  ): Promise<MergeRequestList> {
+    return this.request<MergeRequestList>("gitlab_mr_list", { scope, state, refresh });
+  }
+
+  /** One merge request in full. */
+  gitlabMergeRequest(
+    key: MergeRequestKey,
+    refresh = false,
+  ): Promise<MergeRequestDetail> {
+    return this.request<MergeRequestDetail>("gitlab_mr_detail", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      refresh,
+    });
+  }
+
+  /** Its comment thread — discussions in GitLab's own order, each note saying whether the
+   *  user themselves wrote it. */
+  gitlabMergeRequestNotes(
+    key: MergeRequestKey,
+    refresh = false,
+  ): Promise<GitLabDiscussionList> {
+    return this.request<GitLabDiscussionList>("gitlab_mr_notes", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      refresh,
+    });
+  }
+
+  /** Its head pipeline and jobs. THE live read: the page repeats it while CI runs, and the
+   *  backend's own window is seconds, so two open pages cost one request between them. */
+  gitlabMergeRequestPipeline(
+    key: MergeRequestKey,
+    refresh = false,
+  ): Promise<GitLabPipelineView> {
+    return this.request<GitLabPipelineView>("gitlab_mr_pipeline", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      refresh,
+    });
+  }
+
+  /** MERGE the branch.
+   *
+   *  The one write in this app that no later call takes back, which is why `sha` is
+   *  required: it is the head commit the PAGE drew, and GitLab refuses a merge whose sha is
+   *  not the branch's head — so a merge request that moved since the reader looked is
+   *  refused rather than landed. Gated like a send (OUTWARD_METHODS in src/bin/server.rs),
+   *  and the UI asks for a second explicit confirmation before it calls. */
+  gitlabMerge(
+    key: MergeRequestKey,
+    options: { sha: string; squash: boolean; removeSourceBranch?: boolean },
+  ): Promise<{ merge: MergeOutcome }> {
+    return this.writeRequest<{ merge: MergeOutcome }>("gitlab_mr_merge", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      sha: options.sha,
+      squash: options.squash,
+      ...(options.removeSourceBranch === undefined
+        ? {}
+        : { remove_source_branch: options.removeSourceBranch }),
+    });
+  }
+
+  /** Comment on it — a new comment, or a reply into the thread `discussionId` names.
+   *
+   *  Everybody watching the merge request is told, under the user's own name, so it is
+   *  gated like a send and only ever called from their own Enter. */
+  gitlabComment(
+    key: MergeRequestKey,
+    body: string,
+    discussionId?: string,
+  ): Promise<{ note: PostedNote }> {
+    return this.writeRequest<{ note: PostedNote }>("gitlab_mr_comment", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      body,
+      ...(discussionId ? { discussion_id: discussionId } : {}),
+    });
+  }
+
+  /** Delete one of the user's OWN comments — the undo that makes the comment above
+   *  acceptable. The backend re-reads whose note it is before it deletes, so a colleague's
+   *  comment is refused there rather than trusted from here. */
+  gitlabDeleteComment(key: MergeRequestKey, noteId: number): Promise<{ deleted: number }> {
+    return this.writeRequest<{ deleted: number }>("gitlab_mr_delete_comment", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      note_id: noteId,
+    });
+  }
+
+  /** Close it, or reopen it. Each direction is the other's undo. */
+  gitlabSetMergeRequestState(
+    key: MergeRequestKey,
+    change: "close" | "reopen",
+  ): Promise<{ state: string }> {
+    return this.writeRequest<{ state: string }>("gitlab_mr_set_state", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      change,
+    });
   }
 
   // ---- events -------------------------------------------------------------

@@ -501,16 +501,21 @@ The app reads the user's Teams/Outlook calendar over Microsoft Graph
   `OUTWARD_METHODS`, its own write-lock coverage — never a quiet addition to the read
   path.
 
-## The trackers are READ-ONLY, save ONE approval (MANDATORY)
+## The trackers are READ-ONLY, save what the USER clicks (MANDATORY)
 
 The app enriches a tracker link pasted into a chat into a rich preview card
-(`src/link_preview.rs`, over `src/gitlab.rs` and `src/linear.rs`). It reads those
-trackers. It writes exactly one thing to them — a merge request's approval, described
-at the end of this section — and nothing else, ever.
+(`src/link_preview.rs`, over `src/gitlab.rs` and `src/linear.rs`), and it holds a whole
+merge-request page (§ The GitLab page). It reads those trackers. It writes **five** things
+to GitLab and nothing else, ever — a merge request's approval (described at the end of this
+section) plus the page's merge, comment, comment deletion and close — and each one happens
+on a click the user just made, never on its own.
 
-- **Never create, edit, comment on, assign, move, merge or close an issue, a merge
-  request or a project** — in either tracker. A comment posted from here reaches everyone
-  watching the issue, under the user's name, and looks like they wrote it.
+- **LINEAR IS READ-ONLY, with no exception at all.** Nothing in this app writes to it.
+- **Never create, edit, assign, move or label an issue, a merge request or a project** —
+  in either tracker. What IS written to GitLab is the five actions above and nothing
+  beyond them: a comment posted from here reaches everyone watching the merge request,
+  under the user's name, and looks like they wrote it, which is why it is gated like a
+  send and offered only from the page's own composer.
 - The credentials carry the consent: a Linear personal API key has **full write
   access**, and a GitLab token has whatever scopes the user granted it. So nothing
   at the API level stops a write. What stops it is that **no code names a write**:
@@ -531,21 +536,26 @@ at the end of this section — and nothing else, ever.
 - Reading, enriching and rendering a link are fine and are what the feature is for.
   Any FURTHER write to a tracker is a deliberate feature: its own consent gate, its own
   entry in `OUTWARD_METHODS`, its own write-lock coverage — never a quiet addition to
-  the read path, and never an edit to `src/gitlab.rs` or `src/linear.rs`.
+  the read path, and never an edit to `src/gitlab.rs`, `src/gitlab_mr.rs` or
+  `src/linear.rs`. That is how the five that exist were built: the approval in
+  `src/gitlab_approval.rs`, the page's four in `src/gitlab_mr_write.rs`, each in a module
+  of its own with a test scanning the rest of the crate for its endpoints.
 
-### The one write: approving a merge request
+### The first write: approving a merge request
 
 A message that names a merge request offers **Approve !42** in its own "…" menu, wearing
 GitLab's own mark (`ApprovalAction` in `web/src/components/message-bubble.tsx`, over
 `src/gitlab_approval.rs`). It is the single exception to everything above, it was built
 as the deliberate feature the paragraph above demands, and six things hold it up:
 
-- **It is REVERSIBLE, and that is why it exists at all.** GitLab publishes `/approve` and
-  `/unapprove`, so the row the app leaves behind is **Revoke approval** — the same call
+- **It is REVERSIBLE, and that is why it was the FIRST one.** GitLab publishes `/approve`
+  and `/unapprove`, so the row the app leaves behind is **Revoke approval** — the same call
   with `approved: false`. A write whose off switch cannot undo its on switch is refused
   here on principle: it is the reason `forceavailability` is banned in
-  § The user's own status, and a comment, an assignment or a merge would each be exactly
-  that. Never add one.
+  § The user's own status. Exactly one write in this app breaks that principle, on the
+  user's own instruction — the MERGE on the page below — and it carries four rails in
+  place of the undo it cannot have. An assignment, a label or a rebase still has neither,
+  and none of them is here.
 - **It is gated like a send.** `gitlab_set_approval` is an `OUTWARD_METHODS` entry — the
   write token, refused read-only — and the automation hook refuses a command line, an
   ad-hoc script or a cargo example that names the endpoint or a Linear `mutation`. There
@@ -578,6 +588,114 @@ a machine with no token — a spec MUST clear it afterwards). `cd web && bun run
 --out /tmp/mr --merge-request` captures the rows, the confirmation and the outcome, and
 `web/e2e/merge-request.spec.ts` pins every rule above. **It has never been run against a
 real GitLab project**: doing that is the user's own click, in their own app.
+
+## The GitLab page (a sidebar of merge requests, and the four writes it offers)
+
+The sidebar's fifth tab is GitLab: the merge requests that are **not merged**, and one of
+them in full — its description, its live pipeline, its approvals, its comments — with the
+actions GitLab's own page offers. `src/gitlab_mr.rs` holds every READ, `src/gitlab_mr_write.rs`
+the four writes, `web/src/lib/gitlab-mr.ts` the pure decisions the surface is built from, and
+`web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
+
+**The split between the two backend modules is the whole safety story**, and it is the one
+in § The trackers: reading a tracker is what the feature is for, and writing to one is the
+user's own click. The four reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`) are
+open like every other read; the four writes (`gitlab_mr_merge`, `_comment`,
+`_delete_comment`, `_set_state`) are `OUTWARD_METHODS` entries — the write token, refused
+read-only, and the automation hook refuses a command line, a script or a cargo example that
+names their endpoints.
+
+**THE MERGE IS THE ONE ACTION IN THIS APP THAT NO LATER CALL TAKES BACK**, beside a message
+deletion. § The trackers refuses an irreversible write on principle; this one exists because
+the user asked for the page to do what GitLab's own does, and it carries four rails in place
+of the undo it cannot have. Each is pinned by a test:
+
+- **The head commit travels with it.** `sha` is required by
+  `gitlab_mr_write::merge` and by the handler, and it is the commit the PAGE drew — GitLab
+  answers `409` when it is not the branch's head, so a merge request that moved after the
+  reader looked is refused rather than landed. Never send a freshly-read sha to "fix" a 409:
+  that would merge exactly the commit nobody reviewed.
+- **The user asks twice.** The first click arms; the second lands the branch, and the
+  sentence under it names both branches and says no later click takes it back. Delete's own
+  pattern.
+- **It is offered only where GitLab would accept it.** `mergeVerdict` reads GitLab's own
+  `detailed_merge_status`, and an UNKNOWN status is never a green light — a state this app
+  has not heard of leaves the button disabled with GitLab's word on it, because "I do not
+  recognise this" must never resolve to "go ahead".
+- **The outcome is reported beside the button**, in GitLab's own words on a refusal
+  (`gitlab-action-error`). An outward action that failed must never be left looking like it
+  worked.
+
+The other three are ordinary gated writes because each is REVERSIBLE from the same page: a
+comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen. Four
+more rules hold the page together:
+
+- **A comment is deleted only when it is the USER'S OWN**, and whose it is comes from
+  GitLab (`note.mine`, matched on the account's id) read BEFORE the deletion — not from what
+  the client claimed. GitLab would let a maintainer remove a colleague's note; this app never
+  offers that, exactly as it refuses to delete a Teams message that is not the user's own.
+- **A reply lands in the thread it answers.** `discussion_id` decides the endpoint, because
+  a reply posted as a new comment lands in the wrong place and nothing reports it.
+- **Nothing on this page is fetched by the browser.** Faces are tinted initials — GitLab's
+  `avatar_url` travels and nothing requests it, since an avatar on a private instance answers
+  401 without a session — and the description and every comment go through the app's own
+  markdown subset (`parseCardMarkdown`), never GitLab's rendered HTML, which would bring
+  remote references with it.
+- **The list can never ask for merged merge requests.** `ListScope` and `ListState` are
+  closed Rust sets and `merged` is not among them, so the page's whole promise is enforced by
+  the type rather than by a filter somebody could widen.
+
+**Performance is a durable cache plus one live read**, and three measured facts shaped it:
+
+- **`gitlab_reads` is a response cache in SQLite** (schema v14). Every read answers from it
+  at once and refreshes behind the page — stale-while-revalidate — so a re-opened merge
+  request paints from disk and the fresh copy arrives on a `gitlab_mr_updated` event. The
+  window is per KIND, by what a stale answer costs: 60 s for the list, 30 s for the detail
+  and the comments, **5 s for the pipeline**. A write drops every read of the merge request
+  it changed, through the one prefix they share (`gitlab_mr::cache_prefix`).
+- **Refreshes are single-flight** (`Ctx::gitlab_refreshing`). A page polls its pipeline while
+  CI runs and two open pages poll the same one; without it, one merge request under two
+  readers would ask GitLab twice a second and earn the token a rate limit.
+- **The LIST endpoint carries no pipeline.** Measured on this tenant: no `head_pipeline` and
+  no `pipeline` on a row of `GET /merge_requests`, so a badge per row would cost one request
+  per merge request — 109 on the first screen. The row states `detailed_merge_status`
+  instead, which IS on the row and is what GitLab's own merge button reads. Do not "fix" the
+  missing badge by fetching per row.
+- **`scope=all` is what makes it a dashboard.** GitLab's default is `created_by_me`, and
+  measured here that is 12 rows and one author against 109 rows and 25 authors. A page that
+  forgot it looks like a page with a bug in its query.
+- **The live pipeline poll is armed only while something is in flight** (`pipelineIsLive`,
+  which reads the JOBS too — GitLab reports a pipeline `success` while a job allowed to fail
+  still runs) and it stops when the page closes, so a page nobody is looking at asks GitLab
+  nothing. Its interval (6 s) sits ABOVE the backend's 5 s window on purpose: below it, every
+  poll would be served the same cached answer and the panel would look frozen.
+
+**The diff is not here yet, and the page says so.** A Changes section states the file count
+and links to GitLab's own, because a page that silently lacked the diff would read as a page
+whose diff failed to load. What is already in place for it: a `DiffNote` keeps the file and
+line it hangs on (`note.position`), and the page names that file, so a review comment is
+never a comment about nothing.
+
+**The four READS are verified against the real instance**, by
+`examples/merge_request_page_recon.rs` — which is READ-ONLY, reads the host and token out of
+the app's own store, and prints counts and field presence rather than anybody's words:
+
+    cargo run --example merge_request_page_recon
+
+Measured 2026-08-06 on `git.sia.partners`: 109 open merge requests (100 asked for, so the
+truncation notice is a real state), 929 closed, 21 authors under `scope=all` against 12 under
+`scope=mine`, a detail carrying its `sha` and `detailed_merge_status`, and a head pipeline of
+15 jobs over 5 stages. Run it again when a parse changes; it re-measures the three facts
+above rather than trusting this paragraph.
+
+`web/mock/server.ts` reproduces the whole flow with no GitLab and no token — including a
+pipeline that advances one step per read, which is what makes "the panel follows the run"
+watchable — and the `{kind:"gitlab_mr"}` test hook arms a refusal, a machine with no token,
+and the reset a spec MUST call afterwards. `cd web && bun run preview -- --out /tmp/mr
+--gitlab` captures the list, the page, the merge armed, the comments and a blocked merge in
+both themes; `web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
+run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
+is the user's own click, in their own app.
 
 ## Automation safety (MANDATORY — read before driving the UI)
 
@@ -686,7 +804,10 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/cal --calendar`, or `openCalendarTab` /
   `openCalendarView` / `openFirstEvent`. For the team → channel tree:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
-  `toggleTeamSection` from the same file. For the chat list's sections and the "…"
+  `toggleTeamSection` from the same file. For the merge-request page — the list, the page,
+  the merge armed, the comments and a blocked merge:
+  `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt`
+  from the same file. For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
   `bun run preview -- --out /tmp/ask --answer-with`. For the typing hint above the
@@ -1738,8 +1859,10 @@ user's. What changes is only what is asked.
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
   and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
-  `src/gitlab.rs` and `src/linear.rs`) plus the ONE write those trackers get — a merge
-  request's approval, and its undo (`src/gitlab_approval.rs`, see § The trackers) —,
+  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its reads in
+  `src/gitlab_mr.rs` over a durable response cache, its four writes in
+  `src/gitlab_mr_write.rs` (see § The GitLab page) — plus the approval those trackers got
+  first, and its undo (`src/gitlab_approval.rs`, see § The trackers),
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
   § The local agent) and the app's own update — the check, the download and the swap

@@ -46,6 +46,7 @@ import {
   type ChatPrefs,
   type Conversation,
   type IncomingCall,
+  type GitLabApproval,
   type GitLabApprovalResult,
   type LinkMetadata,
   type LiveStatus,
@@ -101,6 +102,20 @@ import {
   type SendKind,
 } from "./call-media";
 import { callFailureMessage, captureDroppedMessage } from "./call-failure";
+import {
+  isNotMerged,
+  mergeRequestId,
+  pipelineIsLive,
+  sameMergeRequest,
+  type GitLabDiscussionList,
+  type GitLabPipelineView,
+  type MergeRequestDetail,
+  type MergeRequestKey,
+  type MergeRequestList,
+  type MergeRequestRow,
+  type MergeRequestScope,
+  type MergeRequestState,
+} from "./gitlab-mr";
 import { CALL_NOTICE, dismissNotice, showNotice } from "./notice";
 import { coalesce } from "./singleflight";
 import {
@@ -146,7 +161,7 @@ export type PendingReply = { message: ChatMessage; marker: string | null };
 /** Which sidebar list is showing: normal chats, the team/channel tree, or the
  *  mailbox. Each is a distinct source — a channel never appears in the chat list,
  *  and mail is a different backend surface entirely — so this is a hard switch. */
-export type SidebarTab = "chats" | "channels" | "mail" | "calendar";
+export type SidebarTab = "chats" | "channels" | "mail" | "calendar" | "gitlab";
 
 /** The cache key a mail attachment's proxied bytes are stored under. Namespaced so
  *  it can never collide with a Teams hosted-content URL in the shared media cache. */
@@ -438,6 +453,58 @@ export type AppState = {
   calendarError: string | null;
   /** The event whose details panel is open, or null. */
   openEventId: string | null;
+
+  // ---- the GitLab merge-request page ----------------------------------------
+  //
+  // Loaded lazily like mail and the calendar: nothing here is fetched until the GitLab
+  // tab is opened once. Every read is served from the backend's durable cache first, so
+  // re-opening a merge request paints immediately and the fresh copy arrives on an event.
+
+  /** Which merge requests the sidebar asks for. Persisted locally: it is a preference
+   *  about this screen, not anything GitLab knows. */
+  gitlabScope: MergeRequestScope;
+  gitlabState: MergeRequestState;
+  /** The rows on screen, newest activity first. */
+  gitlabList: MergeRequestRow[];
+  /** How many match, when GitLab said, and whether the list stops short of it. A list
+   *  that stopped without saying so would read as a complete one. */
+  gitlabTotal: number | null;
+  gitlabTruncated: boolean;
+  gitlabListLoading: boolean;
+  /** Why the list could not be read, or null. Scoped to this page: GitLab failing must
+   *  never break the chat surfaces. */
+  gitlabListError: string | null;
+  /** Whether this machine holds a GitLab token at all — the backend's own answer, carried
+   *  by the list read. Without one the page can read nothing, so it says that instead of
+   *  showing an empty list somebody would read as "no work".
+   *
+   *  TRUE until told otherwise: the notice must not flash in front of a list that is about
+   *  to arrive, and an older backend that says nothing is one whose list still works. */
+  gitlabTokenSet: boolean;
+
+  /** The open merge request (mirrors the `/mr/<id>` route), or null. */
+  openMergeRequest: MergeRequestKey | null;
+  gitlabDetail: MergeRequestDetail | null;
+  gitlabDetailLoading: boolean;
+  gitlabDetailError: string | null;
+  /** Its approval state, and whether the user's own approval is on. The same read the
+   *  message menu uses (`gitlab_approvals`), so there is one answer in this app. */
+  gitlabApproval: GitLabApproval | null;
+  /** Its comments, and its pipeline with jobs. */
+  gitlabNotes: GitLabDiscussionList | null;
+  gitlabPipeline: GitLabPipelineView | null;
+  /** What the composer holds, per merge request, so walking away and back keeps a
+   *  half-written comment — and a reply keeps its own draft apart from the main one. */
+  gitlabCommentDraft: string;
+  /** Which thread the composer is replying into, or null for a new comment. */
+  gitlabReplyTo: string | null;
+  /** An outward action in flight — "merge", "comment", "close", "reopen", "approve" —
+   *  so the page can disable exactly one control rather than all of them. */
+  gitlabActing: string | null;
+  /** What the last outward action said, reported where the click was made. An action
+   *  that failed must never be left looking like it worked. */
+  gitlabActionError: string | null;
+  gitlabActionDone: string | null;
 };
 
 const DRAFT_SAVE_DELAY_MS = 150;
@@ -500,6 +567,17 @@ const MEDIA_CACHE_BYTES = 48 * 1024 * 1024;
 // would otherwise accumulate megabytes of markup. The backend caches every body
 // durably in SQLite, so re-opening an evicted mail is a local round-trip.
 const RETAINED_MAIL_BODIES = 12;
+// How many merge requests keep their detail, comments and draft in the session cache. A
+// reviewer walks between a handful at a time; the backend caches every read durably, so
+// re-opening an evicted one is a local round-trip.
+const RETAINED_MERGE_REQUESTS = 8;
+// How often a LIVE pipeline is re-read while its merge request is open.
+//
+// It has to sit above the backend's own cache window (GITLAB_PIPELINE_TTL, 5 s) or the poll
+// would keep being served the same cached answer and the page would look frozen; and it has
+// to stay short enough that a job turning green is seen while the reader is still looking.
+// Only ever armed while something is actually in flight (see `pipelineIsLive`).
+const GITLAB_PIPELINE_POLL_MS = 6000;
 // Where the locally-chosen visible calendars are persisted (client-only, like the
 // channel-pin overrides).
 const VISIBLE_CALENDARS_KEY = "teams-lite:visible-calendars";
@@ -619,6 +697,28 @@ function initialState(): AppState {
     calendarLoading: false,
     calendarError: null,
     openEventId: null,
+    // Every open merge request the token can see — the question the page exists to
+    // answer. The other three scopes narrow it, and `merged` is not a state it can ask.
+    gitlabScope: "all",
+    gitlabState: "opened",
+    gitlabList: [],
+    gitlabTotal: null,
+    gitlabTruncated: false,
+    gitlabListLoading: false,
+    gitlabListError: null,
+    gitlabTokenSet: true,
+    openMergeRequest: null,
+    gitlabDetail: null,
+    gitlabDetailLoading: false,
+    gitlabDetailError: null,
+    gitlabApproval: null,
+    gitlabNotes: null,
+    gitlabPipeline: null,
+    gitlabCommentDraft: "",
+    gitlabReplyTo: null,
+    gitlabActing: null,
+    gitlabActionError: null,
+    gitlabActionDone: null,
   };
 }
 
@@ -955,6 +1055,7 @@ export class TeamsController {
     this.callTimers.clear();
     for (const t of this.agentRunTimers.values()) clearTimeout(t);
     this.agentRunTimers.clear();
+    this.stopPipelinePolling();
     this.receiptsByConv.clear();
     for (const blob of this.mediaBlobs.values()) URL.revokeObjectURL(blob.objectUrl);
     this.mediaBlobs.clear();
@@ -1189,6 +1290,67 @@ export class TeamsController {
         this.set({ calendarError: d?.error || "Couldn\u2019t load the calendar", calendarLoading: false });
       }
     });
+    // The backend refreshed a merge-request list behind the page. It names the query it
+    // answers, so a page showing another filter ignores it — the sidebar must never
+    // silently swap the rows the user is reading for another scope's.
+    on("gitlab_list_updated", (raw) => {
+      const list = raw as (MergeRequestList & { scope?: string; state?: string }) | null;
+      if (!list || !Array.isArray(list.items)) return;
+      const state = this.get();
+      if (list.scope !== state.gitlabScope || list.state !== state.gitlabState) return;
+      this.applyGitLabList(list);
+    });
+
+    // One merge request moved. `kind` says which read arrived — or `stale`, which is what
+    // a WRITE broadcasts: it carries no payload, because the point of it is that every
+    // page (this one included, and the phone beside it) has to read again.
+    on("gitlab_mr_updated", (raw) => {
+      const d = raw as
+        | (Record<string, unknown> & { project_path?: string; iid?: number; kind?: string })
+        | null;
+      if (!d || typeof d.project_path !== "string" || typeof d.iid !== "number") return;
+      const key = { projectPath: d.project_path, iid: d.iid };
+      if (!sameMergeRequest(key, this.get().openMergeRequest)) return;
+      const id = mergeRequestId(key);
+      // Each frame is validated on the one field its own shape cannot be without, so a
+      // payload this build does not understand is ignored rather than drawn as an empty
+      // panel. A frame with no `kind` this page knows — `stale`, which is what a WRITE
+      // broadcasts — is the ask to read again.
+      if (d.kind === "detail" && typeof d.title === "string") {
+        const detail = d as unknown as MergeRequestDetail;
+        this.cacheGitLabDetail(id, detail);
+        this.set({ gitlabDetail: detail, gitlabDetailError: null });
+      } else if (d.kind === "notes" && Array.isArray(d.discussions)) {
+        const notes = d as unknown as GitLabDiscussionList;
+        this.gitlabNotesCache.set(id, notes);
+        this.set({ gitlabNotes: notes });
+      } else if (d.kind === "pipeline") {
+        const view = d as unknown as GitLabPipelineView;
+        this.set({ gitlabPipeline: view });
+        // A refresh that arrived from somewhere else still decides whether this page keeps
+        // polling: a pipeline that finished must stop the timer, and one that started must
+        // arm it.
+        if (pipelineIsLive(view)) this.schedulePipelinePoll(key);
+        else this.stopPipelinePolling();
+      } else if (d.kind === "stale") {
+        void this.reloadMergeRequest();
+      }
+    });
+
+    // A background refresh was refused. Reported only when there is nothing on screen:
+    // a failed refresh behind a populated page is noise, and the page keeps the answer it
+    // has — but an EMPTY page with no word would read as "there are no merge requests".
+    on("gitlab_read_error", (raw) => {
+      const d = raw as { key?: string; error?: string } | null;
+      const message = d?.error || "GitLab could not be read";
+      const state = this.get();
+      if (typeof d?.key === "string" && d.key.startsWith("list:")) {
+        if (state.gitlabList.length === 0) this.set({ gitlabListError: message });
+        return;
+      }
+      if (!state.gitlabDetail) this.set({ gitlabDetailError: message });
+    });
+
     on("realtime_status", (s) => {
       const status = s as LiveStatus;
       if (status === "disconnected") this.connectionDropped = true;
@@ -2016,12 +2178,15 @@ export class TeamsController {
     }
   }
 
-  /** Switch the sidebar between the chat list, the channel tree and the mailbox.
-   *  Opening Mail for the first time is what loads it — see `loadMailFolders`. */
+  /** Switch the sidebar between the chat list, the channel tree, the mailbox, the
+   *  calendar and the merge requests. Opening one of the lazy surfaces for the first time
+   *  is what loads it — see `loadMailFolders`, `ensureCalendarLoaded`,
+   *  `ensureGitLabLoaded`. */
   setSidebarTab(tab: SidebarTab): void {
     if (this.get().sidebarTab !== tab) this.set({ sidebarTab: tab });
     if (tab === "mail") void this.ensureMailLoaded();
     if (tab === "calendar") void this.ensureCalendarLoaded();
+    if (tab === "gitlab") void this.ensureGitLabLoaded();
   }
 
   // ---- mail (read-only Outlook surface) ------------------------------------
@@ -2549,6 +2714,462 @@ export class TeamsController {
       this.set({ calendarSettings: next });
     } catch {
       /* ignore — display preferences are non-critical */
+    }
+  }
+
+  // ---- the GitLab merge-request page ---------------------------------------
+  //
+  // Local-first in the same shape as mail: the backend answers every read from its own
+  // durable cache and refreshes behind the page, so switching between merge requests is
+  // instant and the fresh copy lands on an event. On top of that this holds a per-query
+  // cache of its own, so flipping the sidebar's filter back and forth costs nothing at
+  // all — not even a round trip to the backend.
+  //
+  // The four WRITES are the only outward things here, and each is one click: nothing on
+  // this page ever posts, merges or closes on its own.
+
+  /** Rows per (scope, state), so a filter the user has already looked at paints at once.
+   *  Bounded by the eight combinations the two closed sets allow. */
+  private gitlabListCache = new Map<string, MergeRequestList>();
+  /** Detail / notes / pipeline per merge request, so walking back to one is instant.
+   *  Bounded LRU — a session spent reviewing must not accumulate every merge request. */
+  private gitlabDetailCache = new Map<string, MergeRequestDetail>();
+  private gitlabNotesCache = new Map<string, GitLabDiscussionList>();
+  /** Comment drafts per merge request, so leaving a half-written comment and coming back
+   *  keeps it. Kept OUT of the reactive state for the same reason chat drafts are. */
+  private gitlabDraftCache = new Map<string, string>();
+  /** The pipeline poll of the OPEN merge request, and nothing else: a page polls the one
+   *  pipeline it is showing, and closing the page stops it. */
+  private gitlabPipelineTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private refreshGitLabList = coalesce(() => this.loadMergeRequests(false));
+
+  /** Load the sidebar the first time the GitLab tab is shown. */
+  private async ensureGitLabLoaded(): Promise<void> {
+    if (this.gitlabListCache.size === 0) await this.refreshGitLabList();
+  }
+
+  /** Forget everything read through the old token or the old host. Called when either
+   *  changes: what a token can see IS the page, so keeping a row would be showing one
+   *  account's world under another's credentials. */
+  private forgetGitLabReads(): void {
+    this.gitlabListCache.clear();
+    this.gitlabDetailCache.clear();
+    this.gitlabNotesCache.clear();
+    this.set({
+      gitlabList: [],
+      gitlabTotal: null,
+      gitlabTruncated: false,
+      gitlabListError: null,
+      gitlabDetail: null,
+      gitlabNotes: null,
+      gitlabPipeline: null,
+      gitlabApproval: null,
+    });
+    if (this.get().sidebarTab === "gitlab") void this.loadMergeRequests(true);
+    if (this.get().openMergeRequest) void this.reloadMergeRequest();
+  }
+
+  /** The key one query's rows are cached under. */
+  private gitlabListKey(scope: MergeRequestScope, state: MergeRequestState): string {
+    return `${scope}:${state}`;
+  }
+
+  /** Show the rows of one list answer, dropping anything that is no longer un-merged: a
+   *  refresh that crossed a merge must not leave a merged row in a list whose whole
+   *  promise is "not merged". */
+  private applyGitLabList(list: MergeRequestList): void {
+    const items = list.items.filter(isNotMerged);
+    this.gitlabListCache.set(this.gitlabListKey(list.scope as MergeRequestScope, list.state as MergeRequestState), {
+      ...list,
+      items,
+    });
+    const state = this.get();
+    if (list.scope !== state.gitlabScope || list.state !== state.gitlabState) return;
+    this.set({
+      gitlabList: items,
+      gitlabTotal: list.total ?? null,
+      gitlabTruncated: list.truncated === true,
+      gitlabTokenSet: list.token_set !== false,
+      gitlabListError: null,
+      gitlabListLoading: false,
+    });
+  }
+
+  /** Read the sidebar's list. `refresh` is the user's own Reload — it waits for GitLab
+   *  rather than taking the backend's cached answer. */
+  private async loadMergeRequests(refresh: boolean): Promise<void> {
+    const { gitlabScope: scope, gitlabState: state } = this.get();
+    const cached = this.gitlabListCache.get(this.gitlabListKey(scope, state));
+    this.set({ gitlabListLoading: !cached || refresh, gitlabListError: null });
+    try {
+      const list = await this.backend.gitlabMergeRequests(scope, state, refresh);
+      this.applyGitLabList(list);
+    } catch (e) {
+      const now = this.get();
+      // A failed refresh behind rows on screen is noise; with nothing to show it is the
+      // only thing the page can say.
+      if (now.gitlabScope === scope && now.gitlabState === state) {
+        this.set({
+          gitlabListError: now.gitlabList.length === 0 ? errText(e) : now.gitlabListError,
+          gitlabListLoading: false,
+        });
+      }
+    }
+  }
+
+  /** Narrow (or widen) which merge requests the sidebar shows. */
+  setGitLabScope(scope: MergeRequestScope): void {
+    if (this.get().gitlabScope === scope) return;
+    this.set({ gitlabScope: scope });
+    this.showCachedGitLabList();
+    void this.loadMergeRequests(false);
+  }
+
+  /** Switch between the open and the closed merge requests — the two halves of "not
+   *  merged", and the only two this page can ask for. */
+  setGitLabState(state: MergeRequestState): void {
+    if (this.get().gitlabState === state) return;
+    this.set({ gitlabState: state });
+    this.showCachedGitLabList();
+    void this.loadMergeRequests(false);
+  }
+
+  /** Paint whatever this filter held last, so a switch is never a blank list. */
+  private showCachedGitLabList(): void {
+    const { gitlabScope: scope, gitlabState: state } = this.get();
+    const cached = this.gitlabListCache.get(this.gitlabListKey(scope, state));
+    this.set({
+      gitlabList: cached?.items ?? [],
+      gitlabTotal: cached?.total ?? null,
+      gitlabTruncated: cached?.truncated === true,
+      gitlabListError: null,
+      gitlabListLoading: !cached,
+    });
+  }
+
+  /** Re-read the list from GitLab, at the user's own asking. */
+  async reloadMergeRequests(): Promise<void> {
+    await this.loadMergeRequests(true);
+  }
+
+  /** Open one merge request: paint what is cached at once, then read the four things the
+   *  page shows — the detail, its approvals, its comments and its pipeline — in parallel,
+   *  so one slow read never holds the others up. */
+  async openMergeRequestPage(key: MergeRequestKey): Promise<void> {
+    const id = mergeRequestId(key);
+    const detail = this.gitlabDetailCache.get(id) ?? null;
+    const notes = this.gitlabNotesCache.get(id) ?? null;
+    this.stopPipelinePolling();
+    this.set({
+      openMergeRequest: key,
+      gitlabDetail: detail,
+      gitlabDetailLoading: !detail,
+      gitlabDetailError: null,
+      gitlabNotes: notes,
+      // The pipeline is deliberately NOT cached across opens: a stale CI badge is the one
+      // piece of this page that would be read as current when it is minutes old.
+      gitlabPipeline: null,
+      gitlabApproval: null,
+      gitlabCommentDraft: this.gitlabDraftCache.get(id) ?? "",
+      gitlabReplyTo: null,
+      gitlabActing: null,
+      gitlabActionError: null,
+      gitlabActionDone: null,
+    });
+    await this.loadMergeRequestPage(key, false);
+  }
+
+  /** Re-read everything about the open merge request.
+   *
+   *  COALESCED, and that is what keeps a write cheap: every write drops the backend's cache
+   *  for that merge request and broadcasts `stale`, so the page is asked to re-read by its
+   *  own action AND by the event its own action caused — and each read is four requests to
+   *  GitLab. One in flight plus one trailing run is the whole amplification this can have
+   *  (see `coalesce`, whose own doc names this exact loop). */
+  private reloadOpenMergeRequest = coalesce(async () => {
+    const key = this.get().openMergeRequest;
+    if (key) await this.loadMergeRequestPage(key, true);
+  });
+
+  /** Re-read the open merge request. Called by a write's own broadcast, by the page's
+   *  Reload, and by every action that changes what GitLab would answer. */
+  async reloadMergeRequest(): Promise<void> {
+    await this.reloadOpenMergeRequest();
+  }
+
+  private async loadMergeRequestPage(key: MergeRequestKey, refresh: boolean): Promise<void> {
+    const id = mergeRequestId(key);
+    const open = () => sameMergeRequest(this.get().openMergeRequest, key);
+
+    const detail = this.backend
+      .gitlabMergeRequest(key, refresh)
+      .then((detail) => {
+        this.cacheGitLabDetail(id, detail);
+        if (open()) this.set({ gitlabDetail: detail, gitlabDetailError: null });
+        // The approval read is addressed by URL — the same call the message menu makes,
+        // so there is one answer about approvals in this app — and the URL is GitLab's
+        // own, from the detail we just read.
+        return this.loadMergeRequestApproval(key, detail.web_url);
+      })
+      .catch((e) => {
+        if (open() && !this.get().gitlabDetail) this.set({ gitlabDetailError: errText(e) });
+      })
+      .finally(() => {
+        if (open()) this.set({ gitlabDetailLoading: false });
+      });
+
+    const notes = this.backend
+      .gitlabMergeRequestNotes(key, refresh)
+      .then((notes) => {
+        this.gitlabNotesCache.set(id, notes);
+        if (open()) this.set({ gitlabNotes: notes });
+      })
+      .catch(() => {
+        /* the comments are one panel: a failure there must not empty the page */
+      });
+
+    const pipeline = this.loadPipeline(key, refresh);
+    await Promise.all([detail, notes, pipeline]);
+  }
+
+  private async loadMergeRequestApproval(key: MergeRequestKey, webUrl: string): Promise<void> {
+    if (!webUrl) return;
+    try {
+      const { approval } = await this.backend.gitlabApprovals(webUrl);
+      if (sameMergeRequest(this.get().openMergeRequest, key)) this.set({ gitlabApproval: approval });
+    } catch {
+      /* an approval panel that cannot be read shows nothing rather than a guess */
+    }
+  }
+
+  /** Read the pipeline, and keep reading it while it moves.
+   *
+   *  THE live half of this page. The poll is armed only while the pipeline is actually in
+   *  flight (see `pipelineIsLive`), so a finished pipeline costs nothing, and the backend's
+   *  own cache window is what makes two open pages cost one request between them. */
+  private async loadPipeline(key: MergeRequestKey, refresh: boolean): Promise<void> {
+    try {
+      const view = await this.backend.gitlabMergeRequestPipeline(key, refresh);
+      if (!sameMergeRequest(this.get().openMergeRequest, key)) return;
+      this.set({ gitlabPipeline: view });
+      if (pipelineIsLive(view)) this.schedulePipelinePoll(key);
+      else this.stopPipelinePolling();
+    } catch {
+      // A pipeline that cannot be read leaves the panel as it stands and stops polling:
+      // hammering a refusal would earn the token a rate limit.
+      this.stopPipelinePolling();
+    }
+  }
+
+  private schedulePipelinePoll(key: MergeRequestKey): void {
+    this.stopPipelinePolling();
+    this.gitlabPipelineTimer = setTimeout(() => {
+      this.gitlabPipelineTimer = null;
+      if (sameMergeRequest(this.get().openMergeRequest, key)) void this.loadPipeline(key, false);
+    }, GITLAB_PIPELINE_POLL_MS);
+  }
+
+  private stopPipelinePolling(): void {
+    if (this.gitlabPipelineTimer === null) return;
+    clearTimeout(this.gitlabPipelineTimer);
+    this.gitlabPipelineTimer = null;
+  }
+
+  closeMergeRequestPage(): void {
+    this.stopPipelinePolling();
+    this.set({
+      openMergeRequest: null,
+      gitlabDetail: null,
+      gitlabDetailError: null,
+      gitlabNotes: null,
+      gitlabPipeline: null,
+      gitlabApproval: null,
+      gitlabCommentDraft: "",
+      gitlabReplyTo: null,
+      gitlabActing: null,
+      gitlabActionError: null,
+      gitlabActionDone: null,
+    });
+  }
+
+  /** Store one detail and drop the least-recently-opened merge request past the budget.
+   *
+   *  Insertion order doubles as the LRU order, which is why the entry is re-inserted rather
+   *  than merely written: `Map.set` on an existing key keeps its old position. */
+  private cacheGitLabDetail(id: string, detail: MergeRequestDetail): void {
+    this.gitlabDetailCache.delete(id);
+    this.gitlabDetailCache.set(id, detail);
+    this.trimGitLabCaches(id);
+  }
+
+  /** Drop the least-recently-opened merge request past the budget, never the open one. */
+  private trimGitLabCaches(justUsed: string): void {
+    while (this.gitlabDetailCache.size > RETAINED_MERGE_REQUESTS) {
+      const oldest = this.gitlabDetailCache.keys().next();
+      if (oldest.done || oldest.value === justUsed) break;
+      this.gitlabDetailCache.delete(oldest.value);
+      this.gitlabNotesCache.delete(oldest.value);
+      this.gitlabDraftCache.delete(oldest.value);
+    }
+  }
+
+  /** What the comment composer holds. Kept per merge request, so walking away and back
+   *  keeps a half-written comment — the same promise the chat composer makes. */
+  setGitLabCommentDraft(text: string): void {
+    const key = this.get().openMergeRequest;
+    if (key) this.gitlabDraftCache.set(mergeRequestId(key), text);
+    this.set({ gitlabCommentDraft: text });
+  }
+
+  /** Reply into one thread, or stop replying (`null`) and write a new comment instead. */
+  setGitLabReplyTo(discussionId: string | null): void {
+    this.set({ gitlabReplyTo: discussionId, gitlabActionError: null });
+  }
+
+  /** Post the comment in the composer — a new one, or a reply into the open thread.
+   *
+   *  Outward: everybody watching the merge request is told, under the user's own name. So
+   *  it happens on their Enter and nowhere else, the words STAY in the composer until
+   *  GitLab has taken them, and a refusal is reported beside the box rather than swallowed
+   *  (the same contract the chat composer holds — see lib/send-failure.ts). */
+  async postGitLabComment(): Promise<void> {
+    const state = this.get();
+    const key = state.openMergeRequest;
+    const body = state.gitlabCommentDraft.trim();
+    if (!key || body === "" || state.gitlabActing) return;
+
+    this.set({ gitlabActing: "comment", gitlabActionError: null, gitlabActionDone: null });
+    try {
+      await this.backend.gitlabComment(key, body, state.gitlabReplyTo ?? undefined);
+      // Only now are the words gone from the box: a comment that never left must not
+      // vanish from under the person who wrote it.
+      this.gitlabDraftCache.delete(mergeRequestId(key));
+      if (sameMergeRequest(this.get().openMergeRequest, key)) {
+        this.set({ gitlabCommentDraft: "", gitlabReplyTo: null });
+      }
+      await this.refreshGitLabNotes(key);
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+    } finally {
+      this.set({ gitlabActing: null });
+    }
+  }
+
+  /** Delete one of the user's OWN comments. The backend re-reads whose it is before it
+   *  deletes, so this is a request rather than a claim. */
+  async deleteGitLabComment(noteId: number): Promise<void> {
+    const key = this.get().openMergeRequest;
+    if (!key || this.get().gitlabActing) return;
+    this.set({ gitlabActing: `delete:${noteId}`, gitlabActionError: null, gitlabActionDone: null });
+    try {
+      await this.backend.gitlabDeleteComment(key, noteId);
+      await this.refreshGitLabNotes(key);
+      this.set({ gitlabActionDone: "Comment deleted." });
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+    } finally {
+      this.set({ gitlabActing: null });
+    }
+  }
+
+  private async refreshGitLabNotes(key: MergeRequestKey): Promise<void> {
+    try {
+      const notes = await this.backend.gitlabMergeRequestNotes(key, true);
+      this.gitlabNotesCache.set(mergeRequestId(key), notes);
+      if (sameMergeRequest(this.get().openMergeRequest, key)) this.set({ gitlabNotes: notes });
+    } catch {
+      /* the comment landed; a failed re-read is not a failed comment */
+    }
+  }
+
+  /** MERGE the open merge request.
+   *
+   *  The one action in this app that no later click takes back, which is why it sends the
+   *  `sha` the page DREW: GitLab refuses a merge whose sha is not the branch's head, so a
+   *  merge request that moved since the reader looked is refused rather than landed. The UI
+   *  asks for a second, explicit confirmation before calling this. */
+  async mergeOpenMergeRequest(): Promise<void> {
+    const state = this.get();
+    const key = state.openMergeRequest;
+    const detail = state.gitlabDetail;
+    if (!key || !detail || state.gitlabActing) return;
+    if (!detail.sha) {
+      this.set({
+        gitlabActionError:
+          "This page does not know which commit to merge — reload it and look again.",
+      });
+      return;
+    }
+
+    this.set({ gitlabActing: "merge", gitlabActionError: null, gitlabActionDone: null });
+    try {
+      const { merge } = await this.backend.gitlabMerge(key, {
+        sha: detail.sha,
+        squash: detail.squash,
+        removeSourceBranch: detail.should_remove_source_branch,
+      });
+      this.set({
+        gitlabActionDone:
+          merge.state === "merged"
+            ? `Merged into ${detail.target_branch}.`
+            : `GitLab reports it as ${merge.state}.`,
+      });
+      await this.reloadMergeRequest();
+      // A merged merge request leaves a list whose promise is "not merged", so the
+      // sidebar is re-read rather than left showing a row that is gone.
+      await this.loadMergeRequests(true);
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+    } finally {
+      this.set({ gitlabActing: null });
+    }
+  }
+
+  /** Close the open merge request, or reopen it. Each direction undoes the other. */
+  async setOpenMergeRequestState(change: "close" | "reopen"): Promise<void> {
+    const key = this.get().openMergeRequest;
+    if (!key || this.get().gitlabActing) return;
+    this.set({ gitlabActing: change, gitlabActionError: null, gitlabActionDone: null });
+    try {
+      const { state } = await this.backend.gitlabSetMergeRequestState(key, change);
+      this.set({ gitlabActionDone: state === "closed" ? "Closed." : "Reopened." });
+      await this.reloadMergeRequest();
+      await this.loadMergeRequests(true);
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+    } finally {
+      this.set({ gitlabActing: null });
+    }
+  }
+
+  /** Give the user's own approval, or take it back — the same call the message menu makes,
+   *  so there is one approval path in this app and not two. */
+  async setOpenMergeRequestApproval(approved: boolean): Promise<void> {
+    const state = this.get();
+    const key = state.openMergeRequest;
+    const url = state.gitlabDetail?.web_url;
+    if (!key || !url || state.gitlabActing) return;
+    this.set({
+      gitlabActing: approved ? "approve" : "unapprove",
+      gitlabActionError: null,
+      gitlabActionDone: null,
+    });
+    try {
+      const { approval } = await this.backend.gitlabSetApproval(url, approved);
+      if (sameMergeRequest(this.get().openMergeRequest, key)) {
+        this.set({
+          gitlabApproval: approval,
+          gitlabActionDone: approved ? "Approved." : "Approval revoked.",
+        });
+      }
+      // An approval can be what a merge was waiting for, so the detail is re-read: the
+      // Merge button's own reason comes from `detailed_merge_status`.
+      await this.reloadMergeRequest();
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+    } finally {
+      this.set({ gitlabActing: null });
     }
   }
 
@@ -3258,8 +3879,10 @@ export class TeamsController {
     this.linkCache.clear();
     this.linkResolved.clear();
     // A new host or a new token changes who GitLab thinks we are, so what it said about
-    // an approval no longer holds either.
+    // an approval no longer holds either — nor does anything the merge-request page read,
+    // which is a whole world seen through that token.
     this.approvalResolved.clear();
+    this.forgetGitLabReads();
     playCue("success");
     return settings;
   }

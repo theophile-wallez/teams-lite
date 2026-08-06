@@ -137,6 +137,48 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'gitlab_approvals', params: { url } }));\n"
     ),
+    # THE merge: it lands somebody's branch in a shared repository and no later call takes
+    # it back. There is no sandbox project to aim one at, so nothing but the user's own
+    # click in the app may make it.
+    "mr-merge-writer.ts": (
+        "// Merges a real merge request straight through GitLab.\n"
+        "await fetch('https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/merge',\n"
+        "  { method: 'PUT', headers: { 'PRIVATE-TOKEN': token } });\n"
+    ),
+    # A comment reaches everybody watching the merge request, under the user's name.
+    "mr-comment-writer.ts": (
+        "// Comments on a real merge request straight through GitLab.\n"
+        "await fetch('https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/notes',\n"
+        "  { method: 'POST', body: JSON.stringify({ body: 'looks good' }) });\n"
+    ),
+    # Closing one is a write too, whatever the verb it rides on.
+    "mr-close-writer.ts": (
+        "// Closes a real merge request straight through GitLab.\n"
+        "await fetch('https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42',\n"
+        "  { method: 'PUT', body: JSON.stringify({ state_event: 'close' }) });\n"
+    ),
+    # And the same four through the backend's gated RPCs, which are still writes.
+    "mr-merge-rpc-writer.ts": (
+        "// Merges a real merge request through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_merge' }));\n"
+    ),
+    "mr-comment-rpc-writer.ts": (
+        "// Comments on a real merge request through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_comment' }));\n"
+    ),
+    # Reading the PAGE is a read, all four of them: the list, the detail, the comments and
+    # the pipeline. A guard that blocked those would make the surface unscreenshotable and
+    # teach its next reader to phrase around it.
+    "mr-page-reader.ts": (
+        "// Reads the merge-request page through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19430');\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_list' }));\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_detail' }));\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_notes' }));\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_pipeline' }));\n"
+    ),
     # A Linear write is a mutation, and the key that reaches it has full write access.
     "linear-mutation-writer.ts": (
         "// Comments on a Linear issue.\n"
@@ -531,6 +573,50 @@ def cases(tmp: Path):
             "curl -X POST 'https://gitlab.com/api/v4/projects/x%2Fy/"
             "merge_requests/42/approve'",
         ),
+        # The merge-request PAGE's four writes, in every shape: the gated RPCs, GitLab's own
+        # endpoints, and a curl. The MERGE is the sharpest — it lands somebody's branch in a
+        # shared repository and no later call takes it back — and there is no sandbox
+        # project, so nothing but the user's own click in the app may make any of them.
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-merge-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-comment-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-close-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-merge-rpc-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-comment-rpc-writer.ts"),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X PUT 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/merge'",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X POST 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/notes' "
+            "-d 'body=looks good'",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X PUT 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42' "
+            "-d 'state_event=close'",
+        ),
+        # But READING the page is ordinary work, all four reads of it — otherwise the
+        # surface could not be screenshotted, and a guard that blocks that teaches its next
+        # reader to phrase around it.
+        ("ALLOW", PROJECT, f"bun run {tmp}/mr-page-reader.ts"),
+        (
+            "ALLOW",
+            PROJECT,
+            "curl -s 'https://gitlab.com/api/v4/merge_requests?scope=all&state=opened'",
+        ),
+        (
+            "ALLOW",
+            PROJECT,
+            "curl -s 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/discussions'",
+        ),
+        # And so is searching the code that implements them.
+        ("ALLOW", PROJECT, "grep -rn 'merge_requests/42/merge' src"),
+        ("ALLOW", PROJECT, "grep -rn state_event src"),
+        ("ALLOW", PROJECT, "cargo test --lib gitlab_mr_write"),
         # The write token is the capability itself — never ours to fetch.
         ("BLOCK", PROJECT, f"bun run {tmp}/token-thief.ts"),
         ("BLOCK", PROJECT, "curl -s http://127.0.0.1:19440/__write-token"),

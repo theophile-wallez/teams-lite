@@ -1,0 +1,1017 @@
+import { useMemo, useState } from "react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  Alert02Icon,
+  ArrowRight01Icon,
+  CheckmarkCircle02Icon,
+  ChevronLeftIcon,
+  Delete02Icon,
+  GitMergeIcon,
+  Link01Icon,
+  Loading02Icon,
+  Message01Icon,
+  PlayIcon,
+  RefreshIcon,
+  Tick02Icon,
+  TimeQuarterIcon,
+  XVariableCircleIcon,
+} from "@hugeicons/core-free-icons";
+import { parseCardMarkdown } from "~/lib/card-markdown";
+import {
+  conversationDiscussions,
+  formatJobDuration,
+  mergeVerdict,
+  pipelineIsLive,
+  pipelineStages,
+  pipelineTone,
+  stageTone,
+  stateChangeFor,
+  systemNotes,
+  unresolvedThreadCount,
+  type GitLabDiscussion,
+  type GitLabJob,
+  type GitLabNote,
+  type MergeRequestDetail,
+  type PipelineTone,
+} from "~/lib/gitlab-mr";
+import { cn } from "~/lib/utils";
+import { Avatar } from "./avatar";
+import { useAppState, useController } from "./controller-context";
+import { GitLabLogo } from "./gitlab-logo";
+import { RichNodes } from "./rich-content";
+
+// The merge-request page. It occupies the same slot as `MessagePane` and `MailPane`, so the
+// two-column layout, the mobile full-screen page and the back button behave identically
+// whether the user is reading a chat, a mail or a merge request.
+//
+// Unlike those two, this surface WRITES: it merges, comments, approves and closes. Four
+// rules hold that apart from the read-only surfaces beside it, and each is load-bearing:
+//
+//   - **Every write is one click of the user's, and MERGE asks twice.** The merge is the one
+//     action in this app that no later click takes back, so it arms a confirmation naming
+//     the target branch — the pattern a message deletion already uses.
+//   - **The outcome is reported HERE**, beside the control that was pressed. An outward
+//     action that failed must never be left looking like it worked (the same contract the
+//     composer holds for a failed send — see lib/send-failure.ts).
+//   - **A control is drawn only where it would work.** The Merge button reads GitLab's own
+//     `detailed_merge_status`, so a blocked merge request shows a disabled control with the
+//     reason on it instead of a refusal after the fact.
+//   - **Nothing here is fetched from the browser.** Faces are tinted initials, and the
+//     description and every comment are rendered through the app's own markdown subset —
+//     never GitLab's rendered HTML, which would carry remote references with it.
+//
+// The Changes / diff section is deliberately absent: reviewing code is its own surface, and
+// the reads it needs (`/diffs`, `/versions`) are not in this build. What is already here for
+// it: a diff comment keeps the file and line it hangs on (`note.position`), and the page
+// names that file, so a review comment is never a comment about nothing.
+
+export function GitLabPane(props: { onBack?: () => void }) {
+  const open = useAppState((s) => s.openMergeRequest);
+  const detail = useAppState((s) => s.gitlabDetail);
+  const loading = useAppState((s) => s.gitlabDetailLoading);
+  const error = useAppState((s) => s.gitlabDetailError);
+  const controller = useController();
+
+  if (!open) return <GitLabEmptyState />;
+
+  return (
+    <section data-testid="gitlab-pane" className="flex min-w-0 flex-1 flex-col bg-background">
+      <header className="flex min-h-16 shrink-0 items-center gap-2 border-b border-border-subtle px-3 pt-[env(safe-area-inset-top)] md:gap-3 md:px-5">
+        {props.onBack && (
+          <button
+            type="button"
+            onClick={props.onBack}
+            aria-label="Back to merge requests"
+            data-testid="back-to-list"
+            className="-ml-1 grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground md:hidden"
+          >
+            <HugeiconsIcon icon={ChevronLeftIcon} className="size-5" strokeWidth={1.6} />
+          </button>
+        )}
+        <GitLabLogo className="size-5 shrink-0" title="GitLab" />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <h2 data-testid="gitlab-title" className="truncate text-sm font-medium text-foreground">
+            {detail ? detail.title : `${open.projectPath}!${open.iid}`}
+          </h2>
+          <p className="truncate text-[11px] text-text-faint">
+            {open.projectPath}
+            {detail ? ` · ${detail.reference}` : ""}
+          </p>
+        </div>
+        <button
+          type="button"
+          data-testid="gitlab-detail-reload"
+          aria-label="Reload this merge request"
+          title="Reload from GitLab"
+          data-cuelume-press=""
+          onClick={() => void controller.reloadMergeRequest()}
+          className="grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <HugeiconsIcon
+            icon={loading ? Loading02Icon : RefreshIcon}
+            className={cn("size-4", loading && "animate-spin")}
+            strokeWidth={1.6}
+          />
+        </button>
+        {detail?.web_url && (
+          <a
+            href={detail.web_url}
+            target="_blank"
+            rel="noreferrer"
+            data-testid="gitlab-open-in-gitlab"
+            title="Open in GitLab"
+            aria-label="Open in GitLab"
+            className="grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <HugeiconsIcon icon={Link01Icon} className="size-4" strokeWidth={1.6} />
+          </a>
+        )}
+      </header>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6">
+        <article className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+          {error && !detail ? (
+            <p data-testid="gitlab-detail-error" className="text-[13px] text-destructive">
+              {error}
+            </p>
+          ) : !detail ? (
+            <p className="flex items-center gap-2 py-6 text-[13px] text-text-faint">
+              <HugeiconsIcon icon={Loading02Icon} className="size-3.5 animate-spin" strokeWidth={1.6} />
+              Loading the merge request…
+            </p>
+          ) : (
+            <>
+              <MergeRequestHeader detail={detail} />
+              <MergeRequestDescription detail={detail} />
+              <PipelinePanel />
+              <ApprovalPanel />
+              <ActionPanel detail={detail} />
+              <ChangesPlaceholder detail={detail} />
+              <DiscussionPanel />
+            </>
+          )}
+        </article>
+      </div>
+    </section>
+  );
+}
+
+/** Title, reference, state, branches and the people on it. */
+function MergeRequestHeader(props: { detail: MergeRequestDetail }) {
+  const detail = props.detail;
+  const notes = useAppState((s) => s.gitlabNotes);
+  const unresolved = unresolvedThreadCount(notes);
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <StateBadge detail={detail} />
+        <span className="text-[12px] tabular-nums text-text-faint">{detail.reference}</span>
+        {detail.changes_count && (
+          <span className="text-[12px] text-text-faint">
+            {detail.changes_count} file{detail.changes_count === "1" ? "" : "s"} changed
+          </span>
+        )}
+        {unresolved > 0 && (
+          <span
+            data-testid="gitlab-unresolved"
+            className="rounded-full bg-element px-2 py-0.5 text-[11px] font-medium text-text-dim"
+          >
+            {unresolved} unresolved thread{unresolved === 1 ? "" : "s"}
+          </span>
+        )}
+      </div>
+
+      <h1
+        data-testid="gitlab-heading"
+        className="text-lg font-semibold leading-snug text-foreground"
+      >
+        {detail.title}
+      </h1>
+
+      {/* The branches, in the direction the merge goes. */}
+      <div className="flex flex-wrap items-center gap-1.5 text-[12px] text-text-dim">
+        <code
+          data-testid="gitlab-source-branch"
+          className="rounded bg-element px-1.5 py-0.5 font-mono text-[11px]"
+        >
+          {detail.source_branch}
+        </code>
+        <HugeiconsIcon icon={ArrowRight01Icon} className="size-3.5 text-text-faint" strokeWidth={2} aria-label="into" />
+        <code
+          data-testid="gitlab-target-branch"
+          className="rounded bg-element px-1.5 py-0.5 font-mono text-[11px]"
+        >
+          {detail.target_branch}
+        </code>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <PersonLine label="Author" people={[detail.author]} />
+        {detail.reviewers && detail.reviewers.length > 0 && (
+          <PersonLine label="Reviewers" people={detail.reviewers} />
+        )}
+        {detail.assignees && detail.assignees.length > 0 && (
+          <PersonLine label="Assignees" people={detail.assignees} />
+        )}
+      </div>
+
+      {detail.labels && detail.labels.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {detail.labels.map((label) => (
+            <span
+              key={label}
+              data-testid="gitlab-label"
+              className="rounded-full bg-element px-2 py-0.5 text-[11px] text-text-dim"
+            >
+              {label}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One row of people, as faces and names. Tinted initials, never a fetched avatar. */
+function PersonLine(props: { label: string; people: { name: string; username: string }[] }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[12px] text-text-faint">{props.label}</span>
+      {props.people.map((person) => (
+        <span
+          key={person.username || person.name}
+          data-testid="gitlab-person"
+          title={person.username ? `@${person.username}` : person.name}
+          className="flex items-center gap-1.5 rounded-full bg-accent/60 py-0.5 pl-0.5 pr-2"
+        >
+          <Avatar
+            seed={person.username || person.name}
+            label={person.name || person.username}
+            initials={(person.name || person.username).slice(0, 1).toUpperCase()}
+            fallback="person"
+            className="size-5 text-[9px]"
+          />
+          <span className="max-w-[160px] truncate text-[12px] text-text-dim">
+            {person.name || person.username}
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** The one-word state, in the tone GitLab gives it. A draft says draft: GitLab calls it
+ *  "opened" and marks it separately, and "Open" on a draft is the wrong thing to read
+ *  first. */
+function StateBadge(props: { detail: MergeRequestDetail }) {
+  const detail = props.detail;
+  const label = detail.draft
+    ? "Draft"
+    : detail.state === "opened"
+      ? "Open"
+      : detail.state === "merged"
+        ? "Merged"
+        : detail.state === "closed"
+          ? "Closed"
+          : detail.state;
+  const tone =
+    detail.state === "merged"
+      ? "bg-primary/12 text-primary"
+      : detail.state === "closed"
+        ? "bg-destructive/12 text-destructive"
+        : detail.draft
+          ? "bg-element text-text-dim"
+          : "bg-primary/12 text-primary";
+  return (
+    <span
+      data-testid="gitlab-state"
+      data-state={detail.state}
+      data-draft={detail.draft ? "true" : undefined}
+      className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold", tone)}
+    >
+      {label}
+    </span>
+  );
+}
+
+/** The description, as markdown through the app's own renderer.
+ *
+ *  Never GitLab's rendered HTML: that would bring remote images and links with it, and
+ *  this app's whole promise about a body is that drawing it makes no request. */
+function MergeRequestDescription(props: { detail: MergeRequestDetail }) {
+  const nodes = useMemo(
+    () => parseCardMarkdown(props.detail.description ?? ""),
+    [props.detail.description],
+  );
+  if (!props.detail.description) return null;
+  return (
+    <RichNodes
+      nodes={nodes}
+      className="text-[13px] leading-relaxed text-text-dim"
+    />
+  );
+}
+
+/** The live pipeline: its status, and its jobs grouped into GitLab's own stages.
+ *
+ *  THE live half of this page. The store polls it while anything is in flight and stops the
+ *  moment nothing is, so a finished pipeline costs nothing (see `loadPipeline`). */
+function PipelinePanel() {
+  const view = useAppState((s) => s.gitlabPipeline);
+  const stages = useMemo(() => pipelineStages(view?.jobs), [view?.jobs]);
+  const live = pipelineIsLive(view);
+
+  if (!view) {
+    return (
+      <Panel title="Pipeline" testId="gitlab-pipeline">
+        <p className="flex items-center gap-2 text-[12px] text-text-faint">
+          <HugeiconsIcon icon={Loading02Icon} className="size-3.5 animate-spin" strokeWidth={1.6} />
+          Reading the pipeline…
+        </p>
+      </Panel>
+    );
+  }
+  if (!view.pipeline) {
+    return (
+      <Panel title="Pipeline" testId="gitlab-pipeline">
+        <p data-testid="gitlab-no-pipeline" className="text-[12px] text-text-faint">
+          No pipeline has run for this merge request.
+        </p>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel
+      title="Pipeline"
+      testId="gitlab-pipeline"
+      data-live={live ? "true" : undefined}
+      right={
+        <div className="flex items-center gap-2">
+          <StatusChip status={view.pipeline.status} testId="gitlab-pipeline-status" />
+          {/* Says that the panel is following the run, so a reader knows the page is not
+              simply stale. */}
+          {live && (
+            <span data-testid="gitlab-pipeline-live" className="text-[11px] text-text-faint">
+              following
+            </span>
+          )}
+          {view.pipeline.web_url && (
+            <a
+              href={view.pipeline.web_url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[11px] text-text-faint underline-offset-2 hover:underline"
+            >
+              #{view.pipeline.id}
+            </a>
+          )}
+        </div>
+      }
+    >
+      {stages.length === 0 ? (
+        <p className="text-[12px] text-text-faint">This pipeline has no jobs yet.</p>
+      ) : (
+        <div className="flex flex-col gap-2.5">
+          {stages.map((stage, index) => (
+            <div key={`${stage.name}:${index}`} data-testid="gitlab-stage" data-stage={stage.name}>
+              <div className="mb-1 flex items-center gap-1.5">
+                <ToneDot tone={stageTone(stage)} />
+                <span className="text-[11px] font-medium text-text-dim">{stage.name}</span>
+              </div>
+              <ul className="flex flex-col gap-1 pl-3.5">
+                {stage.jobs.map((job) => (
+                  <JobRow key={job.id} job={job} />
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/** One CI job: its name, what it did, and how long it took. */
+function JobRow(props: { job: GitLabJob }) {
+  const job = props.job;
+  const duration = formatJobDuration(job.duration);
+  return (
+    <li data-testid="gitlab-job" data-status={job.status} className="flex items-center gap-2">
+      <ToneDot tone={pipelineTone(job.status)} />
+      {job.web_url ? (
+        <a
+          href={job.web_url}
+          target="_blank"
+          rel="noreferrer"
+          className="min-w-0 truncate text-[12px] text-text-dim underline-offset-2 hover:text-foreground hover:underline"
+        >
+          {job.name}
+        </a>
+      ) : (
+        <span className="min-w-0 truncate text-[12px] text-text-dim">{job.name}</span>
+      )}
+      {/* A job allowed to fail says so, because a red mark on something nobody has to fix
+          is a red mark that teaches people to ignore red. */}
+      {job.allow_failure && job.status === "failed" && (
+        <span className="shrink-0 text-[10px] text-text-faint">(allowed to fail)</span>
+      )}
+      <span className="ml-auto shrink-0 text-[11px] tabular-nums text-text-faint">
+        {duration || job.status}
+      </span>
+    </li>
+  );
+}
+
+/** A dot in one of the four tones. Colour is never the only signal: every row that carries
+ *  one also states its status in words (the job's own status or its duration, the stage's
+ *  jobs below it), so the panel reads without colour vision. */
+function ToneDot(props: { tone: PipelineTone }) {
+  const tone =
+    props.tone === "success"
+      ? "bg-primary"
+      : props.tone === "failed"
+        ? "bg-destructive"
+        : props.tone === "running"
+          ? "bg-primary/60 animate-pulse"
+          : "bg-text-faint/40";
+  return (
+    <span
+      data-testid="gitlab-tone"
+      data-tone={props.tone}
+      aria-hidden
+      className={cn("size-2 shrink-0 rounded-full", tone)}
+    />
+  );
+}
+
+/** A status as GitLab spells it, in the tone it means. */
+function StatusChip(props: { status: string; testId?: string }) {
+  const tone = pipelineTone(props.status);
+  const icon =
+    tone === "success"
+      ? CheckmarkCircle02Icon
+      : tone === "failed"
+        ? XVariableCircleIcon
+        : tone === "running"
+          ? Loading02Icon
+          : props.status === "manual"
+            ? PlayIcon
+            : TimeQuarterIcon;
+  return (
+    <span
+      data-testid={props.testId}
+      data-status={props.status}
+      data-tone={tone}
+      className={cn(
+        "flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium",
+        tone === "success"
+          ? "bg-primary/12 text-primary"
+          : tone === "failed"
+            ? "bg-destructive/12 text-destructive"
+            : "bg-element text-text-dim",
+      )}
+    >
+      <HugeiconsIcon
+        icon={icon}
+        className={cn("size-3", tone === "running" && "animate-spin")}
+        strokeWidth={1.8}
+        aria-hidden
+      />
+      {props.status}
+    </span>
+  );
+}
+
+/** Who has approved, and the user's own approval as a toggle.
+ *
+ *  The same read and the same write a chat message's menu uses (`gitlab_approvals` /
+ *  `gitlab_set_approval`), so there is one approval path in this app and not two — and the
+ *  same reason it is offered at all: `approved: false` is GitLab's own undo. */
+function ApprovalPanel() {
+  const approval = useAppState((s) => s.gitlabApproval);
+  const acting = useAppState((s) => s.gitlabActing);
+  const controller = useController();
+  if (!approval) return null;
+
+  const busy = acting === "approve" || acting === "unapprove";
+  return (
+    <Panel
+      title="Approvals"
+      testId="gitlab-approvals"
+      right={
+        <button
+          type="button"
+          data-testid="gitlab-approve"
+          data-mine={approval.mine ? "true" : undefined}
+          disabled={!!acting}
+          data-cuelume-toggle=""
+          onClick={() => void controller.setOpenMergeRequestApproval(!approval.mine)}
+          className={cn(
+            "flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12px] font-medium transition-colors",
+            approval.mine
+              ? "bg-element text-text-dim hover:text-foreground"
+              : "bg-primary/12 text-primary hover:bg-primary/20",
+            !!acting && "opacity-60",
+          )}
+        >
+          <HugeiconsIcon
+            icon={busy ? Loading02Icon : Tick02Icon}
+            className={cn("size-3.5", busy && "animate-spin")}
+            strokeWidth={1.8}
+          />
+          {approval.mine ? "Revoke approval" : "Approve"}
+        </button>
+      }
+    >
+      <div className="flex flex-col gap-1 text-[12px] text-text-dim">
+        {approval.approvals_left != null && approval.approvals_left > 0 ? (
+          <p data-testid="gitlab-approvals-left">
+            {approval.approvals_left} more approval{approval.approvals_left === 1 ? "" : "s"} needed.
+          </p>
+        ) : approval.approved ? (
+          <p data-testid="gitlab-approved">GitLab reports this as approved.</p>
+        ) : null}
+        {approval.approved_by && approval.approved_by.length > 0 ? (
+          <p data-testid="gitlab-approved-by">Approved by {approval.approved_by.join(", ")}.</p>
+        ) : (
+          <p className="text-text-faint">Nobody has approved it yet.</p>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+/** The two writes that change what a merge request IS: the merge, and the close.
+ *
+ *  The merge asks twice — it is the one action here that no later click takes back — and the
+ *  close does not, because a reopen undoes it from the same row. */
+function ActionPanel(props: { detail: MergeRequestDetail }) {
+  const detail = props.detail;
+  const acting = useAppState((s) => s.gitlabActing);
+  const error = useAppState((s) => s.gitlabActionError);
+  const done = useAppState((s) => s.gitlabActionDone);
+  const controller = useController();
+  const [armed, setArmed] = useState(false);
+
+  const verdict = mergeVerdict(detail);
+  const change = stateChangeFor(detail);
+  const merging = acting === "merge";
+  const changing = acting === change;
+
+  return (
+    <Panel title="Actions" testId="gitlab-actions">
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* MERGE. Two clicks: the first arms, the second lands the branch. The sentence
+              under it names what that costs, so nobody presses the second one to find out.
+              Disabled — with GitLab's own reason on it — wherever GitLab would refuse. */}
+          {detail.state === "opened" && (
+            <button
+              type="button"
+              data-testid={armed ? "gitlab-merge-confirm" : "gitlab-merge"}
+              data-armed={armed ? "true" : undefined}
+              disabled={!verdict.can || !!acting}
+              title={verdict.reason}
+              data-cuelume-press=""
+              onClick={() => {
+                if (!armed) {
+                  setArmed(true);
+                  return;
+                }
+                setArmed(false);
+                void controller.mergeOpenMergeRequest();
+              }}
+              className={cn(
+                "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors",
+                armed
+                  ? "bg-destructive text-white hover:bg-destructive/90"
+                  : "bg-primary text-primary-foreground hover:bg-primary/90",
+                (!verdict.can || !!acting) && "cursor-not-allowed opacity-50",
+              )}
+            >
+              <HugeiconsIcon
+                icon={merging ? Loading02Icon : GitMergeIcon}
+                className={cn("size-4", merging && "animate-spin")}
+                strokeWidth={1.8}
+              />
+              {armed ? "Merge — this cannot be undone" : "Merge"}
+            </button>
+          )}
+
+          {armed && (
+            <button
+              type="button"
+              data-testid="gitlab-merge-cancel"
+              onClick={() => setArmed(false)}
+              className="rounded-lg px-2.5 py-1.5 text-[12px] text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+            >
+              Cancel
+            </button>
+          )}
+
+          {change && !armed && (
+            <button
+              type="button"
+              data-testid={change === "close" ? "gitlab-close" : "gitlab-reopen"}
+              disabled={!!acting}
+              data-cuelume-press=""
+              onClick={() => void controller.setOpenMergeRequestState(change)}
+              className={cn(
+                "flex items-center gap-1.5 rounded-lg bg-element px-3 py-1.5 text-[13px] font-medium text-text-dim transition-colors hover:text-foreground",
+                !!acting && "opacity-60",
+              )}
+            >
+              <HugeiconsIcon
+                icon={changing ? Loading02Icon : XVariableCircleIcon}
+                className={cn("size-4", changing && "animate-spin")}
+                strokeWidth={1.8}
+              />
+              {change === "close" ? "Close" : "Reopen"}
+            </button>
+          )}
+        </div>
+
+        {/* What the state of things is, in one line. While armed it is the WARNING, because
+            that is the moment the sentence matters. */}
+        <p
+          data-testid="gitlab-merge-hint"
+          className={cn("text-[12px]", armed ? "text-destructive" : "text-text-faint")}
+        >
+          {armed
+            ? `This merges ${detail.source_branch} into ${detail.target_branch} for everybody, and no later click takes it back.`
+            : verdict.reason}
+        </p>
+
+        {/* The outcome, where the click was made. A failure is never left looking like a
+            success, and never left to the eleven pixels of the status line. */}
+        {error && (
+          <p
+            data-testid="gitlab-action-error"
+            className="flex items-start gap-1.5 text-[12px] text-destructive"
+          >
+            <HugeiconsIcon icon={Alert02Icon} className="mt-px size-3.5 shrink-0" strokeWidth={1.8} />
+            {error}
+          </p>
+        )}
+        {done && !error && (
+          <p data-testid="gitlab-action-done" className="text-[12px] text-primary">
+            {done}
+          </p>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+/** Where the code review will live, and what already points at it.
+ *
+ *  Not a stub for its own sake: the section says plainly that the diff is not here and
+ *  offers the one thing that does work today — GitLab's own Changes tab — because a page
+ *  that silently lacked the diff would read as a page whose diff failed to load. */
+function ChangesPlaceholder(props: { detail: MergeRequestDetail }) {
+  const detail = props.detail;
+  return (
+    <Panel title="Changes" testId="gitlab-changes">
+      <p className="text-[12px] text-text-faint">
+        {detail.changes_count
+          ? `${detail.changes_count} file${detail.changes_count === "1" ? "" : "s"} changed. `
+          : ""}
+        The diff is not reviewed here yet.{" "}
+        {detail.web_url && (
+          <a
+            href={`${detail.web_url}/diffs`}
+            target="_blank"
+            rel="noreferrer"
+            data-testid="gitlab-changes-link"
+            className="text-text-dim underline-offset-2 hover:text-foreground hover:underline"
+          >
+            Open the changes in GitLab
+          </a>
+        )}
+      </p>
+    </Panel>
+  );
+}
+
+/** The conversation: real comments as bubbles, GitLab's own events as a quiet timeline, and
+ *  a composer that posts under the user's name on their own Enter. */
+function DiscussionPanel() {
+  const notes = useAppState((s) => s.gitlabNotes);
+  const discussions = useMemo(() => conversationDiscussions(notes), [notes]);
+  const events = useMemo(() => systemNotes(notes), [notes]);
+  const [showEvents, setShowEvents] = useState(false);
+
+  return (
+    <Panel
+      title="Comments"
+      testId="gitlab-comments"
+      right={
+        events.length > 0 && (
+          <button
+            type="button"
+            data-testid="gitlab-events-toggle"
+            aria-expanded={showEvents}
+            onClick={() => setShowEvents((open) => !open)}
+            className="text-[11px] text-text-faint underline-offset-2 hover:text-text-dim hover:underline"
+          >
+            {showEvents ? "Hide" : "Show"} {events.length} event
+            {events.length === 1 ? "" : "s"}
+          </button>
+        )
+      }
+    >
+      <div className="flex flex-col gap-3">
+        {showEvents && events.length > 0 && (
+          <ul data-testid="gitlab-events" className="flex flex-col gap-1 border-l border-border-subtle pl-3">
+            {events.map((note) => (
+              <li key={note.id} className="text-[11px] text-text-faint">
+                <span className="text-text-dim">{note.author.name || note.author.username}</span>{" "}
+                {note.body} · {formatNoteTime(note.created_at)}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {discussions.length === 0 ? (
+          <p data-testid="gitlab-comments-empty" className="text-[12px] text-text-faint">
+            Nothing has been said on this merge request yet.
+          </p>
+        ) : (
+          discussions.map((discussion) => (
+            <DiscussionThread key={discussion.id} discussion={discussion} />
+          ))
+        )}
+
+        {notes?.truncated && (
+          <p className="text-[11px] text-text-faint">
+            GitLab holds more comments than this page read.
+          </p>
+        )}
+
+        <CommentComposer />
+      </div>
+    </Panel>
+  );
+}
+
+/** One discussion — a standalone comment, or a thread with its replies and its Reply. */
+function DiscussionThread(props: { discussion: GitLabDiscussion }) {
+  const discussion = props.discussion;
+  const controller = useController();
+  const replyTo = useAppState((s) => s.gitlabReplyTo);
+  const first = discussion.notes[0];
+  const unresolved = discussion.notes.some((note) => note.resolvable && !note.resolved);
+  const replying = replyTo === discussion.id;
+
+  return (
+    <div
+      data-testid="gitlab-discussion"
+      data-discussion={discussion.id}
+      data-thread={discussion.individual_note ? undefined : "true"}
+      data-unresolved={unresolved ? "true" : undefined}
+      className={cn(
+        "flex flex-col gap-2 rounded-xl p-2.5",
+        discussion.individual_note ? "bg-card" : "bg-card ring-1 ring-inset ring-border-subtle",
+      )}
+    >
+      {/* Where a thread hangs in the code, when it does. The diff is not here yet, so the
+          file and line are what keep a review comment attached to something. */}
+      {first?.position && (
+        <p data-testid="gitlab-note-position" className="font-mono text-[11px] text-text-faint">
+          {first.position.new_path ?? first.position.old_path}
+          {first.position.new_line != null ? `:${first.position.new_line}` : ""}
+        </p>
+      )}
+
+      {discussion.notes.map((note) => (
+        <NoteBubble key={note.id} note={note} />
+      ))}
+
+      {!discussion.individual_note && (
+        <button
+          type="button"
+          data-testid="gitlab-reply"
+          onClick={() => controller.setGitLabReplyTo(replying ? null : discussion.id)}
+          className="self-start text-[11px] text-text-faint underline-offset-2 hover:text-text-dim hover:underline"
+        >
+          {replying ? "Cancel reply" : "Reply in this thread"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** One comment. Its body is markdown through the app's own renderer, and the user's OWN
+ *  comment carries the one thing that takes it back. */
+function NoteBubble(props: { note: GitLabNote }) {
+  const note = props.note;
+  const controller = useController();
+  const acting = useAppState((s) => s.gitlabActing);
+  const nodes = useMemo(() => parseCardMarkdown(note.body), [note.body]);
+  const deleting = acting === `delete:${note.id}`;
+  const [armed, setArmed] = useState(false);
+
+  return (
+    <div data-testid="gitlab-note" data-note={note.id} data-mine={note.mine ? "true" : undefined}>
+      <div className="flex items-center gap-2">
+        <Avatar
+          seed={note.author.username || note.author.name}
+          label={note.author.name || note.author.username}
+          initials={(note.author.name || note.author.username).slice(0, 1).toUpperCase()}
+          fallback="person"
+          className="size-5 text-[9px]"
+        />
+        <span className="text-[12px] font-medium text-foreground">
+          {note.author.name || note.author.username}
+        </span>
+        <time className="text-[11px] text-text-faint">{formatNoteTime(note.created_at)}</time>
+        {note.resolvable && (
+          <span
+            data-testid="gitlab-note-resolved"
+            className={cn(
+              "rounded px-1.5 py-px text-[10px] font-medium",
+              note.resolved ? "bg-primary/12 text-primary" : "bg-element text-text-faint",
+            )}
+          >
+            {note.resolved ? "resolved" : "unresolved"}
+          </span>
+        )}
+
+        {/* A comment of the user's OWN can be deleted, and that undo is why commenting is
+            offered at all. It asks twice, like every other irreversible-looking action —
+            and the backend re-reads whose comment it is before it deletes. */}
+        {note.mine && (
+          <button
+            type="button"
+            data-testid={armed ? "gitlab-note-delete-confirm" : "gitlab-note-delete"}
+            disabled={!!acting}
+            aria-label={armed ? "Confirm deleting this comment" : "Delete this comment"}
+            onClick={() => {
+              if (!armed) {
+                setArmed(true);
+                return;
+              }
+              setArmed(false);
+              void controller.deleteGitLabComment(note.id);
+            }}
+            className={cn(
+              "ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-px text-[10px] transition-colors",
+              armed ? "bg-destructive/12 text-destructive" : "text-text-faint hover:text-text-dim",
+            )}
+          >
+            <HugeiconsIcon
+              icon={deleting ? Loading02Icon : Delete02Icon}
+              className={cn("size-3", deleting && "animate-spin")}
+              strokeWidth={1.8}
+            />
+            {armed ? "Delete for everybody" : "Delete"}
+          </button>
+        )}
+      </div>
+      <RichNodes nodes={nodes} className="pl-7 pt-1 text-[13px] leading-relaxed text-text-dim" />
+    </div>
+  );
+}
+
+/** The comment box.
+ *
+ *  Outward, so it holds the composer's own contract: the words stay in the box until GitLab
+ *  has taken them, a failure is reported beside it, and nothing is posted but by the user's
+ *  own click or ⌘↵. */
+function CommentComposer() {
+  const controller = useController();
+  const draft = useAppState((s) => s.gitlabCommentDraft);
+  const replyTo = useAppState((s) => s.gitlabReplyTo);
+  const acting = useAppState((s) => s.gitlabActing);
+  const error = useAppState((s) => s.gitlabActionError);
+  const posting = acting === "comment";
+  const empty = draft.trim() === "";
+
+  return (
+    <div data-testid="gitlab-composer" className="flex flex-col gap-2 pt-1">
+      {replyTo && (
+        <p className="text-[11px] text-text-faint">
+          Replying in a thread ·{" "}
+          <button
+            type="button"
+            onClick={() => controller.setGitLabReplyTo(null)}
+            className="underline-offset-2 hover:text-text-dim hover:underline"
+          >
+            write a new comment instead
+          </button>
+        </p>
+      )}
+      <textarea
+        data-testid="gitlab-comment-input"
+        value={draft}
+        rows={3}
+        placeholder={replyTo ? "Reply in this thread…" : "Comment on this merge request…"}
+        onChange={(event) => controller.setGitLabCommentDraft(event.target.value)}
+        onKeyDown={(event) => {
+          // ⌘↵ / Ctrl+↵ posts, plain Enter does not: a comment is outward, and a newline
+          // in a review note is far more common than a finished thought.
+          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            if (!empty && !acting) void controller.postGitLabComment();
+          }
+        }}
+        className={cn(
+          "w-full resize-y rounded-xl bg-card px-3 py-2 text-[13px] text-foreground shadow-chip",
+          "placeholder:text-text-faint focus:outline-none focus:ring-1 focus:ring-primary/40",
+        )}
+      />
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          data-testid="gitlab-comment-send"
+          disabled={empty || !!acting}
+          data-cuelume-press=""
+          onClick={() => void controller.postGitLabComment()}
+          className={cn(
+            "flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[12px] font-medium text-primary-foreground transition-colors hover:bg-primary/90",
+            (empty || !!acting) && "cursor-not-allowed opacity-50",
+          )}
+        >
+          <HugeiconsIcon
+            icon={posting ? Loading02Icon : Message01Icon}
+            className={cn("size-3.5", posting && "animate-spin")}
+            strokeWidth={1.8}
+          />
+          {replyTo ? "Reply" : "Comment"}
+        </button>
+        <span className="text-[11px] text-text-faint">
+          Posts to GitLab under your name. ⌘↵ sends.
+        </span>
+      </div>
+      {/* The composer's own report of a failed post, beside the words that are still in the
+          box — the mirror of `sendError` in the chat composer. */}
+      {error && posting === false && (
+        <p data-testid="gitlab-comment-error" className="text-[12px] text-destructive">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** One panel of the page: a heading, an optional control on its right, and its content. */
+function Panel(props: {
+  title: string;
+  testId: string;
+  right?: React.ReactNode;
+  children: React.ReactNode;
+  "data-live"?: string;
+}) {
+  return (
+    <section
+      data-testid={props.testId}
+      data-live={props["data-live"]}
+      className="flex flex-col gap-2 rounded-2xl bg-card/60 p-3"
+    >
+      <div className="flex items-center gap-2">
+        <h3 className="text-[12px] font-semibold uppercase tracking-wide text-text-faint">
+          {props.title}
+        </h3>
+        <div className="ml-auto flex items-center gap-2">{props.right}</div>
+      </div>
+      {props.children}
+    </section>
+  );
+}
+
+/** A comment's time, in the shape a conversation reads in. */
+function formatNoteTime(iso: string): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  }
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/** Shown in the detail pane while the GitLab tab is up but nothing is open. */
+function GitLabEmptyState() {
+  return (
+    <section
+      data-testid="gitlab-pane-empty"
+      className="flex min-w-0 flex-1 items-center justify-center bg-background p-8"
+    >
+      <div className="flex max-w-xs flex-col items-center gap-3 text-center">
+        <GitLabLogo className="size-10" title="GitLab" />
+        <p className="text-sm text-text-dim">Pick a merge request to read it.</p>
+        <p className="text-[12px] text-text-faint">
+          The list holds what is not merged. Merging, commenting, approving and closing all
+          happen under your own GitLab account, and only when you press the button.
+        </p>
+      </div>
+    </section>
+  );
+}

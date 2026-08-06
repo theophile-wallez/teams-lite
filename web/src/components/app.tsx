@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useMatchRoute, useNavigate, useParams } from "@tanstack/react-router";
 import { ControllerProvider, useAppState, useController } from "./controller-context";
 import { CalendarPane } from "./calendar-pane";
 import { ConversationList } from "./conversation-list";
+import { GitLabPane } from "./gitlab-pane";
 import { MailPane } from "./mail-pane";
 import { MessagePane } from "./message-pane";
 import { SettingsPane } from "./settings-pane";
@@ -17,6 +18,11 @@ import { useChatSections } from "./use-chat-sections";
 import { TooltipProvider } from "./ui/tooltip";
 import { Button } from "./ui/button";
 import { callStageIsUp } from "~/lib/call-stage";
+import {
+  mergeRequestId as gitlabRowId,
+  parseMergeRequestId,
+  sameMergeRequest,
+} from "~/lib/gitlab-mr";
 import { hasModifier } from "~/lib/platform";
 import { cn } from "~/lib/utils";
 import { installVirtualKeyboardState } from "~/lib/virtual-keyboard";
@@ -50,6 +56,8 @@ function AppInner() {
   const replyingTo = useAppState((s) => s.replyingTo);
   const mailMessages = useAppState((s) => s.mailMessages);
   const openMailId = useAppState((s) => s.openMailId);
+  const gitlabList = useAppState((s) => s.gitlabList);
+  const openMergeRequest = useAppState((s) => s.openMergeRequest);
   const { chats: visibleChats } = useChatSections();
   // Whether a live call is drawn over the whole app right now (see call-stage.tsx).
   const callStage = useCallStage();
@@ -57,11 +65,21 @@ function AppInner() {
   const callHasTheScreen = callStage.mode === "full" && callStageIsUp(liveCall);
 
   // The URL is the source of truth for what is open. `/` means nothing; `/c/<id>` a
-  // conversation; `/m/<id>` a mail. `strict: false` lets this shell read either
-  // param whether or not its route is the matched one.
-  const { conversationId, mailId } = useParams({ strict: false });
+  // conversation; `/m/<id>` a mail; `/mr/<project>!<iid>` a merge request. `strict: false`
+  // lets this shell read any of those params whether or not its route is the matched one.
+  const { conversationId, mailId, mergeRequestId } = useParams({ strict: false });
   const routeConversationId = conversationId ?? null;
   const routeMailId = mailId ?? null;
+  // A malformed id resolves to null, which reads as "nothing open" — the page then shows
+  // its own empty state instead of asking the backend about an address that names nothing.
+  const routeMergeRequest = useMemo(
+    () => (mergeRequestId ? parseMergeRequestId(mergeRequestId) : null),
+    [mergeRequestId],
+  );
+  // Which SURFACE the URL asks for is the route, not the parse: an id that names nothing
+  // still asked for the merge-request page, and answering it with a chat's empty state would
+  // send the reader looking for a chat they never opened.
+  const onMergeRequestRoute = mergeRequestId != null;
 
   // Whether the settings route is active. When it is, the right pane shows the
   // settings surface instead of a conversation; the sidebar stays put.
@@ -77,7 +95,11 @@ function AppInner() {
   // list of things to open, so on mobile the grid IS the page and the pane is up as
   // soon as the tab is.
   const paneOpen =
-    !!routeConversationId || !!routeMailId || onSettings || sidebarTab === "calendar";
+    !!routeConversationId ||
+    !!routeMailId ||
+    onMergeRequestRoute ||
+    onSettings ||
+    sidebarTab === "calendar";
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -94,6 +116,12 @@ function AppInner() {
   const goToMail = useCallback(
     (id: string) => {
       void navigate({ to: "/m/$mailId", params: { mailId: id } });
+    },
+    [navigate],
+  );
+  const goToMergeRequest = useCallback(
+    (id: string) => {
+      void navigate({ to: "/mr/$mergeRequestId", params: { mergeRequestId: id } });
     },
     [navigate],
   );
@@ -133,6 +161,20 @@ function AppInner() {
     if (openMailId) controller.closeMail();
   }, [ready, routeMailId, openMailId, controller]);
 
+  // The same reconciliation for a merge request: `/mr/<id>` opens it through the
+  // controller, and leaving the route closes it — which also stops the pipeline poll, so a
+  // page nobody is looking at asks GitLab nothing.
+  useEffect(() => {
+    if (!ready) return;
+    if (routeMergeRequest) {
+      if (!sameMergeRequest(openMergeRequest, routeMergeRequest)) {
+        void controller.openMergeRequestPage(routeMergeRequest);
+      }
+      return;
+    }
+    if (openMergeRequest) controller.closeMergeRequestPage();
+  }, [ready, routeMergeRequest, openMergeRequest, controller]);
+
   // The keyboard-navigable list is whichever the active tab shows: chats or mail.
   // (The channel tree is a tree, not a flat list, and the calendar is a grid — both
   // use click/Tab focus, and the calendar pane owns its own arrow keys.)
@@ -141,7 +183,25 @@ function AppInner() {
   // is folded away (see `useChatSections`). The selection is an index into that order,
   // so deriving it from anywhere else is how ArrowDown ends up opening a chat other
   // than the highlighted row.
-  const keyboardList = sidebarTab === "mail" ? mailMessages : visibleChats;
+  // A merge-request row is keyed by its own pair rather than by an `id`, so the shared
+  // list shape is built for it here — the keyboard walks the rows as rendered, exactly as
+  // it does for chats and mail.
+  // Memoized because the GitLab branch DERIVES its rows: a fresh array on every render
+  // would re-attach the window's keydown listener on every render, since `onKeyDown`
+  // closes over this list.
+  const gitlabKeyboardRows = useMemo(
+    () =>
+      gitlabList.map((row) => ({
+        id: gitlabRowId({ projectPath: row.project_path, iid: row.iid }),
+      })),
+    [gitlabList],
+  );
+  const keyboardList =
+    sidebarTab === "mail"
+      ? mailMessages
+      : sidebarTab === "gitlab"
+        ? gitlabKeyboardRows
+        : visibleChats;
 
   // Keep the selection in range as the active list changes.
   useEffect(() => {
@@ -181,7 +241,7 @@ function AppInner() {
           controller.cancelReply();
           return;
         }
-        if (routeConversationId || routeMailId || onSettings) {
+        if (routeConversationId || routeMailId || onMergeRequestRoute || onSettings) {
           goToList();
           return;
         }
@@ -191,7 +251,7 @@ function AppInner() {
       // settings (otherwise the composer / settings form own the keyboard). It
       // drives whichever virtualized list the active tab shows — Chats or Mail;
       // the Channels tab is a tree and uses click/Tab focus.
-      if (routeConversationId || routeMailId || onSettings) return;
+      if (routeConversationId || routeMailId || onMergeRequestRoute || onSettings) return;
       if (sidebarTab === "channels" || sidebarTab === "calendar") return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
@@ -209,6 +269,7 @@ function AppInner() {
         const item = keyboardList[selectedIndex];
         if (!item) return;
         if (sidebarTab === "mail") goToMail(item.id);
+        else if (sidebarTab === "gitlab") goToMergeRequest(item.id);
         else goToConversation(item.id);
       }
     },
@@ -218,6 +279,7 @@ function AppInner() {
       replyingTo,
       routeConversationId,
       routeMailId,
+      onMergeRequestRoute,
       onSettings,
       sidebarTab,
       keyboardList,
@@ -225,6 +287,7 @@ function AppInner() {
       controller,
       goToConversation,
       goToMail,
+      goToMergeRequest,
       goToList,
       callHasTheScreen,
     ],
@@ -262,12 +325,16 @@ function AppInner() {
             paneOpen ? "translate-x-0" : "translate-x-full",
           )}
         >
-          {/* Which surface the detail pane shows. Settings wins; then the calendar
-              when its tab is up; then a mail — either one addressed by the URL, or
-              the Mail tab's own empty state, so switching to Mail does not leave a
-              chat's empty state on the right. */}
+          {/* Which surface the detail pane shows. Settings wins; then a merge request —
+              either one addressed by the URL, or the GitLab tab's own empty state; then
+              the calendar when its tab is up; then a mail, on the same two conditions.
+              Each tab owning its own empty state is what stops switching sections from
+              leaving another section's empty state on the right. */}
           {onSettings ? (
             <SettingsPane onBack={goToList} />
+          ) : onMergeRequestRoute ||
+            (sidebarTab === "gitlab" && !routeConversationId && !routeMailId) ? (
+            <GitLabPane onBack={goToList} />
           ) : sidebarTab === "calendar" && !routeConversationId && !routeMailId ? (
             <CalendarPane onBack={() => controller.setSidebarTab("chats")} />
           ) : routeMailId || (sidebarTab === "mail" && !routeConversationId) ? (

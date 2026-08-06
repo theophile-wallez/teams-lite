@@ -8,6 +8,8 @@ pub mod calling;
 pub mod changelog;
 pub mod gitlab;
 pub mod gitlab_approval;
+pub mod gitlab_mr;
+pub mod gitlab_mr_write;
 pub mod graph_time;
 pub mod linear;
 pub mod link_preview;

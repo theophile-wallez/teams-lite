@@ -352,6 +352,24 @@ CREATE TABLE IF NOT EXISTS sender_icons (
     bytes        BLOB,
     fetched_ms   INTEGER NOT NULL DEFAULT 0
 );
+-- One answer GitLab gave, kept so the merge-request page paints from disk before it asks
+-- (see `gitlab_mr`). It is a RESPONSE cache and not a mirror, which is the whole
+-- difference from the mail and calendar tables above: nothing here is merged, reconciled
+-- or queried by field — a row is written whole, read whole, and replaced whole.
+--
+-- Durable rather than in-memory for the reason every other cache here is: this backend
+-- restarts many times a day, and a page that opened to a spinner after every re-stage
+-- would make the feature feel broken. The TTL lives with the CALLER, per kind of read
+-- (a list goes stale in a minute, a running pipeline in seconds), because only the caller
+-- knows what a stale answer costs.
+CREATE TABLE IF NOT EXISTS gitlab_reads (
+    -- The read's own identity: "list:<scope>:<state>", "mr:<project>!<iid>",
+    -- "notes:<project>!<iid>", "pipeline:<project>!<iid>". Built by the caller, so a
+    -- filter switch can never be answered with another filter's rows.
+    key        TEXT PRIMARY KEY,
+    payload    TEXT NOT NULL,
+    fetched_ms INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 /// Indexes, applied AFTER [`migrate`] because several of them cover columns that a
@@ -447,7 +465,10 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// v13 adds `sender_icons`, the icon of an organisation that mails the user (see
 /// [`Store::sender_icon`]). A whole new table rather than columns, and additive: an
 /// older binary never names it.
-const SCHEMA_VERSION: i64 = 13;
+///
+/// v14 adds `gitlab_reads`, the durable response cache the merge-request page paints from
+/// (see [`Store::gitlab_read`]). A whole new table, additive the same way.
+const SCHEMA_VERSION: i64 = 14;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -3268,6 +3289,58 @@ impl Store {
         Ok(())
     }
 
+    /// One cached GitLab answer and its age in milliseconds, or `None` when this read was
+    /// never made. The caller decides whether the age is acceptable — a merge-request list
+    /// is worth a minute, a running pipeline is worth seconds — because only it knows what
+    /// a stale answer costs (see `gitlab_reads` in `SCHEMA`).
+    ///
+    /// `now_ms` is passed in rather than read here so the decision is testable and so two
+    /// reads in one request judge staleness against the same instant.
+    pub fn gitlab_read(&self, key: &str, now_ms: i64) -> Result<Option<(String, i64)>> {
+        Ok(self
+            .query_one(
+                "SELECT payload, fetched_ms FROM gitlab_reads WHERE key = ?1",
+                params![key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            // A clock that moved backwards (an NTP step, a store copied between machines)
+            // must not make a row read as fresh forever, so a negative age is clamped to 0
+            // — the newest a row can be — rather than trusted.
+            .map(|(payload, fetched_ms)| (payload, (now_ms - fetched_ms).max(0))))
+    }
+
+    /// Remember one GitLab answer, replacing whatever that read held before.
+    pub fn put_gitlab_read(&self, key: &str, payload: &str, fetched_ms: i64) -> Result<()> {
+        self.exec(
+            "INSERT INTO gitlab_reads (key, payload, fetched_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                payload    = excluded.payload,
+                fetched_ms = excluded.fetched_ms",
+            params![key, payload, fetched_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Forget every cached answer whose key starts with `prefix`, and say how many went.
+    ///
+    /// This is what a WRITE calls: merging, commenting or closing a merge request makes
+    /// every read of it wrong at once, and a page that painted the stale copy back would
+    /// report the opposite of what just happened. A prefix rather than a list because the
+    /// reads of one merge request share one — `<project>!<iid>` — so a caller cannot
+    /// forget the detail and leave the comments behind.
+    pub fn forget_gitlab_reads(&self, prefix: &str) -> Result<usize> {
+        // `||` is SQLite's own concatenation, so the pattern is assembled in the statement
+        // rather than formatted into it. The prefix is escaped because a project path
+        // routinely holds `_`, which LIKE would otherwise read as "any character" — and
+        // then forgetting one merge request would forget a neighbour's cache too.
+        Ok(self.exec(
+            "DELETE FROM gitlab_reads WHERE key LIKE ?1 || '%' ESCAPE '\\'",
+            params![prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")],
+        )?)
+    }
+
     /// Read one application setting by key. Returns `None` when the key was never
     /// set. This is a simple key/value side table (see `SCHEMA`), used for
     /// durable app configuration such as the GitLab host and access token — data
@@ -4344,7 +4417,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (13, 0x1381_4ce2_589a_1a10);
+        const PINNED: (i64, u64) = (14, 0x3e42_c0e7_81bc_3c46);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -4357,6 +4430,49 @@ mod tests {
             SCHEMA_VERSION,
             actual,
         );
+    }
+
+    /// The GitLab page's response cache: a read is answered with its age, a write forgets
+    /// every read of the merge request it changed, and a neighbour's cache survives it.
+    #[test]
+    fn the_gitlab_cache_answers_with_an_age_and_is_forgotten_by_prefix() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.gitlab_read("list:all:opened", 1_000).unwrap(), None);
+
+        s.put_gitlab_read("list:all:opened", "[]", 1_000).unwrap();
+        let (payload, age) = s.gitlab_read("list:all:opened", 4_000).unwrap().expect("a row");
+        assert_eq!(payload, "[]");
+        assert_eq!(age, 3_000, "the age is what decides staleness");
+
+        // A clock that stepped backwards must not make a row read as newer than new.
+        assert_eq!(s.gitlab_read("list:all:opened", 500).unwrap().unwrap().1, 0);
+
+        // A write forgets every read of ONE merge request, together.
+        for kind in ["detail", "notes", "pipeline"] {
+            s.put_gitlab_read(&crate::gitlab_mr::cache_key("g/a_b", 42, kind), "{}", 1_000)
+                .unwrap();
+        }
+        // A project whose path holds `_` is the case a LIKE pattern gets wrong, and a
+        // neighbouring iid is the other.
+        s.put_gitlab_read(&crate::gitlab_mr::cache_key("g/axb", 42, "detail"), "{}", 1_000)
+            .unwrap();
+        s.put_gitlab_read(&crate::gitlab_mr::cache_key("g/a_b", 4, "detail"), "{}", 1_000)
+            .unwrap();
+
+        let gone = s.forget_gitlab_reads(&crate::gitlab_mr::cache_prefix("g/a_b", 42)).unwrap();
+        assert_eq!(gone, 3, "the detail, the comments and the pipeline go together");
+        assert!(s.gitlab_read(&crate::gitlab_mr::cache_key("g/a_b", 42, "notes"), 1).unwrap().is_none());
+        assert!(
+            s.gitlab_read(&crate::gitlab_mr::cache_key("g/axb", 42, "detail"), 1).unwrap().is_some(),
+            "`_` must not match any character, or one merge request's write empties another's"
+        );
+        assert!(
+            s.gitlab_read(&crate::gitlab_mr::cache_key("g/a_b", 4, "detail"), 1).unwrap().is_some(),
+            "!4 is not !42"
+        );
+        // The list is untouched by one merge request's write: it is a different read, and
+        // re-fetching 100 rows because one row changed is the cost this prefix avoids.
+        assert!(s.gitlab_read("list:all:opened", 1).unwrap().is_some());
     }
 
     #[test]

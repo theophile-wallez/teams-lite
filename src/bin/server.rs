@@ -13,6 +13,9 @@
 //          | fetch_media | fetch_avatar | sender_icon | profile | people_by_address | presence
 //          | get_settings | set_settings | set_always_available | enrich_link
 //          | gitlab_approvals | gitlab_set_approval
+//          | gitlab_mr_list | gitlab_mr_detail | gitlab_mr_notes | gitlab_mr_pipeline
+//          | gitlab_mr_merge | gitlab_mr_comment | gitlab_mr_delete_comment
+//          | gitlab_mr_set_state
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | mail_mark_read
 //          | calendars | calendar_view
@@ -25,6 +28,7 @@
 //          | update_restart
 //          | mail_folders_changed | mail_list_updated | mail_list_error
 //          | calendars_changed | calendar_view_updated | calendar_view_error
+//          | gitlab_list_updated | gitlab_mr_updated | gitlab_read_error
 //          | agent_stream | person_override_changed
 //
 // The `mail_*` methods are the READ-ONLY Outlook surface (see `mail`): the same
@@ -72,12 +76,20 @@
 // issues as the user, so `linear` sends GraphQL queries only and `linear::tests`
 // enforce that on the source, as `gitlab::tests` now do for the GET-only read path.
 //
-// `gitlab_set_approval` is the ONE exception, and the only write this app makes to a
-// tracker: it approves a merge request under the user's own GitLab account, or takes
-// that approval back (see `gitlab_approval`). It lives in a module of its own, it is an
-// {@link OUTWARD_METHODS} entry — the write token, refused read-only, blocked by the
-// automation hook — and it exists only because it is reversible from the same menu.
-// `gitlab_approvals` beside it is the READ that tells the menu which half to offer.
+// `gitlab_set_approval` was the FIRST write this app made to a tracker: it approves a
+// merge request under the user's own GitLab account, or takes that approval back (see
+// `gitlab_approval`). It lives in a module of its own, it is an {@link OUTWARD_METHODS}
+// entry — the write token, refused read-only, blocked by the automation hook — and it
+// exists because it is reversible from the same menu. `gitlab_approvals` beside it is the
+// READ that tells the menu which half to offer.
+//
+// The `gitlab_mr_*` methods are the MERGE-REQUEST PAGE (see `gitlab_mr` for the reads,
+// `gitlab_mr_write` for the writes, and AGENTS.md § The GitLab page). The reads — `list`,
+// `detail`, `notes`, `pipeline` — are open like every other read and answer from a durable
+// response cache (`gitlab_reads`) before they ask GitLab, so the page paints from disk and
+// refreshes behind itself. The four writes — `merge`, `comment`, `delete_comment`,
+// `set_state` — are {@link OUTWARD_METHODS} entries, and `gitlab_mr_merge` is the one that
+// cannot be taken back.
 //
 // No raw tokens are ever logged or sent.
 
@@ -99,7 +111,7 @@ use teams_lite::{
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
-use teams_lite::{gitlab, gitlab_approval, link_preview};
+use teams_lite::{gitlab, gitlab_approval, gitlab_mr, gitlab_mr_write, link_preview};
 
 /// The port the user's own backend owns: what the `teams` command and the web app
 /// dial by default.
@@ -244,7 +256,21 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// user's CAMERA or their SCREEN in front of everybody in a meeting — a screen more so than a
 /// face, because a screen shows whatever else is on it. Nothing calls it but a click, and the
 /// browser asks its own permission on top.
-const OUTWARD_METHODS: [&str; 15] = [
+///
+/// The four `gitlab_mr_*` entries are the merge-request PAGE's writes (see
+/// [`teams_lite::gitlab_mr_write`] and AGENTS.md § The GitLab page). Each acts under the
+/// user's own GitLab account and everybody watching the merge request is told, so each is
+/// gated exactly like a send — and three of the four are REVERSIBLE from the same page:
+/// a comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen.
+///
+/// `gitlab_mr_merge` is the ONE entry in this list that no later call takes back, which
+/// puts it beside `delete`. It lands somebody's branch in a shared repository, and a
+/// project's CI may deploy from it. It is here because the user asked for the page to do
+/// what GitLab's own does; what makes it defensible is that GitLab refuses a merge whose
+/// `sha` is not the branch's head, so the page can only ever merge the commit it drew —
+/// plus the second, explicit confirmation the UI asks for, exactly as it does before a
+/// message deletion.
+const OUTWARD_METHODS: [&str; 19] = [
     "send",
     "edit",
     "delete",
@@ -260,6 +286,10 @@ const OUTWARD_METHODS: [&str; 15] = [
     "call_hangup",
     "call_mute",
     "gitlab_set_approval",
+    "gitlab_mr_merge",
+    "gitlab_mr_comment",
+    "gitlab_mr_delete_comment",
+    "gitlab_mr_set_state",
 ];
 
 /// The RPC methods that act on THIS MACHINE rather than on the user's Teams account.
@@ -1064,6 +1094,14 @@ struct Ctx {
     /// call this machine is in. Empty and idle on a backend that does not call at all
     /// ({@link calling_available}) — see [`CallingPlane`].
     calling: Arc<Mutex<CallingPlane>>,
+    /// The GitLab reads being refreshed behind the page right now, by cache key.
+    ///
+    /// Single-flight, and it earns its place on the hot path: the merge-request page polls
+    /// its pipeline while CI runs, two open pages (a phone and a laptop) poll the same one,
+    /// and every stale answer starts a refresh. Without this, one merge request under two
+    /// readers would ask GitLab twice a second and earn the token a rate limit. See
+    /// [`gitlab_cached`].
+    gitlab_refreshing: Arc<Mutex<std::collections::BTreeSet<String>>>,
 }
 
 /// Everything this machine knows about audio calling right now.
@@ -2252,6 +2290,7 @@ async fn main() -> Result<()> {
         calendar_watch: Arc::new(Mutex::new(None)),
         last_repair: Arc::new(Mutex::new(None)),
         calling: Arc::new(Mutex::new(CallingPlane::default())),
+        gitlab_refreshing: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
     };
 
     // Watch the broker, and react once per CHANGE of state (see `observe_broker`).
@@ -4430,7 +4469,252 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 approved,
             )
             .await?;
+            // The page reads the approval state as part of one merge request's detail, so
+            // an approval given from there makes that detail wrong the moment it lands.
+            if let Some((project_path, iid)) = gitlab_merge_request_of(&url, &settings.gitlab_host) {
+                forget_gitlab_merge_request(ctx, &project_path, iid);
+            }
             Ok(json!({ "approval": approval, "token_set": true }))
+        }
+
+        // ---- the merge-request page: reads ------------------------------------
+        //
+        // Every one of these answers from the durable response cache FIRST and refreshes
+        // behind the page (see `gitlab_cached`), which is what makes the surface feel
+        // local: a re-opened merge request paints from disk, and the fresh copy arrives on
+        // a `gitlab_mr_updated` event a moment later. All four are ordinary reads, so none
+        // is gated — but each needs the user's token, because "what can I see" is a
+        // question about an account (see `gitlab_mr::require_token`).
+
+        // The merge requests that are NOT merged, for the sidebar. `scope` and `state` are
+        // closed sets in the Rust type, so a client cannot widen the query into one the
+        // page never offers — in particular it can never ask for merged ones.
+        "gitlab_mr_list" => {
+            let query = gitlab_list_query(params)?;
+            let refresh = params.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            // Whether this machine holds a token at all travels with the answer, and it is
+            // read HERE rather than from the settings by the page. Two reasons, and the
+            // second is the load-bearing one: the read is the thing that needs the token,
+            // so the honest place to report it is beside its result — and it must not be
+            // derived from a cached payload, since a token can be added or removed while
+            // one sits in the store.
+            //
+            // With no token the list is not asked for at all: the answer is an EMPTY list
+            // that says so, rather than a refusal the user would read as a failure.
+            let token_set = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?.gitlab_token.is_some()
+            };
+            if !token_set {
+                return Ok(json!({
+                    "scope": query.scope.as_str(),
+                    "state": query.state.as_str(),
+                    "items": [],
+                    "truncated": false,
+                    "token_set": false,
+                }));
+            }
+            let mut list = gitlab_cached(
+                ctx,
+                query.cache_key(),
+                GITLAB_LIST_TTL,
+                refresh,
+                GitLabRead::List(query),
+            )
+            .await?;
+            if let Some(object) = list.as_object_mut() {
+                object.insert("token_set".to_string(), json!(true));
+            }
+            Ok(list)
+        }
+
+        // One merge request in full: the header, the description, the branches, the people
+        // and the head pipeline as the detail body states it.
+        "gitlab_mr_detail" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let refresh = params.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            gitlab_cached(
+                ctx,
+                gitlab_mr::cache_key(&project_path, iid, "detail"),
+                GITLAB_DETAIL_TTL,
+                refresh,
+                GitLabRead::Detail { project_path, iid },
+            )
+            .await
+        }
+
+        // The comment thread. Discussions in GitLab's own order, threads and standalone
+        // comments told apart, and each note saying whether the user themselves wrote it —
+        // which is what decides whether a deletion is offered.
+        "gitlab_mr_notes" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let refresh = params.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            gitlab_cached(
+                ctx,
+                gitlab_mr::cache_key(&project_path, iid, "notes"),
+                GITLAB_NOTES_TTL,
+                refresh,
+                GitLabRead::Notes { project_path, iid },
+            )
+            .await
+        }
+
+        // The head pipeline and its jobs. THE live read: the page repeats it while CI is
+        // running, so its cache window is seconds rather than half a minute — long enough
+        // that two open pages cost one request, short enough that a job turning green shows
+        // up when it happens.
+        "gitlab_mr_pipeline" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let refresh = params.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            gitlab_cached(
+                ctx,
+                gitlab_mr::cache_key(&project_path, iid, "pipeline"),
+                GITLAB_PIPELINE_TTL,
+                refresh,
+                GitLabRead::Pipeline { project_path, iid },
+            )
+            .await
+        }
+
+        // ---- the merge-request page: the four writes -------------------------
+        //
+        // Each is an `OUTWARD_METHODS` entry: the write token, refused by a read-only
+        // backend, and the automation hook refuses a command line that names the endpoint.
+        // Each carries out one click the user just made, each drops the cache of the merge
+        // request it changed, and each reports GitLab's own words on a refusal.
+
+        // MERGE the branch. The one write in this app that no later call takes back, which
+        // is why the `sha` the page drew travels with it: GitLab refuses a merge whose sha
+        // is not the branch's head, so a merge request that moved since the reader looked
+        // is refused rather than landed. The UI asks twice before it calls.
+        "gitlab_mr_merge" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let sha = param_str(params, "sha")?;
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let result = gitlab_mr_write::merge(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &gitlab_mr_write::MergeRequest {
+                    project_path: project_path.clone(),
+                    iid,
+                    sha,
+                    squash: params.get("squash").and_then(Value::as_bool).unwrap_or(false),
+                    remove_source_branch: params
+                        .get("remove_source_branch")
+                        .and_then(Value::as_bool),
+                },
+            )
+            .await?;
+            forget_gitlab_merge_request(ctx, &project_path, iid);
+            Ok(json!({ "merge": result }))
+        }
+
+        // COMMENT on it — a new comment, or a reply into the thread `discussion_id` names.
+        // Everybody watching the merge request is told, under the user's own name, so this
+        // is gated like a send and is only ever called from their own Enter.
+        "gitlab_mr_comment" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let body = param_str(params, "body")?;
+            let discussion = params
+                .get("discussion_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let note = gitlab_mr_write::comment(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &project_path,
+                iid,
+                discussion.as_deref(),
+                &body,
+            )
+            .await?;
+            forget_gitlab_merge_request(ctx, &project_path, iid);
+            Ok(json!({ "note": note }))
+        }
+
+        // DELETE one of the user's OWN comments — the undo that makes the comment above
+        // acceptable. Whose comment it is, is read from GitLab BEFORE the deletion and
+        // matched on the account's own id: GitLab would let a maintainer remove a
+        // colleague's note, and this app never offers that (the same rule that refuses to
+        // delete a Teams message that is not the user's own).
+        "gitlab_mr_delete_comment" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let note_id = params
+                .get("note_id")
+                .and_then(Value::as_u64)
+                .context("`note_id` must be a number")?;
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let discussions = gitlab_mr::fetch_discussions(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &project_path,
+                iid,
+            )
+            .await?;
+            let mine = discussions
+                .discussions
+                .iter()
+                .flat_map(|discussion| discussion.notes.iter())
+                .find(|note| note.id == note_id)
+                .map(|note| note.mine);
+            match mine {
+                Some(true) => {}
+                Some(false) => anyhow::bail!(
+                    "that comment is somebody else's — this app only deletes what the user \
+                     wrote themselves"
+                ),
+                None => anyhow::bail!("that comment is no longer on the merge request"),
+            }
+            gitlab_mr_write::delete_comment(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &project_path,
+                iid,
+                note_id,
+            )
+            .await?;
+            forget_gitlab_merge_request(ctx, &project_path, iid);
+            Ok(json!({ "deleted": note_id }))
+        }
+
+        // CLOSE or REOPEN it. Each direction is the other's undo, which is what makes this
+        // an ordinary gated write rather than a second irreversible one.
+        "gitlab_mr_set_state" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let requested = param_str(params, "change")?;
+            let change = gitlab_mr_write::StateChange::from_str(&requested)
+                .context("`change` must be \"close\" or \"reopen\"")?;
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let state = gitlab_mr_write::set_state(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &project_path,
+                iid,
+                change,
+            )
+            .await?;
+            forget_gitlab_merge_request(ctx, &project_path, iid);
+            Ok(json!({ "state": state }))
         }
 
         // One person's directory card — name, job title, department, email, work
@@ -5566,6 +5850,262 @@ fn link_preview_settings(store: &Store) -> Result<link_preview::Settings> {
         gitlab_token: token(SETTING_GITLAB_TOKEN)?,
         linear_token: token(SETTING_LINEAR_TOKEN)?,
     })
+}
+
+// ---- the merge-request page's read cache ------------------------------------
+//
+// Four reads, one mechanism: answer from `gitlab_reads` at once, and when that answer is
+// older than its own window, refresh behind the page and broadcast the fresh one. The page
+// therefore never waits on GitLab for something it has seen before, which is what makes
+// switching between merge requests feel local — and a backend restart costs nothing,
+// because the cache is on disk.
+//
+// The windows differ by what a stale answer COSTS, not by how expensive the read is:
+
+/// A list of merge requests moves when somebody opens or closes one, which is minutes
+/// apart. A minute of staleness in the sidebar is invisible; the row the user clicks is
+/// re-read as a detail anyway.
+const GITLAB_LIST_TTL: Duration = Duration::from_secs(60);
+/// A detail carries the state a MERGE is offered from, so it is worth less staleness than
+/// the list — and GitLab refuses a merge on a stale `sha` regardless, so this window
+/// decides how often the page corrects itself rather than whether it can be wrong.
+const GITLAB_DETAIL_TTL: Duration = Duration::from_secs(30);
+/// A comment thread is a conversation: half a minute behind is a chat client's own
+/// tolerance, and posting one refreshes it immediately anyway.
+const GITLAB_NOTES_TTL: Duration = Duration::from_secs(30);
+/// THE live one. A running pipeline changes every few seconds and the page polls it, so the
+/// window is short enough that a job turning green is seen when it happens — and long
+/// enough that two open pages, or a page and a phone, cost ONE request between them.
+const GITLAB_PIPELINE_TTL: Duration = Duration::from_secs(5);
+
+/// One read of the merge-request page, and everything needed to make it again.
+///
+/// It exists so the CACHED path and the REFRESH path cannot drift: a background refresh
+/// re-runs this exact value, so what lands in the cache is what the handler would have
+/// answered. Cheap to clone (two strings at most), which is what lets a stale answer be
+/// returned and refreshed in the same breath.
+#[derive(Clone)]
+enum GitLabRead {
+    List(gitlab_mr::ListQuery),
+    Detail { project_path: String, iid: u64 },
+    Notes { project_path: String, iid: u64 },
+    Pipeline { project_path: String, iid: u64 },
+}
+
+impl GitLabRead {
+    /// Make the read against GitLab and return the JSON the page gets.
+    async fn fetch(&self, ctx: &Ctx) -> Result<Value> {
+        let settings = {
+            let store = ctx.store()?;
+            link_preview_settings(&store)?
+        };
+        let host = settings.gitlab_host.as_str();
+        let token = settings.gitlab_token.as_deref();
+        Ok(match self {
+            Self::List(query) => {
+                json!(gitlab_mr::fetch_list(&ctx.http, host, token, *query).await?)
+            }
+            Self::Detail { project_path, iid } => {
+                json!(gitlab_mr::fetch_detail(&ctx.http, host, token, project_path, *iid).await?)
+            }
+            Self::Notes { project_path, iid } => {
+                json!(gitlab_mr::fetch_discussions(&ctx.http, host, token, project_path, *iid).await?)
+            }
+            Self::Pipeline { project_path, iid } => {
+                json!(gitlab_mr::fetch_pipeline(&ctx.http, host, token, project_path, *iid).await?)
+            }
+        })
+    }
+
+    /// The event a fresh answer is broadcast on, and what identifies it there.
+    ///
+    /// A LIST goes out on its own event because the sidebar is what listens for it, and it
+    /// names the query so a page showing another filter ignores it. The other three name
+    /// the merge request and which read arrived, so an open page can replace one panel
+    /// without touching the rest.
+    fn event(&self) -> (&'static str, Value) {
+        match self {
+            Self::List(query) => (
+                "gitlab_list_updated",
+                json!({ "scope": query.scope.as_str(), "state": query.state.as_str() }),
+            ),
+            Self::Detail { project_path, iid } => (
+                "gitlab_mr_updated",
+                json!({ "project_path": project_path, "iid": iid, "kind": "detail" }),
+            ),
+            Self::Notes { project_path, iid } => (
+                "gitlab_mr_updated",
+                json!({ "project_path": project_path, "iid": iid, "kind": "notes" }),
+            ),
+            Self::Pipeline { project_path, iid } => (
+                "gitlab_mr_updated",
+                json!({ "project_path": project_path, "iid": iid, "kind": "pipeline" }),
+            ),
+        }
+    }
+}
+
+/// Answer one GitLab read: from the cache when it holds one, then refresh behind the page.
+///
+/// - A cached answer is returned WHATEVER its age, so the page paints at once.
+/// - When that answer is older than `ttl`, a refresh runs in the background and the fresh
+///   copy is broadcast. Nothing is awaited, so a slow GitLab never holds the page up.
+/// - With nothing cached — a cold store, a filter never used — the read is awaited, because
+///   answering "there is nothing" would be indistinguishable from an empty tracker.
+/// - `refresh: true` is the user's own Reload: it awaits a fresh read and replaces the row.
+async fn gitlab_cached(
+    ctx: &Ctx,
+    key: String,
+    ttl: Duration,
+    refresh: bool,
+    read: GitLabRead,
+) -> Result<Value> {
+    if !refresh {
+        let cached = {
+            let store = ctx.store()?;
+            store.gitlab_read(&key, now_ms())?
+        };
+        // An unparseable payload is treated as no payload: a build that changed a field's
+        // shape must not serve the old one for a minute.
+        if let Some((payload, age)) = cached {
+            if let Ok(value) = serde_json::from_str::<Value>(&payload) {
+                if age > ttl.as_millis() as i64 {
+                    let ctx_bg = ctx.clone();
+                    let key_bg = key.clone();
+                    let read_bg = read.clone();
+                    tokio::spawn(async move {
+                        gitlab_refresh_behind_the_page(&ctx_bg, key_bg, read_bg).await;
+                    });
+                }
+                return Ok(value);
+            }
+        }
+    }
+    gitlab_fetch_and_cache(ctx, &key, &read).await
+}
+
+/// Make one read, store it, and hand it back.
+async fn gitlab_fetch_and_cache(ctx: &Ctx, key: &str, read: &GitLabRead) -> Result<Value> {
+    let value = read.fetch(ctx).await?;
+    // A read that could not be stored is still a read the page can have: the cache is a
+    // performance feature, and failing the request over it would trade a working page for
+    // a faster one.
+    if let Ok(store) = ctx.store() {
+        if let Err(e) = store.put_gitlab_read(key, &value.to_string(), now_ms()) {
+            eprintln!("[gitlab] the answer for {key} could not be cached: {e:#}");
+        }
+    }
+    Ok(value)
+}
+
+/// Refresh one read behind the page and broadcast the result — once per key at a time.
+///
+/// Single-flight through [`Ctx::gitlab_refreshing`]: two pages polling one pipeline, or one
+/// page whose poll overlaps a slow answer, cost ONE request between them. A refusal is
+/// broadcast too, on `gitlab_read_error`, because a page that keeps painting a stale answer
+/// with no word is a page telling the user everything is fine.
+async fn gitlab_refresh_behind_the_page(ctx: &Ctx, key: String, read: GitLabRead) {
+    if !ctx.gitlab_refreshing.lock().unwrap().insert(key.clone()) {
+        return;
+    }
+    let outcome = gitlab_fetch_and_cache(ctx, &key, &read).await;
+    ctx.gitlab_refreshing.lock().unwrap().remove(&key);
+
+    match outcome {
+        Ok(value) => {
+            let (event, mut data) = read.event();
+            if let (Some(object), Some(payload)) = (data.as_object_mut(), value.as_object()) {
+                for (field, value) in payload {
+                    object.insert(field.clone(), value.clone());
+                }
+            }
+            ctx.emit(event, data);
+        }
+        Err(e) => ctx.emit("gitlab_read_error", json!({ "key": key, "error": e.to_string() })),
+    }
+}
+
+/// Drop everything cached about one merge request, and tell every open page to re-read it.
+///
+/// Called by all four writes and by an approval: each makes the detail, the comments and
+/// the pipeline wrong in the same instant, and a page that painted the stale copy back
+/// would report the opposite of what the user just did. The list is deliberately NOT
+/// dropped — it is a different read, and re-fetching a hundred rows because one row moved
+/// is the cost the shared prefix exists to avoid; its own window closes within the minute.
+fn forget_gitlab_merge_request(ctx: &Ctx, project_path: &str, iid: u64) {
+    if let Ok(store) = ctx.store() {
+        if let Err(e) = store.forget_gitlab_reads(&gitlab_mr::cache_prefix(project_path, iid)) {
+            eprintln!("[gitlab] the cache of {project_path}!{iid} could not be dropped: {e:#}");
+        }
+    }
+    ctx.emit(
+        "gitlab_mr_updated",
+        json!({ "project_path": project_path, "iid": iid, "kind": "stale" }),
+    );
+}
+
+/// Which merge requests a list read asks for, from a client's params.
+///
+/// Both halves default rather than fail: a page that asked for nothing gets the sidebar's
+/// own default — every open merge request the token can see — and a name outside the closed
+/// set is refused rather than forwarded to GitLab as a query parameter.
+fn gitlab_list_query(params: &Value) -> Result<gitlab_mr::ListQuery> {
+    let scope = match params.get("scope").and_then(Value::as_str) {
+        Some(name) => gitlab_mr::ListScope::from_str(name)
+            .with_context(|| format!("unknown scope: {name}"))?,
+        None => gitlab_mr::ListScope::All,
+    };
+    let state = match params.get("state").and_then(Value::as_str) {
+        Some(name) => gitlab_mr::ListState::from_str(name)
+            .with_context(|| format!("a merge-request list is opened or closed, not {name}"))?,
+        None => gitlab_mr::ListState::Opened,
+    };
+    Ok(gitlab_mr::ListQuery { scope, state })
+}
+
+/// Longest project path accepted from a client. GitLab's own limit on a full path is 255
+/// characters, so anything longer names nothing there.
+const MAX_PROJECT_PATH_BYTES: usize = 255;
+
+/// WHICH merge request a call is about: a project path and an iid, checked for shape.
+///
+/// The host is never in these params — it comes from the user's own settings and every
+/// endpoint is built from [`gitlab::api_base`] — so this cannot repoint the token. What it
+/// checks is that the path is a path: `gitlab::encode_path` would percent-encode a whole
+/// URL into one harmless segment, but a request built from junk earns a 404 nobody can read,
+/// and refusing it here says what was wrong instead.
+fn gitlab_merge_request_params(params: &Value) -> Result<(String, u64)> {
+    let project_path = param_str(params, "project_path")?.trim().to_string();
+    anyhow::ensure!(!project_path.is_empty(), "`project_path` must name a project");
+    anyhow::ensure!(
+        project_path.len() <= MAX_PROJECT_PATH_BYTES,
+        "`project_path` is longer than any GitLab project path"
+    );
+    anyhow::ensure!(
+        !project_path.starts_with('/')
+            && !project_path.ends_with('/')
+            && !project_path.contains("//")
+            && !project_path.contains("..")
+            && !project_path.contains(':')
+            && !project_path.chars().any(char::is_whitespace),
+        "`project_path` must be a project path like \"group/sub/project\""
+    );
+    let iid = params
+        .get("iid")
+        .and_then(Value::as_u64)
+        .filter(|iid| *iid > 0)
+        .context("`iid` must be the merge request's number")?;
+    Ok((project_path, iid))
+}
+
+/// The merge request one URL names on the configured host, through the read path's own
+/// parser — so an approval given from a chat message can drop that merge request's cache
+/// without a second host check living here.
+fn gitlab_merge_request_of(url: &str, gitlab_host: &str) -> Option<(String, u64)> {
+    match gitlab::parse_url(url, gitlab_host)? {
+        gitlab::Resource::MergeRequest { project_path, iid } => Some((project_path, iid)),
+        gitlab::Resource::Issue { .. } | gitlab::Resource::Project { .. } => None,
+    }
 }
 
 /// Resolve the persistent SQLite path, following the XDG Base Directory spec:
@@ -8511,6 +9051,162 @@ mod tests {
             "the gitlab_approvals arm names the approval WRITE. That arm is ungated, so a \
              write called from it would reach the user's tracker with no consent gate at all."
         );
+    }
+
+    // The merge-request page's four writes are gated exactly like a send, and its four
+    // reads stay open exactly like every other read. That split is the whole safety story
+    // of the page: reading a tracker is what it is for, and writing to one is the user's
+    // own click (see AGENTS.md § The GitLab page).
+    #[test]
+    fn the_merge_request_page_gates_its_writes_and_leaves_its_reads_open() {
+        for write in [
+            "gitlab_mr_merge",
+            "gitlab_mr_comment",
+            "gitlab_mr_delete_comment",
+            "gitlab_mr_set_state",
+        ] {
+            assert!(OUTWARD_METHODS.contains(&write), "{write} must be outward-facing");
+            assert_eq!(write_class(write), Some(WriteClass::Outward), "{write}");
+            let params = json!({ "project_path": "a/b", "iid": 1, "sha": "abc", "body": "hi" });
+            let err = match check_write_allowed(write, &params, Some("tok")) {
+                Ok(()) => panic!("{write} must be refused when no write token is presented"),
+                Err(err) => err,
+            };
+            assert!(err.contains("write token"), "{write}: {err}");
+            let mut with_token = params.clone();
+            with_token["write_token"] = json!("tok");
+            assert!(check_write_allowed(write, &with_token, Some("tok")).is_ok(), "{write}");
+        }
+
+        // The reads are ungated. A page that could not LIST merge requests on a read-only
+        // backend would be a page nothing could screenshot, and reading a tracker is the
+        // half of this feature that was never in question.
+        for read in [
+            "gitlab_mr_list",
+            "gitlab_mr_detail",
+            "gitlab_mr_notes",
+            "gitlab_mr_pipeline",
+        ] {
+            assert_eq!(write_class(read), None, "{read} is a read");
+            assert!(check_write_allowed(read, &json!({}), None).is_ok(), "{read}");
+        }
+
+        // And nothing else about a merge request is a method at all: a rebase, an
+        // assignment or a label edit is a further tracker write, which is a deliberate
+        // feature with its own gate rather than a new arm in the dispatcher.
+        for absent in [
+            "gitlab_mr_rebase",
+            "gitlab_mr_assign",
+            "gitlab_mr_set_labels",
+            "gitlab_mr_edit",
+        ] {
+            assert_eq!(write_class(absent), None, "{absent}");
+        }
+    }
+
+    /// The MERGE is the one write on this page that no later call takes back, and the `sha`
+    /// is what stands between it and landing a commit the reader never saw. GitLab enforces
+    /// it — a mismatched sha is a 409 — so the handler must always send one.
+    #[test]
+    fn the_merge_handler_always_sends_the_commit_the_page_read() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code
+            .split("\"gitlab_mr_merge\" => {")
+            .nth(1)
+            .expect("the gitlab_mr_merge handler")
+            .split("\"gitlab_mr_comment\" =>")
+            .next()
+            .expect("the handler ends at the next arm");
+        assert!(handler.contains("gitlab_mr_write::merge"), "scanned the wrong text");
+        assert!(
+            handler.contains("param_str(params, \"sha\")"),
+            "the merge handler must REQUIRE the sha the page drew. Without it GitLab merges \
+             whatever the branch holds now, which is exactly the commit nobody reviewed."
+        );
+        // And it drops the cache of what it changed, or the page paints the pre-merge state
+        // straight back over the outcome.
+        assert!(handler.contains("forget_gitlab_merge_request"), "the merge must invalidate");
+    }
+
+    /// A comment is deleted only when it is the USER'S OWN, and that is decided from
+    /// GitLab's answer rather than from what the client claimed. GitLab itself would let a
+    /// maintainer remove a colleague's note; this app never offers that.
+    #[test]
+    fn a_comment_is_deleted_only_when_it_is_the_user_s_own() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code
+            .split("\"gitlab_mr_delete_comment\" => {")
+            .nth(1)
+            .expect("the gitlab_mr_delete_comment handler")
+            .split("\"gitlab_mr_set_state\" =>")
+            .next()
+            .expect("the handler ends at the next arm");
+        assert!(handler.contains("fetch_discussions"), "whose note it is must be READ first");
+        assert!(handler.contains("note.mine"), "ownership is GitLab's own answer");
+        assert!(
+            handler.find("fetch_discussions").unwrap()
+                < handler.find("delete_comment").unwrap(),
+            "the ownership check must happen BEFORE the deletion, not after it"
+        );
+    }
+
+    /// Every read of the page has a staleness window, and they are ordered by what a stale
+    /// answer costs: a running pipeline is the shortest, the sidebar list the longest.
+    #[test]
+    fn the_live_read_has_the_shortest_window_and_the_list_the_longest() {
+        assert!(GITLAB_PIPELINE_TTL < GITLAB_DETAIL_TTL);
+        assert!(GITLAB_PIPELINE_TTL < GITLAB_NOTES_TTL);
+        assert!(GITLAB_DETAIL_TTL <= GITLAB_LIST_TTL);
+        // The live one is short enough to feel live, and long enough that two open pages
+        // cost one request between them rather than two.
+        assert!(GITLAB_PIPELINE_TTL >= Duration::from_secs(2));
+        assert!(GITLAB_PIPELINE_TTL <= Duration::from_secs(10));
+    }
+
+    /// A list read is a closed set on both axes, and its default is the sidebar's own.
+    #[test]
+    fn a_list_query_can_never_ask_for_merged_merge_requests() {
+        let query = gitlab_list_query(&json!({})).expect("a default");
+        assert_eq!(query.scope.as_str(), "all");
+        assert_eq!(query.state.as_str(), "opened");
+
+        let query = gitlab_list_query(&json!({ "scope": "reviewing", "state": "closed" }))
+            .expect("both named");
+        assert_eq!((query.scope.as_str(), query.state.as_str()), ("reviewing", "closed"));
+
+        // The page is about what is NOT merged, so `merged` is not a state it can ask for
+        // — and a scope GitLab would understand but the page never offers is refused too.
+        assert!(gitlab_list_query(&json!({ "state": "merged" })).is_err());
+        assert!(gitlab_list_query(&json!({ "state": "all" })).is_err());
+        assert!(gitlab_list_query(&json!({ "scope": "created_by_me" })).is_err());
+    }
+
+    /// The params name a project and a number, and nothing that could aim a request
+    /// somewhere else. The host is never among them — it comes from the user's settings —
+    /// so this checks the shape a 404 would otherwise be the only report of.
+    #[test]
+    fn a_merge_request_is_addressed_by_a_project_path_and_a_number() {
+        assert_eq!(
+            gitlab_merge_request_params(&json!({ "project_path": " group/sub/app ", "iid": 42 }))
+                .unwrap(),
+            ("group/sub/app".to_string(), 42)
+        );
+        for bad in [
+            json!({ "iid": 1 }),
+            json!({ "project_path": "", "iid": 1 }),
+            json!({ "project_path": "/group/app", "iid": 1 }),
+            json!({ "project_path": "group//app", "iid": 1 }),
+            json!({ "project_path": "group/../app", "iid": 1 }),
+            json!({ "project_path": "https://evil.example/a/b", "iid": 1 }),
+            json!({ "project_path": "group/a b", "iid": 1 }),
+            json!({ "project_path": "group/app" }),
+            json!({ "project_path": "group/app", "iid": 0 }),
+            json!({ "project_path": "group/app", "iid": "42" }),
+        ] {
+            assert!(gitlab_merge_request_params(&bad).is_err(), "{bad} must be refused");
+        }
     }
 
     /// The handler names the ONE property whose write round-trips, and no other. A

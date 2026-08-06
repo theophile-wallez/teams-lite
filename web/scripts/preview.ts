@@ -36,6 +36,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/mail --mail        # the Mail surface
 //   bun run web/scripts/preview.ts --out /tmp/cal --calendar     # the Calendar surface
 //   bun run web/scripts/preview.ts --out /tmp/chan --channels    # the team → channel tree
+//   bun run web/scripts/preview.ts --out /tmp/mr --gitlab       # the merge-request page
 //   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
 //   bun run web/scripts/preview.ts --out /tmp/img --image       # the picture lightbox
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
@@ -426,6 +427,41 @@ export async function openMailAt(page: Page, index: number): Promise<string> {
     .first()
     .waitFor({ timeout: APP_READY_TIMEOUT_MS });
   return id;
+}
+
+/**
+ * Switch the sidebar to the GitLab tab and wait for its list to populate.
+ *
+ * The merge requests load lazily — nothing is fetched until this tab is first shown — so a
+ * caller must go through here rather than assuming rows exist.
+ *
+ * Reading merge requests is a pure read. The page's four WRITES (merge, comment, delete a
+ * comment, close) are exercised here too, and that is safe for exactly one reason: this only
+ * ever runs inside `withPreview`, which proved the backend was the mock before handing over
+ * the page. There is no GitLab and no token behind it — see the `gitlab_mr_*` fixtures in
+ * web/mock/server.ts.
+ */
+export async function openGitLabTab(page: Page): Promise<void> {
+  await page.locator('[data-testid="tab-gitlab"]').click();
+  await page.waitForSelector('[data-testid="gitlab-row"]', { timeout: APP_READY_TIMEOUT_MS });
+}
+
+/** Open the merge request at `index` in the list and wait for its page. Returns its
+ *  reference ("!596"), which is what a report names it by. */
+export async function openMergeRequestAt(page: Page, index: number): Promise<string> {
+  const row = page.locator('[data-testid="gitlab-row"]').nth(index);
+  const iid = (await row.getAttribute("data-iid")) ?? "";
+  await row.click();
+  await page.waitForSelector('[data-testid="gitlab-heading"]', { timeout: APP_READY_TIMEOUT_MS });
+  // The pipeline and the comments arrive in their own round-trips; wait for the pipeline
+  // panel to settle on something rather than catching it mid-read.
+  await page
+    .locator(
+      '[data-testid="gitlab-pipeline-status"], [data-testid="gitlab-no-pipeline"]',
+    )
+    .first()
+    .waitFor({ timeout: APP_READY_TIMEOUT_MS });
+  return `!${iid}`;
 }
 
 /**
@@ -1624,6 +1660,52 @@ if (import.meta.main) {
         `[preview] wrote ${out}-list-light.png, ${out}-light.png, ` +
           `${out}-attachments-light.png, ${out}-recipients-{light,all-light,dark}.png ` +
           `and ${out}-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // The merge-request page: the sidebar's list, one merge request in full with its live
+  // pipeline, the merge asking twice, and the comment box — in both themes.
+  //
+  // Nothing here reaches GitLab. The mock holds the merge requests, advances one pipeline a
+  // step per read and answers the four writes in memory (see the `gitlab_mr_*` fixtures in
+  // web/mock/server.ts), which is what makes an irreversible action reviewable at all.
+  if (args.includes("--gitlab")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openGitLabTab(page);
+      await shot(`${out}-list-light.png`, element);
+
+      // The first fixture is the interesting one: it can merge, its pipeline is running,
+      // and it carries a thread with a code comment on it.
+      await openMergeRequestAt(page, 0);
+      await shot(`${out}-light.png`);
+
+      // The merge ARMED — the second click is the one that lands the branch, and the
+      // sentence under it is what says so before anybody presses it.
+      await page.locator('[data-testid="gitlab-merge"]').click();
+      await page.locator('[data-testid="gitlab-merge-confirm"]').waitFor();
+      await shot(`${out}-merge-armed-light.png`);
+      await page.locator('[data-testid="gitlab-merge-cancel"]').click();
+
+      // The conversation: a standalone comment, a thread with a code comment on it and the
+      // user's own reply in it, and the box that posts under their name.
+      await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
+      await shot(`${out}-comments-light.png`);
+
+      // A merge request GitLab will not merge: the button is disabled and the reason is on
+      // it, rather than a refusal arriving after the click.
+      await openMergeRequestAt(page, 1);
+      await shot(`${out}-blocked-light.png`);
+
+      await setTheme("dark");
+      await shot(`${out}-blocked-dark.png`);
+      await openMergeRequestAt(page, 0);
+      await shot(`${out}-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-list-light.png, ${out}-light.png, ` +
+          `${out}-merge-armed-light.png, ${out}-comments-light.png, ` +
+          `${out}-blocked-{light,dark}.png and ${out}-dark.png`,
       );
     });
     process.exit(0);
