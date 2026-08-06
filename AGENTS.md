@@ -2344,6 +2344,14 @@ user's. What changes is only what is asked.
   runtime, the release backend and the built web app; that binary is what `install.sh`
   downloads and what `.github/workflows/build.yml` publishes as the rolling `latest`
   release. It is the launcher, not a second interface: it renders nothing itself.
+  **It takes options only, and REFUSES an argv it does not know** (`parseArgs`, exit 2 with
+  the usage). It used to ignore what it could not parse, so a script written against a
+  DIFFERENT `teams` — `teams chats -n 40 --json`, from this machine's telegram bridge —
+  started the whole app instead: a second web server on the default port, ATTACHED to the
+  backend another launcher had spawned, so it handed its pages the write-token FILE of a
+  backend that no longer existed. Every send and every update was refused on the door a
+  phone reaches through (§ Automation safety names that state `foreign`), and the caller got
+  no JSON at all, so it blocked on the output for a day.
 
 ## Ports
 
