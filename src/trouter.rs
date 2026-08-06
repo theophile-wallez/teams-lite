@@ -39,7 +39,7 @@ const TROUTER_BEGIN: &str = "https://go.trouter.teams.microsoft.com/v4/a";
 pub const REGISTRAR: &str = "https://teams.microsoft.com/registrar/prod/V2/registrations";
 const TCCV: &str = "2024.23.01.2";
 const CLIENT_VERSION: &str = "1415/26061118216";
-const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) teams-lite/0.1";
+const UA: &str = crate::USER_AGENT;
 
 /// The messaging worker's registration — the one this app has always used.
 const MESSAGING_APP_ID: &str = "TeamsCDLWebWorker";

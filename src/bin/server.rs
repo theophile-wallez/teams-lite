@@ -117,7 +117,7 @@ const DEFAULT_PORT: u16 = 19420;
 /// busy_timeout, see `store::Store::open`).
 const READ_ONLY_PORT: u16 = 19430;
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
-const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) teams-lite/0.1";
+const UA: &str = teams_lite::USER_AGENT;
 /// Give the UI ample time to connect after the server becomes ready. Authentication
 /// happens before the listener binds, so this only covers local startup delays.
 const INITIAL_CLIENT_GRACE: Duration = Duration::from_secs(30);
@@ -3006,7 +3006,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }
             anyhow::ensure!(sender_icons_enabled(&store)?, "sender icons are turned off");
 
-            let icon = sender_icon::fetch_icon(&ctx.http, &domain).await.unwrap_or(None);
+            let icon = sender_icon::fetch_icon(&domain).await.unwrap_or(None);
             store.put_sender_icon(&domain, icon.as_ref(), now_ms())?;
             Ok(sender_icon_json(icon.as_ref()))
         }
@@ -3246,15 +3246,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 let host = sender_icon::extract_host(url)
                     .ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
                 let domain = sender_icon::registrable_domain(&host);
-                let media = sender_icon::fetch_raster(
-                    &ctx.http,
-                    url,
-                    custom_emoji::MAX_CUSTOM_EMOJI_BYTES,
-                )
-                .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Could not fetch a raster image from that URL")
-                })?;
+                let media = sender_icon::fetch_raster(url, custom_emoji::MAX_CUSTOM_EMOJI_BYTES)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Could not fetch a raster image from that URL")
+                    })?;
 
                 let (content_type, width, height) = custom_emoji::measure_art(&media.bytes)?;
 

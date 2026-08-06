@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
 
     // 1. Fetch the emoji through the app's own network rails.
     println!("fetching emoji from slackmojis...");
-    let media = sender_icon::fetch_raster(&http, EMOJI_URL, custom_emoji::MAX_CUSTOM_EMOJI_BYTES)
+    let media = sender_icon::fetch_raster(EMOJI_URL, custom_emoji::MAX_CUSTOM_EMOJI_BYTES)
         .await
         .context("fetch emoji from slackmojis")?
         .context("no image returned from slackmojis")?;

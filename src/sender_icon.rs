@@ -38,7 +38,10 @@
 //   - **The host must resolve to a PUBLIC address.** A hostile sender's domain can
 //     point at 127.0.0.1 or at 169.254.169.254, the cloud metadata endpoint, which
 //     would make this fetch an SSRF into the machine's own network. Every resolved
-//     address is checked before the request goes out.
+//     address is checked before the request goes out — and again on every REDIRECT, which
+//     is why this module fetches with a client of its own that follows none (see
+//     [`fetch_client`]). A hop the HTTP library took by itself is a host no rail here ever
+//     saw.
 //   - **The bytes must really be an image**, by magic number rather than by the
 //     content type the server claims, and under a size cap. SVG is refused: it is a
 //     document, not a bitmap, and nothing here needs one.
@@ -229,6 +232,50 @@ pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
+/// The client this module fetches with, built once. It is deliberately NOT the app's
+/// shared one, and the single difference is the point: it follows no redirects.
+///
+/// reqwest follows up to ten by default, and a hop is a host `ensure_public_host` never
+/// saw — a pasted URL answering `302 Location: http://169.254.169.254/latest/meta-data/`
+/// would have walked straight past every rail below and read the cloud metadata endpoint,
+/// which is precisely the SSRF this module exists to refuse. So the hops are taken here
+/// instead, one at a time, with every rail re-run on each. The app's shared client must
+/// keep following redirects — a Graph download link is a 302 (see src/teams_media.rs) —
+/// which is why this is a client of its own rather than a policy change over there.
+fn fetch_client() -> Result<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let client = reqwest::Client::builder()
+        .user_agent(crate::USER_AGENT)
+        .http1_only()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("build the image fetch client")?;
+    Ok(CLIENT.get_or_init(|| client))
+}
+
+/// How many hops a fetch will take. Following none at all was the other way to close the
+/// hole above and it would have cost real pictures: an apex `/favicon.ico` commonly 301s
+/// to `www`, and slackmojis' own download URL — the shape a user pastes into the emoji
+/// dialog — answers `302` with the image. Three is enough for those and short enough that
+/// a server bouncing a client around is refused rather than followed.
+const MAX_HOPS: usize = 3;
+
+/// The URL a response redirects to, or `None` when it is not a redirect this module
+/// follows. Absolute `https` only: a relative `Location` would need a URL joiner this
+/// module deliberately does not have, and no scheme but https is ever fetched here.
+///
+/// Split out from the fetch so the decision can be tested without a network — the whole
+/// point of it is what it refuses.
+fn hop_target(status: u16, location: Option<&str>) -> Option<&str> {
+    if !(300..400).contains(&status) {
+        return None;
+    }
+    location.filter(|target| target.starts_with("https://"))
+}
+
 /// Fetch a raster image from a URL, checking every rail: public-IP-only resolution,
 /// byte cap on the claimed and actual lengths, raster sniff on the bytes rather than
 /// the claimed type. Adds no cookie, referrer, or query of its own. Returns `Ok(None)`
@@ -239,34 +286,54 @@ pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// an image from a URL a user supplied — the sender icon and the custom emoji URL
 /// source. Every rail here exists because of a specific attack or leak; read the module
 /// comment before weakening one.
-pub async fn fetch_raster(
-    http: &reqwest::Client,
-    url: &str,
-    max_bytes: usize,
-) -> Result<Option<Media>> {
-    let domain = extract_host(url).ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
+pub async fn fetch_raster(url: &str, max_bytes: usize) -> Result<Option<Media>> {
+    let mut url = url.to_string();
+    // One more pass than there are hops, because the last hop still has to be fetched.
+    for _ in 0..=MAX_HOPS {
+        let domain = extract_host(&url).ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
 
-    anyhow::ensure!(is_fetchable_domain(&domain), "refusing to fetch from {domain:?}");
-    ensure_public_host(&domain).await?;
+        anyhow::ensure!(is_fetchable_domain(&domain), "refusing to fetch from {domain:?}");
+        ensure_public_host(&domain).await?;
 
-    let resp = http.get(url).timeout(FETCH_TIMEOUT).send().await.context("request")?;
-    if !resp.status().is_success() {
-        return Ok(None);
+        let resp = fetch_client()?
+            .get(&url)
+            .timeout(FETCH_TIMEOUT)
+            .send()
+            .await
+            .context("request")?;
+
+        // A hop names a host of the server's choosing, so it goes back through the two
+        // rails above rather than being followed by the HTTP client.
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok());
+        if let Some(next) = hop_target(resp.status().as_u16(), location) {
+            url = next.to_string();
+            continue;
+        }
+
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        if resp.content_length().is_some_and(|len| len as usize > max_bytes) {
+            return Ok(None);
+        }
+        let bytes = resp.bytes().await.context("read body")?;
+        if bytes.len() > max_bytes {
+            return Ok(None);
+        }
+        let Some(content_type) = image_kind(&bytes) else {
+            return Ok(None);
+        };
+        return Ok(Some(Media {
+            content_type: content_type.to_string(),
+            bytes: bytes.to_vec(),
+        }));
     }
-    if resp.content_length().is_some_and(|len| len as usize > max_bytes) {
-        return Ok(None);
-    }
-    let bytes = resp.bytes().await.context("read body")?;
-    if bytes.len() > max_bytes {
-        return Ok(None);
-    }
-    let Some(content_type) = image_kind(&bytes) else {
-        return Ok(None);
-    };
-    Ok(Some(Media {
-        content_type: content_type.to_string(),
-        bytes: bytes.to_vec(),
-    }))
+    // A chain longer than that is a server playing games, and there is no image at the end
+    // of it worth the requests.
+    Ok(None)
 }
 
 /// Fetch the icon of one domain, or `Ok(None)` when it serves none we can use — which
@@ -274,12 +341,12 @@ pub async fn fetch_raster(
 ///
 /// `domain` MUST already be a registrable domain; this re-validates defensively so a
 /// future caller's mistake cannot turn the request into an SSRF vector.
-pub async fn fetch_icon(http: &reqwest::Client, domain: &str) -> Result<Option<Media>> {
+pub async fn fetch_icon(domain: &str) -> Result<Option<Media>> {
     anyhow::ensure!(is_fetchable_domain(domain), "refusing to fetch an icon for {domain:?}");
 
     for path in ICON_PATHS {
         let url = format!("https://{domain}{path}");
-        match fetch_raster(http, &url, MAX_ICON_BYTES).await {
+        match fetch_raster(&url, MAX_ICON_BYTES).await {
             Ok(Some(media)) => return Ok(Some(media)),
             // No icon at this path, or something the bytes say is not an image: try the
             // next one. A sender's server failing is not this app's error.
@@ -447,12 +514,49 @@ mod tests {
     fn a_hostile_domain_never_reaches_the_network() {
         // The validator is re-run inside `fetch_icon`, so a caller that forgot to check
         // cannot turn it into a request. No network is touched by this test.
-        let http = reqwest::Client::new();
         let refused = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(fetch_icon(&http, "127.0.0.1"));
+            .block_on(fetch_icon("127.0.0.1"));
         assert!(refused.is_err());
+    }
+
+    // A redirect used to be the one way past every rail above: the shared client followed
+    // up to ten of them, so a URL the user pasted could answer `302` and send this fetch
+    // wherever it liked — the cloud metadata endpoint included. The hops are this module's
+    // own now, which is only true while its client refuses to take them itself.
+    #[test]
+    fn a_redirect_is_a_hop_this_module_takes_itself() {
+        // Followed: an absolute https hop, which is how an apex favicon reaches `www` and
+        // how slackmojis' download URL reaches the image.
+        assert_eq!(
+            hop_target(302, Some("https://www.example.com/favicon.ico")),
+            Some("https://www.example.com/favicon.ico")
+        );
+        let cdn = "https://cdn.example.com/i.png";
+        assert_eq!(hop_target(301, Some(cdn)), Some(cdn));
+
+        // Refused: anything but https (the metadata endpoint speaks plain http), a relative
+        // target, and a response that is not a redirect at all.
+        assert_eq!(hop_target(302, Some("http://169.254.169.254/latest/meta-data/")), None);
+        assert_eq!(hop_target(302, Some("/favicon.ico")), None);
+        assert_eq!(hop_target(200, Some(cdn)), None);
+        assert_eq!(hop_target(302, None), None);
+
+        // And a hop that IS followed is checked like the first URL, by the same two rails:
+        // the string one refuses an address outright, and a NAME that points inside — a
+        // `metadata.…` host reads as an ordinary domain — is refused by `ensure_public_host`
+        // when it resolves, which is the rail the loop re-runs per hop.
+        assert!(!is_fetchable_domain("169.254.169.254"));
+        assert!(!is_public("169.254.169.254".parse().unwrap()));
+
+        // The rails are only reached if the client hands us the redirect rather than
+        // following it, and there is no way to ask a built client what its policy is.
+        let source = include_str!("sender_icon.rs");
+        assert!(
+            source.contains("redirect(reqwest::redirect::Policy::none())"),
+            "the fetch client must refuse to follow a redirect on its own"
+        );
     }
 }

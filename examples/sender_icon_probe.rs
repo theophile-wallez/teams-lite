@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
         // domain reduced first, the address checked for being public, the bytes
         // sniffed rather than trusted.
         let reduced = teams_lite::sender_icon::registrable_domain(domain);
-        match teams_lite::sender_icon::fetch_icon(&http, &reduced).await {
+        match teams_lite::sender_icon::fetch_icon(&reduced).await {
             Ok(Some(icon)) => println!(
                 "   -> sender_icon({reduced}) = {} , {} B",
                 icon.content_type,

@@ -1,3 +1,9 @@
+/// The `User-Agent` this app's outbound requests carry, in ONE spelling. A stranger's
+/// server answers a request by what it claims to be — several of the domains a sender icon
+/// is fetched from 403 a client that names none — so a module building its own client for a
+/// reason of its own (see `sender_icon`) must still sound like the rest of the app.
+pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) teams-lite/0.1";
+
 pub mod agent;
 pub mod agent_markdown;
 pub mod agent_models;
