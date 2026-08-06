@@ -5416,9 +5416,15 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "merge": result }))
         }
 
-        // COMMENT on it — a new comment, or a reply into the thread `discussion_id` names.
-        // Everybody watching the merge request is told, under the user's own name, so this
-        // is gated like a send and is only ever called from their own Enter.
+        // COMMENT on it — a new comment, a reply into the thread `discussion_id` names, or a
+        // new thread on the DIFF LINE `position` names. Everybody watching the merge request
+        // is told, under the user's own name, so this is gated like a send and is only ever
+        // called from their own Enter.
+        //
+        // The three are one method because they are one act: the same people are told, the
+        // same deletion undoes it, and only where GitLab files the words differs. A position
+        // is built from primitives here (see `gitlab_diff_anchor`) so a client can never hand
+        // GitLab a field this app does not know it is sending.
         "gitlab_mr_comment" => {
             let (project_path, iid) = gitlab_merge_request_params(params)?;
             let body = param_str(params, "body")?;
@@ -5428,6 +5434,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
                 .map(str::to_string);
+            let anchor = gitlab_diff_anchor(params)?;
             let settings = {
                 let store = ctx.store()?;
                 link_preview_settings(&store)?
@@ -5439,6 +5446,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 &project_path,
                 iid,
                 discussion.as_deref(),
+                anchor.as_ref(),
                 &body,
             )
             .await?;
@@ -7065,6 +7073,67 @@ fn gitlab_merge_request_params(params: &Value) -> Result<(String, u64)> {
         .filter(|iid| *iid > 0)
         .context("`iid` must be the merge request's number")?;
     Ok((project_path, iid))
+}
+
+/// WHERE on a diff a comment hangs, out of the `position` a client sent — or `None` when it
+/// sent none, which is an ordinary comment on the merge request.
+///
+/// Every field is checked here rather than trusted, and the shape is built from primitives:
+/// the client names a file, two line numbers and a side, and the backend spells the position
+/// (and the line codes inside it) itself. So no client can hand GitLab a `position` key this
+/// app does not know it is sending — the same reason `gitlab_merge_request_params` refuses a
+/// project path that is really a URL.
+fn gitlab_diff_anchor(params: &Value) -> Result<Option<gitlab_mr_write::DiffAnchor>> {
+    let Some(position) = params.get("position").filter(|v| v.is_object()) else {
+        return Ok(None);
+    };
+    let refs = position.get("refs").filter(|v| v.is_object()).context(
+        "a comment on a diff line needs the commits that diff is of — reload the changes",
+    )?;
+    let sha = |key: &str| -> Result<String> {
+        let value = param_str(refs, key)?.trim().to_string();
+        anyhow::ensure!(!value.is_empty(), "`{key}` must name a commit");
+        Ok(value)
+    };
+    Ok(Some(gitlab_mr_write::DiffAnchor {
+        refs: gitlab_mr::DiffRefs {
+            base_sha: sha("base_sha")?,
+            head_sha: sha("head_sha")?,
+            start_sha: sha("start_sha")?,
+        },
+        // A file has one path or two, and either may be absent — an added file has no old
+        // path and a deleted one has no new path. The write refuses a position with neither.
+        new_path: position.get("new_path").and_then(Value::as_str).unwrap_or_default().to_string(),
+        old_path: position.get("old_path").and_then(Value::as_str).unwrap_or_default().to_string(),
+        line: gitlab_diff_anchor_line(position.get("line"))?
+            .context("a comment on a diff line needs the line it hangs on")?,
+        // A range's own START. Absent for a comment about one line, which is the common case
+        // and is not a range of one (see `gitlab_mr_write::DiffAnchor`).
+        start: gitlab_diff_anchor_line(position.get("start"))?,
+    }))
+}
+
+/// One end of such a position: where the line sits in each file, and which side it is on.
+fn gitlab_diff_anchor_line(value: Option<&Value>) -> Result<Option<gitlab_mr_write::AnchorLine>> {
+    let Some(value) = value.filter(|v| v.is_object()) else {
+        return Ok(None);
+    };
+    let number = |key: &str| -> Result<u64> {
+        value
+            .get(key)
+            .and_then(Value::as_u64)
+            .filter(|line| *line > 0)
+            .with_context(|| format!("`{key}` must be the line's place in that file"))
+    };
+    let side = param_str(value, "side")?;
+    Ok(Some(gitlab_mr_write::AnchorLine {
+        old: number("old")?,
+        new: number("new")?,
+        // A closed set: a side decides which line numbers the position may state, and GitLab
+        // refuses one whose numbers do not match the line it names.
+        side: gitlab_mr_write::LineSide::from_str(&side)
+            .with_context(|| format!("a diff line is on the old side, the new one or both, not {side}"))?,
+    }))
 }
 
 /// The merge request one URL names on the configured host, through the read path's own

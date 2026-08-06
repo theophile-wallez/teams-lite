@@ -32,6 +32,12 @@ p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+# SHA-1, for exactly one caller: a GitLab line code is
+# `SHA1(<file path>)_<old line>_<new line>` (see `gitlab_mr_write::line_code`), which is how
+# a comment names the two ends of a range of diff lines. It is an identifier GitLab's own
+# schema spells that way, never a security primitive — and it shares the `digest` traits
+# `sha2` above already brings in, so it adds no tree of its own.
+sha1 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]

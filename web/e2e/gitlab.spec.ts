@@ -317,8 +317,11 @@ test.describe.serial("the GitLab merge-request page", () => {
     await openGitLab(page);
     await openMergeRequest(page, 596);
 
-    const thread = page.locator('[data-testid="gitlab-discussion"][data-thread="true"]');
+    // Named rather than "the thread on this merge request": the fixture holds two, one of
+    // them on a diff line, and a reply has to land in the one it was written under.
+    const thread = page.locator('[data-testid="gitlab-discussion"][data-discussion="d-596-2"]');
     await expect(thread).toBeVisible();
+    await expect(thread).toHaveAttribute("data-thread", "true");
     const before = await thread.locator('[data-testid="gitlab-note"]').count();
 
     await thread.locator('[data-testid="gitlab-reply"]').click();
@@ -759,6 +762,183 @@ test.describe.serial("the GitLab merge-request page", () => {
     // GitLab's own is what is left.
     await expect(page.locator('[data-testid="gitlab-review-changes"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="gitlab-changes-link"]')).toBeVisible();
+  });
+
+  // ---- a comment on a diff line -------------------------------------------
+  //
+  // The gesture is the feature: a press on a line NUMBER, or a drag from one line number to
+  // another. Both are driven here the way a reader makes them — through the pointer, over
+  // pierre's own gutter — because a store call would pin the plumbing and not the gesture.
+
+  /** One line number in the gutter of the open patch.
+   *
+   *  The number AND the side, because in a unified diff an old line and a new line can wear the
+   *  same number: three lines into a change block, `3` is both the line that went and the one
+   *  that came. `data-column-number` and `data-line-type` are pierre's own attributes on a
+   *  gutter cell, inside the shadow root Playwright pierces; everything asserted afterwards is
+   *  this app's own `data-testid`. */
+  function gutterLine(page: Page, line: number, side: "additions" | "deletions" = "additions") {
+    const types =
+      side === "additions"
+        ? ["context", "addition", "change-addition"]
+        : ["context", "deletion", "change-deletion"];
+    const selector = types
+      .map((type) => `[data-column-number="${line}"][data-line-type="${type}"]`)
+      .join(", ");
+    return page.locator(`[data-testid="gitlab-diff-patch"] :is(${selector})`).first();
+  }
+
+  /** Drag down the gutter from one line number to another. The STEPS matter: a jump straight
+   *  from one point to the other fires no move between them, and pierre would report one line. */
+  async function dragLines(page: Page, from: number, to: number) {
+    const start = await gutterLine(page, from).boundingBox();
+    const end = await gutterLine(page, to).boundingBox();
+    if (!start || !end) throw new Error(`no gutter line ${from} or ${to}`);
+    await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 10 });
+    await page.mouse.up();
+  }
+
+  async function openHealthFile(page: Page) {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+    await waitForPatch(page);
+    await pickFile(page, "src/server/health.ts");
+    await waitForPatch(page);
+  }
+
+  test("a press on a line number opens a comment box under that line", async ({ page }) => {
+    await openHealthFile(page);
+
+    // Nothing is open until the reader asks: a box drawn by default would be a comment nobody
+    // started.
+    await expect(page.locator('[data-testid="gitlab-diff-composer"]')).toHaveCount(0);
+    await gutterLine(page, 5).click();
+
+    const composer = page.locator('[data-testid="gitlab-diff-composer"]');
+    await expect(composer).toBeVisible();
+    // It says which line, and which FILE: a line number means nothing without one.
+    await expect(composer).toHaveAttribute("data-lines", "Line 5");
+    await expect(composer).toContainText("src/server/health.ts");
+    // And it says what the send costs before it is pressed.
+    await expect(composer).toContainText("Everybody watching is told");
+
+    // Cancel takes it away, and the words with it.
+    await page.locator('[data-testid="gitlab-diff-comment-cancel"]').click();
+    await expect(composer).toHaveCount(0);
+  });
+
+  test("a drag down the line numbers comments on the span, in reading order", async ({ page }) => {
+    await openHealthFile(page);
+
+    // Downwards, and then UPWARDS over the same lines: GitLab hangs a thread on the LAST line
+    // of a range, so a pair left in pointer order would file an upward drag at the top of the
+    // block and name the span backwards. Both gestures must say the same thing.
+    await dragLines(page, 3, 6);
+    const composer = page.locator('[data-testid="gitlab-diff-composer"]');
+    await expect(composer).toHaveAttribute("data-lines", "Lines 3–6");
+
+    await page.locator('[data-testid="gitlab-diff-comment-cancel"]').click();
+    await dragLines(page, 6, 3);
+    await expect(composer).toHaveAttribute("data-lines", "Lines 3–6");
+    await page.locator('[data-testid="gitlab-diff-comment-cancel"]').click();
+  });
+
+  test("the comment lands as a thread on the lines it was written about", async ({ page }) => {
+    await openHealthFile(page);
+    await dragLines(page, 3, 5);
+    await expect(page.locator('[data-testid="gitlab-diff-composer"]')).toBeVisible();
+
+    await page
+      .locator('[data-testid="gitlab-diff-comment-input"]')
+      .fill("This block runs on every probe.");
+    await page.locator('[data-testid="gitlab-diff-comment-send"]').click();
+
+    // The box goes only once GitLab has taken the words, and what is left is the thread they
+    // became — on the same lines, under the user's own name.
+    await expect(page.locator('[data-testid="gitlab-diff-composer"]')).toHaveCount(0);
+    const thread = page.locator('[data-testid="gitlab-diff-thread"][data-lines="Lines 3–5"]');
+    await expect(thread).toBeVisible();
+    await expect(thread).toContainText("This block runs on every probe.");
+    await expect(thread.locator('[data-testid="gitlab-diff-note"]').first()).toHaveAttribute(
+      "data-mine",
+      "true",
+    );
+
+    // And the undo that makes writing one from this page acceptable, asked for twice.
+    await thread.locator('[data-testid="gitlab-diff-note-delete"]').first().click();
+    await thread.locator('[data-testid="gitlab-diff-note-delete-confirm"]').first().click();
+    await expect(thread).toHaveCount(0);
+  });
+
+  test("draws the threads already on the file, and replies into one", async ({ page }) => {
+    await openHealthFile(page);
+
+    // The thread the fixture holds: a comment on a RANGE, by a colleague, with the user's own
+    // answer under it. A colleague's comment offers no deletion — this app deletes only what
+    // the user wrote themselves, exactly as it does for a Teams message.
+    const thread = page.locator('[data-testid="gitlab-diff-thread"][data-lines="Lines 8–10"]');
+    await expect(thread).toBeVisible();
+    const theirs = thread.locator('[data-testid="gitlab-diff-note"]').first();
+    await expect(theirs).toContainText("Three returns for one question");
+    await expect(theirs.locator('[data-testid="gitlab-diff-note-delete"]')).toHaveCount(0);
+
+    await thread.locator('[data-testid="gitlab-diff-thread-reply"]').click();
+    await thread.locator('[data-testid="gitlab-diff-reply-input"]').fill("Splitting it then.");
+    await thread.locator('[data-testid="gitlab-diff-reply-send"]').click();
+
+    // A reply lands IN the thread rather than starting one of its own: the count grows and no
+    // second card appears on those lines.
+    await expect(thread.locator('[data-testid="gitlab-diff-note"]')).toHaveCount(3);
+    await expect(page.locator('[data-testid="gitlab-diff-thread"][data-lines="Lines 8–10"]')).toHaveCount(1);
+  });
+
+  test("a comment that GitLab refused is reported at the box, with the words still in it", async ({
+    page,
+  }) => {
+    await openHealthFile(page);
+    await gutterLine(page, 5).click();
+    await page.locator('[data-testid="gitlab-diff-comment-input"]').fill("Refused, this one.");
+
+    await setMergeRequestControl(page, {
+      refuse: "GitLab refused: this account may not comment there",
+    });
+    await page.locator('[data-testid="gitlab-diff-comment-send"]').click();
+
+    // The refusal is beside the words rather than on a page the reader is not looking at — and
+    // the box keeps what they wrote, because a comment that never left must not vanish.
+    await expect(page.locator('[data-testid="gitlab-diff-comment-error"]')).toContainText(
+      "may not comment there",
+    );
+    await expect(page.locator('[data-testid="gitlab-diff-comment-input"]')).toHaveValue(
+      "Refused, this one.",
+    );
+    // Cleared, because one mock process serves the whole run and a refusal left armed would
+    // fail every write after this one.
+    await setMergeRequestControl(page, { clear: true });
+    await page.locator('[data-testid="gitlab-diff-comment-cancel"]').click();
+  });
+
+  test("offers no comment on a file with no line to point at", async ({ page }) => {
+    await openHealthFile(page);
+    // A binary file has no patch, so there is nothing to press and nothing to place a comment
+    // against. The control is not drawn at all rather than drawn dead.
+    await pickFile(page, "docs/diagrams/rollout.png");
+    await expect(page.locator('[data-testid="gitlab-diff-file-notice"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-diff-comment-affordance"]')).toHaveCount(0);
+  });
+
+  test("takes a half-written comment away with the file it was about", async ({ page }) => {
+    await openHealthFile(page);
+    await gutterLine(page, 5).click();
+    await expect(page.locator('[data-testid="gitlab-diff-composer"]')).toBeVisible();
+
+    // Walking to another file leaves the code the comment was about, so the box goes with it:
+    // a composer left open over unrelated code would name a line it is not about.
+    await pickFile(page, "charts/user-facing/values.yaml");
+    await expect(page.locator('[data-testid="gitlab-diff-composer"]')).toHaveCount(0);
   });
 
   test("merges, and the merge request leaves the list for good", async ({ page }) => {

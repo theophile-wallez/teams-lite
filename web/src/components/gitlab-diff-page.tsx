@@ -24,8 +24,15 @@ import {
   type DiffLayout,
   type GitLabDiffFile,
 } from "~/lib/gitlab-diff";
+import {
+  diffCommentAnchor,
+  diffCommentsAvailable,
+  diffThreadsFor,
+} from "~/lib/gitlab-diff-comment";
+import type { DiffAnnotation } from "./gitlab-diff-view";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
+import { DiffLineComposer, DiffLineThread } from "./gitlab-diff-comments";
 import { GitLabLogo } from "./gitlab-logo";
 
 // The DIFF PAGE: the whole screen, the changed files down the left, one of them read on the
@@ -82,11 +89,19 @@ function useDiffState() {
     path: useAppState((s) => s.gitlabDiffPath),
     layout: useAppState((s) => s.gitlabDiffLayout),
     theme: useAppState((s) => s.resolvedTheme),
+    /** The comments on the merge request, which is where the threads on this file come from.
+     *  They are read with the page, so there is one answer about a conversation in this app. */
+    notes: useAppState((s) => s.gitlabNotes),
+    /** The lines lit by the gesture in flight, and the lines a comment is being written
+     *  about. Two fields, because the box opens when the gesture ENDS (see the store). */
+    selection: useAppState((s) => s.gitlabDiffSelection),
+    comment: useAppState((s) => s.gitlabDiffComment),
   };
 }
 
 export function GitLabDiffPage(props: { onBack: () => void }) {
-  const { detail, diff, loading, error, path, layout, theme } = useDiffState();
+  const { detail, diff, loading, error, path, layout, theme, notes, selection, comment } =
+    useDiffState();
   const controller = useController();
 
   const file = useMemo(() => selectDiffFile(diff, path), [diff, path]);
@@ -97,6 +112,28 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
   const columns = diffPageColumns(width, column);
   const effective = effectiveDiffLayout(layout, width);
   const expand = expandDiffHint(diff);
+
+  // What hangs under a line of this file: every thread already there, and the composer for the
+  // comment being written. One list, because the renderer takes one — and the composer is put
+  // LAST so that a reader who picks the line a thread is already on gets the box under it
+  // rather than above it.
+  const commentable = diffCommentsAvailable(file, detail?.diff_refs);
+  const threads = useMemo(() => diffThreadsFor(file, notes), [file, notes]);
+  const openComment = comment && file && comment.path === file.path ? comment : null;
+  const annotations = useMemo(() => {
+    const rows: DiffAnnotation[] = threads.map((thread) => ({
+      side: thread.side,
+      lineNumber: thread.lineNumber,
+      metadata: { kind: "thread", thread },
+    }));
+    if (openComment) {
+      rows.push({
+        ...diffCommentAnchor(openComment),
+        metadata: { kind: "composer", target: openComment },
+      });
+    }
+    return rows;
+  }, [threads, openComment]);
 
   return (
     <section
@@ -248,6 +285,12 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
                       layout={effective}
                       theme={theme}
                       generated={file.generated}
+                      commentable={commentable}
+                      selection={selection}
+                      onSelectionChange={(range) => controller.setGitLabDiffSelection(range)}
+                      onSelectionEnd={(range) => controller.openGitLabDiffComment(range)}
+                      annotations={annotations}
+                      renderAnnotation={renderDiffAnnotation}
                     />
                   </Suspense>
                 </div>
@@ -264,6 +307,21 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
         </div>
       )}
     </section>
+  );
+}
+
+/** What one annotation draws: a thread that is there, or the box for a comment being written.
+ *
+ *  Hoisted out of the page so the render prop is stable across renders, like the two slots
+ *  beside it. The two components are NOT lazy: they are ordinary app components, and the chunk
+ *  that has to stay off a chat's path is the highlighter's (see `gitlab-diff-view.tsx`). */
+function renderDiffAnnotation(annotation: DiffAnnotation) {
+  const metadata = annotation.metadata;
+  if (!metadata) return null;
+  return metadata.kind === "thread" ? (
+    <DiffLineThread thread={metadata.thread} />
+  ) : (
+    <DiffLineComposer target={metadata.target} />
   );
 }
 

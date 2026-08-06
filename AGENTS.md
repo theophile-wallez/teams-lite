@@ -591,7 +591,9 @@ the name the user gave them: § A tracker user who is also a colleague, applied 
 most merge requests and issues are met on. It reads those trackers. It writes **five** things
 to GitLab and nothing else, ever — a merge request's approval (described at the end of this
 section) plus the page's merge, comment, comment deletion and close — and each one happens
-on a click the user just made, never on its own.
+on a click the user just made, never on its own. A comment is a comment wherever it is written:
+one on a DIFF LINE (§ A comment on a diff LINE) is the same write in another of GitLab's own
+shapes, not a sixth.
 
 - **LINEAR IS READ-ONLY, with no exception at all.** Nothing in this app writes to it.
 - **Never create, edit, assign, move or label an issue, a merge request or a project** —
@@ -687,7 +689,9 @@ user's own click. The five reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipel
 are open like every other read; the four writes (`gitlab_mr_merge`, `_comment`,
 `_delete_comment`, `_set_state`) are `OUTWARD_METHODS` entries — the write token, refused
 read-only, and the automation hook refuses a command line, a script or a cargo example that
-names their endpoints.
+names their endpoints. `_comment` covers three shapes of ONE act — a comment of its own, a reply
+into a thread, and a thread on a DIFF LINE (§ A comment on a diff LINE) — because they reach the
+same people and the same deletion undoes each.
 
 **THE MERGE IS THE ONE ACTION IN THIS APP THAT NO LATER CALL TAKES BACK**, beside a message
 deletion. § The trackers refuses an irreversible write on principle; this one exists because
@@ -1075,6 +1079,97 @@ phone's width, a 150-character title at both widths and a blocked merge in both 
 run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
 is the user's own click, in their own app.
 
+### A comment on a diff LINE (a press on a line number, or a drag over several)
+
+The diff page comments on code the way GitLab's own does: press a line NUMBER and a box opens
+under that line, or drag from one line number to another and the box is about the span. The
+thread it makes hangs there from then on, beside the threads colleagues already left.
+`web/src/lib/gitlab-diff-comment.ts` holds every pure decision, `gitlab-diff-comments.tsx` the
+card and the box, `gitlab-diff-view.tsx` the seam onto the renderer, and the write itself is
+`gitlab_mr_write::comment` with a `DiffAnchor`.
+
+**It is not a fifth write.** It is the COMMENT above — the same `gitlab_mr_comment` method, the
+same `OUTWARD_METHODS` gate, the same people told, the same deletion undoing it — in the third
+shape GitLab files a comment in (`POST …/discussions` with a `position`, beside `…/notes` and a
+reply's `…/discussions/{id}/notes`). Adding a gate of its own would be a second consent for one
+act; what it does need is the rails below, because a position is a claim about WHICH code.
+
+- **The gesture is the RENDERER's**, and that is why it is a gesture at all: `@pierre/diffs`
+  starts a selection only from the line-number gutter and follows the pointer to another number,
+  so a press is one line and a drag is a span. Nothing here reimplements it. What this app adds
+  is the MEANING of the answer, which is the one thing a diff renderer cannot know (below).
+- **The box opens when the gesture ENDS, never during it.** A card drawn mid-drag inserts a row
+  into the patch and moves the line numbers out from under the reader's own pointer — measured:
+  it cut a drag from line 3 to line 6 short at line 4. So `onLineSelectionChange` only lights
+  lines and `onLineSelectionEnd` is what opens the box. **`onLineSelected` is deliberately not
+  the signal**: pierre calls it whenever the selection is SET, the app's own `selectedLines`
+  prop included, and the React wrapper writes that prop back on every render — so a live
+  highlight would come back as "the reader finished here" a frame later, which is that same
+  mid-drag card.
+- **A line means two numbers, and the patch is the only thing that knows both.** The renderer
+  reports a number on a SIDE (42 in the additions gutter); GitLab addresses the same line by its
+  place in BOTH files and states only the side the line is really on — an added line has no old
+  line, a context line has both. `patchLines` walks the patch git's own way to reconcile them,
+  and it is one walk on purpose: two — one for the display, one for the position — would
+  disagree on the first patch with a removal in it. Two traps are pinned by tests: nothing
+  before the first `@@` is a line (the header this app writes carries `--- a/…` and `+++ b/…`,
+  which are neither a removal nor an addition), and a context line whose leading space somebody
+  stripped is still counted, because skipping one puts every number below it out by one — a
+  comment quietly filed against the wrong line.
+- **The two ends are put in READING order.** Pierre reports `start` as the line the drag began
+  on, so an upward drag arrives backwards — and GitLab hangs a thread on the LAST line of a
+  range, so a pair left in pointer order would file the comment at the top of the block and name
+  the span the wrong way round.
+- **A range of one line is a LINE.** GitLab's own answers carry no `line_range` for one, so
+  writing one would describe the comment as something it is not.
+- **The three commits travel with it** (`diff_refs` — `base_sha`, `head_sha`, `start_sha`, all
+  three or none). A line number means nothing on its own across a push: the diff moves and the
+  number stays. GitLab resolves the position against the diff those three describe and REFUSES
+  one it cannot place, which is the same rail the merge's own `sha` is — a comment written on a
+  page that has gone stale is refused rather than hung on whichever line now holds that number.
+  The refusal says so in words a reader can act on, and it is offered only where it would work:
+  a file with no patch (a binary file, a pure rename, one GitLab did not expand) and a diff
+  whose commits this page never read offer no control at all rather than one that collects a
+  comment with nowhere to go.
+- **Every failure is reported in the box the words are in**, and the box keeps them. This page
+  holds several at once — a composer and a thread per line — so the sentence carries WHICH one
+  it belongs to; a refusal drawn in every card would report a failed reply inside three threads
+  that have nothing to do with it.
+- **A comment of the user's OWN is deleted from here**, asked for twice, which is what makes
+  writing one from this page acceptable at all (§ The trackers). Whose comment it is comes from
+  GitLab before the deletion, so a colleague's is refused by the backend and offered by nothing.
+- **The position is built from PRIMITIVES.** The page sends a file, two line numbers and a side;
+  the backend spells GitLab's own `position` and the line codes inside it (`gitlab_diff_anchor`
+  in src/bin/server.rs). So no client can hand GitLab a field this app does not know it is
+  sending — the rule `gitlab_merge_request_params` already holds for a project path.
+
+**Every field of that position is MEASURED, because there is no sandbox project to try a write
+against.** `examples/merge_request_diff_note_recon.rs` is READ-ONLY — it walks the positions
+GitLab itself stored on this instance's own comments and checks each rule against them:
+
+    cargo run --example merge_request_diff_note_recon
+
+Measured 2026-08-06 on `git.sia.partners`, over the 40 newest open merge requests: all 40 carry
+three whole commits in `diff_refs`; 275 notes carry a position and every one is
+`position_type: "text"`; the anchor names the NEW line alone on 254 (an added line) and both
+lines on 21 (a context line); 16 carry a `line_range`, whose ends are
+`{line_code, old_line, new_line, type}` with `type` in `new` (20), `old` (4) and `expanded`
+(8) — GitLab's word for a context line inside a region somebody OPENED, which is a line this app
+cannot select and therefore never writes. And **all 32 of those line codes match what this crate
+computes** (`gitlab_mr::line_code`, the SHA-1 of the path with BOTH counters, which is why a
+removed line still carries its place in the new file). That last one is the part nothing else
+could have checked: a line code is a hash, so a wrong rule earns a refusal that names nothing.
+
+`web/mock/server.ts` reproduces the whole flow with no GitLab and no token — it translates the
+position the way the backend does, so what the page reads back is the shape the tenant would
+answer with, and it seeds one thread on a RANGE of a file the page really shows (a colleague's
+comment with the user's own reply under it, so the deletion is on screen too). `cd web && bun
+run preview -- --out /tmp/dc --diff-comment` captures the thread in both themes, the affordance
+in the gutter, the box on one line, the drag's own span in both themes, the words written, the
+thread they became, and the box on a phone; `web/e2e/gitlab.spec.ts` pins every rule above by
+driving the POINTER, because the drag is the feature. **It has never run against a real GitLab
+project**: like every other write here, that is the user's own click, in their own app.
+
 ## Automation safety (MANDATORY — read before driving the UI)
 
 **This section exists because of a real incident.** An agent was screenshotting a
@@ -1194,7 +1289,11 @@ user. Two independent mechanisms enforce that split:
   each of the three files with no patch, the expand control and what it hands over, and both of
   its columns at a phone's width:
   `bun run preview -- --out /tmp/diff --diff`, or `openChanges` / `pickDiffFile` from the same
-  file. For the chat list's sections and the "…"
+  file. For a COMMENT on a diff line — the affordance in the gutter, the box on one line, the
+  span a drag covers, and the thread it lands as:
+  `bun run preview -- --out /tmp/dc --diff-comment`, or `diffGutterLine` / `dragDiffLines` from
+  the same file (the drag is driven with the pointer, because the drag IS the feature).
+  For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
   `bun run preview -- --out /tmp/ask --answer-with`. For the typing hint above the

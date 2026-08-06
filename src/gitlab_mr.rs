@@ -258,6 +258,12 @@ pub struct MergeRequestDetail {
     /// merge landing a commit the reader never saw (see [`crate::gitlab_mr_write`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha: Option<String>,
+    /// The three commits a comment on a diff LINE is addressed by. They travel for the same
+    /// reason `sha` does: GitLab places a positioned note against the diff those three
+    /// commits describe, so a comment written on a page whose diff has since moved is
+    /// refused rather than hung on whichever line now holds that number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_refs: Option<DiffRefs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merge_status: Option<String>,
     /// GitLab's own reason, in one word, for whether this can merge right now.
@@ -290,6 +296,20 @@ pub struct MergeRequestDetail {
     /// paint draws so the panel is never empty for a round trip.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<PipelineSummary>,
+}
+
+/// The three commits GitLab addresses one merge request's diff by.
+///
+/// Every positioned comment carries all three, so they are read as a set: `base_sha` is
+/// where the branch left the target, `head_sha` is the commit the page drew, and `start_sha`
+/// is the target's own head at that moment. GitLab resolves a line number against the diff
+/// those three describe — which is what makes a comment refer to the line the reader was
+/// looking at rather than to whatever now sits at that number.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiffRefs {
+    pub base_sha: String,
+    pub head_sha: String,
+    pub start_sha: String,
 }
 
 /// A pipeline, without its jobs: what a badge needs.
@@ -367,6 +387,13 @@ pub struct Note {
 }
 
 /// The file and line a `DiffNote` is attached to.
+///
+/// `new_line` and `old_line` name the ANCHOR — the one line the thread hangs under, which on
+/// a comment about several lines is the LAST of them. Exactly one of the two is set on a line
+/// that exists on one side only (an added line has no old line), and both are set on a
+/// context line. That is GitLab's own convention and it is deliberately not smoothed over
+/// here: which side a line is on is what tells a reader whether a comment is about code that
+/// arrived, code that went, or code that stayed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NotePosition {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -377,6 +404,31 @@ pub struct NotePosition {
     pub new_line: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_line: Option<u64>,
+    /// Both ends, when the comment was written about a RANGE of lines. Absent on a comment
+    /// about one line, which is what a reader of this field must not have to guess: a range
+    /// of one is drawn as a line, because that is what it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_range: Option<NoteLineRange>,
+}
+
+/// The two ends of a comment on several lines, in reading order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NoteLineRange {
+    pub start: NoteLineEnd,
+    pub end: NoteLineEnd,
+}
+
+/// One end of such a range. The line numbers follow [`NotePosition`]'s own convention, and
+/// `kind` is GitLab's own word for which side the end sits on — absent on a context line,
+/// which belongs to both.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NoteLineEnd {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_line: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_line: Option<u64>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// One discussion: a standalone comment, or a thread with replies.
@@ -1131,6 +1183,7 @@ fn detail_from_json(
         labels: labels_field(value),
         milestone: value.get("milestone").and_then(|m| str_field(m, "title")),
         sha: str_field(value, "sha"),
+        diff_refs: diff_refs(value.get("diff_refs")),
         merge_status: str_field(value, "merge_status"),
         detailed_merge_status: str_field(value, "detailed_merge_status"),
         has_conflicts: bool_field(value, "has_conflicts"),
@@ -1205,6 +1258,45 @@ fn note_from_json(value: &serde_json::Value, me: Option<u64>) -> Option<Note> {
     })
 }
 
+/// GitLab's own identifier for one line of one file: the SHA-1 of the path, and the line's
+/// place in each file.
+///
+/// It lives on the READ side because it is a fact about GitLab's diff model rather than about
+/// writing to one: `line_range` names its two ends by it, so anything that reads a diff note
+/// or writes one has to spell it the same way. The one caller today is
+/// [`crate::gitlab_mr_write::DiffAnchor`], and `examples/merge_request_diff_note_recon.rs`
+/// checks this function against the codes GitLab itself stored on real comments — READ-ONLY,
+/// so the write it feeds rests on a measurement rather than on a reading of the
+/// documentation. It is an identifier and never a security primitive; SHA-1 is GitLab's
+/// choice, not one made here.
+///
+/// BOTH counters always travel, added and removed lines included: a line that exists on one
+/// side still carries the place it holds in the other file. That is the asymmetry with a
+/// position, which states only the side its line is really on.
+pub fn line_code(path: &str, old_line: u64, new_line: u64) -> String {
+    use sha1::{Digest as _, Sha1};
+    let digest = Sha1::digest(path.as_bytes());
+    let mut hex = String::with_capacity(40);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("{hex}_{old_line}_{new_line}")
+}
+
+/// The three commits a positioned comment is addressed by, when the body carries them.
+///
+/// All three or none: a position built from two of them names a diff GitLab cannot resolve,
+/// so half an answer must not travel as if it were one.
+fn diff_refs(value: Option<&serde_json::Value>) -> Option<DiffRefs> {
+    let value = value.filter(|v| v.is_object())?;
+    Some(DiffRefs {
+        base_sha: str_field(value, "base_sha")?,
+        head_sha: str_field(value, "head_sha")?,
+        start_sha: str_field(value, "start_sha")?,
+    })
+}
+
 fn note_position(value: Option<&serde_json::Value>) -> Option<NotePosition> {
     let value = value.filter(|v| v.is_object())?;
     let position = NotePosition {
@@ -1212,6 +1304,7 @@ fn note_position(value: Option<&serde_json::Value>) -> Option<NotePosition> {
         old_path: str_field(value, "old_path"),
         new_line: value.get("new_line").and_then(serde_json::Value::as_u64),
         old_line: value.get("old_line").and_then(serde_json::Value::as_u64),
+        line_range: note_line_range(value.get("line_range")),
     };
     // A position naming no file at all says nothing; drop it rather than draw an empty
     // anchor on a comment.
@@ -1219,6 +1312,35 @@ fn note_position(value: Option<&serde_json::Value>) -> Option<NotePosition> {
         return None;
     }
     Some(position)
+}
+
+/// Both ends of a comment on several lines, when GitLab sent both.
+///
+/// One end alone is dropped: a range with no start is not a range, and drawing it as one
+/// would state a span this app cannot read the other side of. `line_code` travels on each end
+/// in GitLab's answer and is deliberately NOT kept — it is a hash of the file path with both
+/// line counters, so this app can compute the one it needs (see
+/// [`crate::gitlab_mr_write::line_code`]) and has no use for one it was handed.
+fn note_line_range(value: Option<&serde_json::Value>) -> Option<NoteLineRange> {
+    let value = value.filter(|v| v.is_object())?;
+    Some(NoteLineRange {
+        start: note_line_end(value.get("start"))?,
+        end: note_line_end(value.get("end"))?,
+    })
+}
+
+fn note_line_end(value: Option<&serde_json::Value>) -> Option<NoteLineEnd> {
+    let value = value.filter(|v| v.is_object())?;
+    let end = NoteLineEnd {
+        new_line: value.get("new_line").and_then(serde_json::Value::as_u64),
+        old_line: value.get("old_line").and_then(serde_json::Value::as_u64),
+        kind: str_field(value, "type"),
+    };
+    // An end that names no line at all cannot be drawn against anything.
+    if end.new_line.is_none() && end.old_line.is_none() {
+        return None;
+    }
+    Some(end)
 }
 
 fn discussion_from_json(value: &serde_json::Value, me: Option<u64>) -> Option<Discussion> {
@@ -1279,6 +1401,25 @@ mod tests {
                  writes live in src/gitlab_mr_write.rs, behind their own consent gates."
             );
         }
+    }
+
+    /// A line code is GitLab's own spelling: the SHA-1 of the file path, then the line's
+    /// place in each file. The hash is pinned against `sha1sum` rather than against this
+    /// function's own output, and `examples/merge_request_diff_note_recon.rs` checks it
+    /// against the codes GitLab itself stored on real comments.
+    #[test]
+    fn a_line_code_is_the_path_hashed_with_both_line_numbers() {
+        assert_eq!(
+            line_code("src/server/health.ts", 3, 9),
+            "306bf1fe4ea9f8a8810c1131e313b0e1e163da6a_3_9"
+        );
+        assert_eq!(
+            line_code("charts/user-facing/values.yaml", 12, 12),
+            "e3ab9281f6234480d8a671315eede03af0c56a02_12_12"
+        );
+        // The path is hashed as its own bytes, so nothing about it is normalised: a rename
+        // is two files to GitLab and two line codes here.
+        assert_ne!(line_code("a.ts", 1, 1), line_code("b.ts", 1, 1));
     }
 
     /// The page never asks for merged merge requests, and the type system is what stops
@@ -1438,6 +1579,11 @@ mod tests {
             "source_branch": "feature/ha",
             "target_branch": "rc/9.0",
             "sha": "e2607442e33693652508637a6a02eb9997d496ff",
+            "diff_refs": {
+                "base_sha": "aa11",
+                "head_sha": "bb22",
+                "start_sha": "cc33",
+            },
             "merge_status": "checking",
             "detailed_merge_status": "checking",
             "has_conflicts": false,
@@ -1461,6 +1607,15 @@ mod tests {
         assert_eq!(d.changes_count.as_deref(), Some("11"));
         assert_eq!(d.reviewers.len(), 1);
         assert_eq!(d.sha.as_deref(), Some("e2607442e33693652508637a6a02eb9997d496ff"));
+        // The three commits a comment on a diff line is placed against. All three or none:
+        // GitLab cannot resolve a position built from two of them.
+        let refs = d.diff_refs.as_ref().expect("diff refs");
+        assert_eq!((refs.base_sha.as_str(), refs.head_sha.as_str()), ("aa11", "bb22"));
+        assert_eq!(refs.start_sha, "cc33");
+        assert!(
+            diff_refs(Some(&serde_json::json!({ "base_sha": "a", "head_sha": "b" }))).is_none(),
+            "two of the three commits name no diff"
+        );
         let pipeline = d.pipeline.as_ref().expect("a head pipeline");
         assert_eq!(pipeline.id, 190933);
         assert_eq!(pipeline.status, "manual");
@@ -1538,6 +1693,52 @@ mod tests {
         let position = parsed.notes[0].position.as_ref().expect("a position");
         assert_eq!(position.new_path.as_deref(), Some("charts/app/templates/deploy.yaml"));
         assert_eq!(position.new_line, Some(42));
+        assert_eq!(position.line_range, None, "one line is not a range");
+    }
+
+    /// A comment about SEVERAL lines carries both of its ends, in the shape measured on this
+    /// instance's own range comments — `{line_code, old_line, new_line, type}`. The line code
+    /// is deliberately dropped: it is a hash of the path with both counters, which this crate
+    /// computes (see [`line_code`]) and has no use for second-hand.
+    #[test]
+    fn reads_both_ends_of_a_comment_about_several_lines() {
+        let note = serde_json::json!({
+            "id": 70001, "body": "This whole block drains twice.",
+            "author": { "id": 12, "username": "ada" },
+            "position": {
+                "new_path": "src/server/health.ts",
+                "old_path": "src/server/health.ts",
+                "position_type": "text",
+                "old_line": null,
+                "new_line": 11,
+                "line_range": {
+                    "start": {
+                        "line_code": "306bf1fe4ea9f8a8810c1131e313b0e1e163da6a_8_9",
+                        "type": null,
+                        "old_line": 8,
+                        "new_line": 9,
+                    },
+                    "end": {
+                        "line_code": "306bf1fe4ea9f8a8810c1131e313b0e1e163da6a_8_11",
+                        "type": "new",
+                        "old_line": null,
+                        "new_line": 11,
+                    },
+                },
+            },
+        });
+        let parsed = note_from_json(&note, Some(12)).expect("a note");
+        let position = parsed.position.expect("a position");
+        // The ANCHOR is the LAST line of the range, which is where GitLab draws the thread.
+        assert_eq!((position.new_line, position.old_line), (Some(11), None));
+        let range = position.line_range.expect("a range");
+        assert_eq!((range.start.old_line, range.start.new_line), (Some(8), Some(9)));
+        assert_eq!(range.start.kind, None, "a context end names no side");
+        assert_eq!(range.end.kind.as_deref(), Some("new"));
+        // Half a range is not a range: an end nobody can read leaves nothing to draw a span
+        // between, so the whole range is dropped rather than half-stated.
+        assert!(note_line_range(Some(&serde_json::json!({ "start": { "new_line": 3 } }))).is_none());
+        assert!(note_line_range(Some(&serde_json::json!({}))).is_none());
     }
 
     #[test]

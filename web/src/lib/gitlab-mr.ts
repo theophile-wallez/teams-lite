@@ -15,6 +15,7 @@
 // somebody is drawn, because the preview cards name people too and one colleague must not be
 // drawn two ways.
 
+import type { DiffRefs } from "./gitlab-diff-comment";
 import type { TrackerPerson } from "./tracker-people";
 
 /** A GitLab person is a tracker person: one shape, one match rule, one way of drawing them
@@ -106,6 +107,10 @@ export type MergeRequestDetail = {
   labels?: string[];
   milestone?: string;
   sha?: string;
+  /** The three commits a comment on a diff LINE is placed against. Mirrors
+   *  `gitlab_mr::DiffRefs`; absent on an older backend, which is what
+   *  `diffCommentsAvailable` reads as "this page cannot place a comment". */
+  diff_refs?: DiffRefs;
   merge_status?: string;
   detailed_merge_status?: string;
   has_conflicts: boolean;
@@ -123,13 +128,25 @@ export type MergeRequestDetail = {
   pipeline?: GitLabPipeline;
 };
 
-/** Where a code comment hangs. Mirrors `gitlab_mr::NotePosition`. */
+/** Where a code comment hangs. Mirrors `gitlab_mr::NotePosition`.
+ *
+ *  The two line numbers are the ANCHOR — the one line the thread hangs under, which on a
+ *  comment about several lines is the LAST of them. Exactly one is set on a line that exists
+ *  on one side only, and both on a context line: GitLab's own convention, and what tells a
+ *  reader whether a comment is about code that arrived, went, or stayed. */
 export type GitLabNotePosition = {
   new_path?: string;
   old_path?: string;
   new_line?: number;
   old_line?: number;
+  /** Both ends, when the comment was written about a RANGE. Absent on a comment about one
+   *  line — a range of one is a line. Mirrors `gitlab_mr::NoteLineRange`. */
+  line_range?: { start: GitLabNoteLineEnd; end: GitLabNoteLineEnd };
 };
+
+/** One end of such a range. Mirrors `gitlab_mr::NoteLineEnd`; `type` is GitLab's own word for
+ *  the side, absent on a context line, which belongs to both. */
+export type GitLabNoteLineEnd = { new_line?: number; old_line?: number; type?: string };
 
 /** Mirrors `gitlab_mr::Note`. */
 export type GitLabNote = {

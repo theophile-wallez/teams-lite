@@ -38,6 +38,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/chan --channels    # the team → channel tree
 //   bun run web/scripts/preview.ts --out /tmp/mr --gitlab       # the merge-request page
 //   bun run web/scripts/preview.ts --out /tmp/diff --diff       # the Changes section
+//   bun run web/scripts/preview.ts --out /tmp/dc --diff-comment # a comment on a diff line
 //   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
 //   bun run web/scripts/preview.ts --out /tmp/img --image       # the picture lightbox
 //   bun run web/scripts/preview.ts --out /tmp/pics --compose-images # several pending images
@@ -505,6 +506,56 @@ export async function pickDiffFile(page: Page, path: string): Promise<void> {
   });
   // A file whose language the highlighter has not loaded yet resolves one more grammar.
   await page.waitForTimeout(600);
+}
+
+/**
+ * One line NUMBER in the gutter of the open diff — where the comment gesture starts.
+ *
+ * The number and the SIDE together, because in a unified diff an old line and a new line can
+ * wear the same number: three lines down a change block, `3` is both the line that went and the
+ * line that came. So the side is not decoration, and the default is the new one, which is what
+ * a reviewer comments on.
+ *
+ * `data-column-number` and `data-line-type` are `@pierre/diffs`' own attributes on a gutter
+ * cell, and Playwright's CSS engine pierces the open shadow root they live in. Everything
+ * ASSERTED afterwards is this app's own `[data-testid]` — the same line `pickDiffFile` draws.
+ */
+export function diffGutterLine(
+  page: Page,
+  line: number,
+  side: "additions" | "deletions" = "additions",
+) {
+  const types =
+    side === "additions"
+      ? ["context", "addition", "change-addition"]
+      : ["context", "deletion", "change-deletion"];
+  const selector = types
+    .map((type) => `[data-column-number="${line}"][data-line-type="${type}"]`)
+    .join(", ");
+  return page.locator(`[data-testid="gitlab-diff-patch"] :is(${selector})`).first();
+}
+
+/**
+ * Drag down the gutter from one line number to another — the gesture that comments on several
+ * lines at once.
+ *
+ * Driven with the mouse rather than through the store, because the drag IS the feature: it is
+ * pierre's interaction manager following a pointer, and the steps matter — a jump straight from
+ * one point to the other fires no move between them and would select one line.
+ */
+export async function dragDiffLines(
+  page: Page,
+  from: number,
+  to: number,
+  side: "additions" | "deletions" = "additions",
+): Promise<void> {
+  const start = await diffGutterLine(page, from, side).boundingBox();
+  const end = await diffGutterLine(page, to, side).boundingBox();
+  if (!start || !end) throw new Error(`[preview] no gutter line ${from} or ${to} to drag between`);
+  await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 10 });
+  await page.mouse.up();
 }
 
 /**
@@ -1994,6 +2045,85 @@ if (import.meta.main) {
             `${out}-split-light.png, ${out}-{rename,binary,collapsed}-light.png, ` +
             `${out}-expand-light.png, ${out}-expanded-light.png and ` +
             `${out}-mobile-{files,patch}-light.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
+  // A COMMENT on a diff line: the gesture that starts one, the box it opens under the line,
+  // and the thread that is already there.
+  //
+  // The gesture is the point and it is a POINTER one, so it is driven here the way a reader
+  // makes it: pressing a line number, and dragging from one line number to another. Both go
+  // through the mock like every other write in this suite — nothing reaches a GitLab.
+  if (args.includes("--diff-comment")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        await openGitLabTab(page);
+        await openMergeRequestAt(page, 0);
+        await openChanges(page);
+        await pickDiffFile(page, "src/server/health.ts");
+
+        // The THREAD already on this file, and its span. It is a comment on lines 8–10 by a
+        // colleague with the user's own reply under it, so the deletion that makes commenting
+        // acceptable is on screen too.
+        await page.waitForSelector('[data-testid="gitlab-diff-thread"]', { timeout: 15_000 });
+        await shot(`${out}-thread-light.png`, '[data-testid="gitlab-diff-thread"]');
+        await setTheme("dark");
+        await shot(`${out}-thread-dark.png`, '[data-testid="gitlab-diff-thread"]');
+        await setTheme("light");
+
+        // The AFFORDANCE: hovering a line reveals the control that says a comment can go
+        // there. It is pierre's own gutter slot, wearing this app's glyph.
+        await diffGutterLine(page, 5).hover();
+        await page.waitForTimeout(200);
+        await shot(`${out}-affordance-light.png`, '[data-testid="gitlab-diff-patch"]');
+
+        // ONE LINE: a press on its number opens the box under it.
+        await diffGutterLine(page, 5).click();
+        await page.waitForSelector('[data-testid="gitlab-diff-composer"][data-lines="Line 5"]', {
+          timeout: 10_000,
+        });
+        await shot(`${out}-line-light.png`, '[data-testid="gitlab-diff-pane"]');
+
+        // SEVERAL: a drag from one line number down to another, which is the half of the
+        // gesture nobody discovers by looking — hence the hint on the control.
+        await dragDiffLines(page, 3, 6);
+        await page.waitForSelector('[data-testid="gitlab-diff-composer"][data-lines="Lines 3–6"]', {
+          timeout: 10_000,
+        });
+        await shot(`${out}-range-light.png`, '[data-testid="gitlab-diff-pane"]');
+        await setTheme("dark");
+        await shot(`${out}-range-dark.png`, '[data-testid="gitlab-diff-pane"]');
+        await setTheme("light");
+
+        // The comment posted: the box goes, and the thread it made hangs on the same lines.
+        await page.locator('[data-testid="gitlab-diff-comment-input"]').fill(
+          "This whole block runs on every probe — worth a note about the cost.",
+        );
+        await shot(`${out}-written-light.png`, '[data-testid="gitlab-diff-composer"]');
+        await page.locator('[data-testid="gitlab-diff-comment-send"]').click();
+        await page.waitForSelector('[data-testid="gitlab-diff-composer"]', {
+          state: "detached",
+          timeout: 15_000,
+        });
+        await page.waitForTimeout(600);
+        await shot(`${out}-posted-light.png`, '[data-testid="gitlab-diff-pane"]');
+
+        // And on a PHONE, where the box shares the screen with the code it is about.
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(600);
+        await diffGutterLine(page, 5).click();
+        await page.waitForSelector('[data-testid="gitlab-diff-composer"]', { timeout: 10_000 });
+        await shot(`${out}-mobile-light.png`);
+        await page.setViewportSize(VIEWPORT);
+
+        console.log(
+          `[preview] wrote ${out}-thread-{light,dark}.png, ${out}-affordance-light.png, ` +
+            `${out}-line-light.png, ${out}-range-{light,dark}.png, ${out}-written-light.png, ` +
+            `${out}-posted-light.png and ${out}-mobile-light.png`,
         );
       },
       { deviceScaleFactor: dpr },

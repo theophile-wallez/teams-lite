@@ -116,10 +116,18 @@ import {
 } from "./call-failure";
 import {
   canExpandDiff,
+  selectDiffFile,
   type DiffDepth,
   type DiffLayout,
   type GitLabDiff,
 } from "./gitlab-diff";
+import {
+  diffCommentPosition,
+  diffCommentTarget,
+  diffCommentsAvailable,
+  type DiffCommentTarget,
+  type PierreLineRange,
+} from "./gitlab-diff-comment";
 import {
   isNotMerged,
   mergeRequestId,
@@ -579,6 +587,32 @@ export type AppState = {
   /** Unified or split, the reader's own choice, persisted per browser. A narrow screen
    *  overrides it to unified without forgetting it (see `effectiveDiffLayout`). */
   gitlabDiffLayout: DiffLayout;
+  /** The lines the diff renderer LIGHTS, in its own vocabulary — a press on a line number, or
+   *  wherever a drag down them has reached.
+   *
+   *  Kept apart from the composer below, and the split is load-bearing: the box has to open at
+   *  the END of a gesture rather than during it. A card drawn mid-drag inserts a row into the
+   *  patch, which moves the line numbers under the reader's own pointer — measured, and it cut
+   *  a drag from line 3 to line 6 short at line 4. */
+  gitlabDiffSelection: PierreLineRange | null;
+  /** WHERE on the diff the reader is writing a comment: the file and the line — or the two
+   *  ends of the range they dragged over — and null when they are not writing one. Set when a
+   *  gesture ENDS. */
+  gitlabDiffComment: DiffCommentTarget | null;
+  /** What that composer holds. Deliberately NOT kept per merge request like the page's own
+   *  draft below: it belongs to one line of one file, and a line moves under a reader the
+   *  moment somebody pushes. */
+  gitlabDiffCommentDraft: string;
+  gitlabDiffCommentBusy: boolean;
+  /** Why a comment did not go out, and WHICH box it was written in — `thread` is the
+   *  discussion for a reply or a deletion, and null for a new comment.
+   *
+   *  The owner travels with the sentence because this page holds several boxes at once: a
+   *  refusal drawn in every card would report a failed reply inside three threads that have
+   *  nothing to do with it. It is reported here rather than on the merge-request page for the
+   *  same reason one step further out — a refusal shown where the reader is not looking is a
+   *  refusal nobody reads. */
+  gitlabDiffCommentError: { thread: string | null; message: string } | null;
   /** What the composer holds, per merge request, so walking away and back keeps a
    *  half-written comment — and a reply keeps its own draft apart from the main one. */
   gitlabCommentDraft: string;
@@ -817,6 +851,11 @@ function initialState(): AppState {
     gitlabDiffPath: null,
     gitlabDiffDepth: "listed",
     gitlabDiffLayout: "unified",
+    gitlabDiffSelection: null,
+    gitlabDiffComment: null,
+    gitlabDiffCommentDraft: "",
+    gitlabDiffCommentBusy: false,
+    gitlabDiffCommentError: null,
     gitlabCommentDraft: "",
     gitlabReplyTo: null,
     gitlabActing: null,
@@ -3349,6 +3388,14 @@ export class TeamsController {
       // piece of this page that would be read as current when it is minutes old.
       gitlabPipeline: null,
       gitlabApproval: null,
+      // A comment being written belongs to one line of one file, so opening another merge
+      // request — or leaving this one — takes it away rather than carrying it over to a line
+      // that means something else there.
+      gitlabDiffSelection: null,
+      gitlabDiffComment: null,
+      gitlabDiffCommentDraft: "",
+      gitlabDiffCommentBusy: false,
+      gitlabDiffCommentError: null,
       gitlabCommentDraft: this.gitlabDraftCache.get(id) ?? "",
       gitlabReplyTo: null,
       gitlabActing: null,
@@ -3458,7 +3505,168 @@ export class TeamsController {
   setGitLabDiffFile(path: string): void {
     const key = this.get().openMergeRequest;
     if (key) this.gitlabDiffPathCache.set(mergeRequestId(key), path);
-    this.set({ gitlabDiffPath: path });
+    // A comment being written is about a line of the file being left, so walking to another
+    // file takes it away. Keeping it would leave a composer open over code it is not about.
+    this.set({
+      gitlabDiffPath: path,
+      gitlabDiffSelection: null,
+      gitlabDiffComment: null,
+      gitlabDiffCommentDraft: "",
+      gitlabDiffCommentError: null,
+    });
+  }
+
+  // ---- a comment on a diff line ---------------------------------------------
+
+  /** The file the diff page is showing, which every rule about a comment on it is relative
+   *  to. One place to ask, so the store and the page can never disagree about which file a
+   *  line number belongs to. */
+  private openDiffFile() {
+    const state = this.get();
+    return selectDiffFile(state.gitlabDiff, state.gitlabDiffPath);
+  }
+
+  /**
+   * The lines the reader is picking RIGHT NOW: their pointer is still down, or they have just
+   * pressed a line number. Only the highlight moves.
+   *
+   * The composer deliberately does not open here. It appears at the END of the gesture
+   * ({@link openGitLabDiffComment}), because a card drawn mid-drag inserts a row into the patch
+   * and moves the line numbers under the reader's own pointer.
+   */
+  setGitLabDiffSelection(range: PierreLineRange | null): void {
+    if (!range) {
+      this.closeGitLabDiffComment();
+      return;
+    }
+    if (!diffCommentsAvailable(this.openDiffFile(), this.get().gitlabDetail?.diff_refs)) return;
+    this.set({ gitlabDiffSelection: range });
+  }
+
+  /**
+   * The gesture ENDED on these lines: open the composer under them.
+   *
+   * The range is the RENDERER's (a line number on a side); what it means is worked out by
+   * `diffCommentTarget`, so a line the patch does not hold — a drag past the end of a hunk —
+   * opens nothing rather than a composer about no line. `null` closes what is open, which is the
+   * same gesture in reverse: pressing the lit line again.
+   *
+   * A range that resolves to the lines already open is left alone, draft and all: a reader
+   * dragging over the same lines twice has not asked for their words to be thrown away.
+   */
+  openGitLabDiffComment(range: PierreLineRange | null): void {
+    if (!range) {
+      this.closeGitLabDiffComment();
+      return;
+    }
+    const state = this.get();
+    if (!diffCommentsAvailable(this.openDiffFile(), state.gitlabDetail?.diff_refs)) return;
+    const target = diffCommentTarget(this.openDiffFile(), range);
+    if (!target) return;
+    const open = state.gitlabDiffComment;
+    if (
+      open &&
+      open.path === target.path &&
+      open.first.row === target.first.row &&
+      open.last.row === target.last.row
+    ) {
+      return;
+    }
+    this.set({
+      gitlabDiffSelection: range,
+      gitlabDiffComment: target,
+      gitlabDiffCommentDraft: "",
+      gitlabDiffCommentError: null,
+    });
+  }
+
+  /** Stop writing that comment: the box goes, and so does the highlight it was about. */
+  closeGitLabDiffComment(): void {
+    if (!this.get().gitlabDiffComment && !this.get().gitlabDiffSelection) return;
+    this.set({
+      gitlabDiffSelection: null,
+      gitlabDiffComment: null,
+      gitlabDiffCommentDraft: "",
+      gitlabDiffCommentError: null,
+    });
+  }
+
+  /** What that composer holds. */
+  setGitLabDiffCommentDraft(text: string): void {
+    this.set({ gitlabDiffCommentDraft: text });
+  }
+
+  /**
+   * Post the comment written on a diff line — a new thread there, or a reply into the thread
+   * `discussionId` names.
+   *
+   * Outward: everybody watching the merge request is told, under the user's own name. So it
+   * happens on their own Enter, the words STAY in the box until GitLab has taken them, and a
+   * refusal is reported at that box rather than swallowed — the contract the chat composer
+   * holds (see lib/send-failure.ts) and the merge-request page's own composer with it.
+   *
+   * It ANSWERS whether the comment landed, because a reply's box is held by the thread it is in
+   * rather than by this store: without the answer that box would close on a refusal and take the
+   * words with it, which is the one thing this contract forbids.
+   */
+  async postGitLabDiffComment(body: string, discussionId?: string): Promise<boolean> {
+    const where = discussionId ?? null;
+    const state = this.get();
+    const key = state.openMergeRequest;
+    const text = body.trim();
+    if (!key || text === "" || state.gitlabDiffCommentBusy) return false;
+    // A reply lands in the thread it answers, which already hangs where it hangs; only a NEW
+    // comment carries a position. Sending both is refused by the backend, so the page must
+    // not build both.
+    const position = discussionId
+      ? null
+      : diffCommentPosition(this.openDiffFile(), state.gitlabDetail?.diff_refs, state.gitlabDiffComment);
+    if (!discussionId && !position) {
+      this.set({
+        gitlabDiffCommentError: {
+          thread: where,
+          message:
+            "This page cannot say which line that is about any more — reload the changes and pick it again.",
+        },
+      });
+      return false;
+    }
+    this.set({ gitlabDiffCommentBusy: true, gitlabDiffCommentError: null });
+    try {
+      await this.backend.gitlabComment(key, text, discussionId, position ?? undefined);
+      // Only now do the words leave the box, and only the composer that sent them closes: a
+      // comment that never left must not vanish from under the person who wrote it.
+      if (sameMergeRequest(this.get().openMergeRequest, key) && !discussionId) {
+        this.set({ gitlabDiffSelection: null, gitlabDiffComment: null, gitlabDiffCommentDraft: "" });
+      }
+      await this.refreshGitLabNotes(key);
+      return true;
+    } catch (e) {
+      this.set({ gitlabDiffCommentError: { thread: where, message: errText(e) } });
+      return false;
+    } finally {
+      this.set({ gitlabDiffCommentBusy: false });
+    }
+  }
+
+  /** Delete one of the user's OWN comments from the diff page — the undo that makes
+   *  commenting here acceptable, offered where the comment is (see AGENTS.md § The
+   *  trackers). The backend re-reads whose comment it is before it deletes, so this is a
+   *  request rather than a claim, and the outcome is reported on this page. */
+  async deleteGitLabDiffComment(noteId: number, discussionId: string): Promise<void> {
+    const key = this.get().openMergeRequest;
+    if (!key || this.get().gitlabDiffCommentBusy) return;
+    this.set({ gitlabDiffCommentBusy: true, gitlabDiffCommentError: null });
+    try {
+      await this.backend.gitlabDeleteComment(key, noteId);
+      await this.refreshGitLabNotes(key);
+    } catch (e) {
+      // In the thread the comment is in, which is the only place the reader can see what
+      // failed to go away.
+      this.set({ gitlabDiffCommentError: { thread: discussionId, message: errText(e) } });
+    } finally {
+      this.set({ gitlabDiffCommentBusy: false });
+    }
   }
 
   /** Ask GitLab to expand the files it collapsed.
@@ -3558,6 +3766,14 @@ export class TeamsController {
       gitlabDiffError: null,
       gitlabDiffPath: null,
       gitlabDiffDepth: "listed",
+      // A comment being written belongs to one line of one file, so opening another merge
+      // request — or leaving this one — takes it away rather than carrying it over to a line
+      // that means something else there.
+      gitlabDiffSelection: null,
+      gitlabDiffComment: null,
+      gitlabDiffCommentDraft: "",
+      gitlabDiffCommentBusy: false,
+      gitlabDiffCommentError: null,
       gitlabCommentDraft: "",
       gitlabReplyTo: null,
       gitlabActing: null,

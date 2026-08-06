@@ -12,6 +12,7 @@ import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { CallPreparation, CallStatus, MeetingAddress } from "./call";
 import type { SendImage } from "./composer-image";
 import type { DiffDepth, GitLabDiff } from "./gitlab-diff";
+import type { WireDiffPosition } from "./gitlab-diff-comment";
 import type {
   GitLabDiscussionList,
   GitLabPipelineView,
@@ -1346,20 +1347,27 @@ export class Backend {
     });
   }
 
-  /** Comment on it — a new comment, or a reply into the thread `discussionId` names.
+  /** Comment on it — a new comment, a reply into the thread `discussionId` names, or a new
+   *  thread on the DIFF LINE `position` names.
    *
    *  Everybody watching the merge request is told, under the user's own name, so it is
-   *  gated like a send and only ever called from their own Enter. */
+   *  gated like a send and only ever called from their own Enter. The position travels as
+   *  primitives — a file, two line numbers and a side — because the BACKEND spells GitLab's
+   *  own shape and computes the line codes inside it (see `gitlab_diff_anchor` in
+   *  src/bin/server.rs): nothing here can hand GitLab a field this app does not know it is
+   *  sending. */
   gitlabComment(
     key: MergeRequestKey,
     body: string,
     discussionId?: string,
+    position?: WireDiffPosition,
   ): Promise<{ note: PostedNote }> {
     return this.writeRequest<{ note: PostedNote }>("gitlab_mr_comment", {
       project_path: key.projectPath,
       iid: key.iid,
       body,
       ...(discussionId ? { discussion_id: discussionId } : {}),
+      ...(position ? { position } : {}),
     });
   }
 

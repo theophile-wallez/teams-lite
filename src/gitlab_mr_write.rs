@@ -6,7 +6,11 @@
 // this one holds what the merge request PAGE offers on top of it —
 //
 //   1. **MERGE** the branch (`PUT …/merge`).
-//   2. **COMMENT** on it (`POST …/notes`, or `POST …/discussions/{id}/notes` for a reply).
+//   2. **COMMENT** on it — `POST …/notes` for a comment of its own, `POST
+//      …/discussions/{id}/notes` for a reply into a thread, and `POST …/discussions` with a
+//      `position` for a comment on a DIFF LINE. Three shapes of one write: they reach the
+//      same people, they are undone by the same deletion, and they differ only in where
+//      GitLab files the words.
 //   3. **DELETE one of the user's OWN comments** (`DELETE …/notes/{id}`) — the undo of 2.
 //   4. **CLOSE or REOPEN** it (`PUT …` with `state_event`), which are each other's undo.
 //
@@ -37,6 +41,14 @@
 // be deleted by whoever wrote it, and a close is undone by a reopen. A comment still
 // reaches every person watching the merge request, under the user's name, so it is gated
 // exactly like a send and never written by anything but their own Enter.
+//
+// **A comment on a diff LINE names a commit, and that is the second place in this module
+// where a commit is a rail rather than a detail.** A line number means nothing on its own
+// across a push — the diff moves and the number stays — so a [`DiffAnchor`] carries the three
+// commits the diff was read at, and GitLab refuses a position it cannot place in that diff.
+// So a comment written on a page that has since gone stale is refused instead of landing on
+// whichever line now holds that number, which is the failure this rail exists for and the
+// only one a reader could not detect for themselves.
 
 use std::time::Duration;
 
@@ -45,7 +57,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::gitlab;
-use crate::gitlab_mr::{self, Person};
+use crate::gitlab_mr::{self, line_code, DiffRefs, Person};
 
 /// How long to wait on the GitLab API. The same 15 s the page's reads take: this is an
 /// action the user is watching the outcome of.
@@ -207,11 +219,202 @@ pub async fn set_state(
     }))
 }
 
-/// Comment on one merge request — a new standalone comment, or a reply into an existing
-/// discussion when `discussion_id` names one.
+/// Which side of a diff one line sits on.
+///
+/// A closed set rather than a string from the client, for the reason [`StateChange`] is one:
+/// it decides which line numbers a position may state, and GitLab refuses a position whose
+/// numbers do not match the line it names. A context line is `Both` — it exists in each file
+/// — and GitLab's own answer names no side for one, which is why [`Self::range_type`]
+/// returns nothing there rather than picking a side on its behalf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineSide {
+    /// A line that was REMOVED: it exists in the old file only.
+    Old,
+    /// A line that was ADDED: it exists in the new file only.
+    New,
+    /// A line that did not change, so it exists in both.
+    Both,
+}
+
+impl LineSide {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "old" => Some(Self::Old),
+            "new" => Some(Self::New),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    /// GitLab's own word for the side a RANGE END sits on, and `None` for a context line,
+    /// which belongs to both files and which GitLab's own model names with a nil there.
+    ///
+    /// Measured over this instance's own range comments: their ends carry `new`, `old` and
+    /// `expanded` — the last being GitLab's word for a context line inside a region somebody
+    /// OPENED, which is a line this app cannot select (its patch holds the hunks GitLab sent
+    /// and nothing beyond them), so it is deliberately never written here.
+    fn range_type(self) -> Option<&'static str> {
+        match self {
+            Self::Old => Some("old"),
+            Self::New => Some("new"),
+            Self::Both => None,
+        }
+    }
+}
+
+/// One line of a diff, as GitLab addresses one.
+///
+/// Both counters always travel, because GitLab's own line identity is the PAIR: a line code
+/// is `SHA1(<path>)_<old>_<new>` for every line, added and removed ones included — a line
+/// that exists on one side still carries the position it holds in the other file. What
+/// `side` decides is narrower and separate: which of the two the POSITION states, since
+/// GitLab refuses an `old_line` on a line that was added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnchorLine {
+    /// Where this line sits in the old file — for an added line, the line it follows.
+    pub old: u64,
+    /// Where it sits in the new file — for a removed line, the line it followed.
+    pub new: u64,
+    pub side: LineSide,
+}
+
+impl AnchorLine {
+    /// The `old_line` a position states for this line, which is nothing on a line that was
+    /// added: it is not in the old file, so naming a number there describes another line.
+    fn position_old_line(self) -> Option<u64> {
+        matches!(self.side, LineSide::Old | LineSide::Both).then_some(self.old)
+    }
+
+    fn position_new_line(self) -> Option<u64> {
+        matches!(self.side, LineSide::New | LineSide::Both).then_some(self.new)
+    }
+
+    /// One end of a `line_range`, in GitLab's own shape.
+    fn range_end(self, path: &str) -> serde_json::Value {
+        let mut end = json!({ "line_code": line_code(path, self.old, self.new) });
+        if let Some(kind) = self.side.range_type() {
+            end["type"] = json!(kind);
+        }
+        if let Some(old) = self.position_old_line() {
+            end["old_line"] = json!(old);
+        }
+        if let Some(new) = self.position_new_line() {
+            end["new_line"] = json!(new);
+        }
+        end
+    }
+}
+
+/// Where on a diff a comment hangs: the file, the line, and the commits that line is a line
+/// OF.
+///
+/// Every field of it is MEASURED rather than read off the documentation, because there is no
+/// sandbox project to try a comment against: `examples/merge_request_diff_note_recon.rs`
+/// walks the positions GitLab itself stored on this instance's own comments, READ-ONLY, and
+/// checks each rule here against them — that a position is always `text`, that it states the
+/// new line alone on an added line and both on a context line, that a range's ends are
+/// `{line_code, old_line, new_line, type}`, and that the line code this crate computes is the
+/// one GitLab wrote.
+///
+/// The three commits are what make this a comment about the code the reader was reading. A
+/// line number on its own means nothing across a push — the diff moves and the number stays
+/// — so GitLab resolves the position against the diff `base_sha`, `head_sha` and `start_sha`
+/// describe, and refuses one it cannot place. That refusal is the feature: it is the same
+/// rail the merge's own `sha` is (see the module header), applied to the one other write
+/// here that names a commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffAnchor {
+    pub refs: DiffRefs,
+    /// The path the file has now. Empty on a deleted file, which has only ever had one.
+    pub new_path: String,
+    /// The path it had. Empty on a file that was added.
+    pub old_path: String,
+    /// The line the thread hangs under — the LAST line when the comment is about several,
+    /// which is where GitLab draws one and therefore where this app must ask for it.
+    pub line: AnchorLine,
+    /// The FIRST line, when the comment is about several. `None` for one line, because a
+    /// range of one is a line and GitLab's own answer carries no `line_range` for it.
+    pub start: Option<AnchorLine>,
+}
+
+impl DiffAnchor {
+    /// The path a line code is hashed from: GitLab's own `new_path.presence || old_path`, so
+    /// a deleted file's lines are addressed by the only path it ever had.
+    fn file_path(&self) -> &str {
+        if self.new_path.trim().is_empty() { &self.old_path } else { &self.new_path }
+    }
+
+    /// This anchor as the `position` GitLab takes.
+    fn position(&self) -> serde_json::Value {
+        let path = self.file_path();
+        let mut position = json!({
+            // The only kind of position this app writes. GitLab also places notes on an
+            // image, which is a different surface with a different gesture.
+            "position_type": "text",
+            "base_sha": self.refs.base_sha,
+            "head_sha": self.refs.head_sha,
+            "start_sha": self.refs.start_sha,
+        });
+        // Each path is stated only when the file really has one, so an added file is not
+        // described as having moved from the empty string.
+        if !self.new_path.trim().is_empty() {
+            position["new_path"] = json!(self.new_path);
+        }
+        if !self.old_path.trim().is_empty() {
+            position["old_path"] = json!(self.old_path);
+        }
+        if let Some(old) = self.line.position_old_line() {
+            position["old_line"] = json!(old);
+        }
+        if let Some(new) = self.line.position_new_line() {
+            position["new_line"] = json!(new);
+        }
+        if let Some(start) = self.start {
+            position["line_range"] = json!({
+                "start": start.range_end(path),
+                "end": self.line.range_end(path),
+            });
+        }
+        position
+    }
+
+    /// Whether this anchor is one GitLab could place, checked before the network.
+    fn check(&self) -> Result<()> {
+        for (name, sha) in [
+            ("base_sha", &self.refs.base_sha),
+            ("head_sha", &self.refs.head_sha),
+            ("start_sha", &self.refs.start_sha),
+        ] {
+            anyhow::ensure!(
+                !sha.trim().is_empty(),
+                "a comment on a diff line needs the commits that diff is of, and `{name}` is \
+                 missing — reload the page and look again"
+            );
+        }
+        anyhow::ensure!(
+            !self.file_path().trim().is_empty(),
+            "a comment on a diff line needs the file it is about"
+        );
+        for line in [Some(self.line), self.start].into_iter().flatten() {
+            anyhow::ensure!(
+                line.old > 0 && line.new > 0,
+                "a diff line is addressed by its place in both files, and one of those is missing"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Comment on one merge request — a new standalone comment, a reply into an existing
+/// discussion when `discussion_id` names one, or a new thread on a DIFF LINE when `anchor`
+/// names one.
 ///
 /// Everybody watching the merge request is told, under the user's own name, so this is
 /// gated exactly like a send and is only ever called from their own Enter.
+///
+/// The three shapes are one write and are deliberately one function: they reach the same
+/// people, they are undone by the same deletion, and they differ only in where GitLab files
+/// the words. Splitting them would be three consent gates for one act.
 pub async fn comment(
     http: &reqwest::Client,
     gitlab_host: &str,
@@ -219,6 +422,7 @@ pub async fn comment(
     project_path: &str,
     iid: u64,
     discussion_id: Option<&str>,
+    anchor: Option<&DiffAnchor>,
     body: &str,
 ) -> Result<PostedNote> {
     let token = gitlab_mr::require_token(token)?;
@@ -230,39 +434,78 @@ pub async fn comment(
         body.len()
     );
 
+    let discussion = discussion_id.map(str::trim).filter(|id| !id.is_empty());
+    // Two addresses for one comment is not a comment with two addresses: a reply lands in a
+    // thread that already hangs where it hangs, so a position beside it would be a second,
+    // contradicting claim about where the words go. Refused here rather than resolved by
+    // picking one.
+    anyhow::ensure!(
+        !(discussion.is_some() && anchor.is_some()),
+        "a reply lands in the thread it answers, so it cannot also name a diff line"
+    );
+    if let Some(anchor) = anchor {
+        anchor.check()?;
+    }
+
     let base = gitlab_mr::merge_request_api(gitlab_host, project_path, iid);
-    // A reply goes into the thread it answers; without a discussion it is a comment of its
-    // own. Sending a reply as a new comment is the mistake this branch exists to prevent:
-    // the words land, in the wrong place, and nothing reports it.
-    let endpoint = match discussion_id.map(str::trim).filter(|id| !id.is_empty()) {
-        Some(discussion) => {
+    // A reply goes into the thread it answers; a comment on a diff line starts a THREAD, so
+    // it is posted as a discussion; without either it is a standalone comment of its own.
+    // Sending a reply as a new comment is the mistake this branch exists to prevent: the
+    // words land, in the wrong place, and nothing reports it.
+    let endpoint = match (discussion, anchor) {
+        (Some(discussion), _) => {
             format!("{base}/discussions/{}/notes", urlencoding::encode(discussion))
         }
-        None => format!("{base}/notes"),
+        (None, Some(_)) => format!("{base}/discussions"),
+        (None, None) => format!("{base}/notes"),
     };
+    let mut request = json!({ "body": body });
+    if let Some(anchor) = anchor {
+        request["position"] = anchor.position();
+    }
 
     let resp = http
         .post(&endpoint)
         .header("Accept", "application/json")
         .header("PRIVATE-TOKEN", token)
-        .json(&json!({ "body": body }))
+        .json(&request)
         .timeout(HTTP_TIMEOUT)
         .send()
         .await
         .context("gitlab comment")?;
     let status = resp.status();
     if !status.is_success() {
-        anyhow::bail!("{}", comment_refusal(status, &read_gitlab_message(resp).await));
+        anyhow::bail!(
+            "{}",
+            comment_refusal(status, anchor.is_some(), &read_gitlab_message(resp).await)
+        );
     }
     let answered: serde_json::Value = resp.json().await.context("gitlab comment body")?;
-    Ok(PostedNote {
-        id: answered.get("id").and_then(serde_json::Value::as_u64).unwrap_or_default(),
-        author: person_from(answered.get("author")),
-        body: string_field(&answered, "body").unwrap_or_else(|| body.to_string()),
-        created_at: string_field(&answered, "created_at").unwrap_or_default(),
-        discussion_id: string_field(&answered, "discussion_id")
-            .or_else(|| discussion_id.map(str::to_string)),
-    })
+    Ok(posted_note(&answered, discussion, body))
+}
+
+/// The note GitLab stored, out of whichever of the two bodies it answered with.
+///
+/// A note endpoint answers with the NOTE; the discussions endpoint answers with the whole
+/// DISCUSSION, whose `id` is the thread's and whose single note is the comment. Reading the
+/// first shape's rule into the second is a real mistake with a quiet symptom: the thread's id
+/// would be stored as the note's, so the deletion offered on that comment would name
+/// something that is not a note.
+fn posted_note(answered: &serde_json::Value, discussion: Option<&str>, typed: &str) -> PostedNote {
+    let thread = answered.get("notes").and_then(serde_json::Value::as_array);
+    let (note, thread_id) = match thread.and_then(|notes| notes.first()) {
+        Some(first) => (first, string_field(answered, "id")),
+        None => (answered, None),
+    };
+    PostedNote {
+        id: note.get("id").and_then(serde_json::Value::as_u64).unwrap_or_default(),
+        author: person_from(note.get("author")),
+        body: string_field(note, "body").unwrap_or_else(|| typed.to_string()),
+        created_at: string_field(note, "created_at").unwrap_or_default(),
+        discussion_id: string_field(note, "discussion_id")
+            .or(thread_id)
+            .or_else(|| discussion.map(str::to_string)),
+    }
 }
 
 /// Delete one comment — the undo of [`comment`], and the reason a comment is offered here
@@ -301,7 +544,9 @@ pub async fn delete_comment(
     if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
         return Ok(());
     }
-    anyhow::bail!("{}", comment_refusal(status, &read_gitlab_message(resp).await));
+    // A deletion names a note by its id and never a diff position, so it has no placement to
+    // fail — `false` is the fact rather than a default.
+    anyhow::bail!("{}", comment_refusal(status, false, &read_gitlab_message(resp).await));
 }
 
 // ---- refusals ---------------------------------------------------------------
@@ -381,7 +626,12 @@ fn state_refusal(status: reqwest::StatusCode, change: StateChange, detail: &str)
     with_detail(&format!("GitLab refused: {cause}"), status, detail)
 }
 
-fn comment_refusal(status: reqwest::StatusCode, detail: &str) -> String {
+/// One sentence for a refused comment. `anchored` is whether it named a diff line, because
+/// that is the one shape with a failure of its own to explain: GitLab resolves a position
+/// against the diff it was written on, so a merge request that was pushed to since the page
+/// read it is refused — and the reader's next move is to look at the new diff, which no
+/// generic "it was not posted" would send them to.
+fn comment_refusal(status: reqwest::StatusCode, anchored: bool, detail: &str) -> String {
     let cause = match status {
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
             "this account may not comment there (or the token lacks the `api` scope)"
@@ -391,6 +641,12 @@ fn comment_refusal(status: reqwest::StatusCode, detail: &str) -> String {
         }
         reqwest::StatusCode::TOO_MANY_REQUESTS => {
             "GitLab is rate-limiting this token, so the comment was not posted"
+        }
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+            if anchored =>
+        {
+            "GitLab could not place that comment on the diff — somebody may have pushed since \
+             this page read it, so reload the changes and look at the line again"
         }
         _ => "the comment was not posted",
     };
@@ -482,6 +738,10 @@ mod tests {
         // The four, and the undo that makes the comment acceptable.
         assert!(code.contains("/merge\""), "the merge endpoint");
         assert!(code.contains("/notes\""), "the comment endpoint");
+        // A comment on a diff line starts a thread, so it is posted as a discussion. It is
+        // the same write as the two above — same people, same undo — and the endpoint is
+        // named here so its arrival stays a deliberate act rather than a quiet third one.
+        assert!(code.contains("/discussions\""), "the diff comment's endpoint");
         assert!(code.contains("/notes/{note_id}"), "the comment's undo");
         assert!(code.contains("state_event"), "the close and its reopen");
         // And each write verb appears exactly as often as it has a reason to.
@@ -564,7 +824,7 @@ mod tests {
             set_state(&http, "gitlab.com", None, "a/b", 1, StateChange::Close)
                 .await
                 .expect_err("no token"),
-            comment(&http, "gitlab.com", Some(""), "a/b", 1, None, "hi")
+            comment(&http, "gitlab.com", Some(""), "a/b", 1, None, None, "hi")
                 .await
                 .expect_err("blank token"),
             delete_comment(&http, "gitlab.com", None, "a/b", 1, 5).await.expect_err("no token"),
@@ -598,16 +858,200 @@ mod tests {
     #[tokio::test]
     async fn an_empty_or_oversized_comment_never_reaches_the_network() {
         let http = reqwest::Client::new();
-        let err = comment(&http, "gitlab.com", Some("tok"), "a/b", 1, None, "   \n ")
+        let err = comment(&http, "gitlab.com", Some("tok"), "a/b", 1, None, None, "   \n ")
             .await
             .expect_err("an empty comment says nothing");
         assert!(err.to_string().contains("empty comment"), "{err}");
 
         let huge = "x".repeat(MAX_COMMENT_BYTES + 1);
-        let err = comment(&http, "gitlab.com", Some("tok"), "a/b", 1, None, &huge)
+        let err = comment(&http, "gitlab.com", Some("tok"), "a/b", 1, None, None, &huge)
             .await
             .expect_err("a runaway paste is refused here");
         assert!(err.to_string().contains("too long"), "{err}");
+    }
+
+    // ---- a comment on a diff line -------------------------------------------
+
+    fn refs() -> DiffRefs {
+        DiffRefs {
+            base_sha: "base".to_string(),
+            head_sha: "head".to_string(),
+            start_sha: "start".to_string(),
+        }
+    }
+
+    fn anchor(line: AnchorLine, start: Option<AnchorLine>) -> DiffAnchor {
+        DiffAnchor {
+            refs: refs(),
+            new_path: "src/server/health.ts".to_string(),
+            old_path: "src/server/health.ts".to_string(),
+            line,
+            start,
+        }
+    }
+
+    /// A position states the side the line is ON, and never the other one. GitLab refuses an
+    /// `old_line` on a line that was added — it is not in the old file, so the number would
+    /// describe a different line — and both counters still travel inside the line code.
+    #[test]
+    fn a_position_states_only_the_side_a_line_is_on() {
+        let added = anchor(AnchorLine { old: 8, new: 9, side: LineSide::New }, None).position();
+        assert_eq!(added["new_line"], json!(9));
+        assert!(added.get("old_line").is_none(), "an added line has no old line: {added}");
+
+        let removed = anchor(AnchorLine { old: 8, new: 9, side: LineSide::Old }, None).position();
+        assert_eq!(removed["old_line"], json!(8));
+        assert!(removed.get("new_line").is_none(), "a removed line has no new line: {removed}");
+
+        let context = anchor(AnchorLine { old: 8, new: 9, side: LineSide::Both }, None).position();
+        assert_eq!((&context["old_line"], &context["new_line"]), (&json!(8), &json!(9)));
+
+        // The three commits and the kind travel on every one of them.
+        for position in [&added, &removed, &context] {
+            assert_eq!(position["position_type"], json!("text"));
+            assert_eq!(position["base_sha"], json!("base"));
+            assert_eq!(position["head_sha"], json!("head"));
+            assert_eq!(position["start_sha"], json!("start"));
+        }
+    }
+
+    /// A comment about SEVERAL lines names both ends; one about a single line names none.
+    /// GitLab's own answers carry no `line_range` for a single line, so writing a range of
+    /// one would describe a comment as something it is not.
+    #[test]
+    fn a_range_names_both_ends_and_a_single_line_names_none() {
+        let single = anchor(AnchorLine { old: 8, new: 9, side: LineSide::New }, None).position();
+        assert!(single.get("line_range").is_none(), "one line is not a range: {single}");
+
+        let ranged = anchor(
+            AnchorLine { old: 8, new: 11, side: LineSide::New },
+            Some(AnchorLine { old: 8, new: 9, side: LineSide::Both }),
+        )
+        .position();
+        let range = &ranged["line_range"];
+        // The ANCHOR is the last line — where GitLab draws the thread — and the range's own
+        // start is the first, so the two together say which way the reader dragged.
+        assert_eq!(ranged["new_line"], json!(11));
+        assert_eq!(
+            range["start"]["line_code"],
+            json!("306bf1fe4ea9f8a8810c1131e313b0e1e163da6a_8_9")
+        );
+        assert_eq!(
+            range["end"]["line_code"],
+            json!("306bf1fe4ea9f8a8810c1131e313b0e1e163da6a_8_11")
+        );
+        assert_eq!(range["end"]["type"], json!("new"));
+        // A context end names no side: it belongs to both files, and GitLab names none there.
+        assert!(range["start"].get("type").is_none(), "a context end has no side: {range}");
+    }
+
+    /// The path a line code is hashed from is the file's own — its new one, or the only one
+    /// a deleted file ever had.
+    #[test]
+    fn a_deleted_file_is_addressed_by_the_path_it_had() {
+        let deleted = DiffAnchor {
+            refs: refs(),
+            new_path: String::new(),
+            old_path: "src/old.ts".to_string(),
+            line: AnchorLine { old: 4, new: 4, side: LineSide::Old },
+            start: None,
+        };
+        assert_eq!(deleted.file_path(), "src/old.ts");
+        let position = deleted.position();
+        assert_eq!(position["old_path"], json!("src/old.ts"));
+        assert!(position.get("new_path").is_none(), "a deleted file has no new path");
+    }
+
+    /// Two addresses for one comment is refused rather than resolved. A reply lands in a
+    /// thread that already hangs where it hangs, so a diff line beside it would be a second,
+    /// contradicting claim about where the words go.
+    #[tokio::test]
+    async fn a_comment_cannot_name_both_a_thread_and_a_diff_line() {
+        let http = reqwest::Client::new();
+        let anchor = anchor(AnchorLine { old: 8, new: 9, side: LineSide::New }, None);
+        let err = comment(
+            &http,
+            "gitlab.com",
+            Some("tok"),
+            "a/b",
+            1,
+            Some("d-1"),
+            Some(&anchor),
+            "hi",
+        )
+        .await
+        .expect_err("a reply cannot also name a line");
+        assert!(err.to_string().contains("cannot also name a diff line"), "{err}");
+    }
+
+    /// An anchor GitLab could not place is refused HERE. Without the three commits the
+    /// position names no diff at all, and a line with no place in one of the two files is
+    /// not a line GitLab can find.
+    #[tokio::test]
+    async fn an_unplaceable_anchor_never_reaches_the_network() {
+        let http = reqwest::Client::new();
+        let mut blank = anchor(AnchorLine { old: 8, new: 9, side: LineSide::New }, None);
+        blank.refs.head_sha = "  ".to_string();
+        let err = comment(&http, "gitlab.com", Some("tok"), "a/b", 1, None, Some(&blank), "hi")
+            .await
+            .expect_err("a position with no head commit is not a position");
+        assert!(err.to_string().contains("`head_sha` is missing"), "{err}");
+
+        let zero = anchor(AnchorLine { old: 0, new: 9, side: LineSide::New }, None);
+        let err = comment(&http, "gitlab.com", Some("tok"), "a/b", 1, None, Some(&zero), "hi")
+            .await
+            .expect_err("a line with no place in the old file is not addressable");
+        assert!(err.to_string().contains("place in both files"), "{err}");
+
+        let nameless = DiffAnchor {
+            refs: refs(),
+            new_path: String::new(),
+            old_path: "   ".to_string(),
+            line: AnchorLine { old: 1, new: 1, side: LineSide::Both },
+            start: None,
+        };
+        let err = comment(&http, "gitlab.com", Some("tok"), "a/b", 1, None, Some(&nameless), "hi")
+            .await
+            .expect_err("a comment on a line needs the file");
+        assert!(err.to_string().contains("needs the file"), "{err}");
+    }
+
+    /// A side is one of three words and nothing else can travel as one.
+    #[test]
+    fn a_line_side_is_one_of_three() {
+        assert_eq!(LineSide::from_str("old"), Some(LineSide::Old));
+        assert_eq!(LineSide::from_str("new"), Some(LineSide::New));
+        assert_eq!(LineSide::from_str("both"), Some(LineSide::Both));
+        assert_eq!(LineSide::from_str("additions"), None);
+        assert_eq!(LineSide::from_str(""), None);
+        // Only a real side is a side GitLab names on a range end.
+        assert_eq!(LineSide::Both.range_type(), None);
+    }
+
+    /// The discussions endpoint answers with the THREAD; the notes endpoints answer with the
+    /// note. The comment is read out of either, and the thread's id never becomes the note's
+    /// — a deletion offered against it would name something that is not a note.
+    #[test]
+    fn a_posted_comment_is_read_from_a_discussion_body_too() {
+        let thread = json!({
+            "id": "8c9a1f0e",
+            "individual_note": false,
+            "notes": [{
+                "id": 70_001,
+                "author": { "username": "ada", "name": "Ada Lovelace" },
+                "body": "This drops the drain timeout.",
+                "created_at": "2026-08-06T09:00:00.000Z",
+            }],
+        });
+        let note = posted_note(&thread, None, "This drops the drain timeout.");
+        assert_eq!(note.id, 70_001);
+        assert_eq!(note.discussion_id.as_deref(), Some("8c9a1f0e"));
+        assert_eq!(note.author.username, "ada");
+
+        // And the plain note body is unchanged by that branch.
+        let plain = json!({ "id": 5, "body": "hi", "discussion_id": "d-9" });
+        assert_eq!(posted_note(&plain, None, "hi").id, 5);
+        assert_eq!(posted_note(&plain, None, "hi").discussion_id.as_deref(), Some("d-9"));
     }
 
     #[test]
@@ -622,8 +1066,19 @@ mod tests {
 
         assert!(state_refusal(reqwest::StatusCode::FORBIDDEN, StateChange::Reopen, "")
             .contains("may not reopen"));
-        assert!(comment_refusal(reqwest::StatusCode::TOO_MANY_REQUESTS, "")
+        assert!(comment_refusal(reqwest::StatusCode::TOO_MANY_REQUESTS, false, "")
             .contains("rate-limiting"));
+
+        // A refused POSITION says what a reader can do about it, and only when the comment
+        // really named a line: the same 400 on an ordinary comment is not about a diff that
+        // moved, and sending them to reload the changes would be a wrong instruction.
+        let moved = comment_refusal(reqwest::StatusCode::BAD_REQUEST, true, "");
+        assert!(moved.contains("reload the changes"), "{moved}");
+        assert!(
+            !comment_refusal(reqwest::StatusCode::BAD_REQUEST, false, "")
+                .contains("reload the changes"),
+            "an ordinary comment's refusal must not name the diff"
+        );
     }
 
     #[test]

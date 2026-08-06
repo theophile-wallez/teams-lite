@@ -3924,7 +3924,18 @@ type MockNote = {
   resolvable: boolean;
   resolved: boolean;
   mine: boolean;
-  position?: { new_path?: string; new_line?: number };
+  /** Where a code comment hangs, in the shape `gitlab_mr::NotePosition` answers with — the
+   *  anchor's two line numbers, and both ends when the comment is about several lines. */
+  position?: {
+    new_path?: string;
+    old_path?: string;
+    new_line?: number;
+    old_line?: number;
+    line_range?: {
+      start: { new_line?: number; old_line?: number; type?: string };
+      end: { new_line?: number; old_line?: number; type?: string };
+    };
+  };
 };
 
 type MockDiscussion = { id: string; individual_note: boolean; notes: MockNote[] };
@@ -4152,6 +4163,54 @@ const mockMergeRequests: MockMergeRequest[] = [
           },
         ],
       },
+      // A thread on a RANGE of lines of a file the diff page really shows, which is what puts
+      // the whole comment-on-a-diff surface on screen out of the box: the card, its span
+      // ("Lines 8–10"), a colleague's comment, the user's own reply — so the deletion that
+      // makes commenting acceptable is reachable — and the reply box under both.
+      {
+        id: "d-596-4",
+        individual_note: false,
+        notes: [
+          {
+            id: 69_861,
+            author: MOCK_GITLAB_MIA,
+            body: "Three returns for one question — could this be one expression?",
+            system: false,
+            created_at: agoIso(52),
+            resolvable: true,
+            resolved: false,
+            mine: false,
+            position: {
+              new_path: "src/server/health.ts",
+              old_path: "src/server/health.ts",
+              new_line: 10,
+              line_range: {
+                start: { new_line: 8, type: "new" },
+                end: { new_line: 10, type: "new" },
+              },
+            },
+          },
+          {
+            id: 69_862,
+            author: MOCK_GITLAB_ME,
+            body: "Kept them apart on purpose: `draining` and `ready` are logged differently.",
+            system: false,
+            created_at: agoIso(48),
+            resolvable: true,
+            resolved: false,
+            mine: true,
+            position: {
+              new_path: "src/server/health.ts",
+              old_path: "src/server/health.ts",
+              new_line: 10,
+              line_range: {
+                start: { new_line: 8, type: "new" },
+                end: { new_line: 10, type: "new" },
+              },
+            },
+          },
+        ],
+      },
       {
         id: "d-596-3",
         individual_note: true,
@@ -4359,6 +4418,37 @@ function mockMergeRequestRow(mr: MockMergeRequest): Record<string, unknown> {
   };
 }
 
+/** The position a comment on a diff line carried, turned into the shape a READ answers with.
+ *
+ *  The client sends primitives — a file, two line numbers and a side — and the real backend
+ *  spells GitLab's own `position` from them (`gitlab_diff_anchor` in src/bin/server.rs). This
+ *  mock does the same translation, so what the page reads back is the shape it would get from
+ *  the tenant: only the side a line is really on is stated, and a range of one is a line. */
+function mockDiffNotePosition(value: unknown): MockNote["position"] | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const raw = value as Record<string, unknown>;
+  const line = (input: unknown) => {
+    if (typeof input !== "object" || input === null) return undefined;
+    const end = input as Record<string, unknown>;
+    const side = end.side;
+    if (typeof end.old !== "number" || typeof end.new !== "number") return undefined;
+    return {
+      ...(side === "old" || side === "both" ? { old_line: end.old } : {}),
+      ...(side === "new" || side === "both" ? { new_line: end.new } : {}),
+      ...(side === "old" ? { type: "old" } : side === "new" ? { type: "new" } : {}),
+    };
+  };
+  const anchor = line(raw.line);
+  if (!anchor) return undefined;
+  const start = line(raw.start);
+  return {
+    ...(typeof raw.new_path === "string" ? { new_path: raw.new_path } : {}),
+    ...(typeof raw.old_path === "string" ? { old_path: raw.old_path } : {}),
+    ...anchor,
+    ...(start ? { line_range: { start, end: anchor } } : {}),
+  };
+}
+
 function mockMergeRequestDetail(mr: MockMergeRequest): Record<string, unknown> {
   return {
     ...mockMergeRequestRow(mr),
@@ -4366,6 +4456,14 @@ function mockMergeRequestDetail(mr: MockMergeRequest): Record<string, unknown> {
     assignees: mr.assignees,
     reviewers: mr.reviewers,
     sha: mr.sha,
+    // The three commits a comment on a diff LINE is placed against. Without them the diff
+    // page offers no comment at all (`diffCommentsAvailable`), so the mock states them for
+    // the same reason it states a `sha`: the gate is exercised rather than assumed.
+    diff_refs: {
+      base_sha: `base-${mr.sha.slice(0, 8)}`,
+      head_sha: mr.sha,
+      start_sha: `start-${mr.sha.slice(0, 8)}`,
+    },
     merge_status: mr.detailed_merge_status === "mergeable" ? "can_be_merged" : "cannot_be_merged",
     has_conflicts: mr.detailed_merge_status === "conflict",
     blocking_discussions_resolved: !mr.discussions.some((d) =>
@@ -4527,7 +4625,10 @@ const mockDiffFiles = new Map<string, MockDiffFile[]>([
           "--- a/src/server/health.ts\n" +
           "+++ b/src/server/health.ts\n" +
           "@@ -1,10 +1,16 @@\n" +
-          'import type { Server } from "./types";\n' +
+          // The leading space is a context line's own mark, and GitLab sends one on every
+          // unchanged line. Without it this fixture is not a patch the tenant could answer
+          // with, and a line number read off it would be one out.
+          ' import type { Server } from "./types";\n' +
           " \n" +
           "-export function health(server: Server) {\n" +
           "-  return server.ready ? 200 : 503;\n" +
@@ -7089,7 +7190,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return { merge: { state: "merged", merge_commit_sha: `merge-${mr.sha.slice(0, 8)}`, merged_at: mr.merged_at } };
     }
 
-    // COMMENT — a new one, or a reply into a thread.
+    // COMMENT — a new one, a reply into a thread, or a new thread on a DIFF LINE.
     case "gitlab_mr_comment": {
       const projectPath = requireString(params, "project_path");
       const iid = requireNumber(params, "iid");
@@ -7100,6 +7201,12 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
       if (mockGitLabWriteRefusal) throw new Error(mockGitLabWriteRefusal);
       if (body.trim() === "") throw new Error("an empty comment says nothing, so it is not posted");
+      // The rail the real backend holds: a reply lands in the thread it answers, which
+      // already hangs where it hangs, so it cannot also name a line.
+      const position = mockDiffNotePosition(o.position);
+      if (position && discussionId) {
+        throw new Error("a reply lands in the thread it answers, so it cannot also name a diff line");
+      }
 
       const note: MockNote = {
         id: ++mockNoteId,
@@ -7107,14 +7214,23 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         body: body.trim(),
         system: false,
         created_at: new Date().toISOString(),
-        resolvable: discussionId !== null,
+        // A comment on a diff line starts a THREAD, which is what makes it resolvable — the
+        // same thing GitLab's own `/discussions` answer says.
+        resolvable: discussionId !== null || position !== undefined,
         resolved: false,
         mine: true,
+        position,
       };
       const thread = discussionId ? mr.discussions.find((d) => d.id === discussionId) : undefined;
       if (discussionId && !thread) throw new Error("that thread is not on this merge request");
       if (thread) thread.notes.push(note);
-      else mr.discussions.push({ id: `d-${mr.iid}-${note.id}`, individual_note: true, notes: [note] });
+      else {
+        mr.discussions.push({
+          id: `d-${mr.iid}-${note.id}`,
+          individual_note: position === undefined,
+          notes: [note],
+        });
+      }
       mr.updated_at = note.created_at;
       broadcastMockMergeRequest(mr);
       return withMockTeamsPeople({ note: { ...note, discussion_id: thread?.id } });
