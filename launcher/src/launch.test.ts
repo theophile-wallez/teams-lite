@@ -1,8 +1,6 @@
 // The command line of `teams`, and the two aliases that must keep working.
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { parseArgs, viteDevEnv } from "./launch";
+import { main, parseArgs, USAGE, viteDevEnv, type EntryDeps, type LaunchOptions } from "./launch";
 
 describe("parseArgs", () => {
   test("defaults to the web app on 19440, loopback, browser opened", () => {
@@ -45,40 +43,17 @@ describe("parseArgs", () => {
     expect(parseArgs(["-h"]).help).toBe(true);
   });
 
-  // An argv this command cannot honour must not resolve to "launch the app anyway".
-  //
-  // This is a real failure and it lasted a day: a script on this machine ran
-  // `teams chats -n 40 --json` — the CLI of a DIFFERENT teams — and the arguments meant
-  // nothing here, so what was left was a bare launch. It took the default web port with a
-  // second server whose pages were handed the write token FILE of a dead backend, so every
-  // send and every update from that door came back refused; and it printed no JSON, so the
-  // caller blocked on its output until somebody noticed.
+  // An argv this command cannot honour must not resolve to "launch the app anyway" — the
+  // failure `parseArgs`'s own comment records: `teams chats -n 40 --json`, meant for a
+  // different `teams`, started a whole second app on the default web port.
   test("an unknown argument is refused, not ignored", () => {
-    expect(() => parseArgs(["chats", "-n", "40", "--json"])).toThrow(/unknown arguments/);
-    expect(() => parseArgs(["login"])).toThrow(/no subcommands/);
-    expect(() => parseArgs(["--nope"])).toThrow(/unknown argument:/);
-    // A value belongs to the option before it, and is never read as a stray word.
-    expect(() => parseArgs(["--port", "8080", "--host", "0.0.0.0"])).not.toThrow();
+    expect(() => parseArgs(["chats", "-n", "40", "--json"])).toThrow(/unknown argument/);
+    expect(() => parseArgs(["login"])).toThrow(/unknown argument/);
+    expect(() => parseArgs(["--nope"])).toThrow(/unknown argument/);
+    // `--web` is the one argument whose ACCEPTANCE is load-bearing now that strays throw.
+    expect(() => parseArgs(["--web"])).not.toThrow();
     // `--help` answers the question a refusal would send them to anyway.
     expect(parseArgs(["--help", "chats"]).help).toBe(true);
-  });
-
-  // A refusal has to happen BEFORE anything is served, which is the whole point of it:
-  // the failure it replaces was a second web server on the default port. That ordering
-  // lives in index.ts, on the other side of a `process.exit`, and it cannot be exercised
-  // from a test runner — running the launcher with an argv it would refuse is exactly what
-  // `.claude/hooks/guard-live-automation.sh` blocks, and rightly. So the shape is read out
-  // of the entry point, the way the Rust side pins what a spawned task does.
-  test("the entry point refuses before it launches anything", () => {
-    const entry = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
-    const refusal = entry.indexOf("process.exit(2)");
-    const launch = entry.indexOf("await launch(");
-    expect(refusal).toBeGreaterThan(-1);
-    expect(launch).toBeGreaterThan(refusal);
-    // And the throw is caught rather than left to the runtime: a stack trace is not an
-    // answer to "you passed an argument I do not have".
-    expect(entry).toMatch(/try\s*\{\s*options\s*=\s*parseArgs\(/);
-    expect(entry).toContain("console.error(USAGE)");
   });
 
   // `teams --dev` starts BOTH halves, so it is the one command that has to introduce
@@ -109,5 +84,55 @@ describe("parseArgs", () => {
     const env = viteDevEnv({ port: 19440, host: "127.0.0.1" }, {});
     expect(env.VITE_TEAMS_WS_URL).toBeDefined();
     expect(env.VITE_TEAMS_WS_URL).not.toContain("19421");
+  });
+});
+
+// What `teams` does with an argv, in the order it does it. The one thing that matters here
+// is that a refusal ends the command BEFORE anything is served: what it replaced was a
+// second web server on the default port, handing its pages a dead backend's write token.
+//
+// Running the real binary to prove it is not available — `.claude/hooks/
+// guard-live-automation.sh` blocks the launcher with any argv but `--help`, and rightly, so
+// the decisions are driven through `main`'s injected deps instead.
+describe("main", () => {
+  function fakeEntry() {
+    const said = { out: [] as string[], err: [] as string[], codes: [] as number[] };
+    const served: LaunchOptions[] = [];
+    const deps: EntryDeps = {
+      out: (text) => void said.out.push(text),
+      err: (text) => void said.err.push(text),
+      exit: (code) => void said.codes.push(code),
+      run: async (options) => void served.push(options),
+    };
+    return { deps, said, served };
+  }
+
+  test("an argv it cannot honour is refused, and NOTHING is served", async () => {
+    const { deps, said, served } = fakeEntry();
+    await main(["chats", "-n", "40", "--json"], deps);
+    expect(served).toEqual([]);
+    expect(said.codes).toEqual([2]);
+    // The reason, and the usage under it: a caller that meant another `teams` is told what
+    // this one takes rather than left with a stack trace.
+    expect(said.err[0]).toMatch(/unknown argument/);
+    expect(said.err[0]).toContain("teams [options]");
+    expect(said.out).toEqual([]);
+  });
+
+  test("--help is answered on stdout, and serves nothing", async () => {
+    const { deps, said, served } = fakeEntry();
+    await main(["--help"], deps);
+    expect(served).toEqual([]);
+    expect(said.out).toEqual([USAGE]);
+    expect(said.codes).toEqual([0]);
+  });
+
+  test("an argv it knows is served, with what was parsed", async () => {
+    const { deps, said, served } = fakeEntry();
+    await main(["--port", "8080", "--no-open"], deps);
+    expect(said.codes).toEqual([]);
+    expect(served).toHaveLength(1);
+    expect(served[0]?.port).toBe(8080);
+    expect(served[0]?.open).toBe(false);
   });
 });

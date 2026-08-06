@@ -79,28 +79,28 @@ Environment:
  * what it was asked has to say so.
  */
 export function parseArgs(argv: string[]): LaunchOptions {
+  // `--help` wins from anywhere in the argv, and it is read BEFORE the loop that would
+  // refuse: the usage is what a refusal sends its reader to anyway, so `teams --help chats`
+  // answers rather than complaining.
+  if (argv.includes("--help") || argv.includes("-h")) return { ...DEFAULTS, help: true };
+
   const options: LaunchOptions = { ...DEFAULTS };
-  const unknown: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--dev" || arg === "--web-dev") options.dev = true;
-    else if (arg === "--web") continue; // the old spelling of "serve the web app": all we do
-    else if (arg === "--help" || arg === "-h") options.help = true;
-    else if (arg === "--no-open") options.open = false;
+    else if (arg === "--web") {
+      // Recognised, and does nothing: serving the web app is all this command does now.
+    } else if (arg === "--no-open") options.open = false;
     else if (arg === "--open") options.open = true;
     else if (arg === "--port" || arg === "-p") options.port = Number(argv[++i]) || DEFAULTS.port;
     else if (arg?.startsWith("--port=")) options.port = Number(arg.slice(7)) || DEFAULTS.port;
     else if (arg === "--host" || arg === "-H") options.host = argv[++i] ?? DEFAULTS.host;
     else if (arg?.startsWith("--host=")) options.host = arg.slice(7) || DEFAULTS.host;
-    else if (arg !== undefined) unknown.push(arg);
-  }
-  // Not while `--help` was asked for: printing the usage is what that flag is for, and it
-  // is also what somebody reaches for after a refusal.
-  if (unknown.length > 0 && !options.help) {
-    throw new Error(
-      `unknown ${unknown.length === 1 ? "argument" : "arguments"}: ${unknown.join(" ")}. ` +
-        "`teams` takes options only — it has no subcommands.",
-    );
+    else if (arg !== undefined) {
+      throw new Error(
+        `unknown argument: ${arg}. \`teams\` takes options only — it has no subcommands.`,
+      );
+    }
   }
   // Honor env overrides so scripting stays flexible.
   if (process.env.TEAMS_WEB_PORT) options.port = Number(process.env.TEAMS_WEB_PORT) || options.port;
@@ -345,4 +345,55 @@ export async function launch(options: LaunchOptions): Promise<void> {
 
   // 4. Open the browser (unless suppressed).
   if (options.open) openBrowser(url);
+}
+
+/**
+ * What the entry point writes to, ends with, and hands the options to.
+ *
+ * Injected for the reason `RelaunchDeps` is (see src/update.ts): the ORDER is the whole of
+ * the behaviour, and a test that reads it out of a source file pins how it is spelled
+ * rather than what it does.
+ */
+export type EntryDeps = {
+  /** The usage, when it was ASKED for — stdout, because it is then the answer. */
+  out: (text: string) => void;
+  /** A refusal, with the usage under it. */
+  err: (text: string) => void;
+  /** End the process with a code a caller can read. */
+  exit: (code: number) => void;
+  /** Bring the app up. The only path here that serves anything. */
+  run: (options: LaunchOptions) => Promise<void>;
+};
+
+const REAL_ENTRY: EntryDeps = {
+  out: (text) => console.log(text),
+  err: (text) => console.error(text),
+  exit: (code) => process.exit(code),
+  run: launch,
+};
+
+/**
+ * `teams` itself: read the argv, then either refuse it, answer it, or serve.
+ *
+ * The order is the point, and it is why this is not written inline in index.ts: an argv this
+ * command cannot honour has to end BEFORE anything is served — see `parseArgs` for the
+ * failure that taught it. Exit 2 is what a caller reads as "you asked for something I do not
+ * have", so a script that meant another `teams` gets an answer instead of a server nobody
+ * asked it for.
+ */
+export async function main(argv: string[], deps: EntryDeps = REAL_ENTRY): Promise<void> {
+  let options: LaunchOptions;
+  try {
+    options = parseArgs(argv);
+  } catch (e) {
+    deps.err(`teams: ${e instanceof Error ? e.message : String(e)}\n\n${USAGE}`);
+    deps.exit(2);
+    return; // `process.exit` never returns — an injected one does.
+  }
+  if (options.help) {
+    deps.out(USAGE);
+    deps.exit(0);
+    return;
+  }
+  await deps.run(options);
 }
