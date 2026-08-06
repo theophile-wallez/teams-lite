@@ -51,6 +51,15 @@ test.describe("Audio calling", () => {
     const button = page.locator('[data-testid="call-button"]');
     await expect(button).toBeEnabled();
     await expect(button).toHaveAttribute("aria-label", /Call Ava Thompson/);
+    // And it states WHOM it rings, out of the app's own state — the same promise the Join
+    // button makes about its meeting and the composer about its conversation. It is what
+    // lets `scripts/call-live.ts` prove its target before an outward click, so it is
+    // measured against the composer's own answer rather than against a fixture's id.
+    const open = await page
+      .locator('[data-testid="composer-shell"]')
+      .getAttribute("data-conversation-id");
+    expect(open).toBeTruthy();
+    await expect(button).toHaveAttribute("data-conversation-id", open!);
 
     // And Settings offers nothing about it, because there is nothing to offer.
     await page.locator('[data-testid="open-settings"]').click();

@@ -41,6 +41,13 @@ FIXTURES = {
         "const page = await (await chromium.launch()).newPage();\n"
         "await page.click('[data-testid=\"meeting-join-here\"]');\n"
     ),
+    # And the same for the driver that RINGS somebody, which is the sharpest of the three.
+    "call-live-copy.ts": (
+        "// A copy of web/scripts/call-live.ts, moved somewhere nobody reviews.\n"
+        "import { chromium } from 'playwright-core';\n"
+        "const page = await (await chromium.launch()).newPage();\n"
+        "await page.click('[data-testid=\"call-button\"]');\n"
+    ),
     "backend-writer.ts": (
         "// Calls a write method on the real backend.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
@@ -751,9 +758,18 @@ def cases(tmp: Path):
         ("ALLOW", WEB, "bun run join-live"),
         ("ALLOW", WEB, "bun run join-live -- --local --hold 45"),
         ("ALLOW", WEB, "bun run scripts/join-live.ts"),
-        # Neither exemption is a licence for a driver that merely mentions them: what is
+        # The third one: it PLACES a call to the one person the user authorized, and proves
+        # that target twice out of the app's own state — the composer's conversation id and
+        # the call button's own — immediately before the click. A call that the service ends
+        # after two seconds can be diagnosed nowhere else: the mock has no tenant, and the
+        # reason arrives on frames the page receives and renders nowhere.
+        ("ALLOW", WEB, "bun run call-live"),
+        ("ALLOW", WEB, "bun run call-live -- --local --hold 20"),
+        ("ALLOW", WEB, "bun run scripts/call-live.ts"),
+        # No exemption is a licence for a driver that merely mentions them: what is
         # allowed is running THOSE files, not borrowing their names.
         ("BLOCK", WEB, f"bun run {tmp}/join-live-copy.ts"),
+        ("BLOCK", WEB, f"bun run {tmp}/call-live-copy.ts"),
         ("ALLOW", WEB, "bun run dev:mock"),
         ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 cargo run --bin server"),
         ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 target/release/server"),

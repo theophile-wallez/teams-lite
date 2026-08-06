@@ -123,7 +123,7 @@ const SILENCE_SECONDS = 10;
  * in `getStats` — that is what the beep was for, and it is still there when that is the
  * question being asked.
  */
-function fakeAudioArgs(tone: boolean): string[] {
+export function fakeAudioArgs(tone: boolean): string[] {
   if (tone) return [];
   const path = joinPath(tmpdir(), `teams-lite-silence-${SILENCE_SECONDS}s.wav`);
   writeFileSync(path, silentWav(SILENCE_SECONDS));
@@ -150,6 +150,55 @@ function silentWav(seconds: number): Buffer {
   buffer.writeUInt32LE(data, 40);
   return buffer;
 }
+
+/**
+ * Keep a handle on the app's own peer connection, from BEFORE its code runs.
+ *
+ * The alternative was a `data-media-state` attribute on the call bar, i.e. production code
+ * carrying a diagnostic. This is instrumentation, so it belongs to the driver: nothing the
+ * user runs is changed by it, and it cannot drift from what the app does because it wraps the
+ * browser's own constructor. Shared with `call-live.ts`, which drives the other outward
+ * action on the same rig — one spelling of a diagnostic, like everything else here.
+ */
+export const PEER_CONNECTION_PROBE = `(() => {
+  const Native = window.RTCPeerConnection;
+  if (!Native) return;
+  const Wrapped = function (...args) {
+    const pc = new Native(...args);
+    window.__tlPc = pc;
+    return pc;
+  };
+  Wrapped.prototype = Native.prototype;
+  window.RTCPeerConnection = Wrapped;
+})()`;
+
+/**
+ * And a handle on what the BACKEND says, for the same reason and by the same means.
+ *
+ * `call_signal` carries every raw calling frame to every client, and the `call_join` reply
+ * names every link the answer held — so both are already on this socket and neither is
+ * rendered. Wrapping the socket keeps the reading in the driver, where a diagnostic belongs:
+ * the app the user runs is unchanged, and this cannot drift from what the app receives
+ * because it IS what the app receives.
+ */
+export const SIGNAL_PROBE = `(() => {
+  const Native = window.WebSocket;
+  if (!Native) return;
+  window.__tlSignals = [];
+  window.WebSocket = class extends Native {
+    constructor(...args) {
+      super(...args);
+      this.addEventListener("message", (event) => {
+        if (typeof event.data !== "string") return;
+        if (!/"call_signal"|"links"/.test(event.data)) return;
+        // Bounded: a long meeting sends a roster frame every few seconds, and an
+        // unbounded array in a page under test is its own kind of failure.
+        if (window.__tlSignals.length > 600) window.__tlSignals.shift();
+        window.__tlSignals.push(event.data);
+      });
+    }
+  };
+})()`;
 
 /** One reading of the live call, as the app itself renders it. */
 export type CallBarState = {
@@ -331,52 +380,8 @@ export async function withJoinLive<T>(
       permissions: ["microphone"],
       ignoreHTTPSErrors: true,
     });
-    // Keep a handle on the app's own peer connection, from BEFORE its code runs.
-    //
-    // The alternative was a `data-media-state` attribute on the call bar, i.e. production
-    // code carrying a diagnostic. This is instrumentation, so it belongs to the driver:
-    // nothing the user runs is changed by it, and it cannot drift from what the app does
-    // because it wraps the browser's own constructor.
-    await context.addInitScript({
-      content: `(() => {
-        const Native = window.RTCPeerConnection;
-        if (!Native) return;
-        const Wrapped = function (...args) {
-          const pc = new Native(...args);
-          window.__tlPc = pc;
-          return pc;
-        };
-        Wrapped.prototype = Native.prototype;
-        window.RTCPeerConnection = Wrapped;
-      })()`,
-    });
-    // And a handle on what the BACKEND says, for the same reason and by the same means.
-    //
-    // `call_signal` carries every raw calling frame to every client, and the `call_join`
-    // reply names every link the answer held — so both are already on this socket and
-    // neither is rendered. Wrapping the socket keeps the reading in the driver, where a
-    // diagnostic belongs: the app the user runs is unchanged, and this cannot drift from
-    // what the app receives because it IS what the app receives.
-    await context.addInitScript({
-      content: `(() => {
-        const Native = window.WebSocket;
-        if (!Native) return;
-        window.__tlSignals = [];
-        window.WebSocket = class extends Native {
-          constructor(...args) {
-            super(...args);
-            this.addEventListener("message", (event) => {
-              if (typeof event.data !== "string") return;
-              if (!/"call_signal"|"links"/.test(event.data)) return;
-              // Bounded: a long meeting sends a roster frame every few seconds, and an
-              // unbounded array in a page under test is its own kind of failure.
-              if (window.__tlSignals.length > 600) window.__tlSignals.shift();
-              window.__tlSignals.push(event.data);
-            });
-          }
-        };
-      })()`,
-    });
+    await context.addInitScript({ content: PEER_CONNECTION_PROBE });
+    await context.addInitScript({ content: SIGNAL_PROBE });
     page = await context.newPage();
     // The page's own voice. Everything that can go wrong in the MEDIA half is reported
     // here and nowhere else: the backend sees a clean join, and the browser sees
@@ -583,7 +588,7 @@ async function assertPinnedMeeting(
  * so this asks for the stage first and falls back — a driver that knew only one of them
  * would report `phase: null` through a whole working join.
  */
-async function readCallBar(page: Page): Promise<CallBarState> {
+export async function readCallBar(page: Page): Promise<CallBarState> {
   const stage = page.locator('[data-testid="call-stage"]').first();
   const bar = (await stage.count()) ? stage : page.locator('[data-testid="call-bar"]').first();
   if (!(await bar.count())) {
@@ -604,7 +609,7 @@ async function readCallBar(page: Page): Promise<CallBarState> {
 }
 
 /** Poll until the call reaches one of `phases`, recording every change on the way. */
-async function waitForPhase(
+export async function waitForPhase(
   page: Page,
   phases: string[],
   timeoutMs: number,
@@ -630,7 +635,7 @@ async function waitForPhase(
 }
 
 /** Ask the peer connection what the media is really doing. */
-async function readMediaStats(page: Page): Promise<MediaStats | null> {
+export async function readMediaStats(page: Page): Promise<MediaStats | null> {
   // Source text rather than a closure, for the same reason as the init script above: this
   // file is typed for node, and `RTCPeerConnection` does not exist here.
   return page.evaluate(`(async () => {
@@ -681,7 +686,7 @@ const SOURCE_REQUEST_LINKS = ["controlVideoStreaming", "applyChannelParameters"]
  * it received, so a reading that turns out to be wrong can be corrected without joining
  * the meeting again.
  */
-async function readSignals(page: Page): Promise<SignalDigest> {
+export async function readSignals(page: Page): Promise<SignalDigest> {
   const raw = (await page.evaluate("window.__tlSignals || []")) as string[];
   const digest: SignalDigest = {
     joinLinks: [],
@@ -900,7 +905,7 @@ function personName(person: Record<string, unknown>): string {
 }
 
 /** Leave the call, if one is up. Idempotent: nothing to do is not an error. */
-async function hangUp(page: Page): Promise<void> {
+export async function hangUp(page: Page): Promise<void> {
   const button = page.locator('[data-testid="call-hangup"]').first();
   if (!(await button.count())) return;
   console.log("  hanging up");
@@ -909,7 +914,7 @@ async function hangUp(page: Page): Promise<void> {
 }
 
 /** Refuse to launch at a front that is not answering, so the failure names its cause. */
-async function assertFrontIsServing(origin: string): Promise<void> {
+export async function assertFrontIsServing(origin: string): Promise<void> {
   const reachable = await fetch(origin, { redirect: "manual" })
     .then(() => true)
     .catch(() => false);
@@ -923,7 +928,7 @@ async function assertFrontIsServing(origin: string): Promise<void> {
   );
 }
 
-function oneLine(text: string): string {
+export function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 

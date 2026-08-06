@@ -207,11 +207,12 @@ at_command_start='(^|[;&|])[[:space:]]*(([A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|]*
 # What earns a live driver its place is not that it is tracked: it is that its target is a
 # CONSTANT in it and re-read from the app's own state immediately before the outward
 # action. `sandbox-live.ts` does that with the sandbox chat's conversation id;
-# `join-live.ts` does it with the authorized meeting's `data-join-url`. A new one must do
-# the same before it is added here.
+# `join-live.ts` does it with the authorized meeting's `data-join-url`; `call-live.ts` does
+# it with the authorized one-to-one's `data-conversation-id`, read twice — off the composer
+# and off the call button. A new one must do the same before it is added here.
 sanctioned_automation() {
   printf '%s' "$command_line" |
-    grep -qE 'scripts/preview\.ts|bun run preview|test:e2e|playwright test|playwright install|scripts/sandbox-live\.ts|bun run sandbox|scripts/join-live\.ts|bun run join-live'
+    grep -qE 'scripts/preview\.ts|bun run preview|test:e2e|playwright test|playwright install|scripts/sandbox-live\.ts|bun run sandbox|scripts/join-live\.ts|bun run join-live|scripts/call-live\.ts|bun run call-live'
 }
 
 # A script file the command RUNS counts as part of the command. The incident's

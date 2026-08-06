@@ -1244,10 +1244,22 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   capture and only that one: the page's simulated camera never refuses, and the service that
   would is a real tenant. A spec must reset afterwards — `call_invite {reset:true}` clears it
   with the rest.
-- **There is no sanctioned live call.** Unlike a send, a call has NO pre-authorized
-  target: the sandbox chat is a group thread, and ringing it would ring real people. A
-  live test is the user's own click, on their own machine, to somebody who agreed to it
-  beforehand — see NATIVE-CALLING.md § 8 for what is still unverified against the tenant.
+- **A live call has ONE authorized target, and `cd web && bun run call-live` is the only way
+  to ring it.** There is no sandbox for a call — the sandbox chat is a group thread, and
+  ringing it would ring real people — so the target is not a place a mistake is harmless but
+  a person who agreed to it: the one-to-one the user named out loud, a CONSTANT in
+  `web/scripts/call-live.ts` (`AUTHORIZED_CALL_CONVERSATION`). It is the third live driver
+  and it earns its place exactly as `sandbox-live.ts` and `join-live.ts` do — no argument can
+  aim it elsewhere, the conversation is opened BY ITS ID rather than clicked for in the
+  sidebar, the target is proved TWICE out of the app's own state immediately before the click
+  (the composer's `data-conversation-id` and the call button's own), and it hangs up on every
+  path out including a throw. Its microphone is a FAKE device capturing silence, so the offer
+  is real and no real microphone opens. It exists because a call the service ENDS cannot be
+  diagnosed anywhere else: the store keeps only "Call ended · 2s", the released build hides
+  its backend's output, and the reason arrives on frames the page receives and renders
+  nowhere — so it digests them (`endReasons`, `mediaLines`, shapes and never a key). Any
+  wider live call is still the user's own click — see NATIVE-CALLING.md § 8 for what is
+  unverified against the tenant.
 
 ## Video in a meeting — received, and sent
 

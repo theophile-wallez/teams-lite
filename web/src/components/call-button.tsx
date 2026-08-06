@@ -56,6 +56,10 @@ export function CallButton(props: { conversationId: string }) {
     <button
       type="button"
       data-testid="call-button"
+      // WHOM this rings, in the app's own state, for the reason the Join button states its
+      // meeting and the composer states its conversation: an outward action a driver cannot
+      // prove is one it must not take. `call-live.ts` reads it immediately before the click.
+      data-conversation-id={props.conversationId}
       // A group call rings EVERY member at once, so the label says what it reaches rather
       // than naming one person. That is the fact the user needs before the click, and the
       // one thing they cannot take back after it.
