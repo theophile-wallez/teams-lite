@@ -25,7 +25,8 @@ use teams_lite::{custom_emoji, sender_icon, teams, teams_send};
 /// target, and the only conversation this file may ever name.
 const SANDBOX: &str = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
 
-/// IC3 token scope for AMS uploads (from src/bin/server.rs:119).
+/// IC3 token scope for AMS uploads — the same string the backend's own `IC3_SCOPE` holds
+/// (src/bin/server.rs). It is spelled again because that const is private to the binary.
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
 
 /// The slackmojis emoji fetched for this test: alert.gif. A real URL, from the live
@@ -74,27 +75,10 @@ async fn main() -> Result<()> {
         media.content_type
     );
 
-    // 2. Validate the art through the same checks the RPC applies.
-    anyhow::ensure!(
-        custom_emoji::CUSTOM_EMOJI_TYPES.contains(&media.content_type.as_str()),
-        "emoji type {} is not in CUSTOM_EMOJI_TYPES",
-        media.content_type
-    );
-    anyhow::ensure!(
-        media.bytes.len() <= custom_emoji::MAX_CUSTOM_EMOJI_BYTES,
-        "emoji size {} exceeds MAX_CUSTOM_EMOJI_BYTES",
-        media.bytes.len()
-    );
-    let (width, height) = sender_icon::image_dimensions(&media.bytes)
-        .context("read image dimensions")?;
-    println!("dimensions: {}x{} px", width, height);
-    anyhow::ensure!(
-        width <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION
-            && height <= custom_emoji::MAX_CUSTOM_EMOJI_DIMENSION,
-        "emoji dimensions {}x{} exceed MAX_CUSTOM_EMOJI_DIMENSION",
-        width,
-        height
-    );
+    // 2. Measure the art the way the RPC does — one call, because a validation sequence
+    // written out again here is one that can disagree with the one that ships.
+    let (content_type, width, height) = custom_emoji::measure_art(&media.bytes)?;
+    println!("measured: {content_type}, {width}x{height} px");
 
     // 3. Write the emoji into the pack.
     let db_path = data_db_path().context("resolve database path")?;
@@ -107,7 +91,7 @@ async fn main() -> Result<()> {
     store
         .set_custom_emoji(
             "alert",
-            Some((&media.content_type, &media.bytes, width, height)),
+            Some((content_type, &media.bytes, width, height)),
             None,
             "slackmojis.com/emojis/2453-alert",
             now_ms,
@@ -120,7 +104,7 @@ async fn main() -> Result<()> {
     let text = "heads up :alert:";
     let emoji_art = vec![teams_send::EmojiArt {
         name: "alert".to_string(),
-        content_type: media.content_type.clone(),
+        content_type: content_type.to_string(),
         bytes: media.bytes.clone(),
     }];
     let (content, emoji_ids) = teams_send::resolve_custom_emoji(
@@ -160,6 +144,13 @@ async fn main() -> Result<()> {
     );
 
     println!("\nOK — slackmojis custom emoji probe complete");
+    // What this run LEAVES BEHIND, said plainly. The pack is the user's own store, not a
+    // fixture: this wrote a row into it and nothing here takes it back, so a reader who
+    // did not want `:alert:` has to be told where it now lives and how to drop it.
+    println!(
+        "the pack on this machine now holds :alert: permanently — remove it in \
+         Settings > Custom emoji if you did not want it"
+    );
     Ok(())
 }
 
