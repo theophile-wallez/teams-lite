@@ -23,6 +23,8 @@ import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
 import { defaultAgentCandidatesFor, type AgentCandidate } from "~/lib/mentions";
 import { reviewRequest, type MergeRequestLink } from "~/lib/merge-request";
+import { recordingsInConversation, type CallRecording } from "~/lib/call-recording";
+import { CallRecordingCard } from "./call-recording-card";
 import { useAppState, useController } from "./controller-context";
 import { AgentMenu } from "./agent-menu";
 import { CallButton } from "./call-button";
@@ -87,7 +89,8 @@ const HIGHLIGHT_MS = 1600;
 type HistoryRow =
   | { kind: "message"; key: string; message: ChatMessage; prev?: ChatMessage; next?: ChatMessage }
   | { kind: "thread"; key: string; thread: Thread }
-  | { kind: "agent"; key: string; run: AgentRun };
+  | { kind: "agent"; key: string; run: AgentRun }
+  | { kind: "recording"; key: string; recording: CallRecording };
 
 /**
  * The right pane: conversation title, the scrolling message history (virtualized,
@@ -118,6 +121,13 @@ export function MessagePane(props: { onBack?: () => void }) {
   // scrolling past it.
   const agentTranscripts = useAppState((s) => s.agentTranscripts);
   const agentTranscriptsOpen = useAppState((s) => s.agentTranscriptsOpen);
+  // The calls this app recorded in THIS conversation. They are this browser's own files and
+  // never messages, so they are merged into the history below rather than coming from it.
+  const recordings = useAppState((s) => s.recordings);
+  const conversationRecordings = useMemo(
+    () => (openId ? recordingsInConversation(recordings, openId) : []),
+    [recordings, openId],
+  );
   // Whether a live call's chat panel is holding this app's one composer right now.
   const callOwnsComposer = useCallOwnsComposer();
   // Our own display name, read off the newest message of ours. The agent's signature
@@ -273,8 +283,31 @@ export function MessagePane(props: { onBack?: () => void }) {
     if (agentRun && !rowOfMessage.has(agentRun.message_id)) {
       rows.push({ kind: "agent", key: `agent:${agentRun.run_id}`, run: agentRun });
     }
+    // A call this app recorded, in its place in time. It is not a message and it reached
+    // nobody — nothing was sent and only this user can see it (see lib/call-recording.ts) —
+    // but it happened AT a moment in this conversation, so that is where it is read: after
+    // whatever was said before the call ended, and before whatever was said next. A recording
+    // whose conversation this is not, and one from a meeting that named no conversation at
+    // all, appear here not at all.
+    for (const recording of conversationRecordings) {
+      const at = rows.findIndex(
+        (row) => row.kind === "message" && row.message.compose_time > recording.endedAtMs,
+      );
+      const row: HistoryRow = { kind: "recording", key: `rec:${recording.id}`, recording };
+      if (at === -1) rows.push(row);
+      else rows.splice(at, 0, row);
+    }
+    // The map is rebuilt once at the end rather than adjusted per insertion: a deep link
+    // scrolls to a row INDEX, and an index taken before a row was spliced in above it points
+    // at the message after the one the reader asked for.
+    if (conversationRecordings.length > 0 && !threads) {
+      rowOfMessage.clear();
+      rows.forEach((row, index) => {
+        if (row.kind === "message") rowOfMessage.set(row.message.id, index);
+      });
+    }
     return { rows, rowOfMessage };
-  }, [threads, messages, agentRun]);
+  }, [threads, messages, agentRun, conversationRecordings]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -743,7 +776,10 @@ export function MessagePane(props: { onBack?: () => void }) {
           // message reads at full contrast instead of sitting under the fade.
           className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-10 pt-4 md:px-5"
         >
-          {messages.length === 0 ? (
+          {/* A conversation with no messages can still hold a recording — a call placed in a
+              thread nobody has written in — and the recording is the one thing on screen
+              then, so it is drawn instead of the empty state rather than behind it. */}
+          {rows.length === 0 ? (
             <EmptyState
               loading={loadingMessages}
               error={messagesError}
@@ -807,6 +843,10 @@ export function MessagePane(props: { onBack?: () => void }) {
                         onToggle={() => toggleThread(row.thread.rootId)}
                         renderMsg={renderMsg}
                       />
+                    ) : row.kind === "recording" ? (
+                      // Its own row and its own card: a recording is not a message, so it
+                      // takes no side, no bubble and no sender (see CallRecordingCard).
+                      <CallRecordingCard recording={row.recording} className="my-2" />
                     ) : row.kind === "agent" ? (
                       <AgentPendingBubble
                         run={row.run}

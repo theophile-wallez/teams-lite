@@ -834,7 +834,10 @@ user. Two independent mechanisms enforce that split:
   file. For Settings › AI providers and its model picker, open and closed in both
   themes: `bun run preview -- --out /tmp/prov --ai-providers`. For the update button, the
   changelog it discloses on hover in both themes, its progress mid-download and the link the
-  other install shape keeps: `bun run preview -- --out /tmp/upd --update`. For the
+  other install shape keeps: `bun run preview -- --out /tmp/upd --update`. For recording a
+  call — the control and the sentence it carries, the live state, the card it leaves in the
+  conversation and the Settings list: `bun run preview -- --out /tmp/rec --call-recording`
+  (it writes a real webm out of the mock's canvases, with no camera and no microphone). For the
   write-lock banner, in both of its
   causes: `bun run preview -- --out /tmp/wl --write-lock`. To review a detail too
   small to read in a
@@ -1073,7 +1076,9 @@ client does: `src/calling.rs` is the signaling plane, the browser carries the me
 (`web/src/lib/call-media.ts`), and `NATIVE-CALLING.md` is the protocol map every line of
 both was written from — read it before touching either. What the user SEES of a live call is
 § A call is a page; video is received and sent, which is § Video in a meeting and
-NATIVE-CALLING.md § 10 for the protocol it rests on.
+NATIVE-CALLING.md § 10 for the protocol it rests on. A call can also be RECORDED, which is
+§ Recording a call — teams-lite's own file, made in the page, and the one thing about a call
+that Teams is never told.
 
 **The backend signals; the page carries the audio.** That split is not an implementation
 detail: the tokens must never reach a browser, and a microphone is only reachable from
@@ -1383,6 +1388,91 @@ joins alone and waits for an offer. Six rules hold it together, and
 after the roster with the measured labels and mids, and `simulatedCallMedia` answers with
 streams captured from a blank canvas — so `cd web && bun run preview -- --out /tmp/call --call`
 shows the stage and the tiles with nothing leaving the machine.
+
+## Recording a call — teams-lite's OWN file, and Teams is never told
+
+A live call can be recorded from its own header: every picture in it and every voice in it,
+into one video kept in this browser, drawn afterwards in the conversation the call was in —
+for the one person who pressed record, and for nobody else
+(`web/src/lib/call-recording.ts` decides what goes in the frame, `call-recorder.ts` writes
+it, `recording-store.ts` keeps it, `web/src/components/call-recording-card.tsx` draws it).
+
+**It is not Teams' recording, and it cannot become one.** Teams' own announces itself to the
+meeting, uploads to OneDrive and drops a file in the chat for everybody; this one never
+touches the calling service, posts no message and sends no byte anywhere — so there is
+nothing to announce it with and nowhere to announce it. Two consequences follow, and both
+are stated in the app rather than left to be assumed:
+
+- **Nobody on the call is told.** The control says so in the words the user reads BEFORE
+  they press it (`RECORD_HINT`, pinned by a test), because that is the one fact they decide
+  with, and asking the people on the call is theirs to do. Never make the control quieter
+  than that sentence.
+- **It is ONE BROWSER's file.** It lives in this browser's IndexedDB, like the chat pins and
+  the calendar preferences and for the same reason — there is no upstream to write it to. So
+  a recording made on the phone is not on the laptop, the card and the Settings pane both say
+  where it is kept, and Save is offered beside it, which is how a recording becomes a file
+  the user really owns.
+
+Ten rules hold it up, and `web/e2e/call-recording.spec.ts` pins each:
+
+- **No RPC exists, and that is the design.** Nothing in this feature reaches the backend, so
+  there is no `OUTWARD_METHODS` entry to add and none to want: a recording publishes nothing
+  about the user and tells the tenant nothing. Sending the bytes to the backend instead was
+  considered and rejected — it would mean a hundred megabytes of base64 over a socket built
+  for JSON, and then serving it back to a `<video>` that has to seek. The narrowest place for
+  a recording of somebody's voice is the machine that made it.
+- **The PICTURE is composited; the app's window is never captured.** A `MediaRecorder` takes
+  one stream and a call is many, so every picture is drawn onto one canvas by the stage's own
+  rule — a shared screen is the subject, faces are a strip under it — and each tile carries
+  the name the roster gave it, drawn INTO the file, because a recording of five faces is what
+  nobody can name a week later. Capturing the window instead would record the sidebar, the
+  reader's scrolling and whatever else is on their screen, and it would ask for a second
+  screen-share permission for streams this app already holds.
+- **Every voice is mixed, the user's own included.** `CallAudio` on `call-media.ts` is what
+  exposes them — the remote streams play through elements that module owns and the microphone
+  is a local variable, so this is the only place they exist. Reading them plays nothing: the
+  mixer's output goes to the recorder and to no destination, or every voice would double and
+  the microphone would feed back.
+- **One call is one file, whatever changes inside it.** A camera that comes on, a screen share
+  that ends, a colleague who unmutes five minutes in: the recorder is TOLD the current sources
+  (`syncRecorder`, from every place the call's media changes) and re-points its own elements
+  and nodes. It never restarts — a call recorded in five files is not a recording of the call.
+- **The file is closed on the ONE path the microphone is released on.** `stopCallMedia` is
+  where it happens, for the reason that function exists: every ending — the user's own press,
+  the hangup, the far side leaving, a dropped transport, calling switched off — comes through
+  it, and a recording lost because of WHICH side hung up would be a file that exists nowhere
+  else. It is idempotent, so a press and a hangup in the same moment write one file.
+- **The row in the history is not a message, and is drawn as one thing that is not.** No
+  bubble, no side, no sender, no reactions, no "…" menu — nothing was sent, and a card that
+  looked like a message would be this app claiming something reached the thread. It sits at
+  the moment the recording ENDED, between what was said before the call and what was said
+  after, because that is when it happened.
+- **A recording asked twice is deleted for good.** There is nothing upstream to take a
+  deletion back from, so this deletion is the whole deletion — the pattern Delete and Approve
+  already use, for the sharper version of the same reason.
+- **What became of the FILE never covers why the CALL ended.** The two arrive together —
+  calling switched off, a dropped transport, both end the recording as well — so the recording
+  speaks under an id of its own (`RECORDING_NOTICE`, beside `CALL_NOTICE` in
+  `web/src/lib/notice.ts`) rather than replacing the sentence the user cannot work out for
+  themselves. One subject, one id, is still the rule: a recording is a different subject.
+- **A meeting joined from a calendar LINK names no conversation**, so its recording has no
+  history to appear in — and Settings › Call recordings is where it, and every older one, is
+  reachable. It is the renamed-people split exactly: the card belongs where the thing
+  happened, the list belongs where a thing months old can still be found. That pane is also
+  the only place that answers what they all COST, because these are the largest things this
+  app keeps and the user is the only one who can decide one is no longer worth the room.
+- **A browser that cannot keep one is not offered the control** (`recordingsCanBeKept`, false
+  until the browser is asked, which is the same reading every unanswered capability takes in
+  this app). A recording that had nowhere to go is a recording nobody asked for.
+
+`web/mock/server.ts` needs no half of its own — the recording is the page's — and the whole
+surface is still reviewable with nothing leaving the machine: `simulatedCallMedia` hands the
+recorder canvases and one silent oscillator (`simulatedAudioStream`, the twin of the canvas
+stand-in and there for the same reason: a real track makes the mixer path the one the mock
+exercises), so a real `MediaRecorder` writes a real webm with no camera, no microphone and no
+permission prompt. `cd web && bun run preview -- --out /tmp/rec --call-recording` captures the
+control and its sentence, the live state, the stop the folded window keeps, the card in both
+themes, its armed deletion, the composite a MEETING's recording holds, and the Settings list.
 
 ## A call is a PAGE, and it folds into a window
 

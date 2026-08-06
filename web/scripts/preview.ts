@@ -1584,6 +1584,121 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // Recording a call: teams-lite's own file, made in the page and kept in this browser —
+  // the control that says nobody on the call is told, the state while it runs, the card it
+  // leaves in the conversation, and the list in Settings
+  // (web/src/lib/call-recording.ts, call-recorder.ts, recording-store.ts).
+  //
+  // The mock has no tenant, no camera and no microphone: `simulatedCallMedia` hands the
+  // recorder canvases and one silent voice, so what is captured here is a REAL webm written
+  // by a real `MediaRecorder`, with nothing leaving the machine.
+  if (args.includes("--call-recording")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      // Calling needs no step: this app is a device the user's calls ring on from startup.
+      //
+      // 1. A live call, with the control in its header. The tooltip is the whole promise, so
+      //    the crop is the header the control sits in.
+      await openConversation(page, "Ava Thompson");
+      await page.locator('[data-testid="call-button"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
+      await page.waitForTimeout(900);
+      await shot(`${out}-control-light.png`, '[data-testid="call-stage"] header');
+      await setTheme("dark");
+      await shot(`${out}-control-dark.png`, '[data-testid="call-stage"] header');
+      await setTheme("light");
+
+      // 2. Recording. The control becomes the state: a red pill counting its own time, which
+      //    is not the call's — a recording begun ten minutes in is ten minutes shorter.
+      await page.locator('[data-testid="call-record"]').click();
+      await page.waitForSelector('[data-testid="call-record"][data-recording="true"]');
+      await page.waitForTimeout(1200);
+      await shot(`${out}-recording-light.png`, '[data-testid="call-stage"] header');
+      await shot(`${out}-recording-page-light.png`);
+
+      // 2a. Folded, where the stop is the ONE control the window gains: a recording the user
+      //     cannot end without unfolding the call would be the microphone mistake again.
+      await page.locator('[data-testid="call-stage-minimize"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="mini"]');
+      await page.waitForTimeout(700);
+      await shot(`${out}-recording-mini-light.png`, '[data-testid="call-stage"]');
+      await page.locator('[data-testid="call-stage-expand"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="full"]');
+      await page.waitForTimeout(700);
+
+      // 3. Stopped: the file is written, and the app says where it went.
+      await page.locator('[data-testid="call-record"]').click();
+      await page.waitForSelector('[data-testid="call-recording-notice"]');
+      await shot(`${out}-kept-light.png`, '[data-testid="call-recording-notice"]');
+
+      await page.locator('[data-testid="call-hangup"]').first().click();
+      await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
+
+      // 3a. And one recording made while there are PICTURES on the call, which is what the
+      //     compositor is really for: every stream drawn into one frame, each tile named. A
+      //     MEETING is where several arrive — the mock renegotiates after the roster with a
+      //     colleague's camera and screen — and the user's own camera goes on top of them.
+      //     Every one is a canvas, so the frame is dark: what these shots are for is the
+      //     LAYOUT and the labels the recorder draws into the file.
+      await openConversation(page, "Design Sync");
+      await page.locator('[data-testid="meeting-join-here"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
+      await page.waitForSelector('[data-testid="call-video-frame"]', { timeout: 30_000 });
+      await page.locator('[data-testid="call-camera"]').click();
+      await page.waitForSelector('[data-testid="call-video-local"]');
+      await page.locator('[data-testid="call-record"]').click();
+      await page.waitForSelector('[data-testid="call-record"][data-recording="true"]');
+      await page.waitForTimeout(1500);
+      await shot(`${out}-recording-video-light.png`);
+      await page.locator('[data-testid="call-record"]').click();
+
+      // 4. The card in the conversation, which is the whole point of the feature. The call is
+      //    ended first, because a live call is a page over the app — which is also when the
+      //    user reaches for the recording.
+      await page.locator('[data-testid="call-hangup"]').first().click();
+      await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
+      // The meeting's recording, in the meeting's own thread. Its first frame is the composite
+      // the recorder drew — the shared screen with the faces under it — which is the one place
+      // the layout inside the FILE can be reviewed.
+      await page.waitForSelector('[data-testid="call-recording"]');
+      await page.waitForTimeout(800);
+      await shot(`${out}-meeting-card-light.png`, '[data-testid="call-recording"]');
+      await openConversation(page, "Ava Thompson");
+      await page.waitForSelector('[data-testid="call-recording"]');
+      await page.waitForTimeout(600);
+      // The one from the 1:1 call, in the conversation that call was in. The meeting's own
+      // recording is in the meeting's thread — a recording belongs where the call was.
+      await shot(`${out}-card-light.png`, '[data-testid="call-recording"]');
+      await shot(`${out}-card-page-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-card-dark.png`, '[data-testid="call-recording"]');
+      await setTheme("light");
+
+      // 4a. Armed for deletion, which is asked twice: there is nothing upstream to take a
+      //     deletion back from.
+      await page.locator('[data-testid="call-recording-delete"]').click();
+      await page.waitForSelector('[data-testid="call-recording-delete-confirm"]');
+      await shot(`${out}-card-confirm-light.png`, '[data-testid="call-recording"]');
+      await page.locator('[data-testid="call-recording-delete-cancel"]').click();
+
+      // 5. And the list in Settings — how a recording made in a link-joined meeting, or one
+      //    made months ago, is reachable at all.
+      await openSettings(page);
+      await page.waitForSelector('[data-testid="call-recording-row"]');
+      await shot(`${out}-settings-light.png`, '[data-testid="call-recordings-settings"]');
+      await setTheme("dark");
+      await shot(`${out}-settings-dark.png`, '[data-testid="call-recordings-settings"]');
+      await setTheme("light");
+
+      console.log(
+        `[preview] wrote ${out}-control-{light,dark}.png, ` +
+          `${out}-recording-{light,page-light,mini-light,video-light}.png, ${out}-kept-light.png, ` +
+          `${out}-card-{light,page-light,dark,confirm-light}.png, ${out}-meeting-card-light.png and ` +
+          `${out}-settings-{light,dark}.png`,
+      );
+    });
+    process.exit(0);
+  }
+
   // The typing hint above the composer: one typist, then three. The whole-page shots
   // are what shows the thing the row is judged on — it starts on the composer's own
   // column, so the faces line up with the words the user types.

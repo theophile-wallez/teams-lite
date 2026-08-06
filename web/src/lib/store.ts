@@ -89,13 +89,16 @@ import {
   holdsMicrophone,
   isLive,
   modalityFor,
+  type ActiveCall,
   type CallMediaSignal,
   type CallStatus,
   type MeetingAddress,
 } from "./call";
+import { callStageTitle } from "./call-stage";
 import {
   simulatedCallMedia,
   startCallMedia,
+  type CallAudio,
   type CallMedia,
   type LocalVideo,
   type RemoteVideo,
@@ -116,7 +119,23 @@ import {
   type MergeRequestScope,
   type MergeRequestState,
 } from "./gitlab-mr";
-import { CALL_NOTICE, dismissNotice, showNotice } from "./notice";
+import {
+  RECORDING_EMPTY_MESSAGE,
+  callCanBeRecorded,
+  recordingFailureMessage,
+  recordingSavedMessage,
+  recordingSources,
+  type CallRecording,
+} from "./call-recording";
+import { startCallRecorder, type CallRecorder, type RecordingInput } from "./call-recorder";
+import {
+  deleteRecording as deleteStoredRecording,
+  getRecordingBlob,
+  listRecordings,
+  putRecording,
+  recordingsCanBeKept,
+} from "./recording-store";
+import { CALL_NOTICE, RECORDING_NOTICE, dismissNotice, showNotice } from "./notice";
 import { coalesce } from "./singleflight";
 import {
   requestRange,
@@ -157,6 +176,21 @@ import {
 } from "./sounds";
 
 export type PendingReply = { message: ChatMessage; marker: string | null };
+
+/** The recording in flight, as the UI reads it.
+ *
+ *  It carries no blob and no recorder: those are non-reactive fields on the controller, and a
+ *  `MediaRecorder` in reactive state would be replaced by a re-render. What a page needs to
+ *  draw is which call it belongs to, when it started, and whether it is being wound up. */
+export type LiveRecording = {
+  id: string;
+  callId: string;
+  startedAtMs: number;
+  /** True from the moment the user presses stop until the file is written. It is a state of
+   *  its own because writing a long recording out takes a moment, and a control that snapped
+   *  back to "record" in it would invite a second recording of nothing. */
+  saving: boolean;
+};
 
 /** Which sidebar list is showing: normal chats, the team/channel tree, or the
  *  mailbox. Each is a distinct source — a channel never appears in the chat list,
@@ -359,6 +393,24 @@ export type AppState = {
    * one place — and it is what lets a tile say "Clément's screen" rather than "a screen".
    */
   callVideoNames: Record<string, string>;
+  /**
+   * The recording running right now, or null.
+   *
+   * teams-lite's own, and Teams is never told: it is made in this page out of the streams
+   * the call already carries, and it is kept in this browser (see lib/call-recording.ts).
+   * The state is the PAGE's rather than the backend's — unlike `call.sending`, which the
+   * backend publishes so two open pages agree — because nothing outside this page knows a
+   * recording exists, and a second page claiming to be recording would be claiming to hold
+   * a file it does not have.
+   */
+  callRecording: LiveRecording | null;
+  /** Every recording this browser holds, newest first. Metadata only: the files are read
+   *  from storage when one is played or saved (see lib/recording-store.ts). */
+  recordings: CallRecording[];
+  /** Whether this browser can keep a recording at all. False means no IndexedDB — a private
+   *  window that refuses one, an ancient browser — and the control is not offered, because a
+   *  recording that could not be kept is a recording nobody asked for. */
+  recordingsCanBeKept: boolean;
   /** Read receipts ("seen by") for the OPEN conversation: every other member's
    *  read position, used to anchor their avatar to the last message they read.
    *  Refreshed on open and kept live by the `read_receipt` event. Empty for the
@@ -651,6 +703,12 @@ function initialState(): AppState {
     callVideo: [],
     callLocalVideo: [],
     callVideoNames: {},
+    callRecording: null,
+    recordings: [],
+    // False until the browser is asked, which happens on start. It is the same reading the
+    // calling switch takes before `call_status` answers: a control offered on a hopeful
+    // default would promise a file this browser cannot keep.
+    recordingsCanBeKept: false,
     readReceipts: [],
     mentionCandidates: [],
     appearance: DEFAULT_APPEARANCE,
@@ -954,6 +1012,10 @@ export class TeamsController {
       // the same reason: an unanswered status reads as "off", which is what the
       // backend defaults to.
       void this.refreshCallStatus();
+      // The recordings this browser holds. Nothing about them is the backend's — they are
+      // this browser's own files (see lib/recording-store.ts) — so this is read locally and
+      // is best-effort: no storage means no recordings, and the control is not offered.
+      void this.loadRecordings();
       // Where this device stands on push notifications, and a re-registration if it
       // is already subscribed (a browser may have rotated the subscription while the
       // app was closed — see syncPush).
@@ -1624,6 +1686,10 @@ export class TeamsController {
     this.set({ callStatus: status });
     const call = status.call;
     if (!holdsMicrophone(call)) this.stopCallMedia();
+    // Otherwise: a roster frame is how somebody arriving becomes a name, so a running
+    // recording collects them here — the people named in the file are everybody who was in
+    // the call while it ran, not everybody who was in it when it started.
+    else this.syncRecorder();
     // A live call says nothing, and — importantly — takes nothing back. Clearing the
     // notice here looked right and was wrong: these frames arrive throughout a call (a
     // roster, a renegotiation, a camera going on), so the first one after a refused
@@ -1644,6 +1710,14 @@ export class TeamsController {
    *  nothing clears is a sentence that stays for ever. That is what this used to be. */
   private reportCall(text: string, kind: "error" | "report"): void {
     showNotice({ text, kind, id: CALL_NOTICE, testId: "call-notice" });
+  }
+
+  /** Say one thing about a RECORDING of a call — where the file went, or why there is none.
+   *
+   *  Its own id, so it never replaces the reason the CALL ended: the two arrive together when
+   *  a call drops, and which of them the user cannot work out for themselves is the call's. */
+  private reportRecording(text: string, kind: "error" | "report"): void {
+    showNotice({ text, kind, id: RECORDING_NOTICE, testId: "call-recording-notice" });
   }
 
   /** The far side's SDP. An ANSWER is what turns a ringing call into audio; an OFFER is
@@ -1737,6 +1811,9 @@ export class TeamsController {
         this.set({
           callVideoNames: { ...this.get().callVideoNames, [section.mid]: person.name },
         });
+        // A running recording draws the name under that tile, so it learns it here too —
+        // this is the one moment the person and the section are both in hand.
+        this.syncRecorder();
       } catch (error) {
         // One refused subscription is one missing tile, not a broken call.
         console.error("[call] could not subscribe to a stream", error);
@@ -1745,6 +1822,13 @@ export class TeamsController {
   }
 
   private stopCallMedia(): void {
+    // A recording is closed out HERE, on the one path the microphone is released on and for
+    // the same reason: every ending — our hangup, theirs, a dropped transport, calling
+    // switched off — comes through this function, and a recording lost because of which side
+    // hung up would be a file that exists nowhere else. It is requested before the media goes
+    // so the last second of the call is in it, and it is idempotent, so the user's own press
+    // and the call ending in the same moment write one file.
+    void this.stopCallRecording();
     this.callMedia?.stop();
     this.callMedia = null;
     // The tiles go with the connection that fed them. A `<video>` left holding a stopped
@@ -1781,8 +1865,21 @@ export class TeamsController {
         });
     // The tiles are reactive state; the connection behind them is not. This is the one
     // bridge between the two, and it is set before anything can arrive on it.
-    media.onRemoteVideoChange = (videos) => this.set({ callVideo: videos });
-    media.onLocalVideoChange = (videos) => this.set({ callLocalVideo: [...videos] });
+    //
+    // Each one also re-points a RUNNING recording, so a camera that comes on five minutes in
+    // is in the file from the moment it is on screen — one recording per call, whatever
+    // changes inside it.
+    media.onRemoteVideoChange = (videos) => {
+      this.set({ callVideo: videos });
+      this.syncRecorder();
+    };
+    media.onLocalVideoChange = (videos) => {
+      this.set({ callLocalVideo: [...videos] });
+      this.syncRecorder();
+    };
+    // A voice joining or leaving. It changes nothing on screen — the audio elements play it
+    // either way — so a recording is its only reader.
+    media.onAudioChange = () => this.syncRecorder();
     // A capture that ended with no click of ours: the BROWSER's own "Stop sharing" bar, or a
     // section the MEETING dropped. Either way the service has to be told from here, or it
     // keeps a section that carries no picture while the button still says on.
@@ -1973,6 +2070,207 @@ export class TeamsController {
       console.error("[call] the hangup failed", error);
     }
     await this.refreshCallStatus();
+  }
+
+  // ---- recording a call (teams-lite's own, and Teams is never told) ---------
+  //
+  // The whole feature lives in this page: the streams are the ones the call already
+  // carries, the file is written by a `MediaRecorder` here, and it is kept in this
+  // browser. Nothing in this slice reaches the backend, and nothing in it can — which is
+  // the point (see lib/call-recording.ts).
+
+  /** The recorder behind {@link AppState.callRecording}. Not reactive, for the reason the
+   *  call's own media is not: it owns a canvas, a `MediaRecorder` and an `AudioContext`,
+   *  and a re-render must never replace it. */
+  private recorder: CallRecorder | null = null;
+
+  /** Who was in the call while the recording ran, by name, the user included.
+   *
+   *  A UNION rather than a snapshot: somebody who joined half way through is in the file,
+   *  so they are in the list. It is collected here because the roster changes under a
+   *  running recording and the recorder has no reason to know about people. */
+  private recordingPeople = new Set<string>();
+
+  /** Object URLs handed out for playback, one per recording, revoked when it is deleted.
+   *
+   *  Cached because a URL is what a `<video>` holds and the history is virtualized: a card
+   *  that scrolled out of view and back would otherwise mint a second URL for the same file
+   *  and leak the first. */
+  private recordingUrls = new Map<string, string>();
+
+  /**
+   * Start recording this call — the picture of everybody in it, and the audio of everybody
+   * in it, into one file in this browser.
+   *
+   * Nothing is announced: this is not Teams' recording and it cannot be, so the people on
+   * the call are not told (the control says so before it is pressed). Nothing is sent, and
+   * no message goes out — the file appears in the conversation for this user alone, once it
+   * is finished.
+   */
+  async startCallRecording(): Promise<void> {
+    const call = this.get().callStatus.call;
+    if (!callCanBeRecorded(call) || !call) return;
+    if (this.get().callRecording || this.recorder) return;
+    // What the LAST recording had to say is taken back, and nothing else: a notice about the
+    // call — a camera it refused, a section it dropped — is about something still true.
+    dismissNotice(RECORDING_NOTICE);
+    try {
+      const recorder = startCallRecorder(this.recordingInput(call));
+      this.recorder = recorder;
+      this.recordingPeople = new Set(this.callPeople(call));
+      this.set({
+        callRecording: {
+          id: `rec-${recorder.startedAtMs}`,
+          callId: call.id,
+          startedAtMs: recorder.startedAtMs,
+          saving: false,
+        },
+      });
+    } catch (error) {
+      // A browser that cannot record says so once, in its own sentence, and the call carries
+      // on untouched: a recording is something extra a call can have, never a part of it.
+      this.recorder = null;
+      this.set({ callRecording: null });
+      this.reportRecording(recordingFailureMessage(error), "error");
+    }
+  }
+
+  /**
+   * Stop recording and keep what was recorded.
+   *
+   * Every path out of a call comes through here — the user's own press, the hangup, the far
+   * side leaving, calling being switched off — because the file has to be closed and written
+   * whoever ended the call. A recording lost because somebody hung up would be the one
+   * failure this feature cannot afford: there is no second copy anywhere.
+   */
+  async stopCallRecording(): Promise<void> {
+    const recorder = this.recorder;
+    const live = this.get().callRecording;
+    if (!recorder || !live) return;
+    // The recorder is released from this controller FIRST, so a second stop — the user's
+    // press and the call ending in the same second — cannot write the file twice.
+    this.recorder = null;
+    this.set({ callRecording: { ...live, saving: true } });
+    const call = this.get().callStatus.call;
+    const title = call ? callStageTitle(call) : "Call";
+    try {
+      const blob = await recorder.stop();
+      const endedAtMs = Date.now();
+      if (blob.size === 0) {
+        // A recorder stopped in the same second it started writes no frames at all. There is
+        // nothing to keep, and an empty row in the history would be worse than the sentence.
+        this.reportRecording(RECORDING_EMPTY_MESSAGE, "report");
+        return;
+      }
+      const recording: CallRecording = {
+        id: live.id,
+        callId: live.callId,
+        // The conversation is read at the END, from the call that is still in hand: a
+        // meeting joined from a calendar link names none, and that recording lives in
+        // Settings instead (see `recordingBelongsInHistory`).
+        conversationId: call?.conversation_id?.trim() || null,
+        title,
+        startedAtMs: live.startedAtMs,
+        endedAtMs,
+        durationMs: Math.max(0, endedAtMs - live.startedAtMs),
+        size: blob.size,
+        mimeType: blob.type,
+        participants: [...this.recordingPeople],
+      };
+      const kept = await putRecording(recording, blob);
+      if (!kept) {
+        // The file is in hand and this browser will not hold it — a full quota, a private
+        // window. Saying so is all this app can do, and it is what the user needs in order
+        // to make room and record again.
+        this.reportRecording("This browser could not keep that recording.", "error");
+        return;
+      }
+      this.set({ recordings: [recording, ...this.get().recordings] });
+      this.reportRecording(recordingSavedMessage(recording), "report");
+    } catch (error) {
+      console.error("[call] the recording could not be written", error);
+      this.reportRecording(recordingFailureMessage(error), "error");
+    } finally {
+      this.recordingPeople.clear();
+      this.set({ callRecording: null });
+    }
+  }
+
+  /** What the recorder should be drawing and mixing right now.
+   *
+   *  Built in one place, so the recording that starts and the recording that follows the call
+   *  are made of the same thing. */
+  private recordingInput(call: ActiveCall): RecordingInput {
+    const state = this.get();
+    const audio: CallAudio = this.callMedia?.audio ?? { microphone: null, remote: [] };
+    return {
+      sources: recordingSources(state.callVideo, state.callLocalVideo, state.callVideoNames),
+      audio,
+      title: callStageTitle(call),
+    };
+  }
+
+  /** Everybody in the call by name, the user first. The roster's own words, and "You" for
+   *  the one person it never names. */
+  private callPeople(call: ActiveCall): string[] {
+    return ["You", ...call.others.map((name) => name.trim()).filter(Boolean)];
+  }
+
+  /**
+   * Re-point a running recording at what the call carries now.
+   *
+   * Called from every place the call's media changes: a camera coming on, a screen share
+   * ending, a voice arriving, a subscription naming whose picture a section holds. The
+   * recording never restarts — it is one file for one call, and the sources inside it change
+   * exactly as they did on screen.
+   */
+  private syncRecorder(): void {
+    const recorder = this.recorder;
+    const call = this.get().callStatus.call;
+    if (!recorder || !call) return;
+    recorder.update(this.recordingInput(call));
+    for (const person of this.callPeople(call)) this.recordingPeople.add(person);
+  }
+
+  /** Read every recording this browser holds, and whether it can hold one at all.
+   *
+   *  Metadata only — the files are read when one is played (see {@link recordingUrl}). */
+  async loadRecordings(): Promise<void> {
+    this.set({ recordingsCanBeKept: recordingsCanBeKept() });
+    this.set({ recordings: await listRecordings() });
+  }
+
+  /**
+   * A URL a `<video>` can play one recording from, or null when this browser does not hold
+   * the file.
+   *
+   * It is an object URL over the stored blob, so playback and seeking are local and cost no
+   * request — a recording never travels anywhere, not even to this app's own server.
+   */
+  async recordingUrl(id: string): Promise<string | null> {
+    const held = this.recordingUrls.get(id);
+    if (held) return held;
+    const blob = await getRecordingBlob(id);
+    if (!blob) return null;
+    const url = URL.createObjectURL(blob);
+    this.recordingUrls.set(id, url);
+    return url;
+  }
+
+  /**
+   * Forget one recording, file and all.
+   *
+   * There is nothing upstream to take it back from, so this deletion is the whole deletion —
+   * which is why the card asks twice, exactly as deleting a message does.
+   */
+  async deleteCallRecording(id: string): Promise<void> {
+    await deleteStoredRecording(id);
+    const url = this.recordingUrls.get(id);
+    if (url) {
+      URL.revokeObjectURL(url);
+      this.recordingUrls.delete(id);
+    }
+    this.set({ recordings: this.get().recordings.filter((recording) => recording.id !== id) });
   }
 
   /** Mute or unmute. The microphone stops first and the service is told second, so the

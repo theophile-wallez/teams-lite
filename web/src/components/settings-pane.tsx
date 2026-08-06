@@ -22,6 +22,7 @@ import type { SettingsPatch } from "~/lib/protocol";
 import { pushBlockerMessage } from "~/lib/push";
 import { cn } from "~/lib/utils";
 import { AiProvidersSettings } from "./ai-providers-settings";
+import { CallRecordingsSettings } from "./call-recordings-settings";
 import { RenamedPeopleSettings } from "./renamed-people-settings";
 import { useAppState, useController } from "./controller-context";
 import { LinearLogo } from "./linear-logo";
@@ -81,6 +82,7 @@ export function SettingsPane(props: { onBack?: () => void }) {
           <GhostModeSettings />
           <SenderIconSettings />
           <AlwaysAvailableSettings />
+          <CallRecordingsSettings />
           <RenamedPeopleSettings />
           <NotificationSettings />
           <AppearanceSettings />

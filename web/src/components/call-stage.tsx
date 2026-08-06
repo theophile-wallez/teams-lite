@@ -11,12 +11,20 @@ import {
   Mic01Icon,
   MicOff01Icon,
   Minimize01Icon,
+  RecordIcon,
+  StopIcon,
   UserGroupIcon,
   UserMultipleIcon,
   Video01Icon,
   VideoOffIcon,
 } from "@hugeicons/core-free-icons";
 import { callDurationLabel, callNamesAConversation, isMeeting, type ActiveCall } from "~/lib/call";
+import {
+  RECORDING_HINT,
+  RECORD_HINT,
+  callCanBeRecorded,
+  recordingDurationLabel,
+} from "~/lib/call-recording";
 import {
   MINI_MARGIN,
   PANEL_BESIDE_PX,
@@ -343,6 +351,7 @@ function FullStage(props: {
             icon={call.muted ? MicOff01Icon : Mic01Icon}
             onClick={() => void controller.setCallMuted(!call.muted)}
           />
+          <RecordControl call={call} />
 
           <span aria-hidden className="mx-0.5 h-6 w-px bg-border-subtle" />
 
@@ -670,6 +679,8 @@ function MiniWindow(props: { call: ActiveCall; layout: StageLayout; onExpand: ()
           icon={call.muted ? MicOff01Icon : Mic01Icon}
           onClick={() => void controller.setCallMuted(!call.muted)}
         />
+        {/* Only while a recording is running — see RecordControl. */}
+        <RecordControl call={call} mini />
         <StageControl
           testId="call-stage-expand"
           size="sm"
@@ -709,10 +720,15 @@ function MiniStatus(props: { call: ActiveCall }) {
 function StageControl(props: {
   testId: string;
   label: string;
+  /** The pointer's own sentence, when it has more to say than the label. The one control that
+   *  needs it is Record: what it costs — that nobody on the call is told — does not fit in the
+   *  words a screen reader should hear as its name. */
+  title?: string;
   icon: IconSvgElement;
   pressed?: boolean;
-  tone?: "primary" | "warning";
+  tone?: "primary" | "warning" | "danger";
   size?: "sm" | "md";
+  disabled?: boolean;
   onClick: () => void;
 }) {
   const small = props.size === "sm";
@@ -722,16 +738,23 @@ function StageControl(props: {
       data-testid={props.testId}
       aria-label={props.label}
       aria-pressed={props.pressed}
-      title={props.label}
+      title={props.title ?? props.label}
+      disabled={props.disabled}
       onClick={props.onClick}
       className={cn(
-        "grid shrink-0 cursor-pointer place-items-center rounded-full transition-colors",
+        "grid shrink-0 cursor-pointer place-items-center rounded-full transition-colors disabled:cursor-default disabled:opacity-70",
         small ? "size-8" : "size-9",
         props.pressed
           ? props.tone === "warning"
             ? "bg-warning/15 text-warning hover:bg-warning/25"
-            : "bg-primary/15 text-primary hover:bg-primary/25"
-          : "bg-element text-text-dim hover:bg-accent hover:text-foreground",
+            : props.tone === "danger"
+              ? "bg-destructive/15 text-destructive hover:bg-destructive/25"
+              : "bg-primary/15 text-primary hover:bg-primary/25"
+          : props.tone === "danger"
+            ? // Record is the one control that wears its colour before it is pressed: it is
+              // the one whose result the people on the call cannot see.
+              "bg-element text-destructive hover:bg-destructive/15"
+            : "bg-element text-text-dim hover:bg-accent hover:text-foreground",
       )}
     >
       <HugeiconsIcon
@@ -741,6 +764,109 @@ function StageControl(props: {
       />
     </button>
   );
+}
+
+/**
+ * Record this call, and stop recording it.
+ *
+ * teams-lite's own recording, and the control has to carry that whole fact before it is
+ * pressed: the file is made here, kept in this browser, and **nobody on the call is told**
+ * (see {@link RECORD_HINT} — Teams' own recording announces itself and this one cannot,
+ * because it never touches Teams). It is one press either way; there is no arming, because
+ * the thing it starts is stoppable and the thing it stops is kept.
+ *
+ * Three rules about where it is drawn:
+ *
+ * - **Only on a call whose audio is up** (`callCanBeRecorded`), because before that there is
+ *   nothing to record and a button that produced an empty file would be worse than none.
+ * - **Only where the file could be kept** (`recordingsCanBeKept`), which is this browser's
+ *   own storage answering. A recording that had nowhere to go is a recording nobody asked
+ *   for.
+ * - **And in the folded window too, while one is running.** The rest of the page's controls
+ *   are deliberately not there — a small window is glanced at — but a recording the user
+ *   cannot stop without unfolding the call is the same mistake as a microphone with no
+ *   findable off switch, which is why this app has no way to hide a live call at all.
+ */
+function RecordControl(props: { call: ActiveCall; mini?: boolean }) {
+  const { call, mini } = props;
+  const controller = useController();
+  const canKeep = useAppState((s) => s.recordingsCanBeKept);
+  const recording = useAppState((s) => s.callRecording);
+  const live = recording && recording.callId === call.id ? recording : null;
+
+  if (!callCanBeRecorded(call)) return null;
+  // In the folded window the control exists only while it has something to stop.
+  if (mini && !live) return null;
+  if (!live && !canKeep) return null;
+
+  if (!live) {
+    return (
+      <StageControl
+        testId="call-record"
+        tone="danger"
+        label="Record this call"
+        title={RECORD_HINT}
+        icon={RecordIcon}
+        onClick={() => void controller.startCallRecording()}
+      />
+    );
+  }
+  // Saving is its own state: writing a long recording out takes a moment, and a control that
+  // snapped straight back to "record" in it would invite a second recording of nothing.
+  if (mini) {
+    return (
+      <StageControl
+        testId="call-record"
+        tone="danger"
+        pressed
+        size="sm"
+        disabled={live.saving}
+        label={live.saving ? "Keeping the recording…" : RECORDING_HINT}
+        icon={StopIcon}
+        onClick={() => void controller.stopCallRecording()}
+      />
+    );
+  }
+  return (
+    <button
+      type="button"
+      data-testid="call-record"
+      data-recording={live.saving ? "saving" : "true"}
+      aria-pressed
+      disabled={live.saving}
+      aria-label={live.saving ? "Keeping the recording…" : RECORDING_HINT}
+      title={live.saving ? "Keeping the recording…" : RECORDING_HINT}
+      onClick={() => void controller.stopCallRecording()}
+      className="flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-full bg-destructive/15 px-3 text-destructive transition-colors hover:bg-destructive/25 disabled:cursor-default disabled:opacity-70"
+    >
+      <RecordingDot />
+      <span className="text-xs font-semibold tabular-nums" data-testid="call-record-elapsed">
+        {live.saving ? "Keeping…" : <RecordingElapsed startedAtMs={live.startedAtMs} />}
+      </span>
+    </button>
+  );
+}
+
+/** The dot that says a recording is live. It breathes, because a recording is the one state
+ *  on this surface that the user may forget they started — and it holds still under
+ *  `prefers-reduced-motion`, where the colour and the elapsed time beside it say it alone. */
+function RecordingDot() {
+  const reduce = useReducedMotion();
+  return (
+    <motion.span
+      aria-hidden
+      className="size-2 shrink-0 rounded-full bg-destructive"
+      animate={reduce ? undefined : { opacity: [1, 0.35, 1] }}
+      transition={reduce ? undefined : { duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
+    />
+  );
+}
+
+/** How long this recording has been going. Its own clock, from its own start: a recording
+ *  begun ten minutes into a call is ten minutes shorter than the call. */
+function RecordingElapsed(props: { startedAtMs: number }) {
+  const now = useNow(true);
+  return <>{recordingDurationLabel(Math.max(0, now - props.startedAtMs))}</>;
 }
 
 /** The way out. It is the one control here that ends something for everybody, so it is the

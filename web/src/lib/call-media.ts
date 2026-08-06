@@ -23,7 +23,9 @@
  *   blob is touched, and nothing about it is guessed: a rewrite belongs there only once
  *   the service has refused what it replaces.
  * - **Every remote stream gets its own element.** A meeting sends one stream per voice,
- *   so the call plays as many as it is sent (see {@link RemoteAudio}).
+ *   so the call plays as many as it is sent (see {@link RemoteAudio}). Those streams are
+ *   also READABLE ({@link CallAudio}), because a recording of the call has to carry every
+ *   voice in it and this is the only place they exist — reading them plays nothing.
  * - **Stopping releases the microphone.** The browser shows a recording indicator for as
  *   long as a track is live, so every path out of a call — hang up, the far side hanging
  *   up, an error, the page closing — goes through {@link CallMedia.stop}.
@@ -83,6 +85,23 @@ export type LocalVideo = {
   stream: MediaStream;
 };
 
+/**
+ * Every VOICE on the call, as streams: the user's own microphone, and one stream per
+ * person the service is sending.
+ *
+ * It exists for exactly one reader — the recorder (see {@link ./call-recorder}) — because a
+ * recording of a call has to carry the audio of everybody in it, and the audio of everybody
+ * in it exists nowhere else: the remote streams play through elements this module owns and
+ * the microphone is a local variable. Nothing else reads it, and nothing here plays it: the
+ * `<audio>` elements are still the only thing that makes a call audible.
+ */
+export type CallAudio = {
+  /** The user's own microphone, or null once the call is over. */
+  microphone: MediaStream | null;
+  /** One stream per remote voice, in the order they arrived. */
+  remote: MediaStream[];
+};
+
 /** One live call's media. */
 export type CallMedia = {
   /** The SDP this side produced — the offer for an outgoing call, the answer for an
@@ -111,6 +130,12 @@ export type CallMedia = {
   readonly remoteVideo: RemoteVideo[];
   /** Called whenever {@link remoteVideo} changes, so the UI can redraw its tiles. */
   onRemoteVideoChange?: (videos: RemoteVideo[]) => void;
+  /** Every voice on the call right now — the microphone, and each remote stream. See
+   *  {@link CallAudio}. */
+  readonly audio: CallAudio;
+  /** Called when a voice joins or leaves, so a recording already running picks up the
+   *  person who spoke up after it started. */
+  onAudioChange?: (audio: CallAudio) => void;
   /**
    * Open the camera (or the screen) and return the OFFER to hand the backend.
    *
@@ -299,6 +324,13 @@ function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
  */
 class RemoteAudio {
   private elements = new Map<string, HTMLAudioElement>();
+  /** The streams themselves, kept beside their elements for the recorder. An element's
+   *  `srcObject` would answer the same question, but reading media back out of the DOM to
+   *  hand it to a mixer is a dependency on how this class happens to play a voice. */
+  private streamsById = new Map<string, MediaStream>();
+  /** Called when a voice joins or leaves. The recorder listens so a person who unmutes
+   *  themselves five minutes in is in the recording too. */
+  onChange?: () => void;
 
   play(stream: MediaStream): void {
     const existing = this.elements.get(stream.id);
@@ -315,11 +347,18 @@ class RemoteAudio {
     audio.srcObject = stream;
     document.body.append(audio);
     this.elements.set(stream.id, audio);
+    this.streamsById.set(stream.id, stream);
     // A voice that leaves the call takes its element with it, so a long meeting does
     // not accumulate one dead element per person who came and went.
     stream.addEventListener("removetrack", () => {
       if (stream.getAudioTracks().length === 0) this.drop(stream.id);
     });
+    this.onChange?.();
+  }
+
+  /** Every remote voice, in the order it arrived. */
+  get streams(): MediaStream[] {
+    return [...this.streamsById.values()];
   }
 
   private drop(id: string): void {
@@ -328,6 +367,8 @@ class RemoteAudio {
     audio.srcObject = null;
     audio.remove();
     this.elements.delete(id);
+    this.streamsById.delete(id);
+    this.onChange?.();
   }
 
   stop(): void {
@@ -652,6 +693,13 @@ function liveCallMedia(
     get localVideo() {
       return stopped ? [] : senders.videos;
     },
+    get audio(): CallAudio {
+      // A call that is over has no voices, microphone included: every track on it has been
+      // stopped, and handing a stopped track to a mixer records silence under a name.
+      return stopped
+        ? { microphone: null, remote: [] }
+        : { microphone: stream, remote: remoteAudio.streams };
+    },
   };
 
   /**
@@ -695,6 +743,9 @@ function liveCallMedia(
 
   remoteVideo.onChange = (videos) => media.onRemoteVideoChange?.(videos);
   senders.onChange = (videos) => media.onLocalVideoChange?.(videos);
+  // A voice arriving or leaving. Nothing about how the call SOUNDS depends on this — the
+  // elements play it either way — so the only reader is a recording already running.
+  remoteAudio.onChange = () => media.onAudioChange?.(media.audio);
   // The browser's own "Stop sharing" bar. It ends the track and nothing else: this app has to
   // notice, take the section down and tell the service, or the meeting keeps a section that
   // carries nothing while the button still says on.
@@ -714,6 +765,12 @@ function liveCallMedia(
  */
 export function simulatedCallMedia(): CallMedia {
   let stopped = false;
+  // One SILENT voice, made once. It stands in for the microphone so that everything
+  // downstream of a call's audio — the recorder's mixer above all — runs against a real
+  // `MediaStream` with a real audio track here, exactly as it does live. Silent, because
+  // that is the honest thing for a stand-in to be, and because a tone would come out of the
+  // reviewer's speakers.
+  const microphone = simulatedAudioStream();
   const media: CallMedia = {
     localSdp: SIMULATED_SDP,
     async setRemoteAnswer(): Promise<void> {},
@@ -784,6 +841,12 @@ export function simulatedCallMedia(): CallMedia {
         for (const track of video.stream.getTracks()) track.stop();
       }
       media.localVideo.length = 0;
+      for (const track of microphone.getTracks()) track.stop();
+    },
+    get audio(): CallAudio {
+      // The stand-in has one voice and it is the user's own: the mock sends no remote audio
+      // at all, so a recording made against it carries the picture and one silent channel.
+      return stopped ? { microphone: null, remote: [] } : { microphone, remote: [] };
     },
     get connectionState(): RTCPeerConnectionState {
       return stopped ? "closed" : "connected";
@@ -814,6 +877,29 @@ function simulatedVideoStream(): MediaStream {
   // One frame per second: this stands in for a picture, and a mock that burned a core
   // animating it would slow every capture that opens a call.
   return canvas.captureStream(1);
+}
+
+/**
+ * A voice with nobody behind it: an oscillator at zero gain, captured.
+ *
+ * The twin of {@link simulatedVideoStream}, and for the same reason — a real
+ * `MediaStreamTrack` behaves for every consumer exactly as a microphone's does, so the code
+ * that mixes a call's audio is the code the mock exercises. The gain is 0, so the track
+ * carries samples and every one of them is silence.
+ *
+ * The context is left as the browser gives it. A recording starts from a click, and the
+ * recorder resumes what it is handed (see `call-recorder.ts`), so nothing here has to know
+ * about the autoplay policy.
+ */
+function simulatedAudioStream(): MediaStream {
+  const context = new AudioContext();
+  const destination = context.createMediaStreamDestination();
+  const silence = context.createGain();
+  silence.gain.value = 0;
+  const oscillator = context.createOscillator();
+  oscillator.connect(silence).connect(destination);
+  oscillator.start();
+  return destination.stream;
 }
 
 /** The labels that name a section carrying a picture. The service labels every section,

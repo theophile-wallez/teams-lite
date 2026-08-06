@@ -50,6 +50,12 @@ export type Notice = {
  *  call has one thing to say at a time. */
 export const CALL_NOTICE = "call";
 
+/** And the notice for a RECORDING of a call, which is a different subject: what happened to
+ *  a FILE. It has an id of its own because the two arrive together — a call that dropped for
+ *  a reason the user did not choose also ends the recording — and one id would let the file's
+ *  fate replace the reason the call ended, which is the half they cannot infer. */
+export const RECORDING_NOTICE = "call-recording";
+
 /** Show one notice, replacing whatever is on screen under the same id. */
 export function showNotice(notice: Notice): void {
   // Client-only. The module store behind `toast` outlives a single SSR render on the
