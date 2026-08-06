@@ -143,3 +143,16 @@ export function AgentCoin(props: {
   );
 }
 
+/**
+ * The colour of the light that travels a bubble's edge while that CLI writes into it
+ * (see `AgentBubbleShine`).
+ *
+ * Claude's own coral, so the edge and the mark inside the bubble are the same vendor —
+ * the choice the composer's tag chips already make. Anything else takes the app's accent
+ * as a `var()`, so it follows the theme: opencode's mark is graphite, and graphite
+ * travelling round a grey bubble is a light nobody can see.
+ */
+export function agentShineColor(backend: string): string {
+  return backend === "claude" ? CLAUDE_CORAL : "var(--primary)";
+}
+

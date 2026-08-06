@@ -129,20 +129,34 @@ that surface together:
   through their account and a colleague sees their name on it — but they did not write
   it, and putting it beside the things they did write is the one place this app would be
   lying to the person it belongs to.
-- **The bubble's own EDGE says a run is live** (`ShineBorder`, in
-  `web/src/components/ui/shine-border.tsx` after magicui's component of that name, drawn
-  from `.shine-border` in `web/src/styles/app.css`). It is the hairline the agent's bubble
-  already wears, with a light travelling round it — the same fact the breathing mark carries,
-  in the one place that covers the whole message: on a long answer the signature scrolls out
-  of the top of the bubble and the edge is still there to say which message is being written
-  into. Four things hold it, and `web/e2e/agent.spec.ts` pins each: it is drawn from the
-  RUN and never from the stored body, so a reply that stopped mid-answer keeps its static
-  ring (nothing is arriving into it, and a moving edge would promise a word that is never
-  coming); it goes when the run does, like every other part of the overlay; only the
-  BACKGROUND moves — the element is masked down to the ring and the gradient slides across
-  it, so a message in a virtualized history is never re-laid-out by it; and it is not drawn
-  at all under `prefers-reduced-motion`, because held still the sweep is a smear of colour
-  over one corner rather than a light going round an edge.
+- **The bubble's own EDGE says an answer is being written into it.** A light travels the
+  hairline the agent's bubble already wears — magicui's `ShineBorder`, added from their
+  registry (`web/src/components/magicui/shine-border.tsx`, with the `shine` keyframes and
+  `--animate-shine` in `web/src/styles/app.css`) and kept as the vendor's file: the app's own
+  half is `AgentBubbleShine` in `web/src/components/agent-reply.tsx`. It carries the fact the
+  breathing mark carries, in the one place that covers the whole message: on a long answer the
+  signature scrolls out of the top of the bubble and the edge is still there to say which
+  message is live. Five things hold it, and `web/e2e/agent.spec.ts` pins each:
+  - **A run this app cannot SEE is still a run.** The light is drawn while a run streams into
+    the page, and also on a reply whose stored body says its answer is unfinished
+    (`agentAuthorship(...).pending` — the message signed `claude is writing…` rather than
+    `— claude, via teams-lite`). That second one is the common case, not an edge case: the
+    point of the feature is asking from a phone, so most replies are watched by no page at
+    all. A run that DIED is in neither, because whichever backend comes up rewrites its
+    message with the failure body (`repair_abandoned_agent_runs`) — so a body still pending
+    is one nobody has closed.
+  - **The words beside it stay still.** `still being written…` gets no shimmer and the answer
+    no caret when nothing is arriving HERE; the edge is the one thing that speaks for a run
+    this page is not being fed.
+  - **It is the CLI's own colour** (`agentShineColor`), so the edge and the mark inside the
+    bubble name one vendor — the choice the composer's tag chips already make. Anything that
+    is not Claude takes the app's accent, because opencode's graphite travelling round a grey
+    bubble is a light nobody can see.
+  - **Only the BACKGROUND moves.** The element is masked down to the ring and the gradient
+    slides across it, so a message in a virtualized history is never re-laid-out by it.
+  - **It is not drawn at all under `prefers-reduced-motion`** — not merely held still, because
+    stopped the sweep is a smear of colour over one corner rather than a light going round an
+    edge.
 - **The work is a transcript: it is OPEN for the whole run, and folded once the run ENDS.**
   The reasoning streams into a panel above the answer, at the pace the answer is revealed
   at, with a row per tool call in place — so a reader watches the run being worked out. It

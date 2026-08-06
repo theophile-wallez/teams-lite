@@ -163,7 +163,15 @@ export async function fetchCapturedSends(page: Page): Promise<CapturedSend[]> {
 /** Inject a live message through the mock's gated test hook. */
 export async function emitLive(
   page: Page,
-  body: { conversation: string; content: string; sender?: string; is_self?: boolean; reply?: boolean },
+  body: {
+    conversation: string;
+    content: string;
+    sender?: string;
+    is_self?: boolean;
+    reply?: boolean;
+    /** The body verbatim, when the spec is about the markup — `content` is escaped. */
+    html?: string;
+  },
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, { data: body });
   expect(res.ok()).toBeTruthy();

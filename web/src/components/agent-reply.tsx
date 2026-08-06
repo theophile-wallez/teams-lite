@@ -13,9 +13,9 @@ import {
 } from "~/lib/agent-run";
 import { agentDisplayName, type AgentBackendName } from "~/lib/agent-message";
 import { cn } from "~/lib/utils";
-import { AgentCoin } from "./agent-logo";
+import { AgentCoin, agentShineColor } from "./agent-logo";
 import { RichContent } from "./rich-content";
-import { ShineBorder } from "./ui/shine-border";
+import { ShineBorder } from "./magicui/shine-border";
 
 /**
  * The agent's reply, as this app draws it.
@@ -258,6 +258,46 @@ export function AgentStream(props: {
       ) : null}
       <AgentFailure run={run} />
     </div>
+  );
+}
+
+/**
+ * How wide the travelling light is, and how long one pass round the bubble takes.
+ *
+ * Two pixels, not one: it rides the hairline the agent's bubble already wears, and a
+ * light no wider than that ring is one a reader has to be told about before they can see
+ * it. Six seconds is a lap slow enough to read as a light going round an edge rather than
+ * a flicker, and quick enough that a glance at the thread catches it somewhere.
+ */
+const SHINE_WIDTH = 2;
+const SHINE_SECONDS = 6;
+
+/**
+ * The bubble's own edge, catching the light while an answer is being written into it
+ * (magicui's ShineBorder, in components/magicui/shine-border.tsx).
+ *
+ * It carries the fact the breathing mark carries, in the one place that covers the whole
+ * message: on a long answer the signature scrolls out of the top of the bubble, and the
+ * edge is still there to say which message is live.
+ *
+ * Two things about it are this app's and not the component's. The colour is the CLI's
+ * (see {@link agentShineColor}), so the edge and the mark inside the bubble are the same
+ * vendor. And under `prefers-reduced-motion` it is not drawn AT ALL rather than merely
+ * held still — stopped, the sweep is a smear of colour over one corner, which reads as a
+ * rendering fault instead of a light. That second one is `.agent-shine` in app.css and not
+ * a check here on purpose: the OS query then takes effect on its own, with no render in
+ * between, which is what a reader who changes the setting with the app open gets.
+ */
+export function AgentBubbleShine(props: { backend: string }) {
+  return (
+    <ShineBorder
+      data-testid="agent-shine"
+      data-backend={props.backend}
+      className="agent-shine"
+      borderWidth={SHINE_WIDTH}
+      duration={SHINE_SECONDS}
+      shineColor={agentShineColor(props.backend)}
+    />
   );
 }
 
@@ -660,8 +700,11 @@ function AgentToolRow(props: {
  * it is exactly as informative as the thread is: an answer that was still being written
  * when the run died says so, and a failure says why.
  *
- * There is deliberately no animation on the "still writing" case. Nothing is arriving —
- * a shimmer would promise a word that is never coming.
+ * The WORDS here never animate. Nothing is arriving into this page, so a shimmer on the
+ * line — or a caret at the end of the answer — would promise the next word at a pace this
+ * app is not being fed at. What does say the answer is unfinished is the bubble's own edge
+ * ({@link AgentBubbleShine}): a run somewhere else is still a run, and one moving hairline
+ * around the whole message claims less than a line of text pretending to be live.
  */
 export function AgentStoredStatus(props: {
   authorship: { pending: boolean; failure: string | null };
@@ -760,7 +803,7 @@ export function AgentPendingBubble(props: {
             (see the mount in message-bubble.tsx). This row is replaced by that bubble the
             moment Teams echoes the placeholder back, and a light that started only then
             would draw attention to a swap the user is not meant to see. */}
-        {agentRunIsLive(props.run) ? <ShineBorder data-testid="agent-shine" /> : null}
+        {agentRunIsLive(props.run) ? <AgentBubbleShine backend={props.run.backend} /> : null}
 
         {/* The same shape a real bubble has, down to the signature sitting inside it —
             this row is replaced by the posted message the moment it arrives, and a

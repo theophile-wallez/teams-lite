@@ -6056,6 +6056,10 @@ function injectMessage(input: {
   senderMri?: string;
   isSelf?: boolean;
   reply?: boolean;
+  /** The body VERBATIM, for a spec that is about the markup rather than the words — an
+   *  agent's own signature line, say, which is what tells this app a reply is still being
+   *  written. `content` is escaped, so it cannot carry one. */
+  html?: string;
 }): ChatMessage | null {
   const t = threadFor(input.conversation);
   if (!t) return null;
@@ -6067,7 +6071,8 @@ function injectMessage(input: {
   const seq = nextSeq(t.messages);
   const last = t.messages.at(-1);
   const content =
-    input.reply && last ? replyContent(last, input.content) : escapeHtml(input.content);
+    input.html ??
+    (input.reply && last ? replyContent(last, input.content) : escapeHtml(input.content));
   const msg: ChatMessage = {
     id: `${input.conversation}#${seq}`,
     conversation_id: input.conversation,
@@ -6461,6 +6466,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       senderMri: typeof body.sender_mri === "string" ? body.sender_mri : undefined,
       isSelf: Boolean(body.is_self),
       reply: Boolean(body.reply),
+      html: typeof body.html === "string" ? body.html : undefined,
     });
     return Response.json({ ok: msg !== null, message: msg }, { status: msg ? 200 : 404 });
   }
