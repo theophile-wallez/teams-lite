@@ -1155,6 +1155,43 @@ attempt cost.
   for exactly that) is refused writes by its own write lock, so it cannot join.
 
   **So the next measurement needs a second participant in the meeting, and nothing else.**
+- **MEASURED WITH A SECOND PARTICIPANT SHARING (2026-08-06), and it inverted the diagnosis.**
+  The user joined the pinned meeting from real Teams with their camera on and their screen
+  shared, and `bun run join-live` drove three variants against it. The roster named their
+  streams — `main-audio 201`, `main-video 202`, `applicationsharing-video 212 sendonly`,
+  `data 213` — so there was a real screen to receive and a real presenter to displace.
+
+  | What this app did | What the service offered on its renegotiation |
+  | --- | --- |
+  | audio-only join, no session | `video port=3481 label:applicationsharing-video mid:3 sendonly x-ssrc-range:3005-3104` |
+  | audio-only join, session TAKEN | `video port=0 label:applicationsharing-video` |
+  | video sections reserved at the join | `video port=0` ×3, echoed for ever, and no live section at all |
+
+  Three things follow, and the first two are things this app had just been changed to do:
+
+  - **Taking the content-sharing session TAKES THE ROLE off whoever is presenting.** The
+    service grants it — `role = "presenter"` in our own roster entry, `can_stop=true` — and then
+    the sharer's section comes back at port 0. Their screen stops arriving and nothing of ours
+    goes out. A meeting shows ONE screen, `takeControl` is how it changes hands, and this app
+    does not offer that: `call_start_sharing` now refuses while anybody else is sharing, named,
+    and a test pins it.
+  - **Reserving video sections in the join offer poisons the layout.** The service rejects them
+    and from then on echoes the rejected slots instead of adding the live section it adds to an
+    audio-only join. So it cost the RECEIVE path and bought nothing. Reverted: the join offers
+    audio alone, which is the only shape this service has ever answered with a live video
+    section.
+  - **RECEIVING is proven end to end at the protocol level.** The live section is there, at the
+    service's own mid 3, with a 100-wide SSRC range — and this app answered it
+    (`answered a media renegotiation: modalities=["audio", "ScreenViewer"]`).
+
+  **SENDING remains unreachable, and every avenue this machine can reach is now measured and
+  closed**: a client-initiated section is rejected at every mid, in every direction, at the join
+  and mid-call, with the whole of the client's transform and with the presenter session held;
+  and the service never offers a section for us to send on. What is left is the one mechanism
+  the client's own decorator names and this app has never spoken —
+  `StartScreenSharing waitFor: "_UpdateMediaDescriptions"`, the `updateMediaDescriptions` link
+  from `executeNegotiation`'s other branch, which changes media DESCRIPTIONS with no SDP
+  renegotiation at all. That is the next thing to build, and it is the last one.
 - Three specific unknowns remain, and the refusal above narrowed none of them:
   - **Whether a `contentSharing` session is needed at all.** § 10.4 says the client opens one,
     with six links and a presenter. But no participant in the measured roster carried a

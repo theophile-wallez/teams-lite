@@ -306,19 +306,14 @@ export async function startCallMedia(options: CallMediaOptions): Promise<CallMed
       // later. Read from the offer as it arrived, because the labels are what name them.
       senders.adopt(pc, labelsByMid(options.remoteOffer));
     } else {
-      // The sections a capture will need, negotiated NOW while nothing is being sent — on
-      // EVERY call this app places or joins.
+      // AUDIO ALONE, which is the only join this service has ever accepted.
       //
-      // A conference was left out of this at first, on a reading of the client's
-      // `addModalities` that its own capture disproves: § 2.5's is a MEETING join, audio only,
-      // and it carries `a=group:BUNDLE 0 1 … 12` — thirteen sections, twelve of them empty. So
-      // a real client pre-negotiates the layout there too, and the `!isMultiparty` line only
-      // supplies a DEFAULT for a media state the join did not state. Measured against the
-      // tenant: every video section this app added mid-call was rejected — at mid 1, and again
-      // at the service's own mid 3 with the label, the codecs, the SSRC range and the presenter
-      // session all in place. A section the first offer never carried is one this service will
-      // not have.
-      senders.reserve(pc);
+      // Reserving the video sections here was tried against the tenant and it made things
+      // WORSE, in a way that is worth writing down: the service rejected all three and from
+      // then on its own renegotiation offers echoed those rejected slots — `video port=0
+      // label:applicationsharing-video`, no mid — instead of adding the live section it adds
+      // to an audio-only join (§ 10.3a). So pre-negotiating the layout did not buy a send
+      // path and it cost the RECEIVE one.
       await pc.setLocalDescription(await pc.createOffer());
     }
     await waitForIceGathering(pc);
@@ -714,12 +709,6 @@ class LocalSenders {
   }
 
   async start(pc: RTCPeerConnection, kind: SendKind): Promise<void> {
-    // The whole LAYOUT, before the first capture of the call goes out. On a one-to-one this
-    // already happened at the first negotiation; in a conference the client adds no video
-    // section until one is asked for, and this is that moment — so the sections are still
-    // created in the client's own order and the screen still lands on the mid the service
-    // keeps for one.
-    this.reserve(pc);
     const stream = await openCapture(kind);
     // A capture that is starting has not been accepted by anybody yet, even when it takes
     // back a section the far side once agreed to: the direction changed, so the section is

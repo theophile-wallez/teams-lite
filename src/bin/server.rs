@@ -4416,6 +4416,23 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 if call.sharing.is_some() {
                     anyhow::bail!("call_start_sharing: this call already holds a sharing session");
                 }
+                // NEVER take the role from somebody who is presenting. A meeting shows one
+                // screen at a time, and asking for the session while a colleague is sharing
+                // takes it off them: measured 2026-08-06 against a real share, the service
+                // granted us the role and then offered their `applicationsharing-video` section
+                // at PORT 0 — so their screen stopped arriving and nothing of ours went out.
+                // Changing hands is what `takeControl` is for, and this app does not offer it.
+                if let Some(sharer) = call
+                    .roster
+                    .iter()
+                    .find(|member| member.streams.iter().any(calling::RosterStream::is_shared_screen))
+                {
+                    anyhow::bail!(
+                        "call_start_sharing: {} is sharing their screen — a meeting shows one at \
+                         a time, and taking it from them is not something this app does",
+                        sharer.display_name
+                    );
+                }
                 let url = call.links.add_modality().map(str::to_string).context(
                     "call_start_sharing: this call has no addModality link — the service names \
                      it on the conversation",
@@ -10691,6 +10708,13 @@ mod tests {
         assert!(
             stop.contains("content_sharing_leave_payload"),
             "a share that cannot be given back is not one this app would start"
+        );
+        // And it never takes the role off somebody who is presenting. Measured against a real
+        // share: the service granted us the role and then offered THEIR screen at port 0, so
+        // their picture stopped and nothing of ours went out.
+        assert!(
+            start.contains("is_shared_screen"),
+            "a share must not take the presenter role from a colleague who holds it"
         );
     }
 
