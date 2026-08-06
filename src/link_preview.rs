@@ -123,7 +123,7 @@ mod tests {
             reference: String::new(),
             state: None,
             draft: None,
-            author_name: None,
+            author: None,
             source_branch: None,
             target_branch: None,
             labels: Vec::new(),

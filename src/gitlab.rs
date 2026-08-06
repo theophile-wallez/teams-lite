@@ -42,6 +42,41 @@ pub enum Resource {
     Project { project_path: String },
 }
 
+/// One person GitLab names — the author of a merge request, a reviewer, whoever wrote a
+/// comment or approved one.
+///
+/// **It lives here because every GitLab surface in this app names people**: the preview CARD
+/// (this module), the merge-request PAGE ([`crate::gitlab_mr`], which re-exports this type)
+/// and an approval ([`crate::gitlab_approval`]). One shape is what lets one rule name them
+/// all — a person is an object carrying a `name` and a `username`, which is what
+/// [`crate::gitlab_people::annotate`] matches to the user's own Teams on the way out.
+///
+/// `avatar_url` is GitLab's own and **nothing fetches it**: no request is ever made to the
+/// instance for a picture, so displaying a card or a page costs the GitLab host nothing — the
+/// same guarantee `mail_html` gives a mail body. It travels because it is what GitLab said; a
+/// bare `<img src>` would not do, since an avatar on a private instance answers 401 without a
+/// session and a broken picture is worse than initials. The face the app really draws is the
+/// TEAMS one, when this person is somebody the user's own Teams knows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Person {
+    pub name: String,
+    pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+/// One person from a GitLab user object. A missing display name falls back to the handle,
+/// never to a blank: a row showing nobody is a row nobody can read.
+pub fn person(value: Option<&serde_json::Value>) -> Person {
+    let value = value.cloned().unwrap_or(serde_json::Value::Null);
+    let username = str_field(&value, "username").unwrap_or_default();
+    Person {
+        name: str_field(&value, "name").unwrap_or_else(|| username.clone()),
+        username,
+        avatar_url: str_field(&value, "avatar_url"),
+    }
+}
+
 /// Structured metadata for one GitLab resource, serialized to the UI. Optional
 /// fields are omitted from the JSON when absent so the wire stays compact and the
 /// TypeScript mirror can treat every optional as truly optional.
@@ -61,8 +96,12 @@ pub struct LinkMetadata {
     pub state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft: Option<bool>,
+    /// Who opened this merge request or issue. A PERSON rather than a bare name, so the card
+    /// draws the colleague the user knows — their Teams face and the name this app calls them
+    /// — exactly as the merge-request page does (see [`crate::gitlab_people`]). `None` for a
+    /// project, which has no author.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub author_name: Option<String>,
+    pub author: Option<Person>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -331,7 +370,7 @@ fn build_metadata(
                 .get("draft")
                 .and_then(serde_json::Value::as_bool)
                 .or_else(|| body.get("work_in_progress").and_then(serde_json::Value::as_bool)),
-            author_name: nested_str(body, "author", "name"),
+            author: body.get("author").filter(|v| !v.is_null()).map(|v| person(Some(v))),
             source_branch: str_field(body, "source_branch"),
             target_branch: str_field(body, "target_branch"),
             labels: labels_field(body),
@@ -349,7 +388,7 @@ fn build_metadata(
             reference: nested_str(body, "references", "short").unwrap_or_else(|| format!("#{iid}")),
             state: str_field(body, "state"),
             draft: None,
-            author_name: nested_str(body, "author", "name"),
+            author: body.get("author").filter(|v| !v.is_null()).map(|v| person(Some(v))),
             source_branch: None,
             target_branch: None,
             labels: labels_field(body),
@@ -370,7 +409,7 @@ fn build_metadata(
             reference: String::new(),
             state: None,
             draft: None,
-            author_name: None,
+            author: None,
             source_branch: None,
             target_branch: None,
             labels: Vec::new(),
@@ -592,7 +631,7 @@ mod tests {
             "web_url": "https://gitlab.com/group/project/-/merge_requests/42",
             "source_branch": "feat/links",
             "target_branch": "main",
-            "author": { "name": "Ada Lovelace" },
+            "author": { "name": "Ada Lovelace", "username": "ada" },
             "references": { "short": "!42" },
             "labels": ["frontend", "enhancement"],
             "milestone": { "title": "v1.0" },
@@ -611,7 +650,11 @@ mod tests {
         assert_eq!(meta.reference, "!42");
         assert_eq!(meta.source_branch.as_deref(), Some("feat/links"));
         assert_eq!(meta.target_branch.as_deref(), Some("main"));
-        assert_eq!(meta.author_name.as_deref(), Some("Ada Lovelace"));
+        let author = meta.author.as_ref().expect("the card names its author");
+        assert_eq!(author.name, "Ada Lovelace");
+        // The handle travels with the name: it is half of what matches this person to a
+        // colleague in the user's own Teams, and it is how they are found on the instance.
+        assert_eq!(author.username, "ada");
         assert_eq!(meta.labels, vec!["frontend", "enhancement"]);
         assert_eq!(meta.milestone.as_deref(), Some("v1.0"));
         assert_eq!(meta.pipeline_status.as_deref(), Some("running"));

@@ -544,7 +544,10 @@ The app reads the user's Teams/Outlook calendar over Microsoft Graph
 
 The app enriches a tracker link pasted into a chat into a rich preview card
 (`src/link_preview.rs`, over `src/gitlab.rs` and `src/linear.rs`), and it holds a whole
-merge-request page (§ The GitLab page). It reads those trackers. It writes **five** things
+merge-request page (§ The GitLab page). A GitLab card names its author as the colleague this
+app already knows — their Teams face and the name the user gave them — which is
+§ A GitLab user who is also a colleague, applied to the surface most merge requests are met
+on. It reads those trackers. It writes **five** things
 to GitLab and nothing else, ever — a merge request's approval (described at the end of this
 section) plus the page's merge, comment, comment deletion and close — and each one happens
 on a click the user just made, never on its own.
@@ -711,6 +714,15 @@ person — `src/gitlab_people.rs` decides who somebody is, `with_teams_people` i
 `src/bin/server.rs` puts the answer on every payload the page gets, and `personFace` in
 `web/src/lib/gitlab-mr.ts` is the one place the surface reads it.
 
+**It covers the preview CARD in a chat too**, not only the page: a merge request pasted into a
+thread names its author, and that author is the same colleague. The card is where most people
+meet a merge request in this app, so a face there is the point rather than a decoration — one
+`gitlab::Person` is what makes it one rule (see `CardAuthor` in
+`web/src/components/gitlab-link-card.tsx`, and the shared type below). **The LINEAR card is
+not covered**: its people (`assignee_name`, `lead_name`, `creator_name`) are still bare names
+joined into one context line, so giving them a face is a layout decision nobody has made. The
+match itself would work — Linear's `assignee { name displayName }` is the same real-name pair.
+
 **The match is MEASURED, by `examples/gitlab_teams_people_recon.rs`** — READ-ONLY, over the
 merge requests the token can see and the store's own people. Measured 2026-08-06 on
 `git.sia.partners` against 12 603 stored messages naming 294 people: of the 26 people named on
@@ -737,13 +749,15 @@ Seven rules hold it, and each is pinned by a test:
   words (§ Performance); the identity is local and current, so freezing it on disk would
   outlive a rename. That is also why a rename re-reads the page from the backend's cache and
   asks GitLab nothing (`rereadGitLabPeople`).
-- **One walk reaches every person.** A person is an object carrying both a `name` and a
-  `username` — `gitlab_mr::Person` and nothing else in these payloads — so a row's author, a
-  merge request's reviewers, every comment's author and whoever APPROVED are covered by one
-  rule, and a field added later is covered too. A CI job has a name and no handle, and is left
-  alone. That is why `Approval.approved_by` carries people rather than the bare names it used
-  to: one shape means one rule, and the sentence "Approved by …" would otherwise be the one
-  place on this page that still names a renamed colleague by their old name.
+- **One walk reaches every person, because there is ONE person type.** `gitlab::Person` lives
+  in the base module — the card's, the page's and an approval's people are all it — and the
+  walk keys on its shape: an object carrying both a `name` and a `username`. So a row's author,
+  a merge request's reviewers, every comment's author, whoever APPROVED and a card's author are
+  covered by one rule, and a field added later is covered too. A CI job has a name and no
+  handle, and is left alone. That is why `Approval.approved_by` and `LinkMetadata.author` carry
+  people rather than the bare names they used to: one shape means one rule, and the sentence
+  "Approved by …" would otherwise be the one place on this page that still names a renamed
+  colleague by their old name.
 - **A stale identity is REPLACED rather than kept**, so a payload that carried one from an
   earlier pass can never show a colleague under a name they no longer have.
 - **The roster is cached for a minute** (`TEAMS_PEOPLE_TTL`), because building it reads every

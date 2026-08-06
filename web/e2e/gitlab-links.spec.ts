@@ -82,6 +82,34 @@ test.describe("GitLab rich link previews", () => {
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 
+  test("names the author as the colleague the app knows, with their face", async ({
+    page,
+    consoleErrors,
+  }) => {
+    await gotoApp(page);
+    await openByPalette(page, "GitLab Links");
+
+    // A merge request opened by somebody this app's own Teams knows: the card draws the
+    // colleague — their real face, through the backend like every other avatar here — rather
+    // than a bare name (see § A GitLab user who is also a colleague in AGENTS.md).
+    const mr = page.locator(
+      '[data-testid="gitlab-link-card"][href="https://gitlab.com/acme/webapp/-/merge_requests/42"]',
+    );
+    const author = mr.locator('[data-testid="gitlab-card-author"]');
+    await expect(author).toHaveAttribute("data-author", "Mia Chen");
+    await expect(author.locator("img[data-picture='face']")).toBeVisible();
+
+    // And an author only GitLab knows keeps GitLab's own name, over initials: nothing is ever
+    // fetched from the instance for a picture.
+    const issue = page
+      .locator('[data-testid="gitlab-link-card"][href*="/-/issues/7"]')
+      .locator('[data-testid="gitlab-card-author"]');
+    await expect(issue).toHaveAttribute("data-author", "Grace Hopper");
+    await expect(issue.locator("img")).toHaveCount(0);
+
+    expect(realErrors(consoleErrors)).toEqual([]);
+  });
+
   test("shows a link-only message as just the card, without a bubble", async ({ page }) => {
     await gotoApp(page);
     await openByPalette(page, "GitLab Links");

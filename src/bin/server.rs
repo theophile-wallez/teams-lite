@@ -4542,7 +4542,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 link_preview_settings(&store)?
             };
             let metadata = link_preview::enrich(&ctx.http, &settings, &url).await?;
-            Ok(json!({ "metadata": metadata }))
+            // A card names people too — a merge request's author, an issue's — so it names
+            // them the way the GitLab page does: the colleague this app knows, with their
+            // Teams face. Nothing is cached here, so there is nothing to keep current.
+            let mut answer = json!({ "metadata": metadata });
+            with_teams_people(ctx, &mut answer);
+            Ok(answer)
         }
 
         // The approval state of one merge request: who has approved it, how many
@@ -11599,8 +11604,9 @@ mod lifecycle_tests {
                  GitLab's own name for a colleague this app already knows."
             );
         }
-        // And the three answers that carry people without going through those two.
+        // And the four answers that carry people without going through those two.
         for (arm, anchor) in [
+            ("\"enrich_link\" =>", "link_preview::enrich"),
             ("\"gitlab_approvals\" =>", "gitlab_approval::fetch"),
             ("\"gitlab_set_approval\" =>", "gitlab_approval::set"),
             ("\"gitlab_mr_comment\" =>", "gitlab_mr_write::comment"),

@@ -43,7 +43,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::gitlab::{self, Resource};
+use crate::gitlab::{self, person, Resource};
 
 /// How long to wait on the GitLab API. Longer than the 8 s enrichment timeout: this is a
 /// page the user opened and is looking at, not a card that may quietly stay a link.
@@ -211,26 +211,14 @@ pub struct MergeRequestList {
     pub truncated: bool,
 }
 
-/// One person GitLab names.
+/// One person GitLab names, and who they are in Teams when this app knows them.
 ///
-/// `avatar_url` is GitLab's own, and **nothing fetches it**: no request is ever made to the
-/// instance for a picture, so displaying a merge request costs the GitLab host nothing — the
-/// same guarantee `mail_html` gives a mail body. It travels because it is what GitLab said;
-/// a bare `<img src>` would not do, since an avatar on a private instance answers 401
-/// without a session and a broken picture is worse than initials.
-///
-/// **The face the page really draws is TEAMS'**, when this person is somebody the user's own
-/// Teams knows: the answer that leaves the backend carries one more field, `teams`, naming
-/// them (see [`crate::gitlab_people`], and `with_teams_people` in src/bin/server.rs). It is
-/// added on the way OUT rather than parsed in here, because it is local, current, and must
-/// never be frozen into the response cache this module's reads are stored in.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Person {
-    pub name: String,
-    pub username: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub avatar_url: Option<String>,
-}
+/// Re-exported from [`crate::gitlab`], where it lives because the preview CARD names people
+/// too: one shape across every GitLab surface is what lets one rule name them all. The `teams`
+/// field the page reads is added to the ANSWER rather than parsed here — see
+/// [`crate::gitlab_people`] and `with_teams_people` in src/bin/server.rs — because it is
+/// local, current, and must never be frozen into the response cache these reads are stored in.
+pub use crate::gitlab::Person;
 
 /// One merge request in full, as the page's header and sidebar panels need it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -697,18 +685,6 @@ fn labels_field(value: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// One person from a GitLab user object. A missing display name falls back to the handle,
-/// never to a blank: a row showing nobody is a row nobody can read.
-fn person(value: Option<&serde_json::Value>) -> Person {
-    let value = value.cloned().unwrap_or(serde_json::Value::Null);
-    let username = str_field(&value, "username").unwrap_or_default();
-    Person {
-        name: str_field(&value, "name").unwrap_or_else(|| username.clone()),
-        username,
-        avatar_url: str_field(&value, "avatar_url"),
-    }
 }
 
 fn people(value: &serde_json::Value, key: &str) -> Vec<Person> {

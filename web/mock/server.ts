@@ -3510,7 +3510,12 @@ function mockGitLabMetadata(url: string): Record<string, unknown> | null {
       reference: `!${iid}`,
       state,
       draft: iid % 5 === 0,
-      author_name: long ? "Clément DELBARRE" : "Ada Lovelace",
+      // Colleagues this mock's Teams also knows, so a card is reviewable with a real face on
+      // it — while the ISSUE card below keeps somebody only GitLab knows, which is the other
+      // shape (see `withMockTeamsPeople`).
+      author: long
+        ? { name: "Charlotte Dubois", username: "charlotte.dubois" }
+        : { name: "Mia Chen", username: "mia.chen" },
       source_branch: long ? "feature/error-handling-and-test" : "feat/gitlab-rich-links",
       target_branch: long ? "master" : "main",
       labels: ["frontend", "enhancement"],
@@ -3529,7 +3534,7 @@ function mockGitLabMetadata(url: string): Record<string, unknown> | null {
       project_path,
       reference: `#${iid}`,
       state: iid % 2 === 0 ? "closed" : "opened",
-      author_name: "Grace Hopper",
+      author: { name: "Grace Hopper", username: "grace" },
       labels: ["bug"],
       description: "A bare URL is hard to scan; show the target's title and status inline.",
     };
@@ -6185,7 +6190,10 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     // Each provider claims its own host, exactly as `link_preview::enrich` does.
     case "enrich_link": {
       const url = requireString(params, "url");
-      return { metadata: mockGitLabMetadata(url) ?? mockLinearMetadata(url) };
+      // A card names people too, so it goes through the same walk the page's answers do.
+      return withMockTeamsPeople({
+        metadata: mockGitLabMetadata(url) ?? mockLinearMetadata(url),
+      });
     }
 
     // Who has approved a merge request. A read, ungated like `enrich_link`.

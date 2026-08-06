@@ -818,7 +818,10 @@ export type GitLabLinkMetadata = {
   reference: string;
   state?: string;
   draft?: boolean;
-  author_name?: string;
+  /** Who opened it — a person the backend may have matched to a colleague in the user's own
+   *  Teams, so the card draws them the way the merge-request page does (`personFace`).
+   *  Absent on a project, which has no author. */
+  author?: GitLabPerson;
   source_branch?: string;
   target_branch?: string;
   labels?: string[];

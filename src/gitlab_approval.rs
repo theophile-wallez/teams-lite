@@ -34,7 +34,6 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::gitlab::{self, Resource};
-use crate::gitlab_mr;
 
 /// How long to wait on the GitLab API. Longer than the enrichment timeout: this is one
 /// action the user is watching the outcome of, not a card that may quietly stay a link.
@@ -61,13 +60,13 @@ pub struct Approval {
     pub approvals_left: Option<u64>,
     /// The people who have approved, in GitLab's own order.
     ///
-    /// [`gitlab_mr::Person`] rather than a bare name, because this page names a colleague the
+    /// [`gitlab::Person`] rather than a bare name, because this page names a colleague the
     /// way the whole app names them: a person carrying a `name` and a `username` is what
     /// [`crate::gitlab_people::annotate`] matches to the user's own Teams, and one shape here
     /// means one rule there (see AGENTS.md § A GitLab user who is also a colleague). Which of
     /// the two words a reader sees is the surface's decision (`personFace`), never this one's.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub approved_by: Vec<gitlab_mr::Person>,
+    pub approved_by: Vec<gitlab::Person>,
     /// Whether the user's OWN account is among them — matched on GitLab's user id, so a
     /// colleague sharing a display name can never be mistaken for them. `false` when
     /// there is no token to identify the account with.
@@ -270,23 +269,16 @@ fn approver_ids(body: &serde_json::Value) -> Vec<u64> {
 /// The people on an approval body, in GitLab's order, dropping the ones it names neither
 /// way. Both words travel: a display name is what a reader reads, and a handle is what is
 /// left when GitLab holds no name — and the pair is what matches this person to a colleague.
-fn approvers(body: &serde_json::Value) -> Vec<gitlab_mr::Person> {
+fn approvers(body: &serde_json::Value) -> Vec<gitlab::Person> {
     body.get("approved_by")
         .and_then(serde_json::Value::as_array)
         .map(|entries| {
             entries
                 .iter()
                 .filter_map(|entry| {
-                    let user = entry.get("user").unwrap_or(entry);
-                    let field = |key: &str| {
-                        user.get(key).and_then(serde_json::Value::as_str).unwrap_or_default()
-                    };
-                    let person = gitlab_mr::Person {
-                        name: field("name").to_string(),
-                        username: field("username").to_string(),
-                        avatar_url: None,
-                    };
-                    (!person.name.is_empty() || !person.username.is_empty()).then_some(person)
+                    // GitLab wraps an approver in `user` on some editions and not on others.
+                    let who = gitlab::person(Some(entry.get("user").unwrap_or(entry)));
+                    (!who.name.is_empty()).then_some(who)
                 })
                 .collect()
         })
@@ -463,12 +455,14 @@ mod tests {
         assert_eq!(
             state.approved_by,
             vec![
-                gitlab_mr::Person {
+                gitlab::Person {
                     name: "Ada Lovelace".into(),
                     username: "ada".into(),
                     avatar_url: None,
                 },
-                gitlab_mr::Person { name: String::new(), username: "grace".into(), avatar_url: None },
+                // A missing display name falls back to the handle rather than to a blank
+                // row, which is `gitlab::person`'s own rule for every surface.
+                gitlab::Person { name: "grace".into(), username: "grace".into(), avatar_url: None },
             ]
         );
         assert!(build_approval(1, &serde_json::json!({ "approved_by": [{ "user": {} }] }), None)
