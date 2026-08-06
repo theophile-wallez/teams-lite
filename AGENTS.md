@@ -1153,7 +1153,12 @@ joins alone and waits for an offer. Six rules hold it together, and
   is stopped", as the report of a click that had worked. And the capture behind it is
   RELEASED, down the same path the browser's own "Stop sharing" takes: a camera whose light
   stays on under a button that says the meeting can see it, while nothing is sent, is the
-  mirror of the failure that path already exists for.
+  mirror of the failure that path already exists for. The two are told apart
+  (`SendingEndedReason`), because a drop is SAID — one sentence, and the one action left
+  (`captureDroppedMessage`) — while the browser's own bar is not: the user pressed that
+  themselves. The mock takes a capture away by REJECTING its section (a zero port, which is
+  how the service says one is gone — `rejectedLabels`, read by the stand-in that has no
+  transceivers), so the whole reaction is pinned by `web/e2e/calling.spec.ts` with no tenant.
 - **A failure here NEVER ends the call.** Audio is already up and untouched, so a
   renegotiation that cannot be answered or a subscription the service refuses costs one tile
   — and the service offers again. Ending a working call because a screen could not be drawn

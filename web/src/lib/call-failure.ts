@@ -9,7 +9,7 @@
 //
 // Pure, so every sentence is unit-tested with no backend and no browser.
 
-import { MicrophoneUnavailableError } from "./call-media";
+import { MicrophoneUnavailableError, type SendKind } from "./call-media";
 
 /** One short sentence for a call, a join, or a capture that did not happen.
  *
@@ -52,6 +52,20 @@ export function callFailureMessage(error: unknown): string {
   // the user pressed a button and something did not happen. It covers a call, a join and a
   // capture, so it names none of them.
   return withoutMethodName(raw) || "That did not happen, and nothing said why.";
+}
+
+/**
+ * What to say when the MEETING dropped a capture the user had turned on.
+ *
+ * There is no error here and nothing was refused: the section was accepted and then rejected,
+ * so the picture stops and the button goes off with no click behind it. Said because a camera
+ * that switches itself off in silence reads as this app losing the user's input — and it names
+ * the one thing left to do, which is to turn it on again.
+ */
+export function captureDroppedMessage(kind: SendKind): string {
+  return kind === "camera"
+    ? "The meeting dropped your camera, so it is off. Turn it on again."
+    : "The meeting dropped your screen share, so it stopped. Share it again.";
 }
 
 /** The words an error carries, whatever shape it arrived in. Browser WebSocket and DOM

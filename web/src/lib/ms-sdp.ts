@@ -75,6 +75,34 @@ export function labelsByMid(sdp: string): Map<string, string> {
 }
 
 /**
+ * The labels of the sections an SDP REJECTS — the ones whose `m=` line carries port 0.
+ *
+ * That is how the far side says a section is gone: it answers, or offers, with the section
+ * still written down and its port zeroed. The browser reads it and STOPS the transceiver, so
+ * the live path never needs this (it asks the transceiver, which is the authoritative
+ * answer). What needs it is the simulated media, which has no transceivers at all and is the
+ * only place that failure can be reviewed with nothing leaving the machine.
+ */
+export function rejectedLabels(sdp: string): Set<string> {
+  const out = new Set<string>();
+  let rejected = false;
+  let label: string | null = null;
+  const flush = () => {
+    if (rejected && label) out.add(label);
+    label = null;
+  };
+  for (const line of splitLines(sdp).lines) {
+    if (line.startsWith("m=")) {
+      flush();
+      // `m=<kind> <port> <profile> …` — a zero port is the rejection.
+      rejected = line.split(" ")[1] === "0";
+    } else if (line.startsWith("a=label:")) label = line.slice("a=label:".length).trim();
+  }
+  flush();
+  return out;
+}
+
+/**
  * How the two sides spell an ICE-TCP candidate's role — the client's own
  * `tcpTypeMapping`, verbatim.
  *

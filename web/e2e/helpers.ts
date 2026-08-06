@@ -270,6 +270,22 @@ export async function refuseNextCallMedia(page: Page): Promise<void> {
   expect(res.ok()).toBeTruthy();
 }
 
+/**
+ * Have the MEETING drop a capture the page is sending, the way the service does it: one
+ * offer that rejects the section.
+ *
+ * It arms nothing — the drop happens on the live call at once — so there is nothing for a
+ * later spec to inherit. What it exercises is the state the page is left in: the capture
+ * released, the button off, and one sentence saying why, because nothing else on the page
+ * would tell the user their camera stopped.
+ */
+export async function dropCallCapture(page: Page, kind: "camera" | "screen"): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_media", drop: kind },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Arm (or clear) a pending update in the mock, through its gated test hook; the mock
  *  then broadcasts `update_available`, mirroring the Rust backend's own event.
  *

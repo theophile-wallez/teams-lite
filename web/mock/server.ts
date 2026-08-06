@@ -3248,6 +3248,39 @@ const MOCK_RENEGOTIATION_OFFER = [
   "",
 ].join("\r\n");
 
+/**
+ * An offer that DROPS one of the sections this page is sending, by rejecting it — the
+ * section still written down, its port zeroed, which is how the far side says a section is
+ * gone. Against a real tenant the browser reads that and stops the transceiver; the
+ * simulated media has none and reads the label instead.
+ *
+ * Sent by the `{kind:"call_media", drop:"camera"|"screen"}` test hook. It is the only way to
+ * review what the app does when the meeting takes a capture away: the page's own simulated
+ * camera is never dropped, and the service that would drop one is a real tenant.
+ */
+function mockSectionDropOffer(label: string): string {
+  return [
+    "v=0",
+    "o=- 0 0 IN IP4 127.0.0.1",
+    "s=teams-lite-mock-drop",
+    "t=0 0",
+    "m=audio 3478 RTP/SAVP 111",
+    "c=IN IP4 0.0.0.0",
+    "a=rtpmap:111 opus/48000/2",
+    "a=mid:0",
+    "a=label:main-audio",
+    "a=sendrecv",
+    // Port 0: the rejection. The mid is the one the page's own section was given.
+    "m=video 0 RTP/SAVP 107",
+    "c=IN IP4 0.0.0.0",
+    "a=rtpmap:107 H264/90000",
+    "a=mid:2",
+    `a=label:${label}`,
+    "a=inactive",
+    "",
+  ].join("\r\n");
+}
+
 /** Off, exactly like a fresh Rust store: turning it on is the consent, so a spec has to
  *  perform that step rather than find it already done. */
 let mockCallingEnabled = false;
@@ -6190,6 +6223,19 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     if (body.kind === "call_media" && body.refuse === true) {
       mockRefusesNextMedia = true;
       return Response.json({ ok: true, refuse: true }, { status: 200 });
+    }
+    // Take a capture AWAY from the page, the way the service does it: one offer that rejects
+    // the section. Nothing is armed — the drop happens now, on the live call — so there is
+    // nothing for a later spec to inherit.
+    if (body.kind === "call_media" && typeof body.drop === "string") {
+      if (!mockCall) return Response.json({ ok: false, error: "no call" }, { status: 409 });
+      const label = body.drop === "screen" ? "applicationsharing-video" : "main-video";
+      broadcast("call_media", {
+        call_id: mockCall.id,
+        sdp: mockSectionDropOffer(label),
+        kind: "offer",
+      });
+      return Response.json({ ok: true, drop: body.drop }, { status: 200 });
     }
     if (body.kind === "call_invite") {
       if (body.reset === true) {

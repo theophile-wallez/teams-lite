@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import {
   calendarEvent,
+  dropCallCapture,
   emitCallInvite,
   gotoApp,
   openCalendarTab,
@@ -555,6 +556,53 @@ test.describe("Joining a meeting", () => {
     await expect(page.locator('[data-testid="call-video-local"]')).toHaveCount(0);
 
     // And the click after it works: ONE refusal, so the surface is seen recovering.
+    await camera.click();
+    await expect(camera).toHaveAttribute("aria-pressed", "true");
+    await page.locator('[data-testid="call-hangup"]').first().click();
+  });
+
+  /**
+   * A capture the MEETING takes away, mid-call. It is the mirror of the refusal above: the
+   * click worked, the picture went out, and then the service dropped the section — and it is
+   * the failure nothing on the page would otherwise report, because all the user sees is
+   * their own preview stopping.
+   *
+   * It reached a real user as the browser's own sentence, "The transceiver is stopped", the
+   * next time they switched the camera OFF — a report of a click that had worked, about an
+   * object they have never heard of.
+   */
+  test("releases a capture the meeting dropped, and says why it went off", async ({ page }) => {
+    await page.goto("/");
+    await turnCallingOn(page);
+    await page.goBack();
+    await expect(page.locator('[data-testid="settings-pane"]')).toHaveCount(0);
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+    await calendarEvent(page, "ev-overlap-a").click();
+    await page.locator('[data-testid="meeting-join-here"]').click();
+
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    const camera = page.locator('[data-testid="call-camera"]');
+    await camera.click();
+    await expect(camera).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator('[data-testid="call-video-local"]')).toHaveCount(1);
+
+    await dropCallCapture(page, "camera");
+
+    // RELEASED, without a click: a camera whose light is on with nowhere to send, under a
+    // button that says the meeting can see it, is the worst shape this surface has.
+    await expect(camera).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator('[data-testid="call-video-local"]')).toHaveCount(0);
+    // And SAID, because nothing else here would tell them — with the one action left.
+    const notice = page.locator('[data-testid="call-notice"]');
+    await expect(notice).toContainText("dropped your camera");
+    await expect(notice).toContainText("Turn it on again");
+    // In the user's own words: no transceiver, no SDP, no RPC name.
+    await expect(notice).not.toContainText("transceiver");
+
+    // The meeting is untouched, and the camera goes back on — the section is gone, not broken.
+    await expect(stage).toHaveAttribute("data-phase", "connected");
     await camera.click();
     await expect(camera).toHaveAttribute("aria-pressed", "true");
     await page.locator('[data-testid="call-hangup"]').first().click();

@@ -100,7 +100,7 @@ import {
   type RemoteVideo,
   type SendKind,
 } from "./call-media";
-import { callFailureMessage } from "./call-failure";
+import { callFailureMessage, captureDroppedMessage } from "./call-failure";
 import { CALL_NOTICE, dismissNotice, showNotice } from "./notice";
 import { coalesce } from "./singleflight";
 import {
@@ -1575,30 +1575,35 @@ export class TeamsController {
     iceServers: RTCIceServer[];
     remoteOffer?: string;
   }): Promise<CallMedia> {
-    if (this.get().backendIsMock) {
-      const mock = simulatedCallMedia();
-      mock.onRemoteVideoChange = (videos) => this.set({ callVideo: videos });
-      mock.onLocalVideoChange = (videos) => this.set({ callLocalVideo: [...videos] });
-      return mock;
-    }
-    const media = await startCallMedia({
-      iceServers: options.iceServers,
-      remoteOffer: options.remoteOffer,
-      onConnectionStateChange: (state) => {
-        if (state === "failed") {
-          console.error("[call] the media transport failed");
-          void this.hangUpCall();
-        }
-      },
-    });
+    // Every callback below is wired ONCE, for the stand-in as much as for the real thing: the
+    // mock is where this surface is reviewed, and a bridge the mock path skipped is a rule no
+    // spec could ever hold the app to.
+    const media = this.get().backendIsMock
+      ? simulatedCallMedia()
+      : await startCallMedia({
+          iceServers: options.iceServers,
+          remoteOffer: options.remoteOffer,
+          onConnectionStateChange: (state) => {
+            if (state === "failed") {
+              console.error("[call] the media transport failed");
+              void this.hangUpCall();
+            }
+          },
+        });
     // The tiles are reactive state; the connection behind them is not. This is the one
     // bridge between the two, and it is set before anything can arrive on it.
     media.onRemoteVideoChange = (videos) => this.set({ callVideo: videos });
     media.onLocalVideoChange = (videos) => this.set({ callLocalVideo: [...videos] });
-    // The BROWSER's own "Stop sharing" bar. It ends the track and tells this app nothing
-    // else, so the service has to be told from here or the meeting keeps a section that
-    // carries no picture while the button still says on.
-    media.onSendingEnded = (kind, offer) => void this.publishSending(offer, `stop ${kind}`);
+    // A capture that ended with no click of ours: the BROWSER's own "Stop sharing" bar, or a
+    // section the MEETING dropped. Either way the service has to be told from here, or it
+    // keeps a section that carries no picture while the button still says on.
+    media.onSendingEnded = (kind, offer, reason) => {
+      // The dropped one is the one the user has to be told about: they turned the capture on,
+      // nothing here took it off, and the picture stopping is all they would otherwise see.
+      // The browser's own bar needs no word — they pressed it themselves.
+      if (reason === "dropped") this.reportCall(captureDroppedMessage(kind), "error");
+      void this.publishSending(offer, `stop ${kind}`);
+    };
     return media;
   }
 

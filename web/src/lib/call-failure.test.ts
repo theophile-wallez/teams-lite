@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { callFailureMessage } from "./call-failure";
+import { callFailureMessage, captureDroppedMessage } from "./call-failure";
 import { MicrophoneUnavailableError } from "./call-media";
 
 // What the user is told when a call, a join or a capture did not happen. The rule is the
@@ -94,5 +94,25 @@ describe("callFailureMessage", () => {
     // A browser WebSocket failure arrives as an Event, which stringifies to "[object Event]".
     expect(callFailureMessage(new Event("error"))).toBe("connection error");
     expect(callFailureMessage({})).toBe("unknown error");
+  });
+});
+
+describe("captureDroppedMessage", () => {
+  it("names the capture and the one action left", () => {
+    // Not a failure of anything the user did: the meeting accepted the section and then
+    // dropped it, so the picture stops with no click behind it. A camera that switches
+    // itself off in silence reads as this app losing their input.
+    expect(captureDroppedMessage("camera")).toMatch(/dropped your camera/);
+    expect(captureDroppedMessage("camera")).toMatch(/Turn it on again/);
+    expect(captureDroppedMessage("screen")).toMatch(/screen share/);
+    expect(captureDroppedMessage("screen")).toMatch(/Share it again/);
+  });
+
+  it("hands the user no word written for whoever holds the socket", () => {
+    // The rule this whole module exists for. "The transceiver is stopped" is what the
+    // browser says, and it reached a real user as the outcome of switching a camera off.
+    for (const kind of ["camera", "screen"] as const) {
+      expect(captureDroppedMessage(kind)).not.toMatch(/transceiver|sdp|section|m-line/i);
+    }
   });
 });

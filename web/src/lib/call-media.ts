@@ -34,7 +34,7 @@
  * nothing leaving the machine.
  */
 
-import { fromMsSdp, labelsByMid, SHARING_LABEL, toMsSdp } from "./ms-sdp";
+import { fromMsSdp, labelsByMid, rejectedLabels, SHARING_LABEL, toMsSdp } from "./ms-sdp";
 
 /** How long to wait for ICE gathering before sending what we have. Chrome finishes a
  *  host+srflx gather in well under a second; the wait only bites when a configured
@@ -64,6 +64,18 @@ export type RemoteVideo = {
 
 /** The two things this app can send beyond a microphone. */
 export type SendKind = "camera" | "screen";
+
+/**
+ * Why a capture ended without this app asking. The two are told apart because one of them
+ * has to be EXPLAINED and the other must not be.
+ */
+export type SendingEndedReason =
+  /** The browser's own "Stop sharing" bar. The user pressed it, so there is nothing to say:
+   *  a notice here would report their own click back to them. */
+  | "browser"
+  /** The far side DROPPED the section. The user turned the capture on, nothing on this page
+   *  took it off, and the only thing that can tell them is a sentence. */
+  | "dropped";
 
 /** What one of those looks like locally, for the preview the sender sees. */
 export type LocalVideo = {
@@ -124,13 +136,15 @@ export type CallMedia = {
    *  share from its own bar, which no click of ours would report. */
   onLocalVideoChange?: (videos: LocalVideo[]) => void;
   /**
-   * Called when a capture ended WITHOUT this app asking — the browser's own "Stop sharing".
+   * Called when a capture ended WITHOUT this app asking — the browser's own "Stop sharing",
+   * or a section the far side dropped.
    *
    * `offer` is the renegotiation that takes the section down, for the caller to post. It
    * exists because only the caller can reach the backend, and the service has to be told or
-   * the meeting keeps a section that carries nothing.
+   * the meeting keeps a section that carries nothing. `reason` decides whether the user is
+   * told anything at all (see {@link SendingEndedReason}).
    */
-  onSendingEnded?: (kind: SendKind, offer: string | null) => void;
+  onSendingEnded?: (kind: SendKind, offer: string | null, reason: SendingEndedReason) => void;
 };
 
 /** What starting media needs. `remoteOffer` is present when answering a call. */
@@ -675,7 +689,7 @@ function liveCallMedia(
    */
   function releaseDroppedSections(): void {
     for (const kind of senders.stoppedKinds()) {
-      void media.stopSending(kind).then((offer) => media.onSendingEnded?.(kind, offer));
+      void media.stopSending(kind).then((offer) => media.onSendingEnded?.(kind, offer, "dropped"));
     }
   }
 
@@ -685,7 +699,7 @@ function liveCallMedia(
   // notice, take the section down and tell the service, or the meeting keeps a section that
   // carries nothing while the button still says on.
   senders.onEndedByBrowser = (kind) => {
-    void media.stopSending(kind).then((offer) => media.onSendingEnded?.(kind, offer));
+    void media.stopSending(kind).then((offer) => media.onSendingEnded?.(kind, offer, "browser"));
   };
   return media;
 }
@@ -709,12 +723,24 @@ export function simulatedCallMedia(): CallMedia {
     // tenant, no camera and no permission prompt.
     async answerRemoteOffer(sdp: string): Promise<string | null> {
       if (stopped) return null;
+      // A section this side is SENDING can be dropped by the offer too, and against a real
+      // tenant the browser reports that by stopping the transceiver. There is none here, so
+      // the stand-in reads the same fact off the wire: a rejected section, by its label.
+      const rejected = rejectedLabels(sdp);
+      for (const kind of ["camera", "screen"] as const) {
+        if (!rejected.has(SEND_LABELS[kind])) continue;
+        if (!media.localVideo.some((video) => video.kind === kind)) continue;
+        void media.stopSending(kind).then((offer) => media.onSendingEnded?.(kind, offer, "dropped"));
+      }
       for (const [mid, label] of labelsByMid(sdp)) {
         // Only the sections that carry a PICTURE. The offer labels its audio and its data
         // sections too, and a stand-in that made a tile for those drew an empty rectangle
         // for the call's own voices — which is exactly the sort of thing a mock is supposed
         // to catch before a real meeting does.
         if (!VIDEO_LABELS.includes(label)) continue;
+        // A REJECTED section carries no picture, so it gets no tile. The offer still writes
+        // it down, label and all, which is the whole reason a reader has to check the port.
+        if (rejected.has(label)) continue;
         const stream = simulatedVideoStream();
         media.remoteVideo.push({
           mid,
