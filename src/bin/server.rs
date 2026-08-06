@@ -13,18 +13,23 @@
 //          | fetch_media | fetch_avatar | sender_icon | profile | people_by_address | presence
 //          | get_settings | set_settings | set_always_available | enrich_link
 //          | gitlab_approvals | gitlab_set_approval
+//          | gitlab_mr_list | gitlab_mr_detail | gitlab_mr_notes | gitlab_mr_pipeline
+//          | gitlab_mr_diff
+//          | gitlab_mr_merge | gitlab_mr_comment | gitlab_mr_delete_comment
+//          | gitlab_mr_set_state
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | mail_mark_read
 //          | calendars | calendar_view
 //          | agent_status | agent_set_mode | agent_set_tools | agent_set_provider
 //          | agent_set_unrestricted
 //          | person_override | person_overrides | set_person_name | set_person_avatar
-//          | update_download | update_apply
+//          | update_check | update_download | update_apply | restart_backend
 // Events:  status | message | conversations_changed | notifications_changed | typing
 //          | read_receipt | call | call_signal | update_available | update_progress
-//          | update_restart
+//          | update_restart | backend_restart
 //          | mail_folders_changed | mail_list_updated | mail_list_error
 //          | calendars_changed | calendar_view_updated | calendar_view_error
+//          | gitlab_list_updated | gitlab_mr_updated | gitlab_read_error
 //          | agent_stream | person_override_changed
 //
 // The `mail_*` methods are the READ-ONLY Outlook surface (see `mail`): the same
@@ -72,12 +77,20 @@
 // issues as the user, so `linear` sends GraphQL queries only and `linear::tests`
 // enforce that on the source, as `gitlab::tests` now do for the GET-only read path.
 //
-// `gitlab_set_approval` is the ONE exception, and the only write this app makes to a
-// tracker: it approves a merge request under the user's own GitLab account, or takes
-// that approval back (see `gitlab_approval`). It lives in a module of its own, it is an
-// {@link OUTWARD_METHODS} entry — the write token, refused read-only, blocked by the
-// automation hook — and it exists only because it is reversible from the same menu.
-// `gitlab_approvals` beside it is the READ that tells the menu which half to offer.
+// `gitlab_set_approval` was the FIRST write this app made to a tracker: it approves a
+// merge request under the user's own GitLab account, or takes that approval back (see
+// `gitlab_approval`). It lives in a module of its own, it is an {@link OUTWARD_METHODS}
+// entry — the write token, refused read-only, blocked by the automation hook — and it
+// exists because it is reversible from the same menu. `gitlab_approvals` beside it is the
+// READ that tells the menu which half to offer.
+//
+// The `gitlab_mr_*` methods are the MERGE-REQUEST PAGE (see `gitlab_mr` for the reads,
+// `gitlab_mr_write` for the writes, and AGENTS.md § The GitLab page). The reads — `list`,
+// `detail`, `notes`, `pipeline`, `diff` — are open like every other read and answer from a durable
+// response cache (`gitlab_reads`) before they ask GitLab, so the page paints from disk and
+// refreshes behind itself. The four writes — `merge`, `comment`, `delete_comment`,
+// `set_state` — are {@link OUTWARD_METHODS} entries, and `gitlab_mr_merge` is the one that
+// cannot be taken back.
 //
 // No raw tokens are ever logged or sent.
 
@@ -94,12 +107,15 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_models, agent_policy, auth, calendar, calling, custom_emoji, mail, push, push_policy, retry,
+    agent, agent_markdown, agent_models, agent_policy, auth, calendar, calling, custom_emoji,
+    mail, push, push_policy, retry,
     sender_icon, store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
-use teams_lite::{gitlab, gitlab_approval, link_preview};
+use teams_lite::{
+    gitlab, gitlab_approval, gitlab_mr, gitlab_mr_write, link_preview, tracker_people,
+};
 
 /// The port the user's own backend owns: what the `teams` command and the web app
 /// dial by default.
@@ -163,15 +179,6 @@ const SETTING_SENDER_ICONS: &str = "sender_icons";
 /// two backends that share this store (the always-on service and the user's dev one)
 /// can leave a trail of registrations Teams still counts as us.
 const SETTING_PRESENCE_ENDPOINT_ID: &str = "presence_endpoint_id";
-/// Native calling (`"1"` = on, anything else = off, and OFF is the default): let this
-/// app take and place audio calls (see [`teams_lite::calling`] and NATIVE-CALLING.md).
-///
-/// A setting rather than a build-time feature, and off by default, because turning it
-/// on REGISTERS a calling endpoint with Teams — and Teams then routes the user's real
-/// incoming calls to it, alongside their phone and their desktop client. That is a
-/// change to their account even before this app rings once, so it is theirs to make;
-/// turning it off unregisters, so their calls stop being offered here.
-const SETTING_CALLING: &str = "calling";
 /// This machine's VAPID private key (base64url), generated on first use. It must
 /// stay stable: every device's subscription embeds the matching public half, so a
 /// new key silently stops every phone that already opted in (see
@@ -253,7 +260,28 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// user's CAMERA or their SCREEN in front of everybody in a meeting — a screen more so than a
 /// face, because a screen shows whatever else is on it. Nothing calls it but a click, and the
 /// browser asks its own permission on top.
-const OUTWARD_METHODS: [&str; 15] = [
+///
+/// The four `gitlab_mr_*` entries are the merge-request PAGE's writes (see
+/// [`teams_lite::gitlab_mr_write`] and AGENTS.md § The GitLab page). Each acts under the
+/// user's own GitLab account and everybody watching the merge request is told, so each is
+/// gated exactly like a send — and three of the four are REVERSIBLE from the same page:
+/// a comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen.
+///
+/// `gitlab_mr_merge` is the ONE entry in this list that no later call takes back, which
+/// puts it beside `delete`. It lands somebody's branch in a shared repository, and a
+/// project's CI may deploy from it. It is here because the user asked for the page to do
+/// what GitLab's own does; what makes it defensible is that GitLab refuses a merge whose
+/// `sha` is not the branch's head, so the page can only ever merge the commit it drew —
+/// plus the second, explicit confirmation the UI asks for, exactly as it does before a
+/// message deletion.
+/// How long to wait for a meeting to grant a content-sharing session before offering the
+/// section anyway. One round trip on the calling plane, plus room for the frame behind it.
+const SHARING_GRANT_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+/// How often to look while waiting. Short enough that the share follows the grant closely, and
+/// long enough that the lock is not held in a spin.
+const SHARING_GRANT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+const OUTWARD_METHODS: [&str; 21] = [
     "send",
     "edit",
     "delete",
@@ -266,9 +294,15 @@ const OUTWARD_METHODS: [&str; 15] = [
     "call_accept",
     "call_answer_media",
     "call_offer_media",
+    "call_start_sharing",
+    "call_stop_sharing",
     "call_hangup",
     "call_mute",
     "gitlab_set_approval",
+    "gitlab_mr_merge",
+    "gitlab_mr_comment",
+    "gitlab_mr_delete_comment",
+    "gitlab_mr_set_state",
 ];
 
 /// The RPC methods that act on THIS MACHINE rather than on the user's Teams account.
@@ -320,22 +354,26 @@ const OUTWARD_METHODS: [&str; 15] = [
 /// approved under the user's own name on the next send. Reading the pack back stays open:
 /// it returns what the user themselves put in.
 ///
-/// `set_calling` and `call_prepare` are the two calling entries that post nothing.
-/// `set_calling` registers (or unregisters) a calling endpoint with Teams, which
-/// decides whether the user's real incoming calls are offered on this machine at all
-/// — the consent gate for the whole feature, and the reason it is not a standing
-/// licence to ring anybody. `call_prepare` reserves the one call slot this machine
-/// has and hands the page the relay credentials its `RTCPeerConnection` needs; the
-/// credentials are why it is gated rather than open, because a client that merely
-/// found this socket has no business holding them.
+/// `call_prepare` is the calling entry that posts nothing: it reserves the one call slot
+/// this machine has and hands the page the relay credentials its `RTCPeerConnection`
+/// needs. The credentials are why it is gated rather than open, because a client that
+/// merely found this socket has no business holding them.
 /// `call_subscribe` ASKS the meeting's media server for somebody's stream and publishes
 /// nothing at all about the user — so it is not outward, and it is not open either: it acts
 /// on the one call this machine holds.
+///
+/// `restart_backend` takes THIS process down and lets whatever runs it start it again (see
+/// [`teams_lite::restart`], and Settings › This app). It is the sibling of `update_apply`
+/// minus the new binary: every open page loses its socket for as long as the restart takes,
+/// a live `@claude` reply is cut off where it stood, and the user's calls do not ring here
+/// meanwhile. Nothing that merely found this socket gets to do that to the app the user is
+/// reading — and `update_check`, which only ASKS GitHub whether a newer build exists,
+/// deliberately stays open beside it: it changes nothing on this machine.
 const MACHINE_METHODS: [&str; 19] = [
     "repair_broker",
+    "restart_backend",
     "update_download",
     "update_apply",
-    "set_calling",
     "call_prepare",
     "call_subscribe",
     "push_subscribe",
@@ -360,6 +398,10 @@ const MACHINE_METHODS: [&str; 19] = [
 fn machine_effect(method: &str) -> &'static str {
     match method {
         "repair_broker" => "restarts the Intune container on this machine",
+        "restart_backend" => {
+            "restarts this app's backend on this machine, which drops every open page's \
+             connection and cuts off a local agent that is writing a reply"
+        }
         "update_download" => "downloads a new build of this app onto this machine",
         "update_apply" => {
             "replaces this app's own binary on this machine, and restarts everything the \
@@ -387,9 +429,6 @@ fn machine_effect(method: &str) -> &'static str {
         }
         "custom_emoji_add" | "custom_emoji_remove" | "custom_emoji_import" => {
             "decides which pictures this machine can post as emoji under the user's name"
-        }
-        "set_calling" => {
-            "registers this machine with Teams as a device the user's calls ring on"
         }
         "call_prepare" => {
             "reserves this machine's one call and hands out the media credentials it holds"
@@ -439,6 +478,21 @@ const PRESENCE_HEARTBEAT: Duration = Duration::from_secs(120);
 /// arrives too often costs one request; one that arrives too late drops the call.
 const CALL_KEEPALIVE: Duration = Duration::from_secs(20);
 
+/// How often this MACHINE asks GitHub what the rolling `latest` release names.
+///
+/// Two minutes, so an app somebody left open on a phone offers a build within two minutes
+/// of CI publishing it — the check used to run once at startup, and an app that is never
+/// restarted never saw a release again.
+///
+/// The number is bounded from below by a MEASURED budget: GitHub allows an unauthenticated
+/// caller 60 requests an hour per IP, and a conditional request buys nothing (a `304` was
+/// measured still spending one). Two minutes is 30 an hour, which is half the budget — and
+/// it stays 30 however many backends this machine runs, because the fetch is claimed
+/// through the store (`Store::claim_release_check`). Shortening it eats the half that
+/// downloads and the compare API live on; a `403` there has no symptom except an update
+/// button that stops appearing.
+const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(120);
+
 /// The systemd unit that repairs the broker by restarting the Intune container.
 /// Never run `intune-container` from here: one unit keeps the rate limit in one
 /// place, counted across the health timer, this backend and the in-app button.
@@ -453,6 +507,14 @@ const REPAIR_MIN_INTERVAL: Duration = Duration::from_secs(20 * 60);
 /// rather than one: the launcher stops the web server and kills this process, and a
 /// loaded machine can take a moment over it.
 const RESTART_GRACE: Duration = Duration::from_secs(10);
+
+/// How long a requested restart waits before it takes this process down.
+///
+/// The RPC's own answer travels on the socket the restart drops, so a restart that acted at
+/// once would swallow the outcome of the click that asked for it — the one frame the user is
+/// waiting on. Long enough for a local WebSocket write, short enough that nothing about the
+/// press feels delayed.
+const RESTART_ANSWER_GRACE: Duration = Duration::from_millis(250);
 
 /// Read-only mode (`TEAMS_LITE_READ_ONLY=1`): refuse every {@link OUTWARD_METHODS}
 /// call before it can reach the network.
@@ -1074,8 +1136,8 @@ struct Ctx {
     events: broadcast::Sender<Value>,
     /// Everything known about a newer release: whether there is one, and how far the
     /// user has taken installing it. Cached rather than only broadcast, because a UI
-    /// connects at any moment — after the one-shot check fired, or in the middle of a
-    /// download it has to draw a progress bar for. See {@link UpdateSlot}.
+    /// connects at any moment — between two passes of the release poll, or in the middle of
+    /// a download it has to draw a progress bar for. See {@link UpdateSlot}.
     update: Arc<std::sync::Mutex<UpdateSlot>>,
     /// Mail folders the live poll watches (see `spawn_mail_sync`). Seeded with the
     /// inbox and extended whenever a UI opens a folder, so the poll costs one
@@ -1091,9 +1153,26 @@ struct Ctx {
     /// See {@link REPAIR_MIN_INTERVAL} and `start_broker_repair`.
     last_repair: Arc<Mutex<Option<std::time::Instant>>>,
     /// The audio-calling plane: the calling connection's own address, and the one
-    /// call this machine is in. Empty and idle until the user turns calling on
-    /// ({@link SETTING_CALLING}) — see [`CallingPlane`].
+    /// call this machine is in. Empty and idle on a backend that does not call at all
+    /// ({@link calling_available}) — see [`CallingPlane`].
     calling: Arc<Mutex<CallingPlane>>,
+    /// The GitLab reads being refreshed behind the page right now, by cache key.
+    ///
+    /// Single-flight, and it earns its place on the hot path: the merge-request page polls
+    /// its pipeline while CI runs, two open pages (a phone and a laptop) poll the same one,
+    /// and every stale answer starts a refresh. Without this, one merge request under two
+    /// readers would ask GitLab twice a second and earn the token a rate limit. See
+    /// [`gitlab_cached`].
+    gitlab_refreshing: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// The Teams people a GitLab name can resolve to, and when the list was folded.
+    ///
+    /// It is a cache with a window, like the GitLab reads it serves (see
+    /// [`TEAMS_PEOPLE_TTL`]): building it reads every person this machine has ever been told
+    /// about — 294 of them here, from 12 603 messages — and the page asks for one on every
+    /// answer it hands out, pipeline poll included. What it holds is only the MATCHING keys,
+    /// Teams' own names, so a rename needs no invalidation at all: the name a page DRAWS is
+    /// read per answer through `Store::display_name_for_mri`. See [`teams_people_of`].
+    tracker_people: Arc<Mutex<Option<(i64, Arc<tracker_people::Roster>)>>>,
 }
 
 /// Everything this machine knows about audio calling right now.
@@ -1124,10 +1203,15 @@ struct CallingPlane {
     connection: Option<tokio::task::JoinHandle<()>>,
 }
 
-/// A one-to-one call, or a meeting.
+/// A one-to-one call, a call that rings a whole group chat, or a meeting.
+///
+/// All three are the same signaling; what differs is what the UI has to say. A 1:1 names
+/// the person, and the other two name the CONVERSATION and then answer "who" from the
+/// roster — because a group of five has no one person to put in a title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallKind {
     Call,
+    Group,
     Meeting,
 }
 
@@ -1135,6 +1219,7 @@ impl CallKind {
     fn as_str(self) -> &'static str {
         match self {
             CallKind::Call => "call",
+            CallKind::Group => "group",
             CallKind::Meeting => "meeting",
         }
     }
@@ -1198,10 +1283,18 @@ struct CallSession {
     phase: CallPhase,
     /// The chat, channel or meeting thread the call belongs to, when it has one.
     conversation_id: Option<String>,
-    /// Who is on the other end of a one-to-one call. A meeting names its subject here
-    /// instead, because "who" is the roster.
+    /// Who is on the other end of a one-to-one call. A meeting and a GROUP call name the
+    /// conversation here instead, because "who" is the roster.
     peer_mri: String,
     peer_name: String,
+    /// Every mri this outgoing call RINGS, resolved once when the call was reserved.
+    ///
+    /// It is the session's rather than the placing request's because `call_place` is a
+    /// second round trip: the page comes back with an SDP and nothing else, so a list
+    /// rebuilt there would be a second roster fetch that could disagree with the first —
+    /// and this list is who a device buzzes for. Empty for an incoming call and for a
+    /// meeting, neither of which rings anybody.
+    ring: Vec<String>,
     /// Everybody the meeting's roster names, us included, newest frame wins. Empty for
     /// a one-to-one call, where the peer above is the whole answer.
     roster: Vec<calling::RosterMember>,
@@ -1223,6 +1316,10 @@ struct CallSession {
     connected_at_ms: Option<i64>,
     /// Why it ended, for the line the UI shows afterwards.
     end_reason: Option<String>,
+    /// True once the service said the invitation reached no endpoint at all — the callee has
+    /// no client signed in. It is set from the frame that names the CAUSE and read by the
+    /// ending, which names only the symptom (`calling::invite_failed`).
+    unreachable: bool,
     /// Where to answer the media offer the service last made us, if it is still open.
     ///
     /// The service renegotiates unprompted and names the link on the frame itself, so this
@@ -1238,6 +1335,13 @@ struct CallSession {
     /// a phone that reconnects mid-call has to be told the camera is on, and a button drawn
     /// from a page's own memory would say off while the meeting sees a face.
     sending: Vec<String>,
+    /// The content-sharing session this endpoint holds, once a meeting has granted one.
+    ///
+    /// A meeting shows ONE screen at a time, so sharing is a session and not a track: the
+    /// service rejects an `applicationsharing-video` section from an endpoint that is not the
+    /// presenter (measured 2026-08-06). It is `None` until the user shares, and it carries the
+    /// way OUT, because a share that could not be given up is not a share this app would make.
+    sharing: Option<calling::ContentSharing>,
 }
 
 impl CallSession {
@@ -1245,6 +1349,13 @@ impl CallSession {
     /// caller, so a count of "who else is here" is one answer in one place.
     fn others(&self) -> Vec<&calling::RosterMember> {
         self.roster.iter().filter(|member| member.mri != self.local.id).collect()
+    }
+
+    /// True once this call is over. `end_call_locally` marks the session before it drops
+    /// it, so a request that comes back from the network reads the same answer whichever
+    /// side of that emit it lands on.
+    fn ended(&self) -> bool {
+        self.phase == CallPhase::Ended
     }
 
     /// The view of this call every client gets. It carries no SDP and no
@@ -1464,9 +1575,9 @@ impl Ctx {
     /// install can replace itself.
     ///
     /// The one place the `update_available` payload is spelled, because it is published
-    /// from two: the check at startup, and every download — which re-reads the release
-    /// first, and must correct the size the button draws its bar against when the answer
-    /// moved (see `refresh_release`).
+    /// from two: the release poll (see `Ctx::poll_release`), and every download — which
+    /// re-reads the release first, and must correct the size the button draws its bar
+    /// against when the answer moved (see `refresh_release`).
     fn publish_release(&self, info: &teams_lite::update::UpdateInfo) -> bool {
         // What the button needs beyond the two commits: how big the download is (so the
         // bar has a total from the first frame), and whether THIS install can replace
@@ -1540,14 +1651,18 @@ impl Ctx {
     ///
     /// Reached from a download that re-read the release and found nothing newer — the user
     /// updated on another install, or CI moved the tag back onto this commit. It empties
-    /// the row rather than reporting a failure, because nothing failed, and it drops the
-    /// cached build for the same reason the check does: being current is what makes a
-    /// downloaded one worthless.
-    fn forget_release(&self) {
+    /// the row rather than reporting a failure, because nothing failed, and it prunes the
+    /// cache for the same reason the check does: a build the release moved PAST is one
+    /// nobody will run again.
+    ///
+    /// `latest` names this build, and the download for it is SPARED even so: another
+    /// install on this machine may be a commit behind and about to install exactly that
+    /// file (see [`teams_lite::update::prune_downloads`]).
+    fn forget_release(&self, latest: &str) {
         let _ = self.with_update(|slot| {
             *slot = UpdateSlot::default();
         });
-        teams_lite::update::discard_downloads();
+        teams_lite::update::prune_downloads(latest);
         self.emit("update_available", Value::Null);
     }
 
@@ -1652,7 +1767,9 @@ impl Ctx {
                 // empties itself, and `forget_release` has already said so.
                 Ok(None) => {
                     eprintln!("[update] the release is no longer newer than this build");
-                    ctx.forget_release();
+                    // The re-read found this build CURRENT, so `latest` names this build's
+                    // own commit — which is the one download the prune has to spare.
+                    ctx.forget_release(teams_lite::update::build_rev().unwrap_or_default());
                 }
                 Err(e) => {
                     eprintln!("[update] download failed: {e:#}");
@@ -1769,9 +1886,25 @@ impl Ctx {
             })?
             .context("nothing is downloaded yet — download the update before applying it")?;
 
-        teams_lite::update::install_binary(&downloaded, &target).with_context(|| {
-            format!("install the new build over {}", target.display())
-        })?;
+        // A failure here is REPORTED, on this machine and to every open page — it used to be
+        // neither. The swap is the one step of an update that touches something outside this
+        // process, so it is the step that fails for reasons nobody in the app can guess at
+        // (the download deleted under it, a full disk, a directory that stopped being
+        // writable): the journal keeps the whole chain for whoever reads it later, and the
+        // slot carries it so the phone that pressed the button and the laptop beside it
+        // agree. Before this, the page that clicked drew a failure of its own and the rest
+        // of the app — and this machine — held no record of it at all.
+        if let Err(e) = teams_lite::update::install_binary(&downloaded, &target) {
+            let e = e.context(format!("install the new build over {}", target.display()));
+            eprintln!("[update] the swap failed: {e:#}");
+            let failed = self.with_update(|slot| {
+                slot.phase = UpdatePhase::Failed;
+                slot.error = format!("{e:#}");
+                slot.progress_json()
+            })?;
+            self.emit("update_progress", failed);
+            return Err(e);
+        }
         eprintln!("[update] installed over {} — restarting", target.display());
 
         // The launcher listens for this on the keepalive socket it already holds
@@ -1814,6 +1947,74 @@ impl Ctx {
             }
         });
         Ok(restarting)
+    }
+
+    /// Restart this backend on the same build, because the user asked from
+    /// Settings › This app.
+    ///
+    /// It is `apply_update` without the new binary, and the same two shapes carry it out:
+    /// a launcher re-spawns the backend it owns (its web server never goes down), and a
+    /// supervised backend simply EXITS and is started again. Which one — and whether either
+    /// exists — is [`teams_lite::restart`]'s decision, and a shape nobody watches is refused
+    /// rather than taken down.
+    ///
+    /// Three things about it:
+    ///
+    ///   * **A live `@claude` reply is asked about first.** A run dies with this process and
+    ///     nothing can resume it, so a restart leaves that message frozen until a sweep
+    ///     closes it (`repair_abandoned_agent_runs`). The first ask therefore reports the
+    ///     runs instead of restarting, and `force` is the user's second press — the shape
+    ///     Delete and the merge already have, decided HERE because the count is a fact only
+    ///     this process holds: a page knows about the runs it happened to watch, and the
+    ///     common case is a run started from a phone.
+    ///   * **The answer goes out before the process does.** The reply travels on the socket
+    ///     this restart takes down, so both paths wait `RESTART_ANSWER_GRACE` first —
+    ///     otherwise the click's own outcome is the one frame that never arrives.
+    ///   * **The calling registration is taken back on the way out**, exactly as the idle
+    ///     shutdown does and for its reason: Teams routes a call to the endpoints it
+    ///     believes are running, and a device that does not ring is a call the user misses.
+    async fn restart_backend(&self, params: &Value) -> Result<Value> {
+        use teams_lite::restart::Restarter;
+
+        let restarter = teams_lite::restart::restarter();
+        anyhow::ensure!(
+            restarter != Restarter::Nothing,
+            teams_lite::restart::NOTHING_WOULD_RESTART_IT
+        );
+
+        let writing = live_agent_runs_here();
+        if writing > 0 && !params.get("force").and_then(Value::as_bool).unwrap_or(false) {
+            return Ok(json!({ "restarted": false, "blocked": "agent", "runs": writing }));
+        }
+
+        let via = match restarter {
+            Restarter::Launcher => "launcher",
+            Restarter::Supervisor => "supervisor",
+            Restarter::Nothing => unreachable!("refused above"),
+        };
+        eprintln!("[lifecycle] restarting on request — the {via} brings this backend back");
+
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RESTART_ANSWER_GRACE).await;
+            ctx.stop_calling().await;
+            match restarter {
+                // The launcher listens for this on the keepalive socket it already holds
+                // (launcher/src/backend-restart.ts) and re-spawns the backend alone. The
+                // port is what tells it the frame is about the child it owns — the same
+                // check `update_restart` makes with the binary path, and for the same
+                // reason: anything on this machine can open a frame on this socket.
+                Restarter::Launcher => {
+                    ctx.emit("backend_restart", json!({ "port": own_port() }));
+                }
+                // Nothing to ask: exiting IS the restart, and the supervisor starts us
+                // again. SQLite runs in WAL with per-request commits, so an abrupt stop
+                // loses nothing that was acknowledged (see the backend unit's own note).
+                Restarter::Supervisor => std::process::exit(0),
+                Restarter::Nothing => {}
+            }
+        });
+        Ok(json!({ "restarted": true, "via": via }))
     }
 
     /// A valid CSA-audience token (auto-refreshed).
@@ -2261,6 +2462,8 @@ async fn main() -> Result<()> {
         calendar_watch: Arc::new(Mutex::new(None)),
         last_repair: Arc::new(Mutex::new(None)),
         calling: Arc::new(Mutex::new(CallingPlane::default())),
+        gitlab_refreshing: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        tracker_people: Arc::new(Mutex::new(None)),
     };
 
     // Watch the broker, and react once per CHANGE of state (see `observe_broker`).
@@ -2320,7 +2523,7 @@ async fn main() -> Result<()> {
     spawn_realtime(ctx.clone(), db_path);
 
     // calling: a second trouter connection, registered as the web client registers
-    // it — but only when the user turned calling on (see `spawn_calling`).
+    // it, so the user's calls ring here too (see `spawn_calling`).
     spawn_calling(ctx.clone());
 
     // mail: poll whichever folders a client opens (read-only, and idle until one
@@ -2341,8 +2544,9 @@ async fn main() -> Result<()> {
     clear_dead_agent_run_markers();
     spawn_agent_run_repair(ctx.clone());
 
-    // one-shot, best-effort: is a newer rolling `latest` build available?
-    spawn_update_check(ctx.clone());
+    // best-effort, and for the whole life of the process: has the rolling `latest` tag
+    // moved off this build? An app left open for weeks has to be able to notice.
+    spawn_release_poll(ctx.clone());
 
     eprintln!("[ok] server ws://{addr} — ready");
     // Read once at boot: a machine that answers a chat message with the user's own
@@ -2369,6 +2573,11 @@ async fn main() -> Result<()> {
             accepted = listener.accept() => accepted,
             _ = &mut idle_shutdown => {
                 eprintln!("[lifecycle] no UI clients remain — shutting down");
+                // Stop being a device the user's calls ring on, before the process that
+                // would answer is gone. The registration would expire on its own within
+                // the hour, and every call offered inside that hour is one they miss:
+                // Teams routes to the endpoints it believes are running.
+                ctx.stop_calling().await;
                 return Ok(());
             }
         };
@@ -2393,9 +2602,24 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Ceiling on ONE request frame read off a UI socket, and the same number the relay in
+/// web/server.ts uses for the traffic it forwards. tungstenite's own defaults are 16 MiB
+/// per frame and 64 MiB per message, which a send carrying pictures walks straight into:
+/// a single 10 MiB image is already 13.4 MiB once base64-encoded, and a message's whole
+/// allowance (`teams_send::MAX_IMAGES_TOTAL_BYTES`, 30 MiB) is 40 MiB. A frame over the
+/// limit is a protocol error, so the connection would be DROPPED rather than the send
+/// refused with a sentence — which is the failure the caps in `teams_send::parse_images`
+/// exist to state.
+const MAX_REQUEST_BYTES: usize = 128 * 1024 * 1024;
+
 /// Handle one UI connection: answer requests + forward broadcast events.
 async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTracker) -> Result<()> {
-    let ws = tokio_tungstenite::accept_async(stream).await?;
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(MAX_REQUEST_BYTES),
+        max_frame_size: Some(MAX_REQUEST_BYTES),
+        ..Default::default()
+    };
+    let ws = tokio_tungstenite::accept_async_with_config(stream, Some(config)).await?;
     let _client_lease = clients.connect();
     let (mut write, mut read) = ws.split();
     let mut events_rx = ctx.events.subscribe();
@@ -2453,7 +2677,18 @@ async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTrac
                         requests.push(async move {
                             let reply = match dispatch(&request_ctx, &method, &params).await {
                                 Ok(result) => json!({ "id": id, "result": result }),
-                                Err(e) => json!({ "id": id, "error": e.to_string() }),
+                                // `{e:#}` — the WHOLE chain, cause included, which is what
+                                // the journal prints everywhere else in this backend.
+                                // `to_string()` gives the outermost context alone, and the
+                                // outermost context is the part the caller already knew: a
+                                // failed update said "install the new build over
+                                // /home/…/teams-bin" and threw away the reason it could not,
+                                // so the one sentence the user was shown named the target
+                                // and nothing they could act on. Every surface that reports
+                                // a refusal — the composer, the approval menu, the update row
+                                // — reads this string, and each of them is the only place
+                                // that failure is ever stated.
+                                Err(e) => json!({ "id": id, "error": format!("{e:#}") }),
                             };
                             WsMessage::Text(reply.to_string().into())
                         }.boxed());
@@ -2527,6 +2762,18 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // their account runs through.
         "update_download" => ctx.start_update_download().await,
         "update_apply" => ctx.apply_update().await,
+
+        // Ask GitHub, now, whether `latest` names a different commit — the poll's own pass,
+        // on the user's ask rather than on the clock (see `Ctx::check_release_now`). OPEN
+        // like every other read: it changes nothing on this machine, it publishes nothing
+        // about the user, and it is the same request the poll already makes every two
+        // minutes.
+        "update_check" => ctx.check_release_now().await,
+
+        // Restart this backend, through whatever runs it. A MACHINE method: it takes the
+        // process every open page is talking to down, so it is the user's own click and
+        // nothing a client that merely found the socket may ask for.
+        "restart_backend" => ctx.restart_backend(params).await,
 
         // ---- push notifications (see src/push.rs) ------------------------------
         // What an installed web app needs to receive a notification while it is
@@ -3405,7 +3652,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .get("content_html")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            let image = params.get("image").map(teams_send::parse_image).transpose()?;
+            // Every picture the composer holds, in the order the user pasted them. The
+            // count and the combined size are refused here, before anything is uploaded.
+            let images = params
+                .get("images")
+                .map(teams_send::parse_images)
+                .transpose()?
+                .unwrap_or_default();
             // Who the message @mentions. The body carries an index per mention and this
             // list says who each index names, so Teams notifies them (see
             // `teams_send::Mention`). Validated before anything leaves this machine.
@@ -3450,7 +3703,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let text = text.clone();
                     let reply_to = reply_to.clone();
                     let content_html = content_html.clone();
-                    let image = image.clone();
+                    let images = images.clone();
                     let emoji_art = emoji_art.clone();
                     let mentions = mentions.clone();
                     async move {
@@ -3475,8 +3728,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             &conv,
                             &text,
                             reply_to.as_ref(),
-                            if rewritten_html.is_empty() { content_html.as_deref() } else { Some(&rewritten_html) },
-                            image.as_ref(),
+                            if rewritten_html.is_empty() {
+                                content_html.as_deref()
+                            } else {
+                                Some(&rewritten_html)
+                            },
+                            &images,
                             &emoji_ids,
                             &mentions,
                         )
@@ -3549,6 +3806,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         } else {
                             (escaped.clone(), Vec::new())
                         };
+                        // A plain edit of the user's OWN message carries no mention: the
+                        // RPC takes text, and a mention needs a span the text has no way to
+                        // hold. The composer's mentions travel on the send.
                         teams_send::edit_message(
                             &http,
                             &session,
@@ -3556,6 +3816,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             &message_id,
                             &text,
                             Some(&rewritten_html),
+                            &[],
                         )
                         .await?;
                         Ok::<_, anyhow::Error>(rewritten_html)
@@ -3933,43 +4194,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // no suggestions still sends messages.
         "members" => {
             let conv = param_str(params, "conversation")?;
-            let self_mri = ctx.session().await?.self_mri.to_string();
-            let http = ctx.http.clone();
-            let roster_conv = conv.clone();
-            let roster = ctx
-                .retry_on_auth(move |session, _csa| {
-                    let http = http.clone();
-                    let conv = roster_conv.clone();
-                    async move { teams_members::fetch_thread_members(&http, &session, &conv).await }
-                })
-                .await
-                .unwrap_or_default();
-
-            let (mut people, unnamed) = {
-                let store = ctx.store()?;
-                let senders = store.thread_senders(&conv, MAX_MENTION_MEMBERS as i64)?;
-                mention_candidates(&roster, &senders, &self_mri)
-            };
-            if !unnamed.is_empty() {
-                let session = ctx.session().await?;
-                if let Ok(profile) = ctx.profile().await {
-                    if let Ok(names) =
-                        teams_profiles::fetch_names(&ctx.http, &session, &profile, &unnamed).await
-                    {
-                        for person in people.iter_mut() {
-                            if let Some(name) = names.get(&person.mri) {
-                                person.display_name = name.clone();
-                            }
-                        }
-                    }
-                }
-            }
-            // Somebody we cannot name is somebody the user cannot pick out of a list,
-            // so they are left out rather than offered as an MRI.
-            let members: Vec<Value> = people
+            let members: Vec<Value> = thread_mentionable_people(ctx, &conv)
+                .await?
                 .into_iter()
-                .filter(|person| !person.display_name.is_empty())
-                .map(|person| json!({ "mri": person.mri, "name": person.display_name }))
+                .map(|person| json!({ "mri": person.mri, "name": person.name }))
                 .collect();
             Ok(json!({ "members": members }))
         }
@@ -4041,47 +4269,18 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         }
 
         // ---- audio calling ------------------------------------------------
-        // Seven methods, and the split between them IS the consent design:
+        // Six methods, and the split between them IS the consent design:
         //   `call_status`  reads state, and is the only open one.
-        //   `set_calling`  registers this machine as a device the user's calls ring
-        //                  on — the gate for the whole feature.
         //   `call_prepare` reserves the one call and hands out the media credentials.
         //   `call_place` / `call_accept` / `call_hangup` / `call_mute` reach a person.
+        // There is no method that turns calling on: this backend registers as a device
+        // the user's calls ring on the way every client they signed in on does (see
+        // {@link calling_available}), and what reaches a person is `call_place`.
         // See `teams_lite::calling` and NATIVE-CALLING.md.
 
         // What this machine can do about calls, and what call it is in. Open, because
         // it returns no SDP and no credentials — only what the UI has to draw.
         "call_status" => Ok(ctx.call_state_payload()),
-
-        // Turn calling on or off.
-        //
-        // ON registers a calling endpoint with Teams, and the user's real incoming
-        // calls are then offered here as well as on their phone. OFF unregisters, so
-        // they stop being offered — the registration is what makes this machine a
-        // device, and leaving one behind would silently swallow their calls.
-        "set_calling" => {
-            let enabled = params
-                .get("enabled")
-                .and_then(Value::as_bool)
-                .context("`enabled` must be true or false")?;
-            // Stored first for ON so a reconnect inside `start_calling` already reads
-            // the new value, and last for OFF so nothing re-registers behind the
-            // unregister.
-            if enabled {
-                ctx.store()?.set_setting(SETTING_CALLING, "1")?;
-                if let Err(e) = ctx.start_calling().await {
-                    // Roll the setting back: a switch that reads "on" while no
-                    // endpoint is registered claims the user's calls ring here.
-                    ctx.store()?.set_setting(SETTING_CALLING, "0")?;
-                    return Err(e);
-                }
-            } else {
-                ctx.stop_calling().await;
-                ctx.store()?.set_setting(SETTING_CALLING, "0")?;
-            }
-            ctx.emit_call_state();
-            Ok(ctx.call_state_payload())
-        }
 
         // Everything the page needs to build one `RTCPeerConnection`, and the
         // reservation of the single call this machine holds.
@@ -4091,14 +4290,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // is ringing (and returns the caller's own offer). The ICE servers are why
         // this is gated: they carry the relay credentials this backend holds.
         "call_prepare" => {
-            // A meeting: reserve the call against the link the calendar already holds.
-            // Its own shape rather than a flag, because what comes back differs — a
-            // join has no offer to answer, and no person to name.
-            if let Some(join_url) = params.get("join_url").and_then(Value::as_str) {
-                let meeting = calling::MeetingJoin::from_join_url(join_url).context(
-                    "call_prepare: that is not a Teams meeting link — this app joins a \
-                     meeting from its own join link and nothing else",
-                )?;
+            // A meeting: reserve the call against the address the caller named — the link
+            // the calendar holds, or the meeting's own thread from the chat list. Its own
+            // shape rather than a flag, because what comes back differs — a join has no
+            // offer to answer, and no person to name.
+            if let Some(meeting) = meeting_address(params)? {
                 let (session, endpoint_id, surl) = {
                     let (endpoint_id, surl) = {
                         let plane = ctx.calling.lock().unwrap();
@@ -4110,16 +4306,23 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     };
                     (ctx.session().await?, endpoint_id, surl)
                 };
-                // The meeting's title, passed by whoever clicked Join, because that is
-                // where it exists: the join link carries no subject, and the caller is
-                // holding the calendar event it came from.
+                // The meeting's title. From the calendar it is passed by whoever clicked
+                // Join, because that is the only place it exists: a join link carries no
+                // subject, and the caller is holding the event it came from. From the CHAT
+                // LIST the thread has a name of its own, so the store answers and no title
+                // is minted twice — which is also what makes two open pages agree.
                 let subject = params
                     .get("subject")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|name| !name.is_empty())
-                    .unwrap_or("Meeting")
-                    .to_string();
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let thread = meeting.thread_id.as_deref()?;
+                        let title = ctx.store().ok()?.conversation_context(thread, "").ok()?;
+                        Some(title).filter(|title| !title.trim().is_empty())
+                    })
+                    .unwrap_or_else(|| "Meeting".to_string());
                 let call_id = uuid::Uuid::new_v4().to_string();
                 let call = CallSession {
                     id: call_id.clone(),
@@ -4133,6 +4336,8 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     conversation_id: meeting.thread_id.clone(),
                     peer_mri: String::new(),
                     peer_name: subject,
+                    // A join rings nobody.
+                    ring: Vec::new(),
                     roster: Vec::new(),
                     in_lobby: false,
                     links: calling::Links::default(),
@@ -4146,9 +4351,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     muted: false,
                     connected_at_ms: None,
                     end_reason: None,
+            unreachable: false,
                     renegotiation_answer_link: None,
                     source_request_sequence: 0,
                     sending: Vec::new(),
+                    sharing: None,
                 };
                 {
                     let mut plane = ctx.calling.lock().unwrap();
@@ -4201,9 +4408,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             )?;
                         (ctx.session().await?, endpoint_id)
                     };
-                    // Who to ring: the roster, minus us. A group call is refused
-                    // rather than half-supported — it needs a roster UI, a mixer and
-                    // more than one audio element.
+                    // Who to ring: the roster, minus us. One person is a one-to-one call;
+                    // several is a GROUP call, which rings every one of them at once and
+                    // is the same POST (`calling::invitation_payload`). What a group needs
+                    // beyond that already exists: the service mixes the voices, the page
+                    // keeps one `<audio>` per remote stream, and "who is in it" is the
+                    // roster a meeting already answers from.
                     let http = ctx.http.clone();
                     let target = conversation.clone();
                     let roster = ctx
@@ -4217,37 +4427,49 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         })
                         .await
                         .unwrap_or_default();
-                    let others: Vec<String> = roster
+                    let ring: Vec<String> = roster
                         .iter()
                         .map(|p| p.mri.clone())
                         .filter(|mri| mri != &session.self_mri && mri.starts_with("8:"))
                         .collect();
-                    let peer_mri = match others.len() {
-                        1 => others[0].clone(),
-                        0 => anyhow::bail!(
-                            "call_prepare: nobody to ring in {conversation} — this app only \
-                             calls a one-to-one chat"
-                        ),
-                        n => anyhow::bail!(
-                            "call_prepare: {conversation} has {n} other people — this app only \
-                             calls a one-to-one chat"
-                        ),
-                    };
+                    if ring.is_empty() {
+                        anyhow::bail!(
+                            "call_prepare: nobody to ring in {conversation} — a call needs at \
+                             least one other person in the conversation"
+                        );
+                    }
+                    if ring.len() > MAX_GROUP_CALL_PEOPLE {
+                        anyhow::bail!(
+                            "call_prepare: {conversation} has {} other people — this app rings \
+                             at most {MAX_GROUP_CALL_PEOPLE} at once",
+                            ring.len()
+                        );
+                    }
+                    let kind =
+                        if ring.len() == 1 { CallKind::Call } else { CallKind::Group };
+                    // A 1:1 call names the person; a group names the CONVERSATION, because
+                    // five people have no one name and the roster is what answers "who".
+                    let peer_mri =
+                        if kind == CallKind::Call { ring[0].clone() } else { String::new() };
                     // The store first, because it is where the user's own nickname for
                     // that person lives (see `person_overrides`): a call has to name
                     // them the way every other surface does.
-                    let peer_name = ctx
-                        .store()?
-                        .display_name_for_mri(&peer_mri)?
-                        .into_iter()
-                        .chain(
-                            roster
-                                .iter()
-                                .find(|p| p.mri == peer_mri)
-                                .map(|p| p.display_name.clone()),
-                        )
-                        .find(|name| !name.trim().is_empty())
-                        .unwrap_or_default();
+                    let peer_name = if kind == CallKind::Call {
+                        ctx.store()?
+                            .display_name_for_mri(&peer_mri)?
+                            .into_iter()
+                            .chain(
+                                roster
+                                    .iter()
+                                    .find(|p| p.mri == peer_mri)
+                                    .map(|p| p.display_name.clone()),
+                            )
+                            .find(|name| !name.trim().is_empty())
+                            .unwrap_or_default()
+                    } else {
+                        let title = ctx.store()?.conversation_context(&conversation, "")?;
+                        if title.trim().is_empty() { "Group call".to_string() } else { title }
+                    };
                     let surl = ctx
                         .calling
                         .lock()
@@ -4261,11 +4483,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let call = CallSession {
                         id: call_id.clone(),
                         direction: CallDirection::Outgoing,
-                        kind: CallKind::Call,
+                        kind,
                         phase: CallPhase::Dialing,
                         conversation_id: Some(conversation.clone()),
                         peer_mri,
                         peer_name,
+                        ring,
                         links: calling::Links::default(),
                         local: ctx.local_participant(&session, &endpoint_id),
                         callbacks: calling::CallbackBase {
@@ -4279,9 +4502,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         muted: false,
                         connected_at_ms: None,
                         end_reason: None,
+            unreachable: false,
                         renegotiation_answer_link: None,
                         source_request_sequence: 0,
                         sending: Vec::new(),
+                        sharing: None,
                     };
                     {
                         let mut plane = ctx.calling.lock().unwrap();
@@ -4298,6 +4523,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     Ok(json!({
                         "call_id": call_id,
                         "ice_servers": ctx.call_ice_servers().await,
+                        // Whether this call is between exactly TWO people, which decides how
+                        // the page negotiates a camera and a screen: the real client reserves
+                        // both sections in the first offer of a one-to-one and adds them
+                        // mid-call in a conference (NATIVE-CALLING.md § 10.8). The kind is
+                        // decided here — the ring list is what says how many people it
+                        // reaches — so the page is told rather than guessing from an id.
+                        "one_to_one": kind == CallKind::Call,
                     }))
                 }
             }
@@ -4321,10 +4553,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 (
                     call.local.clone(),
                     call.callbacks.clone(),
-                    vec![call.peer_mri.clone()],
+                    call.ring.clone(),
                     call.conversation_id.clone(),
                 )
             };
+            if to.is_empty() {
+                anyhow::bail!("call_place: that call rings nobody — call_prepare first");
+            }
             let session = ctx.session().await?;
             let ic3 = ctx.tokens.get(IC3_SCOPE).await?;
             let placed = calling::place_call(
@@ -4341,11 +4576,23 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             .await;
             match placed {
                 Ok(placed) => {
-                    {
+                    let held = {
                         let mut plane = ctx.calling.lock().unwrap();
-                        if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
-                            call.links.merge(&placed.links);
+                        match plane.call.as_mut().filter(|c| c.id == call_id && !c.ended()) {
+                            Some(call) => {
+                                call.links.merge(&placed.links);
+                                true
+                            }
+                            None => false,
                         }
+                    };
+                    if !held {
+                        // The user hung up while this POST was in flight, so the invite is
+                        // out and the reservation is gone: a device is buzzing for a call
+                        // nothing here holds, and the answer's own links are the only way
+                        // to take it back.
+                        ctx.hang_up_orphan("call_place", &local, &placed.links).await;
+                        return Ok(json!({ "call_id": call_id, "cancelled": true }));
                     }
                     ctx.emit_call_state();
                     Ok(json!({ "call_id": call_id, "links": placed.links.names() }))
@@ -4367,9 +4614,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         "call_join" => {
             let call_id = param_str(params, "call_id")?;
             let sdp = param_str(params, "sdp")?;
-            let join_url = param_str(params, "join_url")?;
-            let meeting = calling::MeetingJoin::from_join_url(&join_url)
-                .context("call_join: that is not a Teams meeting link")?;
+            // The same address the reservation named, in either shape (see
+            // `meeting_address`): a calendar link, or the meeting's own chat thread.
+            let meeting = meeting_address(params)
+                .context("call_join")?
+                .context("call_join: no meeting named — pass join_url or meeting_thread")?;
             let (local, callbacks) = {
                 let plane = ctx.calling.lock().unwrap();
                 let call = plane
@@ -4403,16 +4652,27 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // The meeting is joined. Its links are held before anything else, so an
             // ending always has somewhere to post — and the lobby is a state of its own,
             // because the one thing the user has to know is that nobody has let them in.
-            {
+            let held = {
                 let mut plane = ctx.calling.lock().unwrap();
-                if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
-                    call.links.merge(&joined.links);
-                    if calling::lobby_state_in_frame(&joined.raw)
-                        == Some(calling::LobbyState::Waiting)
-                    {
-                        call.in_lobby = true;
+                match plane.call.as_mut().filter(|c| c.id == call_id && !c.ended()) {
+                    Some(call) => {
+                        call.links.merge(&joined.links);
+                        if calling::lobby_state_in_frame(&joined.raw)
+                            == Some(calling::LobbyState::Waiting)
+                        {
+                            call.in_lobby = true;
+                        }
+                        true
                     }
+                    None => false,
                 }
+            };
+            if !held {
+                // The user left while this POST was in flight, so the meeting holds a
+                // participant this machine no longer has: leave it, on the links the answer
+                // carried (see `call_place`).
+                ctx.hang_up_orphan("call_join", &local, &joined.links).await;
+                return Ok(json!({ "call_id": call_id, "cancelled": true }));
             }
             ctx.emit_call_state();
             // What the answer granted. `activeModalities.call` is the audio leg, and it
@@ -4466,13 +4726,24 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             match ctx.post_call_signal(&url, &payload).await {
                 Ok(response) => {
                     let links = calling::Links::collect(&response);
-                    {
+                    let held = {
                         let mut plane = ctx.calling.lock().unwrap();
-                        if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
-                            call.links.merge(&links);
-                            call.phase = CallPhase::Connected;
-                            call.connected_at_ms = Some(now_ms());
+                        match plane.call.as_mut().filter(|c| c.id == call_id && !c.ended()) {
+                            Some(call) => {
+                                call.links.merge(&links);
+                                call.phase = CallPhase::Connected;
+                                call.connected_at_ms = Some(now_ms());
+                                true
+                            }
+                            None => false,
                         }
+                    };
+                    if !held {
+                        // The user hung up while the acceptance was in flight, so the caller
+                        // is now in a call with a machine that holds nothing: end it on the
+                        // links the acceptance answered with (see `call_place`).
+                        ctx.hang_up_orphan("call_accept", &local, &links).await;
+                        return Ok(json!({ "call_id": call_id, "cancelled": true }));
                     }
                     ctx.emit_call_state();
                     Ok(json!({ "call_id": call_id }))
@@ -4524,7 +4795,139 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
             }
             eprintln!("[calling] answered a media renegotiation: modalities={modalities:?}");
+            // The whole structure of what was posted. The service refuses an answer with
+            // `SdpParsingFailure` and names no line, so this is the only way to see which one
+            // it means. Keys, candidates and SSRCs are dropped (`calling::sdp_structure`).
+            if std::env::var("TEAMS_LITE_SDP_DEBUG").is_ok() {
+                for line in calling::sdp_structure(&answer.blob) {
+                    eprintln!("[sdp] {line}");
+                }
+            }
             Ok(json!({ "call_id": call_id }))
+        }
+
+        // Become the PRESENTER of the meeting's content-sharing session.
+        //
+        // A meeting shows one screen at a time, so a share is a session before it is a track:
+        // measured on 2026-08-06, a meeting rejected an `applicationsharing-video` section
+        // outright — no mid, no label, a zeroed port — from an endpoint that had not asked for
+        // one. The client asks first (`startContentSharingAsync`), POSTing a `contentSharing`
+        // blob to the `addModality` link, and only then offers the section.
+        //
+        // It is an `OUTWARD_METHODS` entry because it announces to everybody in the meeting
+        // that this endpoint is about to show them something, and because the section that
+        // follows carries whatever is on the user's screen.
+        "call_start_sharing" => {
+            let call_id = param_str(params, "call_id")?;
+            let (local, callbacks, url, correlation_id) = {
+                let plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_ref()
+                    .filter(|c| c.id == call_id && !c.ended())
+                    .context("call_start_sharing: no such call")?;
+                if call.phase != CallPhase::Connected {
+                    anyhow::bail!(
+                        "call_start_sharing: this call is not connected yet — a modality is \
+                         added to a live conversation"
+                    );
+                }
+                if call.sharing.is_some() {
+                    anyhow::bail!("call_start_sharing: this call already holds a sharing session");
+                }
+                // NEVER take the role from somebody who is presenting. A meeting shows one
+                // screen at a time, and asking for the session while a colleague is sharing
+                // takes it off them: measured 2026-08-06 against a real share, the service
+                // granted us the role and then offered their `applicationsharing-video` section
+                // at PORT 0 — so their screen stopped arriving and nothing of ours went out.
+                // Changing hands is what `takeControl` is for, and this app does not offer it.
+                if let Some(sharer) = call
+                    .roster
+                    .iter()
+                    .find(|member| member.streams.iter().any(calling::RosterStream::is_shared_screen))
+                {
+                    anyhow::bail!(
+                        "call_start_sharing: {} is sharing their screen — a meeting shows one at \
+                         a time, and taking it from them is not something this app does",
+                        sharer.display_name
+                    );
+                }
+                let url = call.links.add_modality().map(str::to_string).context(
+                    "call_start_sharing: this call has no addModality link — the service names \
+                     it on the conversation",
+                )?;
+                (
+                    call.local.clone(),
+                    call.callbacks.clone(),
+                    url,
+                    uuid::Uuid::new_v4().to_string(),
+                )
+            };
+            let payload = calling::content_sharing_payload(&local, &callbacks, &correlation_id);
+            // The reservation goes in FIRST, so the frame that grants the session has somewhere
+            // to land: it can arrive before this POST has even answered.
+            {
+                let mut plane = ctx.calling.lock().unwrap();
+                if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                    call.sharing = Some(calling::ContentSharing {
+                        correlation_id: correlation_id.clone(),
+                        session_id: None,
+                        leave: None,
+                    });
+                }
+            }
+            let response = ctx.post_call_signal(&url, &payload).await?;
+            // The answer carries `{}` — measured — so the session is not in it. It is read off
+            // the `addModalitySuccess` FRAME, and this WAITS for that frame: the client's own
+            // `start` returns a deferred the frame resolves, and a section offered before the
+            // service has registered the presenter is a section it rejects.
+            let granted = ctx.await_sharing_session(&call_id).await;
+            if !granted {
+                eprintln!(
+                    "[calling] the meeting never granted the sharing session — answer links={:?}",
+                    calling::Links::collect(&response).names()
+                );
+            }
+            Ok(json!({ "call_id": call_id, "can_stop": granted }))
+        }
+
+        // Give the sharing session back.
+        //
+        // Outward for the same reason as the start, and gated the same way: the meeting is
+        // told this endpoint has stopped presenting. It is deliberately forgiving — a session
+        // the service never named a way out of is dropped locally rather than kept for ever,
+        // because the alternative is a call that can never share again.
+        "call_stop_sharing" => {
+            let call_id = param_str(params, "call_id")?;
+            let held = {
+                let mut plane = ctx.calling.lock().unwrap();
+                let call = plane
+                    .call
+                    .as_mut()
+                    .filter(|c| c.id == call_id)
+                    .context("call_stop_sharing: no such call")?;
+                let held = call.sharing.take();
+                (held, call.local.clone(), call.callbacks.clone())
+            };
+            let (session, local, callbacks) = held;
+            let Some(session) = session else {
+                return Ok(json!({ "call_id": call_id, "told_service": false }));
+            };
+            let told = match &session.leave {
+                Some(url) => {
+                    let payload = calling::content_sharing_leave_payload(&local, &callbacks);
+                    match ctx.post_call_signal(url, &payload).await {
+                        Ok(_) => true,
+                        Err(e) => {
+                            eprintln!("[calling] the sharing session would not close: {e:#}");
+                            false
+                        }
+                    }
+                }
+                None => false,
+            };
+            eprintln!("[calling] gave the sharing session up: told_service={told}");
+            Ok(json!({ "call_id": call_id, "told_service": told }))
         }
 
         // OFFER new media on a call that is already up: the user's camera, or their screen.
@@ -4578,11 +4981,25 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
             }
             ctx.emit_call_state();
-            eprintln!("[calling] offered media: modalities={modalities:?} sending={sending:?}");
+            eprintln!(
+                "[calling] offered media: modalities={modalities:?} sending={sending:?} \
+                 sections={}",
+                calling::media_sections(&offer.blob).join(" | ")
+            );
             // The ANSWER may be in this response or arrive on our `mediaAnswer` callback —
             // the service has done both for other negotiations. Handing back whichever is
             // here lets the page apply it without waiting for a frame that may not come.
             let answer = calling::media_answer_from_frame(&response).map(|m| m.blob);
+            // The answer that came WITH the response, stated the same way as the one that
+            // arrives on a frame: which sections the service took and which it refused. A
+            // rejected one is the difference between a screen the meeting shows and a
+            // capture the page has to release, and it was invisible here.
+            if let Some(answer) = &answer {
+                eprintln!(
+                    "[calling] the offer was answered at once: {}",
+                    calling::media_sections(answer).join(" | ")
+                );
+            }
             Ok(json!({ "call_id": call_id, "answer_sdp": answer }))
         }
 
@@ -4745,7 +5162,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 link_preview_settings(&store)?
             };
             let metadata = link_preview::enrich(&ctx.http, &settings, &url).await?;
-            Ok(json!({ "metadata": metadata }))
+            // A card names people too — a merge request's author, an issue's — so it names
+            // them the way the GitLab page does: the colleague this app knows, with their
+            // Teams face. Nothing is cached here, so there is nothing to keep current.
+            let mut answer = json!({ "metadata": metadata });
+            with_teams_people(ctx, &mut answer);
+            Ok(answer)
         }
 
         // The approval state of one merge request: who has approved it, how many
@@ -4767,7 +5189,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 &url,
             )
             .await?;
-            Ok(json!({ "approval": approval, "token_set": settings.gitlab_token.is_some() }))
+            // Who approved is one more list of people on this page, so it is named the same
+            // way the rest of it is.
+            let mut answer =
+                json!({ "approval": approval, "token_set": settings.gitlab_token.is_some() });
+            with_teams_people(ctx, &mut answer);
+            Ok(answer)
         }
 
         // Give, or take back, the user's own approval of a merge request. THE one write
@@ -4798,7 +5225,278 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 approved,
             )
             .await?;
-            Ok(json!({ "approval": approval, "token_set": true }))
+            // The page reads the approval state as part of one merge request's detail, so
+            // an approval given from there makes that detail wrong the moment it lands.
+            if let Some((project_path, iid)) = gitlab_merge_request_of(&url, &settings.gitlab_host) {
+                forget_gitlab_merge_request(ctx, &project_path, iid);
+            }
+            let mut answer = json!({ "approval": approval, "token_set": true });
+            with_teams_people(ctx, &mut answer);
+            Ok(answer)
+        }
+
+        // ---- the merge-request page: reads ------------------------------------
+        //
+        // Every one of these answers from the durable response cache FIRST and refreshes
+        // behind the page (see `gitlab_cached`), which is what makes the surface feel
+        // local: a re-opened merge request paints from disk, and the fresh copy arrives on
+        // a `gitlab_mr_updated` event a moment later. All four are ordinary reads, so none
+        // is gated — but each needs the user's token, because "what can I see" is a
+        // question about an account (see `gitlab_mr::require_token`).
+
+        // The merge requests that are NOT merged, for the sidebar. `scope` and `state` are
+        // closed sets in the Rust type, so a client cannot widen the query into one the
+        // page never offers — in particular it can never ask for merged ones.
+        "gitlab_mr_list" => {
+            let query = gitlab_list_query(params)?;
+            let refresh = params.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            // Whether this machine holds a token at all travels with the answer, and it is
+            // read HERE rather than from the settings by the page. Two reasons, and the
+            // second is the load-bearing one: the read is the thing that needs the token,
+            // so the honest place to report it is beside its result — and it must not be
+            // derived from a cached payload, since a token can be added or removed while
+            // one sits in the store.
+            //
+            // With no token the list is not asked for at all: the answer is an EMPTY list
+            // that says so, rather than a refusal the user would read as a failure.
+            let token_set = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?.gitlab_token.is_some()
+            };
+            if !token_set {
+                return Ok(json!({
+                    "scope": query.scope.as_str(),
+                    "state": query.state.as_str(),
+                    "items": [],
+                    "truncated": false,
+                    "token_set": false,
+                }));
+            }
+            let mut list = gitlab_cached(
+                ctx,
+                query.cache_key(),
+                GITLAB_LIST_TTL,
+                refresh,
+                GitLabRead::List(query),
+            )
+            .await?;
+            if let Some(object) = list.as_object_mut() {
+                object.insert("token_set".to_string(), json!(true));
+            }
+            Ok(list)
+        }
+
+        // One merge request in full: the header, the description, the branches, the people
+        // and the head pipeline as the detail body states it.
+        "gitlab_mr_detail" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let refresh = params.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            gitlab_cached(
+                ctx,
+                gitlab_mr::cache_key(&project_path, iid, "detail"),
+                GITLAB_DETAIL_TTL,
+                refresh,
+                GitLabRead::Detail { project_path, iid },
+            )
+            .await
+        }
+
+        // The comment thread. Discussions in GitLab's own order, threads and standalone
+        // comments told apart, and each note saying whether the user themselves wrote it —
+        // which is what decides whether a deletion is offered.
+        "gitlab_mr_notes" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let refresh = params.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            gitlab_cached(
+                ctx,
+                gitlab_mr::cache_key(&project_path, iid, "notes"),
+                GITLAB_NOTES_TTL,
+                refresh,
+                GitLabRead::Notes { project_path, iid },
+            )
+            .await
+        }
+
+        // What the merge request CHANGED, for the Changes section. `depth` picks between the
+        // modern `/diffs` — one page, and whatever GitLab chose to expand — and the older
+        // `/changes?access_raw_diffs=true`, which expands everything and costs half a
+        // megabyte on a big merge request. It is a closed Rust set, so a client can never
+        // widen it into a third endpoint (see `gitlab_mr::DiffDepth`), and the expanded read
+        // is the reader's own ask: `listed` is what opening the section costs.
+        "gitlab_mr_diff" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let refresh = params.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            let depth = gitlab_diff_depth(params)?;
+            gitlab_cached(
+                ctx,
+                gitlab_mr::cache_key(&project_path, iid, depth.cache_kind()),
+                GITLAB_DIFF_TTL,
+                refresh,
+                GitLabRead::Diff { project_path, iid, depth },
+            )
+            .await
+        }
+
+        // The head pipeline and its jobs. THE live read: the page repeats it while CI is
+        // running, so its cache window is seconds rather than half a minute — long enough
+        // that two open pages cost one request, short enough that a job turning green shows
+        // up when it happens.
+        "gitlab_mr_pipeline" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let refresh = params.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            gitlab_cached(
+                ctx,
+                gitlab_mr::cache_key(&project_path, iid, "pipeline"),
+                GITLAB_PIPELINE_TTL,
+                refresh,
+                GitLabRead::Pipeline { project_path, iid },
+            )
+            .await
+        }
+
+        // ---- the merge-request page: the four writes -------------------------
+        //
+        // Each is an `OUTWARD_METHODS` entry: the write token, refused by a read-only
+        // backend, and the automation hook refuses a command line that names the endpoint.
+        // Each carries out one click the user just made, each drops the cache of the merge
+        // request it changed, and each reports GitLab's own words on a refusal.
+
+        // MERGE the branch. The one write in this app that no later call takes back, which
+        // is why the `sha` the page drew travels with it: GitLab refuses a merge whose sha
+        // is not the branch's head, so a merge request that moved since the reader looked
+        // is refused rather than landed. The UI asks twice before it calls.
+        "gitlab_mr_merge" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let sha = param_str(params, "sha")?;
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let result = gitlab_mr_write::merge(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &gitlab_mr_write::MergeRequest {
+                    project_path: project_path.clone(),
+                    iid,
+                    sha,
+                    squash: params.get("squash").and_then(Value::as_bool).unwrap_or(false),
+                    remove_source_branch: params
+                        .get("remove_source_branch")
+                        .and_then(Value::as_bool),
+                },
+            )
+            .await?;
+            forget_gitlab_merge_request(ctx, &project_path, iid);
+            Ok(json!({ "merge": result }))
+        }
+
+        // COMMENT on it — a new comment, or a reply into the thread `discussion_id` names.
+        // Everybody watching the merge request is told, under the user's own name, so this
+        // is gated like a send and is only ever called from their own Enter.
+        "gitlab_mr_comment" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let body = param_str(params, "body")?;
+            let discussion = params
+                .get("discussion_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let note = gitlab_mr_write::comment(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &project_path,
+                iid,
+                discussion.as_deref(),
+                &body,
+            )
+            .await?;
+            forget_gitlab_merge_request(ctx, &project_path, iid);
+            // The comment the page adds at once, so it arrives wearing the same face as the
+            // ones it lands beside — the note it is drawn from is the user's own.
+            let mut answer = json!({ "note": note });
+            with_teams_people(ctx, &mut answer);
+            Ok(answer)
+        }
+
+        // DELETE one of the user's OWN comments — the undo that makes the comment above
+        // acceptable. Whose comment it is, is read from GitLab BEFORE the deletion and
+        // matched on the account's own id: GitLab would let a maintainer remove a
+        // colleague's note, and this app never offers that (the same rule that refuses to
+        // delete a Teams message that is not the user's own).
+        "gitlab_mr_delete_comment" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let note_id = params
+                .get("note_id")
+                .and_then(Value::as_u64)
+                .context("`note_id` must be a number")?;
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let discussions = gitlab_mr::fetch_discussions(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &project_path,
+                iid,
+            )
+            .await?;
+            let mine = discussions
+                .discussions
+                .iter()
+                .flat_map(|discussion| discussion.notes.iter())
+                .find(|note| note.id == note_id)
+                .map(|note| note.mine);
+            match mine {
+                Some(true) => {}
+                Some(false) => anyhow::bail!(
+                    "that comment is somebody else's — this app only deletes what the user \
+                     wrote themselves"
+                ),
+                None => anyhow::bail!("that comment is no longer on the merge request"),
+            }
+            gitlab_mr_write::delete_comment(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &project_path,
+                iid,
+                note_id,
+            )
+            .await?;
+            forget_gitlab_merge_request(ctx, &project_path, iid);
+            Ok(json!({ "deleted": note_id }))
+        }
+
+        // CLOSE or REOPEN it. Each direction is the other's undo, which is what makes this
+        // an ordinary gated write rather than a second irreversible one.
+        "gitlab_mr_set_state" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let requested = param_str(params, "change")?;
+            let change = gitlab_mr_write::StateChange::from_str(&requested)
+                .context("`change` must be \"close\" or \"reopen\"")?;
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let state = gitlab_mr_write::set_state(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &project_path,
+                iid,
+                change,
+            )
+            .await?;
+            forget_gitlab_merge_request(ctx, &project_path, iid);
+            Ok(json!({ "state": state }))
         }
 
         // One person's directory card — name, job title, department, email, work
@@ -5812,6 +6510,45 @@ fn import_order(entries: &[Value]) -> Vec<&Value> {
     art.into_iter().chain(aliases).collect()
 }
 
+/// WHICH meeting a `call_prepare` / `call_join` is about, in either way one can be named.
+///
+/// A meeting has two addresses and they come from two surfaces the user actually has:
+/// `join_url` is the link a CALENDAR event carries, and `meeting_thread` is the meeting's own
+/// conversation from the CHAT LIST — where a meeting the user was invited to already sits,
+/// with no link anywhere in it (this tenant's invitations carry the short `/meet/{code}`
+/// shape, and that code lives in the calendar event alone). Both parse to one
+/// [`calling::MeetingJoin`], so everything downstream knows one address type.
+///
+/// `Ok(None)` means the caller named neither, which is how the placing branch of
+/// `call_prepare` is told apart from the joining one. A value that IS named and does not
+/// parse is an error rather than a fallthrough: a join that quietly became a call would ring
+/// people instead of walking into a meeting.
+fn meeting_address(params: &Value) -> Result<Option<calling::MeetingJoin>> {
+    if let Some(join_url) = params.get("join_url").and_then(Value::as_str) {
+        return calling::MeetingJoin::from_join_url(join_url).map(Some).context(
+            "that is not a Teams meeting link — this app joins a meeting from its own join \
+             link and nothing else",
+        );
+    }
+    if let Some(thread) = params.get("meeting_thread").and_then(Value::as_str) {
+        return calling::MeetingJoin::from_thread_id(thread).map(Some).context(
+            "that conversation is not a meeting — only a meeting's own thread can be joined, \
+             and a group chat is called instead",
+        );
+    }
+    Ok(None)
+}
+
+/// How many people one call may ring at once.
+///
+/// A group call is the same POST as a 1:1 (`calling::invitation_payload`), so nothing in the
+/// protocol imposes this — what does is that every one of them is a device buzzing in
+/// somebody's pocket, and a mis-click on a 60-person thread cannot be taken back. Twenty is
+/// the size Teams itself stops tracking a thread's read receipts at, which is a fair line
+/// between a group and a broadcast. Above it the user still has real Teams, which is where a
+/// meeting for that many people belongs.
+const MAX_GROUP_CALL_PEOPLE: usize = 20;
+
 /// The modalities a media answer declares, checked against the four the service names.
 ///
 /// It is a check rather than a pass-through because a modality is a CLAIM about what the
@@ -5937,6 +6674,382 @@ fn link_preview_settings(store: &Store) -> Result<link_preview::Settings> {
         gitlab_token: token(SETTING_GITLAB_TOKEN)?,
         linear_token: token(SETTING_LINEAR_TOKEN)?,
     })
+}
+
+// ---- the merge-request page's read cache ------------------------------------
+//
+// Four reads, one mechanism: answer from `gitlab_reads` at once, and when that answer is
+// older than its own window, refresh behind the page and broadcast the fresh one. The page
+// therefore never waits on GitLab for something it has seen before, which is what makes
+// switching between merge requests feel local — and a backend restart costs nothing,
+// because the cache is on disk.
+//
+// The windows differ by what a stale answer COSTS, not by how expensive the read is:
+
+/// A list of merge requests moves when somebody opens or closes one, which is minutes
+/// apart. A minute of staleness in the sidebar is invisible; the row the user clicks is
+/// re-read as a detail anyway.
+const GITLAB_LIST_TTL: Duration = Duration::from_secs(60);
+/// A detail carries the state a MERGE is offered from, so it is worth less staleness than
+/// the list — and GitLab refuses a merge on a stale `sha` regardless, so this window
+/// decides how often the page corrects itself rather than whether it can be wrong.
+const GITLAB_DETAIL_TTL: Duration = Duration::from_secs(30);
+/// A comment thread is a conversation: half a minute behind is a chat client's own
+/// tolerance, and posting one refreshes it immediately anyway.
+const GITLAB_NOTES_TTL: Duration = Duration::from_secs(30);
+/// THE live one. A running pipeline changes every few seconds and the page polls it, so the
+/// window is short enough that a job turning green is seen when it happens — and long
+/// enough that two open pages, or a page and a phone, cost ONE request between them.
+const GITLAB_PIPELINE_TTL: Duration = Duration::from_secs(5);
+/// THE BIG one, and the one that moves least. A diff changes only when somebody PUSHES to
+/// the branch, which is minutes or hours apart, and the expanded read is half a megabyte on
+/// a large merge request — so this is the longest window on the page. It matters little
+/// either way: a push moves the `sha` the detail carries within 30 s, and the reader's own
+/// Reload asks for a fresh one.
+const GITLAB_DIFF_TTL: Duration = Duration::from_secs(120);
+
+/// One read of the merge-request page, and everything needed to make it again.
+///
+/// It exists so the CACHED path and the REFRESH path cannot drift: a background refresh
+/// re-runs this exact value, so what lands in the cache is what the handler would have
+/// answered. Cheap to clone (two strings at most), which is what lets a stale answer be
+/// returned and refreshed in the same breath.
+#[derive(Clone)]
+enum GitLabRead {
+    List(gitlab_mr::ListQuery),
+    Detail { project_path: String, iid: u64 },
+    Notes { project_path: String, iid: u64 },
+    Pipeline { project_path: String, iid: u64 },
+    Diff { project_path: String, iid: u64, depth: gitlab_mr::DiffDepth },
+}
+
+impl GitLabRead {
+    /// Make the read against GitLab and return the JSON the page gets.
+    async fn fetch(&self, ctx: &Ctx) -> Result<Value> {
+        let settings = {
+            let store = ctx.store()?;
+            link_preview_settings(&store)?
+        };
+        let host = settings.gitlab_host.as_str();
+        let token = settings.gitlab_token.as_deref();
+        Ok(match self {
+            Self::List(query) => {
+                json!(gitlab_mr::fetch_list(&ctx.http, host, token, *query).await?)
+            }
+            Self::Detail { project_path, iid } => {
+                json!(gitlab_mr::fetch_detail(&ctx.http, host, token, project_path, *iid).await?)
+            }
+            Self::Notes { project_path, iid } => {
+                json!(gitlab_mr::fetch_discussions(&ctx.http, host, token, project_path, *iid).await?)
+            }
+            Self::Pipeline { project_path, iid } => {
+                json!(gitlab_mr::fetch_pipeline(&ctx.http, host, token, project_path, *iid).await?)
+            }
+            Self::Diff { project_path, iid, depth } => {
+                json!(
+                    gitlab_mr::fetch_diff(&ctx.http, host, token, project_path, *iid, *depth)
+                        .await?
+                )
+            }
+        })
+    }
+
+    /// The event a fresh answer is broadcast on, and what identifies it there.
+    ///
+    /// A LIST goes out on its own event because the sidebar is what listens for it, and it
+    /// names the query so a page showing another filter ignores it. The other three name
+    /// the merge request and which read arrived, so an open page can replace one panel
+    /// without touching the rest.
+    fn event(&self) -> (&'static str, Value) {
+        match self {
+            Self::List(query) => (
+                "gitlab_list_updated",
+                json!({ "scope": query.scope.as_str(), "state": query.state.as_str() }),
+            ),
+            Self::Detail { project_path, iid } => (
+                "gitlab_mr_updated",
+                json!({ "project_path": project_path, "iid": iid, "kind": "detail" }),
+            ),
+            Self::Notes { project_path, iid } => (
+                "gitlab_mr_updated",
+                json!({ "project_path": project_path, "iid": iid, "kind": "notes" }),
+            ),
+            Self::Pipeline { project_path, iid } => (
+                "gitlab_mr_updated",
+                json!({ "project_path": project_path, "iid": iid, "kind": "pipeline" }),
+            ),
+            // The DEPTH is part of the kind, so a page showing the expanded diff is never
+            // handed the plain one — which holds fewer patches — a moment after asking.
+            Self::Diff { project_path, iid, depth } => (
+                "gitlab_mr_updated",
+                json!({
+                    "project_path": project_path,
+                    "iid": iid,
+                    "kind": depth.cache_kind(),
+                }),
+            ),
+        }
+    }
+}
+
+/// Answer one GitLab read: from the cache when it holds one, then refresh behind the page.
+///
+/// - A cached answer is returned WHATEVER its age, so the page paints at once.
+/// - When that answer is older than `ttl`, a refresh runs in the background and the fresh
+///   copy is broadcast. Nothing is awaited, so a slow GitLab never holds the page up.
+/// - With nothing cached — a cold store, a filter never used — the read is awaited, because
+///   answering "there is nothing" would be indistinguishable from an empty tracker.
+/// - `refresh: true` is the user's own Reload: it awaits a fresh read and replaces the row.
+async fn gitlab_cached(
+    ctx: &Ctx,
+    key: String,
+    ttl: Duration,
+    refresh: bool,
+    read: GitLabRead,
+) -> Result<Value> {
+    let mut value = None;
+    if !refresh {
+        let cached = {
+            let store = ctx.store()?;
+            store.gitlab_read(&key, now_ms())?
+        };
+        // An unparseable payload is treated as no payload: a build that changed a field's
+        // shape must not serve the old one for a minute.
+        if let Some((payload, age)) = cached {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&payload) {
+                if age > ttl.as_millis() as i64 {
+                    let ctx_bg = ctx.clone();
+                    let key_bg = key.clone();
+                    let read_bg = read.clone();
+                    tokio::spawn(async move {
+                        gitlab_refresh_behind_the_page(&ctx_bg, key_bg, read_bg).await;
+                    });
+                }
+                value = Some(parsed);
+            }
+        }
+    }
+    let mut value = match value {
+        Some(value) => value,
+        None => gitlab_fetch_and_cache(ctx, &key, &read).await?,
+    };
+    // The LAST thing that happens to any answer, on both paths, and never before the cache:
+    // who these people are in Teams is local and current, and a copy of it frozen on disk
+    // would outlive a rename.
+    with_teams_people(ctx, &mut value);
+    Ok(value)
+}
+
+/// How long a folded roster of Teams people is reused before it is built again.
+///
+/// The window's cost is one thing only: a colleague whose FIRST message this machine has
+/// ever stored is drawn as a stranger on the GitLab page for up to a minute. Its benefit is
+/// that opening a merge request — four reads at once — reads 294 people once instead of four
+/// times, and that a pipeline poll every 6 s costs nothing. The same trade, and the same
+/// minute, as the merge-request list's own window.
+const TEAMS_PEOPLE_TTL: Duration = Duration::from_secs(60);
+
+/// Add to one GitLab answer, in place, who each of its people is in Teams.
+///
+/// Called on every payload the page is handed — the four reads above, and the note a comment
+/// write hands back — so a colleague wears one face and one name everywhere in this app. The
+/// resolution itself is `tracker_people`; what lives here is where its two halves come from:
+/// the roster to match a real name against, and each matched person's CURRENT display name,
+/// which is [`store::Store::display_name_for_mri`] — the same read every other name in this
+/// app goes through, so the user's own nickname wins here exactly as it does in a chat.
+///
+/// It cannot fail the read. A face and a nicer name are what this adds; a store that cannot
+/// be opened costs them and leaves GitLab's own words, which is what the page drew before
+/// this existed.
+///
+/// Both reads are LAZY, which is what keeps it off the hot path: the roster is built on the
+/// first person the payload holds, and the store is opened on the first person who really
+/// resolves. A pipeline — THE live read, polled every few seconds while CI runs — names
+/// nobody at all, so it costs nothing here.
+fn with_teams_people(ctx: &Ctx, value: &mut Value) {
+    let mut roster: Option<Arc<tracker_people::Roster>> = None;
+    let mut store: Option<Store> = None;
+    // One lookup per distinct name, not per row: a hundred merge requests are written by a
+    // couple of dozen people, and a comment thread by fewer.
+    let mut resolved: std::collections::HashMap<String, Option<tracker_people::TeamsPerson>> =
+        std::collections::HashMap::new();
+    tracker_people::annotate(value, &mut |name| {
+        if let Some(known) = resolved.get(name) {
+            return known.clone();
+        }
+        let person = (|| {
+            if roster.is_none() {
+                roster = teams_people_of(ctx);
+            }
+            let mri = roster.as_ref()?.mri_for(name)?;
+            if store.is_none() {
+                store = ctx.store().ok();
+            }
+            let display = store.as_ref()?.display_name_for_mri(mri).ok().flatten()?;
+            Some(tracker_people::TeamsPerson { mri: mri.to_string(), name: display })
+        })();
+        resolved.insert(name.to_string(), person.clone());
+        person
+    });
+}
+
+/// The folded roster of Teams people, from the cache when it is fresh enough.
+///
+/// `None` when the store cannot be read, which costs the identities and nothing else.
+fn teams_people_of(ctx: &Ctx) -> Option<Arc<tracker_people::Roster>> {
+    {
+        let cached = ctx.tracker_people.lock().unwrap();
+        if let Some((built, roster)) = cached.as_ref() {
+            if now_ms().saturating_sub(*built) < TEAMS_PEOPLE_TTL.as_millis() as i64 {
+                return Some(roster.clone());
+            }
+        }
+    }
+    let people = ctx.store().ok()?.named_people().ok()?;
+    let roster = Arc::new(tracker_people::Roster::from_people(people));
+    *ctx.tracker_people.lock().unwrap() = Some((now_ms(), roster.clone()));
+    Some(roster)
+}
+
+/// Make one read, store it, and hand it back.
+async fn gitlab_fetch_and_cache(ctx: &Ctx, key: &str, read: &GitLabRead) -> Result<Value> {
+    let value = read.fetch(ctx).await?;
+    // A read that could not be stored is still a read the page can have: the cache is a
+    // performance feature, and failing the request over it would trade a working page for
+    // a faster one.
+    if let Ok(store) = ctx.store() {
+        if let Err(e) = store.put_gitlab_read(key, &value.to_string(), now_ms()) {
+            eprintln!("[gitlab] the answer for {key} could not be cached: {e:#}");
+        }
+    }
+    Ok(value)
+}
+
+/// Refresh one read behind the page and broadcast the result — once per key at a time.
+///
+/// Single-flight through [`Ctx::gitlab_refreshing`]: two pages polling one pipeline, or one
+/// page whose poll overlaps a slow answer, cost ONE request between them. A refusal is
+/// broadcast too, on `gitlab_read_error`, because a page that keeps painting a stale answer
+/// with no word is a page telling the user everything is fine.
+async fn gitlab_refresh_behind_the_page(ctx: &Ctx, key: String, read: GitLabRead) {
+    if !ctx.gitlab_refreshing.lock().unwrap().insert(key.clone()) {
+        return;
+    }
+    let outcome = gitlab_fetch_and_cache(ctx, &key, &read).await;
+    ctx.gitlab_refreshing.lock().unwrap().remove(&key);
+
+    match outcome {
+        Ok(mut value) => {
+            // The same last step the handler's own answer takes: an event carries the page's
+            // whole payload, so a fresh copy that skipped this would replace every face and
+            // every Teams name with GitLab's own a moment after they were drawn.
+            with_teams_people(ctx, &mut value);
+            let (event, mut data) = read.event();
+            if let (Some(object), Some(payload)) = (data.as_object_mut(), value.as_object()) {
+                for (field, value) in payload {
+                    object.insert(field.clone(), value.clone());
+                }
+            }
+            ctx.emit(event, data);
+        }
+        Err(e) => ctx.emit("gitlab_read_error", json!({ "key": key, "error": e.to_string() })),
+    }
+}
+
+/// Drop everything cached about one merge request, and tell every open page to re-read it.
+///
+/// Called by all four writes and by an approval: each makes the detail, the comments and
+/// the pipeline wrong in the same instant, and a page that painted the stale copy back
+/// would report the opposite of what the user just did. The list is deliberately NOT
+/// dropped — it is a different read, and re-fetching a hundred rows because one row moved
+/// is the cost the shared prefix exists to avoid; its own window closes within the minute.
+fn forget_gitlab_merge_request(ctx: &Ctx, project_path: &str, iid: u64) {
+    if let Ok(store) = ctx.store() {
+        if let Err(e) = store.forget_gitlab_reads(&gitlab_mr::cache_prefix(project_path, iid)) {
+            eprintln!("[gitlab] the cache of {project_path}!{iid} could not be dropped: {e:#}");
+        }
+    }
+    ctx.emit(
+        "gitlab_mr_updated",
+        json!({ "project_path": project_path, "iid": iid, "kind": "stale" }),
+    );
+}
+
+/// Which merge requests a list read asks for, from a client's params.
+///
+/// Both halves default rather than fail: a page that asked for nothing gets the sidebar's
+/// own default — every open merge request the token can see — and a name outside the closed
+/// set is refused rather than forwarded to GitLab as a query parameter.
+fn gitlab_list_query(params: &Value) -> Result<gitlab_mr::ListQuery> {
+    let scope = match params.get("scope").and_then(Value::as_str) {
+        Some(name) => gitlab_mr::ListScope::from_str(name)
+            .with_context(|| format!("unknown scope: {name}"))?,
+        None => gitlab_mr::ListScope::All,
+    };
+    let state = match params.get("state").and_then(Value::as_str) {
+        Some(name) => gitlab_mr::ListState::from_str(name)
+            .with_context(|| format!("a merge-request list is opened or closed, not {name}"))?,
+        None => gitlab_mr::ListState::Opened,
+    };
+    Ok(gitlab_mr::ListQuery { scope, state })
+}
+
+/// Which of the two diff reads a client asked for.
+///
+/// Defaults to the cheap one rather than failing, because that is what opening the Changes
+/// section costs — and a name outside the closed set is refused rather than forwarded, since
+/// it decides which GitLab endpoint the user's token reaches.
+fn gitlab_diff_depth(params: &Value) -> Result<gitlab_mr::DiffDepth> {
+    match params.get("depth").and_then(Value::as_str) {
+        Some(name) => gitlab_mr::DiffDepth::from_str(name)
+            .with_context(|| format!("a diff is listed or raw, not {name}")),
+        None => Ok(gitlab_mr::DiffDepth::Listed),
+    }
+}
+
+/// Longest project path accepted from a client. GitLab's own limit on a full path is 255
+/// characters, so anything longer names nothing there.
+const MAX_PROJECT_PATH_BYTES: usize = 255;
+
+/// WHICH merge request a call is about: a project path and an iid, checked for shape.
+///
+/// The host is never in these params — it comes from the user's own settings and every
+/// endpoint is built from [`gitlab::api_base`] — so this cannot repoint the token. What it
+/// checks is that the path is a path: `gitlab::encode_path` would percent-encode a whole
+/// URL into one harmless segment, but a request built from junk earns a 404 nobody can read,
+/// and refusing it here says what was wrong instead.
+fn gitlab_merge_request_params(params: &Value) -> Result<(String, u64)> {
+    let project_path = param_str(params, "project_path")?.trim().to_string();
+    anyhow::ensure!(!project_path.is_empty(), "`project_path` must name a project");
+    anyhow::ensure!(
+        project_path.len() <= MAX_PROJECT_PATH_BYTES,
+        "`project_path` is longer than any GitLab project path"
+    );
+    anyhow::ensure!(
+        !project_path.starts_with('/')
+            && !project_path.ends_with('/')
+            && !project_path.contains("//")
+            && !project_path.contains("..")
+            && !project_path.contains(':')
+            && !project_path.chars().any(char::is_whitespace),
+        "`project_path` must be a project path like \"group/sub/project\""
+    );
+    let iid = params
+        .get("iid")
+        .and_then(Value::as_u64)
+        .filter(|iid| *iid > 0)
+        .context("`iid` must be the merge request's number")?;
+    Ok((project_path, iid))
+}
+
+/// The merge request one URL names on the configured host, through the read path's own
+/// parser — so an approval given from a chat message can drop that merge request's cache
+/// without a second host check living here.
+fn gitlab_merge_request_of(url: &str, gitlab_host: &str) -> Option<(String, u64)> {
+    match gitlab::parse_url(url, gitlab_host)? {
+        gitlab::Resource::MergeRequest { project_path, iid } => Some((project_path, iid)),
+        gitlab::Resource::Issue { .. } | gitlab::Resource::Project { .. } => None,
+    }
 }
 
 /// Resolve the persistent SQLite path, following the XDG Base Directory spec:
@@ -6294,6 +7407,72 @@ fn mention_candidates(
     (people, unnamed)
 }
 
+/// Everybody a message in one conversation may @mention, named, most relevant first.
+///
+/// A pure READ: the roster GET (src/teams_members.rs) and the short-profile lookup that
+/// names it, both of which this app already does elsewhere.
+///
+/// Two sources, because neither covers both thread kinds: the thread's roster (complete
+/// for a chat, just us for a channel) and everybody who has written in the conversation
+/// (the only source a channel has, and the one that carries the names we already hold).
+/// Whoever is still nameless — a chat member who never wrote — is resolved in one batch
+/// against the directory.
+///
+/// Best-effort by contract: a roster Teams refuses, or a directory that answers nothing,
+/// leaves a shorter list rather than an error, because a composer with no suggestions
+/// still sends messages.
+///
+/// Two callers, one list, and that is the point: it is what the `members` method offers
+/// the composer, and it is the ONLY set of people an agent's answer can mention (see
+/// [`agent_policy::reply_body`]). A machine and a person can name the same people.
+async fn thread_mentionable_people(
+    ctx: &Ctx,
+    conversation_id: &str,
+) -> Result<Vec<agent_markdown::Mentionable>> {
+    let self_mri = ctx.session().await?.self_mri.to_string();
+    let http = ctx.http.clone();
+    let roster_conv = conversation_id.to_string();
+    let roster = ctx
+        .retry_on_auth(move |session, _csa| {
+            let http = http.clone();
+            let conv = roster_conv.clone();
+            async move { teams_members::fetch_thread_members(&http, &session, &conv).await }
+        })
+        .await
+        .unwrap_or_default();
+
+    let (mut people, unnamed) = {
+        let store = ctx.store()?;
+        let senders = store.thread_senders(conversation_id, MAX_MENTION_MEMBERS as i64)?;
+        mention_candidates(&roster, &senders, &self_mri)
+    };
+    if !unnamed.is_empty() {
+        let session = ctx.session().await?;
+        if let Ok(profile) = ctx.profile().await {
+            if let Ok(names) =
+                teams_profiles::fetch_names(&ctx.http, &session, &profile, &unnamed).await
+            {
+                for person in people.iter_mut() {
+                    if let Some(name) = names.get(&person.mri) {
+                        person.display_name = name.clone();
+                    }
+                }
+            }
+        }
+    }
+    // Somebody we cannot name is somebody the user cannot pick out of a list, and
+    // somebody an answer cannot write either, so they are left out rather than offered
+    // as an MRI.
+    Ok(people
+        .into_iter()
+        .filter(|person| !person.display_name.is_empty())
+        .map(|person| agent_markdown::Mentionable {
+            mri: person.mri,
+            name: person.display_name,
+        })
+        .collect())
+}
+
 /// Serialize one message for the wire.
 ///
 /// `message_type` is the Teams `messagetype` verbatim (`Text`, `RichText/Html`,
@@ -6528,28 +7707,135 @@ fn spawn_presence_heartbeat(ctx: Ctx) {
     });
 }
 
-/// Check GitHub once, in the background, for a newer rolling `latest` release
-/// than the commit this binary was built from, and tell the UI if there is one.
+/// Watch the rolling `latest` release for the whole life of the process, and tell the UI
+/// when it names a commit this build is not.
 ///
-/// Best-effort by design: a dev build (no embedded commit), no network, or a
-/// rate-limited API all end the check quietly — it must never affect startup or
-/// the running app. On a hit we cache the payload (so UIs that connect later
-/// still learn about it, see `serve_conn`) and broadcast it to any UI already
-/// connected.
-fn spawn_update_check(ctx: Ctx) {
+/// **It repeats, and that is the feature.** It used to run exactly once, at startup, which
+/// meant an app left open — which is what this app is, on a phone, for weeks — never
+/// learned about anything CI published after it booted. The update button appeared only if
+/// a release happened to be newer at the moment the backend came up, so the usual way to
+/// see one was to restart the thing the button exists to restart.
+///
+/// Best-effort by design: a dev build (no embedded commit), no network, or a rate-limited
+/// API all end a pass quietly — it must never affect startup or the running app.
+fn spawn_release_poll(ctx: Ctx) {
     let Some(current) = teams_lite::update::build_rev() else {
         // Built from source: nothing meaningful to compare against, so we never
         // nag developers running a local build.
         return;
     };
     tokio::spawn(async move {
-        match teams_lite::update::check(&ctx.http, current).await {
-            Ok(Some(info)) => {
+        // `interval` fires its first tick immediately, so the startup check this replaces
+        // still happens at startup.
+        let mut ticks = tokio::time::interval(RELEASE_CHECK_INTERVAL);
+        loop {
+            ticks.tick().await;
+            // The outcome is the button's business (see `Ctx::check_release_now`): a pass
+            // on the clock has nobody waiting on an answer, and it has already published
+            // whatever moved.
+            let _ = ctx.release_pass(current, ReleaseAsk::Poll).await;
+        }
+    });
+}
+
+/// Whether a pass of the release watch may spend a GitHub request, and on whose behalf.
+///
+/// The two differ in exactly one respect — whether the machine's slot has to be free — and
+/// that difference is the whole reason a button exists beside the clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseAsk {
+    /// The two-minute clock (`spawn_release_poll`). It asks only when nothing on this
+    /// machine has asked inside the interval.
+    Poll,
+    /// The user pressed **Check for updates**. It takes the slot whatever the timestamp
+    /// says, because an answer up to two minutes old is not what they pressed for.
+    User,
+}
+
+/// What one pass found, for the caller that has to report it. The poll drops it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReleaseOutcome {
+    /// A newer build exists, and the update row is already offering it.
+    Available,
+    /// This build IS the newest one.
+    Current,
+    /// The pass stood aside: the user has already pressed something and a download owns
+    /// the payload.
+    Busy,
+    /// Nothing could be compared — a build made from source, GitHub naming no commit we
+    /// can read, or no stored answer yet on a backend that never fetches.
+    Unknown,
+    /// The request itself failed, in GitHub's own words (or the transport's).
+    Failed(String),
+}
+
+impl Ctx {
+    /// One pass of the release watch: read what `latest` names, compare it with this
+    /// build, and publish only what CHANGED.
+    ///
+    /// Shared by the clock and by the user's own **Check for updates**, so there is one
+    /// spelling of "is there a newer build" rather than two that drift — `ask` carries the
+    /// single difference between them (see [`ReleaseAsk`]).
+    ///
+    /// Four rules, and each is pinned by a test:
+    ///
+    ///   * **One request per MACHINE, not per backend.** The answer is the same for every
+    ///     process here, so it is fetched under a claim and shared through the store
+    ///     ([`Store::claim_release_check`], which carries the measured budget this obeys).
+    ///     A backend that loses the claim still learns the new release on this same pass,
+    ///     because it reads the stored answer rather than its own.
+    ///   * **Silence unless something moved.** A client hears `update_available` when the
+    ///     release changes and never on a pass that found the same one, so a page open for
+    ///     a week is not sent one event every two minutes — and the journal keeps one line
+    ///     per release rather than 720 a day. The OUTCOME is returned either way: the user
+    ///     who pressed the button has to be told there is nothing new, which is the one
+    ///     answer an event cannot carry.
+    ///   * **A download owns the payload while it runs.** Every phase but `Idle` means the
+    ///     user has pressed something, and the asset a bar is drawn against is re-read by
+    ///     the download itself (`refresh_release`). A pass that overwrote it mid-transfer
+    ///     would move the total under the bar.
+    ///   * **A request the USER asked for and could not make is a failure, never a verdict.**
+    ///     The poll falls back to the stored answer and says one line to the journal; a
+    ///     manual check reports what went wrong instead, because "you are up to date" on
+    ///     the strength of a read that failed is the one answer it must not give.
+    async fn release_pass(&self, current: &str, ask: ReleaseAsk) -> ReleaseOutcome {
+        if !matches!(self.with_update(|slot| slot.phase), Ok(UpdatePhase::Idle)) {
+            return ReleaseOutcome::Busy;
+        }
+        // A read-only backend never takes the claim: it is a screenshot backend, it cannot
+        // install anything, and holding the machine's slot would delay by up to one
+        // interval the discovery by the app that CAN act on it. It still reads the stored
+        // answer, so its UI says what the app's does.
+        let mut failure = None;
+        if !read_only() && self.claim_release_read(ask) {
+            match teams_lite::update::fetch_release(&self.http).await {
+                Ok(Some(release)) => self.remember_release(&release),
+                // GitHub answered and named no commit we could read: nothing to store, and
+                // the previous answer stands rather than being erased by an unreadable one.
+                Ok(None) => {}
+                // Reached-but-failed or offline. One line, never a reason to drop what we
+                // already knew — and kept, for the caller that has somebody waiting on it.
+                Err(e) => {
+                    eprintln!("[update] check skipped: {e}");
+                    failure = Some(format!("{e}"));
+                }
+            }
+        }
+        if let (ReleaseAsk::User, Some(why)) = (ask, failure) {
+            return ReleaseOutcome::Failed(why);
+        }
+        let Some(release) = self.stored_release() else { return ReleaseOutcome::Unknown };
+        match teams_lite::update::compare(&release, current) {
+            Some(info) => {
+                let known = self.with_update(|slot| slot.latest.clone()).unwrap_or_default();
+                if known == info.latest {
+                    return ReleaseOutcome::Available;
+                }
                 // What it brings, before it is announced: the payload is spelled once, in
                 // `publish_release`, so the list has to be known by the time it runs or the
                 // first thing every client hears would carry no list.
-                ctx.learn_release_changes(&info).await;
-                let installable = ctx.publish_release(&info);
+                self.learn_release_changes(&info).await;
+                let installable = self.publish_release(&info);
                 eprintln!(
                     "[update] a newer build is available ({} -> {}){}",
                     info.current,
@@ -6560,15 +7846,90 @@ fn spawn_update_check(ctx: Ctx) {
                         " — update it the way it was installed"
                     }
                 );
+                ReleaseOutcome::Available
             }
-            // Up to date, or the remote commit couldn't be identified: say nothing — and
-            // drop any build left in the cache, since being current is exactly what makes
-            // a downloaded one worthless (a successful update ends here).
-            Ok(None) => teams_lite::update::discard_downloads(),
-            // Reached-but-failed or offline: log once, never surface to the user.
-            Err(e) => eprintln!("[update] check skipped: {e}"),
+            // This build IS the release. Empty the row if it was offering one — the user
+            // updated on another install, or CI moved the tag back onto this commit — but
+            // stay SILENT when it was not, or an up-to-date app would be sent a null every
+            // two minutes.
+            //
+            // The PRUNE runs either way, and deliberately: a build the release moved past
+            // is worthless, and the one left in the cache may have been downloaded by an
+            // EARLIER process, which this slot knows nothing about.
+            //
+            // It spares the download for `latest` — which here is this build's own commit —
+            // because the process that put it there may be ANOTHER install on this machine,
+            // a commit behind and one click from installing it. This backend's own phase
+            // guards nothing on its behalf: a phase is per process and this cache is per
+            // machine (see `update::prune_downloads`).
+            None => {
+                if self.with_update(|slot| slot.available.is_some()).unwrap_or(false) {
+                    self.forget_release(&release.rev);
+                } else {
+                    teams_lite::update::prune_downloads(&release.rev);
+                }
+                ReleaseOutcome::Current
+            }
         }
-    });
+    }
+
+    /// The `update_check` RPC: the pass above, on the user's own ask, reported back to the
+    /// control they pressed.
+    ///
+    /// The row in the sidebar still appears (or empties) on its own, because the pass
+    /// publishes exactly what a poll publishes — this answer is what the BUTTON says, and
+    /// the one thing the events cannot carry is "there is nothing new", which is the
+    /// commonest outcome of pressing it.
+    async fn check_release_now(&self) -> Result<Value> {
+        // A build made from source has no commit to compare, so there is nothing to ask
+        // GitHub about — the same reason the poll never starts in that build. Said rather
+        // than silently answered "up to date": one is a fact, the other a guess.
+        let Some(current) = teams_lite::update::build_rev() else {
+            return Ok(json!({ "outcome": "unsupported" }));
+        };
+        Ok(match self.release_pass(current, ReleaseAsk::User).await {
+            ReleaseOutcome::Available => json!({ "outcome": "available" }),
+            ReleaseOutcome::Current => json!({ "outcome": "current" }),
+            ReleaseOutcome::Busy => json!({ "outcome": "busy" }),
+            ReleaseOutcome::Unknown => json!({ "outcome": "unknown" }),
+            ReleaseOutcome::Failed(error) => json!({ "outcome": "failed", "error": error }),
+        })
+    }
+
+    /// Take the machine's release-check slot, or find that another backend has it.
+    /// A store that cannot answer is read as "not ours", so a failure costs one pass
+    /// rather than turning the poll into a per-backend one.
+    ///
+    /// The user's own ask takes the slot whatever its timestamp says — they pressed the
+    /// button to learn where they stand NOW, and a two-minute-old answer is not that. It
+    /// still MOVES the timestamp, so the clock's next pass stands down: one request for the
+    /// press, not one for the press and one for the tick behind it.
+    fn claim_release_read(&self, ask: ReleaseAsk) -> bool {
+        let now = now_ms();
+        let free_since = match ask {
+            ReleaseAsk::Poll => now - RELEASE_CHECK_INTERVAL.as_millis() as i64,
+            ReleaseAsk::User => now,
+        };
+        self.store()
+            .and_then(|store| store.claim_release_check(now, free_since))
+            .unwrap_or(false)
+    }
+
+    /// Write the machine's answer down, for every other backend's next pass.
+    fn remember_release(&self, release: &teams_lite::update::Release) {
+        if let (Ok(json), Ok(store)) = (serde_json::to_string(release), self.store()) {
+            let _ = store.set_setting(teams_lite::update::SETTING_RELEASE, &json);
+        }
+    }
+
+    /// The machine's last answer, whoever fetched it. `None` before the first successful
+    /// read, and on a stored value this build cannot parse — an older shape is treated as
+    /// no answer rather than guessed at.
+    fn stored_release(&self) -> Option<teams_lite::update::Release> {
+        let stored =
+            self.store().ok()?.get_setting(teams_lite::update::SETTING_RELEASE).ok()??;
+        serde_json::from_str(&stored).ok()
+    }
 }
 
 // ---- push notifications --------------------------------------------------------
@@ -6878,6 +8239,29 @@ fn publish_agent_run_marker(run: &store::AgentRun) {
     let _ = std::fs::write(dir.join(marker_name(&run.message_id)), body);
 }
 
+/// How many agent replies THIS process is writing right now.
+///
+/// Read from the markers rather than from the store, and narrowed to our own pid, because
+/// the question a restart asks is "what would I cut off": the store's rows belong to every
+/// backend on this machine, and a run in the other one survives us untouched. It is the same
+/// directory `bin/teams-lite-service.sh` counts before it restarts the units
+/// (`wait_for_quiet_agent`) — one place a live run is published, two readers.
+///
+/// Best-effort like everything else about the markers: no runtime directory, or a directory
+/// that will not open, reads as no runs — which is what the caller would have assumed.
+fn live_agent_runs_here() -> usize {
+    let Some(dir) = agent_run_marker_dir() else { return 0 };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+    let ours = format!("pid={}", std::process::id());
+    entries
+        .flatten()
+        .filter(|entry| {
+            std::fs::read_to_string(entry.path())
+                .is_ok_and(|body| body.lines().any(|line| line.trim() == ours))
+        })
+        .count()
+}
+
 /// Take a finished run's marker away. Called on every exit path, so the directory
 /// holds live runs and leftovers of killed processes — nothing else.
 fn remove_agent_run_marker(message_id: &str) {
@@ -7105,9 +8489,24 @@ fn agent_session_key(conversation_id: &str, backend: &str) -> String {
 async fn agent_reply(
     ctx: &Ctx,
     command: &agent_policy::Command,
-    request: agent::Request,
+    mut request: agent::Request,
 ) -> Result<()> {
     let backend = command.backend;
+    // Who the answer may @mention, resolved once for the whole run: the people of THIS
+    // thread and nobody else. The list does two jobs — it tells the model which names it
+    // can write (a capability nothing says is a capability nothing uses), and it is what
+    // every `@…` in the answer is matched against.
+    //
+    // Best-effort, like the composer's own list: a thread whose roster Teams refuses
+    // leaves an answer that mentions nobody, which is what every answer did before.
+    let people = thread_mentionable_people(ctx, &command.conversation_id)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("[agent] no mention list for {}: {e}", command.conversation_id);
+            Vec::new()
+        });
+    request.system_prompt.push_str(&agent_markdown::mention_note(&people));
+
     let placeholder = agent_policy::thinking_html(backend);
     let sent = agent_send(ctx, command, &placeholder).await?;
     if sent.id.is_empty() {
@@ -7144,7 +8543,7 @@ async fn agent_reply(
     }
     publish_agent_run_marker(&run);
 
-    let outcome = agent_run_to_completion(ctx, command, request, &sent.id).await;
+    let outcome = agent_run_to_completion(ctx, command, request, &sent.id, &people).await;
 
     // The run is over, whatever it produced. Clearing the record BEFORE the result is
     // propagated is deliberate: a failed final edit is a finished run whose answer was
@@ -7165,6 +8564,7 @@ async fn agent_run_to_completion(
     command: &agent_policy::Command,
     request: agent::Request,
     message_id: &str,
+    people: &[agent_markdown::Mentionable],
 ) -> Result<()> {
     let backend = command.backend;
 
@@ -7186,7 +8586,7 @@ async fn agent_run_to_completion(
         drop(progress);
         outcome
     };
-    let edits = agent_stream_edits(ctx, command, message_id, &mut watch_edits);
+    let edits = agent_stream_edits(ctx, command, message_id, &mut watch_edits, people);
     let local = agent_stream_local(ctx, command, message_id, &mut watch_local);
     let alive = agent_run_heartbeat(ctx, &command.conversation_id, message_id, &mut watch_alive);
     // All four at once: the child's output drives the watch channel, and the three
@@ -7196,13 +8596,13 @@ async fn agent_run_to_completion(
         eprintln!("[agent] a progress edit failed (the answer still lands): {e}");
     }
 
-    let (final_html, session_id, cost) = match &outcome {
+    let (final_body, session_id, cost) = match &outcome {
         Ok(outcome) => (
-            agent_policy::reply_html(backend, &outcome.text, true),
+            agent_policy::reply_body(backend, &outcome.text, true, people),
             outcome.session_id.clone(),
             outcome.cost_usd,
         ),
-        Err(e) => (agent_policy::failure_html(backend, &e.to_string()), None, None),
+        Err(e) => (agent_policy::failure_body(backend, &e.to_string()), None, None),
     };
     // The answer lands in the thread, and only THEN does the stream say it is over.
     //
@@ -7211,7 +8611,7 @@ async fn agent_run_to_completion(
     // web/src/lib/store.ts). If "done" arrived first, the message it fell back to would
     // still be the second-to-last edit — so the answer would visibly lose its last
     // sentence for as long as it takes Teams to echo the final one back.
-    let edited = agent_edit(ctx, &command.conversation_id, message_id, &final_html).await;
+    let edited = agent_edit(ctx, &command.conversation_id, message_id, &final_body).await;
     // The run's own last state, with the authoritative answer over it. The transcript
     // travels on the terminal frame too: it is an overlay on the message, so this is the
     // last frame that can carry it, and a `done` that dropped it would blank the
@@ -7339,8 +8739,8 @@ async fn repair_abandoned_agent_runs(ctx: &Ctx) {
         }
         let backend =
             agent_policy::backend_named(&run.backend).unwrap_or(&agent_policy::BACKENDS[0]);
-        let html = agent_policy::interrupted_html(backend);
-        if let Err(e) = agent_edit(ctx, &run.conversation_id, &run.message_id, &html).await {
+        let body = agent_policy::interrupted_body(backend);
+        if let Err(e) = agent_edit(ctx, &run.conversation_id, &run.message_id, &body).await {
             // Put it back rather than lose it: a transient 429 or a re-locked broker
             // must not be the reason a message stays "thinking…" for good.
             eprintln!("[agent] could not close the run on {}: {e:#}", run.message_id);
@@ -7383,6 +8783,7 @@ async fn agent_stream_edits(
     command: &agent_policy::Command,
     message_id: &str,
     progress: &mut tokio::sync::watch::Receiver<agent::Progress>,
+    people: &[agent_markdown::Mentionable],
 ) -> Result<()> {
     let mut edits = 0;
     let mut posted = String::new();
@@ -7397,8 +8798,8 @@ async fn agent_stream_edits(
         if text.trim().is_empty() || text == posted {
             continue;
         }
-        let html = agent_policy::reply_html(command.backend, &text, false);
-        agent_edit(ctx, &command.conversation_id, message_id, &html).await?;
+        let body = agent_policy::reply_body(command.backend, &text, false, people);
+        agent_edit(ctx, &command.conversation_id, message_id, &body).await?;
         posted = text;
         edits += 1;
         // Rate limit AFTER the edit, so the first piece of the answer appears as soon
@@ -7561,7 +8962,7 @@ async fn agent_send(
                 "",
                 Some(&reply_to),
                 Some(&html),
-                None,
+                &[],
                 // An agent's answer carries no custom emoji: its words are not the
                 // user's pack, and an agent that turned text into art would upload
                 // bytes the user never chose to post — and re-upload them on every
@@ -7585,20 +8986,28 @@ async fn agent_edit(
     ctx: &Ctx,
     conversation_id: &str,
     message_id: &str,
-    html: &str,
+    body: &agent_policy::ReplyBody,
 ) -> Result<()> {
     let http = ctx.http.clone();
     let conversation = conversation_id.to_string();
     let message_id = message_id.to_string();
-    let html = html.to_string();
+    let body = body.clone();
     ctx.retry_on_auth(move |session, _csa| {
         let http = http.clone();
         let conversation = conversation.clone();
         let message_id = message_id.clone();
-        let html = html.clone();
+        let body = body.clone();
         async move {
-            teams_send::edit_message(&http, &session, &conversation, &message_id, "", Some(&html))
-                .await
+            teams_send::edit_message(
+                &http,
+                &session,
+                &conversation,
+                &message_id,
+                "",
+                Some(&body.html),
+                &body.mentions,
+            )
+            .await
         }
     })
     .await
@@ -7684,11 +9093,31 @@ fn agent_status_json(store: &Store) -> Result<Value> {
 // an answer in — and this side never handles RTP.
 // ---------------------------------------------------------------------------
 
-/// Is calling turned on in this store? Off in a fresh one, and off for a read-only
-/// backend whatever the store says: a screenshot backend must not register a device
-/// the user's calls ring on.
-fn calling_enabled(store: &Store) -> bool {
-    !read_only() && store.get_setting(SETTING_CALLING).ok().flatten().as_deref() == Some("1")
+/// Does this backend take and place calls? EVERY install does, save a read-only one.
+///
+/// The app IS a Teams client, so it registers as a device their calls ring on the way
+/// every other client they are signed in on does — there is no switch, because a
+/// messaging client that cannot be called is half a client, and every window the user
+/// opens is one they may want to call from. Registering is reversible in both directions
+/// and by itself reaches nobody: what rings a person is `call_place`, which is gated as
+/// the outward action it is.
+///
+/// A READ-ONLY backend is the single exception, and it is the one install the user never
+/// opened: a screenshot backend must not become a device their calls ring on.
+///
+/// SEVERAL installs on one machine therefore all register, and that is deliberate. Each
+/// holds a calling endpoint id of its own (`endpoint_id_path`, keyed by the port), so the
+/// service sees as many DEVICES — a call rings all of them, exactly as it rings the
+/// user's phone beside their laptop, and answering on one ends the ring on the rest.
+/// That second ring is the whole cost, and it used to be paid the other way round: the
+/// released build running beside the staged pair carried an environment value that
+/// silenced its registration, so every call and Join control in that window was drawn
+/// disabled — and the window a phone had open was the silenced one, which reads as an app
+/// that cannot call at all. No environment value silences a device now
+/// (`no_environment_value_silences_calling` scans this module), because a call the user
+/// cannot place is far the worse failure.
+fn calling_available() -> bool {
+    !read_only()
 }
 
 impl Ctx {
@@ -7696,11 +9125,10 @@ impl Ctx {
     /// that reconnects mid-call learns exactly what a live one already knows.
     fn call_state_payload(&self) -> Value {
         let plane = self.calling.lock().unwrap();
-        let enabled = self.store().map(|s| calling_enabled(&s)).unwrap_or(false);
         json!({
-            "enabled": enabled,
+            "enabled": calling_available(),
             // Ready means a call could start right now: the connection is up and
-            // registered. A switch that is on while this is false is honest about a
+            // registered. A backend that calls while this is false is honest about a
             // connection that has not come back yet.
             "ready": plane.channel.is_some() && plane.connected,
             "call": plane.call.as_ref().map(CallSession::json),
@@ -7726,8 +9154,7 @@ impl Ctx {
     ///
     /// One connection of its own, on the calling trouter, registered as the web
     /// client registers it. It reconnects forever on its own (`trouter::run`), so
-    /// this is called once per process and once more whenever the user switches the
-    /// setting on.
+    /// this is called once per process, at boot (see `spawn_calling`).
     async fn start_calling(&self) -> Result<()> {
         if self.calling.lock().unwrap().connection.is_some() {
             return Ok(());
@@ -7898,6 +9325,31 @@ impl Ctx {
             return;
         }
 
+        // The content-sharing session being GRANTED. It arrives here and not in the answer to
+        // the POST, which is `{}` — measured 2026-08-06 — so this is the moment this endpoint
+        // becomes the meeting's presenter, and `call_start_sharing` waits for it before the
+        // page offers a section. The links are kept on the session's own struct: merged into
+        // the call's, this frame's `leave` would overwrite the one a hangup posts to.
+        if frame.url.contains(calling::paths::CONVERSATION_ADD_MODALITY_SUCCESS) {
+            let mut plane = self.calling.lock().unwrap();
+            if let Some(call) = plane.call.as_mut().filter(|c| !c.ended()) {
+                let correlation = call
+                    .sharing
+                    .as_ref()
+                    .map(|s| s.correlation_id.clone())
+                    .unwrap_or_default();
+                if let Some(session) = calling::ContentSharing::from_frame(&correlation, &frame.body)
+                {
+                    eprintln!(
+                        "[calling] the meeting granted the sharing session: can_stop={}",
+                        session.leave.is_some()
+                    );
+                    call.sharing = Some(session);
+                }
+            }
+            return;
+        }
+
         // Everything below is about the call we are already in. A frame for any other
         // call is not ours to act on — a second call rings the user's other devices.
         let links = calling::Links::collect(&frame.body);
@@ -7912,6 +9364,24 @@ impl Ctx {
             }
         };
         if !mine {
+            return;
+        }
+
+        // The invitation reached NOBODY. It is the only frame that says so, it arrives a beat
+        // before the ending, and the ending's own phrase names the symptom instead — so the
+        // cause is remembered here and preferred below. Without it the user is told "The call
+        // ended." two seconds after they pressed call, which reads as this app dropping it.
+        if let Some(failed) = calling::invite_failed(&frame.url, &frame.body) {
+            eprintln!(
+                "[calling] the invitation reached nobody: {} (no endpoints: {})",
+                failed.phrase, failed.no_endpoints
+            );
+            if failed.no_endpoints {
+                let mut plane = self.calling.lock().unwrap();
+                if let Some(call) = plane.call.as_mut() {
+                    call.unreachable = true;
+                }
+            }
             return;
         }
 
@@ -8070,6 +9540,14 @@ impl Ctx {
                     None => return,
                 }
             };
+            // What CAME BACK, section by section. The offer's modalities were already
+            // logged and they say what this machine asked for; only the answer says what
+            // the service granted — and a screen share that was rejected mid-call left
+            // nothing on this machine to read (`calling::media_sections`).
+            eprintln!(
+                "[calling] a media answer arrived: {}",
+                calling::media_sections(&answer.blob).join(" | ")
+            );
             self.emit(
                 "call_media",
                 json!({ "call_id": id, "sdp": answer.blob, "kind": "answer" }),
@@ -8130,6 +9608,10 @@ impl Ctx {
             conversation_id: invite.thread_id.clone(),
             peer_mri: invite.caller_mri.clone(),
             peer_name,
+            // We are the one being rung, so this side rings nobody. An invite that reaches
+            // us from a GROUP call is still named after its CALLER: they are who the user
+            // decides about, and everybody else arrives on the roster.
+            ring: Vec::new(),
             links: invite.links.clone(),
             local: calling::LocalParticipant {
                 // The leg the service assigned us, when it did: answering under a
@@ -8151,9 +9633,11 @@ impl Ctx {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            unreachable: false,
             renegotiation_answer_link: None,
             source_request_sequence: 0,
             sending: Vec::new(),
+            sharing: None,
         };
 
         {
@@ -8170,33 +9654,102 @@ impl Ctx {
         self.emit_call_state();
     }
 
+    /// Wait for the meeting to GRANT the sharing session, bounded.
+    ///
+    /// The grant arrives on the `addModalitySuccess` callback rather than in the answer to the
+    /// POST (measured 2026-08-06: the answer is `{}`), and the client's own `start` returns a
+    /// deferred that frame resolves — so a section offered before it lands is a section the
+    /// service has no presenter for. Polled rather than notified because the wait is one
+    /// request long and a channel per call would be a second thing to keep in step with the
+    /// call's own lifetime.
+    ///
+    /// It gives up rather than failing: the caller reports `can_stop: false`, the page still
+    /// offers its section, and the journal says the grant never came — which is a measurement
+    /// rather than an error, and it is how the next unknown gets named.
+    async fn await_sharing_session(&self, call_id: &str) -> bool {
+        for _ in 0..(SHARING_GRANT_WAIT.as_millis() / SHARING_GRANT_POLL.as_millis()) {
+            {
+                let plane = self.calling.lock().unwrap();
+                match plane.call.as_ref().filter(|c| c.id == call_id) {
+                    // Granted: the frame filled the way out in.
+                    Some(call) if call.sharing.as_ref().is_some_and(|s| s.leave.is_some()) => {
+                        return true;
+                    }
+                    // The call ended, or the share was given up while this was waiting.
+                    None => return false,
+                    Some(call) if call.sharing.is_none() => return false,
+                    Some(_) => {}
+                }
+            }
+            tokio::time::sleep(SHARING_GRANT_POLL).await;
+        }
+        false
+    }
+
     /// Mark the call over locally and tell every client. Sends nothing: this is what
     /// runs when the SERVICE ended it, when the connection moved, or after our own
     /// hangup has already gone out.
     async fn end_call_locally(&self, reason: &str) {
-        let had_call = {
+        let ending = {
             let mut plane = self.calling.lock().unwrap();
             match plane.call.as_mut() {
                 Some(call) if call.phase != CallPhase::Ended => {
                     call.phase = CallPhase::Ended;
-                    call.end_reason = Some(reason.to_string());
-                    true
+                    // A call that rang NOBODY ends with a phrase about the symptom ("no one
+                    // else has joined"), and the cause arrived on its own frame a beat
+                    // earlier. The cause wins wherever we have it.
+                    let stated = if call.unreachable {
+                        calling::END_REASON_UNREACHABLE.to_string()
+                    } else {
+                        reason.to_string()
+                    };
+                    call.end_reason = Some(stated.clone());
+                    Some(stated)
                 }
-                _ => false,
+                _ => None,
             }
         };
-        if !had_call {
+        let Some(stated) = ending else {
             return;
-        }
+        };
         // EVERY ending passes through here, so this is the one place that can state why.
         // The page says "The call ended." and the reason was nowhere on this machine, so a
         // call that stopped a second after it started could not be told from one the
-        // service refused — the same blind spot a refused write had before it said so.
-        eprintln!("[calling] the call is over: {reason}");
+        // service refused — the same blind spot a refused write had before it said so. The
+        // service's own words are kept beside ours: they are what a journal is read for.
+        eprintln!("[calling] the call is over: {stated} (the service said: {reason})");
         // One emit with the ending in it, then the slot is free. The UI needs that
         // frame to stop holding the microphone, so the drop cannot be folded into it.
         self.emit_call_state();
         self.calling.lock().unwrap().call = None;
+    }
+
+    /// End a call the service accepted for a reservation this machine no longer holds.
+    ///
+    /// It is the one thing a cancelled start cannot leave alone. The user hangs up while
+    /// the POST that places, joins or accepts is still on the wire: the hangup finds no
+    /// link to post on — the answer carrying it has not come back yet — so it drops the
+    /// call here, and a moment later the service reports a call somebody is ringing for,
+    /// or is already talking into. That answer's own links are the only address that call
+    /// ever has, and this is the only moment they exist.
+    ///
+    /// Nothing is retried and nothing is reported to the page: the user ended this call
+    /// before it existed, and there is no surface left to say anything on.
+    async fn hang_up_orphan(
+        &self,
+        method: &str,
+        local: &calling::LocalParticipant,
+        links: &calling::Links,
+    ) {
+        let Some(url) = links.hangup() else {
+            eprintln!("[calling] {method}: the call was cancelled and answered no hangup link");
+            return;
+        };
+        let url = url.to_string();
+        match self.post_call_signal(&url, &calling::hangup_payload(local)).await {
+            Ok(_) => eprintln!("[calling] {method}: the call was cancelled — hung it up"),
+            Err(e) => eprintln!("[calling] {method}: the cancelled call did not hang up: {e:#}"),
+        }
     }
 
     /// POST one signaling frame for the live call, with its correlation id.
@@ -8571,18 +10124,15 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
     });
 }
 
-/// Bring the calling connection up at boot, but only when the user turned calling on.
+/// Bring the calling connection up at boot, on every backend that calls at all.
 ///
-/// Off in a fresh store and off for a read-only backend, because coming up REGISTERS a
-/// device the user's calls ring on (see {@link SETTING_CALLING}). A failure is one
-/// journal line and nothing else: the rest of the app does not depend on it.
+/// This is the whole of "calling is on": the app registers as a device the user's calls
+/// ring on, once, at startup (see {@link calling_available} for the one backend that does
+/// not). A failure is one journal line and nothing else: the rest of the app does not
+/// depend on it, and `trouter::run` reconnects on its own.
 fn spawn_calling(ctx: Ctx) {
     tokio::spawn(async move {
-        let enabled = match ctx.store() {
-            Ok(store) => calling_enabled(&store),
-            Err(_) => false,
-        };
-        if !enabled {
+        if !calling_available() {
             return;
         }
         if let Err(e) = ctx.start_calling().await {
@@ -8834,6 +10384,163 @@ mod tests {
         );
     }
 
+    // The merge-request page's four writes are gated exactly like a send, and its four
+    // reads stay open exactly like every other read. That split is the whole safety story
+    // of the page: reading a tracker is what it is for, and writing to one is the user's
+    // own click (see AGENTS.md § The GitLab page).
+    #[test]
+    fn the_merge_request_page_gates_its_writes_and_leaves_its_reads_open() {
+        for write in [
+            "gitlab_mr_merge",
+            "gitlab_mr_comment",
+            "gitlab_mr_delete_comment",
+            "gitlab_mr_set_state",
+        ] {
+            assert!(OUTWARD_METHODS.contains(&write), "{write} must be outward-facing");
+            assert_eq!(write_class(write), Some(WriteClass::Outward), "{write}");
+            let params = json!({ "project_path": "a/b", "iid": 1, "sha": "abc", "body": "hi" });
+            let err = match check_write_allowed(write, &params, Some("tok")) {
+                Ok(()) => panic!("{write} must be refused when no write token is presented"),
+                Err(err) => err,
+            };
+            assert!(err.contains("write token"), "{write}: {err}");
+            let mut with_token = params.clone();
+            with_token["write_token"] = json!("tok");
+            assert!(check_write_allowed(write, &with_token, Some("tok")).is_ok(), "{write}");
+        }
+
+        // The reads are ungated. A page that could not LIST merge requests on a read-only
+        // backend would be a page nothing could screenshot, and reading a tracker is the
+        // half of this feature that was never in question.
+        for read in [
+            "gitlab_mr_list",
+            "gitlab_mr_detail",
+            "gitlab_mr_notes",
+            "gitlab_mr_pipeline",
+            "gitlab_mr_diff",
+        ] {
+            assert_eq!(write_class(read), None, "{read} is a read");
+            assert!(check_write_allowed(read, &json!({}), None).is_ok(), "{read}");
+        }
+
+        // And nothing else about a merge request is a method at all: a rebase, an
+        // assignment or a label edit is a further tracker write, which is a deliberate
+        // feature with its own gate rather than a new arm in the dispatcher.
+        for absent in [
+            "gitlab_mr_rebase",
+            "gitlab_mr_assign",
+            "gitlab_mr_set_labels",
+            "gitlab_mr_edit",
+        ] {
+            assert_eq!(write_class(absent), None, "{absent}");
+        }
+    }
+
+    /// The MERGE is the one write on this page that no later call takes back, and the `sha`
+    /// is what stands between it and landing a commit the reader never saw. GitLab enforces
+    /// it — a mismatched sha is a 409 — so the handler must always send one.
+    #[test]
+    fn the_merge_handler_always_sends_the_commit_the_page_read() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code
+            .split("\"gitlab_mr_merge\" => {")
+            .nth(1)
+            .expect("the gitlab_mr_merge handler")
+            .split("\"gitlab_mr_comment\" =>")
+            .next()
+            .expect("the handler ends at the next arm");
+        assert!(handler.contains("gitlab_mr_write::merge"), "scanned the wrong text");
+        assert!(
+            handler.contains("param_str(params, \"sha\")"),
+            "the merge handler must REQUIRE the sha the page drew. Without it GitLab merges \
+             whatever the branch holds now, which is exactly the commit nobody reviewed."
+        );
+        // And it drops the cache of what it changed, or the page paints the pre-merge state
+        // straight back over the outcome.
+        assert!(handler.contains("forget_gitlab_merge_request"), "the merge must invalidate");
+    }
+
+    /// A comment is deleted only when it is the USER'S OWN, and that is decided from
+    /// GitLab's answer rather than from what the client claimed. GitLab itself would let a
+    /// maintainer remove a colleague's note; this app never offers that.
+    #[test]
+    fn a_comment_is_deleted_only_when_it_is_the_user_s_own() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code
+            .split("\"gitlab_mr_delete_comment\" => {")
+            .nth(1)
+            .expect("the gitlab_mr_delete_comment handler")
+            .split("\"gitlab_mr_set_state\" =>")
+            .next()
+            .expect("the handler ends at the next arm");
+        assert!(handler.contains("fetch_discussions"), "whose note it is must be READ first");
+        assert!(handler.contains("note.mine"), "ownership is GitLab's own answer");
+        assert!(
+            handler.find("fetch_discussions").unwrap()
+                < handler.find("delete_comment").unwrap(),
+            "the ownership check must happen BEFORE the deletion, not after it"
+        );
+    }
+
+    /// Every read of the page has a staleness window, and they are ordered by what a stale
+    /// answer costs: a running pipeline is the shortest, the sidebar list the longest.
+    #[test]
+    fn the_live_read_has_the_shortest_window_and_the_list_the_longest() {
+        assert!(GITLAB_PIPELINE_TTL < GITLAB_DETAIL_TTL);
+        assert!(GITLAB_PIPELINE_TTL < GITLAB_NOTES_TTL);
+        assert!(GITLAB_DETAIL_TTL <= GITLAB_LIST_TTL);
+        // The live one is short enough to feel live, and long enough that two open pages
+        // cost one request between them rather than two.
+        assert!(GITLAB_PIPELINE_TTL >= Duration::from_secs(2));
+        assert!(GITLAB_PIPELINE_TTL <= Duration::from_secs(10));
+    }
+
+    /// A list read is a closed set on both axes, and its default is the sidebar's own.
+    #[test]
+    fn a_list_query_can_never_ask_for_merged_merge_requests() {
+        let query = gitlab_list_query(&json!({})).expect("a default");
+        assert_eq!(query.scope.as_str(), "all");
+        assert_eq!(query.state.as_str(), "opened");
+
+        let query = gitlab_list_query(&json!({ "scope": "reviewing", "state": "closed" }))
+            .expect("both named");
+        assert_eq!((query.scope.as_str(), query.state.as_str()), ("reviewing", "closed"));
+
+        // The page is about what is NOT merged, so `merged` is not a state it can ask for
+        // — and a scope GitLab would understand but the page never offers is refused too.
+        assert!(gitlab_list_query(&json!({ "state": "merged" })).is_err());
+        assert!(gitlab_list_query(&json!({ "state": "all" })).is_err());
+        assert!(gitlab_list_query(&json!({ "scope": "created_by_me" })).is_err());
+    }
+
+    /// The params name a project and a number, and nothing that could aim a request
+    /// somewhere else. The host is never among them — it comes from the user's settings —
+    /// so this checks the shape a 404 would otherwise be the only report of.
+    #[test]
+    fn a_merge_request_is_addressed_by_a_project_path_and_a_number() {
+        assert_eq!(
+            gitlab_merge_request_params(&json!({ "project_path": " group/sub/app ", "iid": 42 }))
+                .unwrap(),
+            ("group/sub/app".to_string(), 42)
+        );
+        for bad in [
+            json!({ "iid": 1 }),
+            json!({ "project_path": "", "iid": 1 }),
+            json!({ "project_path": "/group/app", "iid": 1 }),
+            json!({ "project_path": "group//app", "iid": 1 }),
+            json!({ "project_path": "group/../app", "iid": 1 }),
+            json!({ "project_path": "https://evil.example/a/b", "iid": 1 }),
+            json!({ "project_path": "group/a b", "iid": 1 }),
+            json!({ "project_path": "group/app" }),
+            json!({ "project_path": "group/app", "iid": 0 }),
+            json!({ "project_path": "group/app", "iid": "42" }),
+        ] {
+            assert!(gitlab_merge_request_params(&bad).is_err(), "{bad} must be refused");
+        }
+    }
+
     /// The handler names the ONE property whose write round-trips, and no other. A
     /// later change that publishes the pin or the hide has to move the measurement
     /// forward first (see src/teams_chat_settings.rs).
@@ -9011,6 +10718,59 @@ mod tests {
         assert!(check_write_allowed("repair_broker", &params, Some("tok")).is_err());
     }
 
+    /// Restarting the backend is gated; ASKING GitHub about a release is not.
+    ///
+    /// The split is the whole shape of Settings › This app. One takes down the process every
+    /// open page is talking to, cuts off a local agent mid-reply and stops the user's calls
+    /// ringing here for a moment; the other makes one HTTP request the poll already makes
+    /// every two minutes and changes nothing on this machine. A gate on the second would
+    /// only stop a page from answering "am I up to date?".
+    #[test]
+    fn restarting_the_backend_is_gated_and_checking_for_an_update_is_not() {
+        assert!(!OUTWARD_METHODS.contains(&"restart_backend"));
+        assert_eq!(write_class("restart_backend"), Some(WriteClass::Machine));
+        assert_eq!(write_class("update_check"), None);
+    }
+
+    #[test]
+    fn restarting_the_backend_is_refused_without_the_token() {
+        let err = check_write_allowed("restart_backend", &json!({}), Some("tok"))
+            .expect_err("must refuse a tokenless restart");
+        assert!(err.contains("write token"), "{err}");
+        // Its own words, not the class's: what this one costs is every page's connection
+        // and a reply an agent was writing.
+        assert!(err.contains("backend"), "{err}");
+        assert!(err.contains("agent"), "{err}");
+    }
+
+    /// A restart answers the click that asked for it, and only then goes.
+    ///
+    /// Scanned rather than run, because the method ends in a killed process: what has to
+    /// hold is the ORDER of three things. The agent count is read BEFORE anything is taken
+    /// down (a reply frozen mid-answer is the one cost the user has to be asked about); the
+    /// reply's grace comes before the exit (the answer travels on the socket this drops, so
+    /// acting at once swallows it); and the calling registration is handed back before the
+    /// process that would answer a call is gone.
+    #[test]
+    fn a_requested_restart_asks_about_the_agent_and_answers_before_it_goes() {
+        let source = include_str!("server.rs");
+        let body = source
+            .split("    async fn restart_backend(")
+            .nth(1)
+            .expect("the restart handler")
+            .split("\n    /// A valid CSA-audience token")
+            .next()
+            .expect("the handler ends before the next method");
+
+        let agent = body.find("live_agent_runs_here()").expect("the agent count");
+        let grace = body.find("RESTART_ANSWER_GRACE").expect("the answer's own grace");
+        let calling = body.find("stop_calling()").expect("the calling registration");
+        let exit = body.find("std::process::exit(0)").expect("the exit");
+        assert!(agent < grace, "the runs a restart would cut off are read before it starts");
+        assert!(grace < calling, "the click's own answer goes out before anything is stopped");
+        assert!(calling < exit, "a device Teams still routes calls to must be taken back");
+    }
+
     #[test]
     fn the_push_methods_are_gated_but_are_not_outward_facing() {
         // Subscribing decides which devices this machine notifies. It posts nothing
@@ -9108,11 +10868,8 @@ mod tests {
             );
         }
 
-        // The two that post nothing: gated, but never described as posting.
-        for (method, phrase) in [
-            ("set_calling", "calls ring on"),
-            ("call_prepare", "media credentials"),
-        ] {
+        // The one that posts nothing: gated, but never described as posting.
+        for (method, phrase) in [("call_prepare", "media credentials")] {
             assert!(!OUTWARD_METHODS.contains(&method), "{method} posts nothing");
             assert_eq!(write_class(method), Some(WriteClass::Machine), "{method}");
             let err = check_write_allowed(method, &json!({}), Some("tok"))
@@ -9124,18 +10881,81 @@ mod tests {
         assert_eq!(write_class("call_status"), None);
     }
 
-    /// Calling is off in a fresh store, and off for a read-only backend whatever the
-    /// store says: coming up registers a device the user's calls ring on.
+    /// NO environment value silences a device, and this scans for the one that used to.
+    ///
+    /// The released build beside the staged pair carried `TEAMS_LITE_CALLING=0`, so the
+    /// front a phone had open drew every call and Join control disabled — a whole feature
+    /// missing, with the cause in a unit file. What that switch bought was one less ring
+    /// on a second registration; what it cost was the user's ability to call at all from
+    /// that window. It reads as a sensible optimisation, which is exactly why a test has
+    /// to keep it out: the spelling is split so this needle is not its own match.
     #[test]
-    fn calling_is_off_until_the_user_turns_it_on() {
-        let store = Store::open_in_memory().unwrap();
-        assert!(!calling_enabled(&store), "a fresh store must not register a calling endpoint");
-        store.set_setting(SETTING_CALLING, "1").unwrap();
-        assert_eq!(calling_enabled(&store), !read_only());
-        for off in ["0", "", "true", "yes"] {
-            store.set_setting(SETTING_CALLING, off).unwrap();
-            assert!(!calling_enabled(&store), "only \"1\" means on, not {off:?}");
+    fn no_environment_value_silences_calling() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let switch = concat!("TEAMS_LITE", "_CALLING");
+        for (number, line) in code.lines().enumerate() {
+            assert!(
+                line.trim_start().starts_with("//") || !line.contains(switch),
+                "line {}: calling has no environment switch — every install but a \
+                 read-only one registers, and each holds an endpoint id of its own",
+                number + 1
+            );
         }
+    }
+
+    /// A read-only backend never registers: a screenshot backend must not become a device
+    /// the user's calls ring on. It is the ONLY backend that says no, so this equality is
+    /// the whole rule rather than one clause of it.
+    #[test]
+    fn a_read_only_backend_is_never_a_device_calls_ring_on() {
+        assert_eq!(calling_available(), !read_only());
+    }
+
+    /// A meeting is named in one of two ways, because the user reaches one from two
+    /// places: the LINK a calendar event carries, and the THREAD it has in the chat list.
+    /// One parse for both, so nothing downstream knows two address types.
+    #[test]
+    fn a_meeting_is_addressed_by_its_link_or_by_its_own_thread() {
+        let by_link = meeting_address(&json!({
+            "join_url": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0"
+        }))
+        .unwrap()
+        .expect("a meeting");
+        assert_eq!(by_link.thread_id.as_deref(), Some("19:meeting_x@thread.v2"));
+
+        let by_thread = meeting_address(&json!({ "meeting_thread": "19:meeting_x@thread.v2" }))
+            .unwrap()
+            .expect("a meeting");
+        assert_eq!(by_thread.thread_id.as_deref(), Some("19:meeting_x@thread.v2"));
+        assert_eq!(by_thread.message_id, "0");
+
+        // Neither named: the placing branch of `call_prepare`, which rings people instead.
+        assert!(meeting_address(&json!({ "conversation": "19:chat@thread.v2" })).unwrap().is_none());
+
+        // Named and unusable is an ERROR, never a fallthrough — a join that quietly became
+        // a call would ring people instead of walking into a meeting. A plain group chat is
+        // the case that really happens: it is called, and it has no meeting to join.
+        let refused = meeting_address(&json!({
+            "meeting_thread": "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2"
+        }))
+        .expect_err("a group chat is not a meeting");
+        assert!(refused.to_string().contains("not a meeting"), "{refused}");
+        assert!(meeting_address(&json!({ "join_url": "https://zoom.us/j/1" })).is_err());
+    }
+
+    /// A group call rings every phone in the thread at once, and that cannot be taken
+    /// back — so there is a ceiling, and it is stated where both the refusal and the mock
+    /// can read it.
+    #[test]
+    fn a_group_call_rings_a_group_and_not_a_broadcast() {
+        assert_eq!(MAX_GROUP_CALL_PEOPLE, 20);
+        // The three kinds a client is shown, each spelled once. A group is its own name
+        // because the UI draws a conversation rather than a face for it, and a meeting's
+        // lobby is a state a group call does not have.
+        assert_eq!(CallKind::Call.as_str(), "call");
+        assert_eq!(CallKind::Group.as_str(), "group");
+        assert_eq!(CallKind::Meeting.as_str(), "meeting");
     }
 
     /// The state every client is given must carry no SDP and no credentials: those
@@ -9152,6 +10972,7 @@ mod tests {
             conversation_id: Some("19:thread@thread.v2".into()),
             peer_mri: "8:orgid:her".into(),
             peer_name: "Her".into(),
+            ring: Vec::new(),
             links: calling::Links::collect(&json!({
                 "links": { "accept": "https://x/accept", "hangup": "https://x/hangup" }
             })),
@@ -9172,9 +10993,11 @@ mod tests {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            unreachable: false,
             renegotiation_answer_link: None,
             source_request_sequence: 0,
             sending: Vec::new(),
+            sharing: None,
         };
         let json = call.json();
         assert_eq!(json["phase"], "ringing");
@@ -9203,6 +11026,7 @@ mod tests {
             conversation_id: None,
             peer_mri: "8:orgid:her".into(),
             peer_name: "Her".into(),
+            ring: Vec::new(),
             links: calling::Links::default(),
             local: calling::LocalParticipant {
                 id: "8:orgid:me".into(),
@@ -9221,9 +11045,11 @@ mod tests {
             muted: false,
             connected_at_ms: None,
             end_reason: None,
+            unreachable: false,
             renegotiation_answer_link: None,
             source_request_sequence: 0,
             sending: Vec::new(),
+            sharing: None,
         };
         assert_eq!(call.json()["can_accept"], false);
         // And a call that is over offers nothing at all.
@@ -9231,6 +11057,131 @@ mod tests {
         call.offer = Some(calling::MediaContent::sdp("v=0"));
         assert_eq!(call.json()["can_accept"], false);
         assert_eq!(call.json()["can_hangup"], false);
+    }
+
+    /// Every POST that puts this machine INTO a call re-reads the reservation when its
+    /// answer comes back, and hangs the call up when the reservation has gone.
+    ///
+    /// That window is one click wide and the user hits it often: they stop a call a second
+    /// after starting it. The hangup then finds no link to post on — the answer carrying it
+    /// is still on the wire — so it drops the call here, and a moment later the service has
+    /// somebody's phone ringing, or a caller talking into a machine that holds nothing. The
+    /// answer's own links are that call's only address, and this is the only moment they
+    /// exist, so a handler that merely skipped its merge would leave the call standing.
+    #[test]
+    fn a_call_answered_for_a_cancelled_start_is_hung_up() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        for (method, next) in [
+            ("\"call_place\" => {", "\"call_join\" => {"),
+            ("\"call_join\" => {", "\"call_accept\" => {"),
+            ("\"call_accept\" => {", "\"call_answer_media\" => {"),
+        ] {
+            let handler = code.split(method).nth(1).expect(method);
+            let handler = handler.split(next).next().expect("the handler ends at the next arm");
+            assert!(
+                handler.contains("hang_up_orphan"),
+                "{method} keeps a call the user cancelled while its POST was in flight. \
+                 Re-read the reservation after the answer and hang the call up on the links \
+                 that answer carried."
+            );
+            assert!(
+                handler.contains("!c.ended()"),
+                "{method} reads the reservation without checking whether it ENDED. \
+                 `end_call_locally` marks the session before it drops it, so a request \
+                 landing on that side of the emit would look like a live call."
+            );
+        }
+    }
+
+    /// A one-to-one call negotiates the CAMERA and the SCREEN with the call itself, and a
+    /// conference does not — so `call_prepare` has to say which kind it reserved.
+    ///
+    /// It is the real client's own split (`addModalities`: `numVideoChannels` is 1 and both
+    /// modalities are forced inactive at the first negotiation of a one-to-one, while a
+    /// conference offers audio alone). This app added the section mid-call in every case, and
+    /// the service answered a real screen share by zeroing its port — see
+    /// NATIVE-CALLING.md § 10.8. The page cannot work the kind out for itself: the RING LIST
+    /// is what says how many people a call reaches, and only the backend fetches it.
+    #[test]
+    fn call_prepare_says_whether_the_call_is_one_to_one() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        // The LAST occurrence is the handler: the name is spelled earlier in this file too,
+        // in the gate list that decides which methods need the write token.
+        let handler = code.rsplit("\"call_prepare\" => {").next().expect("call_prepare");
+        let handler = handler.split("\"call_place\" => {").next().expect("the next arm");
+        assert!(
+            handler.contains("\"one_to_one\": kind == CallKind::Call"),
+            "call_prepare no longer states whether the call is a one-to-one. The page \
+             reserves the camera and screen sections in the first offer for that case only, \
+             and it has no other way to know: a conversation id does not say how many \
+             people a call rings."
+        );
+        // And it is stated for a CHAT call only. A meeting join reserves nothing, exactly as
+        // the client's own conference path offers audio alone.
+        assert_eq!(
+            handler.matches("\"one_to_one\"").count(),
+            1,
+            "`one_to_one` is answered more than once in call_prepare. A meeting and an \
+             answered call must not claim it: the reservation belongs to the one shape the \
+             client reserves for."
+        );
+    }
+
+    /// A share ASKS before it offers, and it can always be given back.
+    ///
+    /// A meeting shows one screen at a time, so a section from an endpoint that never asked to
+    /// present is rejected outright — measured 2026-08-06, with the section labelled correctly
+    /// and offering the codecs a client offers. Both halves are outward: everybody in the
+    /// meeting is told who is presenting.
+    #[test]
+    fn sharing_a_screen_is_a_session_that_is_gated_and_can_be_given_back() {
+        assert!(OUTWARD_METHODS.contains(&"call_start_sharing"));
+        assert!(OUTWARD_METHODS.contains(&"call_stop_sharing"));
+
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let start = code
+            .rsplit("\"call_start_sharing\" => {")
+            .next()
+            .and_then(|rest| rest.split("\"call_stop_sharing\" => {").next())
+            .expect("the start handler");
+        // The link is the conversation's own, and the session is asked of a LIVE call: the
+        // service adds a modality to an ongoing conversation and refuses one before that.
+        assert!(start.contains("add_modality()"), "the session is asked for on `addModality`");
+        assert!(start.contains("CallPhase::Connected"), "a modality needs a live conversation");
+        // The GRANT is waited for. It arrives on the `addModalitySuccess` callback and not in
+        // the answer to the POST, and a section offered before the service has registered a
+        // presenter is a section it rejects (measured 2026-08-06).
+        assert!(
+            start.contains("await_sharing_session"),
+            "the section must not be offered before the meeting has granted the session"
+        );
+        // And the session's links never join the call's: merged in, this frame's `leave`
+        // would overwrite the one a hangup posts to, so giving a share up would end the call.
+        assert!(!start.contains("links.merge"), "the session's links stay on their own struct");
+        let frames = code
+            .split("CONVERSATION_ADD_MODALITY_SUCCESS")
+            .nth(1)
+            .expect("the grant frame is read");
+        assert!(
+            frames.contains("ContentSharing::from_frame"),
+            "the grant is read off its own frame"
+        );
+
+        let stop = code.rsplit("\"call_stop_sharing\" => {").next().expect("the stop handler");
+        assert!(
+            stop.contains("content_sharing_leave_payload"),
+            "a share that cannot be given back is not one this app would start"
+        );
+        // And it never takes the role off somebody who is presenting. Measured against a real
+        // share: the service granted us the role and then offered THEIR screen at port 0, so
+        // their picture stopped and nothing of ours went out.
+        assert!(
+            start.contains("is_shared_screen"),
+            "a share must not take the presenter role from a colleague who holds it"
+        );
     }
 
     /// "Ready" must mean a call could start RIGHT NOW: registered, and the socket up.
@@ -9387,6 +11338,157 @@ mod tests {
         assert!(
             stale_ms >= 4 * AGENT_STREAM_KEEPALIVE.as_millis(),
             "{stale_ms} ms is under four keepalives"
+        );
+    }
+
+    /// The release poll must fit inside GitHub's own hourly budget, with room to spare.
+    ///
+    /// The two numbers only mean something together: `GITHUB_HOURLY_REQUESTS` is what a
+    /// measurement said an unauthenticated caller gets per IP, and this interval is how
+    /// often this machine spends one. Half is the ceiling because the poll is not the only
+    /// thing that asks — the compare API behind the changelog, and the re-read before every
+    /// download attempt, come out of the same 60 — and a `403` costs the update button with
+    /// no visible symptom at all.
+    #[test]
+    fn the_release_poll_spends_at_most_half_of_githubs_hourly_budget() {
+        let per_hour = 3600 / RELEASE_CHECK_INTERVAL.as_secs();
+        assert!(
+            per_hour <= u64::from(teams_lite::update::GITHUB_HOURLY_REQUESTS) / 2,
+            "{per_hour} requests an hour leaves too little of GitHub's {} for the compare \
+             API and for downloads",
+            teams_lite::update::GITHUB_HOURLY_REQUESTS
+        );
+        // And it must stay a POLL: an interval measured in hours would be back to the
+        // startup-only check this replaced, where an app left open never saw a release.
+        assert!(
+            RELEASE_CHECK_INTERVAL <= Duration::from_secs(10 * 60),
+            "an app left open has to notice a release within minutes"
+        );
+    }
+
+    /// The poll asks once per MACHINE, and speaks only when something moved.
+    ///
+    /// Scanned rather than run, because the pass is a loop over the network and the store:
+    /// what has to hold is the ORDER of its guards, and each one costs something real if it
+    /// goes. The claim keeps two installs from spending the budget twice; the read-only
+    /// exclusion keeps a screenshot backend from holding the slot the app needs; the
+    /// phase check keeps a pass from moving the asset under a progress bar; and the
+    /// comparison against what is already published is what stops a page open for a week
+    /// from being sent an event every two minutes.
+    #[test]
+    fn the_release_poll_shares_one_request_and_speaks_only_on_a_change() {
+        let source = include_str!("server.rs");
+        let pass = source
+            .split("    async fn release_pass(")
+            .nth(1)
+            .expect("the release watch's own pass")
+            .split("\n    /// The `update_check` RPC")
+            .next()
+            .expect("the pass ends before the next method");
+
+        for (needle, why) in [
+            (
+                "slot.phase",
+                "a pass must stand aside for a download: it owns the asset the bar is \
+                 drawn against",
+            ),
+            (
+                "!read_only() && self.claim_release_read(ask)",
+                "the claim must be taken before the fetch, and never by a read-only \
+                 backend — it cannot install anything and would hold the machine's slot",
+            ),
+            (
+                "self.stored_release()",
+                "a backend that lost the claim must read the machine's answer, or it would \
+                 learn nothing until it won one",
+            ),
+            (
+                "known == info.latest",
+                "an unchanged release must be silent, or every client is sent an event \
+                 every interval for ever",
+            ),
+        ] {
+            assert!(pass.contains(needle), "{why} (looked for `{needle}`)");
+        }
+
+        // The fetch happens inside the claim, never beside it. Read positionally, because
+        // that ordering IS the budget: a fetch above the claim would spend a request per
+        // backend and the claim would only decide who writes the answer down.
+        let claim = pass.find("claim_release_read(ask)").expect("the claim");
+        let fetch = pass.find("update::fetch_release(").expect("the fetch");
+        assert!(claim < fetch, "the request must happen under the claim, not beside it");
+
+        // And its cleanup NAMES what it spares. The pass's own phase check above guards
+        // this process's download and nothing else: the cache is per machine, so a pass
+        // that cleared it wholesale took the download another install was about to install
+        // (see `update::prune_downloads`).
+        assert!(
+            pass.contains("prune_downloads(&release.rev)"),
+            "the pass must spare the download for the release it just read — a clear-all \
+             here is the 2026-08-06 failure, where the staged service deleted the 130 MB \
+             the released build was one click from installing"
+        );
+    }
+
+    /// **A failed swap is REPORTED — on this machine, and to every open page.**
+    ///
+    /// This is what the 2026-08-06 failure cost its reader. The install threw, the page
+    /// that had clicked drew a failure out of the rejected RPC, and nothing else knew: no
+    /// journal line on the machine the app runs on, no phase for the phone beside it, and —
+    /// because the reply carried `to_string()` — a sentence naming the install path with the
+    /// reason stripped off it. The user was shown "install the new build over
+    /// /home/…/teams-bin" and had nothing to act on.
+    ///
+    /// Scanned, because the failure is a filesystem one and reaching it for real means
+    /// making a directory unwritable under a live `Ctx`; what has to hold is that all three
+    /// halves are spelled at all.
+    #[test]
+    fn a_failed_swap_says_why_to_the_journal_and_to_every_page() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let apply = code
+            .split("    async fn apply_update(")
+            .nth(1)
+            .expect("the apply")
+            .split("\n    /// Restart this backend")
+            .next()
+            .expect("the apply ends before the restart");
+
+        for (needle, why) in [
+            (
+                "UpdatePhase::Failed",
+                "a swap that failed must leave the slot FAILED, or the row on a second page \
+                 keeps drawing `Restarting…` for a restart that never happens",
+            ),
+            (
+                "slot.error = format!(\"{e:#}\")",
+                "the slot must carry the WHOLE chain: the outermost context names the \
+                 target, and the cause is the half the reader can act on",
+            ),
+            (
+                "eprintln!(\"[update] the swap failed",
+                "this machine must keep a record — a failure nobody wrote down cannot be \
+                 diagnosed after the page that saw it was closed",
+            ),
+        ] {
+            assert!(apply.contains(needle), "{why} (looked for `{needle}`)");
+        }
+
+        // And the reply a client reads carries the cause too. `to_string()` on an
+        // `anyhow::Error` is the outermost context ALONE, which is the part the caller
+        // already knew; every surface that states a refusal — the composer, the approval
+        // menu, the update row — is reading this one string.
+        let reply = code
+            .split("match dispatch(&request_ctx, &method, &params).await {")
+            .nth(1)
+            .expect("the dispatch reply")
+            .split("};")
+            .next()
+            .expect("the match ends");
+        assert!(
+            reply.contains("format!(\"{e:#}\")") && !reply.contains("e.to_string()"),
+            "an RPC refusal must reach the client with its cause, not with the context \
+             sentence alone"
         );
     }
 
@@ -10501,6 +12603,76 @@ mod lifecycle_tests {
                  clears the marker on every device the user owns."
             );
         }
+    }
+
+    // Every GitLab payload the page is handed must say who its people are in Teams, or the
+    // one answer that forgot is the one surface where a colleague reads as a stranger — and
+    // it must be said AFTER the response cache, since `gitlab_reads` outlives a rename (see
+    // AGENTS.md § A GitLab user who is also a colleague). Both halves are scanned, because
+    // there is no single line either could be enforced by.
+    #[test]
+    fn every_gitlab_answer_names_its_people_and_never_the_cache() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        // The two places a read leaves the backend: the handler's own answer, and the event a
+        // refresh behind the page broadcasts.
+        for (function, ends_at, anchor) in [
+            ("async fn gitlab_cached(", "/// How long a folded roster", "store.gitlab_read"),
+            (
+                "async fn gitlab_refresh_behind_the_page(",
+                "/// Drop everything cached about",
+                "gitlab_refreshing",
+            ),
+        ] {
+            let body = code
+                .split(function)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{function} is gone"))
+                .split(ends_at)
+                .next()
+                .expect("the function ends before the next item");
+            assert!(body.contains(anchor), "scanned the wrong text for {function}");
+            assert!(
+                body.contains("with_teams_people"),
+                "`{function}` no longer names `with_teams_people`, so the page would draw \
+                 GitLab's own name for a colleague this app already knows."
+            );
+        }
+        // And the four answers that carry people without going through those two.
+        for (arm, anchor) in [
+            ("\"enrich_link\" =>", "link_preview::enrich"),
+            ("\"gitlab_approvals\" =>", "gitlab_approval::fetch"),
+            ("\"gitlab_set_approval\" =>", "gitlab_approval::set"),
+            ("\"gitlab_mr_comment\" =>", "gitlab_mr_write::comment"),
+        ] {
+            let handler = code
+                .split(arm)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{arm} is gone"))
+                .split("        \"")
+                .next()
+                .expect("the arm ends at the next one");
+            assert!(handler.contains(anchor), "scanned the wrong text for {arm}");
+            assert!(
+                handler.contains("with_teams_people"),
+                "the {arm} answer names people and no longer names `with_teams_people`."
+            );
+        }
+        // The cache keeps GITLAB'S OWN words: an identity written into it would outlive the
+        // rename that changed it, on disk, across restarts.
+        let cache = code
+            .split("async fn gitlab_fetch_and_cache(")
+            .nth(1)
+            .expect("the caching read")
+            .split("/// Refresh one read behind the page")
+            .next()
+            .expect("the function ends before the next item");
+        assert!(cache.contains("put_gitlab_read"), "scanned the wrong text for the cache write");
+        assert!(
+            !cache.contains("with_teams_people"),
+            "`gitlab_fetch_and_cache` names `with_teams_people`, so a Teams name would be \
+             stored in `gitlab_reads` and served back after the user changed it."
+        );
     }
 
     // The one method that requests something from a server nobody here configured. Its

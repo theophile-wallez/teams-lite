@@ -16,7 +16,7 @@
 import { existsSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { WRITE_TOKEN_ROUTE, writeTokenResponse } from "./write-token";
-import { readBuildInfo, refuseToServeReason } from "./build-info";
+import { bundleWasReplaced, readBuildInfo, refuseToServeReason } from "./build-info";
 
 const here = import.meta.dir;
 const distDir = join(here, "dist");
@@ -42,7 +42,7 @@ if (refusal) {
 }
 
 const { default: ssr } = (await import(serverEntry)) as {
-  default: { fetch: (request: Request) => Response | Promise<Response> };
+  default: { fetch: (request: Request) => unknown };
 };
 
 const port = Number(process.env.PORT ?? 19440);
@@ -87,6 +87,136 @@ function staticFileFor(pathname: string): string | null {
   const full = join(clientDir, rel);
   if (!full.startsWith(clientDir)) return null;
   return existsSync(full) ? full : null;
+}
+
+// Whether Bun will serve this object, which is NOT `instanceof Response`. Bun.serve
+// accepts a Response its own class constructed and refuses every other object — and
+// srvx's `NodeResponse` (h3, under TanStack Start) passes `instanceof` while being
+// refused, so the constructor is the only test that matches Bun's own behaviour. Handed
+// one, Bun answers with its BRANDED "fetch(req) did not return a Response object" page,
+// at status 200, and dumps the object over a dozen journal lines: the reader is told
+// nothing and the operator is told nothing about the cause.
+function bunWillServe(value: unknown): value is Response {
+  return value instanceof Response && value.constructor === Response;
+}
+
+/** How much of a refused body to quote: enough to name a cause, never a whole page. */
+const CAUSE_CHARS = 300;
+
+/**
+ * One LINE for the journal, and the cause rather than the shape.
+ *
+ * `console.error` on a Response prints a screenful of getters — that is what Bun's own
+ * refusal did, seventeen times, and it named nothing. What is worth having is inside the
+ * refused object: the SSR handler catches its own module-resolution error and hands back a
+ * response CARRYING it (`Cannot find module './assets/start-….js'`), so reading that body
+ * is the difference between a report and a shrug. Bounded, and it never throws: this runs
+ * on the path that exists because something else already went wrong.
+ */
+async function causeOf(value: unknown): Promise<string> {
+  if (value instanceof Error) return value.message;
+  const shape = (value as object)?.constructor?.name ?? typeof value;
+  if (!(value instanceof Response)) return `returned ${shape}`;
+  try {
+    const text = (await value.text()).replace(/\s+/g, " ").trim();
+    if (!text) return `returned ${shape} ${value.status} with an empty body`;
+    return `returned ${shape} ${value.status}: ${text.slice(0, CAUSE_CHARS)}`;
+  } catch {
+    return `returned ${shape} ${value.status}, whose body could not be read`;
+  }
+}
+
+// What was last reported, so a broken build says its cause ONCE instead of once per
+// request. A phone retrying behind a lock screen is the common case.
+let lastFailure = "";
+
+function reportOnce(line: string): void {
+  if (line === lastFailure) return;
+  lastFailure = line;
+  console.error(`[teams-web] ${line}`);
+}
+
+/** Text into markup. Both callers pass literals; nothing later has to remember that. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * A page for a request this server cannot render, as a REAL Response.
+ *
+ * Plain HTML with no script and no remote reference — the discipline the rest of the app
+ * holds to, and the only shape that is certain to render when the bundle behind it is the
+ * thing that is broken. It says nothing about the cause either: that goes to the journal,
+ * because an SSR error quoted onto a page states this machine's paths to whoever reached
+ * it. No auto-refresh: `install` stages without restarting anything, so a page that
+ * reloaded itself would spin for ever there. The reader gets the sentence and the link.
+ */
+function plainPage(status: number, rawTitle: string, rawSentence: string): Response {
+  const title = escapeHtml(rawTitle);
+  const sentence = escapeHtml(rawSentence);
+  const body =
+    `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>${title}</title><style>` +
+    `body{margin:0;min-height:100vh;display:grid;place-items:center;` +
+    `font:16px/1.5 system-ui,sans-serif;background:#111;color:#eee;padding:2rem}` +
+    `main{max-width:32rem;text-align:center}h1{font-size:1.25rem;margin:0 0 .5rem}` +
+    `p{margin:0 0 1.5rem;color:#aaa}a{color:#eee}</style></head>` +
+    `<body><main><h1>${title}</h1><p>${sentence}</p>` +
+    `<a href="">Reload</a></main></body></html>`;
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+/**
+ * Render with the SSR handler, and never hand Bun something it refuses to serve.
+ *
+ * Two failures come through here and they are told apart by the build stamp on disk
+ * (`bundleWasReplaced`), because the reader's next move differs:
+ *
+ *   - THE BUNDLE MOVED UNDER US. An update staged a new `dist/` while this process kept
+ *     the module graph of the old one, so a lazy route chunk no longer exists. The
+ *     restart that finishes the update is seconds away, so the answer is 503 + a reload.
+ *     This is the one that reached a real user: on 2026-08-06 an update staged a bundle
+ *     and then held its restart for a live `@claude` run that took 40 minutes, so the
+ *     phone was served Bun's own error page from the moment it staged (see the header of
+ *     bin/teams-lite-service.sh, which now waits BEFORE it stages).
+ *   - ANYTHING ELSE is a real SSR fault at this build, and calling it an update would
+ *     send the reader reloading a page that is never going to come back on its own.
+ */
+async function renderWithSsr(request: Request): Promise<Response> {
+  let answer: unknown;
+  try {
+    answer = await ssr.fetch(request);
+  } catch (error) {
+    answer = error instanceof Error ? error : new Error(String(error));
+  }
+  if (bunWillServe(answer)) return answer;
+
+  const path = new URL(request.url).pathname;
+  if (bundleWasReplaced(buildInfo, readBuildInfo(distDir))) {
+    reportOnce(
+      "the bundle on disk was replaced while this server was running, so its route " +
+        "chunks are gone — serving 503 until the update restarts it",
+    );
+    return plainPage(
+      503,
+      "teams-lite is being updated",
+      "This build was replaced a moment ago. Reload once the service has restarted.",
+    );
+  }
+  reportOnce(`the SSR handler failed on ${path}: ${await causeOf(answer)}`);
+  return plainPage(
+    500,
+    "teams-lite could not render this page",
+    "The server could not build the page. Its journal says why.",
+  );
 }
 
 // Exported, and that export is load-bearing for exactly one caller: the `teams`
@@ -134,7 +264,7 @@ export const server = Bun.serve<Relay>({
           : { "cache-control": "no-cache" },
       });
     }
-    return ssr.fetch(request);
+    return renderWithSsr(request);
   },
   websocket: {
     maxPayloadLength: MAX_FRAME_BYTES,

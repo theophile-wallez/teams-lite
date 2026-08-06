@@ -11,33 +11,35 @@
 // on stdin, so we need no bundled tar parser.
 
 import { spawnSync } from "bun";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+import {
+  assetId,
+  cachedAssetIsCurrent,
+  forgetCachedAsset,
+  stampCachedAsset,
+} from "./embedded-cache";
 
 /// Extract the embedded web bundle to ~/.cache/teams-lite/web and return that
 /// directory. It contains server.ts (the Bun SSR server) plus the dist/ assets
 /// it serves, laid out so server.ts resolves them relative to itself. Re-extracts
-/// only when the embedded archive differs (size change), so upgrades refresh it
-/// while normal launches are a cheap stat().
+/// whenever the embedded archive is not the one already unpacked there — by its
+/// CONTENT, exactly as the backend beside it (see embedded-cache.ts): a gzipped
+/// tarball that happens to weigh what the last one weighed would otherwise serve
+/// the previous build's app for ever.
 export async function extractEmbeddedWeb(): Promise<string> {
   const { default: bunfsPath } = await import("./embedded-web");
   const bytes = new Uint8Array(await Bun.file(bunfsPath).arrayBuffer());
 
   const dir = join(homedir(), ".cache", "teams-lite", "web");
   mkdirSync(dir, { recursive: true });
-  const stamp = join(dir, ".archive-size");
+  const stamp = join(dir, ".archive-id");
   const entry = join(dir, "server.ts");
+  const id = assetId(bytes);
 
-  let upToDate = false;
-  try {
-    upToDate =
-      existsSync(entry) &&
-      statSync(stamp).isFile() &&
-      Number(readFileSync(stamp, "utf8")) === bytes.byteLength;
-  } catch {
-    upToDate = false;
-  }
+  const upToDate = existsSync(entry) && cachedAssetIsCurrent(stamp, id);
 
   if (!upToDate) {
     const result = spawnSync(["tar", "-xzf", "-", "-C", dir], {
@@ -49,7 +51,9 @@ export async function extractEmbeddedWeb(): Promise<string> {
       const err = result.stderr ? new TextDecoder().decode(result.stderr) : "unknown error";
       throw new Error(`failed to extract embedded web bundle: ${err}`);
     }
-    writeFileSync(stamp, String(bytes.byteLength));
+    stampCachedAsset(stamp, id);
+    // The byte count an older launcher stamped here says nothing now.
+    forgetCachedAsset(join(dir, ".archive-size"));
   }
 
   if (!existsSync(entry)) {

@@ -17,8 +17,13 @@
 // never touches the app's own settings, so running it cannot change what the user's
 // backend holds.
 //
-// READS ONLY. `linear` sends GraphQL queries and nothing else (a test enforces that
-// on its source), so no amount of running this can alter an issue.
+// It also reports WHO a person on the issue is in the user's own Teams, which is the honest
+// check for the Linear half of that match (see `tracker_people`): there is no "list every
+// issue" read in this app, so a workspace's people can only be counted one real link at a
+// time. It prints the handle and the verdict, never a colleague's name.
+//
+// READS ONLY, twice over: `linear` sends GraphQL queries and nothing else (a test enforces
+// that on its source), and the roster comes from the local store.
 use anyhow::{Context, Result};
 
 #[tokio::main]
@@ -26,6 +31,18 @@ async fn main() -> Result<()> {
     let key = std::env::var("LINEAR_API_KEY")
         .context("set LINEAR_API_KEY to a Linear personal API key")?;
     let http = reqwest::Client::new();
+
+    // The people this machine has been told the name of, so a real issue can say whether its
+    // assignee is a colleague this app already knows. Read-only, and optional: with no store
+    // the rest of the check still runs, since the enrichment is what it is really about.
+    let roster = teams_lite::store::Store::open(&db_path())
+        .ok()
+        .and_then(|store| store.named_people().ok())
+        .map(teams_lite::tracker_people::Roster::from_people);
+    match &roster {
+        Some(roster) => println!("== teams · {} names resolve to one person", roster.len()),
+        None => println!("== teams · no store on this machine, so nobody can be matched"),
+    }
 
     let urls: Vec<String> = std::env::args().skip(1).collect();
     let urls = if urls.is_empty() {
@@ -63,11 +80,27 @@ async fn main() -> Result<()> {
                         meta.state_color.as_deref().unwrap_or("-"),
                     );
                 }
+                // Whoever owns it, and WHO THAT IS IN TEAMS — the question the card's face
+                // answers (see `tracker_people`). This is the honest check for the Linear half
+                // of that match: there is no "list every issue" read here, so a workspace's
+                // people can only be counted one real link at a time.
+                for (label, who) in [
+                    ("assignee", &meta.assignee),
+                    ("lead", &meta.lead),
+                    ("creator", &meta.creator),
+                ] {
+                    if let Some(who) = who {
+                        let teams = roster
+                            .as_ref()
+                            .and_then(|roster| roster.mri_for(&who.name))
+                            .map_or("no colleague of that name in this store", |_| {
+                                "resolves to a colleague — the card draws their Teams face"
+                            });
+                        println!("  {label:<8} -> @{} · {teams}", who.username);
+                    }
+                }
                 for (label, value) in [
                     ("team", &meta.team),
-                    ("assignee", &meta.assignee_name),
-                    ("lead", &meta.lead_name),
-                    ("creator", &meta.creator_name),
                     ("project", &meta.project),
                     ("parent", &meta.parent),
                     ("priority", &meta.priority_label),
@@ -99,4 +132,14 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The store the backend keeps, resolved the way it resolves it. Absent is not an error here:
+/// this example is about the enrichment, and the roster only adds who somebody is.
+fn db_path() -> String {
+    let base = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| format!("{}/.local/share", std::env::var("HOME").unwrap_or_default()));
+    format!("{base}/teams-lite/teams-lite.sqlite")
 }

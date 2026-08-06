@@ -34,6 +34,19 @@
 # it reads. The wait is bounded and then restarts anyway: the run left behind is closed
 # by whichever backend comes up (`repair_abandoned_agent_runs`), so the thread ends up
 # honest either way, and a staged commit is never held hostage by one stuck run.
+#
+# WHY IT WAITS BEFORE IT STAGES, AND NOT AFTER. Staging is not the harmless half. The web
+# bundle is a DIRECTORY of hashed chunks, and the SSR handler imports them off disk as the
+# routes are asked for; replace that directory under the running web server and its next
+# lazy import names a file that is gone — so the page dies while the process stays up.
+# It happened on 2026-08-06: an update staged a new bundle and then held its restart for a
+# live `@claude` run that took 40 minutes, so from the moment it staged the app served
+# Bun's own "fetch(req) did not return a Response object" page to the user's phone.
+# So the wait comes FIRST, and staging plus the restart follow together: a bundle and the
+# process serving it are out of step for the seconds a `try-restart` takes rather than for
+# the length of a run. `renderWithSsr` in web/server.ts answers honestly inside those
+# seconds, and neither half replaces the other — `install` stages without restarting
+# anything at all.
 set -euo pipefail
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -500,11 +513,15 @@ cmd_update() {
     shift
   done
 
+  # Build first: it writes into the checkout's own target/ and web/dist, so it touches
+  # nothing the running service reads and it costs about a minute nobody has to wait for.
   build_artifacts
+  # Then wait, BEFORE anything staged is replaced. Staging breaks the running web server
+  # on its next lazy import (see WHY IT WAITS BEFORE IT STAGES above), so everything that
+  # replaces a live artifact goes after this line and as close to the restart as it can.
+  [ "$wait_for_agent" = no ] || wait_for_quiet_agent
   stage_artifacts
   install_units
-  # The staged artifacts are in place; only the restart can still cut a reply short.
-  [ "$wait_for_agent" = no ] || wait_for_quiet_agent
   # Restart only what is already running: an update must not start a service the
   # user chose to keep down.
   say "Restarting whatever is running…"

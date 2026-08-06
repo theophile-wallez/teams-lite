@@ -91,9 +91,9 @@ mod tests {
             state: Some("Todo".to_string()),
             state_type: Some("unstarted".to_string()),
             state_color: None,
-            assignee_name: None,
-            lead_name: None,
-            creator_name: None,
+            assignee: None,
+            lead: None,
+            creator: None,
             priority: None,
             priority_label: None,
             project: None,
@@ -109,7 +109,7 @@ mod tests {
         assert_eq!(value["kind"], "issue");
         assert_eq!(value["identifier"], "ENG-1");
         // Absent optionals stay off the wire.
-        assert!(value.get("assignee_name").is_none());
+        assert!(value.get("assignee").is_none());
     }
 
     #[test]
@@ -123,7 +123,7 @@ mod tests {
             reference: String::new(),
             state: None,
             draft: None,
-            author_name: None,
+            author: None,
             source_branch: None,
             target_branch: None,
             labels: Vec::new(),

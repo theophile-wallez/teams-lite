@@ -37,6 +37,7 @@ import {
   type AppSettings,
   type BrokerStatus,
   type CalendarEvent,
+  type BackendRestartResult,
   type CalendarInfo,
   type CalendarViewResult,
   type CallSignal,
@@ -47,6 +48,7 @@ import {
   type Conversation,
   type CustomEmoji,
   type IncomingCall,
+  type GitLabApproval,
   type GitLabApprovalResult,
   type LinkMetadata,
   type LiveStatus,
@@ -67,6 +69,7 @@ import {
   type SettingsPatch,
   type TypingName,
   type TypingSignal,
+  type UpdateCheckResult,
   type UpdateInfo,
   type UpdateProgress,
   type WriteLock,
@@ -90,18 +93,64 @@ import {
   holdsMicrophone,
   isLive,
   modalityFor,
+  type ActiveCall,
   type CallMediaSignal,
   type CallStatus,
+  type MeetingAddress,
 } from "./call";
+import { callStageTitle } from "./call-stage";
 import {
-  MicrophoneUnavailableError,
   simulatedCallMedia,
   startCallMedia,
+  type CallAudio,
   type CallMedia,
   type LocalVideo,
   type RemoteVideo,
   type SendKind,
 } from "./call-media";
+import {
+  callFailureMessage,
+  captureDroppedMessage,
+  captureRefusedMessage,
+  renegotiationRefusedMessage,
+} from "./call-failure";
+import {
+  canExpandDiff,
+  type DiffDepth,
+  type DiffLayout,
+  type GitLabDiff,
+} from "./gitlab-diff";
+import {
+  isNotMerged,
+  mergeRequestId,
+  pipelineIsLive,
+  sameMergeRequest,
+  type GitLabDiscussionList,
+  type GitLabPipelineView,
+  type MergeRequestDetail,
+  type MergeRequestKey,
+  type MergeRequestList,
+  type MergeRequestRow,
+  type MergeRequestScope,
+  type MergeRequestState,
+} from "./gitlab-mr";
+import {
+  RECORDING_EMPTY_MESSAGE,
+  callCanBeRecorded,
+  recordingFailureMessage,
+  recordingSavedMessage,
+  recordingSources,
+  type CallRecording,
+} from "./call-recording";
+import { startCallRecorder, type CallRecorder, type RecordingInput } from "./call-recorder";
+import {
+  deleteRecording as deleteStoredRecording,
+  getRecordingBlob,
+  listRecordings,
+  putRecording,
+  recordingsCanBeKept,
+} from "./recording-store";
+import { CALL_NOTICE, RECORDING_NOTICE, dismissNotice, showNotice } from "./notice";
 import { coalesce } from "./singleflight";
 import {
   requestRange,
@@ -143,10 +192,25 @@ import {
 
 export type PendingReply = { message: ChatMessage; marker: string | null };
 
+/** The recording in flight, as the UI reads it.
+ *
+ *  It carries no blob and no recorder: those are non-reactive fields on the controller, and a
+ *  `MediaRecorder` in reactive state would be replaced by a re-render. What a page needs to
+ *  draw is which call it belongs to, when it started, and whether it is being wound up. */
+export type LiveRecording = {
+  id: string;
+  callId: string;
+  startedAtMs: number;
+  /** True from the moment the user presses stop until the file is written. It is a state of
+   *  its own because writing a long recording out takes a moment, and a control that snapped
+   *  back to "record" in it would invite a second recording of nothing. */
+  saving: boolean;
+};
+
 /** Which sidebar list is showing: normal chats, the team/channel tree, or the
  *  mailbox. Each is a distinct source — a channel never appears in the chat list,
  *  and mail is a different backend surface entirely — so this is a hard switch. */
-export type SidebarTab = "chats" | "channels" | "mail" | "calendar";
+export type SidebarTab = "chats" | "channels" | "mail" | "calendar" | "gitlab";
 
 /** The cache key a mail attachment's proxied bytes are stored under. Namespaced so
  *  it can never collide with a Teams hosted-content URL in the shared media cache. */
@@ -319,16 +383,9 @@ export type AppState = {
   /** What this machine can do about audio calls, and the one call it is in (see
    *  lib/call.ts). Both flags are false until the backend answers `call_status`: a
    *  hopeful `enabled` would tell the user their calls ring here while nothing is
-   *  registered. */
+   *  registered. The backend decides it — there is no switch in this app, and a
+   *  page holds no preference of its own about calling. */
   callStatus: CallStatus;
-  /** Why the last call attempt failed, in words for the user — a refused microphone,
-   *  a conversation that cannot be called. Cleared when the next one starts. */
-  callError: string | null;
-  /** Why the last call ended, when it is worth saying — a call the user did not end
-   *  themselves. Its own field rather than a read of the ended call, because the call is
-   *  dropped the moment that frame is delivered: the backend hands out ONE frame with the
-   *  ending in it and then frees the slot. Cleared on its own after a few seconds. */
-  callNotice: string | null;
   /**
    * The video arriving on the call right now — a colleague's camera, a colleague's shared
    * screen. Empty whenever there is nothing to draw, which is most calls.
@@ -351,6 +408,24 @@ export type AppState = {
    * one place — and it is what lets a tile say "Clément's screen" rather than "a screen".
    */
   callVideoNames: Record<string, string>;
+  /**
+   * The recording running right now, or null.
+   *
+   * teams-lite's own, and Teams is never told: it is made in this page out of the streams
+   * the call already carries, and it is kept in this browser (see lib/call-recording.ts).
+   * The state is the PAGE's rather than the backend's — unlike `call.sending`, which the
+   * backend publishes so two open pages agree — because nothing outside this page knows a
+   * recording exists, and a second page claiming to be recording would be claiming to hold
+   * a file it does not have.
+   */
+  callRecording: LiveRecording | null;
+  /** Every recording this browser holds, newest first. Metadata only: the files are read
+   *  from storage when one is played or saved (see lib/recording-store.ts). */
+  recordings: CallRecording[];
+  /** Whether this browser can keep a recording at all. False means no IndexedDB — a private
+   *  window that refuses one, an ancient browser — and the control is not offered, because a
+   *  recording that could not be kept is a recording nobody asked for. */
+  recordingsCanBeKept: boolean;
   /** Read receipts ("seen by") for the OPEN conversation: every other member's
    *  read position, used to anchor their avatar to the last message they read.
    *  Refreshed on open and kept live by the `read_receipt` event. Empty for the
@@ -445,6 +520,77 @@ export type AppState = {
   calendarError: string | null;
   /** The event whose details panel is open, or null. */
   openEventId: string | null;
+
+  // ---- the GitLab merge-request page ----------------------------------------
+  //
+  // Loaded lazily like mail and the calendar: nothing here is fetched until the GitLab
+  // tab is opened once. Every read is served from the backend's durable cache first, so
+  // re-opening a merge request paints immediately and the fresh copy arrives on an event.
+
+  /** Which merge requests the sidebar asks for. Persisted locally: it is a preference
+   *  about this screen, not anything GitLab knows. */
+  gitlabScope: MergeRequestScope;
+  gitlabState: MergeRequestState;
+  /** The rows on screen, newest activity first. */
+  gitlabList: MergeRequestRow[];
+  /** How many match, when GitLab said, and whether the list stops short of it. A list
+   *  that stopped without saying so would read as a complete one. */
+  gitlabTotal: number | null;
+  gitlabTruncated: boolean;
+  gitlabListLoading: boolean;
+  /** Why the list could not be read, or null. Scoped to this page: GitLab failing must
+   *  never break the chat surfaces. */
+  gitlabListError: string | null;
+  /** Whether this machine holds a GitLab token at all — the backend's own answer, carried
+   *  by the list read. Without one the page can read nothing, so it says that instead of
+   *  showing an empty list somebody would read as "no work".
+   *
+   *  TRUE until told otherwise: the notice must not flash in front of a list that is about
+   *  to arrive, and an older backend that says nothing is one whose list still works. */
+  gitlabTokenSet: boolean;
+
+  /** The open merge request (mirrors the `/mr/<id>` route), or null. */
+  openMergeRequest: MergeRequestKey | null;
+  gitlabDetail: MergeRequestDetail | null;
+  gitlabDetailLoading: boolean;
+  gitlabDetailError: string | null;
+  /** Its approval state, and whether the user's own approval is on. The same read the
+   *  message menu uses (`gitlab_approvals`), so there is one answer in this app. */
+  gitlabApproval: GitLabApproval | null;
+  /** Its comments, and its pipeline with jobs. */
+  gitlabNotes: GitLabDiscussionList | null;
+  gitlabPipeline: GitLabPipelineView | null;
+  /** What it CHANGED, for the Changes section. Read with the page, like the four above:
+   *  reviewing the diff is what a merge-request page is for, so it is never behind a click.
+   *  The RENDERER is lazy (see gitlab-diff-view.tsx) because Shiki carries a grammar per
+   *  language; the read itself
+   *  is measured at ~40 KB for a typical merge request on this instance. */
+  gitlabDiff: GitLabDiff | null;
+  gitlabDiffLoading: boolean;
+  /** Reported inside the section rather than on the page: a diff that could not be read
+   *  costs the Changes panel and nothing else, exactly as the comments do. */
+  gitlabDiffError: string | null;
+  /** Which file the section is showing, or null for "whichever `selectDiffFile` picks".
+   *  Per merge request, so walking away and back keeps the file the reader was on. */
+  gitlabDiffPath: string | null;
+  /** Whether the reader has asked for the expanded read of THIS merge request. Their ask,
+   *  their merge request: it is not a preference, because the cost is per diff. */
+  gitlabDiffDepth: DiffDepth;
+  /** Unified or split, the reader's own choice, persisted per browser. A narrow screen
+   *  overrides it to unified without forgetting it (see `effectiveDiffLayout`). */
+  gitlabDiffLayout: DiffLayout;
+  /** What the composer holds, per merge request, so walking away and back keeps a
+   *  half-written comment — and a reply keeps its own draft apart from the main one. */
+  gitlabCommentDraft: string;
+  /** Which thread the composer is replying into, or null for a new comment. */
+  gitlabReplyTo: string | null;
+  /** An outward action in flight — "merge", "comment", "close", "reopen", "approve" —
+   *  so the page can disable exactly one control rather than all of them. */
+  gitlabActing: string | null;
+  /** What the last outward action said, reported where the click was made. An action
+   *  that failed must never be left looking like it worked. */
+  gitlabActionError: string | null;
+  gitlabActionDone: string | null;
 };
 
 const DRAFT_SAVE_DELAY_MS = 150;
@@ -457,10 +603,6 @@ const TYPING_TIMEOUT_MS = 8000;
 // terminal call event, but a missed close (or a client that reconnected mid-call)
 // must not leave a banner ringing forever. Comfortably past Teams' own ring window.
 const CALL_RING_TIMEOUT_MS = 45_000;
-
-/** How long the line about a call that ended stays on screen. Long enough to read a
- *  sentence, short enough that nobody has to dismiss it. */
-const CALL_NOTICE_MS = 6_000;
 
 /** How long a fetched presence is trusted before the next person card refetches
  *  it. Short enough that a colleague who just joined a meeting reads as busy on
@@ -511,11 +653,27 @@ const MEDIA_CACHE_BYTES = 48 * 1024 * 1024;
 // would otherwise accumulate megabytes of markup. The backend caches every body
 // durably in SQLite, so re-opening an evicted mail is a local round-trip.
 const RETAINED_MAIL_BODIES = 12;
+// How many merge requests keep their detail, comments and draft in the session cache. A
+// reviewer walks between a handful at a time; the backend caches every read durably, so
+// re-opening an evicted one is a local round-trip.
+const RETAINED_MERGE_REQUESTS = 8;
+// How often a LIVE pipeline is re-read while its merge request is open.
+//
+// It has to sit above the backend's own cache window (GITLAB_PIPELINE_TTL, 5 s) or the poll
+// would keep being served the same cached answer and the page would look frozen; and it has
+// to stay short enough that a job turning green is seen while the reader is still looking.
+// Only ever armed while something is actually in flight (see `pipelineIsLive`).
+const GITLAB_PIPELINE_POLL_MS = 6000;
 // Where the locally-chosen visible calendars are persisted (client-only, like the
 // channel-pin overrides).
 const VISIBLE_CALENDARS_KEY = "teams-lite:visible-calendars";
 // And the view menu's display preferences.
 const CALENDAR_SETTINGS_KEY = "teams-lite:calendar-settings";
+// Whether the reader reads a diff unified or split. Client-only, like the calendar's own
+// preferences and for the same reason: it is a per-screen decision and there is no upstream
+// to write it to. What is deliberately NOT here is the expanded read — that is per merge
+// request, because its cost is (see `canExpandDiff`).
+const GITLAB_DIFF_LAYOUT_KEY = "teams-lite:gitlab-diff-layout";
 
 /**
  * The calendar's display preferences — the three toggles the view menu offers.
@@ -581,11 +739,15 @@ function initialState(): AppState {
     typingByConversation: {},
     incomingCalls: [],
     callStatus: UNKNOWN_CALL_STATUS,
-    callError: null,
-    callNotice: null,
     callVideo: [],
     callLocalVideo: [],
     callVideoNames: {},
+    callRecording: null,
+    recordings: [],
+    // False until the browser is asked, which happens on start. It is the same reading the
+    // calling switch takes before `call_status` answers: a control offered on a hopeful
+    // default would promise a file this browser cannot keep.
+    recordingsCanBeKept: false,
     readReceipts: [],
     mentionCandidates: [],
     appearance: DEFAULT_APPEARANCE,
@@ -632,6 +794,34 @@ function initialState(): AppState {
     calendarLoading: false,
     calendarError: null,
     openEventId: null,
+    // Every open merge request the token can see — the question the page exists to
+    // answer. The other three scopes narrow it, and `merged` is not a state it can ask.
+    gitlabScope: "all",
+    gitlabState: "opened",
+    gitlabList: [],
+    gitlabTotal: null,
+    gitlabTruncated: false,
+    gitlabListLoading: false,
+    gitlabListError: null,
+    gitlabTokenSet: true,
+    openMergeRequest: null,
+    gitlabDetail: null,
+    gitlabDetailLoading: false,
+    gitlabDetailError: null,
+    gitlabApproval: null,
+    gitlabNotes: null,
+    gitlabPipeline: null,
+    gitlabDiff: null,
+    gitlabDiffLoading: false,
+    gitlabDiffError: null,
+    gitlabDiffPath: null,
+    gitlabDiffDepth: "listed",
+    gitlabDiffLayout: "unified",
+    gitlabCommentDraft: "",
+    gitlabReplyTo: null,
+    gitlabActing: null,
+    gitlabActionError: null,
+    gitlabActionDone: null,
   };
 }
 
@@ -839,6 +1029,7 @@ export class TeamsController {
     this.applyPersistedCollapsedSections();
     this.applyPersistedVisibleCalendars();
     this.applyPersistedCalendarSettings();
+    this.applyPersistedDiffLayout();
     this.wireEvents();
     this.watchWakeups();
 
@@ -879,6 +1070,10 @@ export class TeamsController {
       // the same reason: an unanswered status reads as "off", which is what the
       // backend defaults to.
       void this.refreshCallStatus();
+      // The recordings this browser holds. Nothing about them is the backend's — they are
+      // this browser's own files (see lib/recording-store.ts) — so this is read locally and
+      // is best-effort: no storage means no recordings, and the control is not offered.
+      void this.loadRecordings();
       // Where this device stands on push notifications, and a re-registration if it
       // is already subscribed (a browser may have rotated the subscription while the
       // app was closed — see syncPush).
@@ -980,6 +1175,7 @@ export class TeamsController {
     this.callTimers.clear();
     for (const t of this.agentRunTimers.values()) clearTimeout(t);
     this.agentRunTimers.clear();
+    this.stopPipelinePolling();
     this.receiptsByConv.clear();
     for (const blob of this.mediaBlobs.values()) URL.revokeObjectURL(blob.objectUrl);
     this.mediaBlobs.clear();
@@ -1221,6 +1417,77 @@ export class TeamsController {
         this.set({ calendarError: d?.error || "Couldn\u2019t load the calendar", calendarLoading: false });
       }
     });
+    // The backend refreshed a merge-request list behind the page. It names the query it
+    // answers, so a page showing another filter ignores it — the sidebar must never
+    // silently swap the rows the user is reading for another scope's.
+    on("gitlab_list_updated", (raw) => {
+      const list = raw as (MergeRequestList & { scope?: string; state?: string }) | null;
+      if (!list || !Array.isArray(list.items)) return;
+      const state = this.get();
+      if (list.scope !== state.gitlabScope || list.state !== state.gitlabState) return;
+      this.applyGitLabList(list);
+    });
+
+    // One merge request moved. `kind` says which read arrived — or `stale`, which is what
+    // a WRITE broadcasts: it carries no payload, because the point of it is that every
+    // page (this one included, and the phone beside it) has to read again.
+    on("gitlab_mr_updated", (raw) => {
+      const d = raw as
+        | (Record<string, unknown> & { project_path?: string; iid?: number; kind?: string })
+        | null;
+      if (!d || typeof d.project_path !== "string" || typeof d.iid !== "number") return;
+      const key = { projectPath: d.project_path, iid: d.iid };
+      if (!sameMergeRequest(key, this.get().openMergeRequest)) return;
+      const id = mergeRequestId(key);
+      // Each frame is validated on the one field its own shape cannot be without, so a
+      // payload this build does not understand is ignored rather than drawn as an empty
+      // panel. A frame with no `kind` this page knows — `stale`, which is what a WRITE
+      // broadcasts — is the ask to read again.
+      if (d.kind === "detail" && typeof d.title === "string") {
+        const detail = d as unknown as MergeRequestDetail;
+        this.cacheGitLabDetail(id, detail);
+        this.set({ gitlabDetail: detail, gitlabDetailError: null });
+      } else if (d.kind === "notes" && Array.isArray(d.discussions)) {
+        const notes = d as unknown as GitLabDiscussionList;
+        this.gitlabNotesCache.set(id, notes);
+        this.set({ gitlabNotes: notes });
+      } else if (d.kind === "diff" || d.kind === "diff-raw") {
+        // The DEPTH is part of the kind, so the plain read refreshing behind the page can
+        // never replace the expanded one a reader asked for — it holds fewer patches.
+        const depth: DiffDepth = d.kind === "diff-raw" ? "raw" : "listed";
+        if (!Array.isArray(d.files)) return;
+        const diff = d as unknown as GitLabDiff;
+        this.gitlabDiffCache.set(this.gitlabDiffKey(id, depth), diff);
+        if (this.get().gitlabDiffDepth === depth) {
+          this.set({ gitlabDiff: diff, gitlabDiffError: null });
+        }
+      } else if (d.kind === "pipeline") {
+        const view = d as unknown as GitLabPipelineView;
+        this.set({ gitlabPipeline: view });
+        // A refresh that arrived from somewhere else still decides whether this page keeps
+        // polling: a pipeline that finished must stop the timer, and one that started must
+        // arm it.
+        if (pipelineIsLive(view)) this.schedulePipelinePoll(key);
+        else this.stopPipelinePolling();
+      } else if (d.kind === "stale") {
+        void this.reloadMergeRequest();
+      }
+    });
+
+    // A background refresh was refused. Reported only when there is nothing on screen:
+    // a failed refresh behind a populated page is noise, and the page keeps the answer it
+    // has — but an EMPTY page with no word would read as "there are no merge requests".
+    on("gitlab_read_error", (raw) => {
+      const d = raw as { key?: string; error?: string } | null;
+      const message = d?.error || "GitLab could not be read";
+      const state = this.get();
+      if (typeof d?.key === "string" && d.key.startsWith("list:")) {
+        if (state.gitlabList.length === 0) this.set({ gitlabListError: message });
+        return;
+      }
+      if (!state.gitlabDetail) this.set({ gitlabDetailError: message });
+    });
+
     on("realtime_status", (s) => {
       const status = s as LiveStatus;
       if (status === "disconnected") this.connectionDropped = true;
@@ -1365,14 +1632,18 @@ export class TeamsController {
     this.set({ typingByConversation: { ...prev, [convId]: names } });
   }
 
-  // ---- incoming calls (awareness only) -------------------------------------
+  // ---- incoming calls (awareness) ------------------------------------------
   //
-  // teams-lite has no media stack: it cannot carry, answer, or place a call.
-  // These handlers turn the backend's `call` event into a ring/dismiss banner so
-  // the user KNOWS a call is happening and can jump to the chat (or answer in
-  // real Teams). A `started` rings; `ended`/`missed` — or a manual dismiss, or a
-  // safety timeout — clears it. The backend already suppresses calls we started
-  // ourselves, so a `started` here is always someone else calling.
+  // These handlers turn the backend's `call` event — the after-the-fact `Event/Call`
+  // chat message, not the calling plane — into a ring/dismiss banner, so the user
+  // KNOWS a call is happening in a conversation nothing rang here. A `started` rings;
+  // `ended`/`missed` — or a manual dismiss, or a safety timeout — clears it. The
+  // backend already suppresses calls we started ourselves, so a `started` here is
+  // always someone else calling.
+  //
+  // What the CARD offers is decided there (`components/incoming-call-banner.tsx`): a
+  // ringing MEETING is joined, because its thread is a join address on its own, and every
+  // other conversation is opened. The real calling plane is the block below.
 
   /** Fold a live `call` signal into the ringing-banner list. */
   private onCall(sig: CallSignal): void {
@@ -1451,8 +1722,38 @@ export class TeamsController {
    *  it. Its observable half is `callStatus`. */
   private callMedia: CallMedia | null = null;
 
-  /** Drops the "why the call ended" line after {@link CALL_NOTICE_MS}. */
-  private callNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Which start the page is on. A hang-up moves it, so a start still in flight learns
+   *  that the user changed their mind.
+   *
+   *  A start is three awaits long — reserve, open the microphone, post the offer — and
+   *  the microphone alone takes up to `GATHER_TIMEOUT_MS`, so a call stopped a second
+   *  after it was placed lands INSIDE one of them. Without this the start ran on to the
+   *  end, the backend refused the offer for a call it had already let go, and the app
+   *  reported that refusal to the user as a fault ("no such call — call_prepare first")
+   *  — for a call they stopped themselves. The counter is the user's own intention, and
+   *  that is why it is not read off a `call_state` frame: a frame says the call is over
+   *  whoever ended it, the failure included, and a failure must still be said. */
+  private callAttempt = 0;
+
+  /** True while `attempt` is still the start the user wants. */
+  private callAttemptStands(attempt: number): boolean {
+    return attempt === this.callAttempt;
+  }
+
+  /** Take the media a start opened — or release it, because the user hung up while it
+   *  was opening.
+   *
+   *  `this.callMedia` is the only handle on a microphone, and it is assigned here: a
+   *  capture adopted after the hang-up would be one nothing could find to stop, and the
+   *  browser's recording indicator would stay on for a call that does not exist. */
+  private adoptCallMedia(media: CallMedia, attempt: number): boolean {
+    if (!this.callAttemptStands(attempt)) {
+      media.stop();
+      return false;
+    }
+    this.callMedia = media;
+    return true;
+  }
 
   /** Fold one `call_state` frame in, and stop the microphone when the call is over.
    *
@@ -1464,30 +1765,38 @@ export class TeamsController {
     this.set({ callStatus: status });
     const call = status.call;
     if (!holdsMicrophone(call)) this.stopCallMedia();
-    if (isLive(call)) {
-      // A new call clears whatever the last one left on screen.
-      this.showCallNotice(null);
-      return;
-    }
-    // The ONE frame that says the call is over. Its reason is kept here because the
-    // slot is freed immediately afterwards — reading it off `callStatus` later would
-    // find nothing. An ending the user caused says nothing back at them.
-    if (call?.phase === "ended") this.showCallNotice(callEndLabel(call) || null);
+    // Otherwise: a roster frame is how somebody arriving becomes a name, so a running
+    // recording collects them here — the people named in the file are everybody who was in
+    // the call while it ran, not everybody who was in it when it started.
+    else this.syncRecorder();
+    // A live call says nothing, and — importantly — takes nothing back. Clearing the
+    // notice here looked right and was wrong: these frames arrive throughout a call (a
+    // roster, a renegotiation, a camera going on), so the first one after a refused
+    // capture erased the reason a beat after it appeared. What a new attempt leaves
+    // behind is taken back where that attempt STARTS, which is the only place that knows
+    // one is starting.
+    if (isLive(call)) return;
+    // The ONE frame that says the call is over. It is said here because the slot is freed
+    // immediately afterwards — reading the reason off `callStatus` later would find
+    // nothing. An ending the user caused says nothing back at them.
+    if (call?.phase === "ended") this.reportCall(callEndLabel(call), "report");
   }
 
-  /** Show (or clear) the one line about a call that ended, and drop it on its own.
-   *  A toast that stays is a toast the user has to dismiss. */
-  private showCallNotice(text: string | null): void {
-    if (this.callNoticeTimer) {
-      clearTimeout(this.callNoticeTimer);
-      this.callNoticeTimer = null;
-    }
-    this.set({ callNotice: text });
-    if (!text) return;
-    this.callNoticeTimer = setTimeout(() => {
-      this.callNoticeTimer = null;
-      this.set({ callNotice: null });
-    }, CALL_NOTICE_MS);
+  /** Say one thing about the call — why it ended, or why it did not happen.
+   *
+   *  It is a NOTICE and not state: by the time there is anything to say the call is
+   *  gone, so there is no surface of its own left to say it in, and a sentence that
+   *  nothing clears is a sentence that stays for ever. That is what this used to be. */
+  private reportCall(text: string, kind: "error" | "report"): void {
+    showNotice({ text, kind, id: CALL_NOTICE, testId: "call-notice" });
+  }
+
+  /** Say one thing about a RECORDING of a call — where the file went, or why there is none.
+   *
+   *  Its own id, so it never replaces the reason the CALL ended: the two arrive together when
+   *  a call drops, and which of them the user cannot work out for themselves is the call's. */
+  private reportRecording(text: string, kind: "error" | "report"): void {
+    showNotice({ text, kind, id: RECORDING_NOTICE, testId: "call-recording-notice" });
   }
 
   /** The far side's SDP. An ANSWER is what turns a ringing call into audio; an OFFER is
@@ -1502,11 +1811,40 @@ export class TeamsController {
     try {
       await media.setRemoteAnswer(signal.sdp);
     } catch (error) {
-      // A rejected answer means this call will never carry audio, so end it rather than
-      // leaving a bar that says "connecting" for good.
       console.error("[call] the answer could not be applied", error);
+      // WHICH answer it was decides everything. THE answer is what makes a call a call: with
+      // it refused nothing will ever be heard, so the call goes rather than leaving a bar
+      // that says "connecting" for good. A LATER one answers a renegotiation of OURS — a
+      // camera, a screen — on a call that is already carrying audio, and ending that call is
+      // exactly what this app did to a real user seconds after they shared their screen.
+      // Losing it costs the picture and nothing else.
+      if (media.negotiated) {
+        await this.abandonCallRenegotiation();
+        return;
+      }
       await this.hangUpCall();
     }
+  }
+
+  /**
+   * Take back an offer of ours the meeting answered in a way this browser cannot read.
+   *
+   * The offer will never be completed, so the connection is rolled back to where it stood
+   * before the attempt and every capture it carried is released — the same shape a capture the
+   * meeting DROPPED takes, and for the same reason: a camera whose light is on while nothing
+   * goes out is the worst state this surface has. The service is told with one offer, and a
+   * failure to tell it changes nothing that can be done here.
+   */
+  private async abandonCallRenegotiation(): Promise<void> {
+    const media = this.callMedia;
+    if (!media) return;
+    const { released, offer } = await media.abandonLocalOffer();
+    // The service is told FIRST, and the sentence is said after it: both speak through one
+    // notice, and this is the one that has to survive — a report that the take-back could not
+    // be posted would replace "you are still in the call" with a fact the user cannot act on.
+    // Swallowed for the same reason: there is nothing left to try.
+    if (offer) await this.publishSending(offer, "take back a media offer").catch(() => {});
+    this.reportCall(renegotiationRefusedMessage(released), "error");
   }
 
   /**
@@ -1581,6 +1919,9 @@ export class TeamsController {
         this.set({
           callVideoNames: { ...this.get().callVideoNames, [section.mid]: person.name },
         });
+        // A running recording draws the name under that tile, so it learns it here too —
+        // this is the one moment the person and the section are both in hand.
+        this.syncRecorder();
       } catch (error) {
         // One refused subscription is one missing tile, not a broken call.
         console.error("[call] could not subscribe to a stream", error);
@@ -1589,6 +1930,16 @@ export class TeamsController {
   }
 
   private stopCallMedia(): void {
+    // The session dies with the call — a meeting has no presenter once nobody is in it — so
+    // the flag goes rather than a POST: the links it would use are the ended call's own.
+    this.sharingSessionHeld = false;
+    // A recording is closed out HERE, on the one path the microphone is released on and for
+    // the same reason: every ending — our hangup, theirs, a dropped transport, calling
+    // switched off — comes through this function, and a recording lost because of which side
+    // hung up would be a file that exists nowhere else. It is requested before the media goes
+    // so the last second of the call is in it, and it is idempotent, so the user's own press
+    // and the call ending in the same moment write one file.
+    void this.stopCallRecording();
     this.callMedia?.stop();
     this.callMedia = null;
     // The tiles go with the connection that fed them. A `<video>` left holding a stopped
@@ -1607,31 +1958,60 @@ export class TeamsController {
   private async openCallMedia(options: {
     iceServers: RTCIceServer[];
     remoteOffer?: string;
+    oneToOne?: boolean;
   }): Promise<CallMedia> {
-    if (this.get().backendIsMock) {
-      const mock = simulatedCallMedia();
-      mock.onRemoteVideoChange = (videos) => this.set({ callVideo: videos });
-      mock.onLocalVideoChange = (videos) => this.set({ callLocalVideo: [...videos] });
-      return mock;
-    }
-    const media = await startCallMedia({
-      iceServers: options.iceServers,
-      remoteOffer: options.remoteOffer,
-      onConnectionStateChange: (state) => {
-        if (state === "failed") {
-          console.error("[call] the media transport failed");
-          void this.hangUpCall();
-        }
-      },
-    });
+    // Every callback below is wired ONCE, for the stand-in as much as for the real thing: the
+    // mock is where this surface is reviewed, and a bridge the mock path skipped is a rule no
+    // spec could ever hold the app to.
+    const media = this.get().backendIsMock
+      ? simulatedCallMedia({ answering: options.remoteOffer !== undefined })
+      : await startCallMedia({
+          iceServers: options.iceServers,
+          remoteOffer: options.remoteOffer,
+          oneToOne: options.oneToOne,
+          onConnectionStateChange: (state) => {
+            if (state === "failed") {
+              console.error("[call] the media transport failed");
+              void this.hangUpCall();
+            }
+          },
+        });
     // The tiles are reactive state; the connection behind them is not. This is the one
     // bridge between the two, and it is set before anything can arrive on it.
-    media.onRemoteVideoChange = (videos) => this.set({ callVideo: videos });
-    media.onLocalVideoChange = (videos) => this.set({ callLocalVideo: [...videos] });
-    // The BROWSER's own "Stop sharing" bar. It ends the track and tells this app nothing
-    // else, so the service has to be told from here or the meeting keeps a section that
-    // carries no picture while the button still says on.
-    media.onSendingEnded = (kind, offer) => void this.publishSending(offer, `stop ${kind}`);
+    //
+    // Each one also re-points a RUNNING recording, so a camera that comes on five minutes in
+    // is in the file from the moment it is on screen — one recording per call, whatever
+    // changes inside it.
+    media.onRemoteVideoChange = (videos) => {
+      this.set({ callVideo: videos });
+      this.syncRecorder();
+    };
+    media.onLocalVideoChange = (videos) => {
+      this.set({ callLocalVideo: [...videos] });
+      this.syncRecorder();
+      // The SESSION is given back on the one path every ending of a screen share passes
+      // through, which is this one — the user's own press, the browser's "Stop sharing" bar, a
+      // section the meeting dropped, and an offer rolled back because its answer could not be
+      // read. It is the rule the microphone already follows, and for the same reason: a
+      // release wired per ending eventually misses one, and a meeting left believing this
+      // endpoint is still its presenter refuses the NEXT share.
+      if (!videos.some((video) => video.kind === "screen")) void this.releaseSharingSession();
+    };
+    // A voice joining or leaving. It changes nothing on screen — the audio elements play it
+    // either way — so a recording is its only reader.
+    media.onAudioChange = () => this.syncRecorder();
+    // A capture that ended with no click of ours: the BROWSER's own "Stop sharing" bar, or a
+    // section the MEETING dropped. Either way the service has to be told from here, or it
+    // keeps a section that carries no picture while the button still says on.
+    media.onSendingEnded = (kind, offer, reason) => {
+      // Both endings the user did not ask for are told, and they are told DIFFERENTLY: a
+      // capture the meeting accepted and then took away is worth turning on again, and one it
+      // never accepted is not — that advice sent a real user straight back into the same
+      // refusal. The browser's own bar needs no word: they pressed it themselves.
+      if (reason === "dropped") this.reportCall(captureDroppedMessage(kind), "error");
+      if (reason === "refused") this.reportCall(captureRefusedMessage(kind), "error");
+      void this.publishSending(offer, `stop ${kind}`);
+    };
     return media;
   }
 
@@ -1668,17 +2048,48 @@ export class TeamsController {
     const media = this.callMedia;
     const call = this.get().callStatus.call;
     if (!media || !call) return;
-    this.set({ callError: null });
     try {
+      // A SCREEN is asked for before it is offered: a meeting shows one at a time, so this
+      // endpoint has to hold its content-sharing session or the section is rejected outright.
+      // The order is the client's own — the modality first, the media after it — and it comes
+      // BEFORE the capture, so a meeting that will not grant one never opens a screen picker.
+      if (kind === "screen" && on) {
+        await this.backend.callStartSharing(call.id);
+        this.sharingSessionHeld = true;
+      }
       const offer = on ? await media.startSending(kind) : await media.stopSending(kind);
       await this.publishSending(offer, `${on ? "start" : "stop"} ${kind}`);
     } catch (error) {
       // A refused camera is a decision, not a fault, so it is said in the user's words and
-      // the call carries on. Whatever happened, the capture is released: `startSending`
-      // stops its own tracks on the way out.
-      this.set({ callError: callErrorText(error) });
-      if (on) await media.stopSending(kind).catch(() => {});
+      // the call carries on. Whatever happened, the capture is released: `startSending` stops
+      // its own tracks on the way out, and releasing it is what gives the session back — a
+      // share that failed after the meeting granted one would otherwise leave a presenter
+      // showing nothing.
+      this.reportCall(callFailureMessage(error), "error");
+      if (on) {
+        await media.stopSending(kind).catch(() => {});
+        // A capture that never started raises no change, so the session is released here too.
+        if (kind === "screen") await this.releaseSharingSession();
+      }
     }
+  }
+
+  /** Whether the meeting has granted this endpoint its content-sharing session. Not reactive:
+   *  nothing on screen is drawn from it, and the button reads the backend's own `sending`. */
+  private sharingSessionHeld = false;
+
+  /**
+   * Give the meeting's sharing session back, once, if this endpoint holds one.
+   *
+   * Idempotent and silent: the picture has already stopped by the time this runs, so there is
+   * nothing left for the user to act on, and a failure costs the meeting one stale presenter
+   * rather than costing them anything.
+   */
+  private async releaseSharingSession(): Promise<void> {
+    const call = this.get().callStatus.call;
+    if (!this.sharingSessionHeld || !call) return;
+    this.sharingSessionHeld = false;
+    await this.backend.callStopSharing(call.id).catch(() => {});
   }
 
   /**
@@ -1702,7 +2113,7 @@ export class TeamsController {
       if (result.answer_sdp) await media.setRemoteAnswer(result.answer_sdp);
     } catch (error) {
       console.error(`[call] could not ${what}`, error);
-      this.set({ callError: callErrorText(error) });
+      this.reportCall(callFailureMessage(error), "error");
       throw error;
     }
   }
@@ -1718,32 +2129,32 @@ export class TeamsController {
     }
   }
 
-  /** Turn calling on or off. The consent gate: ON registers this machine with Teams as
-   *  a device the user's calls ring on. */
-  async setCallingEnabled(enabled: boolean): Promise<void> {
-    this.set({ callError: null });
-    try {
-      this.set({ callStatus: await this.backend.setCalling(enabled) });
-    } catch (error) {
-      this.set({ callError: errText(error) });
-      await this.refreshCallStatus();
-    }
-  }
-
   /** Place a call in a one-to-one chat: reserve it, open the microphone, send the
    *  offer. Every step is the user's own click — nothing here starts on its own. */
   async startCall(conversationId: string): Promise<void> {
     if (isLive(this.get().callStatus.call)) return;
-    this.set({ callError: null });
-    this.showCallNotice(null);
+    dismissNotice(CALL_NOTICE);
+    const attempt = ++this.callAttempt;
     let callId: string | null = null;
     try {
       const prepared = await this.backend.callPrepare({ conversation: conversationId });
       callId = prepared.call_id;
-      this.callMedia = await this.openCallMedia({ iceServers: prepared.ice_servers });
-      await this.backend.callPlace(prepared.call_id, this.callMedia.localSdp);
+      const media = await this.openCallMedia({
+        iceServers: prepared.ice_servers,
+        // A one-to-one negotiates the camera and the screen up front, the way the real
+        // client does. The backend decides it: the ring list is what says how many people
+        // the call reaches.
+        oneToOne: prepared.one_to_one === true,
+      });
+      // The user hung up while the microphone was opening: the reservation went back with
+      // their click, so the offer must not go out and nothing is said.
+      if (!this.adoptCallMedia(media, attempt)) return;
+      await this.backend.callPlace(prepared.call_id, media.localSdp);
     } catch (error) {
-      this.set({ callError: callErrorText(error) });
+      // A start the user stopped is not a failure to report: they were there, and the
+      // hang-up already released the microphone and the reservation.
+      if (!this.callAttemptStands(attempt)) return;
+      this.reportCall(callFailureMessage(error), "error");
       this.stopCallMedia();
       // The backend reserved the call before the failure, so release it: a machine that
       // thinks it is dialling refuses the next call.
@@ -1753,25 +2164,28 @@ export class TeamsController {
   }
 
   /**
-   * Join a meeting from the link its calendar event carries.
+   * Join a meeting — from the link its calendar event carries, or from the meeting's own
+   * conversation in the chat list (see {@link MeetingAddress}).
    *
    * The same three steps as placing a call, and the same gate: the backend reserves the
    * call and hands back what a peer connection needs, the page opens the microphone,
    * and the SDP goes back. Nothing is joined without this click — the calendar's join
    * link is never followed on the user's behalf.
    */
-  async joinMeeting(joinUrl: string, subject?: string): Promise<void> {
+  async joinMeeting(meeting: MeetingAddress, subject?: string): Promise<void> {
     if (isLive(this.get().callStatus.call)) return;
-    this.set({ callError: null });
-    this.showCallNotice(null);
+    dismissNotice(CALL_NOTICE);
+    const attempt = ++this.callAttempt;
     let callId: string | null = null;
     try {
-      const prepared = await this.backend.callPrepare({ joinUrl, subject });
+      const prepared = await this.backend.callPrepare({ meeting, subject });
       callId = prepared.call_id;
-      this.callMedia = await this.openCallMedia({ iceServers: prepared.ice_servers });
-      await this.backend.callJoin(prepared.call_id, joinUrl, this.callMedia.localSdp);
+      const media = await this.openCallMedia({ iceServers: prepared.ice_servers });
+      if (!this.adoptCallMedia(media, attempt)) return;
+      await this.backend.callJoin(prepared.call_id, meeting, media.localSdp);
     } catch (error) {
-      this.set({ callError: callErrorText(error) });
+      if (!this.callAttemptStands(attempt)) return;
+      this.reportCall(callFailureMessage(error), "error");
       this.stopCallMedia();
       if (callId) await this.hangUpCall();
       await this.refreshCallStatus();
@@ -1782,18 +2196,20 @@ export class TeamsController {
   async answerCall(): Promise<void> {
     const call = this.get().callStatus.call;
     if (!call || !call.can_accept) return;
-    this.set({ callError: null });
-    this.showCallNotice(null);
+    dismissNotice(CALL_NOTICE);
+    const attempt = ++this.callAttempt;
     try {
       const prepared = await this.backend.callPrepare({ callId: call.id });
       if (!prepared.offer_sdp) throw new Error("that call carried nothing to answer");
-      this.callMedia = await this.openCallMedia({
+      const media = await this.openCallMedia({
         iceServers: prepared.ice_servers,
         remoteOffer: prepared.offer_sdp,
       });
-      await this.backend.callAccept(call.id, this.callMedia.localSdp);
+      if (!this.adoptCallMedia(media, attempt)) return;
+      await this.backend.callAccept(call.id, media.localSdp);
     } catch (error) {
-      this.set({ callError: callErrorText(error) });
+      if (!this.callAttemptStands(attempt)) return;
+      this.reportCall(callFailureMessage(error), "error");
       this.stopCallMedia();
       await this.hangUpCall();
     }
@@ -1803,6 +2219,9 @@ export class TeamsController {
    *  here as well as on the backend's own frame, because the user asked for it now. */
   async hangUpCall(): Promise<void> {
     const call = this.get().callStatus.call;
+    // Whatever start is in flight is over: this click is the user saying so, and it is the
+    // one thing an await inside that start cannot see (see {@link callAttempt}).
+    this.callAttempt += 1;
     this.stopCallMedia();
     if (!call) return;
     try {
@@ -1811,6 +2230,207 @@ export class TeamsController {
       console.error("[call] the hangup failed", error);
     }
     await this.refreshCallStatus();
+  }
+
+  // ---- recording a call (teams-lite's own, and Teams is never told) ---------
+  //
+  // The whole feature lives in this page: the streams are the ones the call already
+  // carries, the file is written by a `MediaRecorder` here, and it is kept in this
+  // browser. Nothing in this slice reaches the backend, and nothing in it can — which is
+  // the point (see lib/call-recording.ts).
+
+  /** The recorder behind {@link AppState.callRecording}. Not reactive, for the reason the
+   *  call's own media is not: it owns a canvas, a `MediaRecorder` and an `AudioContext`,
+   *  and a re-render must never replace it. */
+  private recorder: CallRecorder | null = null;
+
+  /** Who was in the call while the recording ran, by name, the user included.
+   *
+   *  A UNION rather than a snapshot: somebody who joined half way through is in the file,
+   *  so they are in the list. It is collected here because the roster changes under a
+   *  running recording and the recorder has no reason to know about people. */
+  private recordingPeople = new Set<string>();
+
+  /** Object URLs handed out for playback, one per recording, revoked when it is deleted.
+   *
+   *  Cached because a URL is what a `<video>` holds and the history is virtualized: a card
+   *  that scrolled out of view and back would otherwise mint a second URL for the same file
+   *  and leak the first. */
+  private recordingUrls = new Map<string, string>();
+
+  /**
+   * Start recording this call — the picture of everybody in it, and the audio of everybody
+   * in it, into one file in this browser.
+   *
+   * Nothing is announced: this is not Teams' recording and it cannot be, so the people on
+   * the call are not told (the control says so before it is pressed). Nothing is sent, and
+   * no message goes out — the file appears in the conversation for this user alone, once it
+   * is finished.
+   */
+  async startCallRecording(): Promise<void> {
+    const call = this.get().callStatus.call;
+    if (!callCanBeRecorded(call) || !call) return;
+    if (this.get().callRecording || this.recorder) return;
+    // What the LAST recording had to say is taken back, and nothing else: a notice about the
+    // call — a camera it refused, a section it dropped — is about something still true.
+    dismissNotice(RECORDING_NOTICE);
+    try {
+      const recorder = startCallRecorder(this.recordingInput(call));
+      this.recorder = recorder;
+      this.recordingPeople = new Set(this.callPeople(call));
+      this.set({
+        callRecording: {
+          id: `rec-${recorder.startedAtMs}`,
+          callId: call.id,
+          startedAtMs: recorder.startedAtMs,
+          saving: false,
+        },
+      });
+    } catch (error) {
+      // A browser that cannot record says so once, in its own sentence, and the call carries
+      // on untouched: a recording is something extra a call can have, never a part of it.
+      this.recorder = null;
+      this.set({ callRecording: null });
+      this.reportRecording(recordingFailureMessage(error), "error");
+    }
+  }
+
+  /**
+   * Stop recording and keep what was recorded.
+   *
+   * Every path out of a call comes through here — the user's own press, the hangup, the far
+   * side leaving, calling being switched off — because the file has to be closed and written
+   * whoever ended the call. A recording lost because somebody hung up would be the one
+   * failure this feature cannot afford: there is no second copy anywhere.
+   */
+  async stopCallRecording(): Promise<void> {
+    const recorder = this.recorder;
+    const live = this.get().callRecording;
+    if (!recorder || !live) return;
+    // The recorder is released from this controller FIRST, so a second stop — the user's
+    // press and the call ending in the same second — cannot write the file twice.
+    this.recorder = null;
+    this.set({ callRecording: { ...live, saving: true } });
+    const call = this.get().callStatus.call;
+    const title = call ? callStageTitle(call) : "Call";
+    try {
+      const blob = await recorder.stop();
+      const endedAtMs = Date.now();
+      if (blob.size === 0) {
+        // A recorder stopped in the same second it started writes no frames at all. There is
+        // nothing to keep, and an empty row in the history would be worse than the sentence.
+        this.reportRecording(RECORDING_EMPTY_MESSAGE, "report");
+        return;
+      }
+      const recording: CallRecording = {
+        id: live.id,
+        callId: live.callId,
+        // The conversation is read at the END, from the call that is still in hand: a
+        // meeting joined from a calendar link names none, and that recording lives in
+        // Settings instead (see `recordingBelongsInHistory`).
+        conversationId: call?.conversation_id?.trim() || null,
+        title,
+        startedAtMs: live.startedAtMs,
+        endedAtMs,
+        durationMs: Math.max(0, endedAtMs - live.startedAtMs),
+        size: blob.size,
+        mimeType: blob.type,
+        participants: [...this.recordingPeople],
+      };
+      const kept = await putRecording(recording, blob);
+      if (!kept) {
+        // The file is in hand and this browser will not hold it — a full quota, a private
+        // window. Saying so is all this app can do, and it is what the user needs in order
+        // to make room and record again.
+        this.reportRecording("This browser could not keep that recording.", "error");
+        return;
+      }
+      this.set({ recordings: [recording, ...this.get().recordings] });
+      this.reportRecording(recordingSavedMessage(recording), "report");
+    } catch (error) {
+      console.error("[call] the recording could not be written", error);
+      this.reportRecording(recordingFailureMessage(error), "error");
+    } finally {
+      this.recordingPeople.clear();
+      this.set({ callRecording: null });
+    }
+  }
+
+  /** What the recorder should be drawing and mixing right now.
+   *
+   *  Built in one place, so the recording that starts and the recording that follows the call
+   *  are made of the same thing. */
+  private recordingInput(call: ActiveCall): RecordingInput {
+    const state = this.get();
+    const audio: CallAudio = this.callMedia?.audio ?? { microphone: null, remote: [] };
+    return {
+      sources: recordingSources(state.callVideo, state.callLocalVideo, state.callVideoNames),
+      audio,
+      title: callStageTitle(call),
+    };
+  }
+
+  /** Everybody in the call by name, the user first. The roster's own words, and "You" for
+   *  the one person it never names. */
+  private callPeople(call: ActiveCall): string[] {
+    return ["You", ...call.others.map((name) => name.trim()).filter(Boolean)];
+  }
+
+  /**
+   * Re-point a running recording at what the call carries now.
+   *
+   * Called from every place the call's media changes: a camera coming on, a screen share
+   * ending, a voice arriving, a subscription naming whose picture a section holds. The
+   * recording never restarts — it is one file for one call, and the sources inside it change
+   * exactly as they did on screen.
+   */
+  private syncRecorder(): void {
+    const recorder = this.recorder;
+    const call = this.get().callStatus.call;
+    if (!recorder || !call) return;
+    recorder.update(this.recordingInput(call));
+    for (const person of this.callPeople(call)) this.recordingPeople.add(person);
+  }
+
+  /** Read every recording this browser holds, and whether it can hold one at all.
+   *
+   *  Metadata only — the files are read when one is played (see {@link recordingUrl}). */
+  async loadRecordings(): Promise<void> {
+    this.set({ recordingsCanBeKept: recordingsCanBeKept() });
+    this.set({ recordings: await listRecordings() });
+  }
+
+  /**
+   * A URL a `<video>` can play one recording from, or null when this browser does not hold
+   * the file.
+   *
+   * It is an object URL over the stored blob, so playback and seeking are local and cost no
+   * request — a recording never travels anywhere, not even to this app's own server.
+   */
+  async recordingUrl(id: string): Promise<string | null> {
+    const held = this.recordingUrls.get(id);
+    if (held) return held;
+    const blob = await getRecordingBlob(id);
+    if (!blob) return null;
+    const url = URL.createObjectURL(blob);
+    this.recordingUrls.set(id, url);
+    return url;
+  }
+
+  /**
+   * Forget one recording, file and all.
+   *
+   * There is nothing upstream to take it back from, so this deletion is the whole deletion —
+   * which is why the card asks twice, exactly as deleting a message does.
+   */
+  async deleteCallRecording(id: string): Promise<void> {
+    await deleteStoredRecording(id);
+    const url = this.recordingUrls.get(id);
+    if (url) {
+      URL.revokeObjectURL(url);
+      this.recordingUrls.delete(id);
+    }
+    this.set({ recordings: this.get().recordings.filter((recording) => recording.id !== id) });
   }
 
   /** Mute or unmute. The microphone stops first and the service is told second, so the
@@ -2016,12 +2636,15 @@ export class TeamsController {
     }
   }
 
-  /** Switch the sidebar between the chat list, the channel tree and the mailbox.
-   *  Opening Mail for the first time is what loads it — see `loadMailFolders`. */
+  /** Switch the sidebar between the chat list, the channel tree, the mailbox, the
+   *  calendar and the merge requests. Opening one of the lazy surfaces for the first time
+   *  is what loads it — see `loadMailFolders`, `ensureCalendarLoaded`,
+   *  `ensureGitLabLoaded`. */
   setSidebarTab(tab: SidebarTab): void {
     if (this.get().sidebarTab !== tab) this.set({ sidebarTab: tab });
     if (tab === "mail") void this.ensureMailLoaded();
     if (tab === "calendar") void this.ensureCalendarLoaded();
+    if (tab === "gitlab") void this.ensureGitLabLoaded();
   }
 
   // ---- mail (read-only Outlook surface) ------------------------------------
@@ -2549,6 +3172,583 @@ export class TeamsController {
       this.set({ calendarSettings: next });
     } catch {
       /* ignore — display preferences are non-critical */
+    }
+  }
+
+  // ---- the GitLab merge-request page ---------------------------------------
+  //
+  // Local-first in the same shape as mail: the backend answers every read from its own
+  // durable cache and refreshes behind the page, so switching between merge requests is
+  // instant and the fresh copy lands on an event. On top of that this holds a per-query
+  // cache of its own, so flipping the sidebar's filter back and forth costs nothing at
+  // all — not even a round trip to the backend.
+  //
+  // The four WRITES are the only outward things here, and each is one click: nothing on
+  // this page ever posts, merges or closes on its own.
+
+  /** Rows per (scope, state), so a filter the user has already looked at paints at once.
+   *  Bounded by the eight combinations the two closed sets allow. */
+  private gitlabListCache = new Map<string, MergeRequestList>();
+  /** Detail / notes / pipeline per merge request, so walking back to one is instant.
+   *  Bounded LRU — a session spent reviewing must not accumulate every merge request. */
+  private gitlabDetailCache = new Map<string, MergeRequestDetail>();
+  private gitlabNotesCache = new Map<string, GitLabDiscussionList>();
+  /** The diff per merge request AND per depth, so walking back to one paints at once and the
+   *  expanded read a reader paid for is never silently replaced by the plain one. */
+  private gitlabDiffCache = new Map<string, GitLabDiff>();
+  /** Which file the reader was on, per merge request. Kept OUT of the reactive state for the
+   *  reason a draft is: it survives a walk away without re-rendering anything. */
+  private gitlabDiffPathCache = new Map<string, string>();
+  /** Comment drafts per merge request, so leaving a half-written comment and coming back
+   *  keeps it. Kept OUT of the reactive state for the same reason chat drafts are. */
+  private gitlabDraftCache = new Map<string, string>();
+  /** The pipeline poll of the OPEN merge request, and nothing else: a page polls the one
+   *  pipeline it is showing, and closing the page stops it. */
+  private gitlabPipelineTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private refreshGitLabList = coalesce(() => this.loadMergeRequests(false));
+
+  /** Load the sidebar the first time the GitLab tab is shown. */
+  private async ensureGitLabLoaded(): Promise<void> {
+    if (this.gitlabListCache.size === 0) await this.refreshGitLabList();
+  }
+
+  /** Forget everything read through the old token or the old host. Called when either
+   *  changes: what a token can see IS the page, so keeping a row would be showing one
+   *  account's world under another's credentials. */
+  private forgetGitLabReads(): void {
+    this.gitlabListCache.clear();
+    this.gitlabDetailCache.clear();
+    this.gitlabNotesCache.clear();
+    this.gitlabDiffCache.clear();
+    this.gitlabDiffPathCache.clear();
+    this.set({
+      gitlabList: [],
+      gitlabTotal: null,
+      gitlabTruncated: false,
+      gitlabListError: null,
+      gitlabDetail: null,
+      gitlabNotes: null,
+      gitlabPipeline: null,
+      gitlabApproval: null,
+      gitlabDiff: null,
+      gitlabDiffError: null,
+    });
+    if (this.get().sidebarTab === "gitlab") void this.loadMergeRequests(true);
+    if (this.get().openMergeRequest) void this.reloadMergeRequest();
+  }
+
+  /** The key one query's rows are cached under. */
+  private gitlabListKey(scope: MergeRequestScope, state: MergeRequestState): string {
+    return `${scope}:${state}`;
+  }
+
+  /** Show the rows of one list answer, dropping anything that is no longer un-merged: a
+   *  refresh that crossed a merge must not leave a merged row in a list whose whole
+   *  promise is "not merged". */
+  private applyGitLabList(list: MergeRequestList): void {
+    const items = list.items.filter(isNotMerged);
+    this.gitlabListCache.set(this.gitlabListKey(list.scope as MergeRequestScope, list.state as MergeRequestState), {
+      ...list,
+      items,
+    });
+    const state = this.get();
+    if (list.scope !== state.gitlabScope || list.state !== state.gitlabState) return;
+    this.set({
+      gitlabList: items,
+      gitlabTotal: list.total ?? null,
+      gitlabTruncated: list.truncated === true,
+      gitlabTokenSet: list.token_set !== false,
+      gitlabListError: null,
+      gitlabListLoading: false,
+    });
+  }
+
+  /** Read the sidebar's list. `refresh` is the user's own Reload — it waits for GitLab
+   *  rather than taking the backend's cached answer. */
+  private async loadMergeRequests(refresh: boolean): Promise<void> {
+    const { gitlabScope: scope, gitlabState: state } = this.get();
+    const cached = this.gitlabListCache.get(this.gitlabListKey(scope, state));
+    this.set({ gitlabListLoading: !cached || refresh, gitlabListError: null });
+    try {
+      const list = await this.backend.gitlabMergeRequests(scope, state, refresh);
+      this.applyGitLabList(list);
+    } catch (e) {
+      const now = this.get();
+      // A failed refresh behind rows on screen is noise; with nothing to show it is the
+      // only thing the page can say.
+      if (now.gitlabScope === scope && now.gitlabState === state) {
+        this.set({
+          gitlabListError: now.gitlabList.length === 0 ? errText(e) : now.gitlabListError,
+          gitlabListLoading: false,
+        });
+      }
+    }
+  }
+
+  /** Narrow (or widen) which merge requests the sidebar shows. */
+  setGitLabScope(scope: MergeRequestScope): void {
+    if (this.get().gitlabScope === scope) return;
+    this.set({ gitlabScope: scope });
+    this.showCachedGitLabList();
+    void this.loadMergeRequests(false);
+  }
+
+  /** Switch between the open and the closed merge requests — the two halves of "not
+   *  merged", and the only two this page can ask for. */
+  setGitLabState(state: MergeRequestState): void {
+    if (this.get().gitlabState === state) return;
+    this.set({ gitlabState: state });
+    this.showCachedGitLabList();
+    void this.loadMergeRequests(false);
+  }
+
+  /** Paint whatever this filter held last, so a switch is never a blank list. */
+  private showCachedGitLabList(): void {
+    const { gitlabScope: scope, gitlabState: state } = this.get();
+    const cached = this.gitlabListCache.get(this.gitlabListKey(scope, state));
+    this.set({
+      gitlabList: cached?.items ?? [],
+      gitlabTotal: cached?.total ?? null,
+      gitlabTruncated: cached?.truncated === true,
+      gitlabListError: null,
+      gitlabListLoading: !cached,
+    });
+  }
+
+  /** Re-read the list from GitLab, at the user's own asking. */
+  async reloadMergeRequests(): Promise<void> {
+    await this.loadMergeRequests(true);
+  }
+
+  /** Open one merge request: paint what is cached at once, then read the four things the
+   *  page shows — the detail, its approvals, its comments and its pipeline — in parallel,
+   *  so one slow read never holds the others up. */
+  async openMergeRequestPage(key: MergeRequestKey): Promise<void> {
+    const id = mergeRequestId(key);
+    const detail = this.gitlabDetailCache.get(id) ?? null;
+    const notes = this.gitlabNotesCache.get(id) ?? null;
+    // The depth is per merge request, so a reader who paid for the expanded read of THIS one
+    // gets it back — while another merge request opens on the cheap read, as it should.
+    const diff = this.gitlabDiffCache.get(this.gitlabDiffKey(id, "raw"))
+      ?? this.gitlabDiffCache.get(this.gitlabDiffKey(id, "listed"))
+      ?? null;
+    this.stopPipelinePolling();
+    this.set({
+      openMergeRequest: key,
+      gitlabDetail: detail,
+      gitlabDetailLoading: !detail,
+      gitlabDetailError: null,
+      gitlabNotes: notes,
+      gitlabDiff: diff,
+      gitlabDiffLoading: !diff,
+      gitlabDiffError: null,
+      gitlabDiffPath: this.gitlabDiffPathCache.get(id) ?? null,
+      gitlabDiffDepth: diff?.expanded ? "raw" : "listed",
+      // The pipeline is deliberately NOT cached across opens: a stale CI badge is the one
+      // piece of this page that would be read as current when it is minutes old.
+      gitlabPipeline: null,
+      gitlabApproval: null,
+      gitlabCommentDraft: this.gitlabDraftCache.get(id) ?? "",
+      gitlabReplyTo: null,
+      gitlabActing: null,
+      gitlabActionError: null,
+      gitlabActionDone: null,
+    });
+    await this.loadMergeRequestPage(key, false);
+  }
+
+  /** Re-read everything about the open merge request.
+   *
+   *  COALESCED, and that is what keeps a write cheap: every write drops the backend's cache
+   *  for that merge request and broadcasts `stale`, so the page is asked to re-read by its
+   *  own action AND by the event its own action caused — and each read is four requests to
+   *  GitLab. One in flight plus one trailing run is the whole amplification this can have
+   *  (see `coalesce`, whose own doc names this exact loop). */
+  private reloadOpenMergeRequest = coalesce(async () => {
+    const key = this.get().openMergeRequest;
+    if (key) await this.loadMergeRequestPage(key, true);
+  });
+
+  /** Re-read the open merge request. Called by a write's own broadcast, by the page's
+   *  Reload, and by every action that changes what GitLab would answer. */
+  async reloadMergeRequest(): Promise<void> {
+    await this.reloadOpenMergeRequest();
+  }
+
+  private async loadMergeRequestPage(key: MergeRequestKey, refresh: boolean): Promise<void> {
+    const id = mergeRequestId(key);
+    const open = () => sameMergeRequest(this.get().openMergeRequest, key);
+
+    const detail = this.backend
+      .gitlabMergeRequest(key, refresh)
+      .then((detail) => {
+        this.cacheGitLabDetail(id, detail);
+        if (open()) this.set({ gitlabDetail: detail, gitlabDetailError: null });
+        // The approval read is addressed by URL — the same call the message menu makes,
+        // so there is one answer about approvals in this app — and the URL is GitLab's
+        // own, from the detail we just read.
+        return this.loadMergeRequestApproval(key, detail.web_url);
+      })
+      .catch((e) => {
+        if (open() && !this.get().gitlabDetail) this.set({ gitlabDetailError: errText(e) });
+      })
+      .finally(() => {
+        if (open()) this.set({ gitlabDetailLoading: false });
+      });
+
+    const notes = this.backend
+      .gitlabMergeRequestNotes(key, refresh)
+      .then((notes) => {
+        this.gitlabNotesCache.set(id, notes);
+        if (open()) this.set({ gitlabNotes: notes });
+      })
+      .catch(() => {
+        /* the comments are one panel: a failure there must not empty the page */
+      });
+
+    const pipeline = this.loadPipeline(key, refresh);
+    const diff = this.loadDiff(key, this.get().gitlabDiffDepth, refresh);
+    await Promise.all([detail, notes, pipeline, diff]);
+  }
+
+  /** The key one merge request's diff is cached under, per depth.
+   *
+   *  Per depth because the two answers differ in what they HOLD — the plain one carried 47
+   *  patches of 100 files where the expanded one carried 142 of 149 (measured) — so one entry
+   *  would serve a reader the cheap answer for the read they paid for. */
+  private gitlabDiffKey(id: string, depth: DiffDepth): string {
+    return `${id}:${depth}`;
+  }
+
+  /** Read what a merge request changed.
+   *
+   *  A failure costs the Changes panel and nothing else — the contract the comments already
+   *  hold: this page is a header, four panels and a composer, and one panel that cannot be
+   *  read must not empty the others. */
+  private async loadDiff(
+    key: MergeRequestKey,
+    depth: DiffDepth,
+    refresh: boolean,
+  ): Promise<void> {
+    const id = mergeRequestId(key);
+    const open = () => sameMergeRequest(this.get().openMergeRequest, key);
+    // Only claim the spinner while the reader has nothing on screen, or asked for this
+    // read themselves: a background refresh behind a drawn diff is not something to say.
+    if (open() && (!this.get().gitlabDiff || refresh)) this.set({ gitlabDiffLoading: true });
+    try {
+      const diff = await this.backend.gitlabMergeRequestDiff(key, depth, refresh);
+      this.gitlabDiffCache.set(this.gitlabDiffKey(id, depth), diff);
+      // The depth is checked as well as the merge request: a reader who asked for the
+      // expanded read while the plain one was still travelling must not have it replaced by
+      // the smaller answer that arrives second.
+      if (open() && this.get().gitlabDiffDepth === depth) {
+        this.set({ gitlabDiff: diff, gitlabDiffError: null });
+      }
+    } catch (e) {
+      if (open() && this.get().gitlabDiffDepth === depth && !this.get().gitlabDiff) {
+        this.set({ gitlabDiffError: errText(e) });
+      }
+    } finally {
+      if (open() && this.get().gitlabDiffDepth === depth) this.set({ gitlabDiffLoading: false });
+    }
+  }
+
+  /** Show one file of the open diff. */
+  setGitLabDiffFile(path: string): void {
+    const key = this.get().openMergeRequest;
+    if (key) this.gitlabDiffPathCache.set(mergeRequestId(key), path);
+    this.set({ gitlabDiffPath: path });
+  }
+
+  /** Ask GitLab to expand the files it collapsed.
+   *
+   *  The reader's own ask, and it happens once: the answer is cached under its own depth, and
+   *  `canExpandDiff` stops the control being offered again — the expanded read costs half a
+   *  megabyte on a large merge request, and it does not always expand everything. */
+  async expandGitLabDiff(): Promise<void> {
+    const key = this.get().openMergeRequest;
+    if (!key || !canExpandDiff(this.get().gitlabDiff)) return;
+    const cached = this.gitlabDiffCache.get(this.gitlabDiffKey(mergeRequestId(key), "raw"));
+    this.set({ gitlabDiffDepth: "raw", gitlabDiffError: null });
+    if (cached) {
+      this.set({ gitlabDiff: cached });
+      return;
+    }
+    await this.loadDiff(key, "raw", false);
+  }
+
+  /** Switch between the unified and the split layout, and remember it. */
+  setGitLabDiffLayout(layout: DiffLayout): void {
+    if (this.get().gitlabDiffLayout === layout) return;
+    this.set({ gitlabDiffLayout: layout });
+    try {
+      localStorage.setItem(GITLAB_DIFF_LAYOUT_KEY, layout);
+    } catch {
+      /* ignore — a failed persist just doesn't survive reload */
+    }
+  }
+
+  /** Load the persisted layout choice. Best-effort and SSR-safe, like every other
+   *  client-only preference: a failure leaves the unified default, which is the one that
+   *  works at every width. */
+  private applyPersistedDiffLayout(): void {
+    try {
+      const raw = localStorage.getItem(GITLAB_DIFF_LAYOUT_KEY);
+      if (raw === "unified" || raw === "split") this.set({ gitlabDiffLayout: raw });
+    } catch {
+      /* ignore — the layout choice is non-critical */
+    }
+  }
+
+  private async loadMergeRequestApproval(key: MergeRequestKey, webUrl: string): Promise<void> {
+    if (!webUrl) return;
+    try {
+      const { approval } = await this.backend.gitlabApprovals(webUrl);
+      if (sameMergeRequest(this.get().openMergeRequest, key)) this.set({ gitlabApproval: approval });
+    } catch {
+      /* an approval panel that cannot be read shows nothing rather than a guess */
+    }
+  }
+
+  /** Read the pipeline, and keep reading it while it moves.
+   *
+   *  THE live half of this page. The poll is armed only while the pipeline is actually in
+   *  flight (see `pipelineIsLive`), so a finished pipeline costs nothing, and the backend's
+   *  own cache window is what makes two open pages cost one request between them. */
+  private async loadPipeline(key: MergeRequestKey, refresh: boolean): Promise<void> {
+    try {
+      const view = await this.backend.gitlabMergeRequestPipeline(key, refresh);
+      if (!sameMergeRequest(this.get().openMergeRequest, key)) return;
+      this.set({ gitlabPipeline: view });
+      if (pipelineIsLive(view)) this.schedulePipelinePoll(key);
+      else this.stopPipelinePolling();
+    } catch {
+      // A pipeline that cannot be read leaves the panel as it stands and stops polling:
+      // hammering a refusal would earn the token a rate limit.
+      this.stopPipelinePolling();
+    }
+  }
+
+  private schedulePipelinePoll(key: MergeRequestKey): void {
+    this.stopPipelinePolling();
+    this.gitlabPipelineTimer = setTimeout(() => {
+      this.gitlabPipelineTimer = null;
+      if (sameMergeRequest(this.get().openMergeRequest, key)) void this.loadPipeline(key, false);
+    }, GITLAB_PIPELINE_POLL_MS);
+  }
+
+  private stopPipelinePolling(): void {
+    if (this.gitlabPipelineTimer === null) return;
+    clearTimeout(this.gitlabPipelineTimer);
+    this.gitlabPipelineTimer = null;
+  }
+
+  closeMergeRequestPage(): void {
+    this.stopPipelinePolling();
+    this.set({
+      openMergeRequest: null,
+      gitlabDetail: null,
+      gitlabDetailError: null,
+      gitlabNotes: null,
+      gitlabPipeline: null,
+      gitlabApproval: null,
+      gitlabDiff: null,
+      gitlabDiffLoading: false,
+      gitlabDiffError: null,
+      gitlabDiffPath: null,
+      gitlabDiffDepth: "listed",
+      gitlabCommentDraft: "",
+      gitlabReplyTo: null,
+      gitlabActing: null,
+      gitlabActionError: null,
+      gitlabActionDone: null,
+    });
+  }
+
+  /** Store one detail and drop the least-recently-opened merge request past the budget.
+   *
+   *  Insertion order doubles as the LRU order, which is why the entry is re-inserted rather
+   *  than merely written: `Map.set` on an existing key keeps its old position. */
+  private cacheGitLabDetail(id: string, detail: MergeRequestDetail): void {
+    this.gitlabDetailCache.delete(id);
+    this.gitlabDetailCache.set(id, detail);
+    this.trimGitLabCaches(id);
+  }
+
+  /** Drop the least-recently-opened merge request past the budget, never the open one. */
+  private trimGitLabCaches(justUsed: string): void {
+    while (this.gitlabDetailCache.size > RETAINED_MERGE_REQUESTS) {
+      const oldest = this.gitlabDetailCache.keys().next();
+      if (oldest.done || oldest.value === justUsed) break;
+      this.gitlabDetailCache.delete(oldest.value);
+      this.gitlabNotesCache.delete(oldest.value);
+      this.gitlabDraftCache.delete(oldest.value);
+      this.gitlabDiffPathCache.delete(oldest.value);
+      // Both depths, because the diff is by far the largest thing kept per merge request —
+      // measured at half a megabyte for one expanded read — and a reviewer walks through
+      // dozens in a session.
+      this.gitlabDiffCache.delete(this.gitlabDiffKey(oldest.value, "listed"));
+      this.gitlabDiffCache.delete(this.gitlabDiffKey(oldest.value, "raw"));
+    }
+  }
+
+  /** What the comment composer holds. Kept per merge request, so walking away and back
+   *  keeps a half-written comment — the same promise the chat composer makes. */
+  setGitLabCommentDraft(text: string): void {
+    const key = this.get().openMergeRequest;
+    if (key) this.gitlabDraftCache.set(mergeRequestId(key), text);
+    this.set({ gitlabCommentDraft: text });
+  }
+
+  /** Reply into one thread, or stop replying (`null`) and write a new comment instead. */
+  setGitLabReplyTo(discussionId: string | null): void {
+    this.set({ gitlabReplyTo: discussionId, gitlabActionError: null });
+  }
+
+  /** Post the comment in the composer — a new one, or a reply into the open thread.
+   *
+   *  Outward: everybody watching the merge request is told, under the user's own name. So
+   *  it happens on their Enter and nowhere else, the words STAY in the composer until
+   *  GitLab has taken them, and a refusal is reported beside the box rather than swallowed
+   *  (the same contract the chat composer holds — see lib/send-failure.ts). */
+  async postGitLabComment(): Promise<void> {
+    const state = this.get();
+    const key = state.openMergeRequest;
+    const body = state.gitlabCommentDraft.trim();
+    if (!key || body === "" || state.gitlabActing) return;
+
+    this.set({ gitlabActing: "comment", gitlabActionError: null, gitlabActionDone: null });
+    try {
+      await this.backend.gitlabComment(key, body, state.gitlabReplyTo ?? undefined);
+      // Only now are the words gone from the box: a comment that never left must not
+      // vanish from under the person who wrote it.
+      this.gitlabDraftCache.delete(mergeRequestId(key));
+      if (sameMergeRequest(this.get().openMergeRequest, key)) {
+        this.set({ gitlabCommentDraft: "", gitlabReplyTo: null });
+      }
+      await this.refreshGitLabNotes(key);
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+    } finally {
+      this.set({ gitlabActing: null });
+    }
+  }
+
+  /** Delete one of the user's OWN comments. The backend re-reads whose it is before it
+   *  deletes, so this is a request rather than a claim. */
+  async deleteGitLabComment(noteId: number): Promise<void> {
+    const key = this.get().openMergeRequest;
+    if (!key || this.get().gitlabActing) return;
+    this.set({ gitlabActing: `delete:${noteId}`, gitlabActionError: null, gitlabActionDone: null });
+    try {
+      await this.backend.gitlabDeleteComment(key, noteId);
+      await this.refreshGitLabNotes(key);
+      this.set({ gitlabActionDone: "Comment deleted." });
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+    } finally {
+      this.set({ gitlabActing: null });
+    }
+  }
+
+  private async refreshGitLabNotes(key: MergeRequestKey): Promise<void> {
+    try {
+      const notes = await this.backend.gitlabMergeRequestNotes(key, true);
+      this.gitlabNotesCache.set(mergeRequestId(key), notes);
+      if (sameMergeRequest(this.get().openMergeRequest, key)) this.set({ gitlabNotes: notes });
+    } catch {
+      /* the comment landed; a failed re-read is not a failed comment */
+    }
+  }
+
+  /** MERGE the open merge request.
+   *
+   *  The one action in this app that no later click takes back, which is why it sends the
+   *  `sha` the page DREW: GitLab refuses a merge whose sha is not the branch's head, so a
+   *  merge request that moved since the reader looked is refused rather than landed. The UI
+   *  asks for a second, explicit confirmation before calling this. */
+  async mergeOpenMergeRequest(): Promise<void> {
+    const state = this.get();
+    const key = state.openMergeRequest;
+    const detail = state.gitlabDetail;
+    if (!key || !detail || state.gitlabActing) return;
+    if (!detail.sha) {
+      this.set({
+        gitlabActionError:
+          "This page does not know which commit to merge — reload it and look again.",
+      });
+      return;
+    }
+
+    this.set({ gitlabActing: "merge", gitlabActionError: null, gitlabActionDone: null });
+    try {
+      const { merge } = await this.backend.gitlabMerge(key, {
+        sha: detail.sha,
+        squash: detail.squash,
+        removeSourceBranch: detail.should_remove_source_branch,
+      });
+      this.set({
+        gitlabActionDone:
+          merge.state === "merged"
+            ? `Merged into ${detail.target_branch}.`
+            : `GitLab reports it as ${merge.state}.`,
+      });
+      await this.reloadMergeRequest();
+      // A merged merge request leaves a list whose promise is "not merged", so the
+      // sidebar is re-read rather than left showing a row that is gone.
+      await this.loadMergeRequests(true);
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+    } finally {
+      this.set({ gitlabActing: null });
+    }
+  }
+
+  /** Close the open merge request, or reopen it. Each direction undoes the other. */
+  async setOpenMergeRequestState(change: "close" | "reopen"): Promise<void> {
+    const key = this.get().openMergeRequest;
+    if (!key || this.get().gitlabActing) return;
+    this.set({ gitlabActing: change, gitlabActionError: null, gitlabActionDone: null });
+    try {
+      const { state } = await this.backend.gitlabSetMergeRequestState(key, change);
+      this.set({ gitlabActionDone: state === "closed" ? "Closed." : "Reopened." });
+      await this.reloadMergeRequest();
+      await this.loadMergeRequests(true);
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+    } finally {
+      this.set({ gitlabActing: null });
+    }
+  }
+
+  /** Give the user's own approval, or take it back — the same call the message menu makes,
+   *  so there is one approval path in this app and not two. */
+  async setOpenMergeRequestApproval(approved: boolean): Promise<void> {
+    const state = this.get();
+    const key = state.openMergeRequest;
+    const url = state.gitlabDetail?.web_url;
+    if (!key || !url || state.gitlabActing) return;
+    this.set({
+      gitlabActing: approved ? "approve" : "unapprove",
+      gitlabActionError: null,
+      gitlabActionDone: null,
+    });
+    try {
+      const { approval } = await this.backend.gitlabSetApproval(url, approved);
+      if (sameMergeRequest(this.get().openMergeRequest, key)) {
+        this.set({
+          gitlabApproval: approval,
+          gitlabActionDone: approved ? "Approved." : "Approval revoked.",
+        });
+      }
+      // An approval can be what a merge was waiting for, so the detail is re-read: the
+      // Merge button's own reason comes from `detailed_merge_status`.
+      await this.reloadMergeRequest();
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+    } finally {
+      this.set({ gitlabActing: null });
     }
   }
 
@@ -3194,6 +4394,21 @@ export class TeamsController {
     void this.refreshNotifications();
     const openId = this.get().openId;
     if (openId) void this.reconcileOpen(openId);
+    this.rereadGitLabPeople();
+  }
+
+  /** Re-read what the GitLab page says about its people, after a rename.
+   *
+   *  A merge request's author is named by the BACKEND, which resolves them against the
+   *  user's own Teams on the way out (`with_teams_people` in src/bin/server.rs) — so a
+   *  rename changes that answer while GitLab's own copy of it is untouched. That is why the
+   *  read asks for no refresh: it is served from the backend's own response cache, and
+   *  nothing here reaches GitLab. Only what is already loaded is re-read; a list nobody has
+   *  opened is named when it is. */
+  private rereadGitLabPeople(): void {
+    if (this.gitlabListCache.size > 0) void this.refreshGitLabList();
+    const key = this.get().openMergeRequest;
+    if (key) void this.loadMergeRequestPage(key, false);
   }
 
   loadProfile(mri: string): Promise<PersonProfile | null> {
@@ -3391,8 +4606,10 @@ export class TeamsController {
     this.linkCache.clear();
     this.linkResolved.clear();
     // A new host or a new token changes who GitLab thinks we are, so what it said about
-    // an approval no longer holds either.
+    // an approval no longer holds either — nor does anything the merge-request page read,
+    // which is a whole world seen through that token.
     this.approvalResolved.clear();
+    this.forgetGitLabReads();
     playCue("success");
     return settings;
   }
@@ -3685,6 +4902,33 @@ export class TeamsController {
     }
   }
 
+  /** Ask GitHub now whether a newer build exists — Settings › This app.
+   *
+   *  A read, so it is passed straight through: the row that offers an update follows the
+   *  `update_available` event this may publish, exactly as it does after a poll, and the
+   *  ANSWER is only what the button says. A failure to reach GitHub arrives as an outcome
+   *  rather than as a rejection, so there is one place the words are chosen (see
+   *  lib/maintenance.ts). */
+  checkForUpdate(): Promise<UpdateCheckResult> {
+    return this.backend.updateCheck();
+  }
+
+  /** Restart the backend — Settings › This app.
+   *
+   *  `force` is the user's second press, after the backend said a local agent is mid-reply.
+   *  Nothing is set on the store: the socket drops a moment later and comes back on its own,
+   *  which is the state the whole app already draws, and the ROW that asked is where the
+   *  outcome belongs. A refused request sounds, like a refused repair — an accepted one does
+   *  not, because what the user asked for has not happened yet. */
+  async restartBackend(force: boolean): Promise<BackendRestartResult> {
+    try {
+      return await this.backend.restartBackend(force);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+  }
+
   /** Start downloading the new build (the update control's first click).
    *
    *  Moves to `downloading` here rather than waiting for the backend's first frame, so
@@ -3901,14 +5145,14 @@ export class TeamsController {
   async sendDraft(
     text: string,
     html?: string,
-    image?: SendImage,
+    images: SendImage[] = [],
     mentions?: OutboundMention[],
   ): Promise<boolean> {
     const id = this.get().openId;
     if (!id) return false;
     const clean = text.trim();
     const richHtml = html?.trim() || undefined;
-    if (!clean && !richHtml && !image) return false;
+    if (!clean && !richHtml && images.length === 0) return false;
 
     const submittedDraft = this.draftCache.get(id) ?? this.get().draft;
     const reply = this.get().replyingTo;
@@ -3917,7 +5161,7 @@ export class TeamsController {
       : undefined;
 
     try {
-      await this.backend.send(id, clean, replyTo, richHtml, image, mentions);
+      await this.backend.send(id, clean, replyTo, richHtml, images, mentions);
     } catch (e) {
       // Both surfaces, and each has its reader. The status line keeps the RAW failure,
       // which is what a developer reads off a screenshot; the composer gets one sentence
@@ -4063,19 +5307,6 @@ export class TeamsController {
     setCuesEnabled(enabled);
     if (enabled) playCue("ready");
   }
-}
-
-/** Why a call attempt failed, in words the user can act on.
- *
- *  A refused microphone is the one failure that is not a bug, and it is the common one:
- *  the browser asks once, the user says no, and every later call fails the same way
- *  until they change it in the site settings. So it gets its own sentence rather than a
- *  `NotAllowedError` the page would show verbatim. */
-function callErrorText(e: unknown): string {
-  if (e instanceof MicrophoneUnavailableError) {
-    return "teams-lite could not open the microphone. Allow it for this site, then try again.";
-  }
-  return errText(e);
 }
 
 function errText(e: unknown): string {

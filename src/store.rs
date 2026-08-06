@@ -376,6 +376,24 @@ CREATE TABLE IF NOT EXISTS sender_icons (
     bytes        BLOB,
     fetched_ms   INTEGER NOT NULL DEFAULT 0
 );
+-- One answer GitLab gave, kept so the merge-request page paints from disk before it asks
+-- (see `gitlab_mr`). It is a RESPONSE cache and not a mirror, which is the whole
+-- difference from the mail and calendar tables above: nothing here is merged, reconciled
+-- or queried by field — a row is written whole, read whole, and replaced whole.
+--
+-- Durable rather than in-memory for the reason every other cache here is: this backend
+-- restarts many times a day, and a page that opened to a spinner after every re-stage
+-- would make the feature feel broken. The TTL lives with the CALLER, per kind of read
+-- (a list goes stale in a minute, a running pipeline in seconds), because only the caller
+-- knows what a stale answer costs.
+CREATE TABLE IF NOT EXISTS gitlab_reads (
+    -- The read's own identity: "list:<scope>:<state>", "mr:<project>!<iid>",
+    -- "notes:<project>!<iid>", "pipeline:<project>!<iid>". Built by the caller, so a
+    -- filter switch can never be answered with another filter's rows.
+    key        TEXT PRIMARY KEY,
+    payload    TEXT NOT NULL,
+    fetched_ms INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 /// Indexes, applied AFTER [`migrate`] because several of them cover columns that a
@@ -471,7 +489,16 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// v13 adds `sender_icons`, the icon of an organisation that mails the user (see
 /// [`Store::sender_icon`]). A whole new table rather than columns, and additive: an
 /// older binary never names it.
-const SCHEMA_VERSION: i64 = 14;
+///
+/// v14 adds `gitlab_reads`, the durable response cache the merge-request page paints from
+/// (see [`Store::gitlab_read`]). A whole new table, additive the same way.
+///
+/// v15 adds `custom_emoji`, the Slack-style pack a `:name:` is substituted from (see
+/// [`Store::custom_emoji`]). A whole new table, additive the same way — and it is v15
+/// rather than a second v14 because both tables were built on branches that each called
+/// themselves 14: `open` runs the DDL pass only when the recorded version MOVES, so a
+/// store stamped 14 by either build would never grow the other one's table.
+const SCHEMA_VERSION: i64 = 15;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -3292,6 +3319,58 @@ impl Store {
         Ok(())
     }
 
+    /// One cached GitLab answer and its age in milliseconds, or `None` when this read was
+    /// never made. The caller decides whether the age is acceptable — a merge-request list
+    /// is worth a minute, a running pipeline is worth seconds — because only it knows what
+    /// a stale answer costs (see `gitlab_reads` in `SCHEMA`).
+    ///
+    /// `now_ms` is passed in rather than read here so the decision is testable and so two
+    /// reads in one request judge staleness against the same instant.
+    pub fn gitlab_read(&self, key: &str, now_ms: i64) -> Result<Option<(String, i64)>> {
+        Ok(self
+            .query_one(
+                "SELECT payload, fetched_ms FROM gitlab_reads WHERE key = ?1",
+                params![key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            // A clock that moved backwards (an NTP step, a store copied between machines)
+            // must not make a row read as fresh forever, so a negative age is clamped to 0
+            // — the newest a row can be — rather than trusted.
+            .map(|(payload, fetched_ms)| (payload, (now_ms - fetched_ms).max(0))))
+    }
+
+    /// Remember one GitLab answer, replacing whatever that read held before.
+    pub fn put_gitlab_read(&self, key: &str, payload: &str, fetched_ms: i64) -> Result<()> {
+        self.exec(
+            "INSERT INTO gitlab_reads (key, payload, fetched_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                payload    = excluded.payload,
+                fetched_ms = excluded.fetched_ms",
+            params![key, payload, fetched_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Forget every cached answer whose key starts with `prefix`, and say how many went.
+    ///
+    /// This is what a WRITE calls: merging, commenting or closing a merge request makes
+    /// every read of it wrong at once, and a page that painted the stale copy back would
+    /// report the opposite of what just happened. A prefix rather than a list because the
+    /// reads of one merge request share one — `<project>!<iid>` — so a caller cannot
+    /// forget the detail and leave the comments behind.
+    pub fn forget_gitlab_reads(&self, prefix: &str) -> Result<usize> {
+        // `||` is SQLite's own concatenation, so the pattern is assembled in the statement
+        // rather than formatted into it. The prefix is escaped because a project path
+        // routinely holds `_`, which LIKE would otherwise read as "any character" — and
+        // then forgetting one merge request would forget a neighbour's cache too.
+        Ok(self.exec(
+            "DELETE FROM gitlab_reads WHERE key LIKE ?1 || '%' ESCAPE '\\'",
+            params![prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")],
+        )?)
+    }
+
     /// Read one application setting by key. Returns `None` when the key was never
     /// set. This is a simple key/value side table (see `SCHEMA`), used for
     /// durable app configuration such as the GitLab host and access token — data
@@ -3560,6 +3639,37 @@ impl Store {
         Ok(self.exec(
             "INSERT OR IGNORE INTO push_deliveries (dedupe_key, claimed_ms) VALUES (?1, ?2)",
             params![dedupe_key, now_ms],
+        )? > 0)
+    }
+
+    /// Claim the machine's next release check, so ONE backend asks GitHub and the others
+    /// read its answer.
+    ///
+    /// `true` means "you fetch"; `false` means another backend on this store asked recently
+    /// enough. The claim is the write itself — SQLite arbitrates, so there is no window
+    /// between reading the timestamp and taking it, exactly as [`Store::claim_once`] leans
+    /// on a primary key.
+    ///
+    /// It exists because of a measured budget, not a hunch: GitHub allows an
+    /// unauthenticated caller **60 requests an hour per IP**, and a conditional request
+    /// does not help — a `304` was measured on this repository still spending one. A
+    /// two-minute poll is 30 an hour, so one poll per machine leaves half the budget for
+    /// the compare API and for downloads, while a poll per BACKEND would spend the lot on
+    /// this machine's two installs and then fail `403` — with no symptom beyond an update
+    /// button that quietly stops appearing.
+    ///
+    /// Unlike a `push_deliveries` key this claim is a moving timestamp, because the thing
+    /// being claimed comes round again every interval.
+    pub fn claim_release_check(&self, now_ms: i64, not_asked_since_ms: i64) -> Result<bool> {
+        Ok(self.exec(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = ?2
+             WHERE CAST(settings.value AS INTEGER) <= ?3",
+            params![
+                crate::update::SETTING_RELEASE_CHECKED_MS,
+                now_ms.to_string(),
+                not_asked_since_ms
+            ],
         )? > 0)
     }
 
@@ -4157,6 +4267,32 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Everybody Teams has NAMED to this machine: one `(mri, name)` pair per person and per
+    /// name they have written under, with no override applied.
+    ///
+    /// It is the local answer to "who does this app know?", and its one caller is the
+    /// GitLab page, which matches a merge request's people against it by real name (see
+    /// [`crate::tracker_people`]). Three things about the shape are deliberate:
+    ///
+    /// - **The name is TEAMS' own**, never the user's nickname for them. What is being
+    ///   compared is two systems' record of one person, and a nickname is neither system's;
+    ///   the name the page then DRAWS goes through [`Store::display_name_for_mri`] like
+    ///   every other name in this app, so a rename still wins where it is shown.
+    /// - **Every name a person has written under travels**, not only their newest. Teams
+    ///   renames people — a marriage, a corrected spelling — and a GitLab account carrying
+    ///   the old one is still that colleague.
+    /// - **Only a person**: `8:…` MRIs, so a Teams app that posts (`28:…`) is never in the
+    ///   roster at all. [`crate::tracker_people::Roster::from_people`] re-checks that, since
+    ///   the rule belongs with the matching rather than with one query.
+    pub fn named_people(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT sender_mri, sender FROM messages
+             WHERE sender_mri LIKE '8:%' AND sender <> ''",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The newest `limit` messages of a conversation, ordered oldest -> newest (for display).
     pub fn newest_messages(&self, conversation_id: &str, limit: i64) -> Result<Vec<Message>> {
         let sql = format!(
@@ -4507,7 +4643,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (14, 0xc4a6_c768_8fef_28a7);
+        const PINNED: (i64, u64) = (15, 0x04fd_f3dd_54fb_c59d);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -4520,6 +4656,49 @@ mod tests {
             SCHEMA_VERSION,
             actual,
         );
+    }
+
+    /// The GitLab page's response cache: a read is answered with its age, a write forgets
+    /// every read of the merge request it changed, and a neighbour's cache survives it.
+    #[test]
+    fn the_gitlab_cache_answers_with_an_age_and_is_forgotten_by_prefix() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.gitlab_read("list:all:opened", 1_000).unwrap(), None);
+
+        s.put_gitlab_read("list:all:opened", "[]", 1_000).unwrap();
+        let (payload, age) = s.gitlab_read("list:all:opened", 4_000).unwrap().expect("a row");
+        assert_eq!(payload, "[]");
+        assert_eq!(age, 3_000, "the age is what decides staleness");
+
+        // A clock that stepped backwards must not make a row read as newer than new.
+        assert_eq!(s.gitlab_read("list:all:opened", 500).unwrap().unwrap().1, 0);
+
+        // A write forgets every read of ONE merge request, together.
+        for kind in ["detail", "notes", "pipeline"] {
+            s.put_gitlab_read(&crate::gitlab_mr::cache_key("g/a_b", 42, kind), "{}", 1_000)
+                .unwrap();
+        }
+        // A project whose path holds `_` is the case a LIKE pattern gets wrong, and a
+        // neighbouring iid is the other.
+        s.put_gitlab_read(&crate::gitlab_mr::cache_key("g/axb", 42, "detail"), "{}", 1_000)
+            .unwrap();
+        s.put_gitlab_read(&crate::gitlab_mr::cache_key("g/a_b", 4, "detail"), "{}", 1_000)
+            .unwrap();
+
+        let gone = s.forget_gitlab_reads(&crate::gitlab_mr::cache_prefix("g/a_b", 42)).unwrap();
+        assert_eq!(gone, 3, "the detail, the comments and the pipeline go together");
+        assert!(s.gitlab_read(&crate::gitlab_mr::cache_key("g/a_b", 42, "notes"), 1).unwrap().is_none());
+        assert!(
+            s.gitlab_read(&crate::gitlab_mr::cache_key("g/axb", 42, "detail"), 1).unwrap().is_some(),
+            "`_` must not match any character, or one merge request's write empties another's"
+        );
+        assert!(
+            s.gitlab_read(&crate::gitlab_mr::cache_key("g/a_b", 4, "detail"), 1).unwrap().is_some(),
+            "!4 is not !42"
+        );
+        // The list is untouched by one merge request's write: it is a different read, and
+        // re-fetching 100 rows because one row changed is the cost this prefix avoids.
+        assert!(s.gitlab_read("list:all:opened", 1).unwrap().is_some());
     }
 
     #[test]
@@ -5863,6 +6042,35 @@ mod tests {
         assert_eq!(
             s.teams_display_name_for_mri("8:orgid:rob").unwrap().as_deref(),
             Some("Robert SMITH")
+        );
+    }
+
+    /// The roster the GitLab page matches its people against: Teams' own names, every name
+    /// a person wrote under, and no Teams app.
+    #[test]
+    fn the_named_people_are_teams_own_names_and_only_people() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation_full(&upd("grp", "Team chat", 500, ConversationKind::Group)).unwrap();
+        s.insert_message(&msg_from("grp", 1, "Robert SMITH", "8:orgid:rob")).unwrap();
+        // The same person under a second name: Teams renamed them, and both still name them.
+        s.insert_message(&msg_from("grp", 2, "Robert SMYTHE", "8:orgid:rob")).unwrap();
+        s.insert_message(&msg_from("grp", 3, "Grace HOPPER", "8:orgid:grace")).unwrap();
+        // A Teams app that posts, and a message we never captured a name for.
+        s.insert_message(&msg_from("grp", 4, "Workflows", "28:358f0194-6b0e")).unwrap();
+        s.insert_message(&msg_from("grp", 5, "", "8:orgid:nameless")).unwrap();
+
+        // A nickname changes what is DRAWN, never what is matched.
+        s.set_person_name("8:orgid:rob", Some("Bob"), 1_000).unwrap();
+
+        let mut people = s.named_people().unwrap();
+        people.sort();
+        assert_eq!(
+            people,
+            vec![
+                ("8:orgid:grace".to_string(), "Grace HOPPER".to_string()),
+                ("8:orgid:rob".to_string(), "Robert SMITH".to_string()),
+                ("8:orgid:rob".to_string(), "Robert SMYTHE".to_string()),
+            ]
         );
     }
 
@@ -7306,6 +7514,44 @@ mod tests {
         // Pruned claims are re-claimable, which is fine: every policy refuses a
         // message that old anyway.
         assert!(s.claim_once("c1/m1", 2_000).unwrap());
+    }
+
+    #[test]
+    fn one_backend_an_interval_asks_github_what_latest_names() {
+        // Every backend on this machine polls, and GitHub allows 60 requests an hour per
+        // IP — so the REQUEST is claimed and the answer is shared. Without this the two
+        // installs here would spend the whole budget between them and then be refused,
+        // which looks exactly like an update button that stopped working.
+        let s = Store::open_in_memory().unwrap();
+        let interval = 120_000;
+        let now = 10_000_000;
+
+        // Nothing has ever asked: the first backend to arrive takes it.
+        assert!(s.claim_release_check(now, now - interval).unwrap());
+        // Its neighbours, in the same pass, are refused — one request, not three.
+        assert!(!s.claim_release_check(now, now - interval).unwrap());
+        assert!(!s.claim_release_check(now + 1, now + 1 - interval).unwrap());
+        // Inside the interval, still refused. The stored answer is what they read instead.
+        assert!(!s.claim_release_check(now + interval - 1, now - 1).unwrap());
+        // And it comes round: the claim is a moving timestamp, not a key taken for good.
+        assert!(s.claim_release_check(now + interval, now).unwrap());
+
+        // The winner's own timestamp is what the next pass is measured against, so a
+        // backend that crashed between claiming and fetching costs one interval and never
+        // the poll itself.
+        assert_eq!(
+            s.get_setting(crate::update::SETTING_RELEASE_CHECKED_MS).unwrap().as_deref(),
+            Some((now + interval).to_string().as_str())
+        );
+
+        // The user's own **Check for updates** passes `now` as the cutoff, which takes the
+        // slot however recently somebody asked: they pressed the button to learn where they
+        // stand NOW, and an answer up to an interval old is not that (see
+        // `Ctx::claim_release_read`). It still moves the timestamp, so the clock's next tick
+        // stands down rather than spending a second request behind the press.
+        let pressed = now + interval + 1;
+        assert!(s.claim_release_check(pressed, pressed).unwrap());
+        assert!(!s.claim_release_check(pressed + 1, pressed + 1 - interval).unwrap());
     }
 
     fn a_run(message_id: &str, heartbeat_ms: i64) -> AgentRun {

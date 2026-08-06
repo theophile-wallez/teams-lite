@@ -24,9 +24,12 @@ import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
 import { defaultAgentCandidatesFor, type AgentCandidate } from "~/lib/mentions";
 import { reviewRequest, type MergeRequestLink } from "~/lib/merge-request";
+import { recordingsInConversation, type CallRecording } from "~/lib/call-recording";
+import { CallRecordingCard } from "./call-recording-card";
 import { useAppState, useController } from "./controller-context";
 import { AgentMenu } from "./agent-menu";
 import { CallButton } from "./call-button";
+import { useCallOwnsComposer } from "./call-stage-context";
 import { AgentPendingBubble } from "./agent-reply";
 import { Avatar, conversationFallback, conversationPhoto, type AvatarPhoto } from "./avatar";
 import { MessageBubble } from "./message-bubble";
@@ -87,7 +90,8 @@ const HIGHLIGHT_MS = 1600;
 type HistoryRow =
   | { kind: "message"; key: string; message: ChatMessage; prev?: ChatMessage; next?: ChatMessage }
   | { kind: "thread"; key: string; thread: Thread }
-  | { kind: "agent"; key: string; run: AgentRun };
+  | { kind: "agent"; key: string; run: AgentRun }
+  | { kind: "recording"; key: string; recording: CallRecording };
 
 /**
  * The right pane: conversation title, the scrolling message history (virtualized,
@@ -118,6 +122,15 @@ export function MessagePane(props: { onBack?: () => void }) {
   // scrolling past it.
   const agentTranscripts = useAppState((s) => s.agentTranscripts);
   const agentTranscriptsOpen = useAppState((s) => s.agentTranscriptsOpen);
+  // The calls this app recorded in THIS conversation. They are this browser's own files and
+  // never messages, so they are merged into the history below rather than coming from it.
+  const recordings = useAppState((s) => s.recordings);
+  const conversationRecordings = useMemo(
+    () => (openId ? recordingsInConversation(recordings, openId) : []),
+    [recordings, openId],
+  );
+  // Whether a live call's chat panel is holding this app's one composer right now.
+  const callOwnsComposer = useCallOwnsComposer();
   // Our own display name, read off the newest message of ours. The agent's signature
   // names the account its answer went out under, and a run that has not been echoed
   // back yet has no message of its own to read it from.
@@ -271,8 +284,31 @@ export function MessagePane(props: { onBack?: () => void }) {
     if (agentRun && !rowOfMessage.has(agentRun.message_id)) {
       rows.push({ kind: "agent", key: `agent:${agentRun.run_id}`, run: agentRun });
     }
+    // A call this app recorded, in its place in time. It is not a message and it reached
+    // nobody — nothing was sent and only this user can see it (see lib/call-recording.ts) —
+    // but it happened AT a moment in this conversation, so that is where it is read: after
+    // whatever was said before the call ended, and before whatever was said next. A recording
+    // whose conversation this is not, and one from a meeting that named no conversation at
+    // all, appear here not at all.
+    for (const recording of conversationRecordings) {
+      const at = rows.findIndex(
+        (row) => row.kind === "message" && row.message.compose_time > recording.endedAtMs,
+      );
+      const row: HistoryRow = { kind: "recording", key: `rec:${recording.id}`, recording };
+      if (at === -1) rows.push(row);
+      else rows.splice(at, 0, row);
+    }
+    // The map is rebuilt once at the end rather than adjusted per insertion: a deep link
+    // scrolls to a row INDEX, and an index taken before a row was spliced in above it points
+    // at the message after the one the reader asked for.
+    if (conversationRecordings.length > 0 && !threads) {
+      rowOfMessage.clear();
+      rows.forEach((row, index) => {
+        if (row.kind === "message") rowOfMessage.set(row.message.id, index);
+      });
+    }
     return { rows, rowOfMessage };
-  }, [threads, messages, agentRun]);
+  }, [threads, messages, agentRun, conversationRecordings]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -488,6 +524,9 @@ export function MessagePane(props: { onBack?: () => void }) {
     return () => cancelAnimationFrame(frame);
   }, [streaming]);
 
+  // Every path that starts a draft on a message asks for the caret, because the next thing
+  // the reader does is type: the banner says which message they answer, and the composer
+  // is where the answer goes.
   const doReply = useCallback((m: ChatMessage) => {
     controller.startReply(m);
     setFocusToken((t) => t + 1);
@@ -502,6 +541,7 @@ export function MessagePane(props: { onBack?: () => void }) {
     (m: ChatMessage, agent: AgentCandidate) => {
       if (!openId) return;
       controller.startReply(m);
+      setFocusToken((t) => t + 1);
       setAgentAnswer((prev) => ({
         token: (prev?.token ?? 0) + 1,
         conversation: openId,
@@ -519,6 +559,7 @@ export function MessagePane(props: { onBack?: () => void }) {
     (m: ChatMessage, agent: AgentCandidate, mergeRequest: MergeRequestLink) => {
       if (!openId) return;
       controller.startReply(m);
+      setFocusToken((t) => t + 1);
       setAgentAnswer((prev) => ({
         token: (prev?.token ?? 0) + 1,
         conversation: openId,
@@ -706,9 +747,10 @@ export function MessagePane(props: { onBack?: () => void }) {
             </p>
           ) : null}
         </div>
-        {/* The header's own controls, as one group on the right: call this person
-            (only in a one-to-one chat, and only where a call would really work — see
-            components/call-button.tsx), and whether this thread answers an `@claude`
+        {/* The header's own controls, as one group on the right: the call this
+            conversation offers — ring the person, ring the whole group, or JOIN the meeting
+            the thread was minted for, and only where it would really work (see
+            components/call-button.tsx) — and whether this thread answers an `@claude`
             message (per conversation on purpose — see components/agent-menu.tsx). */}
         {openId && (
           <div className="ml-auto flex shrink-0 items-center gap-1">
@@ -735,7 +777,10 @@ export function MessagePane(props: { onBack?: () => void }) {
           // message reads at full contrast instead of sitting under the fade.
           className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-10 pt-4 md:px-5"
         >
-          {messages.length === 0 ? (
+          {/* A conversation with no messages can still hold a recording — a call placed in a
+              thread nobody has written in — and the recording is the one thing on screen
+              then, so it is drawn instead of the empty state rather than behind it. */}
+          {rows.length === 0 ? (
             <EmptyState
               loading={loadingMessages}
               error={messagesError}
@@ -799,6 +844,10 @@ export function MessagePane(props: { onBack?: () => void }) {
                         onToggle={() => toggleThread(row.thread.rootId)}
                         renderMsg={renderMsg}
                       />
+                    ) : row.kind === "recording" ? (
+                      // Its own row and its own card: a recording is not a message, so it
+                      // takes no side, no bubble and no sender (see CallRecordingCard).
+                      <CallRecordingCard recording={row.recording} className="my-2" />
                     ) : row.kind === "agent" ? (
                       <AgentPendingBubble
                         run={row.run}
@@ -832,7 +881,11 @@ export function MessagePane(props: { onBack?: () => void }) {
       )}
 
       <TypingIndicator />
-      <Composer focusToken={focusToken} agentAnswer={agentAnswer} />
+      {/* There is ONE composer in this app, and while a call has this thread open in its
+          own chat panel that panel is where it lives (see `useCallOwnsComposer`). Nothing
+          is hidden by handing it over: the stage is full-screen at that moment, so this
+          pane is not on screen at all. */}
+      {!callOwnsComposer && <Composer focusToken={focusToken} agentAnswer={agentAnswer} />}
     </section>
   );
 }

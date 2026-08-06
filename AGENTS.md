@@ -59,8 +59,9 @@
   which conversation a keystroke lands in.
 - **`cd web && bun run join-live` is its twin for the one outward action a chat cannot
   cover: JOINING a meeting.** Same shape and same rails — the meeting is a constant in the
-  file, no argument can aim it elsewhere, the button's own `data-join-url` is re-read
-  immediately before the click, and it hangs up on every path out. It exists because that
+  file, no argument can aim it elsewhere, the button's own address (`data-join-url`, or
+  `data-meeting-thread` under `--from-chat`) is re-read immediately before the click, and it
+  hangs up on every path out. It exists because that
   feature is untestable anywhere else (see § Joining a meeting), and it is what took the
   user out of a loop where every protocol fault cost them a click and a paste. A NEW live
   driver earns its place the same way: a constant target, proved from the app's own state
@@ -77,6 +78,23 @@
   all — so the whole event was an error chime. The status line still carries the RAW
   failure for whoever reads a screenshot; the composer carries the half the user acts on.
   Never trade one for the other, and never swallow a send failure into a cue.
+- **A send that WORKS takes back the words that left, and only those.** The network takes
+  as long as it takes, and the reader keeps writing meanwhile — or their phone's keyboard
+  commits a correction as Enter is pressed — so the box can hold more than the message did.
+  The sent range is followed through every change the document takes while it travels
+  (`removeSentWords` in `web/src/components/rich-editor.tsx`, over ProseMirror's own
+  `Mapping`) and exactly that range goes — and only while it still holds exactly the words
+  that left, so a draft the reader REWROTE meanwhile is left whole. The two shortcuts are
+  both wrong and both happened: clearing the whole box erases words nobody sent, and
+  clearing nothing leaves the message that just left sitting there, so the next Enter posts
+  it twice.
+- **A reply puts the caret in the box, in the same task as the click that asked.** Every
+  path that drafts on a message asks for it (`doReply`, and the two "… with <agent>" rows),
+  and `focusEditor` focuses the field itself before it places the caret: TipTap finishes
+  its own focus in a `requestAnimationFrame`, and a frame is long enough to type into — on
+  a phone it is worse, because a keyboard is raised only for a focus inside the gesture
+  that asked for one. `web/e2e/messaging.spec.ts` pins both rules by typing with no wait
+  at all.
 - Outside the sandbox chat, consent is per-message and never standing: approval
   to send one message is not permission to send others. When in doubt, draft it and
   ask first.
@@ -84,6 +102,47 @@
   is not an exception to the rule above: it answers only a message the USER wrote,
   only in a conversation the user opted in, and the sandbox channel is the only one
   opted in out of the box.
+
+## Pictures in a message (up to ten, and the ceilings are a set)
+
+A message carries as many pictures as the user pasted — the clipboard's images in one
+paste, several pastes one after another, or a multi-file pick — previewed above the field
+and uploaded by the backend as part of the same `send` (`teams_send::send_message`, over
+`parse_images`; the composer's half is `web/src/components/composer.tsx` and
+`web/src/lib/composer-image.ts`). It needs no gate of its own: `send` is already an
+`OUTWARD_METHODS` entry and the pictures ride in its params, exactly as a mention does.
+The second paste used to REPLACE the first, which made a message meant to carry three
+screenshots carry the last one.
+
+- **THREE ceilings, and they are one set.** Ten pictures per message
+  (`teams_send::MAX_IMAGES`, mirrored by `COMPOSER_IMAGE_MAX_COUNT` and by the mock), 10
+  MiB each (`MAX_IMAGE_BYTES`), 30 MiB for all of them (`MAX_IMAGES_TOTAL_BYTES`) — and
+  the socket's own read limit above every one of them (`MAX_REQUEST_BYTES` in
+  src/bin/server.rs, the number the relay in web/server.ts already used). That last one is
+  why they move together: tungstenite's defaults are 16 MiB per frame and one 10 MiB image
+  is 13.4 MiB once base64-encoded, so a send carrying two of them was already over the
+  limit — and a frame over the limit is a PROTOCOL error, which drops the connection
+  instead of refusing the send with a sentence. Raise a count without raising that and the
+  failure stops being something the user can read.
+- **The composer states the count, the backend enforces it.** A batch that crosses ten
+  keeps the ten that fit and says so beside the pictures, so the eleventh is refused before
+  a send rather than by one. One bad file in a batch costs that file and nothing else.
+- **One AMS upload per picture, in the order they were added**, and that order is what the
+  body's `<img>` tags carry. `amsreferences` was ALREADY an array, so nothing about the
+  Teams shape is invented here. An upload that fails happens before the message POST, so
+  nothing is posted and what did upload is an unreferenced blob.
+- **A send takes back exactly the pictures that left**, matched by the id the pending list
+  keys on — the rule `removeSentWords` follows for the words. Clearing the box would erase
+  a screenshot pasted while the request was travelling; clearing nothing would leave the
+  ones that left sitting there, so the next Enter posts them twice.
+- **Several are drawn SMALLER than one.** Ten thumbnails at the height a single one gets is
+  a composer that has eaten the conversation.
+- `cd web && bun run preview -- --out /tmp/pics --compose-images` captures the row in both
+  themes and the sentence a full box earns; `web/e2e/composer-images.spec.ts` pins every
+  rule above. That spec deliberately does NOT send its ten-picture message: one mock
+  process serves the whole run, and a message ten pictures tall is shared state — it makes
+  the deep-link scroll in `notifications.spec.ts` time out, which is a fragility of the
+  virtualized history worth its own look and NOT something a test should hide.
 
 ## The local agent (`@claude` in a thread)
 
@@ -104,7 +163,7 @@ the answer so far, the phase, the tool in flight, and the TRANSCRIPT — the mod
 reasoning and every tool call, interleaved in the order they happened (`agent::Step`). The
 web UI renders it word by word under the CLI's own mark (`web/src/components/agent-reply.tsx`
 and `agent-logo.tsx`, over `web/src/lib/agent-run.ts` and `agent-markdown.ts` — a port
-of the Rust markdown subset, pinned to it case for case by its tests). Six rules hold
+of the Rust markdown subset, pinned to it case for case by its tests). Seven rules hold
 that surface together:
 
 - **The stream is an overlay on the posted message, never a message of its own.** The
@@ -128,6 +187,34 @@ that surface together:
   through their account and a colleague sees their name on it — but they did not write
   it, and putting it beside the things they did write is the one place this app would be
   lying to the person it belongs to.
+- **The bubble's own EDGE says an answer is being written into it.** A light travels the
+  hairline the agent's bubble already wears — magicui's `ShineBorder`, added from their
+  registry (`web/src/components/magicui/shine-border.tsx`, with the `shine` keyframes and
+  `--animate-shine` in `web/src/styles/app.css`) and kept as the vendor's file: the app's own
+  half is `AgentBubbleShine` in `web/src/components/agent-reply.tsx`. It carries the fact the
+  breathing mark carries, in the one place that covers the whole message: on a long answer the
+  signature scrolls out of the top of the bubble and the edge is still there to say which
+  message is live. Five things hold it, and `web/e2e/agent.spec.ts` pins each:
+  - **A run this app cannot SEE is still a run.** The light is drawn while a run streams into
+    the page, and also on a reply whose stored body says its answer is unfinished
+    (`agentAuthorship(...).pending` — the message signed `claude is writing…` rather than
+    `— claude, via teams-lite`). That second one is the common case, not an edge case: the
+    point of the feature is asking from a phone, so most replies are watched by no page at
+    all. A run that DIED is in neither, because whichever backend comes up rewrites its
+    message with the failure body (`repair_abandoned_agent_runs`) — so a body still pending
+    is one nobody has closed.
+  - **The words beside it stay still.** `still being written…` gets no shimmer and the answer
+    no caret when nothing is arriving HERE; the edge is the one thing that speaks for a run
+    this page is not being fed.
+  - **It is the CLI's own colour** (`agentShineColor`), so the edge and the mark inside the
+    bubble name one vendor — the choice the composer's tag chips already make. Anything that
+    is not Claude takes the app's accent, because opencode's graphite travelling round a grey
+    bubble is a light nobody can see.
+  - **Only the BACKGROUND moves.** The element is masked down to the ring and the gradient
+    slides across it, so a message in a virtualized history is never re-laid-out by it.
+  - **It is not drawn at all under `prefers-reduced-motion`** — not merely held still, because
+    stopped the sweep is a smear of colour over one corner rather than a light going round an
+    edge.
 - **The work is a transcript: it is OPEN for the whole run, and folded once the run ENDS.**
   The reasoning streams into a panel above the answer, at the pace the answer is revealed
   at, with a row per tool call in place — so a reader watches the run being worked out. It
@@ -293,6 +380,28 @@ Five more things worth knowing before touching it:
 - **The reply signs itself.** The message is posted under the user's name, so the last
   line says a machine wrote it (`— claude, via teams-lite`). That is honesty about
   authorship, not decoration.
+- **The answer can @mention the people of ITS OWN thread, and it is the one part of a
+  reply that acts on somebody.** A mention notifies the person it names, so the
+  capability is bounded by code and not by the prompt. The candidates are resolved once
+  per run by `thread_mentionable_people` — the same list the composer's "@" offers, so a
+  machine and a person can name exactly the same people — and travel two ways: into the
+  system prompt as the names that may be written (`agent_markdown::mention_note`, because
+  a capability nothing states is a capability nothing uses), and into the renderer as the
+  only names that resolve. Five rules, each pinned by a test in `src/agent_markdown.rs`:
+  - **A name the thread does not hold stays plain text.** `@Alan Turing` in a thread
+    without one is the words it is. A model cannot reach anybody the conversation does
+    not contain, and the roster module it comes from is GET-only by construction.
+  - **An ambiguous name names NOBODY.** Two Adas and a bare `@Ada` resolve to neither:
+    notifying the wrong colleague is worse than notifying none. `@[Ada Byron]` — the
+    explicit form — resolves it.
+  - **The span shows the name the THREAD holds**, never the text the model typed, so a
+    message can never show one person's name over another person's MRI.
+  - **A mention inside a code span is code.** An answer explaining the syntax must not
+    ping anybody while it does so.
+  - **The edit carries the pair.** An agent's body only exists after the edit, so
+    `build_edit_body` writes `properties.mentions` and refuses a mention with no span in
+    the body, exactly as a send does. Before this, an edit dropped `properties` entirely
+    and an answer's mention would have been blue text notifying nobody.
 - **A run is bounded by SILENCE, not by a clock.** A question that needs an hour of tool
   calls gets the hour: the child is killed when the CLI emits nothing at all for
   `agent::RUN_IDLE_TIMEOUT` (30 min), and the deadline moves forward on every event, so
@@ -472,16 +581,24 @@ The app reads the user's Teams/Outlook calendar over Microsoft Graph
   `OUTWARD_METHODS`, its own write-lock coverage — never a quiet addition to the read
   path.
 
-## The trackers are READ-ONLY, save ONE approval (MANDATORY)
+## The trackers are READ-ONLY, save what the USER clicks (MANDATORY)
 
 The app enriches a tracker link pasted into a chat into a rich preview card
-(`src/link_preview.rs`, over `src/gitlab.rs` and `src/linear.rs`). It reads those
-trackers. It writes exactly one thing to them — a merge request's approval, described
-at the end of this section — and nothing else, ever.
+(`src/link_preview.rs`, over `src/gitlab.rs` and `src/linear.rs`), and it holds a whole
+merge-request page (§ The GitLab page). Either card names its own person — a merge request's
+author, an issue's assignee — as the colleague this app already knows, with their Teams face and
+the name the user gave them: § A tracker user who is also a colleague, applied to the surface
+most merge requests and issues are met on. It reads those trackers. It writes **five** things
+to GitLab and nothing else, ever — a merge request's approval (described at the end of this
+section) plus the page's merge, comment, comment deletion and close — and each one happens
+on a click the user just made, never on its own.
 
-- **Never create, edit, comment on, assign, move, merge or close an issue, a merge
-  request or a project** — in either tracker. A comment posted from here reaches everyone
-  watching the issue, under the user's name, and looks like they wrote it.
+- **LINEAR IS READ-ONLY, with no exception at all.** Nothing in this app writes to it.
+- **Never create, edit, assign, move or label an issue, a merge request or a project** —
+  in either tracker. What IS written to GitLab is the five actions above and nothing
+  beyond them: a comment posted from here reaches everyone watching the merge request,
+  under the user's name, and looks like they wrote it, which is why it is gated like a
+  send and offered only from the page's own composer.
 - The credentials carry the consent: a Linear personal API key has **full write
   access**, and a GitLab token has whatever scopes the user granted it. So nothing
   at the API level stops a write. What stops it is that **no code names a write**:
@@ -502,21 +619,26 @@ at the end of this section — and nothing else, ever.
 - Reading, enriching and rendering a link are fine and are what the feature is for.
   Any FURTHER write to a tracker is a deliberate feature: its own consent gate, its own
   entry in `OUTWARD_METHODS`, its own write-lock coverage — never a quiet addition to
-  the read path, and never an edit to `src/gitlab.rs` or `src/linear.rs`.
+  the read path, and never an edit to `src/gitlab.rs`, `src/gitlab_mr.rs` or
+  `src/linear.rs`. That is how the five that exist were built: the approval in
+  `src/gitlab_approval.rs`, the page's four in `src/gitlab_mr_write.rs`, each in a module
+  of its own with a test scanning the rest of the crate for its endpoints.
 
-### The one write: approving a merge request
+### The first write: approving a merge request
 
 A message that names a merge request offers **Approve !42** in its own "…" menu, wearing
 GitLab's own mark (`ApprovalAction` in `web/src/components/message-bubble.tsx`, over
 `src/gitlab_approval.rs`). It is the single exception to everything above, it was built
 as the deliberate feature the paragraph above demands, and six things hold it up:
 
-- **It is REVERSIBLE, and that is why it exists at all.** GitLab publishes `/approve` and
-  `/unapprove`, so the row the app leaves behind is **Revoke approval** — the same call
+- **It is REVERSIBLE, and that is why it was the FIRST one.** GitLab publishes `/approve`
+  and `/unapprove`, so the row the app leaves behind is **Revoke approval** — the same call
   with `approved: false`. A write whose off switch cannot undo its on switch is refused
   here on principle: it is the reason `forceavailability` is banned in
-  § The user's own status, and a comment, an assignment or a merge would each be exactly
-  that. Never add one.
+  § The user's own status. Exactly one write in this app breaks that principle, on the
+  user's own instruction — the MERGE on the page below — and it carries four rails in
+  place of the undo it cannot have. An assignment, a label or a rebase still has neither,
+  and none of them is here.
 - **It is gated like a send.** `gitlab_set_approval` is an `OUTWARD_METHODS` entry — the
   write token, refused read-only — and the automation hook refuses a command line, an
   ad-hoc script or a cargo example that names the endpoint or a Linear `mutation`. There
@@ -549,6 +671,346 @@ a machine with no token — a spec MUST clear it afterwards). `cd web && bun run
 --out /tmp/mr --merge-request` captures the rows, the confirmation and the outcome, and
 `web/e2e/merge-request.spec.ts` pins every rule above. **It has never been run against a
 real GitLab project**: doing that is the user's own click, in their own app.
+
+## The GitLab page (a sidebar of merge requests, and the four writes it offers)
+
+The sidebar's fifth tab is GitLab: the merge requests that are **not merged**, and one of
+them in full — its description, its live pipeline, its approvals, its **diff** and its
+comments — with the actions GitLab's own page offers. `src/gitlab_mr.rs` holds every READ,
+`src/gitlab_mr_write.rs` the four writes, `web/src/lib/gitlab-mr.ts` the pure decisions the
+surface is built from (`gitlab-diff.ts` the diff's own), and
+`web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
+
+**The split between the two backend modules is the whole safety story**, and it is the one
+in § The trackers: reading a tracker is what the feature is for, and writing to one is the
+user's own click. The five reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`, `_diff`)
+are open like every other read; the four writes (`gitlab_mr_merge`, `_comment`,
+`_delete_comment`, `_set_state`) are `OUTWARD_METHODS` entries — the write token, refused
+read-only, and the automation hook refuses a command line, a script or a cargo example that
+names their endpoints.
+
+**THE MERGE IS THE ONE ACTION IN THIS APP THAT NO LATER CALL TAKES BACK**, beside a message
+deletion. § The trackers refuses an irreversible write on principle; this one exists because
+the user asked for the page to do what GitLab's own does, and it carries four rails in place
+of the undo it cannot have. Each is pinned by a test:
+
+- **The head commit travels with it.** `sha` is required by
+  `gitlab_mr_write::merge` and by the handler, and it is the commit the PAGE drew — GitLab
+  answers `409` when it is not the branch's head, so a merge request that moved after the
+  reader looked is refused rather than landed. Never send a freshly-read sha to "fix" a 409:
+  that would merge exactly the commit nobody reviewed.
+- **The user asks twice.** The first click arms; the second lands the branch, and the
+  sentence under it names both branches and says no later click takes it back. Delete's own
+  pattern.
+- **It is offered only where GitLab would accept it.** `mergeVerdict` reads GitLab's own
+  `detailed_merge_status`, and an UNKNOWN status is never a green light — a state this app
+  has not heard of leaves the button disabled with GitLab's word on it, because "I do not
+  recognise this" must never resolve to "go ahead".
+- **The outcome is reported beside the button**, in GitLab's own words on a refusal
+  (`gitlab-action-error`). An outward action that failed must never be left looking like it
+  worked.
+
+The other three are ordinary gated writes because each is REVERSIBLE from the same page: a
+comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen. Five
+more rules hold the page together:
+
+- **A comment is deleted only when it is the USER'S OWN**, and whose it is comes from
+  GitLab (`note.mine`, matched on the account's id) read BEFORE the deletion — not from what
+  the client claimed. GitLab would let a maintainer remove a colleague's note; this app never
+  offers that, exactly as it refuses to delete a Teams message that is not the user's own.
+- **A reply lands in the thread it answers.** `discussion_id` decides the endpoint, because
+  a reply posted as a new comment lands in the wrong place and nothing reports it.
+- **Nothing on this page is fetched FROM GITLAB by the browser.** Its `avatar_url` travels and
+  nothing requests it — an avatar on a private instance answers 401 without a session — and
+  the description and every comment go through the app's own markdown parser
+  (`parseGitLabMarkdown`), never GitLab's rendered HTML, which would bring remote references
+  with it. An IMAGE is the sharp case and it is handled in the parser: a `![alt](url)` becomes
+  the LINK its alt text names, never an `<img>`, so a description written by somebody outside
+  this app cannot make the page fetch anything either. A real FACE **is** drawn, and it is a
+  TEAMS read: it goes through the backend's own `fetch_avatar` like every other avatar in this
+  app, it tells the GitLab instance nothing, and it is what § A GitLab user who is also a
+  colleague is about.
+- **The list can never ask for merged merge requests.** `ListScope` and `ListState` are
+  closed Rust sets and `merged` is not among them, so the page's whole promise is enforced by
+  the type rather than by a filter somebody could widen.
+- **The TAB wears the tanuki in two spellings, and the section's own state picks.** A section
+  that merges under the user's GitLab account has to say GitLab (see `GitLabLogo`) — but this
+  is the one place that mark stands in a row of the app's own glyphs, and a strip of tabs says
+  which section is current. Full-colour at all times made GitLab the only lit tab of the five,
+  which reads as the selected one. So the tanuki is GitLab's LINE at rest —
+  `GitLabLogoOutline`, one `currentColor` stroke at the weight hugeicons draws, so it dims and
+  hovers with its four neighbours — and GitLab's three fills once the section IS current,
+  where every other tab takes the accent. Nothing is recoloured: the mark is either GitLab's
+  or it is the app's own line, and there is no third, half-tinted spelling of it. The geometry
+  is theirs in both — the outline is their own contour path, and only that one: the four
+  creases their fills meet along cross in the middle of a 17px mark and read as bars over it.
+  The two boxes are one size in one place, so the swap changes the ink and never the target.
+  `web/e2e/gitlab.spec.ts` measures that.
+
+### A tracker user who is also a colleague is drawn as the colleague
+
+Most people on a merge request or a Linear issue are the user's own colleagues, and this app
+already knows them: their Teams face, and the name the user themselves gave them (§ Renaming a
+person). So a tracker's user is matched to a Teams person **by their real name**, and the
+surface then draws that person — `src/tracker_people.rs` decides who somebody is,
+`with_teams_people` in `src/bin/server.rs` puts the answer on every payload that carries
+people, and `personFace` in `web/src/lib/tracker-people.ts` is the one place a surface reads it.
+
+**Three surfaces, one rule.** The merge-request PAGE and its sidebar (a row's author, the
+reviewers, every comment's author, whoever approved), the GitLab CARD in a chat, and the LINEAR
+CARD — whose owner is whichever of `assignee` / `lead` / `creator` the resource has. Both cards
+wear the same chip (`CardPerson` in `web/src/components/card-person.tsx`), because a GitLab card
+naming its author one way and a Linear card naming its assignee another would be two answers to
+"who is this?" in one thread. A card is where most people MEET a merge request or an issue in
+this app, so a face there is the point rather than a decoration.
+
+**The match is MEASURED, by `examples/gitlab_teams_people_recon.rs`** — READ-ONLY, over the
+merge requests the token can see and the store's own people. Measured 2026-08-06 on
+`git.sia.partners` against 12 603 stored messages naming 294 people: of the 26 people named on
+200 merge requests, **18 resolve, 0 are ambiguous, 8 do not** — and all 8 of those are a GitLab
+import's `Placeholder <name>` account. All 18 are spelled identically on both sides, because
+this instance is provisioned from the same directory Teams is. Run it again rather than
+widening the key on a hunch; what the numbers already refused is accent folding.
+
+**LINEAR's half is not measured the same way, and it cannot be.** There is no "list every
+issue" read in this app — `linear` enriches one link at a time — so nothing here can count a
+workspace's people. What is known: Linear's `assignee { name displayName }` is the same
+real-name/handle pair GitLab gives (its `name` on this workspace is the tenant's own spelling,
+because Linear signs in through the same directory), and
+`examples/linear_live_check.rs` now prints the verdict for any real issue URL it is passed —
+READ-ONLY, the handle and the verdict, never a colleague's name. That is the honest check
+available; do not write a number into this file that nothing measured.
+
+Seven rules hold it, and each is pinned by a test:
+
+- **The identity is only ever ADDED to what the tracker said.** Its own `name` and `username`
+  travel untouched beside it, the handle stays in the chip's title on the page (it is how a
+  colleague is found over there), and a person the store cannot name keeps the tracker's own
+  words over tinted initials.
+- **An AMBIGUOUS name names nobody**, and **only a PERSON is ever matched** (`8:…`, so a Teams
+  app can never lend its face to a tracker account). The wrong face on a name is worse than no
+  face — the rule § @mentions already applies to a mention.
+- **What is compared is TEAMS' own name; what is DRAWN is the user's.** The roster is built
+  from `Store::named_people` with no nickname applied, because what is being matched is two
+  systems' record of one person — and the name the page shows then goes through
+  `Store::display_name_for_mri`, so a rename wins here exactly as in a chat, and a custom
+  avatar wins because `fetch_avatar` serves the override first.
+- **It is stitched on at the ANSWER, never into the cache.** `gitlab_reads` keeps GitLab's own
+  words (§ Performance); the identity is local and current, so freezing it on disk would
+  outlive a rename. That is also why a rename re-reads the page from the backend's cache and
+  asks GitLab nothing (`rereadGitLabPeople`).
+- **One walk reaches every person, because there is ONE person type.**
+  `tracker_people::Person` is it — `gitlab::Person` and `gitlab_mr::Person` are re-exports of
+  that one struct, and `linear` fills the same shape from `name` / `displayName` — and the walk
+  keys on the shape: an object carrying both a `name` and a `username`. So a row's author, a
+  merge request's reviewers, every comment's author, whoever APPROVED, a GitLab card's author
+  and a Linear card's owner are covered by one rule, and a field added later is covered too. A
+  CI job has a name and no handle, and a Linear label has neither, so both are left alone. That
+  is why `Approval.approved_by`, `gitlab::LinkMetadata.author` and Linear's three people carry
+  people rather than the bare names they used to: one shape means one rule, and the sentence
+  "Approved by …" would otherwise be the one place on this page that still names a renamed
+  colleague by their old name.
+- **A stale identity is REPLACED rather than kept**, so a payload that carried one from an
+  earlier pass can never show a colleague under a name they no longer have.
+- **The roster is cached for a minute** (`TEAMS_PEOPLE_TTL`), because building it reads every
+  person this machine was ever told about and the page asks on every answer, pipeline poll
+  included. What that minute costs is that a colleague whose FIRST stored message just arrived
+  is a stranger for up to a minute; it costs nothing about a rename, since only the matching
+  keys are cached.
+
+`web/mock/server.ts` reproduces it with no tenant, no GitLab and no Linear
+(`withMockTeamsPeople`, over the mock's own people): one colleague with a Teams photo, one
+without, the user themselves, and Ada, Grace and a bot who are on the tracker only — so all four
+shapes are on screen at once. `web/e2e/gitlab.spec.ts`, `gitlab-links.spec.ts` and
+`linear-links.spec.ts` pin them, and `web/e2e/person-override.spec.ts` pins that a rename
+reaches the page with no reload.
+
+**The markdown is real GFM, and its subset is MEASURED rather than guessed**
+(`web/src/lib/gitlab-markdown.ts`, over the shared inline scanner in `markdown-inline.ts`).
+GitLab hands us what the author typed, and this app renders it — so the parser has to cover
+what the authors on this instance write. `examples/merge_request_markdown_recon.rs` counts
+that, READ-ONLY, over the 40 newest open merge requests (measured 2026-08-06: of the 36
+descriptions with words in them, 32 hold a heading, 32 inline code, 29 emphasis, 28 a bullet,
+24 a **table**, 19 a **fenced block**, 18 a task list, 16 a numbered item, 14 a thematic
+break, 10 a nested bullet). It used to go through `parseCardMarkdown`, which makes ONE BLOCK
+PER LINE — the right rule for a card, which arrives pre-flattened, and the wrong one here: a
+heading kept its hashes, a table came out as a wall of pipes with its `|---|` row silently
+dropped, a fenced block became one paragraph per line with the markdown inside it parsed, and
+a `---` disappeared. Four things follow, and each is pinned by a test:
+
+- **The inline half is shared, the block half is not** (`markdown-inline.ts`, used by both
+  `card-markdown.ts` and `gitlab-markdown.ts`). What `**bold**` and `[label](url)` mean is
+  the same everywhere; how a line becomes a block is exactly what these two surfaces disagree
+  about. Two copies of the emphasis scanner would drift apart at the first `snake_case`
+  somebody reports.
+- **The three constructs measured at ZERO decide as much as the others.** Indented code is
+  NOT a block — every four-space line in that sample was a list item's own continuation or
+  the inside of a fence, so the rule would draw sub-bullets as grey slabs and no author asked
+  for it; raw HTML and an HTML comment stay the author's literal text, because parsing HTML
+  here would be the second renderer this page exists to avoid. Do not add a rule the recon
+  cannot find an author for — run it again instead.
+- **A list's content is parsed by the same function**, which is what makes a sub-list, or a
+  fence inside a bullet, work with no rule apiece. A task list's state is a glyph in the
+  item's own words (`☑`/`☐`): the renderer has no checkbox, and a description here is read,
+  never ticked.
+- **The description names itself** (`data-testid="gitlab-description"`) and carries `min-w-0`,
+  so a wide table and a long fenced line scroll INSIDE it. Without that the article widens
+  and takes the page's own controls off a phone's screen — `bun run preview -- --out /tmp/mr
+  --gitlab` captures it at 390px for that reason.
+
+**Performance is a durable cache plus one live read**, and three measured facts shaped it:
+
+- **`gitlab_reads` is a response cache in SQLite** (schema v14). Every read answers from it
+  at once and refreshes behind the page — stale-while-revalidate — so a re-opened merge
+  request paints from disk and the fresh copy arrives on a `gitlab_mr_updated` event. The
+  window is per KIND, by what a stale answer costs: 60 s for the list, 30 s for the detail
+  and the comments, **5 s for the pipeline** and **120 s for the diff** (the longest, because a
+  diff moves only when somebody pushes and it is the biggest read). A write drops every read of
+  the merge request it changed, through the one prefix they share (`gitlab_mr::cache_prefix`).
+- **Refreshes are single-flight** (`Ctx::gitlab_refreshing`). A page polls its pipeline while
+  CI runs and two open pages poll the same one; without it, one merge request under two
+  readers would ask GitLab twice a second and earn the token a rate limit.
+- **The LIST endpoint carries no pipeline.** Measured on this tenant: no `head_pipeline` and
+  no `pipeline` on a row of `GET /merge_requests`, so a badge per row would cost one request
+  per merge request — 109 on the first screen. The row states `detailed_merge_status`
+  instead, which IS on the row and is what GitLab's own merge button reads. Do not "fix" the
+  missing badge by fetching per row.
+- **`scope=all` is what makes it a dashboard.** GitLab's default is `created_by_me`, and
+  measured here that is 12 rows and one author against 109 rows and 25 authors. A page that
+  forgot it looks like a page with a bug in its query.
+- **The live pipeline poll is armed only while something is in flight** (`pipelineIsLive`,
+  which reads the JOBS too — GitLab reports a pipeline `success` while a job allowed to fail
+  still runs) and it stops when the page closes, so a page nobody is looking at asks GitLab
+  nothing. Its interval (6 s) sits ABOVE the backend's 5 s window on purpose: below it, every
+  poll would be served the same cached answer and the panel would look frozen.
+
+### The DIFF (a tree of files, and one of them read in full)
+
+The Changes section is the diff: the changed files as a TREE on the left, one of them
+highlighted on the right. It is the one part of this app drawn by somebody else's renderer —
+**`@pierre/trees`** for the tree ([trees.software](https://trees.software)) and
+**`@pierre/diffs`** for the patch ([diffs.com](https://diffs.com), Shiki underneath) — and the
+seam is where all the care is. `src/gitlab_mr.rs` holds the read and WRITES the patch,
+`web/src/lib/gitlab-diff.ts` every pure decision, `web/src/components/gitlab-changes.tsx` the
+section, and `gitlab-diff-view.tsx` the whole of this app's contact with either package.
+
+**Every fact below was measured against the real instance** by
+`examples/merge_request_diff_recon.rs` — READ-ONLY, over 508 files on the 25 newest open merge
+requests, printing counts and shapes and never anybody's code:
+
+    cargo run --example merge_request_diff_recon
+
+- **GitLab's own `diff` opens at `@@`.** No `diff --git`, no `--- a/…`, no `+++ b/…` — on all
+  338 rows that carried hunks. A patch renderer reads the FILE out of that header, so
+  `gitlab_mr::unified_patch` writes one from the row's own `old_path` / `new_path` / modes /
+  flags, and only the hunks are GitLab's text. Measured back: 356 of 356 patches that travel
+  open with the header this app wrote. `unidiff=true` gives `--- / +++` and was rejected — it
+  still writes no `rename from`, which is the one thing a pure rename has to say.
+- **A pure RENAME carries no diff at all**, and GitLab sets `collapsed: true` on those rows
+  anyway. Reading that as an elision reported every moved file as one GitLab refused to expand,
+  so `renamed` wins over `collapsed` on BOTH sides — in `diff_file_from_json` and again in
+  `diffFileState`, because a payload from an older backend must not draw it either. 18 of 508.
+- **The COLLAPSE is a property of the merge request, never of the page.** The same 96 of 149
+  files came back collapsed at every `per_page` from 10 to 100, and the expanded bytes were
+  174 703 every time: GitLab expands a diff collection up to a byte budget and collapses the
+  rest. **Paging is not the way out** — do not "fix" a collapsed file by asking for a smaller
+  page. `access_raw_diffs=true` IS, and only on the older `/changes`: `/diffs` ignores the
+  parameter (measured, byte for byte). That read is `DiffDepth::Raw`, it expanded 142 of those
+  149 in one **523 KB** answer, and it is therefore the READER'S OWN ASK — `canExpandDiff`
+  offers it once, `expandDiffHint` names the cost before the press, and it is never the
+  default. The row shape of the two endpoints is IDENTICAL (`a_mode b_mode collapsed
+  deleted_file diff generated_file new_file new_path old_path renamed_file too_large`, on all
+  149 and all 508), which is what lets one parser serve both.
+- **A BINARY file carries a one-line marker** (`Binary files a/… and /dev/null differ`) rather
+  than hunks. It is STATED; running GitLab's prose through a code renderer would draw it as
+  somebody's code. 4 of 508.
+
+So four of the five states a file arrives in have NO patch, and each says something different
+because the reader's next move differs. That is `diffFileState`, and it is why the section's
+decisions are pure and testable without loading a megabyte of highlighter to make them.
+
+Seven more rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
+
+- **The renderer is a LAZY chunk, and that is load-bearing.** `@pierre/diffs` carries Shiki,
+  which resolves a TextMate grammar per language as a dynamic import — measured at a 728 KB
+  chunk of its own plus one per language, and **+3.9 MiB gzipped on the release asset** (which
+  the launcher embeds, so it is on every in-app update). It must never sit on the path of a
+  chat: `gitlab-diff-view.tsx` is reached only through `lazy(() => import(…))`, exactly as the
+  emoji picker is. The grammars are worth their room — a review surface that drew an unlisted
+  language as plain text would fail silently on the file somebody needed.
+- **Both packages render into a SHADOW ROOT**, so their internals cannot be styled from
+  app.css and are not meant to be: each publishes a `--diffs-*` / `--trees-*` property per
+  colour and app.css maps the surfaces onto this app's tokens. What stays THEIRS is the syntax
+  palette (`pierre-light` / `pierre-dark`, from `@pierre/theme`, which ships with the renderer)
+  and the git status tint per row — that is a colour vocabulary, not a surface.
+- **The theme is passed EXPLICITLY, never sniffed.** Both resolve `light-dark()` from the used
+  `color-scheme`, and their own `:host` leaves it at `light dark` — which follows the OS rather
+  than this app's appearance setting, so a reader whose OS is dark and whose app is light got a
+  black diff in a white page. `themeType` carries the app's resolved theme to the highlighter,
+  and app.css pins `color-scheme` on both hosts (an outer-tree rule beats `:host`). It is the
+  mistake the update button's orb already made once.
+- **The GLYPHS are this app's own** (`web/src/lib/tree-icons.ts`). Pierre ships a coloured
+  file-type icon pack and it is a second icon set — a different grid at a different weight,
+  three centimetres from this app's own tab strip, which is what § Project shape bans. So
+  hugeicons' data is serialized into the sprite pierre injects into its shadow root, under
+  **this app's own symbol ids**: pierre PREPENDS its built-in sprite and a `<use href="#id">`
+  takes the first match, so a sprite reusing their four ids loses to theirs every time (it did,
+  and the capture showed it). `set: "none"` and `colored: false` are both needed too. The
+  chevron is the DOWN one, because pierre rotates it `-90deg` on a collapsed row.
+- **The tree model is created ONCE and mutated.** A new diff — the expanded read, another merge
+  request — is `resetPaths` + `setGitStatus` on the one model, which is what keeps the reader's
+  folds and their scroll position across it. It needs an explicit HEIGHT rather than a
+  `max-height`: it virtualizes its rows, so it measures its box before drawing any, and a box
+  with only a max measures zero — which drew an empty column the width of a tree.
+- **A narrow screen is always UNIFIED** (`effectiveDiffLayout`, `SPLIT_MIN_WIDTH`). Split needs
+  two columns of code and this app is read from a phone, where 390px is two columns of eight
+  characters. The preference is kept and persisted per browser; it simply cannot apply there,
+  and the toggle is not drawn at all — a control that changes nothing reads as a bug.
+- **A diff that cannot be read costs THIS panel and nothing else** — the contract the comments
+  already hold. And the way out to GitLab's own `/diffs` stays whatever this page can draw: a
+  file GitLab will not expand, a merge request past 100 files and a review comment on a line
+  this page does not show are all reasons a reader still wants theirs.
+
+The diff is read WITH the page, as a fifth parallel read, because reviewing code is what a
+merge-request page is for — never behind a click. It is cached for 120 s (`GITLAB_DIFF_TTL`,
+the longest window on the page: a diff moves only when somebody pushes, and it is the biggest
+read), under the merge request's own prefix so a write forgets it, and per DEPTH so the
+expanded answer a reader paid for is never replaced by the plain one.
+
+A `DiffNote` still keeps the file and line it hangs on (`note.position`), and the page names
+that file — so a comment on a line this section does not show is never a comment about nothing.
+
+`web/mock/server.ts` reproduces every state with no GitLab and no token (`mockDiffFiles`,
+which holds a patch, a pure rename, a binary file, a file GitLab collapsed and a generated one
+over several languages, plus `refuse_diff` on the `{kind:"gitlab_mr"}` hook — a spec MUST clear
+it). `cd web && bun run preview -- --out /tmp/diff --diff` captures the section in both themes,
+the split layout, all three files with no patch, the expand control and what it hands over, and
+the whole thing at a phone's width. **No diff has been rendered from the real instance yet**:
+the reads are measured (above) and the surface is pinned against the mock, so what is untested
+is the pairing — one open of a real merge request in the user's own app.
+
+**The four page READS are verified against the real instance**, by
+`examples/merge_request_page_recon.rs` — which is READ-ONLY, reads the host and token out of
+the app's own store, and prints counts and field presence rather than anybody's words (the
+fifth, the diff, has a recon of its own — see § The DIFF):
+
+    cargo run --example merge_request_page_recon
+
+Measured 2026-08-06 on `git.sia.partners`: 109 open merge requests (100 asked for, so the
+truncation notice is a real state), 929 closed, 21 authors under `scope=all` against 12 under
+`scope=mine`, a detail carrying its `sha` and `detailed_merge_status`, and a head pipeline of
+15 jobs over 5 stages. Run it again when a parse changes; it re-measures the three facts
+above rather than trusting this paragraph.
+
+`web/mock/server.ts` reproduces the whole flow with no GitLab and no token — including a
+pipeline that advances one step per read, which is what makes "the panel follows the run"
+watchable — and the `{kind:"gitlab_mr"}` test hook arms a refusal, a machine with no token,
+and the reset a spec MUST call afterwards. `cd web && bun run preview -- --out /tmp/mr
+--gitlab` captures the tab strip in both of its states (pass `--dpr 4`: the tanuki is 17px),
+the list, the page, the merge armed, the comments, the description at a
+phone's width and a blocked merge in both themes; `web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
+run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
+is the user's own click, in their own app.
 
 ## Automation safety (MANDATORY — read before driving the UI)
 
@@ -641,7 +1103,10 @@ user. Two independent mechanisms enforce that split:
   --user start` on the always-on service's units, and including the `teams` command
   itself, which is that backend plus the real app on 19440 in one word — and
   `teams-lite-service.sh update --now`, the switch that skips the wait for a live
-  `@claude` run and so freezes a half-written reply in the thread. It reads the
+  `@claude` run and so freezes a half-written reply in the thread — and `restart_backend`,
+  which is that same failure from inside the app (see § Settings › This app). Asking whether a
+  release is newer (`update_check`) stays allowed: it is a read, and the backend already makes
+  that request every two minutes. It reads the
   *contents* of what a command runs, including an untracked `examples/*.rs` a `cargo
   run --example` names. Searching, stopping and inspecting stay allowed on purpose: a
   `grep` whose pattern names a launcher runs nothing, and a guard that fired on it
@@ -657,7 +1122,15 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/cal --calendar`, or `openCalendarTab` /
   `openCalendarView` / `openFirstEvent`. For the team → channel tree:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
-  `toggleTeamSection` from the same file. For the chat list's sections and the "…"
+  `toggleTeamSection` from the same file. For the merge-request page — its tab strip at rest
+  and current, the list, the page,
+  the merge armed, the comments, the description at a phone's width and a blocked merge:
+  `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt`
+  from the same file. For its DIFF — the tree beside the patch in both themes, the split
+  layout, each of the three files with no patch, the expand control and what it hands over,
+  and the whole section at a phone's width:
+  `bun run preview -- --out /tmp/diff --diff`, or `openChanges` / `pickDiffFile` from the same
+  file. For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
   `bun run preview -- --out /tmp/ask --answer-with`. For the typing hint above the
@@ -665,9 +1138,14 @@ user. Two independent mechanisms enforce that split:
   (it honours `--dpr`, because the faces in it are 20px). For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
   file. For Settings › AI providers and its model picker, open and closed in both
-  themes: `bun run preview -- --out /tmp/prov --ai-providers`. For the update button, the
+  themes: `bun run preview -- --out /tmp/prov --ai-providers`. For Settings › This app — the
+  update check's answer and the restart armed on a live agent run:
+  `bun run preview -- --out /tmp/app --maintenance`. For the update button, the
   changelog it discloses on hover in both themes, its progress mid-download and the link the
-  other install shape keeps: `bun run preview -- --out /tmp/upd --update`. For the
+  other install shape keeps: `bun run preview -- --out /tmp/upd --update`. For recording a
+  call — the control and the sentence it carries, the live state, the card it leaves in the
+  conversation and the Settings list: `bun run preview -- --out /tmp/rec --call-recording`
+  (it writes a real webm out of the mock's canvases, with no camera and no microphone). For the
   write-lock banner, in both of its
   causes: `bun run preview -- --out /tmp/wl --write-lock`. To review a detail too
   small to read in a
@@ -904,45 +1382,175 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
 The app takes and places one-to-one **audio** calls, by doing what the real Teams WEB
 client does: `src/calling.rs` is the signaling plane, the browser carries the media
 (`web/src/lib/call-media.ts`), and `NATIVE-CALLING.md` is the protocol map every line of
-both was written from — read it before touching either. Video is RECEIVED and never sent:
-see § Seeing video below, and NATIVE-CALLING.md § 10 for the protocol it rests on.
+both was written from — read it before touching either. What the user SEES of a live call is
+§ A call is a page; video is received and sent, which is § Video in a meeting and
+NATIVE-CALLING.md § 10 for the protocol it rests on. A call can also be RECORDED, which is
+§ Recording a call — teams-lite's own file, made in the page, and the one thing about a call
+that Teams is never told.
 
 **The backend signals; the page carries the audio.** That split is not an implementation
 detail: the tokens must never reach a browser, and a microphone is only reachable from
 one. So an SDP crosses the local WebSocket in each direction and nothing else about a
 call does — this side never handles RTP, and the page never learns a Teams URL.
 
-- **Calling is OFF until the user turns it on** (`SETTING_CALLING`, Settings › Audio
-  calls). The switch IS the consent gate for the whole feature, because turning it on
-  REGISTERS a calling endpoint with Teams: their real incoming calls are then offered
-  here as well as on their phone. Turning it off **unregisters** — a registration left
-  behind keeps routing their calls to a client that is not listening, and a call offered
-  to a device that never rings is a call they miss. Never make it the default, and never
-  turn it on for the user.
+- **Calling is ON, with no switch anywhere** (`calling_available` in `src/bin/server.rs`).
+  The app IS a Teams client, so it REGISTERS a calling endpoint at startup the way every
+  other client the user is signed in on does, and their real incoming calls are offered
+  here as well as on their phone. There used to be a Settings switch, off by default; it
+  was the wrong shape for the one thing it gated — registering reaches nobody by itself,
+  and the actions that reach a person are gated one by one below. Four things hold the
+  new shape, and each is pinned by a test:
+  - **A READ-ONLY backend says no, and nothing else does.** A screenshot backend must not
+    become a device the user's calls ring on; every install they can open registers, and
+    no environment value takes that back (`no_environment_value_silences_calling` scans
+    for the one that used to). **Two installs on one machine both register, deliberately**
+    — each holds a calling endpoint id of its own (`endpoint_id_path`, keyed by the port),
+    so the service sees two DEVICES and rings both, exactly as it rings a phone beside a
+    laptop. The released build beside the staged pair used to be silenced with
+    `TEAMS_LITE_CALLING=0`, to spare that second ring; what it really cost was every call
+    and Join control in that window, drawn disabled — and the front a phone had open was
+    the silenced one, so the app read as one that cannot call at all. A second ring is
+    cheap; a call the user cannot place is not. Never trade one for the other again.
+  - **The registration is TAKEN BACK as the app goes away.** `stop_calling` runs on the
+    idle shutdown, because a registration Teams still believes in keeps routing their
+    calls to a process that is gone, and a call offered to a device that never rings is a
+    call they miss. It would expire within the hour on its own; every call inside that
+    hour is the reason not to wait for it.
+  - **What a window cannot do, it says.** `enabled: false` is no longer something the user
+    can fix, so the disabled call and Join controls say what that window IS — never "turn
+    it on in Settings", which would name a switch that does not exist
+    (`callUnavailableReason` / `meetingUnavailableReason`).
+  - **The page never assumes it.** `UNKNOWN_CALL_STATUS` is still both flags false until
+    the backend answers: a hopeful `true` would claim the user's calls ring here while
+    nothing is registered.
 - **Four methods reach a person, and they are `OUTWARD_METHODS` entries**: `call_place`
   starts a device buzzing in somebody's pocket, `call_accept` opens the user's own
   microphone to whoever is on the other end, `call_hangup` ends the call for both of them
   (or declines it, which the caller is shown), and `call_mute` publishes whether they can
   be heard. None can be taken back, and each one carries out one click the user just made
   — nothing in this feature ever acts on its own.
-- **`set_calling` and `call_prepare` are `MACHINE_METHODS` entries**, with their own
-  refusal words: the first decides whether this machine is a device the user's calls ring
-  on, the second reserves the one call slot and hands the page the relay credentials this
-  backend holds. `call_status` stays open: it returns no SDP, no links and no credentials,
-  only what the UI has to draw.
+- **`call_prepare` is a `MACHINE_METHODS` entry**, with its own refusal words: it reserves
+  the one call slot and hands the page the relay credentials this backend holds.
+  `call_status` stays open: it returns no SDP, no links and no credentials, only what the
+  UI has to draw. There is no method that turns calling on — the registration is the
+  backend's own act at startup, so no client can ask for it and none can take it away.
 - **One call at a time.** A second simultaneous call needs a second microphone and a UI
   that can hold two. An invite that arrives while a call is up is left for the user's
   other devices to ring, which is what Teams does with a client that does not answer.
-- **A CALL is one-to-one; a MEETING is joined.** The call button is not drawn outside a
-  1:1 and the backend refuses a conversation with more than one other person — a group
-  call would need a roster the caller assembles and a UI that rings three people. A
-  meeting is the other shape and it IS supported (see § Joining a meeting): its roster
-  already exists, so joining one is a POST rather than a product.
+- **A CHAT is called; a MEETING is joined, and the conversation decides which**
+  (`conversationCallAction` in `web/src/lib/call.ts`, drawn by `call-button.tsx`). One
+  control per conversation, in its header:
+  - a **1:1** rings the person, and a **GROUP CHAT** rings every member at once. That is
+    the same POST — `calling::invitation_payload` takes a list, `participants.to` carries
+    all of them, and `enableGroupCallEventMessages` was already on, so the call line lands
+    in the thread everybody in it reads. The roster the service then reports is what
+    answers "who is in it", which is machinery a meeting already had (`CallSession::others`,
+    one `<audio>` per remote stream). `call_prepare` resolves the list ONCE and keeps it on
+    the session (`ring`), because `call_place` is a second round trip and a list rebuilt
+    there could disagree with the one the user was shown.
+  - a **MEETING chat** — a thread Teams minted FOR a meeting — JOINS instead, addressed by
+    that thread (see § Joining a meeting). It offers no ring: joining and ringing everybody
+    invited answer the same question, and only one of them is what the thread is for.
+  - **All three wear ONE control, in one box** (`MeetingJoinButton shape="icon"`, the call
+    button's own 36px square and its own handset). A header is a row of controls the user
+    aims at, so a chat that changed their size or shape would move the target between two
+    conversations — and the labelled blue pill the calendar keeps would read as a fourth kind
+    of thing here. The handset is not a claim that the click rings anybody: it says "start
+    talking to the people in this conversation, here", which is what both actions do. WHICH
+    action it is lives in the tooltip, in the label a screen reader gets, and in the row's own
+    "Meeting chat" subtitle — and `web/e2e/calling.spec.ts` measures the two boxes against
+    each other rather than trusting the class list. A glyph that tried to say "join" was
+    measured and rejected: `MeetingRoomIcon` reads as a bare panel at 20px.
+  - **`MAX_GROUP_CALL_PEOPLE` (20) is the ceiling**, and it is a product rule rather than a
+    protocol one: every name in that list is a device buzzing in somebody's pocket, and a
+    mis-click on a 60-person thread cannot be taken back. Above it the user still has real
+    Teams. The mock mirrors the number, so the refusal is reviewable.
+  - **The label says what the click reaches** — "Call everybody in Design crew" — because
+    that is the fact the user needs before it and the one thing they cannot undo after. A
+    group call is NOT asked for twice: it is one click, exactly like a 1:1, and the words
+    carry the difference.
+  - **A group call names the CONVERSATION where a 1:1 names the person** (`CallKind::Group`,
+    empty `peer_mri`): five people have no one name, so the surface draws the group mark
+    rather than a face seeded from nothing, and says who is there from the roster once
+    somebody picks up. It has no lobby — that state is a meeting's, and reading one into a
+    call would show a state that cannot end.
+  - An INCOMING group call is still named after its CALLER: they are who the user decides
+    about, and everybody else arrives on the roster.
+  - **It is unverified against the tenant**, like the 1:1 call and for the same reason: a
+    call has no pre-authorized target, so ringing a real group chat is the user's own click.
+    What the mock proves is the whole surface; what the protocol rests on is that the body
+    is the join's own shape with a longer `participants.to`.
 - **The microphone is released on ONE path.** Every ending — our hangup, theirs, a
-  dropped connection, calling switched off — arrives as the backend's `call_state` frame,
+  dropped connection, this machine stopping taking calls — arrives as the backend's
+  `call_state` frame,
   and the store's handler is the only place that stops the media. A path that released it
   somewhere else would eventually miss a case and leave the browser's recording indicator
   on for a call that does not exist.
+- **A start the user STOPS is not a failure, and the call it half-made is taken back.** A
+  start is three awaits long — reserve, open the microphone, post the offer — and the
+  microphone alone takes up to `GATHER_TIMEOUT_MS`, so a call stopped a second after it was
+  placed lands inside one of them. Both halves used to be wrong, and each is now pinned by a
+  test:
+  - **The page holds the user's own intention** (`callAttempt` in `web/src/lib/store.ts`,
+    moved by every start and every hang-up). A start whose attempt no longer stands says
+    nothing, sends no offer, and RELEASES the media it had just opened — `adoptCallMedia` is
+    the only place `callMedia` is assigned, because a capture adopted after the hang-up is
+    one nothing can find to stop. It is read off the counter and never off a `call_state`
+    frame: a frame says the call is over whoever ended it, a real failure included, and a
+    failure must still be said. Before this the start ran on to the end and the backend's
+    refusal of an offer for a call it had already let go was floated at the user as a fault
+    — `no such call — call_prepare first`, for a call they stopped themselves.
+  - **The backend hangs up what the service accepted meanwhile** (`hang_up_orphan`, in
+    `call_place`, `call_join` and `call_accept`). The hangup finds no link to post on while
+    that POST is still on the wire, so it drops the call here — and a moment later the
+    service has a device buzzing in somebody's pocket, or a caller talking into a machine
+    that holds nothing. The answer's own links are that call's only address and this is the
+    only moment they exist, so each handler re-reads the reservation after its answer and
+    ends the call when it has gone. `a_call_answered_for_a_cancelled_start_is_hung_up` scans
+    all three.
+  - **The mock can hold ONE step of a start** (`{kind:"call_start", hold:"prepare"|"place"}`,
+    over `holdCallStart`), which is what makes the window reachable from a spec at all: the
+    mock's own media is instant, so the window a user cancels in did not exist there.
+- **What a call has to SAY is a transient notice, and this app's only one**
+  (`web/src/lib/notice.ts`, drawn by `app-toaster.tsx` over `sonner`). Why a call ended for a
+  reason the user did not choose, why one never went out, why a capture was refused: by the
+  time there is anything to say the call is gone, so there is no surface of its own left to
+  say it in. It was a CARD before, and the card was wrong twice — it carried no timer at all,
+  so `not connected` sat over the user's chat list until they placed another call, and it was
+  drawn only while NO call was live, which is exactly when a refused camera has something to
+  say. Five rules hold it, and `web/e2e/calling.spec.ts` pins each:
+  - **It leaves on its own.** `NOTICE_MS` for a report of something that happened,
+    `ERROR_NOTICE_MS` for a failure — longer, because that is the one the user may have to
+    act on. Nothing here ever waits to be dismissed.
+  - **It never lands on the controls it is about.** The ringing card measures its own stack
+    into `--notice-inset-bottom` (the base inset is in `styles/app.css`), so a sentence stacks
+    over that card instead of over Answer — and both clear the composer, for the reason the
+    card already clears it. A live call needs no reservation: its controls are the page's own
+    header, at the top (see § A call is a page), and the spec measures the notice against that
+    header rather than trusting the inset.
+  - **A new attempt takes the old reason back, and a `call_state` frame never does.** Those
+    frames arrive all through a call — a roster, a renegotiation, a camera going on — so
+    clearing there erased a refusal a beat after it appeared. The dismiss lives where an
+    attempt STARTS, which is the only place that knows one is starting.
+  - **The words are the user's, not the socket's** (`web/src/lib/call-failure.ts`, the twin
+    of `send-failure.ts`): the RPC name the backend opens every refusal with is dropped, the
+    socket's `not connected` becomes what it costs the call, and a failure that carried no
+    words at all — the service answers `400` with an empty body — still says something.
+  - **A call that rang NOTHING says whose devices were not there.** Measured against the
+    tenant: calling somebody with no client signed in is accepted, answered with an SDP, and
+    then ended two seconds later — and the only frame that names the CAUSE is
+    `addParticipantFailure` (`code 480 subCode 10037`, "No callee endpoints were found."),
+    which arrives a beat before the ending whose own phrase names the symptom ("no one else
+    has joined the group call"). So `calling::invite_failed` reads it, the session remembers
+    it (`unreachable`), and the ending is stated as `calling::END_REASON_UNREACHABLE` — a NAME
+    rather than the service's prose, because `callEndLabel` turns names into sentences and a
+    Rust test pins the two spellings together. Without it the user pressed call, watched it
+    die two seconds later, and was told "The call ended." — five times in a row, which reads
+    as this app dropping their calls.
+  - **Only a CALL comes through here.** A failed send stays at the composer and an approval
+    stays in the menu it was clicked in (§ Sending messages, § The trackers), and the write
+    lock, a broken sign-in and a pending update keep their banners and their row: each of
+    those is a STATE of the app, and a state that scrolls away is one nobody can check.
 - **The registration mimics the WEB client, not the desktop one.** `SkypeSpacesWeb_2.6`,
   TTL 3600, path = the bare surl, on a connection of its own to `calling_trouterUrl`
   (`trouter::Endpoint::calling`). The desktop client's `NGCallManagerWin` /
@@ -972,19 +1580,43 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   microphone**, and the page pairs it with `simulatedCallMedia` because that backend
   announces itself as a mock. That is what makes this surface reviewable with nothing
   leaving the machine: `cd web && bun run preview -- --out /tmp/call --call` captures the
-  switch, the button, the ring and the bar, and `web/e2e/calling.spec.ts` pins every rule
-  above.
-- **There is no sanctioned live call.** Unlike a send, a call has NO pre-authorized
-  target: the sandbox chat is a group thread, and ringing it would ring real people. A
-  live test is the user's own click, on their own machine, to somebody who agreed to it
-  beforehand — see NATIVE-CALLING.md § 8 for what is still unverified against the tenant.
+  button, the ring, the page, the window it folds into and the notice, and
+  `web/e2e/calling.spec.ts` pins every rule above. That mock CALLS out of the box, like the
+  backend it stands for, and its `{kind:"calling", enabled:false}` test hook is the only
+  way to the window that does not — a spec MUST reset it (`call_invite {reset:true}`), since
+  one mock process serves the whole run. A MID-CALL failure is reachable only through that
+  mock's own `call_media` test hooks, because the page's simulated media never refuses anything
+  and the service that does is a real tenant. There are FOUR of them, and each stands for one
+  ending a capture really has: `{refuse:true}` refuses the NEXT offer outright (armed — a spec
+  must reset with `call_invite {reset:true}`), `{drop:"screen"}` takes away a section the
+  meeting had accepted, `{reject:"screen"}` answers the offer that added one by rejecting it —
+  never accepted, which is what the tenant really did — and `{unreadable:true}` answers in a way
+  no browser can read, which is the one that used to cost the whole call. The last three arm
+  nothing: they happen on the live call at once.
+- **A live call has ONE authorized target, and `cd web && bun run call-live` is the only way
+  to ring it.** There is no sandbox for a call — the sandbox chat is a group thread, and
+  ringing it would ring real people — so the target is not a place a mistake is harmless but
+  a person who agreed to it: the one-to-one the user named out loud, a CONSTANT in
+  `web/scripts/call-live.ts` (`AUTHORIZED_CALL_CONVERSATION`). It is the third live driver
+  and it earns its place exactly as `sandbox-live.ts` and `join-live.ts` do — no argument can
+  aim it elsewhere, the conversation is opened BY ITS ID rather than clicked for in the
+  sidebar, the target is proved TWICE out of the app's own state immediately before the click
+  (the composer's `data-conversation-id` and the call button's own), and it hangs up on every
+  path out including a throw. Its microphone is a FAKE device capturing silence, so the offer
+  is real and no real microphone opens. It exists because a call the service ENDS cannot be
+  diagnosed anywhere else: the store keeps only "Call ended · 2s", the released build hides
+  its backend's output, and the reason arrives on frames the page receives and renders
+  nowhere — so it digests them (`endReasons`, `mediaLines`, shapes and never a key). Any
+  wider live call is still the user's own click — see NATIVE-CALLING.md § 8 for what is
+  unverified against the tenant.
 
 ## Video in a meeting — received, and sent
 
-A meeting draws the pictures other people put into it — a colleague's shared SCREEN on a
+A meeting draws the pictures other people put into it — a colleague's shared SCREEN on the
 stage, their CAMERA as a tile beside it — and it can put the user's own camera and screen
-into the meeting (`web/src/components/call-video.tsx` and the two toggles in `call-bar.tsx`,
-over `callVideo` / `callLocalVideo`).
+into the meeting (`web/src/components/call-video.tsx` draws one picture, `call-stage.tsx`
+decides where each one goes and carries the two toggles, over `callVideo` /
+`callLocalVideo`).
 
 **Sending is the sharper half, and the split in the gates says so.** Receiving publishes
 nothing about the user; sending puts their face — or whatever else is on their screen — in
@@ -1043,10 +1675,136 @@ joins alone and waits for an offer. Six rules hold it together, and
   browser reported on its `track` events, which exist only after the answer is applied).
   Neither half can do it alone. A screen takes a section before a camera does: it is the
   thing somebody deliberately put on screen to be read.
-- **A failure here NEVER ends the call.** Audio is already up and untouched, so a
-  renegotiation that cannot be answered or a subscription the service refuses costs one tile
-  — and the service offers again. Ending a working call because a screen could not be drawn
-  would be much the worse outcome.
+- **A section the far side DROPPED is read as absent** (`sectionIsStopped` in
+  `web/src/lib/call-media.ts`). The service can reject a section this app offered, and the
+  browser then STOPS that transceiver: it loses its mid, it carries nothing, and every setter
+  on it throws. So a stopped one is never written to and never reused — switching the camera
+  off wrote `direction` on it and handed the user the browser's own sentence, "The transceiver
+  is stopped", as the report of a click that had worked. And the capture behind it is
+  RELEASED, down the same path the browser's own "Stop sharing" takes: a camera whose light
+  stays on under a button that says the meeting can see it, while nothing is sent, is the
+  mirror of the failure that path already exists for. The two are told apart
+  (`SendingEndedReason`), because a drop is SAID — one sentence, and the one action left
+  (`captureDroppedMessage`) — while the browser's own bar is not: the user pressed that
+  themselves. The mock takes a capture away by REJECTING its section (a zero port, which is
+  how the service says one is gone — `rejectedLabels`, read by the stand-in that has no
+  transceivers), so the whole reaction is pinned by `web/e2e/calling.spec.ts` with no tenant.
+- **A failure here NEVER ends the call, and the ANSWER is where that rule was broken.** Audio
+  is already up and untouched, so a renegotiation that cannot be answered or a subscription the
+  service refuses costs one tile — and the service offers again. Ending a working call because
+  a screen could not be drawn would be much the worse outcome. It happened, on 2026-08-06, the
+  first time a screen was shared against the real tenant: the service answered our offer, the
+  browser threw the answer out, and `onCallMedia` hung up — so the user got an error and then
+  could not hear their coworker, twice in two minutes. `hangUpCall` releases the microphone and
+  the remote `<audio>` elements before any round trip, so the call goes silent at once. Three
+  rules follow, and `web/e2e/calling.spec.ts` pins each:
+  - **WHICH answer it is decides everything** (`CallMedia.negotiated`, read off the connection's
+    own `currentRemoteDescription` rather than counted). THE answer is what makes a call a call:
+    with it refused nothing will ever be heard, so the call goes rather than sitting at
+    "connecting" for good. A LATER one answers a renegotiation of ours, and losing it costs the
+    picture. One reaction for both is the bug.
+  - **An offer whose answer is unreadable is ROLLED BACK** (`abandonLocalOffer`), because a
+    connection left in `have-local-offer` has every later renegotiation rolled back under it by
+    the browser instead — and the captures it carried are released down the path a DROPPED one
+    already takes, since nothing is being sent.
+  - **The sentence says the call is still there** (`renegotiationRefusedMessage`). That half is
+    load-bearing: the share stopping and an error arriving both say the opposite.
+- **The sections a camera and a screen go out on are negotiated with the CALL, not when
+  somebody presses share — on a ONE-TO-ONE.** That is the real client's own shape and it is
+  why a screen share was refused without it: its `addModalities` forces both modalities
+  `inactive` at the first negotiation of a one-to-one (`numVideoChannels` is 1 there), so
+  every section exists in the FIRST offer and turning a share on ACTIVATES one the service
+  already answered. This app offered one audio section and asked the service to accept a new
+  `applicationsharing-video` mid-call; the service zeroed its port and nothing was ever
+  shown. NATIVE-CALLING.md § 10.8 holds the client's code and the four things it settles.
+  Four rules, and each is pinned by a test:
+  - **A CONFERENCE is the opposite, and its behaviour is unchanged.** With `isMultiparty` the
+    client creates no video entity until one is asked for, so a meeting adds the section
+    mid-call exactly as this app always did. One reaction for both is what was wrong.
+  - **The backend says WHICH** (`call_prepare`'s `one_to_one`), because the RING LIST is what
+    says how many people a call reaches and only the backend fetches it. A conversation id
+    does not answer it, and a backend too old to say reads as `false` — the older behaviour.
+  - **An INCOMING offer is ADOPTED, never added to** (`LocalSenders.adopt`). The far side is a
+    real client, so its offer already holds the layout: the sections are claimed from it BY
+    LABEL (`reservedKindFor`), and a section labelled anything else is never claimed — putting
+    the user's screen on a section the far side described otherwise is the one thing this must
+    not do.
+  - **A reserved section publishes NOTHING.** It is `inactive` and carries no track, so no
+    camera and no screen is opened until the user asks: the consent gate is untouched.
+- **A SCREEN is a SESSION before it is a track, and a meeting grants one at a time.** Measured
+  2026-08-06 against the tenant: a meeting rejected an `applicationsharing-video` section
+  outright — no mid, no label, a zeroed port — with the section negotiated correctly, labelled
+  correctly and offering the codecs a client offers. What this app never did is ASK to present.
+  The client asks first (`startContentSharingAsync` → the session's `start`), POSTing a
+  `contentSharing` blob to the conversation's `addModality` link and setting `isPresenter` on
+  the answer. So `call_start_sharing` and `call_stop_sharing` are `OUTWARD_METHODS` entries
+  either side of the media offer, and the automation hook blocks a script that names either.
+  Five rules, each pinned by a test:
+  - **The session is asked for BEFORE the section is offered, and before the capture.** The
+    order is the client's own, and it is the one rule of this feature no screen can show — a
+    page that offered the media first looks exactly right and shares nothing. `web/mock/server.ts`
+    records the order for that reason (`{kind:"call_sharing_order"}`), and a meeting that
+    refuses to grant one never opens a screen picker.
+  - **A CAMERA asks for nothing.** A meeting carries as many cameras as it has people; only the
+    one screen is a session, so a camera stays the plain renegotiation it always was.
+  - **The session's links are read APART from the call's** (`calling::ContentSharing`). The
+    answer carries a `leave` of its own and `Links::collect` takes the deepest of a name, so
+    merging it would overwrite the link this app hangs the CALL up on: giving a share back
+    would have ended the call.
+  - **It is given back on the ONE path every ending of a screen passes through** —
+    `onLocalVideoChange`, which is the user's own press, the browser's "Stop sharing" bar, a
+    section the meeting dropped, and an offer rolled back because its answer could not be read.
+    It is the rule the microphone already follows: a release wired per ending misses one, and a
+    meeting still believing this endpoint is its presenter REFUSES the next share. A spec
+    catches that, because the mock refuses a second session while one is held.
+  - **A share that cannot be given back is not one this app starts.** The answer's own `leave`
+    is what `call_stop_sharing` posts to, and a session the service named no way out of is
+    reported rather than remembered — the principle § The trackers states for an irreversible
+    write.
+- **A CONFERENCE is offered three video codecs, and a one-to-one is offered every one the
+  browser has.** That split is the client's own — `allowedVideoCodecsMultiparty` is
+  `[H264, AV1, rtx]` with `filterCodecsInSdpMultiparty: true`, while `allowedVideoCodecs` is
+  empty and `filterCodecsInSdp` false — and this app offered Chrome's whole list everywhere:
+  VP8 and VP9 first, into a service whose own video sections carry `H264/90000` alone.
+  `conferenceVideoCodecs` is the pure half (H.264 FIRST, `rtx` kept because retransmission is
+  not optional, and an empty answer means say nothing rather than offer no codec at all), and
+  `LocalSenders.addVideoSection` is the ONE place a section is created, so the list cannot be
+  forgotten on one of the two paths.
+- **A colleague's video was never drawable, and TWO named refusals were in the way.** Both were
+  found by driving a real meeting with a real second participant sharing
+  (`bun run join-live -- --share`), and each one names itself — which is the whole reason to
+  prefer a refusal over a hypothesis:
+  - **Chrome threw the service's own offer out.** `InvalidAccessError … A BUNDLE group contains a
+    codec collision for header extension id=3. The id must be the same across all bundled media
+    descriptions` — the service gives one header-extension id two meanings across the sections of
+    one bundle. `fromMsSdp` therefore makes the offer CONSISTENT before Chrome sees it: every URI
+    keeps the first id it was given, and a URI whose id is taken moves to the lowest free one.
+    Dropping the clashing line instead was tried and moved the problem — Chrome then numbered the
+    extension differently per section in its ANSWER and the service refused that.
+  - **The service threw our answer out.** `SdpParsingFailure`, with no line named. The cause was
+    a section the browser had REJECTED: this app sent Chrome's whole description for it, and the
+    client's own transform writes a stub — `m=<kind> 0 RTP/SAVP 34` with its mid and its label and
+    nothing else (`Kn(e) = e.port === 0`). With the stub, the call survives the renegotiation.
+- **Every section states its SSRCs as `a=x-ssrc-range`**, added beside the browser's own
+  `a=ssrc:` lines rather than replacing them — which is what the captured client offer does
+  (NATIVE-CALLING.md § 2.5) and what the service does on every section of its own. Audio is
+  accepted without it, so it is not what makes a section work; a send section the service must
+  allocate a channel for is where that would show.
+- **A capture the meeting never ACCEPTED is not one it dropped, and the advice is the whole
+  difference.** A section rejected in the answer to the very offer that added it never carried
+  anything, so "Share it again" sends the user into the identical refusal — which is what
+  happened, in the same second. `LocalSenders.noteAccepted` writes down what the far side
+  agreed to at the one moment `currentDirection` still says so, `SendingEndedReason` carries
+  `refused` beside `dropped`, and `captureRefusedMessage` names what is really left, which is
+  real Teams. **Sending is still unverified against the tenant** (NATIVE-CALLING.md § 10.8):
+  the only live attempt was refused, so a fix for the refusal itself waits for a refusal that
+  names what it wants — the rule this whole plane was built under.
+- **What the service GRANTED is in the journal** (`calling::media_sections`, on every answer,
+  in the `call_offer_media` response and on the frame). The modalities were logged and they
+  are a claim about what this machine asked for; only the answer says what came back, so the
+  one live failure left nothing on this machine to read. It prints the SHAPE and never the
+  content — kind, mid, label, accepted or REJECTED — which is the discipline
+  `web/scripts/join-live.ts` already follows: no candidate, no fingerprint, no port.
 - **`call_answer_media` is an `OUTWARD_METHODS` entry and `call_subscribe` is a
   `MACHINE_METHODS` one**, and the split is the point. Subscribing ASKS to receive and
   publishes nothing about the user. Answering carries an SDP — and an SDP is what would offer
@@ -1059,13 +1817,240 @@ after the roster with the measured labels and mids, and `simulatedCallMedia` ans
 streams captured from a blank canvas — so `cd web && bun run preview -- --out /tmp/call --call`
 shows the stage and the tiles with nothing leaving the machine.
 
+## Recording a call — teams-lite's OWN file, and Teams is never told
+
+A live call can be recorded from its own header: every picture in it and every voice in it,
+into one video kept in this browser, drawn afterwards in the conversation the call was in —
+for the one person who pressed record, and for nobody else
+(`web/src/lib/call-recording.ts` decides what goes in the frame, `call-recorder.ts` writes
+it, `recording-store.ts` keeps it, `web/src/components/call-recording-card.tsx` draws it).
+
+**It is not Teams' recording, and it cannot become one.** Teams' own announces itself to the
+meeting, uploads to OneDrive and drops a file in the chat for everybody; this one never
+touches the calling service, posts no message and sends no byte anywhere — so there is
+nothing to announce it with and nowhere to announce it. Two consequences follow, and both
+are stated in the app rather than left to be assumed:
+
+- **Nobody on the call is told.** The control says so in the words the user reads BEFORE
+  they press it (`RECORD_HINT`, pinned by a test), because that is the one fact they decide
+  with, and asking the people on the call is theirs to do. Never make the control quieter
+  than that sentence.
+- **It is ONE BROWSER's file.** It lives in this browser's IndexedDB, like the chat pins and
+  the calendar preferences and for the same reason — there is no upstream to write it to. So
+  a recording made on the phone is not on the laptop, the card and the Settings pane both say
+  where it is kept, and Save is offered beside it, which is how a recording becomes a file
+  the user really owns.
+
+Ten rules hold it up, and `web/e2e/call-recording.spec.ts` pins each:
+
+- **No RPC exists, and that is the design.** Nothing in this feature reaches the backend, so
+  there is no `OUTWARD_METHODS` entry to add and none to want: a recording publishes nothing
+  about the user and tells the tenant nothing. Sending the bytes to the backend instead was
+  considered and rejected — it would mean a hundred megabytes of base64 over a socket built
+  for JSON, and then serving it back to a `<video>` that has to seek. The narrowest place for
+  a recording of somebody's voice is the machine that made it.
+- **The PICTURE is composited; the app's window is never captured.** A `MediaRecorder` takes
+  one stream and a call is many, so every picture is drawn onto one canvas by the stage's own
+  rule — a shared screen is the subject, faces are a strip under it — and each tile carries
+  the name the roster gave it, drawn INTO the file, because a recording of five faces is what
+  nobody can name a week later. Capturing the window instead would record the sidebar, the
+  reader's scrolling and whatever else is on their screen, and it would ask for a second
+  screen-share permission for streams this app already holds.
+- **Every voice is mixed, the user's own included.** `CallAudio` on `call-media.ts` is what
+  exposes them — the remote streams play through elements that module owns and the microphone
+  is a local variable, so this is the only place they exist. Reading them plays nothing: the
+  mixer's output goes to the recorder and to no destination, or every voice would double and
+  the microphone would feed back.
+- **One call is one file, whatever changes inside it.** A camera that comes on, a screen share
+  that ends, a colleague who unmutes five minutes in: the recorder is TOLD the current sources
+  (`syncRecorder`, from every place the call's media changes) and re-points its own elements
+  and nodes. It never restarts — a call recorded in five files is not a recording of the call.
+- **The file is closed on the ONE path the microphone is released on.** `stopCallMedia` is
+  where it happens, for the reason that function exists: every ending — the user's own press,
+  the hangup, the far side leaving, a dropped transport, calling switched off — comes through
+  it, and a recording lost because of WHICH side hung up would be a file that exists nowhere
+  else. It is idempotent, so a press and a hangup in the same moment write one file.
+- **The row in the history is not a message, and is drawn as one thing that is not.** No
+  bubble, no side, no sender, no reactions, no "…" menu — nothing was sent, and a card that
+  looked like a message would be this app claiming something reached the thread. It sits at
+  the moment the recording ENDED, between what was said before the call and what was said
+  after, because that is when it happened.
+- **A recording asked twice is deleted for good.** There is nothing upstream to take a
+  deletion back from, so this deletion is the whole deletion — the pattern Delete and Approve
+  already use, for the sharper version of the same reason.
+- **What became of the FILE never covers why the CALL ended.** The two arrive together —
+  calling switched off, a dropped transport, both end the recording as well — so the recording
+  speaks under an id of its own (`RECORDING_NOTICE`, beside `CALL_NOTICE` in
+  `web/src/lib/notice.ts`) rather than replacing the sentence the user cannot work out for
+  themselves. One subject, one id, is still the rule: a recording is a different subject.
+- **A meeting joined from a calendar LINK names no conversation**, so its recording has no
+  history to appear in — and Settings › Call recordings is where it, and every older one, is
+  reachable. It is the renamed-people split exactly: the card belongs where the thing
+  happened, the list belongs where a thing months old can still be found. That pane is also
+  the only place that answers what they all COST, because these are the largest things this
+  app keeps and the user is the only one who can decide one is no longer worth the room.
+- **A browser that cannot keep one is not offered the control** (`recordingsCanBeKept`, false
+  until the browser is asked, which is the same reading every unanswered capability takes in
+  this app). A recording that had nowhere to go is a recording nobody asked for.
+
+`web/mock/server.ts` needs no half of its own — the recording is the page's — and the whole
+surface is still reviewable with nothing leaving the machine: `simulatedCallMedia` hands the
+recorder canvases and one silent oscillator (`simulatedAudioStream`, the twin of the canvas
+stand-in and there for the same reason: a real track makes the mixer path the one the mock
+exercises), so a real `MediaRecorder` writes a real webm with no camera, no microphone and no
+permission prompt. `cd web && bun run preview -- --out /tmp/rec --call-recording` captures the
+control and its sentence, the live state, the stop the folded window keeps, the card in both
+themes, its armed deletion, the composite a MEETING's recording holds, and the Settings list.
+
+## A call is a PAGE, and it folds into a window
+
+A live call takes the whole screen (`web/src/components/call-stage.tsx`, over the pure
+`web/src/lib/call-stage.ts`): a header that names it and holds every control, one card with
+the picture — or the person — in the middle of it, and a side panel for the people and for
+the meeting's own chat. It used to be a card in the corner, which was the right shape for a
+two-minute audio call and the wrong one for the thing this app grew into: a shared screen
+does not fit in 26rem, and "who is in this meeting" does not fit in a line.
+
+**A RINGING call is not the page.** It is an offer — nothing is connected and no microphone
+is open — so it stays the card beside the conversation (`call-bar.tsx`, `callStageIsUp`):
+taking the screen for something the user may decline would be the app deciding for them.
+Everything after they answer is the page's, dialling included, because the microphone opens
+there.
+
+**The two shapes are ONE element, and that is the whole design.** Nothing is unmounted
+between them, so the video keeps playing, the roster keeps arriving and the microphone is
+never touched by a fold. Four rules hold the motion up, and `web/e2e/calling.spec.ts`
+measures the geometry rather than trusting it:
+
+- **The geometry is animated, not the layout.** `x` / `y` / `width` / `height` are motion
+  values on one `position: fixed` box, and the content is ordinary flex that re-flows into
+  whatever size the box has at that frame. So no part of it is ever a stretched picture of
+  another size — at 40% of the way the stage genuinely IS 40% of the way, which is what makes
+  it read as one object moving instead of as a window being resized. `STAGE_MORPH_SECONDS`
+  (0.42) on a strong ease-out, because the movement crosses most of a screen.
+- **The two contents crossfade over that movement**, quicker than it and led by it: a page's
+  header and a small window's bar are different things and neither can be the other. They
+  overlap on purpose — a `mode="wait"` swap would leave the box empty for the one moment the
+  user is watching it.
+- **The window is dragged with the same motion values**, so a window dropped in a corner
+  expands FROM that corner and folds back TO it. Every drop is CLAMPED
+  (`clampMiniPosition`) and so is every viewport change: a window left where it no longer
+  fits would take the hang-up button off screen with it.
+- **Its SIZE is a share of a narrow screen** (`miniSize`, pinned by `web/e2e/mobile.spec.ts`).
+  This app is read from a phone, and 320px over a 412px viewport is not a call folded away —
+  it is the app with a hole punched in it, which is the one thing folding exists to avoid. The
+  height is 16:9 plus the control bar at every width, because a picture that is not 16:9 is a
+  picture with black edges.
+- **There is no close.** The stage is drawn for every live call, folded or not, because a
+  call this app holds and shows nowhere is a microphone the user cannot find the off switch
+  for. Escape closes the open panel, then folds — and never hangs up, since that is the one
+  action here nothing takes back.
+
+What the page itself decides:
+
+- **A shared SCREEN takes the whole content, and faces give way to it.** A screen is text
+  and it is the only thing in a call a tile is too small for; a face reads at any size. The
+  user's own camera is a TILE among the others (it is what they look like to the meeting),
+  and their own SCREEN is a corner preview that never becomes the content — a mirror of one's
+  own screen inside itself is a hall of mirrors, but the only way to know what the meeting is
+  seeing is to see it too. `callStageLayout` decides all of it in one place, and
+  `call-video.tsx` draws one picture without knowing where it goes.
+- **A call with no picture draws the PERSON**, centred, with what the call is doing under
+  them. Most calls are that.
+- **The header carries the time twice** — how long the call has been going, and the clock time
+  it started at — because they answer different questions, and somebody who joined late is
+  asking the second one.
+- **The People panel counts the user themselves, first.** A meeting they are alone in still
+  holds one person. What each person is sending is read from the ROSTER's own streams, never
+  from the sections this page happens to have subscribed to: a camera is on for the meeting
+  whether or not this machine asked to see it.
+- **The CHAT panel is the app's own thread, in a column, and it is OPEN by default**
+  (`initialCallStagePanel`). A call in a conversation is half a conversation — what is being
+  said in the thread while people are talking is the other half — so the sidebar starts open
+  rather than behind a click nobody would think to make. There is no second condition on
+  that: every call with a thread behind it opens with it, on every screen. Three things
+  follow:
+  - **An open panel OPENS that conversation underneath**, so the history, the drafts, the live
+    feed and the read state are the ones the conversation already has — there is no second
+    history loader, and a message sent from the panel goes out through the same composer under
+    the same consent. It runs from the panel being OPEN rather than from the click that opened
+    it, so the default and the toggle take one path.
+  - **It is drawn only where there IS a thread** (`callStageChatConversation`): a meeting
+    joined from a calendar LINK names none — the service resolves one from the code and never
+    tells us — and a conversation this app does not hold has nothing behind a tab. That is the
+    one call that opens with no panel.
+  - **So a call MARKS ITS OWN THREAD READ**, because opening a conversation does (see
+    § Sending messages on `mark_read`). For every call the user starts that thread is already
+    the open one and nothing changes; a call they ANSWER in a thread they were not looking at
+    publishes that read when the page opens with its chat. That is the price of the default,
+    it was asked for deliberately, and Ghost mode still decides whether Teams is told.
+- **There is ONE composer in this app, and the panel TAKES it rather than adding a second**
+  (`useCallOwnsComposer`). It carries the live sentinel `sandbox-live.ts` proves its target
+  with (`data-conversation-id`), so two of them would give that question two answers — the
+  spec asserts the count. Nothing is hidden by the handover: the panel only holds it while
+  the stage is FULL, and a full stage covers the message pane completely.
+- **A message is read here and acted on there.** No reactions, no edit, no delete, no "…"
+  menu in the panel: a call's side column is for following what is being said and saying
+  something back, and everything else is one fold away in the conversation itself, where it
+  has the room its menus need. The transcript is bounded (`TRANSCRIPT_MESSAGES`) and not
+  virtualized for the same reason — mounting a whole backlog beside a live video stage would
+  cost the call frames.
+
+`cd web && bun run preview -- --out /tmp/call --call` captures the page, both panels, the
+folded window, the drag and the picture in both themes.
+
 ## Joining a meeting (the calendar stays read-only)
 
-A calendar event with a Teams link offers **Join here** beside the link that opens real
-Teams (`web/src/components/meeting-join-button.tsx`). It joins with a microphone and
-nothing else, so both actions exist and neither replaces the other: a meeting whose point
-is a shared screen is still one to open in Teams.
+A calendar event with a Teams link offers **Join here** beside the way out to real
+Teams (`web/src/components/meeting-join-button.tsx`) — and the HEADER of the meeting's own
+chat offers the same join, as the icon control every other chat's header carries (see
+§ Audio calls for why one shape). A meeting is usually noticed in the chat list, which is
+why both surfaces exist. It joins with a microphone and nothing else, so a meeting whose
+point is a shared screen is still one to open in Teams.
 
+**The event's footer holds TWO controls at every width: this app's join, and "Open in"**
+(`OpenIn` in `web/src/components/calendar-event-details.tsx`). The panel is 320px beside its
+event and a phone's screen in a dialog, and "Join here" + "Open in Teams" + "Open in
+Outlook" is wider than either — on a phone the last of them fell off the panel's own clip,
+so the event offered a join and no way to Outlook at all. Four rules hold it, and
+`web/e2e/calendar.spec.ts` pins each:
+
+- **A menu holds a CHOICE, so it is drawn only where there is one.** An ordinary event
+  carries an Outlook link and no meeting, and it keeps the labelled link it always had: a
+  menu whose single row is already named by its trigger asks for a click to say nothing.
+- **The panel's width is its HOST's decision, never its content's.** What really clipped the
+  footer was one unbreakable word — Graph's `bodyPreview` opens with the 80-character rule of
+  underscores Outlook draws above a Teams block — widening a grid item whose `min-width` was
+  `auto`. `min-w-0` on the panel and `break-words` on the tenant's own text is the fix, and
+  the mock carries a real invitation body so the case cannot hide again.
+- **Escape closes the MENU, and the panel takes the next one.** `@radix-ui/react-popover`
+  ships its own copy of the dismissable-layer module, so on a wide screen the panel keeps a
+  layer stack of its own and cannot know a menu opened above it — its Escape handler closed
+  the whole panel from under the menu. The menu owns the key while it is open.
+- **A click on an EVENT is not a dismissal** (`onInteractOutside` in
+  `calendar-event-popover.tsx`), and the pane's background rule tests its own DOM subtree
+  (`calendar-pane.tsx`). React events bubble out of a portal, so that rule used to see the
+  clicks inside the panel and close it from a control the user had just pressed — and Radix's
+  own dismissal then raced the click that re-opened it.
+
+**Two ADDRESSES, because the user reaches a meeting from two places, and neither covers
+the other** (`meeting_address` in `src/bin/server.rs`, `MeetingAddress` in
+`web/src/lib/call.ts`; exactly one of `join_url` / `meeting_thread` ever travels).
+
+- **A THREAD is a join address on its own** (`calling::MeetingJoin::from_thread_id`): Teams
+  mints one conversation per meeting and puts it in the chat list, and that
+  `19:meeting_…@thread.v2` id is what a long link carries in its own first segment. The
+  `meetingInfo` beside it is what the service PREFERS, not what it requires — a long link
+  with no context joins by its thread. So a meeting is joinable from the chat the user is
+  already looking at, with no link to find: measured on this tenant, 399 of its
+  conversations are meeting-backed and NOT ONE of them holds a join link anywhere in its
+  history, because the invitations use the short shape and that code lives in the calendar
+  event alone. Only a `19:meeting_` thread parses: a group chat has no meeting to join (it
+  is called instead), and a channel meeting hangs off a message id a thread cannot name, so
+  guessing `"0"` there would address the channel rather than the meeting inside it.
+- **The title comes from the store for a thread, and from the caller for a link.** Each is
+  read where it exists — a join link carries no subject, and a thread has a name of its own
+  — so no title is ever minted twice.
 - **The link IS the address, in either shape Teams writes one.**
   `calling::MeetingJoin::from_join_url` reads both: the long
   `…/l/meetup-join/{thread}/{message}?context={Tid,Oid}`, whose thread and context become
@@ -1109,8 +2094,9 @@ is a shared screen is still one to open in Teams.
   (`ConnectedForRosterOnly`), and the UI says "Waiting to be let in…" rather than
   "Connecting…" — the one thing they have to know is that nobody has admitted them yet.
 - **The roster is what "who" means in a meeting.** `rosterUpdate` frames replace the list
-  wholesale, we are dropped from it (`CallSession::others`), and the bar names one or two
-  people and counts a crowd. A meeting's title stands where a call names a person.
+  wholesale, we are dropped from it (`CallSession::others`), and the header names one or two
+  people and counts a crowd — the People panel is where every name is (see § A call is a
+  page). A meeting's title stands where a call names a person.
 - **Several voices, several audio elements.** Teams sends a meeting's voices as separate
   streams, so `call-media.ts` keeps one `<audio>` per remote stream and drops each when
   its stream ends. A single element would play one person and silently drop the rest.
@@ -1130,13 +2116,21 @@ is a shared screen is still one to open in Teams.
   its callbacks sit on, so the acceptance, its answer and the acknowledgement the service
   waits 30 s for were all invisible. The script is the live twin of `sandbox-live.ts` and
   carries the same rails — the meeting is a CONSTANT, the caller gets no raw page, the
-  button's own `data-join-url` is re-read immediately before the click, and it hangs up on
+  button's own address is re-read immediately before the click, and it hangs up on
   every path out including a throw. Its microphone is a FAKE device, so the offer is real
   and no real microphone opens. Both live drivers are named in the automation guard's
   allowlist; a copy of either parked outside the repo is still blocked.
-- **The button states which meeting it joins** (`data-join-url`), for the same reason the
-  composer states its conversation: an outward action a driver cannot prove is one it must
-  not take.
+  **`--from-chat` drives the other surface**, the CHAT header's Join, and it earns its place
+  the same way rather than by being a flag on a script that already exists: the thread is the
+  same constant (`AUTHORIZED_MEETING_THREAD`), the conversation is opened BY THAT ID instead
+  of clicked for in the sidebar, and two things out of the app's own state are checked before
+  the click — the composer's `data-conversation-id` and the button's `data-meeting-thread`.
+  No argument can aim either mode at another meeting. **The thread-addressed join is NOT yet
+  verified against the tenant**: it needs the always-on service re-staged onto the commit
+  that added it, and then one run of that command.
+- **The button states which meeting it joins** — `data-join-url` for a link,
+  `data-meeting-thread` for a thread, never both — for the same reason the composer states
+  its conversation: an outward action a driver cannot prove is one it must not take.
 
 ## The user's own status (outward, and gated like one)
 
@@ -1198,9 +2192,16 @@ mention whole. The chip is blue on a light blue wash in the composer and in the 
   (`8:…`, never a `19:` thread or a `28:` app), carry visible text, and have a span in
   the body. **A mention with no span is refused**, because `properties` is what
   notifies the person: a mention the reader cannot see is an invisible ping.
-- **The local agent never mentions anybody.** `agent_reply` passes an empty list, and
-  it must stay empty: a machine posting under the user's name must not be able to
-  notify a colleague.
+- **The local agent can mention the people of the thread it answers in, and nobody
+  else.** An answer writes `@[Full Name]` or `@Name`, and `agent_markdown` turns it into
+  the same pair a composer builds (see § The local agent). Four rails, all
+  in code: the candidates come from that conversation's own roster
+  (`thread_mentionable_people`, the very list the `members` RPC offers), a name that
+  resolves to nobody or to two people stays plain text, the span shows the name the
+  THREAD holds rather than the text the model typed, and a mention inside a code span is
+  code. The edit path carries `properties.mentions` for this — an agent's body only
+  exists after the edit, so a mention it writes can travel nowhere else — and
+  `build_edit_body` refuses a mention with no span exactly as a send does.
 - **The candidate list is READ-ONLY, and two sources feed it** (the `members` RPC,
   over `src/teams_members.rs`). `GET {chatService}/v1/threads/{id}?view=msnp24Equivalent`
   gives a chat's roster — verified; a **channel** answers with one member, us, so a
@@ -1366,17 +2367,20 @@ a fold, a pin or a local read position.
   reads.** `nicknamed!` is baked into `SELECT_COLS` and into the `conversations` /
   `channels` / `display_name_for_mri` / `other_party_name` / `thread_senders` queries,
   so a rename covers every message that person ever sent, the title of their 1:1, the
-  sidebar's preview attribution, the typing line, the "seen by" row and the @mention
-  list at once. That placement is the whole design: `insert_message` freezes a
+  sidebar's preview attribution, the typing line, the "seen by" row, the @mention
+  list and their merge requests at once. That placement is the whole design: `insert_message` freezes a
   message's `sender` at first insert and no sync refreshes it, so a rename applied at
   render time would have to be applied at a dozen render sites — and the one that got
   forgotten is the bug. Never move it out to a caller.
-- **What the store never produced, the server resolves explicitly.** Three names do not
+- **What the store never produced, the server resolves explicitly.** Four names do not
   come through a store read: the activity feed's actor (`feed_json`), the sender of a
-  live push (`push_live_message`, which gets the frame that just arrived), and a 1:1's
+  live push (`push_live_message`, which gets the frame that just arrived), a 1:1's
   title in `conversation_context` — which is why that one takes `self_mri`, so a
-  nickname the user gave THEMSELVES can never retitle their own chat. The phone is the
-  sharpest case: it is the one surface the user cannot correct by looking again.
+  nickname the user gave THEMSELVES can never retitle their own chat — and a person on the
+  GitLab page, whose name arrives from GITLAB and is matched to a colleague by it
+  (`with_teams_people`, see § A tracker user who is also a colleague). Each of the four ends
+  in the same `display_name_for_mri`, so there is one answer about a name in this app. The
+  phone is the sharpest case: it is the one surface the user cannot correct by looking again.
 - **The override never rewrites a message.** An @mention chip inside a body, the author
   of a reply quote, and the participant list of a call event all keep the words their
   frame carried. The rule is one sentence: it applies to every name this app STATES
@@ -1507,12 +2511,17 @@ user's. What changes is only what is asked.
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
   and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
-  `src/gitlab.rs` and `src/linear.rs`) plus the ONE write those trackers get — a merge
-  request's approval, and its undo (`src/gitlab_approval.rs`, see § The trackers) —,
+  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its five reads (the DIFF
+  among them, whose unified patch this app writes over GitLab's bare hunks) in
+  `src/gitlab_mr.rs` over a durable response cache and its four writes in
+  `src/gitlab_mr_write.rs`, plus who a person on EITHER tracker is in the user's own Teams
+  (`src/tracker_people.rs`, see § A tracker user who is also a colleague) — plus the approval
+  those trackers got first, and its undo (`src/gitlab_approval.rs`, see § The trackers),
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
   § The local agent) and the app's own update — the check, the download and the swap
-  (`src/update.rs`, see § Updating the app from inside it).
+  (`src/update.rs`, see § Updating the app from inside it) — plus the restart the user can
+  ask for without a new build at all (`src/restart.rs`, see § Settings › This app).
   Exposed over a local WebSocket (`ws://127.0.0.1:19420`).
 - One front-end, talking to the backend only through that WebSocket. Local-first is
   enforced server-side; the front-end touches neither the network nor SQLite directly.
@@ -1530,7 +2539,10 @@ user's. What changes is only what is asked.
     corner radius — so a row mixing them reads as two designs sharing one screen.
     `web/src/lib/icon-library.test.ts` pins that: it scans the source tree and the
     manifest, and fails on a second icon package. Pick the nearest hugeicons glyph
-    rather than installing one.
+    rather than installing one. A vendored component that ships its OWN pack is held to
+    the same rule through its own seam rather than exempted: `@pierre/trees` draws the
+    merge-request diff's file tree with hugeicons, serialized into the sprite it injects
+    (`web/src/lib/tree-icons.ts`, see § The DIFF).
   - There was a terminal UI (OpenTUI + Solid, in `ui/`) until 2026-08-03. It is gone,
     and the web app is the only client: do not re-add a second front-end, and read a
     comment that names one as history rather than as a place to keep in sync.
@@ -1582,9 +2594,41 @@ send-capable port they do not know is a hole in the guard.
 
 There is no version number: teams-lite ships as a ROLLING `latest` GitHub release, so a
 build IS the commit it was compiled from (`TEAMS_BUILD_REV`, baked by build.rs). The
-backend checks once at startup whether `latest` names a different commit and, if it does,
-the sidebar offers the update as a blue button above the status line
+backend WATCHES whether `latest` names a different commit and, when it does, the sidebar
+offers the update as a blue button above the status line
 (`web/src/components/update-button.tsx`, over the pure `web/src/lib/update.ts`).
+
+**The watch is a POLL, every two minutes, and one request per MACHINE**
+(`spawn_release_poll` / `Ctx::poll_release`, over `RELEASE_CHECK_INTERVAL`). It used to be a
+single check at startup, and that was wrong for the app this is: it runs for weeks on a
+phone, so nothing published after it booted was ever offered — the reliable way to be shown
+an update was to restart the app the button exists to restart. Four rules hold it, and each
+is pinned by a test:
+
+- **The budget is MEASURED, and it sets the floor on the interval.** GitHub allows an
+  unauthenticated caller **60 requests an hour per IP** (`update::GITHUB_HOURLY_REQUESTS`),
+  and a conditional request buys nothing — an `If-None-Match` answering `304` was measured
+  still spending one, so an ETag is not the way out. Two minutes is 30 an hour, half the
+  budget, and the other half belongs to the compare API behind the changelog and to the
+  re-read before every download.
+- **One request per machine, not per backend.** The answer is the same for every process
+  here, so the FETCH is claimed (`Store::claim_release_check`, a moving timestamp rather than
+  a `push_deliveries` key, because the thing being claimed comes round again) and the answer
+  is shared through the store (`update::SETTING_RELEASE`). A backend that loses the claim
+  reads that answer on the same pass, so it learns about a release just as quickly without
+  asking. This machine runs three send-capable backends: a poll per backend would spend the
+  whole budget and then be refused `403`, whose only symptom is an update button that stops
+  appearing. The split that makes it possible is `update::fetch_release` (the network half,
+  machine-wide) beside `update::compare` (pure, per build — two installs here run two
+  different commits).
+- **A read-only backend never takes the claim.** It cannot install anything, and holding the
+  machine's slot would delay by up to one interval the discovery by the app that can. It
+  still reads the stored answer, so its UI says what the app's does.
+- **Silence unless something moved.** `update_available` goes out when the release CHANGES
+  and never on a pass that found the same one, so a page open for a week is not sent an event
+  every two minutes and the journal keeps one line per release rather than 720 a day. A pass
+  also stands aside whenever the phase is not `Idle`: the user has pressed something, and the
+  asset a progress bar is drawn against is the download's own (`refresh_release`).
 
 **Every build publishes TWO releases, and each answers what the other cannot**
 (`.github/workflows/build.yml`). `build-<shortsha>` is immutable, one per commit, and kept
@@ -1669,6 +2713,23 @@ button says what it costs before it is pressed.
   keeps the inode it started from — overwriting the bytes of a running executable is how a
   process gets a `SIGBUS` — and the next start gets the new build
   (`update::install_binary`, pinned by an inode assertion).
+- **A NEW BINARY IS A NEW BACKEND AND A NEW WEB BUNDLE, and neither is told apart by its
+  SIZE.** The release asset is one file that CARRIES both: the launcher unpacks the Rust
+  backend to `~/.cache/teams-lite/server` and the web app to `.../web`, keeps what is
+  already there when it is the asset this binary holds, and used to decide that on the byte
+  COUNT. A Rust release binary's size is decided by section alignment, so three consecutive
+  builds weighed exactly 17 432 216 bytes — the update installed the new launcher, the
+  launcher kept the backend it had extracted two commits earlier, and the BACKEND is the
+  process that compares its own build with the release. So the app offered the same update
+  for ever: download, apply, restart, `Update available`, again — with a new UI in front of
+  an old backend, where a new RPC answers `unknown method`. An asset is identified by its
+  CONTENT now (`assetId` in `launcher/src/embedded-cache.ts`, stamped beside the extracted
+  copy), every failure to read that stamp extracts again, and the backend is moved into
+  place by a RENAME for the same reason `update::install_binary` is — the released unit and
+  a `teams` the user typed share one cache path, so this machine may be running the file
+  being replaced. `launcher/src/embedded-cache.test.ts` pins each half, and scans both
+  extractors so a size comparison — which reads as a sensible optimisation — cannot come
+  back.
 - **What is downloaded is checked before it can be installed**: the byte count must match
   the size the release published, and the first four bytes must be an ELF header. Neither
   alone is enough — a captive portal's login page is the wrong shape, and a cut-off
@@ -1694,6 +2755,17 @@ button says what it costs before it is pressed.
     reader hunting a network fault that was never there. The response's own `Content-Length`
     is checked before the bytes, so a replaced asset costs a page rather than 130 MB — but it
     is never taken as the expected size, since a captive portal states a length too.
+- **A failed SWAP says why, on this machine and to every page.** The swap is the one step that
+  touches something outside this process, so it is the step that fails for reasons nobody in
+  the app can guess at — and it used to fail silently: the page that had clicked drew a
+  failure out of its rejected RPC, the journal held nothing, a second page kept drawing
+  `Restarting…`, and the sentence the user got named the install path with the CAUSE stripped
+  off it (`e.to_string()` on an `anyhow::Error` is the outermost context alone). All three
+  halves are pinned by a test: the slot goes `Failed` with the whole chain so every page
+  agrees, one journal line keeps the record after that page is closed, and **an RPC refusal
+  reaches its client as `{e:#}`** — which is every surface that states a refusal, the composer
+  and the approval menu included. The retry is a fresh download, which is what heals the
+  commonest cause.
 - **The RESTART is the launcher's, and only the launcher's** (`launcher/src/update.ts`).
   The web server runs inside that process and the backend is its child, so it is the one
   process that can free both ports and bring both back: the backend asks with an
@@ -1726,6 +2798,9 @@ button says what it costs before it is pressed.
 - The notice used to be an eleven-pixel link that REPLACED the status line, where it hid
   the truncated `error:` a sign-in outage puts there (see `broker-banner.tsx`). It has its
   own row now, and `web/e2e/update.spec.ts` pins that it never covers that line again.
+- **The user can also ask NOW, from Settings › This app** (`update_check`), which is the poll's
+  own pass on their own ask — and the only surface that answers "there is nothing new". See
+  § Settings › This app, which also holds the restart that has no new binary in it.
 
 `web/mock/server.ts` reproduces the whole flow with no GitHub and no binary (armed with
 the `{kind: "update"}` test hook, which a spec MUST clear afterwards — one mock process
@@ -1737,6 +2812,91 @@ capped. `cd web && bun run preview -- --out /tmp/upd
 --update` captures the button, the changelog it discloses in both themes, the capped list,
 the download mid-transfer, the restart it offers next, the failure and its reason, and the
 link the other install shape keeps.
+
+## Settings › This app (a manual check, and a restart)
+
+Settings' last section holds the two things the user can do to the APP rather than to their
+Teams account: **Check for updates**, and **Restart the backend**
+(`web/src/components/maintenance-settings.tsx`, over the pure `web/src/lib/maintenance.ts`).
+Both exist for the same reason, and it is the reason most of this app exists: it is read from
+a PHONE, over a tailnet, and the machine it runs on is somewhere else — everything either row
+does used to need a terminal on that machine.
+
+**Both report their outcome where the click was made**, which is the rule § Sending messages
+states for the composer and § The trackers for the approval menu. These two need it more than
+either: a check that finds nothing new changes nothing anywhere else in the app, and a restart
+nobody carried out looks exactly like one that worked. The words for every state live in
+`maintenance.ts` so they are unit-tested; the component holds the one thing a pure function
+cannot know — whether the socket really went down and came back.
+
+**`update_check` is the POLL's own pass, on the user's ask** (`Ctx::check_release_now`, over
+the shared `Ctx::release_pass` — one spelling of "is there a newer build", with `ReleaseAsk`
+carrying the single difference between the clock and the button). Four rules, each pinned by a
+test:
+
+- **It is an OPEN read, unlike everything else in this area.** It changes nothing on this
+  machine, publishes nothing about the user, and makes the request the backend already makes
+  every two minutes — a gate would only stop a page from answering "am I up to date?".
+- **The user's ask TAKES the machine's slot**, whatever its timestamp says
+  (`Ctx::claim_release_read`): they pressed the button to learn where they stand now, and an
+  answer up to two minutes old is not that. It still MOVES the timestamp, so the clock's next
+  tick stands down — one request for the press, not one for the press and one behind it.
+- **A request the USER asked for and could not make is a failure, never a verdict.** The poll
+  falls back to the stored answer with one journal line; a manual check reports the reason
+  instead, because "you are up to date" on the strength of a read that failed is the one
+  answer it must not give.
+- **The row says an update exists and points at the SIDEBAR.** The update control there is
+  the one place a build is downloaded and restarted onto (§ Updating the app from inside it);
+  a second one here would be a second spelling of six states. Nothing in either surface ever
+  names a commit.
+
+**`restart_backend` is `update_apply` minus the new binary, and the same two shapes carry it
+out** (`src/restart.rs` decides which). It is the one repair for a backend that answers reads
+and has stopped doing something else — and it is deliberately NOT the fix for a broken
+sign-in, which has its own button on its own banner because that one restarts the Intune
+container instead. Five rules hold it, and each is pinned by a test:
+
+- **A backend cannot restart itself, so something has to bring it back — and each watcher
+  SAYS so.** The staged service is the backend under systemd, so it exits and `Restart=always`
+  starts it again; the `teams` command and `teams-lite-app.service` run the LAUNCHER, which
+  owns the backend as a child and re-spawns it on the `backend_restart` event
+  (`launcher/src/backend-restart.ts`), with its web server never going down — so the page
+  stays served and only its socket blinks. Neither is detected: `INVOCATION_ID` proves only
+  that systemd started something in this tree (a launcher unit's child inherits it) and
+  `Restart=` is invisible from inside a process, so the launcher sets `TEAMS_LITE_LAUNCHER` on
+  every backend it spawns and the backend unit declares `TEAMS_LITE_RESTART_ON_EXIT`. **A
+  backend nobody watches is REFUSED** and told so — a button that stopped the app for good is
+  the one outcome this must not have.
+- **The re-spawned child keeps the PINNED write token.** A fresh one would leave every send
+  refused until somebody reloaded, which is the exact failure the pinned token exists to
+  prevent (§ Automation safety).
+- **The user asks twice while a local agent is writing a reply.** A run dies with the process
+  and nothing can resume it, so the first press is answered with the count it would cut off
+  (`restarted: false, blocked: "agent"`) and `force` is the second press — Delete's own
+  pattern, decided in the BACKEND because the count is a fact only it holds: a page knows
+  about the runs it happened to watch, and the common case is a reply asked for from a phone.
+  The sentence never says the answer is lost, because it is not: whichever backend comes up
+  rewrites that message as interrupted (`repair_abandoned_agent_runs`).
+- **The answer goes out before the process does** (`RESTART_ANSWER_GRACE`), because the reply
+  travels on the socket the restart drops — and the calling registration is handed back on the
+  way out, exactly as the idle shutdown does it and for its reason.
+- **The SOCKET is the proof.** It drops when the backend goes and returns when it is back, so
+  a restart this page watched happen is one it can report. Nothing dropping inside
+  `RESTART_STALLED_MS` is the launcher not being there at all — the backend accepted, asked,
+  and nobody acted — and the row says so rather than spinning for ever. A connection that went
+  and has not returned stays `Restarting…` on purpose: the app already says the backend is
+  down, and this row must not call a restart on its way a failure.
+
+It is gated as a `MACHINE_METHODS` entry — the write token, refused read-only — and the
+automation hook blocks a script that names it against a live port, for the reason it blocks
+`update_apply`: tooling must not restart the app somebody is reading.
+
+`web/mock/server.ts` reproduces both rows with no GitHub and nothing to restart (the
+`{kind:"maintenance"}` test hook arms a check's outcome, the agent runs a restart would cut
+off, and the machine that would refuse — a spec MUST reset it, since one mock process serves
+the whole run). `cd web && bun run preview -- --out /tmp/app --maintenance` captures the
+section, the check's answer and the armed restart in both themes, and
+`web/e2e/maintenance.spec.ts` pins every rule above.
 
 ## The always-on service
 
@@ -1771,6 +2931,22 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   `update` holds the `try-restart` until the agent is quiet — bounded, then it proceeds
   (see § The local agent for the other half, which closes what a restart did leave
   behind). `--now` skips the wait and is the user's: the hook refuses it.
+- **And it waits BEFORE it stages, because staging alone breaks the running app.** The web
+  bundle is a DIRECTORY of hashed chunks and the SSR handler imports them off disk as the
+  routes are asked for, so a `dist/` replaced under the live web server leaves it holding a
+  module graph whose files are gone: the process stays up and every page dies. It reached
+  the user on 2026-08-06 — an `update` staged, then held its restart for a 40-minute
+  `@claude` run, and their phone was served Bun's own "fetch(req) did not return a Response
+  object" page for all of it. So the order is build (which touches nothing live), wait,
+  stage, restart, and `update::tests::the_installer_waits_before_it_replaces_a_live_artifact`
+  pins it. The other half is in the app: `renderWithSsr` in `web/server.ts` never hands Bun
+  an object it refuses to serve — it tells a REPLACED bundle from an SSR fault by the build
+  stamp on disk (`bundleWasReplaced`) and answers 503 or 500 accordingly, because the
+  reader's next move differs and "we are updating" about a real fault sends them reloading
+  for ever. Neither half replaces the other: `install` stages without restarting anything.
+  Note what Bun's own refusal cost — srvx's `NodeResponse` passes `instanceof Response` and
+  is still refused, so the test is the CONSTRUCTOR, and the cause is read out of the refused
+  body rather than dumped as a wall of getters.
 - **It is not the only install on this machine.** `teams-lite-app.service` runs the
   RELEASED build beside it, on 19422/19442, and the same script owns that unit — see
   § Running the released build beside the staged one for what keeps the two apart.
@@ -1852,9 +3028,29 @@ What the two DO share is the SQLite store, deliberately — that is a shape this
 has, and every duplication hazard is handled where it belongs: a live notification is
 claimed in `push_deliveries` before it is pushed, an `@claude` trigger is claimed before it
 is answered, and the presence endpoint id lives in the store so both backends refresh ONE
-registration. Two things are deliberately NOT shared: the tailnet mapping (give the
-released one its own port if the phone should reach it) and calling, which stays off in
-that unit — two registered calling endpoints on one machine would ring both.
+registration. One thing is deliberately NOT shared: the tailnet mapping (give the released
+one its own port if the phone should reach it — this machine serves 8443 → 19440 and
+8444 → 19442).
+
+**They also share the DOWNLOAD CACHE, and that one bit them.** `~/.cache/teams-lite/updates`
+is per MACHINE while an update's phase is per PROCESS, so the staged service's own cleanup
+reached the released build's 130 MB: the staged pair IS the newest release within minutes of
+every push, its two-minute poll therefore found itself current, and it cleared that directory
+wholesale — including the build the released one had just downloaded and was one click from
+installing. The second click failed, and the reader was shown the install path with no reason
+under it. So a cleanup **prunes by rev and spares whatever `latest` names**
+(`update::prune_downloads`, and there is deliberately no way to spell "remove everything"):
+every install fetches exactly what `latest` names, which is what makes one process's cleanup
+safe for another's transfer. The kept build is a bounded 130 MB that the next release clears.
+A phase check cannot stand in for it — this backend's phase says nothing about the other's.
+
+**CALLING runs in BOTH, and that is the one rule here that was reversed on purpose.** The
+app unit used to carry `TEAMS_LITE_CALLING=0` so only the staged pair rang; the cost was
+that every call and Join control on 19442 was drawn disabled, and a phone whose bookmark
+pointed there found an app that could not call. Both register now — a calling endpoint id
+is keyed by the PORT, so they are two devices to the service and a call rings both, exactly
+as it rings a phone beside a laptop. That second ring is the deliberate price of every
+window being able to place a call.
 
 **The REAL-TIME endpoint id is the sharpest thing they must not share, and it was the one
 bug this arrangement really cost.** The live feed follows the endpoint id, and a second

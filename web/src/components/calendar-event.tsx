@@ -123,8 +123,14 @@ function Rail(props: { hidden?: boolean; rounded?: boolean }) {
  *
  * The time is dropped when the block is too short to carry a second line — a
  * 15-minute hold is 12 pixels tall, and half a clock reading is worse than none.
+ *
+ * `tight` is the shortest of those: a block whose own height is less than one padded
+ * line. It gives up its padding and centres the title on the block, because a title
+ * clipped along its baseline is a title nobody can read. The block is never grown to
+ * fit instead — that is what used to draw a quarter-hour meeting over the one after it
+ * (see `layoutDayGrid`).
  */
-export function EventBlock(props: EventVisualProps & { compact?: boolean }) {
+export function EventBlock(props: EventVisualProps & { compact?: boolean; tight?: boolean }) {
   const { event } = props;
   const span = eventSpan(event);
 
@@ -133,14 +139,16 @@ export function EventBlock(props: EventVisualProps & { compact?: boolean }) {
       {...eventShellProps(props)}
       className={cn(
         filledClasses(props),
-        "flex-col gap-px rounded-[4px] py-[1px] pl-2 pr-1",
+        "flex-col gap-px rounded-[4px] pl-2 pr-1",
+        props.tight ? "justify-center py-0" : "py-[1px]",
         props.className,
       )}
     >
       <Rail rounded />
       <span
         className={cn(
-          "w-full truncate text-[11px] font-semibold leading-[1.35] text-[var(--event-title)]",
+          "w-full truncate text-[11px] font-semibold text-[var(--event-title)]",
+          props.tight ? "leading-none" : "leading-[1.35]",
           isDeclined(event) && "line-through",
         )}
       >

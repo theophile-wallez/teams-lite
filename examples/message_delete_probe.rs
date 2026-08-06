@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         "",
         None,
         Some("<p>delete probe — this message removes itself</p>"),
-        None,
+        &[],
         &[],
         // A probe mentions nobody: a mention notifies the person it names.
         &[],

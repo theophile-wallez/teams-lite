@@ -1,0 +1,657 @@
+import { test, expect, gotoApp, setMergeRequestControl } from "./helpers";
+import type { Page } from "@playwright/test";
+
+// The GitLab merge-request page: a sidebar of what is NOT merged, and one merge request in
+// full — its description, its LIVE pipeline, its approvals, its comments, and the four
+// writes it offers (merge, comment, delete a comment, close).
+//
+// Everything runs against the mock's own merge requests (the `gitlab_mr_*` fixtures in
+// web/mock/server.ts): no GitLab, no token, nothing leaving the machine. That is what makes
+// the MERGE — the one action in this app no later click takes back — testable at all.
+//
+// Serial, and each test leaves the surface as it found it, because one mock process serves
+// the whole run and these tests MERGE and CLOSE the fixtures.
+test.describe.serial("the GitLab merge-request page", () => {
+  const row = '[data-testid="gitlab-row"]';
+
+  /** Open the GitLab tab and wait for its rows. */
+  async function openGitLab(page: Page) {
+    await gotoApp(page);
+    await page.locator('[data-testid="tab-gitlab"]').click();
+    await expect(page.locator(row).first()).toBeVisible();
+  }
+
+  /** Open the merge request with this iid and wait for its page. */
+  async function openMergeRequest(page: Page, iid: number) {
+    await page.locator(`${row}[data-iid="${iid}"]`).click();
+    await expect(page.locator('[data-testid="gitlab-heading"]')).toBeVisible();
+  }
+
+  test.afterEach(async ({ page }) => {
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("wears GitLab's line in the tab strip, and GitLab's colours once it is current", async ({
+    page,
+  }) => {
+    // The tab strip is a row of the app's OWN glyphs, and a strip says which section is
+    // current: a brand mark lit in every state read as the selected tab. So the tanuki has
+    // two spellings — the outline at rest, one weight with its four neighbours, and GitLab's
+    // three fills where every other tab takes the accent (see `GitLabLogoOutline`).
+    await gotoApp(page);
+    const tab = page.locator('[data-testid="tab-gitlab"]');
+    const outline = tab.locator('[data-testid="gitlab-logo-outline"]');
+    const brand = tab.locator('[data-testid="gitlab-logo"]');
+    await expect(tab).toHaveAttribute("data-state", "inactive");
+    await expect(outline).toBeVisible();
+    await expect(brand).toBeHidden();
+    const atRest = await outline.boundingBox();
+
+    await tab.click();
+    await expect(tab).toHaveAttribute("data-state", "active");
+    await expect(brand).toBeVisible();
+    await expect(outline).toBeHidden();
+
+    // And the swap never moves the target the user aims at: the two marks are one size, in
+    // one place, so only the ink changes.
+    const asCurrent = await brand.boundingBox();
+    expect(atRest).not.toBeNull();
+    expect(asCurrent).not.toBeNull();
+    expect(Math.abs(asCurrent!.x - atRest!.x)).toBeLessThan(1);
+    expect(Math.abs(asCurrent!.y - atRest!.y)).toBeLessThan(1);
+    expect(Math.abs(asCurrent!.width - atRest!.width)).toBeLessThan(1);
+  });
+
+  test("lists what is not merged, and never a merged merge request", async ({ page }) => {
+    await openGitLab(page);
+
+    // Open by default — the question the page exists to answer.
+    await expect(page.locator('[data-testid="gitlab-state-opened"]')).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    const rows = page.locator(row);
+    await expect(rows).toHaveCount(4);
+    // Every row states its project and its reference, because "!42" alone means nothing
+    // across a hundred projects.
+    await expect(rows.first().locator('[data-testid="gitlab-row-project"]')).toHaveText(
+      "acme/webapp",
+    );
+
+    // A row carries NO pipeline badge: the list endpoint answers without one, so a status
+    // per row would cost one request per merge request (see src/gitlab_mr.rs).
+    await expect(page.locator('[data-testid="gitlab-pipeline-status"]')).toHaveCount(0);
+
+    // The closed half is the other half of "not merged" — and the merged one is in neither.
+    await page.locator('[data-testid="gitlab-state-closed"]').click();
+    await expect(page.locator(`${row}[data-iid="594"]`)).toBeVisible();
+    await expect(page.locator(`${row}[data-iid="596"]`)).toHaveCount(0);
+    await page.locator('[data-testid="gitlab-state-opened"]').click();
+    await expect(page.locator(`${row}[data-iid="596"]`)).toBeVisible();
+  });
+
+  /** Open the scope picker and wait until its rows can be clicked.
+   *
+   *  Radix keeps a CLOSING menu mounted for its exit animation, and a menu opened during
+   *  that window is re-created mid-flight — which detaches the row this is about to click.
+   *  Only a script drives a control that fast, so the waiting belongs here (the calendar's
+   *  view menu makes the same allowance, for the same reason). */
+  async function openScopePicker(page: Page) {
+    const menu = page.locator('[role="menu"]');
+    await menu.waitFor({ state: "detached" }).catch(() => {});
+    await page.locator('[data-testid="gitlab-scope-picker"]').click();
+    await menu.waitFor();
+  }
+
+  test("narrows by scope, and the filter says which is which", async ({ page }) => {
+    await openGitLab(page);
+    await openScopePicker(page);
+    // Every scope names what it means: a four-way filter of one-word labels needs it.
+    const options = page.locator('[data-testid="gitlab-scope-option"]');
+    await expect(options).toHaveCount(4);
+    await expect(options.filter({ hasText: "I review" })).toContainText("reviewer");
+
+    await options.filter({ hasText: "Mine" }).click();
+    await expect(page.locator('[data-testid="gitlab-scope-picker"]')).toHaveAttribute(
+      "data-scope",
+      "mine",
+    );
+    // Only the user's own: !595, and not Ada's !596.
+    await expect(page.locator(`${row}[data-iid="595"]`)).toBeVisible();
+    await expect(page.locator(`${row}[data-iid="596"]`)).toHaveCount(0);
+
+    // Back to everything, so the next test starts where this one did.
+    await openScopePicker(page);
+    await page.locator('[data-testid="gitlab-scope-option"][data-scope="all"]').click();
+    await expect(page.locator(`${row}[data-iid="596"]`)).toBeVisible();
+  });
+
+  test("draws one merge request in full, and its pipeline follows the run", async ({ page }) => {
+    // Every read of the live pipeline moves it on, and the tests before this one have read
+    // it — so it starts from its first frame here, which is what makes "a job turns green
+    // on its own" a thing to watch rather than a race.
+    await setMergeRequestControl(page, { clear: true });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    // The header states the branches in the direction the merge goes.
+    await expect(page.locator('[data-testid="gitlab-source-branch"]')).toHaveText(
+      "feature/ha-replicas",
+    );
+    await expect(page.locator('[data-testid="gitlab-target-branch"]')).toHaveText("main");
+    await expect(page.locator('[data-testid="gitlab-state"]')).toHaveText("Open");
+
+    // The description is GitLab's own MARKDOWN through the app's own renderer, so its bold is
+    // bold rather than asterisks — and no remote reference comes with it.
+    const description = page.locator('[data-testid="gitlab-description"]');
+    await expect(description.locator("strong").first()).toHaveText("two replicas");
+
+    // The pipeline is grouped into GitLab's own stages, in GitLab's own order.
+    const stages = page.locator('[data-testid="gitlab-stage"]');
+    await expect(stages).toHaveCount(3);
+    await expect(stages.nth(0)).toHaveAttribute("data-stage", "check");
+    await expect(stages.nth(2)).toHaveAttribute("data-stage", "deploy");
+
+    // And it is LIVE: the panel says it is following, and a job that was running turns
+    // green on its own — the mock advances one step per read, so this is the poll working
+    // rather than a still picture.
+    await expect(page.locator('[data-testid="gitlab-pipeline-live"]')).toBeVisible();
+    const unit = page.locator('[data-testid="gitlab-job"]').filter({ hasText: "unit" });
+    await expect(unit).toHaveAttribute("data-status", "running");
+    await expect(unit).toHaveAttribute("data-status", "success", { timeout: 20_000 });
+  });
+
+  test("draws the description as the markdown GitLab holds, not as its source", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    const description = page.locator('[data-testid="gitlab-description"]');
+
+    // A heading is a heading, and its hashes are gone. Measured on the tenant: 32 of the 36
+    // descriptions with words in them carry one (see examples/merge_request_markdown_recon.rs).
+    await expect(description.locator("h2").first()).toHaveText("What changes");
+    await expect(description).not.toContainText("## What changes");
+
+    // A pipe table is a real table — 24 of those 36 hold one, and printed as source it is a
+    // wall of pipes with the |---| row missing.
+    const table = description.locator("table");
+    await expect(table).toHaveCount(1);
+    await expect(table.locator("th")).toHaveCount(3);
+    await expect(table.locator("tbody tr")).toHaveCount(3);
+    await expect(description).not.toContainText("| -------- |");
+
+    // A fenced block keeps its own lines, and nothing inside it was parsed as markdown.
+    const code = description.locator("pre");
+    await expect(code).toHaveCount(1);
+    await expect(code).toContainText("helmfile -e staging apply --selector name=web");
+    await expect(description).not.toContainText("```");
+
+    // A task list says which box is ticked, and a sub-bullet sits inside its own parent.
+    await expect(description.getByText("☑ staging")).toBeVisible();
+    await expect(description.getByText("☐ production, one cluster at a time")).toBeVisible();
+    await expect(description.locator("ul ul li")).toHaveCount(2);
+
+    // A thematic break is a rule rather than three characters — or, as the card parser read
+    // it, nothing at all.
+    await expect(description.locator("hr")).toHaveCount(1);
+
+    // And NOTHING in it is fetched: the promise the whole page is built on holds for a body
+    // written by somebody outside this app.
+    await expect(description.locator("img")).toHaveCount(0);
+
+    // A comment is the same markdown, because a review quotes code as often as a description
+    // does.
+    await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
+    const note = page.locator('[data-testid="gitlab-note"]').filter({ hasText: "MEDIUM" });
+    await expect(note.locator("pre")).toContainText("sleep {{ .Values.drain }}");
+  });
+
+  test("says why a merge request cannot be merged, instead of refusing after the click", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 595);
+
+    const merge = page.locator('[data-testid="gitlab-merge"]');
+    await expect(merge).toBeDisabled();
+    // GitLab's own reason, in words the reader can act on.
+    await expect(page.locator('[data-testid="gitlab-merge-hint"]')).toContainText(
+      "still needs an approval",
+    );
+
+    // A conflict is a different reason, and it is stated as one.
+    await page.locator('[data-testid="tab-gitlab"]').click();
+    await openMergeRequest(page, 63);
+    await expect(page.locator('[data-testid="gitlab-merge"]')).toBeDisabled();
+    await expect(page.locator('[data-testid="gitlab-merge-hint"]')).toContainText("conflicts");
+  });
+
+  test("the merge asks twice, and says what the second click costs", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    // The first click ARMS. Nothing has been merged: the state badge still says Open.
+    await page.locator('[data-testid="gitlab-merge"]').click();
+    const confirm = page.locator('[data-testid="gitlab-merge-confirm"]');
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toContainText("cannot be undone");
+    await expect(page.locator('[data-testid="gitlab-merge-hint"]')).toContainText(
+      "no later click takes it back",
+    );
+    await expect(page.locator('[data-testid="gitlab-state"]')).toHaveText("Open");
+
+    // And it can be taken back before it happens.
+    await page.locator('[data-testid="gitlab-merge-cancel"]').click();
+    await expect(page.locator('[data-testid="gitlab-merge"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-state"]')).toHaveText("Open");
+  });
+
+  test("a refused merge is reported where the click was made", async ({ page }) => {
+    await setMergeRequestControl(page, {
+      refuse: "GitLab refused: this account may not merge that merge request",
+    });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    await page.locator('[data-testid="gitlab-merge"]').click();
+    await page.locator('[data-testid="gitlab-merge-confirm"]').click();
+
+    // The refusal is beside the button, in GitLab's own words — never swallowed, and never
+    // left to the eleven pixels of the status line.
+    await expect(page.locator('[data-testid="gitlab-action-error"]')).toContainText(
+      "may not merge",
+    );
+    // And nothing was merged, so the page still offers the merge.
+    await expect(page.locator('[data-testid="gitlab-state"]')).toHaveText("Open");
+    await expect(page.locator('[data-testid="gitlab-merge"]')).toBeVisible();
+  });
+
+  test("comments under the user's own name, and takes one back", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    const input = page.locator('[data-testid="gitlab-comment-input"]');
+    await input.fill("Checked the drain window against the load balancer — 20s is enough.");
+    // The box says whose name it posts under, because that is what the reader is agreeing
+    // to before they press it.
+    await expect(page.locator('[data-testid="gitlab-composer"]')).toContainText("under your name");
+    await page.locator('[data-testid="gitlab-comment-send"]').click();
+
+    const posted = page
+      .locator('[data-testid="gitlab-note"]')
+      .filter({ hasText: "20s is enough" });
+    await expect(posted).toBeVisible();
+    // Only now is the box empty: a comment that never left must not vanish from under the
+    // person who wrote it.
+    await expect(input).toHaveValue("");
+
+    // The user's OWN comment carries the undo that makes commenting acceptable — and it
+    // asks twice, like every other action that cannot be walked back by hovering.
+    await posted.locator('[data-testid="gitlab-note-delete"]').click();
+    await posted.locator('[data-testid="gitlab-note-delete-confirm"]').click();
+    await expect(
+      page.locator('[data-testid="gitlab-note"]').filter({ hasText: "20s is enough" }),
+    ).toHaveCount(0);
+  });
+
+  test("offers no deletion on somebody else's comment", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    // A colleague's comment is not the user's, so there is nothing to delete on it — GitLab
+    // would let a maintainer remove it, and this app never offers that.
+    const theirs = page
+      .locator('[data-testid="gitlab-note"]')
+      .filter({ hasText: "Two replicas is right" });
+    await expect(theirs).toBeVisible();
+    await expect(theirs).not.toHaveAttribute("data-mine", "true");
+    await expect(theirs.locator('[data-testid="gitlab-note-delete"]')).toHaveCount(0);
+
+    // The user's own reply in the thread beside it does offer one.
+    const mine = page.locator('[data-testid="gitlab-note"][data-mine="true"]').first();
+    await expect(mine.locator('[data-testid="gitlab-note-delete"]')).toBeVisible();
+  });
+
+  test("replies into a thread rather than starting a new comment", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    const thread = page.locator('[data-testid="gitlab-discussion"][data-thread="true"]');
+    await expect(thread).toBeVisible();
+    const before = await thread.locator('[data-testid="gitlab-note"]').count();
+
+    await thread.locator('[data-testid="gitlab-reply"]').click();
+    await expect(page.locator('[data-testid="gitlab-composer"]')).toContainText(
+      "Replying in a thread",
+    );
+    await page.locator('[data-testid="gitlab-comment-input"]').fill("Re-quoted, thanks.");
+    await page.locator('[data-testid="gitlab-comment-send"]').click();
+
+    // The reply landed IN the thread — the wrong place is exactly the failure nothing
+    // reports afterwards.
+    await expect(thread.locator('[data-testid="gitlab-note"]')).toHaveCount(before + 1);
+    await expect(thread).toContainText("Re-quoted, thanks.");
+
+    // Put the fixture back, since one mock process serves the whole run.
+    const posted = thread.locator('[data-testid="gitlab-note"]').last();
+    await posted.locator('[data-testid="gitlab-note-delete"]').click();
+    await posted.locator('[data-testid="gitlab-note-delete-confirm"]').click();
+    await expect(thread.locator('[data-testid="gitlab-note"]')).toHaveCount(before);
+  });
+
+  test("keeps GitLab's own events out of the conversation, behind a count", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    // "changed the description" is an event, not something anybody said, so it is not a
+    // comment — and it is not hidden either: the count says it is there.
+    await expect(page.locator('[data-testid="gitlab-events"]')).toHaveCount(0);
+    const toggle = page.locator('[data-testid="gitlab-events-toggle"]');
+    await expect(toggle).toContainText("1 event");
+    await toggle.click();
+    await expect(page.locator('[data-testid="gitlab-events"]')).toContainText(
+      "changed the description",
+    );
+  });
+
+  test("closes a merge request, and the reopen undoes it", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 63);
+
+    // A close needs no confirmation, because the row that replaces it is its undo.
+    await page.locator('[data-testid="gitlab-close"]').click();
+    await expect(page.locator('[data-testid="gitlab-state"]')).toHaveText("Closed");
+    await expect(page.locator('[data-testid="gitlab-action-done"]')).toContainText("Closed");
+    // And it leaves the OPEN list, which is what that list promises.
+    await expect(page.locator(`${row}[data-iid="63"]`)).toHaveCount(0);
+
+    const reopen = page.locator('[data-testid="gitlab-reopen"]');
+    await expect(reopen).toBeVisible();
+    await reopen.click();
+    await expect(page.locator('[data-testid="gitlab-state"]')).toHaveText("Open");
+    await expect(page.locator(`${row}[data-iid="63"]`)).toBeVisible();
+  });
+
+  test("approves from the page, and the same control revokes", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    const approve = page.locator('[data-testid="gitlab-approve"]');
+    await expect(approve).toHaveText("Approve");
+    await approve.click();
+    // The row becomes its own undo — the reason the approval write exists at all.
+    await expect(approve).toHaveText("Revoke approval");
+    // Who approved is named the way this app names people: the user's own approval reads as
+    // the user, not as the way their GitLab account happens to be spelled.
+    await expect(page.locator('[data-testid="gitlab-approved-by"]')).toContainText("You");
+
+    await approve.click();
+    await expect(approve).toHaveText("Approve");
+  });
+
+  test("draws a colleague the app's own Teams knows as that colleague", async ({ page }) => {
+    await openGitLab(page);
+
+    // The sidebar has no room for a name, so the row states whose face it draws. The user's
+    // own merge request is attributed the way this app calls THEM — not the way GitLab spells
+    // their account, which is the whole point of matching the two by real name.
+    await expect(page.locator(`${row}[data-iid="595"]`)).toHaveAttribute("data-author", "You");
+    // …and a merge request by somebody only GitLab knows keeps GitLab's own words.
+    await expect(page.locator(`${row}[data-iid="63"]`)).toHaveAttribute(
+      "data-author",
+      "Ada Lovelace",
+    );
+
+    await openMergeRequest(page, 596);
+
+    // A colleague in both systems, drawn as the colleague: their Teams name, and their real
+    // face — fetched through the backend like every other avatar here, never from GitLab.
+    const note = page.locator('[data-testid="gitlab-note"]').filter({ hasText: "Two replicas" });
+    await expect(note.locator('[data-testid="gitlab-note-author"]')).toHaveText("Mia Chen");
+    await expect(note.locator("img[data-picture='face']")).toBeVisible();
+
+    // The people on the merge request, in all three shapes. The user themselves is named the
+    // way this app names them everywhere else.
+    const person = (name: string) =>
+      page.locator(`[data-testid="gitlab-person"][data-person="${name}"]`).first();
+    await expect(person("You")).toBeVisible();
+    // A colleague the app knows who has no Teams photo keeps tinted initials — there is
+    // nothing to fetch, and the app never falls back to GitLab's own avatar URL.
+    await expect(person("Lucas Silva")).toBeVisible();
+    await expect(person("Lucas Silva").locator("img")).toHaveCount(0);
+    // And somebody GitLab alone knows keeps GitLab's own name, over initials.
+    await expect(person("Ada Lovelace")).toBeVisible();
+    await expect(person("Ada Lovelace").locator("img")).toHaveCount(0);
+
+    // The bot that reviews is nobody in Teams, and stays what GitLab called it.
+    const robot = page.locator('[data-testid="gitlab-note"]').filter({ hasText: "MEDIUM" });
+    await expect(robot.locator('[data-testid="gitlab-note-author"]')).toHaveText("review-bot");
+    await expect(robot.locator("img")).toHaveCount(0);
+  });
+
+  test("says a machine with no token can read nothing, rather than showing an empty list", async ({
+    page,
+  }) => {
+    await setMergeRequestControl(page, { no_token: true });
+    await gotoApp(page);
+    await page.locator('[data-testid="tab-gitlab"]').click();
+
+    // An empty list would read as "no work". The notice names the one thing that fixes it.
+    await expect(page.locator('[data-testid="gitlab-no-token"]')).toContainText("Settings");
+    await expect(page.locator('[data-testid="gitlab-row"]')).toHaveCount(0);
+  });
+
+  test("survives a deep link, and an id that names nothing", async ({ page }) => {
+    // The URL carries the pair the backend takes, with the project path encoded — so a
+    // reload lands on the same merge request with no list to read it from.
+    await page.goto("/mr/acme%2Fwebapp!596");
+    await expect(page.locator('[data-testid="gitlab-heading"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-heading"]')).toContainText("HA replicas");
+
+    // An id that names nothing resolves to "nothing open", and the page says so instead of
+    // asking the backend about an address that means nothing.
+    await page.goto("/mr/not-an-id");
+    await expect(page.locator('[data-testid="gitlab-pane-empty"]')).toBeVisible();
+  });
+
+  // ---- the Changes section: the diff ---------------------------------------
+  //
+  // The one part of this page drawn by somebody else's renderer — `@pierre/trees` for the
+  // file tree, `@pierre/diffs` for the patch, both behind a lazy import. So these tests
+  // assert on this app's own `data-testid`s and on ONE attribute of pierre's
+  // (`data-item-path`, which is how a row is addressed); asserting on their internals would
+  // be a test of their release notes.
+  //
+  // Every state a real GitLab answer holds is in the fixture, because four of the five are
+  // files with NO patch (see `mockDiffFiles` in web/mock/server.ts). They sit BEFORE the
+  // merge below, which is destructive to !596.
+
+  /** Open the Changes section of the merge request already on screen, and wait for a patch.
+   *
+   *  The wait is on the PATCH rather than the section: the section paints from the read, and
+   *  what takes time after that is the lazy chunk and then Shiki resolving the file's own
+   *  grammar. */
+  async function openChanges(page: Page) {
+    await page.locator('[data-testid="gitlab-changes"]').scrollIntoViewIfNeeded();
+    await expect(page.locator('[data-testid="gitlab-diff-patch"]')).toBeVisible({
+      timeout: 25_000,
+    });
+  }
+
+  /** Show one file of the open diff by pressing its row.
+   *
+   *  Pierre's tree renders into a shadow root and Playwright's CSS engine pierces an open
+   *  one, so this drives the row a reader would press. The assertion afterwards is on this
+   *  app's own heading, which is what proves the press reached the section. */
+  async function pickFile(page: Page, path: string) {
+    await page.locator(`[data-item-path="${path}"]`).first().click();
+    await expect(page.locator('[data-testid="gitlab-changes-file"]')).toHaveAttribute(
+      "data-path",
+      path,
+    );
+  }
+
+  test("states what changed, and opens on a file with something to read", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openChanges(page);
+
+    // The heading counts what TRAVELLED and the lines that moved, and the way out to
+    // GitLab's own diff stays whatever this page can draw.
+    const summary = page.locator('[data-testid="gitlab-changes-summary"]');
+    await expect(summary).toContainText("7 files");
+    await expect(summary).toContainText("+27");
+    await expect(page.locator('[data-testid="gitlab-changes-link"]')).toHaveAttribute(
+      "href",
+      /\/diffs$/,
+    );
+
+    // Nothing was picked, so the section opens on the first file that HAS a patch — never on
+    // a sentence explaining why there is nothing to see, which reads as a failed load.
+    await expect(page.locator('[data-testid="gitlab-changes-file"]')).toHaveAttribute(
+      "data-change",
+      "changed",
+    );
+    await expect(page.locator('[data-testid="gitlab-diff-tree"]')).toBeVisible();
+    // A file with a patch explains nothing: the patch is the explanation.
+    await expect(page.locator('[data-testid="gitlab-changes-file-notice"]')).toHaveCount(0);
+  });
+
+  test("shows the file whose row was pressed, and its own stat", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openChanges(page);
+
+    await pickFile(page, "src/server/health.ts");
+    const file = page.locator('[data-testid="gitlab-changes-file"]');
+    await expect(file).toContainText("+9");
+    await expect(file).toContainText("−3");
+    await expect(page.locator('[data-testid="gitlab-diff-patch"]')).toBeVisible();
+  });
+
+  test("tells the files with no patch apart", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openChanges(page);
+    const notice = page.locator('[data-testid="gitlab-changes-file-notice"]');
+
+    // A pure RENAME: no hunks by definition, and its patch IS the header stating the move. So
+    // it explains NOTHING — and it must never read as a file GitLab collapsed, which is what
+    // GitLab's own `collapsed: true` on those rows would have made it.
+    await pickFile(page, "src/server/drain.ts");
+    const file = page.locator('[data-testid="gitlab-changes-file"]');
+    await expect(file).toHaveAttribute("data-change", "renamed");
+    await expect(file).toContainText("src/server/shutdown.ts");
+    await expect(notice).toHaveCount(0);
+
+    // A BINARY file: GitLab describes it with one sentence rather than hunks, and this page
+    // says so instead of running that prose through a code renderer.
+    await pickFile(page, "docs/diagrams/rollout.png");
+    await expect(notice).toHaveAttribute("data-state", "binary");
+    await expect(notice).toContainText(/binary/i);
+    await expect(page.locator('[data-testid="gitlab-diff-patch"]')).toHaveCount(0);
+
+    // A file GitLab COLLAPSED — the one state a second read can mend. And a generated file
+    // says so, because a surprising change hides in one.
+    await pickFile(page, "bun.lock");
+    await expect(notice).toHaveAttribute("data-state", "collapsed");
+    await expect(notice).toContainText(/did not expand/i);
+    await expect(file).toContainText("generated");
+  });
+
+  test("offers the expanded read once, names what it costs, then stops offering", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openChanges(page);
+
+    const expand = page.locator('[data-testid="gitlab-changes-expand"]');
+    await expect(expand).toContainText("Expand 1 file");
+    // The cost, before the press — the rule the update button follows for its 130 MB.
+    await expect(page.locator('[data-testid="gitlab-changes-expand-hint"]')).toContainText(
+      /slower and much larger/i,
+    );
+
+    // The collapsed file carries no patch until the reader asks.
+    await pickFile(page, "bun.lock");
+    await expect(page.locator('[data-testid="gitlab-changes-file-notice"]')).toHaveAttribute(
+      "data-state",
+      "collapsed",
+    );
+
+    await expand.click();
+    // Now it does, and the sentence about it is gone.
+    await expect(page.locator('[data-testid="gitlab-diff-patch"]')).toBeVisible({
+      timeout: 25_000,
+    });
+    await expect(page.locator('[data-testid="gitlab-changes-file-notice"]')).toHaveCount(0);
+    // Offered ONCE: a second press would pay half a megabyte for the same answer, and the
+    // expanded read does not always expand everything either.
+    await expect(expand).toHaveCount(0);
+  });
+
+  test("is unified on a phone, and offers no layout it cannot draw", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openChanges(page);
+    // Split needs two columns of code and this app is read from a phone, so the toggle is not
+    // drawn at all: a control that changes nothing reads as a bug.
+    await expect(page.locator('[data-testid="gitlab-diff-layout"]')).toHaveCount(0);
+    // The tree is still there — it is how a file is picked, at every width.
+    await expect(page.locator('[data-testid="gitlab-diff-tree"]')).toBeVisible();
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const toggle = page.locator('[data-testid="gitlab-diff-layout"]');
+    await expect(toggle).toHaveAttribute("data-layout", "unified");
+    await page.locator('[data-testid="gitlab-diff-layout-split"]').click();
+    await expect(toggle).toHaveAttribute("data-layout", "split");
+    // Put it back: the choice is persisted per browser, and one mock process serves the run.
+    await page.locator('[data-testid="gitlab-diff-layout-unified"]').click();
+    await expect(toggle).toHaveAttribute("data-layout", "unified");
+  });
+
+  test("a diff that cannot be read costs the Changes panel and nothing else", async ({ page }) => {
+    await setMergeRequestControl(page, {
+      refuse_diff: "GitLab refused: this account may not read the changes",
+    });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await page.locator('[data-testid="gitlab-changes"]').scrollIntoViewIfNeeded();
+
+    await expect(page.locator('[data-testid="gitlab-changes-error"]')).toContainText(
+      "may not read the changes",
+    );
+    // The page is a header and five panels. One that cannot be read must not empty the
+    // others — the contract the comments already hold.
+    await expect(page.locator('[data-testid="gitlab-heading"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-pipeline"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-comments"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-actions"]')).toBeVisible();
+    // And the way out to GitLab's own diff is still offered, which is the one thing left.
+    await expect(page.locator('[data-testid="gitlab-changes-link"]')).toBeVisible();
+  });
+
+  test("merges, and the merge request leaves the list for good", async ({ page }) => {
+    // LAST, deliberately: it is the one test that cannot be undone against the fixtures,
+    // exactly as the action itself cannot be undone against GitLab.
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    await page.locator('[data-testid="gitlab-merge"]').click();
+    await page.locator('[data-testid="gitlab-merge-confirm"]').click();
+
+    await expect(page.locator('[data-testid="gitlab-action-done"]')).toContainText("Merged into main");
+    await expect(page.locator('[data-testid="gitlab-state"]')).toHaveText("Merged");
+    // A merged merge request offers neither a merge nor a close: there is nothing left to
+    // do to it, and GitLab would refuse both.
+    await expect(page.locator('[data-testid="gitlab-merge"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="gitlab-close"]')).toHaveCount(0);
+    // And it is in neither list, because neither one holds what is merged.
+    await expect(page.locator(`${row}[data-iid="596"]`)).toHaveCount(0);
+    await page.locator('[data-testid="gitlab-state-closed"]').click();
+    await expect(page.locator(`${row}[data-iid="596"]`)).toHaveCount(0);
+  });
+});

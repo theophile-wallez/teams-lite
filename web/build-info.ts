@@ -60,6 +60,33 @@ export function readBuildInfo(distDir: string): BuildInfo | null {
 }
 
 /**
+ * Whether the bundle on disk is no longer the one this process imported.
+ *
+ * THE FAILURE THIS NAMES. The SSR handler is imported once at boot, but it imports its
+ * ROUTE chunks off disk as the routes are asked for — `dist/server/assets/*.js`, hashed
+ * per build. `bin/teams-lite-service.sh` replaces that whole directory in place, so a
+ * staged update under a running web server leaves it holding a module graph whose files
+ * are gone: the next lazy import throws, and what comes back is not a Response Bun will
+ * serve (see `renderWithSsr` in server.ts). The process stays up and the app is dead.
+ *
+ * The stamp is what tells that apart from an ordinary SSR fault, and the difference is
+ * the whole answer: a replaced bundle is being updated and will be right in a moment, so
+ * the reader is asked to reload; a fault at the same build is a fault, and saying "we are
+ * updating" about it would send them reloading for ever.
+ *
+ * A stamp that cannot be read now proves nothing — a bundle mid-copy has no stamp for an
+ * instant — so it reads as "not replaced" and the caller reports the fault it really saw.
+ * Pure, so the decision is unit-tested without a build or a server.
+ */
+export function bundleWasReplaced(
+  atBoot: BuildInfo | null,
+  onDisk: BuildInfo | null,
+): boolean {
+  if (!atBoot || !onDisk) return false;
+  return atBoot.builtAt !== onDisk.builtAt || atBoot.commit !== onDisk.commit;
+}
+
+/**
  * The reason this bundle must not be served, or null when it may be.
  *
  * A missing file is NOT an error: a bundle built before this check existed cannot

@@ -3,9 +3,16 @@
 // kill it on exit. One command starts everything.
 
 import { spawn, type Subprocess } from "bun";
-import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+import {
+  assetId,
+  cachedAssetIsCurrent,
+  replaceFile,
+  stampCachedAsset,
+} from "./embedded-cache";
 
 /// Where a normal, send-capable backend listens.
 const DEFAULT_PORT = 19420;
@@ -47,10 +54,11 @@ export function repoRoot(): string {
   return join(import.meta.dir, "..", "..");
 }
 
-/// Extract the embedded backend to a stable cache path and return it. We only
-/// rewrite the file when it is missing or its size differs from the embedded
-/// copy, so upgrades (a newer `teams` binary) transparently refresh it while
-/// normal launches are a cheap stat().
+/// Extract the embedded backend to a stable cache path and return it. The copy already
+/// there is kept only when it IS the asset this binary carries — same bytes, not merely
+/// the same byte count (see embedded-cache.ts, which says what that cost). An upgrade
+/// therefore refreshes it, and an ordinary launch pays one hash of bytes it had to read
+/// anyway.
 async function extractEmbeddedBackend(): Promise<string> {
   const { default: bunfsPath } = await import("./embedded-backend");
   const bytes = new Uint8Array(await Bun.file(bunfsPath).arrayBuffer());
@@ -58,15 +66,12 @@ async function extractEmbeddedBackend(): Promise<string> {
   const dir = join(homedir(), ".cache", "teams-lite");
   mkdirSync(dir, { recursive: true });
   const dest = join(dir, "server");
+  const stamp = join(dir, ".server-id");
+  const id = assetId(bytes);
 
-  let upToDate = false;
-  try {
-    upToDate = statSync(dest).size === bytes.byteLength;
-  } catch {
-    upToDate = false;
-  }
-  if (!upToDate) {
-    writeFileSync(dest, bytes);
+  if (!existsSync(dest) || !cachedAssetIsCurrent(stamp, id)) {
+    replaceFile(dest, bytes, 0o755);
+    stampCachedAsset(stamp, id);
   }
   chmodSync(dest, 0o755);
   return dest;
@@ -141,15 +146,33 @@ export function mintWriteToken(): string {
 /// `TEAMS_LITE_WRITE_TOKEN` pins the write lock's token (see `mintWriteToken`), and the
 /// caller hands the same value to the web server it runs in-process.
 ///
+/// `TEAMS_LITE_LAUNCHER` says a launcher OWNS this backend and can re-spawn it, which is
+/// what lets Settings › This app offer a restart (`restart` in the Rust crate, over the
+/// `backend_restart` event). It is set for every spawn, compiled or not — unlike
+/// `TEAMS_LITE_LAUNCHER_BIN`, which names a binary an update may replace and so exists only
+/// in a compiled run. A backend the user started by hand has neither, and the app then says
+/// so instead of exiting into nothing.
+///
 /// `TEAMS_NO_IDLE_EXIT` (dev only) keeps a spawned backend up across the frontend
 /// reloads a hot-reloading session produces.
 export function backendEnv(keepAlive: boolean, writeToken?: string): Record<string, string> {
   const env: Record<string, string> = {};
   if (isCompiledBinary()) env[LAUNCHER_BIN_ENV] = process.execPath;
+  env[LAUNCHER_ENV] = "1";
   if (writeToken) env[WRITE_TOKEN_ENV] = writeToken;
   if (keepAlive) env.TEAMS_NO_IDLE_EXIT = "1";
   return env;
 }
+
+/// Environment variable that tells the backend a launcher can restart it (`LAUNCHER_ENV`
+/// in src/restart.rs). Kept in step with the Rust side by name, like the two above.
+export const LAUNCHER_ENV = "TEAMS_LITE_LAUNCHER";
+
+/// What a backend we merely ATTACHED to answers when asked to restart. It is another
+/// launcher's child, or a systemd unit's process: killing it would take down an app we did
+/// not start, and the process that owns it is the one that can put it back.
+export const ATTACHED_BACKEND_CANNOT_RESTART =
+  "this launcher attached to a backend it did not start, so it cannot restart it";
 
 export type BackendHandle = {
   stop: () => void;
@@ -167,6 +190,17 @@ export type BackendHandle = {
   /// Resolves immediately when we only attached to somebody else's backend, which is not
   /// ours to stop or to wait for.
   waitForExit: () => Promise<void>;
+  /// Stop the backend we spawned and start it again, resolving once it is listening.
+  ///
+  /// What Settings › This app asks for: the backend goes, our web server does NOT, so the
+  /// page stays served and only its socket blinks. The new child keeps the SAME pinned
+  /// write token — a fresh one would be refused by the page's copy until somebody reloaded,
+  /// which is the exact failure the pinned token exists to prevent.
+  ///
+  /// Rejects for a backend we attached to (`ATTACHED_BACKEND_CANNOT_RESTART`), and for a
+  /// new child that never binds — the caller says so rather than leaving the user with a
+  /// page that quietly has nothing behind it.
+  restart: () => Promise<void>;
 };
 
 /// Ensure the backend is running. If a server is already up, attach to it and
@@ -180,16 +214,60 @@ export async function ensureBackend(opts: { keepAlive?: boolean } = {}): Promise
   if (await portOpen()) {
     // Someone else owns it: neither ours to stop, nor ours to wait for, and its token is
     // its own — published to the file our frontend already reads.
-    return { stop: () => {}, waitForExit: () => Promise.resolve(), writeToken: null };
+    return {
+      stop: () => {},
+      waitForExit: () => Promise.resolve(),
+      writeToken: null,
+      restart: () => Promise.reject(new Error(ATTACHED_BACKEND_CANNOT_RESTART)),
+    };
   }
 
   const bin = await backendBinary();
   const writeToken = mintWriteToken();
+  // `let`, because a restart replaces it — and `stop` below reads it through this binding
+  // rather than capturing one child, so the exit handlers registered ONCE always kill
+  // whichever backend is current.
+  let proc = await startBackend(bin, opts.keepAlive === true, writeToken);
+  const stop = () => {
+    try {
+      proc.kill(9);
+    } catch {}
+  };
+  killChildOnExit(stop);
+  return {
+    stop,
+    writeToken,
+    // `proc.exited` resolves when the kernel has reaped it, which is also when its
+    // port is free — the one thing a relaunch has to wait for.
+    waitForExit: async () => {
+      await proc.exited;
+    },
+    restart: async () => {
+      stop();
+      // AWAITED for the reason `waitForExit` exists: a signalled process still holds its
+      // port for a moment, and the replacement's own bind would fail on it.
+      await proc.exited;
+      proc = await startBackend(bin, opts.keepAlive === true, writeToken);
+    },
+  };
+}
+
+/// Spawn one backend and resolve once it is listening.
+///
+/// Separate from `ensureBackend` because a restart does exactly this again: the wait for the
+/// port is the whole of "is it up", and a second copy of it would be a second answer to that
+/// question (the broker handshake can take seconds, so a shorter wait somewhere would report
+/// a healthy start as a failure).
+async function startBackend(
+  bin: string,
+  keepAlive: boolean,
+  writeToken: string,
+): Promise<Subprocess> {
   const proc: Subprocess = spawn([bin], {
     stdout: Bun.file("/tmp/teams-lite-server.log"),
     stderr: Bun.file("/tmp/teams-lite-server.log"),
     stdin: "ignore",
-    env: { ...process.env, ...backendEnv(opts.keepAlive === true, writeToken) },
+    env: { ...process.env, ...backendEnv(keepAlive, writeToken) },
   });
 
   // wait for it to bind (auth broker handshake can take a few seconds)
@@ -200,23 +278,7 @@ export async function ensureBackend(opts: { keepAlive?: boolean } = {}): Promise
         `backend exited (code ${proc.exitCode}). See /tmp/teams-lite-server.log`,
       );
     }
-    if (await portOpen()) {
-      const stop = () => {
-        try {
-          proc.kill(9);
-        } catch {}
-      };
-      killChildOnExit(stop);
-      return {
-        stop,
-        writeToken,
-        // `proc.exited` resolves when the kernel has reaped it, which is also when its
-        // port is free — the one thing a relaunch has to wait for.
-        waitForExit: async () => {
-          await proc.exited;
-        },
-      };
-    }
+    if (await portOpen()) return proc;
     await Bun.sleep(300);
   }
   try { proc.kill(9); } catch {}

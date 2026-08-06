@@ -3,6 +3,12 @@
 // These mirror the Rust backend's WebSocket protocol (see src/bin/server.rs).
 // Nothing here touches the DOM, the network, or any runtime-specific API.
 
+// The one type this file borrows rather than restates. A person a TRACKER names has one
+// spelling in this app — `tracker_people::Person` plus the identity the backend resolves onto
+// it — and a card and an approval both name people, so they take that spelling instead of a
+// second copy that would drift.
+import type { TrackerPerson } from "./tracker-people";
+
 // Mirrors the Rust `ConversationKind` (src/store.rs).
 export type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
 
@@ -419,6 +425,34 @@ export type UpdateProgress = {
   error: string;
 };
 
+/** What the `update_check` RPC answers — Settings › This app asking GitHub NOW rather than
+ *  waiting for the two-minute poll (`Ctx::check_release_now` in src/bin/server.rs).
+ *
+ *  It is a verdict, never a failure to be thrown: `failed` is one of the outcomes, because
+ *  "GitHub could not be reached" is as much an answer to the press as "you are up to date"
+ *  is. The update ROW is unaffected either way — it follows the `update_available` event the
+ *  same check publishes. */
+export type UpdateCheckResult = {
+  outcome: "available" | "current" | "busy" | "unknown" | "unsupported" | "failed";
+  /** Why the request failed, in GitHub's or the transport's own words. Only on `failed`. */
+  error?: string;
+};
+
+/** What the `restart_backend` RPC answers.
+ *
+ *  `restarted: false` is not an error: the backend refuses ONCE while a local agent is
+ *  writing a reply (`blocked: "agent"`, with the count), and the user's second press carries
+ *  `force`. Everything the user cannot press through — no launcher and no supervisor, a
+ *  missing write token, a read-only backend — is a rejected request instead. */
+export type BackendRestartResult = {
+  restarted: boolean;
+  /** What is bringing the backend back: the launcher that owns it, or its supervisor. */
+  via?: "launcher" | "supervisor";
+  blocked?: "agent";
+  /** How many agent replies this backend is writing right now. */
+  runs?: number;
+};
+
 export type LiveStatus = "connecting" | "connected" | "disconnected";
 
 /** Wire shape of the backend `broker_status` event (see `broker_status_payload` in
@@ -809,7 +843,10 @@ export type GitLabLinkMetadata = {
   reference: string;
   state?: string;
   draft?: boolean;
-  author_name?: string;
+  /** Who opened it — a person the backend may have matched to a colleague in the user's own
+   *  Teams, so the card draws them the way the merge-request page does (`personFace`).
+   *  Absent on a project, which has no author. */
+  author?: TrackerPerson;
   source_branch?: string;
   target_branch?: string;
   labels?: string[];
@@ -852,11 +889,15 @@ export type LinearLinkMetadata = {
   state_type?: string;
   /** The state's colour in Linear, as a CSS hex string ("#5e6ad2"). */
   state_color?: string;
-  assignee_name?: string;
+  /** Who owns this, and which of the three it is depends on the resource: an issue is
+   *  assigned, a project is led, a document is written. Each is a person the backend may have
+   *  matched to a colleague in the user's own Teams, so the card draws them the way every
+   *  other surface in this app does (`personFace`). */
+  assignee?: TrackerPerson;
   /** Project lead. */
-  lead_name?: string;
+  lead?: TrackerPerson;
   /** Document author. */
-  creator_name?: string;
+  creator?: TrackerPerson;
   /** Linear's numeric priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. */
   priority?: number;
   /** The priority's own label ("Urgent", "High", …). */
@@ -903,8 +944,10 @@ export type GitLabApproval = {
   approved?: boolean;
   approvals_required?: number;
   approvals_left?: number;
-  /** Who has approved, by display name, in GitLab's own order. */
-  approved_by?: string[];
+  /** Who has approved, in GitLab's own order — each one a person the backend may have
+   *  matched to a colleague, so the sentence names them the way the rest of this app does
+   *  (`personFace`). An older backend answered bare names; nothing reads it as one. */
+  approved_by?: TrackerPerson[];
   /** Whether the user's OWN account is among them, matched on GitLab's user id. This
    *  is what decides whether the menu offers "Approve" or "Revoke approval": the two
    *  are opposite actions, and offering the wrong one is a mistake the reader cannot

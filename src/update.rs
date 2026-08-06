@@ -8,8 +8,13 @@
 // running?" If so, a newer build exists.
 //
 // It lives in the backend, not the UI, because the UI never touches the network
-// (local-first is enforced server-side). The server runs the check once at startup,
-// best-effort, and pushes an `update_available` event to the UI.
+// (local-first is enforced server-side). The server POLLS it — `spawn_release_poll`, every
+// RELEASE_CHECK_INTERVAL for the whole life of the process, best-effort — and pushes an
+// `update_available` event to the UI when the answer changes. It used to ask once at
+// startup, which meant an app left open for weeks never learned about anything published
+// after it booted: the only reliable way to be offered an update was to restart the app the
+// button exists to restart. The request is claimed through the store so it stays ONE per
+// machine (see `GITHUB_HOURLY_REQUESTS`, which is why that matters).
 //
 // The check's network call is deliberately unwrapped from the shared retry policy:
 // an update check is a nicety, not core function — a single attempt that fails
@@ -54,6 +59,20 @@ pub const ASSET_NAME: &str = "teams-linux-x64";
 /// never hold anything up, so this is short.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// What GitHub's REST API allows an UNAUTHENTICATED caller, per hour and per IP.
+///
+/// Measured against this repository on 2026-08-06, because the number decides how often
+/// the release may be polled: the response says `x-ratelimit-limit: 60`, and a conditional
+/// request buys nothing — an `If-None-Match` that answered `304` still moved
+/// `x-ratelimit-used` from 2 to 3 to 4 on three successive requests. So the budget is 60
+/// requests an hour for everything this app asks GitHub: the poll, the compare API behind
+/// the changelog, and the re-read before every download.
+///
+/// It is a shared budget per MACHINE (an IP), which is why the poll is claimed through the
+/// store rather than run per backend — see `Store::claim_release_check` and
+/// `RELEASE_CHECK_INTERVAL` in src/bin/server.rs.
+pub const GITHUB_HOURLY_REQUESTS: u32 = 60;
+
 /// How long the DOWNLOAD may take. Generous next to the check: it is 130 MB the user
 /// asked for and is watching a progress bar of, on whatever connection a phone-facing
 /// machine has. Long enough to be irrelevant on any working link, short enough that a
@@ -95,11 +114,37 @@ pub struct UpdateInfo {
 /// rolling tag that CI republishes on every push, so this size stops matching the file
 /// behind that URL the next time the project ships. Read it again before a download —
 /// never compare a transfer against a number an earlier check remembered.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Asset {
     pub url: String,
     pub size: u64,
 }
+
+/// The published `latest` release, as a fact about the REPOSITORY rather than about any
+/// one build: the commit it was made from, its page, and the binary on it.
+///
+/// It is separate from [`UpdateInfo`] because the two have different owners. This is what
+/// GitHub says and it is the same answer for every process on a machine — so it is read
+/// ONCE per machine and shared through the store (see `SETTING_RELEASE`), which is what
+/// keeps a two-minute poll inside GitHub's 60-requests-an-hour budget for an unauthenticated
+/// caller. `UpdateInfo` is the comparison against ONE build, which is local, free, and
+/// different for the staged pair and the released build running beside it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Release {
+    /// The commit the release was built from, full length and lowercase.
+    pub rev: String,
+    pub url: String,
+    pub asset: Option<Asset>,
+}
+
+/// Where the machine's last release read is kept, so every backend sharing this store
+/// learns what `latest` names without asking GitHub itself.
+pub const SETTING_RELEASE: &str = "release_latest";
+
+/// When the machine last ASKED (epoch ms). It is the claim as well as the record: the
+/// backend that moves it is the one that fetches, which is what makes the poll one
+/// request per machine rather than one per backend (see `Store::claim_release_check`).
+pub const SETTING_RELEASE_CHECKED_MS: &str = "release_checked_ms";
 
 /// The commit this binary was built from, or `None` for a dev build.
 ///
@@ -119,9 +164,27 @@ pub fn build_rev() -> Option<&'static str> {
 /// Returns `Ok(Some(info))` when the published `latest` release was built from a
 /// different commit, `Ok(None)` when up to date (or the remote commit could not
 /// be determined), and `Err` only on a network/HTTP failure the caller should
-/// swallow. The `http` client is reused from the backend (it already carries a
-/// User-Agent, which the GitHub API requires).
+/// swallow.
+///
+/// One request and one comparison, for the caller that needs both at once: a download,
+/// which must read the release again before it trusts a size. The repeating POLL uses the
+/// two halves apart — [`fetch_release`] once per machine, [`compare`] in every backend —
+/// because the request is the scarce half.
 pub async fn check(http: &reqwest::Client, current_rev: &str) -> Result<Option<UpdateInfo>> {
+    Ok(fetch_release(http).await?.as_ref().and_then(|r| compare(r, current_rev)))
+}
+
+/// Ask GitHub what the rolling `latest` release is now. The network half, and the only
+/// half that costs anything.
+///
+/// `Ok(None)` means GitHub answered but the release's commit could not be identified —
+/// never a guess, because a wrong answer here is a false alarm on every client. `Err` is a
+/// network or HTTP failure the caller swallows; the API answers `403` once this IP has
+/// spent its hour, which is why the poll is shared rather than made per backend.
+///
+/// The `http` client is reused from the backend (it already carries a User-Agent, which
+/// the GitHub API requires).
+pub async fn fetch_release(http: &reqwest::Client) -> Result<Option<Release>> {
     let api = format!("https://api.github.com/repos/{REPO}/releases/tags/latest");
     let resp = http
         .get(&api)
@@ -147,22 +210,28 @@ pub async fn check(http: &reqwest::Client, current_rev: &str) -> Result<Option<U
         .map(str::to_string)
         .unwrap_or_else(|| format!("https://github.com/{REPO}/releases/latest"));
 
-    let Some(latest) = parse_release_rev(target, notes) else {
+    let Some(rev) = parse_release_rev(target, notes) else {
         // We reached GitHub but couldn't identify the release's commit. Don't
         // guess — say "no update" rather than risk a false alarm.
         return Ok(None);
     };
 
-    if is_update(current_rev, &latest) {
-        Ok(Some(UpdateInfo {
-            current: short_rev(current_rev),
-            latest: short_rev(&latest),
-            url: html_url,
-            asset: parse_asset(body.get("assets")),
-        }))
-    } else {
-        Ok(None)
-    }
+    Ok(Some(Release { rev, url: html_url, asset: parse_asset(body.get("assets")) }))
+}
+
+/// Is this release a newer build than `current_rev`? The comparison half: pure, free, and
+/// answered per BACKEND, because two installs on one machine run different commits.
+///
+/// `None` means this build IS the release (or there is nothing to compare against, for a
+/// build made from source) — never a nag without a real comparison, which is
+/// [`is_update`]'s own rule.
+pub fn compare(release: &Release, current_rev: &str) -> Option<UpdateInfo> {
+    is_update(current_rev, &release.rev).then(|| UpdateInfo {
+        current: short_rev(current_rev),
+        latest: short_rev(&release.rev),
+        url: release.url.clone(),
+        asset: release.asset.clone(),
+    })
 }
 
 /// Read the commits between two builds — what the update would actually bring.
@@ -297,7 +366,14 @@ fn is_writable_dir(dir: &Path) -> bool {
 pub fn download_path(latest_rev: &str) -> Result<PathBuf> {
     let dir = updates_dir(&cache_base()?);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    Ok(dir.join(format!("teams-{}", short_rev(latest_rev))))
+    Ok(dir.join(download_name(latest_rev)))
+}
+
+/// What a build's download is CALLED, in one place — because [`prune_downloads`] decides
+/// what to keep by that name, and two spellings of it would mean a cleanup that spares
+/// nothing.
+fn download_name(rev: &str) -> String {
+    format!("teams-{}", short_rev(rev))
 }
 
 /// This machine's cache root, XDG first.
@@ -320,25 +396,65 @@ fn updates_dir(base: &Path) -> PathBuf {
     base.join("teams-lite").join("updates")
 }
 
-/// Throw away every downloaded build.
+/// Throw away every downloaded build EXCEPT the one `keep_rev` names.
 ///
-/// Called when the check finds this build CURRENT, which is the moment a download becomes
-/// worthless: either it was installed and we are now running it, or the release moved on
-/// past it. Without this, 130 MB of a build nobody will ever run again would sit in the
-/// cache for good — and a successful update is precisely the case that leaves one there.
+/// Called on every pass of the release watch, because a build the release has moved past
+/// is worthless: 130 MB nobody will ever run again would otherwise sit in the cache for
+/// good, and a successful update is precisely the case that leaves one there.
+///
+/// **What is kept is the download for whatever `latest` names, and that is the whole rail.**
+/// This cache is per MACHINE while a phase is per PROCESS, and this machine deliberately
+/// runs two installs on two different commits (see § Running the released build beside the
+/// staged one): the staged service IS the newest release within minutes of every push,
+/// while the released build — the only shape that can update itself — is an older commit
+/// sitting on a download it is about to install. Clearing the whole directory therefore
+/// deleted that download from under it, and the second click failed with a message naming
+/// the install path and no reason. It happened on 2026-08-06. Every install agrees on what
+/// `latest` is and every download fetches exactly that, so keeping that one rev is what
+/// makes one process's cleanup safe for another's transfer. There is deliberately no way to
+/// ask for "remove everything".
 ///
 /// Best-effort and quiet: the cache is the one place a machine may clean up behind us, so
 /// a failure here is not worth a word to anybody.
-pub fn discard_downloads() {
+pub fn prune_downloads(keep_rev: &str) {
     if let Ok(base) = cache_base() {
-        discard_downloads_in(&base);
+        prune_downloads_in(&base, keep_rev);
     }
 }
 
-/// [`discard_downloads`] with the cache root injected, so what it removes — and what it
+/// Did the caller fail to name a rev at all?
+///
+/// A build made from source has no `TEAMS_BUILD_REV` to compare with, and "I do not know
+/// what `latest` is" must never resolve to "so remove everything": that is the rule
+/// [`prune_downloads`] exists to hold, spelled for the one caller that reads its own rev.
+/// A prune that knows nothing removes nothing.
+fn names_no_build(keep_rev: &str) -> bool {
+    keep_rev.trim().is_empty()
+}
+
+/// [`prune_downloads`] with the cache root injected, so what it removes — and what it
 /// leaves alone — is unit-tested.
-fn discard_downloads_in(base: &Path) {
-    let _ = std::fs::remove_dir_all(updates_dir(base));
+fn prune_downloads_in(base: &Path, keep_rev: &str) {
+    if names_no_build(keep_rev) {
+        return;
+    }
+    let dir = updates_dir(base);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    // Both spellings of the kept build: the finished file, and the `.part` a transfer that
+    // is still running writes into. Removing the second one is removing a download in
+    // flight.
+    let keep = download_name(keep_rev);
+    let keep_part = format!("{keep}.part");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == keep || name == keep_part {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
 }
 
 /// Stream `asset` to `dest`, reporting progress as it goes.
@@ -576,6 +692,55 @@ mod tests {
         assert!(!is_update(SHA_A, SHA_A));
     }
 
+    /// The comparison is the FREE half, and it is per build.
+    ///
+    /// One machine runs two installs on one commit each, so the release is fetched once and
+    /// compared twice. Splitting it out is what lets the poll cost one request whatever the
+    /// number of backends — and it makes the answer testable with no network at all.
+    #[test]
+    fn a_release_is_compared_against_each_build_without_a_request() {
+        let release = Release {
+            rev: SHA_B.to_string(),
+            url: "https://github.com/o/r/releases/tag/latest".to_string(),
+            asset: Some(Asset { url: "https://example.invalid/teams".to_string(), size: 7 }),
+        };
+
+        // A build the release moved away from: an update, named by both short revs, and
+        // carrying the asset a download needs.
+        let info = compare(&release, SHA_A).expect("a different commit is an update");
+        assert_eq!(info.current, SHA_A[..7]);
+        assert_eq!(info.latest, SHA_B[..7]);
+        assert_eq!(info.url, release.url);
+        assert_eq!(info.asset, release.asset);
+
+        // The build the release IS — including its short form, which is what a stored
+        // `latest` from an older payload looks like. Never a nag against oneself.
+        assert!(compare(&release, SHA_B).is_none());
+        assert!(compare(&release, &SHA_B[..7]).is_none());
+        // And never a nag with nothing to compare against (a build made from source).
+        assert!(compare(&release, "").is_none());
+    }
+
+    /// A `Release` survives the store round trip, because that is how one backend's answer
+    /// reaches the others. An older shape must be readable or the poll would re-fetch
+    /// every pass; a shape it cannot read is treated as no answer, never guessed at.
+    #[test]
+    fn a_release_travels_through_the_store_as_json() {
+        let release = Release {
+            rev: SHA_A.to_string(),
+            url: "https://example.invalid/releases".to_string(),
+            asset: Some(Asset { url: "https://example.invalid/a".to_string(), size: 130 }),
+        };
+        let json = serde_json::to_string(&release).expect("a release serializes");
+        assert_eq!(serde_json::from_str::<Release>(&json).unwrap(), release);
+
+        // A release with no binary for this machine is a real state, not a parse failure:
+        // the notice stays a link.
+        let linkless = Release { asset: None, ..release };
+        let json = serde_json::to_string(&linkless).unwrap();
+        assert_eq!(serde_json::from_str::<Release>(&json).unwrap(), linkless);
+    }
+
     #[test]
     fn is_update_different_commit_is_an_update() {
         assert!(is_update(SHA_A, SHA_B));
@@ -804,11 +969,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Clearing downloads drops the 130 MB nobody will run again — and NOTHING else in
+    /// Pruning downloads drops the 130 MB nobody will run again — and NOTHING else in
     /// that cache. Its siblings are the backend and the web bundle the `teams` command
     /// unpacked and is running from; reaching those would break the app it just updated.
     #[test]
-    fn discarding_downloads_spares_the_app_it_runs_from() {
+    fn pruning_downloads_spares_the_app_it_runs_from() {
         let base = std::env::temp_dir().join(format!("teams-lite-cache-{}", std::process::id()));
         let updates = updates_dir(&base);
         std::fs::create_dir_all(&updates).unwrap();
@@ -816,13 +981,72 @@ mod tests {
         let extracted = base.join("teams-lite").join("server");
         std::fs::write(&extracted, b"the backend this process is running").unwrap();
 
-        discard_downloads_in(&base);
+        prune_downloads_in(&base, SHA_A);
 
-        assert!(!updates.exists(), "the downloads must be gone");
+        assert!(
+            !updates.join("teams-def5678").exists(),
+            "a build the release moved past must be gone"
+        );
         assert!(extracted.is_file(), "the unpacked backend must survive");
         // Idempotent: a machine with nothing cached is the common case.
-        discard_downloads_in(&base);
+        prune_downloads_in(&base, SHA_A);
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// **A prune must never take the download for the build `latest` names.**
+    ///
+    /// This is the 2026-08-06 failure. The cache is per MACHINE and a phase is per
+    /// PROCESS, and this machine runs two installs on two different commits on purpose:
+    /// the staged service becomes the newest release within minutes of every push, so its
+    /// two-minute poll found itself CURRENT — and cleared the whole directory, including
+    /// the 130 MB the RELEASED build (an older commit, and the only shape that can update
+    /// itself) had just downloaded and was waiting to install. The second click then
+    /// failed, and the user was shown the install path with no reason behind it.
+    ///
+    /// Every install fetches exactly what `latest` names, so sparing that one rev is what
+    /// makes one process's cleanup safe for another process's transfer.
+    #[test]
+    fn a_prune_never_takes_the_build_another_install_is_about_to_run() {
+        let base = std::env::temp_dir().join(format!("teams-lite-keep-{}", std::process::id()));
+        let updates = updates_dir(&base);
+        std::fs::create_dir_all(&updates).unwrap();
+        let live = updates.join(download_name(SHA_A));
+        let in_flight = updates.join(format!("{}.part", download_name(SHA_A)));
+        let stale = updates.join(download_name(SHA_B));
+        std::fs::write(&live, b"the build the other install is about to run").unwrap();
+        std::fs::write(&in_flight, b"a transfer that is still running").unwrap();
+        std::fs::write(&stale, b"a build the release moved past").unwrap();
+
+        // The pass that used to be destructive: this backend IS the release, and another
+        // one is sitting on that very download.
+        prune_downloads_in(&base, SHA_A);
+
+        assert!(live.is_file(), "the download for `latest` must survive a prune");
+        assert!(in_flight.is_file(), "a transfer in flight must survive a prune");
+        assert!(!stale.exists(), "a build nobody will run again must go");
+
+        // And a prune that knows NOTHING removes nothing: a build made from source names no
+        // commit, and "I cannot compare" must never resolve to "so remove everything".
+        std::fs::write(&stale, b"a build the release moved past").unwrap();
+        prune_downloads_in(&base, "");
+        assert!(stale.is_file(), "a prune with no rev to spare must remove nothing");
+        assert!(live.is_file(), "a prune with no rev to spare must remove nothing");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// There must be no way to spell "clear the whole directory": that is the shape of the
+    /// bug above, and it reads as sensible cleanup every time somebody writes it.
+    #[test]
+    fn nothing_in_this_module_clears_the_download_directory_wholesale() {
+        let source = include_str!("update.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields a first part");
+        assert!(
+            !source.contains("remove_dir_all"),
+            "a download directory removed wholesale takes another install's transfer with \
+             it — prune by the rev `latest` names instead"
+        );
     }
 
     #[test]
@@ -946,6 +1170,22 @@ mod tests {
              orphaned backend holding its port"
         );
 
+        // And it says NOTHING about calling, which is how this install calls at all. It
+        // used to silence its own registration to spare the second ring, and every call
+        // and Join control in this window was disabled for it — a whole feature missing,
+        // named nowhere the user could read. Two registrations are safe because each
+        // backend holds a calling endpoint id of its own, keyed by its port.
+        // The directive, not the word: the unit's own comment explains the absence.
+        let silences_calling = unit.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("Environment=") && line.contains(concat!("TEAMS_LITE", "_CALLING"))
+        });
+        assert!(
+            !silences_calling,
+            "the released build must be a device the user can call FROM — every window \
+             they open is one they may want to call from"
+        );
+
         // Not part of the staged pair's target: restarting or enabling that target must
         // not reach a second app the user did not ask for.
         let joins_staged_target = unit
@@ -1041,14 +1281,33 @@ mod tests {
     ///
     /// The test reads the script, like the one above: the wait lives on the other side
     /// of the process boundary, and no Rust test would see it go missing.
+    /// The body of one subcommand of the installer script.
+    ///
+    /// Scoped rather than searched whole, because every name these tests look for also
+    /// appears in the script's own prose and in its other subcommands: `stage_artifacts` is
+    /// a definition and an `install` step, and `try-restart` is named in the header comment
+    /// that explains why the wait exists. A whole-file `find` matched that comment and
+    /// failed a test about the order of the code underneath it.
+    fn installer_subcommand(name: &str) -> &'static str {
+        let installer = include_str!("../bin/teams-lite-service.sh");
+        installer
+            .split_once(&format!("\n{name}() {{"))
+            .unwrap_or_else(|| panic!("bin/teams-lite-service.sh defines {name}"))
+            .1
+            .split("\ncmd_")
+            .next()
+            .expect("a subcommand body ends at the next one")
+    }
+
     #[test]
     fn the_installer_waits_for_the_agent_before_it_restarts() {
         let installer = include_str!("../bin/teams-lite-service.sh");
+        let update = installer_subcommand("cmd_update");
 
-        let restart = installer
+        let restart = update
             .find("try-restart")
-            .expect("bin/teams-lite-service.sh restarts the units");
-        let wait = installer.find("|| wait_for_quiet_agent").expect(
+            .expect("`update` restarts the units");
+        let wait = update.find("|| wait_for_quiet_agent").expect(
             "`update` must wait for a quiet agent, or a restart freezes a reply mid-answer",
         );
         assert!(wait < restart, "the wait must come BEFORE the restart, not after it");
@@ -1062,6 +1321,49 @@ mod tests {
         assert!(
             installer.contains(r#"[ "$wait_for_agent" = no ]"#),
             "`update --now` must be able to skip the wait"
+        );
+    }
+
+    /// And it must wait before it STAGES, not merely before it restarts.
+    ///
+    /// The other half of the same failure, found on 2026-08-06. Staging looks like the
+    /// harmless step and is not: the web bundle is a directory of hashed chunks, and the
+    /// SSR handler imports them off disk as the routes are asked for. Replaced under the
+    /// running web server, its next lazy import names a file that is gone — the process
+    /// stays up and the app is dead. `update` staged, then held its restart for 19 minutes
+    /// for a live `@claude` run, and the user's phone was served Bun's own "fetch(req) did
+    /// not return a Response object" page for the whole wait.
+    ///
+    /// So the order is build (which touches nothing live), wait, stage, restart: a bundle
+    /// and the process serving it are out of step for the seconds a `try-restart` takes.
+    /// `renderWithSsr` in web/server.ts answers honestly inside those seconds, and neither
+    /// half replaces the other — `install` stages without restarting anything at all.
+    #[test]
+    fn the_installer_waits_before_it_replaces_a_live_artifact() {
+        let update = installer_subcommand("cmd_update");
+
+        let wait = update.find("|| wait_for_quiet_agent").expect(
+            "`update` must wait for a quiet agent, or a restart freezes a reply mid-answer",
+        );
+        let stage = update
+            .find("stage_artifacts")
+            .expect("`update` stages what it built");
+        assert!(
+            wait < stage,
+            "the wait must come BEFORE staging: replacing the web bundle under the \
+             running server breaks the app for the whole wait, not just for the restart"
+        );
+
+        // The build is the one step that belongs on the far side of the wait: it writes
+        // into the checkout, so it touches nothing the running service reads — and a
+        // minute of compiling inside the wait would be a minute added to every update.
+        let build = update
+            .find("build_artifacts")
+            .expect("`update` builds before it stages");
+        assert!(
+            build < wait,
+            "building must stay BEFORE the wait: it touches no staged artifact, and \
+             moving it after would add its whole duration to every update"
         );
     }
 }

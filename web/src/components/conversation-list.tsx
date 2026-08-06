@@ -42,6 +42,7 @@ import { Avatar, conversationFallback, conversationPhoto } from "./avatar";
 import { BrokerBanner } from "./broker-banner";
 import { WriteLockBanner } from "./write-lock-banner";
 import { CalendarSidebar } from "./calendar-sidebar";
+import { GitLabSidebar, GitLabTabIcon } from "./gitlab-sidebar";
 import { ChatMenu } from "./chat-menu";
 import { useAppState, useController } from "./controller-context";
 import { MailList } from "./mail-list";
@@ -83,11 +84,11 @@ function formatTime(ms: number): string {
 /**
  * The left sidebar: an account header, a ⌘K search field, a section switch, and —
  * depending on the section — a virtualized conversation list, the team → channel
- * tree, the mailbox, or the calendar's own rail. Channel messages live entirely
- * under the Channels tab and never appear in the chat list, matching the Microsoft
- * Teams separation.
+ * tree, the mailbox, the calendar's own rail, or the merge requests that are not
+ * merged. Channel messages live entirely under the Channels tab and never appear in
+ * the chat list, matching the Microsoft Teams separation.
  *
- * The four sections show as icons in the tab strip, not as words: a 320px column
+ * The five sections show as icons in the tab strip, not as words: a 320px column
  * will not carry "Channels" and "Calendar" in full, and an abbreviation ("Chans",
  * "Cal") reads worse than the symbol it stands for. Each trigger therefore carries
  * the full name on `aria-label` and on the tooltip, so nothing is lost to a screen
@@ -227,6 +228,24 @@ export function ConversationList(props: {
             >
               <HugeiconsIcon icon={CalendarDaysIcon} className="size-[19px]" strokeWidth={1.6} />
             </TabsTrigger>
+            {/* The one tab that wears a VENDOR's mark rather than a hugeicons glyph, for
+                the reason every other GitLab affordance does (see `GitLabLogo`): a section
+                that merges and comments under the user's GitLab account has to say GitLab.
+                It says it in TWO spellings, because this is also the one place the mark
+                stands in a row of the app's own glyphs: GitLab's line while the tab is at
+                rest, so the strip reads as five icons of one weight, and GitLab's colours
+                once the section is current — the tint every other tab takes from the accent.
+                Full-colour at all times made it the only lit tab of the five, which reads as
+                the selected one. `group` is what lets the mark follow `data-state`. */}
+            <TabsTrigger
+              value="gitlab"
+              data-testid="tab-gitlab"
+              aria-label="Merge requests"
+              title="Merge requests"
+              className={cn(TAB_ICON, "group")}
+            >
+              <GitLabTabIcon />
+            </TabsTrigger>
           </TabsList>
         </div>
 
@@ -241,6 +260,9 @@ export function ConversationList(props: {
         </TabsPanel>
         <TabsPanel value="calendar" className="flex min-h-0 flex-1 flex-col">
           <CalendarSidebar />
+        </TabsPanel>
+        <TabsPanel value="gitlab" className="flex min-h-0 flex-1 flex-col">
+          <GitLabSidebar />
         </TabsPanel>
       </Tabs>
 

@@ -27,6 +27,10 @@ export default defineConfig({
     // production server's runtime file set and its build-info guard are not client
     // code, and a pattern that only saw src/ would run their tests never — which is
     // how the embedded bundle went out missing a module in the first place.
-    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.{ts,tsx}"],
+    //
+    // The web ROOT is in it for the same reason and it is the sharper case: server.ts and
+    // build-info.ts decide what a phone is served, and they sat outside every pattern —
+    // so the day a staged update broke the running server, nothing was watching them.
+    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.{ts,tsx}", "*.test.{ts,tsx}"],
   },
 });

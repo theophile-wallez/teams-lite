@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
         "reaction probe — this message gets a custom emoji reaction",
         None,
         None,
-        None,
+        &[],
         &[],
         &[],
     )

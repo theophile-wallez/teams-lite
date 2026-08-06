@@ -29,6 +29,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::tracker_people::Person;
+
 /// Linear's GraphQL endpoint. A constant on purpose — see the module doc: the
 /// user's API key is only ever sent here, never to a host taken from a link.
 pub const API_URL: &str = "https://api.linear.app/graphql";
@@ -100,14 +102,19 @@ pub struct LinkMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_color: Option<String>,
     /// Who the issue is assigned to.
+    ///
+    /// A PERSON rather than a bare name, and that is what lets the card draw the colleague
+    /// the user already knows — their Teams face and the name this app calls them — instead
+    /// of Linear's own words (see [`crate::tracker_people`], whose walk finds this shape).
+    /// The three below are one rule: whichever of them the resource has is "who owns this".
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignee_name: Option<String>,
+    pub assignee: Option<Person>,
     /// Who leads the project.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lead_name: Option<String>,
+    pub lead: Option<Person>,
     /// Who wrote the document.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub creator_name: Option<String>,
+    pub creator: Option<Person>,
     /// Linear's numeric priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. The
     /// card decides from this whether a priority badge is worth the space.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -387,11 +394,20 @@ fn nested_str(value: &serde_json::Value, outer: &str, inner: &str) -> Option<Str
     value.get(outer).and_then(|v| str_field(v, inner))
 }
 
-/// A person's display name: their full name, falling back to the handle Linear
-/// shows when a name is not set.
-fn person_name(value: &serde_json::Value, key: &str) -> Option<String> {
-    let person = value.get(key)?;
-    str_field(person, "name").or_else(|| str_field(person, "displayName"))
+/// One person from a Linear user object, or `None` when the resource has nobody there.
+///
+/// Linear's `displayName` IS its handle ("clement.delbarre") and its `name` is the real name,
+/// so the pair maps onto [`Person`]'s `name` / `username` — the same two words GitLab gives,
+/// which is what makes ONE match rule cover both trackers. A user with no name set falls back
+/// to the handle rather than to a blank, exactly as [`crate::gitlab::person`] does.
+pub fn person(value: &serde_json::Value, key: &str) -> Option<Person> {
+    let who = value.get(key).filter(|v| !v.is_null())?;
+    let username = str_field(who, "displayName").unwrap_or_default();
+    let name = str_field(who, "name").unwrap_or_else(|| username.clone());
+    if name.is_empty() && username.is_empty() {
+        return None;
+    }
+    Some(Person { name, username, avatar_url: None })
 }
 
 /// Read a `{ nodes: [...] }` connection into a plain slice of its nodes.
@@ -573,9 +589,9 @@ fn build_metadata(
             state: nested_str(body, "state", "name"),
             state_type: nested_str(body, "state", "type"),
             state_color: nested_str(body, "state", "color"),
-            assignee_name: person_name(body, "assignee"),
-            lead_name: None,
-            creator_name: None,
+            assignee: person(body, "assignee"),
+            lead: None,
+            creator: None,
             priority: priority(body),
             priority_label: str_field(body, "priorityLabel"),
             project: nested_str(body, "project", "name"),
@@ -596,9 +612,9 @@ fn build_metadata(
             state: nested_str(body, "status", "name"),
             state_type: nested_str(body, "status", "type"),
             state_color: nested_str(body, "status", "color"),
-            assignee_name: None,
-            lead_name: person_name(body, "lead"),
-            creator_name: None,
+            assignee: None,
+            lead: person(body, "lead"),
+            creator: None,
             priority: None,
             priority_label: None,
             project: None,
@@ -619,9 +635,9 @@ fn build_metadata(
             state: None,
             state_type: None,
             state_color: None,
-            assignee_name: None,
-            lead_name: None,
-            creator_name: person_name(body, "creator"),
+            assignee: None,
+            lead: None,
+            creator: person(body, "creator"),
             priority: None,
             priority_label: None,
             project: nested_str(body, "project", "name"),
@@ -891,7 +907,11 @@ mod tests {
         assert_eq!(meta.state.as_deref(), Some("Pending Review"));
         assert_eq!(meta.state_type.as_deref(), Some("started"));
         assert_eq!(meta.state_color.as_deref(), Some("#f2994a"));
-        assert_eq!(meta.assignee_name.as_deref(), Some("Clément DELBARRE"));
+        // A person, not a bare name: the handle travels beside the real name, which is what
+        // matches this colleague to the Teams person the card then draws.
+        let assignee = meta.assignee.as_ref().expect("the issue names its assignee");
+        assert_eq!(assignee.name, "Clément DELBARRE");
+        assert_eq!(assignee.username, "clement.delbarre");
         assert_eq!(meta.team.as_deref(), Some("Stratumn Engine"));
         assert_eq!(meta.project.as_deref(), Some("Trace lifecycle"));
         assert_eq!(meta.parent.as_deref(), Some("STMN-3400"));
@@ -911,8 +931,8 @@ mod tests {
         );
         // Project/document-only fields stay absent on an issue.
         assert_eq!(meta.progress, None);
-        assert_eq!(meta.lead_name, None);
-        assert_eq!(meta.creator_name, None);
+        assert_eq!(meta.lead, None);
+        assert_eq!(meta.creator, None);
     }
 
     #[test]
@@ -938,7 +958,9 @@ mod tests {
             &body,
             "https://fallback",
         );
-        assert_eq!(meta.assignee_name.as_deref(), Some("ada"));
+        let assignee = meta.assignee.as_ref().expect("a handle is still somebody");
+        assert_eq!(assignee.name, "ada", "a user with no name set falls back to their handle");
+        assert_eq!(assignee.username, "ada");
     }
 
     #[test]
@@ -977,12 +999,12 @@ mod tests {
         assert_eq!(meta.identifier, "");
         assert_eq!(meta.state.as_deref(), Some("In Progress"));
         assert_eq!(meta.state_type.as_deref(), Some("started"));
-        assert_eq!(meta.lead_name.as_deref(), Some("Théophile"));
+        assert_eq!(meta.lead.as_ref().map(|p| p.name.as_str()), Some("Théophile"));
         assert_eq!(meta.team.as_deref(), Some("Stratumn Engine, Platform"));
         assert_eq!(meta.progress, Some(0.42));
         assert_eq!(meta.target_date.as_deref(), Some("2026-09-11"));
         // Issue-only fields stay absent on a project.
-        assert_eq!(meta.assignee_name, None);
+        assert_eq!(meta.assignee, None);
         assert_eq!(meta.priority, None);
         assert!(meta.labels.is_empty());
     }
@@ -1003,7 +1025,7 @@ mod tests {
         );
         assert_eq!(meta.kind, "document");
         assert_eq!(meta.title, "Scalable Batch Actions — System Design");
-        assert_eq!(meta.creator_name.as_deref(), Some("Théophile"));
+        assert_eq!(meta.creator.as_ref().map(|p| p.name.as_str()), Some("Théophile"));
         assert_eq!(meta.project.as_deref(), Some("Scalable Batch Actions"));
         assert_eq!(
             meta.description.as_deref(),

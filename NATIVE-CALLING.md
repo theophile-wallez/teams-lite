@@ -371,12 +371,15 @@ WebRTC or the microphone.
 
 ## 6. The surface, and what each part is for
 
-Seven RPCs, and the split between them IS the consent design (see § 7):
+Six RPCs, and the split between them IS the consent design (see § 7). There is no RPC
+that turns calling on: the backend registers as a device the user's calls ring on at
+startup, the way every Teams client they are signed in on does (`calling_available` in
+`src/bin/server.rs`), so no client can ask for the registration and none can take it
+away. A read-only backend is the only one that never registers.
 
 | Method | Gate | What it does |
 | --- | --- | --- |
 | `call_status` | open | The state the UI draws. No SDP, no links, no credentials. |
-| `set_calling` | `MACHINE_METHODS` | Registers (or unregisters) this machine as a device the user's calls ring on. |
 | `call_prepare` | `MACHINE_METHODS` | Reserves the one call, and returns the ICE servers (plus the offer, when answering). |
 | `call_place` | `OUTWARD_METHODS` | The § 2.3 POST, carrying our offer. Rings a person. |
 | `call_join` | `OUTWARD_METHODS` | The same POST for a MEETING: no `to`, plus `meetingInfo`. Rings nobody. |
@@ -400,9 +403,10 @@ Two things the backend does on its own, and neither is a decision about a call:
   invalidates a live call's links, and only that ends the call.
 
 The browser half is two files: `web/src/lib/call.ts` (pure state model) and
-`call-media.ts` (the microphone, one `RTCPeerConnection`, the remote audio element). The
-UI is `call-bar.tsx` (ringing and in-call, one component), `call-button.tsx` (a 1:1
-header) and the Settings switch.
+`call-media.ts` (the microphone, one `RTCPeerConnection`, the remote audio element). The UI
+is `call-bar.tsx` (a RINGING call, and the notice a call leaves behind), `call-stage.tsx`
+(the PAGE a live call takes over, and the window it folds into, over `lib/call-stage.ts`),
+`call-video.tsx` (one picture) and `call-button.tsx` (a 1:1 header).
 
 A meeting is joined rather than placed, and it is the same plane. The join link comes in
 two shapes and `calling::MeetingJoin` reads both: the long
@@ -434,9 +438,12 @@ that hold `send` hold here, and one is stricter:
   no standing licence, and a call is never placed by anything automatic.
 - **`call` / `answer` / `hangup` are `OUTWARD_METHODS` entries**: the write token,
   refused on a read-only backend, and named in the automation hook.
-- **Registering the calling endpoint changes where Teams routes the user's real calls.**
-  That is a side effect on their account even when this app never rings anybody, so the
-  registration stays behind a setting that is off by default.
+- **Registering the calling endpoint changes where Teams routes the user's real calls**,
+  and the app does it at startup, because that is what a Teams client is: their calls are
+  offered here as well as on their other clients. It reaches nobody by itself — every
+  action that does is gated one by one above — and it is taken back as the app shuts down.
+  A read-only backend is the only one that never registers; a second install on the same
+  machine DOES, as a device of its own, so every window the user opens can call.
 - **The live target is the sandbox chat and its one consenting counterpart**, exactly as
   § Sending messages says. A test call goes there and nowhere else.
 - Answering a call the user was already being offered is the one action that starts
@@ -469,13 +476,13 @@ the thing that refused it rather than guessed:
 5. the leave body, which is not a `callEnd`.
 
 `cd web && bun run join-live` is what closes that loop without the user: it drives the
-live app against the one authorized meeting, reports the call bar and the page's own
-console, and hangs up on every path out. Everything BEFORE the browser is still
-`examples/meeting_join_probe.rs`; everything after it needs that script.
+live app against the one authorized meeting, reports what the app says about the call and
+the page's own console, and hangs up on every path out. Everything BEFORE the browser is
+still `examples/meeting_join_probe.rs`; everything after it needs that script.
 
 **And the media really flows.** `bun run join-live` reports the peer connection's own
-`getStats()`, because "connected" on the call bar only means the answer was applied —
-DTLS can still fail and ICE can still find no path, and the bar would look identical:
+`getStats()`, because a "connected" phase only means the answer was applied — DTLS can
+still fail and ICE can still find no path, and the page would look identical:
 
 ```
 media: connected/connected via prflx/udp -> relay/udp
@@ -561,7 +568,7 @@ than pinning the names in this file.
 
 And the surface itself, with no tenant, no registration and no microphone:
 
-    cd web && bun run preview -- --out /tmp/call --call     # the switch, the ring, the bar
+    cd web && bun run preview -- --out /tmp/call --call     # the button, the ring, the page
     cd web && bun run test                                  # the state model
     cd web && bun run test:e2e -- calling.spec.ts           # the whole flow, through the mock
     cargo test                                              # the payloads, the frames, the gates
@@ -669,10 +676,10 @@ their screen:
 
 **`calling::roster_in_frame` reads none of this and returns `None` on every real frame.** It
 looks for `/rosterUpdate/participants` as an ARRAY, and its test invented that shape — so a
-joined meeting has never named anybody, and the call bar has always said "In the meeting"
-where it should say who is in it. That is a shipped bug this recon found, it is fixed
-separately from any video work, and it is also step one of every feature below: the MSI has
-nowhere else to come from.
+joined meeting has never named anybody, and the app has always said "In the meeting" where
+it should say who is in it. That is a shipped bug this recon found, it is fixed separately
+from any video work, and it is also step one of every feature below: the MSI has nowhere
+else to come from.
 
 To see that stream, the client picks one of ITS OWN receive video sections and asks the
 service to put that source on it. Two spellings, and the client sends both because the
@@ -870,7 +877,10 @@ The user's four asks, ordered by what each one really needs on top of the audio 
   tile. `RemoteAudio` is the pattern to follow, and it is already the right shape.
 - `web/src/lib/call.ts`, `call-bar.tsx` — a call bar becomes a call SURFACE: a tile grid, a
   shared-screen stage, and per-tile state. This is the largest piece of the work by volume,
-  and it is entirely ours: no protocol in it.
+  and it is entirely ours: no protocol in it. **Built** — `call-stage.tsx` over the pure
+  `lib/call-stage.ts`: a full-screen page with the share on the stage and the faces as tiles,
+  a draggable folded window it morphs into, and panels for the roster and the meeting's chat
+  (AGENTS.md § A call is a page).
 - `web/mock/server.ts` — a mock roster with MSIs, and synthesized video, so the whole
   surface stays reviewable with nothing leaving the machine. Without this half the UI can
   only be seen in a real meeting, which is the one place it must not be debugged.
@@ -923,18 +933,21 @@ so the whole path is reviewable with no tenant.
 
 Sending is built too: `calling::media_offer_payload` and the `call_offer_media` RPC, over
 `LocalSenders` in `web/src/lib/call-media.ts` (one reused transceiver per kind, the labels
-restated on every offer) and the two toggles in `call-bar.tsx`. It POSTs a `mediaNegotiation`
-to the `mediaRenegotiation` link the acceptance named, declaring `Video` for a camera and
-`ScreenSharer` for a screen.
+restated on every offer) and the two toggles in the page's header (`call-stage.tsx`). It POSTs
+a `mediaNegotiation` to the `mediaRenegotiation` link the acceptance named, declaring `Video`
+for a camera and `ScreenSharer` for a screen.
 
-**It has never been sent to the tenant.** Everything above is the client's own shape and the
-mock's reproduction of it; § 10.8 says what that leaves open.
+**It HAS now been sent to the tenant, and the service rejected the section** (2026-08-06, a
+real call, twice — § 10.8). The shapes above are still the client's own and the mock's
+reproduction of them; what the one live attempt added is that the POST is accepted and the
+video section is not, with no word about why. § 10.8 says what that leaves open, and what the
+attempt cost.
 
 ### 10.8 What is still open
 
 - **The roster fix is pinned but not SEEN.** The measured shape is in the tests and the
-  driver reads a real frame with it, but the call bar still says "In the meeting" rather than
-  a name — correctly, and for a reason worth writing down: the only other participant in the
+  driver reads a real frame with it, but the page still says "In the meeting" rather than a
+  name — correctly, and for a reason worth writing down: the only other participant in the
   test meeting is the USER'S OWN second device. One person, two endpoints, one mri, so
   `CallSession::others` excludes them and an empty list is the honest answer.
   `participantCounts` says `totalParticipants: 2` beside it, which is the count of endpoints
@@ -952,9 +965,260 @@ mock's reproduction of it; § 10.8 says what that leaves open.
   on every one of them and this app posts neither. Whether the service minds being ignored is
   known — it does not, the call runs for its whole length — but what it does with an answer is
   not.
-- **Sending is BUILT but untried against the tenant.** The outgoing renegotiation has never
-  been POSTed, so the service has never had the chance to refuse its shape — and it refuses
-  without explaining more often than not (§ 8). Three specific unknowns:
+- **Sending was TRIED against the tenant on 2026-08-06, and the service REFUSED the
+  section.** Not a probe: the user shared their screen in a real one-to-one call, twice. This
+  is what the journal holds, and it is all of it — which is the second finding.
+
+      offered media: modalities=["audio", "ScreenSharer"] sending=["screen"]   09:21:21
+      offered media: modalities=["audio"] sending=[]                           09:21:37
+      the call is over: CallEndReasonHangup                                    09:21:42
+      offered media: modalities=["audio", "ScreenSharer"] sending=["screen"]   09:22:00
+      offered media: modalities=["audio"] sending=[]                           09:22:00
+      the call is over: CallEndReasonHangup                                    09:22:11
+
+  Four things read out of it, and they are separate:
+
+  - **The offer is ACCEPTED as a request and the SECTION is rejected.** The service answers
+    rather than refusing the POST — no `400`, no subCode — and its answer zeroes the video
+    section's port, which the browser reads by stopping the transceiver. That is why the
+    second line of each pair is this app taking the capture back down
+    (`releaseDroppedSections`), and on the retry it happened in the SAME SECOND, so the
+    answer came in the POST's own response.
+  - **The refusal names NOTHING**, which is § 8's pattern exactly. So the three unknowns
+    below are still unknowns: a rejected m-line does not say which of them it is, and a
+    rewrite earns its place only when a refusal names what it wants (§ 10.3a's own rule, and
+    how the transport profile was found). `calling::media_sections` now prints the answer's
+    sections on every negotiation for that reason — the shape and never the content — because
+    at the time this happened the journal said only that an offer had gone out.
+  - **`CallEndReasonHangup` is THIS MACHINE hanging up** (`end_call_locally` is reached from
+    `call_hangup`; a service ending carries the service's own prose). The app ended a working
+    call because it could not read an answer to a renegotiation, so the user lost the person
+    they were talking to seconds after sharing. That was a bug in the page and it is fixed —
+    see AGENTS.md § Video in a meeting — and it is the reason the two rounds above are all
+    the measurement there is: each attempt cost the user their call.
+  - **The next attempt is worth making, and it is the user's own click.** What it needs is a
+    live call, the journal open, and the `[calling] the offer was answered at once:` line —
+    which now says which section came back REJECTED and whether the audio came back with it.
+- **The CAUSE was then found in the client's own code, and it is the section LAYOUT.**
+  `addModalities` in `calling-pluginless-779e39a54b8bcd49.js`, verbatim:
+
+  ```js
+  addModalities(e){const t=this.mediaManager.isEmpty();
+    !this.isMultiparty && t && !this.isPstnCall &&
+      (e.video = e.video || "inactive", e.sharing = e.sharing || "inactive"),
+    …
+    for (const i of sy) {
+      if (this.mediaManager.getMediaEntitiesByModality(i)[0] || !e[i]) continue;
+      let n; switch (i) {
+        case D.MODALITY.video:   n = this.numVideoChannels; break;
+        case D.MODALITY.sharing: n = this.numVbssChannels;  break;
+        default:                 n = 1;                      break; }
+      times(n, s => { const o = this.mediaManager.createMediaEntity(i);
+        o.setExtension("reinviteless", t && this.reinvitelessContext.maxStreamsForModality[i] > s);
+        this.createTransceiverForEntity(o) }) } }
+  ```
+
+  Read with `this.numVideoChannels = this.isMultiparty && config.numVideoChannelsGvc || 1`,
+  `numVbssChannels = 1`, and `createTransceiver` → `{direction: "inactive"}`, it says four
+  things — and every one of them was news:
+
+  - **On a ONE-TO-ONE the sections exist before anybody shares.** `isMultiparty` is false and
+    the media manager is empty, so `video` and `sharing` are forced to `inactive` and one
+    transceiver of each is created — in the FIRST offer. Turning a share on is then an
+    ACTIVATION of a section the service already answered, which is why `StartScreenSharing`
+    is decorated `waitFor: "_UpdateMediaDescriptions"` and not `_RenegotiateOutgoing`:
+    `executeNegotiation`'s own branch posts to the `updateMediaDescriptions` link when no new
+    SDP is needed.
+  - **This app did the opposite.** It offered one audio section and asked the service to
+    accept a NEW `applicationsharing-video` on the `mediaRenegotiation` link. That is what
+    was refused, and the refusal shape fits: the request is accepted and the SECTION is
+    zeroed.
+  - **A CONFERENCE really does add sections mid-call**, which is why receiving works and why
+    the meeting path was never suspect: with `isMultiparty` true the two lines above do not
+    run, `e.video` / `e.sharing` are absent on an audio join, and no video entity is created
+    until somebody asks for one. So this app's existing behaviour is right for a meeting and
+    wrong for a one-to-one — the two need different code, and `call_prepare` now says which
+    kind it reserved (`one_to_one`).
+  - **The 13-section BUNDLE of § 2.5 is a MEETING's**, not every call's:
+    `numVideoChannelsGvc` is what makes it thirteen. A one-to-one is three — audio,
+    `main-video`, `applicationsharing-video` — which is exactly what `LocalSenders.reserve`
+    now offers.
+
+  **What is built from that reading**: `reserve` on the offer path of a one-to-one, `adopt`
+  on the answer path (an incoming offer from a real client already holds the layout, so the
+  sections are claimed from it BY LABEL rather than added), and the activation is the
+  renegotiation this app already had — the section is no longer new, which is the whole
+  point. `updateMediaDescriptions` is NOT implemented: it is the client's optimisation for
+  the same activation, and one thing at a time.
+
+  **It is UNVERIFIED against the tenant**, and it changes the first offer of every
+  one-to-one, which is the path that works today. `cd web && bun run call-live` is what
+  proves it — the offer's own m-lines are in its digest, and the journal now names what the
+  answer granted per section (`calling::media_sections`).
+- **Two more of the client's own differences are now sent, and they are the CONFERENCE's
+  candidates.** The only reachable test target is a group chat, which is multiparty — so the
+  multiparty half of the client's config is what matters there, and it says two things this
+  app was not doing:
+
+  - **`allowedVideoCodecsMultiparty: [{video/H264},{video/AV1},{video/rtx}]` with
+    `filterCodecsInSdpMultiparty: true`.** A real client's multiparty offer carries those
+    three; Chrome's carries VP8, VP9, AV1, H.264, red and ulpfec, VP8 first. The service's own
+    video sections are `H264/90000` alone. `setCodecPreferences` now applies the client's list
+    on a conference and nothing on a one-to-one, which is where its own
+    `allowedVideoCodecs: []` / `filterCodecsInSdp: false` leave Chrome's list alone.
+  - **`a=x-ssrc-range` per section**, added beside `a=ssrc:` as § 2.5's capture shows. Audio is
+    accepted without it, which is the control experiment that says it is not required in
+    general — but the service declares one on every section it offers, and a SEND section it
+    must allocate a channel for is where an omission would tell.
+
+  Both are copies of the client rather than inventions, and neither is verified: the next
+  share attempt is what says. The journal names the answer's sections
+  (`calling::media_sections`), so the outcome is one line either way.
+- **The section was still rejected with all of that, and the client's code names why: a screen
+  is a SESSION.** Measured 2026-08-06, second attempt, in a meeting, with the section labelled
+  `applicationsharing-video`, the conference codec list applied and `x-ssrc-range` stated:
+
+      offered media: modalities=["audio", "ScreenSharer"] sending=["screen"]
+      a media answer arrived: audio mid=0 label=main-audio accepted | video REJECTED
+
+  Note what the rejected line does NOT carry: no `mid` and no `label`. The service did not echo
+  the section at all — it refused to have one. And the call SURVIVED it, which is the earlier
+  fix holding: audio was untouched and nothing hung up.
+
+  The client's own path is `startScreenSharing` → `startContentSharingAsync` →
+  `ContentSharingSession.start(addModalityUrl, content, …)`, which POSTs `j2(session, content)`:
+
+  ```js
+  { participants: { from: <local participant>, to: [] },
+    contentSharing: { identifier, subject, sessionState, sequenceNumber,
+                      links: { sessionUpdate, sessionEnd } },
+    links: { addModalitySuccess, addModalityFailure } }
+  ```
+
+  with a `ContentSharingCorrelationId` header, and it sets `isPresenter = true` on the answer.
+  `startContentSharingAsync` fills that body as `{contentIdentifier: e, subject: i || null,
+  sessionState: t || null, sequenceNumber: 1}` — so two of the four fields are legitimately
+  null and the sequence number is the literal `1`. The answer carries the session's own six
+  links (`contentSharingController`, `takeControl`, `updateSessionState`, `sync`,
+  `notificationLinks`, `leave`).
+
+  **That is § 10.4's session, and it is now built**: `calling::content_sharing_payload` /
+  `content_sharing_leave_payload` / `ContentSharing`, the `call_start_sharing` and
+  `call_stop_sharing` RPCs, and the page asking for one before it offers the section. Read
+  AGENTS.md § Video in a meeting for the five rules. Two things about it are worth keeping in
+  mind next time:
+  - **The session's `leave` must never be merged into the call's links.** `Links::collect`
+    takes the deepest of a name and the call already has a `leave` — merged in, giving a share
+    back would hang the call up. It is read into its own struct for that reason.
+  - **`takeControl` and `updateSessionState` are deliberately not read.** A link nothing posts
+    to goes stale in a struct, and this app has neither feature.
+
+  **Still unverified**: the POST has never been accepted or refused by the tenant. If it is
+  refused it will say so with a subCode, which is more than the section's silent rejection ever
+  did.
+- **The whole of the client's transform is now sent, and the service PARSES it — which is the
+  first thing it ever explained.** Driven by `bun run join-live -- --share`, which grew the step
+  that presses the stage's own control and the instrument that reads OUR OWN offer back
+  (`readLocalOffer`, off `setLocalDescription` as it is applied — reading `localDescription`
+  afterwards reads the last one, and a rejected section has been taken down by then).
+  Implemented from § 2.5's own diff, in `web/src/lib/ms-sdp.ts`:
+
+  - **`b=CT:4000`, and its POSITION is load-bearing.** After `t=` the service refuses the whole
+    description by name: `SdpParsingError … Line 5: Unexpected field 'b' found. The field may be
+    undefined or in the wrong order.` The grammar puts a session bandwidth before `t=`, and so
+    does the capture. That refusal is the only one this service has ever spelled out, and it
+    proves the SDP is parsed strictly and named precisely when it is wrong — so the next mistake
+    will say what it is.
+  - **The bundle's real transport, per section.** A browser writes the address on the section
+    that carries candidates and `9` / `IN IP4 0.0.0.0` on every other; the client copies the real
+    port and `c=` onto each (`transformBundle`).
+  - **`a=rtcp:<port>` on an offer, deleted on an answer** (the client's `rtcpTransform`), the
+    session **fingerprint copied onto every live section**, and **`a=msid-semantic: WMS *`**.
+
+  And these, from the client's code rather than the capture: the conference codec list, the
+  SSRC range (0-wide, because `getSsrcRangeForIndex` is `or(direction) && simulcast ? … : 0` and
+  simulcast is off), the content-sharing session, and the section LAYOUT — cameras before the
+  screen, so a conference's sharing section is the fourth m-line at the service's own mid 3.
+
+  **Every video section is still rejected, and audio goes through the same transform and is
+  accepted.** Measured across nine live joins, with each of these eliminated one at a time:
+  mid 1 and mid 3; `inactive`, `recvonly` and `sendonly`; at the join and mid-call; with the
+  presenter session granted (`role = "presenter"` in the roster, `can_stop=true`) and without.
+
+  **What has NEVER been true in any of those runs: somebody else in the meeting.** Every one was
+  joined alone — no other roster entry, and no `mediaRenegotiation` from the service, which is
+  its own signal that it has something to negotiate. § 10.3a already measured that: of five
+  joins, the four that got a renegotiation had a SECOND endpoint and the one that joined an empty
+  meeting got none in 30 s. A conference SFU refusing to allocate a video channel with no
+  receiver in the meeting fits every measurement above, and it is the one hypothesis this
+  machine cannot test by itself — the second install (`--released`, the front this driver grew
+  for exactly that) is refused writes by its own write lock, so it cannot join.
+
+  **So the next measurement needs a second participant in the meeting, and nothing else.**
+- **MEASURED WITH A SECOND PARTICIPANT SHARING (2026-08-06), and it inverted the diagnosis.**
+  The user joined the pinned meeting from real Teams with their camera on and their screen
+  shared, and `bun run join-live` drove three variants against it. The roster named their
+  streams — `main-audio 201`, `main-video 202`, `applicationsharing-video 212 sendonly`,
+  `data 213` — so there was a real screen to receive and a real presenter to displace.
+
+  | What this app did | What the service offered on its renegotiation |
+  | --- | --- |
+  | audio-only join, no session | `video port=3481 label:applicationsharing-video mid:3 sendonly x-ssrc-range:3005-3104` |
+  | audio-only join, session TAKEN | `video port=0 label:applicationsharing-video` |
+  | video sections reserved at the join | `video port=0` ×3, echoed for ever, and no live section at all |
+
+  Three things follow, and the first two are things this app had just been changed to do:
+
+  - **Taking the content-sharing session TAKES THE ROLE off whoever is presenting.** The
+    service grants it — `role = "presenter"` in our own roster entry, `can_stop=true` — and then
+    the sharer's section comes back at port 0. Their screen stops arriving and nothing of ours
+    goes out. A meeting shows ONE screen, `takeControl` is how it changes hands, and this app
+    does not offer that: `call_start_sharing` now refuses while anybody else is sharing, named,
+    and a test pins it.
+  - **Reserving video sections in the join offer poisons the layout.** The service rejects them
+    and from then on echoes the rejected slots instead of adding the live section it adds to an
+    audio-only join. So it cost the RECEIVE path and bought nothing. Reverted: the join offers
+    audio alone, which is the only shape this service has ever answered with a live video
+    section.
+  - **RECEIVING is proven end to end at the protocol level.** The live section is there, at the
+    service's own mid 3, with a 100-wide SSRC range — and this app answered it
+    (`answered a media renegotiation: modalities=["audio", "ScreenViewer"]`).
+
+  **SENDING remains unreachable, and every avenue this machine can reach is now measured and
+  closed**: a client-initiated section is rejected at every mid, in every direction, at the join
+  and mid-call, with the whole of the client's transform and with the presenter session held;
+  and the service never offers a section for us to send on. What is left is the one mechanism
+  the client's own decorator names and this app has never spoken —
+  `StartScreenSharing waitFor: "_UpdateMediaDescriptions"`, the `updateMediaDescriptions` link
+  from `executeNegotiation`'s other branch, which changes media DESCRIPTIONS with no SDP
+  renegotiation at all. That is the next thing to build, and it is the last one.
+- **RECEIVING was blocked by two refusals, both now named and both now fixed** (2026-08-06,
+  driven against the pinned meeting with the user sharing from real Teams):
+
+  1. **Chrome refused the service's renegotiation offer**, so the section carrying a colleague's
+     screen never reached a `track` event and the stage drew nothing:
+
+         InvalidAccessError: Failed to set remote offer sdp: A BUNDLE group contains a codec
+         collision for header extension id=3. The id must be the same across all bundled media
+         descriptions
+
+     The service declares one extension id with different URIs on different sections of one
+     bundle. `fromMsSdp` now canonicalises them: first id per URI wins, a URI whose id is taken
+     moves to the lowest free one. **Dropping the clashing line was tried first and was worse** —
+     Chrome then chose its own ids per section in the ANSWER (id 2 on audio, id 1 on video) and
+     the service refused that with `SdpParsingFailure`.
+  2. **The service refused our answer**, ending the call a second after it went out, with
+     `SdpParsingFailure` and no line named. The cause was the `x-data` section the browser had
+     REJECTED: this app sent Chrome's whole description for it. The client's own transform writes
+     a STUB for a port-0 section — `Kn(e) = e.port === 0`, which deletes every key but the kind,
+     port, profile, payloads, mid and label and sets the payloads to `34`. With the stub the call
+     stays up through the renegotiation for as long as it is held.
+
+  So both ends of the receive path are open for the first time: Chrome accepts the offer, and the
+  service accepts the answer. **A TILE has still not been seen**, because the second participant
+  had left by the time the last refusal was fixed — that is one more run with somebody sharing,
+  and nothing else.
+- Three specific unknowns remain, and the refusal above narrowed none of them:
   - **Whether a `contentSharing` session is needed at all.** § 10.4 says the client opens one,
     with six links and a presenter. But no participant in the measured roster carried a
     `contentSharing` object *even while sharing* — their share was a `mediaStreams` entry and

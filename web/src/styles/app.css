@@ -115,6 +115,25 @@
   --font-sans:
     "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif,
     "Apple Color Emoji", "Segoe UI Emoji";
+
+  /* magicui's ShineBorder (components/magicui/shine-border.tsx) — the light that
+   * travels the edge of a bubble an agent is writing into. The registry item ships this
+   * pair with the component, and it belongs in an `inline` theme: `--duration` is set on
+   * the element itself, so the value has to be inlined into the utility rather than
+   * resolved here. */
+  --animate-shine: shine var(--duration) infinite linear;
+}
+
+@keyframes shine {
+  0% {
+    background-position: 0% 0%;
+  }
+  50% {
+    background-position: 100% 100%;
+  }
+  to {
+    background-position: 0% 0%;
+  }
 }
 
 /* The app shell is exactly one dynamic viewport tall. `dvh` tracks the space the
@@ -139,6 +158,16 @@
 
 html[data-virtual-keyboard-open] .composer-shell {
   padding-bottom: 0;
+}
+
+/* How far off the bottom a transient notice sits (components/app-toaster.tsx). The BASE
+ * clears the composer and the home indicator, which is the same inset the call bar takes
+ * — a card over the message box swallows the click that focuses it. `call-bar.tsx` then
+ * overrides `--notice-inset-bottom` with its own height while it draws a card, so a
+ * notice stacks above that card instead of over its controls. The base is a variable of
+ * its own so the reservation can add to it without spelling the inset twice. */
+:root {
+  --notice-inset-base: calc(6rem + env(safe-area-inset-bottom));
 }
 
 @layer base {
@@ -500,6 +529,18 @@ html[data-virtual-keyboard-open] .composer-shell {
   }
 }
 
+/* The light that travels the edge of a bubble an agent is writing into (magicui's
+   ShineBorder, in components/magicui/shine-border.tsx; `AgentBubbleShine` holds this app's
+   half of it). The component already stops the animation under `prefers-reduced-motion`,
+   which is not enough: held still, the sweep is a smear of colour over one corner rather
+   than a light going round an edge, so the ring goes away entirely and the bubble keeps
+   the static hairline it already wears. */
+@media (prefers-reduced-motion: reduce) {
+  .agent-shine {
+    display: none;
+  }
+}
+
 /* The caret at the end of an answer that is still arriving. It rides the body's last
    block as a pseudo-element, which is what puts it after the final word instead of on
    a line of its own — no marker element in the text, nothing to strip out on copy. */
@@ -855,4 +896,66 @@ html[data-virtual-keyboard-open] .composer-shell {
     color-mix(in srgb, var(--event-color) 22%, transparent) 0 2px,
     transparent 2px 6px
   );
+}
+
+/* ---------------------------------------------------------------------------
+   The merge-request DIFF: the seam between this app's tokens and Pierre's two
+   custom elements (§ The GitLab page).
+
+   `@pierre/diffs` and `@pierre/trees` render into a SHADOW ROOT, so nothing
+   inside them can be styled from here and nothing is meant to be. Each publishes
+   a custom property per colour instead, and every one of them reads an
+   `-override` from the host first — which is the vendor's own seam, and the only
+   thing this block uses. It is the choice made for magicui's ShineBorder: keep
+   the vendor's file, own the boundary.
+
+   `color-scheme` is the load-bearing declaration. Both packages resolve their
+   palettes with CSS `light-dark()`, and their own `:host` rules leave the scheme
+   at `light dark` — which follows the OS, not this app's appearance setting. So a
+   reader whose OS is dark and whose app is light would get a black diff in a
+   white page. A rule here on the host element beats `:host` (the outer tree wins
+   for the host), so these two lines are what make the diff follow the app.
+   `themeType` carries the same answer to the highlighter — see
+   `gitlab-diff-view.tsx`. */
+diffs-container,
+file-tree-container {
+  color-scheme: light;
+  display: block;
+  min-width: 0;
+}
+[data-theme="dark"] diffs-container,
+[data-theme="dark"] file-tree-container {
+  color-scheme: dark;
+}
+
+/* The code's own type is the app's mono stack at the size the rest of the page
+   reads code at, so a patch and an inline `code` span are one typeface. */
+diffs-container {
+  --diffs-font-family: ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Mono",
+    "Liberation Mono", monospace;
+  --diffs-header-font-family: inherit;
+  --diffs-font-size: 12px;
+  --diffs-line-height: 19px;
+  /* The surfaces come from this app so a diff sits in the page rather than on it.
+     Only the SURFACE is ours: the syntax colours are the Shiki theme's
+     (`pierre-light` / `pierre-dark`), which is what the package is for. */
+  --diffs-light-bg: var(--card);
+  --diffs-dark-bg: var(--card);
+  --diffs-light: var(--foreground);
+  --diffs-dark: var(--foreground);
+}
+
+/* The tree is a sidebar of this app, so it takes this app's sidebar colours —
+   and the accent that tints its selected row is the one accent. What stays
+   Pierre's is the git status tint per row: added, modified, renamed and deleted
+   are that vocabulary's own colours, and they are the thing the row says. */
+file-tree-container {
+  --trees-accent-override: var(--primary);
+  --trees-bg-override: var(--card);
+  --trees-fg-override: var(--text-dim);
+  --trees-fg-muted-override: var(--text-faint);
+  --trees-border-color-override: var(--border-subtle);
+  --trees-font-family-override: inherit;
+  --trees-font-size-override: 12px;
+  --trees-focus-ring-color-override: var(--ring);
 }

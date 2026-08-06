@@ -1,6 +1,7 @@
 import {
   test,
   expect,
+  clearComposer,
   composerField,
   fetchCapturedSends,
   fillComposer,
@@ -39,6 +40,67 @@ test.describe("messaging", () => {
     const second = await openConversationAt(page, 1);
     expect(second).not.toBe(first);
     await expect(shell).toHaveAttribute("data-conversation-id", second);
+  });
+
+  // A send takes as long as the network takes, and the reader keeps typing into the box
+  // meanwhile — or their phone's keyboard commits a correction as Enter is pressed. The
+  // words that LEFT must go and the words that did not must stay: clearing everything
+  // erases what nobody sent, and clearing nothing shows the message that just left, so
+  // the next Enter posts it twice.
+  test("takes the sent words out and keeps the ones typed after them", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    await setSendControl(page, { clear: true, delay_ms: 600 });
+
+    await fillComposer(page, "this one leaves");
+    const field = composerField(page);
+    await field.press("Enter");
+    await page.keyboard.type(" and this one stays");
+
+    await expect(page.locator('[data-testid="message"]', { hasText: "this one leaves" })).toBeVisible();
+    await expect(field).toHaveText("and this one stays");
+    await setSendControl(page, { clear: true });
+    await clearComposer(page);
+  });
+
+  // The other half of the same rule: a draft REWRITTEN while the message travelled is the
+  // reader's, whole. The sent range no longer describes anything that left, so nothing is
+  // taken out of it — the words on screen are the ones they mean to send next.
+  test("leaves a draft rewritten while the message travelled", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    await setSendControl(page, { clear: true, delay_ms: 600 });
+
+    await fillComposer(page, "the first one");
+    const field = composerField(page);
+    await field.press("Enter");
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.type("a different message");
+
+    await expect(page.locator('[data-testid="message"]', { hasText: "the first one" })).toBeVisible();
+    await expect(field).toHaveText("a different message");
+    await setSendControl(page, { clear: true });
+    await clearComposer(page);
+  });
+
+  // Reply, then type: the caret has to be in the box by the time the next keystroke
+  // arrives, or the answer the reader writes goes nowhere.
+  test("the keystrokes that follow a Reply land in the composer", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    // The box starts empty and unfocused, which is the state this test is about.
+    await clearComposer(page);
+
+    const target = page.locator('[data-testid="message"]').first();
+    await target.hover();
+    await target.locator('[data-testid="message-actions"]').click();
+    // No wait: this is somebody who clicks Reply and writes.
+    await page.locator('[data-testid="action-reply"]').click();
+    await page.keyboard.type("straight into the box");
+    await expect(composerField(page)).toHaveText("straight into the box");
+
+    await page.keyboard.press("Escape");
+    await clearComposer(page);
   });
 
   test("Shift+Enter inserts a newline instead of sending", async ({ page }) => {

@@ -412,6 +412,58 @@ describe("layoutDayGrid", () => {
     expect(block!.top + block!.height).toBeLessThanOrEqual(100.001);
   });
 
+  it("never grows a short meeting over the one that starts at its end", () => {
+    // Two quarter-hour holds back to back, then a half hour: the day holds no overlap,
+    // so no block may cover the next one's start.
+    const events = [
+      timed("quarter", at(2026, 7, 22, 15, 0), at(2026, 7, 22, 15, 15)),
+      timed("next", at(2026, 7, 22, 15, 15), at(2026, 7, 22, 15, 30)),
+      timed("half", at(2026, 7, 22, 15, 30), at(2026, 7, 22, 16, 0)),
+    ];
+    const blocks = layoutDayGrid(events, day);
+    const quarter = 100 / 24 / 4;
+    for (const id of ["quarter", "next"]) {
+      expect(blocks.find((b) => b.event.id === id)!.height).toBeCloseTo(quarter, 5);
+    }
+    // Every block ends where its own meeting does, so none of them overlap.
+    const sorted = [...blocks].sort((a, b) => a.top - b.top);
+    for (let i = 1; i < sorted.length; i++) {
+      expect(sorted[i - 1]!.top + sorted[i - 1]!.height).toBeLessThanOrEqual(sorted[i]!.top + 0.001);
+    }
+  });
+
+  it("grows a short meeting into the gap that follows it", () => {
+    const events = [
+      timed("quarter", at(2026, 7, 22, 15, 0), at(2026, 7, 22, 15, 15)),
+      timed("later", at(2026, 7, 22, 16, 0), at(2026, 7, 22, 17, 0)),
+    ];
+    const [quarter] = layoutDayGrid(events, day);
+    // Nothing starts before 16:00, so the block takes the legible half hour.
+    expect(quarter!.height).toBeCloseTo(100 / 24 / 2, 5);
+  });
+
+  it("keeps a block visible when the next meeting starts minutes later", () => {
+    const events = [
+      timed("brief", at(2026, 7, 22, 9, 0), at(2026, 7, 22, 9, 5)),
+      timed("soon", at(2026, 7, 22, 9, 10), at(2026, 7, 22, 10, 0)),
+    ];
+    const [brief] = layoutDayGrid(events, day);
+    expect(brief!.height).toBeCloseTo((10 / (24 * 60)) * 100, 5);
+  });
+
+  it("still grows a short meeting that a longer one overlaps, and cascades it", () => {
+    // A real overlap is drawn as a cascade, so the minimum height applies in full: the
+    // two blocks are side by side, and neither hides the other's leading edge.
+    const events = [
+      timed("quarter", at(2026, 7, 22, 10, 0), at(2026, 7, 22, 10, 15)),
+      timed("long", at(2026, 7, 22, 10, 5), at(2026, 7, 22, 11, 0)),
+    ];
+    const blocks = layoutDayGrid(events, day);
+    const quarter = blocks.find((b) => b.event.id === "quarter")!;
+    expect(quarter.height).toBeCloseTo(100 / 24 / 2, 5);
+    expect(quarter.columns).toBe(2);
+  });
+
   it("excludes banded events", () => {
     expect(layoutDayGrid([allDay("x", "2026-07-22", "2026-07-23")], day)).toHaveLength(0);
   });

@@ -36,8 +36,11 @@
 //   bun run web/scripts/preview.ts --out /tmp/mail --mail        # the Mail surface
 //   bun run web/scripts/preview.ts --out /tmp/cal --calendar     # the Calendar surface
 //   bun run web/scripts/preview.ts --out /tmp/chan --channels    # the team → channel tree
+//   bun run web/scripts/preview.ts --out /tmp/mr --gitlab       # the merge-request page
+//   bun run web/scripts/preview.ts --out /tmp/diff --diff       # the Changes section
 //   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
 //   bun run web/scripts/preview.ts --out /tmp/img --image       # the picture lightbox
+//   bun run web/scripts/preview.ts --out /tmp/pics --compose-images # several pending images
 //   bun run web/scripts/preview.ts --out /tmp/preview --react   # reaction chips + emoji picker
 //   bun run web/scripts/preview.ts --out /tmp/del --delete      # delete: menu, confirm, placeholder
 //   bun run web/scripts/preview.ts --out /tmp/preview --scrolled # history scrolled up (jump button)
@@ -47,6 +50,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/agent --agent     # the local-agent menu
 //   bun run web/scripts/preview.ts --out /tmp/reply --agent-reply  # the agent answering
 //   bun run web/scripts/preview.ts --out /tmp/prov --ai-providers # Settings › AI providers
+//   bun run web/scripts/preview.ts --out /tmp/app --maintenance # Settings › This app
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
 //   bun run web/scripts/preview.ts --out /tmp/tag --agent-tag   # tagging an agent
 //   bun run web/scripts/preview.ts --out /tmp/ask --answer-with # "Answer with <agent>" on a message
@@ -429,6 +433,75 @@ export async function openMailAt(page: Page, index: number): Promise<string> {
 }
 
 /**
+ * Switch the sidebar to the GitLab tab and wait for its list to populate.
+ *
+ * The merge requests load lazily — nothing is fetched until this tab is first shown — so a
+ * caller must go through here rather than assuming rows exist.
+ *
+ * Reading merge requests is a pure read. The page's four WRITES (merge, comment, delete a
+ * comment, close) are exercised here too, and that is safe for exactly one reason: this only
+ * ever runs inside `withPreview`, which proved the backend was the mock before handing over
+ * the page. There is no GitLab and no token behind it — see the `gitlab_mr_*` fixtures in
+ * web/mock/server.ts.
+ */
+export async function openGitLabTab(page: Page): Promise<void> {
+  await page.locator('[data-testid="tab-gitlab"]').click();
+  await page.waitForSelector('[data-testid="gitlab-row"]', { timeout: APP_READY_TIMEOUT_MS });
+}
+
+/** Open the merge request at `index` in the list and wait for its page. Returns its
+ *  reference ("!596"), which is what a report names it by. */
+export async function openMergeRequestAt(page: Page, index: number): Promise<string> {
+  const row = page.locator('[data-testid="gitlab-row"]').nth(index);
+  const iid = (await row.getAttribute("data-iid")) ?? "";
+  await row.click();
+  await page.waitForSelector('[data-testid="gitlab-heading"]', { timeout: APP_READY_TIMEOUT_MS });
+  // The pipeline and the comments arrive in their own round-trips; wait for the pipeline
+  // panel to settle on something rather than catching it mid-read.
+  await page
+    .locator(
+      '[data-testid="gitlab-pipeline-status"], [data-testid="gitlab-no-pipeline"]',
+    )
+    .first()
+    .waitFor({ timeout: APP_READY_TIMEOUT_MS });
+  return `!${iid}`;
+}
+
+/** Scroll the Changes section into view and wait for its diff to be drawn.
+ *
+ *  The wait is for the PATCH rather than the section: the section paints from the read, and
+ *  what takes time after that is the lazy chunk (`@pierre/diffs` carries Shiki) and then the
+ *  grammar for the file's own language. A shot taken before both is a shot of the
+ *  "Highlighting…" placeholder. */
+export async function openChanges(page: Page): Promise<void> {
+  await page.locator('[data-testid="gitlab-changes"]').scrollIntoViewIfNeeded();
+  await page.waitForSelector('[data-testid="gitlab-diff-patch"]', {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+  // The highlighter resolves its grammar and theme asynchronously, so the element exists
+  // before it holds any code. One frame past that is what makes a capture readable.
+  await page.waitForTimeout(800);
+}
+
+/** Show one file of the open diff by clicking its row in the tree.
+ *
+ *  The tree renders inside a shadow root, and Playwright's CSS engine pierces an open one — so
+ *  this drives the row a reader would press rather than the store behind it. `data-item-path`
+ *  is `@pierre/trees`' own attribute per row; the WAIT is on this app's own heading, which is
+ *  what proves the click reached the section rather than only the tree.
+ *
+ *  What is asserted afterwards is always the app's own `[data-testid]`s. Reaching further into
+ *  a vendor's markup would be a test of their release notes. */
+export async function pickDiffFile(page: Page, path: string): Promise<void> {
+  await page.locator(`[data-item-path="${path}"]`).first().click();
+  await page.waitForSelector(`[data-testid="gitlab-changes-file"][data-path="${path}"]`, {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+  // A file whose language the highlighter has not loaded yet resolves one more grammar.
+  await page.waitForTimeout(600);
+}
+
+/**
  * Switch the sidebar to the Calendar tab and wait for the grid to render.
  *
  * The calendar loads lazily — the calendar list and the first window are only
@@ -510,6 +583,18 @@ export async function openFirstEvent(page: Page): Promise<string> {
   // surface and reads as a styling bug that is not there.
   await page.waitForTimeout(250);
   return id;
+}
+
+/** Open one NAMED event's details panel, for a capture that needs the fixture's own
+ *  shape — a meeting with a join link and a real invitation body, which `.first()` is a
+ *  coin toss for. Same pane scoping and the same wait as {@link openFirstEvent}. */
+export async function openEvent(page: Page, id: string): Promise<void> {
+  await page
+    .locator(`[data-testid="calendar-pane"] [data-testid="calendar-event"][data-event-id="${id}"]`)
+    .first()
+    .click();
+  await page.waitForSelector('[data-testid="calendar-event-details"]');
+  await page.waitForTimeout(250);
 }
 
 /** Flip one of the view menu's display settings and close the menu again. */
@@ -1313,8 +1398,9 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  // Audio calling: the switch that is the consent, the button in a 1:1 header, a call
-  // ringing with a working Answer, and the bar while it is up.
+  // Audio calling: the button in a 1:1 header, a call ringing with a working Answer, the
+  // PAGE it becomes once answered — its people, its chat, its picture — and the window
+  // that page folds into and is dragged around in.
   //
   // Nothing here registers anything or opens a microphone. The mock reproduces the
   // signaling and the page uses `simulatedCallMedia` because the backend announced
@@ -1322,29 +1408,20 @@ if (import.meta.main) {
   // the machine (see web/mock/server.ts and src/lib/call-media.ts).
   if (args.includes("--call")) {
     await withPreview(async ({ page, shot, setTheme, emit }) => {
-      // 1. Off, which is the state a fresh backend is really in: the button is drawn
-      //    but disabled, and its tooltip says where to turn calling on.
-      await openConversation(page, "Ava Thompson");
-      await shot(`${out}-off-light.png`, '[data-testid="message-pane"] header');
-
-      // 2. The switch. Turning it on is the consent, so it is performed rather than
-      //    assumed — the same reason the agent's mode is switched on in its capture.
-      await openSettings(page);
-      const section = page.locator('[data-testid="calling-settings"]');
-      await section.waitFor();
-      await shot(`${out}-settings-light.png`, '[data-testid="calling-settings"]');
-      await page.locator('[data-testid="calling-toggle"]').click();
-      await page.waitForSelector('[data-testid="calling-state"]:has-text("registered")');
-      await shot(`${out}-settings-on-light.png`, '[data-testid="calling-settings"]');
-      await setTheme("dark");
-      await shot(`${out}-settings-on-dark.png`, '[data-testid="calling-settings"]');
-      await setTheme("light");
-
-      // 3. The header button, now live.
+      // 1. The header button, live with no step in between: the backend registered as a
+      //    device the user's calls ring on at startup, and there is no switch anywhere.
       const conversationId = await openConversation(page, "Ava Thompson");
       await shot(`${out}-button-light.png`, '[data-testid="message-pane"] header');
 
-      // 4. Ringing, with an Answer that works.
+      // 2. A window whose backend does not take calls at all — a read-only one, or the
+      //    second install beside the user's app. The control stays and says so.
+      await emit({ kind: "calling", enabled: false });
+      await page.waitForTimeout(300);
+      await shot(`${out}-off-light.png`, '[data-testid="message-pane"] header');
+      await emit({ kind: "call_invite", reset: true });
+      await page.waitForTimeout(300);
+
+      // 3. Ringing, with an Answer that works.
       await emit({ kind: "call_invite", conversation: conversationId });
       await page.waitForSelector('[data-testid="call-bar"][data-phase="ringing"]');
       await page.waitForTimeout(300);
@@ -1354,22 +1431,103 @@ if (import.meta.main) {
       await shot(`${out}-ringing-card-dark.png`, '[data-testid="call-bar"]');
       await setTheme("light");
 
-      // 5. Answered: the bar, the duration, mute.
+      // 4. Answered: the CALL AS A PAGE — the header, the time, the controls, and the card
+      //    with the person in the middle of it. This is the whole surface, so the shot is
+      //    the page rather than a crop.
       await page.locator('[data-testid="call-answer"]').click();
-      await page.waitForSelector('[data-testid="call-bar"][data-phase="connected"]');
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="full"]');
       await page.waitForTimeout(1100);
-      await shot(`${out}-connected-card-light.png`, '[data-testid="call-bar"]');
-      await page.locator('[data-testid="call-mute"]').click();
+      await shot(`${out}-stage-light.png`);
+      await shot(`${out}-stage-header-light.png`, '[data-testid="call-stage"] header');
+      await page.locator('[data-testid="call-mute"]').first().click();
       await page.waitForSelector('[data-testid="call-mute"][aria-pressed="true"]');
-      await shot(`${out}-muted-card-light.png`, '[data-testid="call-bar"]');
+      await shot(`${out}-stage-muted-light.png`, '[data-testid="call-stage"] header');
       await setTheme("dark");
-      await shot(`${out}-connected-card-dark.png`, '[data-testid="call-bar"]');
-      await page.locator('[data-testid="call-hangup"]').click();
+      await shot(`${out}-stage-dark.png`);
+      await setTheme("light");
 
-      // 6. A meeting: the Join button beside the link out, the lobby, then the roster.
+      // 4a. FOLDED. The same element, morphed into a window the user drags out of the way
+      //     — so the shot after the drag is the proof that the position is the window's own
+      //     and that expanding returns from exactly there.
+      await page.locator('[data-testid="call-stage-minimize"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="mini"]');
+      await page.waitForTimeout(600);
+      await shot(`${out}-mini-light.png`, '[data-testid="call-stage"]');
+      await shot(`${out}-mini-page-light.png`);
+      const folded = await page.locator('[data-testid="call-stage"]').boundingBox();
+      if (folded) {
+        await page.mouse.move(folded.x + folded.width / 2, folded.y + 12);
+        await page.mouse.down();
+        await page.mouse.move(240, 160, { steps: 24 });
+        await page.mouse.up();
+        await page.waitForTimeout(600);
+        await shot(`${out}-mini-dragged-light.png`);
+      }
+      await setTheme("dark");
+      await shot(`${out}-mini-dark.png`, '[data-testid="call-stage"]');
+      await setTheme("light");
+      // And back, from where it was dropped.
+      await page.locator('[data-testid="call-stage-expand"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="full"]');
+      await page.waitForTimeout(600);
+      await page.locator('[data-testid="call-hangup"]').first().click();
+      await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
+
+      // 4b. A GROUP chat: the same button, and a label that says it rings everybody. Then
+      //     the stage, which names the CONVERSATION and fills in who picked up.
+      await openConversation(page, "Platform Team");
+      await shot(`${out}-group-button-light.png`, '[data-testid="message-pane"] header');
+      await page.locator('[data-testid="call-button"]').click();
+      await page.waitForSelector('[data-testid="call-stage"]');
+      await shot(`${out}-group-dialing-light.png`);
+      await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
+      await page.waitForSelector('[data-testid="call-phase"]:has-text("With")');
+      await shot(`${out}-group-stage-light.png`);
+      await page.locator('[data-testid="call-hangup"]').first().click();
+      await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
+
+      // 4c. A MEETING chat, which is the other thing a chat header can offer: Join, from the
+      //     thread itself, with no calendar and no link. The meeting the thread was minted
+      //     for is the one action it gets — and once joined, that thread's own chat is the
+      //     panel beside the picture.
+      await openConversation(page, "Design Sync");
+      await shot(`${out}-meeting-chat-light.png`, '[data-testid="message-pane"] header');
+      // The control on its own. It is a 20px glyph and whether it reads as a MEETING rather
+      // than as the handset next door is the whole of this row, so `--dpr` is worth passing
+      // when this shot is the one being judged.
+      await shot(`${out}-meeting-chat-icon.png`, '[data-testid="meeting-join-here"]');
+      await setTheme("dark");
+      await shot(`${out}-meeting-chat-dark.png`, '[data-testid="message-pane"] header');
+      await setTheme("light");
+      await page.locator('[data-testid="meeting-join-here"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
+      await page.waitForTimeout(600);
+      await shot(`${out}-meeting-chat-stage-light.png`);
+
+      // 4d. The two panels. The CHAT is already open — a call in a conversation opens with
+      //     it (`initialCallStagePanel`), which is what the shot above shows — so this walks
+      //     to People, the roster the service reports, and back.
+      await page.locator('[data-testid="call-stage-people"]').click();
+      await page.waitForSelector('[data-testid="call-stage-people-panel"]');
+      await page.waitForTimeout(500);
+      await shot(`${out}-people-light.png`);
+      await shot(`${out}-people-panel-light.png`, '[data-testid="call-stage-panel"]');
+      await page.locator('[data-testid="call-stage-chat-toggle"]').click();
+      await page.waitForSelector('[data-testid="call-stage-transcript"]');
+      await page.waitForTimeout(500);
+      await shot(`${out}-chat-light.png`);
+      await shot(`${out}-chat-panel-light.png`, '[data-testid="call-stage-panel"]');
+      await setTheme("dark");
+      await shot(`${out}-chat-dark.png`);
+      await setTheme("light");
+      await page.locator('[data-testid="call-hangup"]').first().click();
+      await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
+
+      // 5. A meeting from the CALENDAR: the Join button beside the link out, the lobby,
+      //    then the roster.
       //
       // Back to the root first: the calendar pane only shows when no conversation is in
-      // the URL, and step 3 opened one (see app.tsx).
+      // the URL, and the steps above opened several (see app.tsx).
       await page.goto(WEB_ORIGIN, { waitUntil: "domcontentloaded" });
       await page.waitForSelector('[data-testid="conversation-row"]');
       await openCalendarTab(page);
@@ -1386,17 +1544,14 @@ if (import.meta.main) {
       await shot(`${out}-meeting-actions-light.png`, '[data-testid="calendar-event-details"]');
       await page.locator('[data-testid="meeting-join-here"]').click();
       await page.waitForSelector('[data-testid="call-phase"]:has-text("Waiting")');
-      await shot(`${out}-meeting-lobby-light.png`, '[data-testid="call-bar"]');
-      await page.waitForSelector('[data-testid="call-bar"][data-phase="connected"]');
+      await shot(`${out}-meeting-lobby-light.png`);
+      await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
       await page.waitForSelector('[data-testid="call-phase"]:has-text("others")');
-      await shot(`${out}-meeting-card-light.png`, '[data-testid="call-bar"]');
-      await setTheme("dark");
-      await shot(`${out}-meeting-card-dark.png`, '[data-testid="call-bar"]');
-      await setTheme("light");
+      await shot(`${out}-meeting-stage-light.png`);
 
-      // 7. And the PICTURE. The mock's service renegotiates right after the roster, the
-      //    page answers and subscribes, and the tiles appear — a shared screen on the
-      //    stage and a camera under it. Nothing here opens a camera: the streams come
+      // 6. And the PICTURE. The mock's service renegotiates right after the roster, the
+      //    page answers and subscribes, and the shared screen takes the whole content with
+      //    the camera as a tile under it. Nothing here opens a camera: the streams come
       //    from a canvas (`simulatedCallMedia`).
       await page.waitForSelector('[data-testid="call-video-frame"][data-sharing="true"]');
       await page.waitForTimeout(400);
@@ -1406,30 +1561,176 @@ if (import.meta.main) {
       await shot(`${out}-video-dark.png`, '[data-testid="call-video"]');
       await setTheme("light");
 
-      // 8. SENDING. The camera and the screen, each one click, each one the consent for that
+      // 7. SENDING. The camera and the screen, each one click, each one the consent for that
       //    action. Nothing is opened here either: against the mock the preview is a canvas,
       //    so no camera light comes on and no picker appears.
-      await shot(`${out}-send-off-light.png`, '[data-testid="call-bar"]');
+      await shot(`${out}-send-off-light.png`, '[data-testid="call-stage"] header');
       await page.locator('[data-testid="call-camera"]').click();
       await page.waitForSelector('[data-testid="call-video-local"][data-kind="camera"]');
       await page.waitForSelector('[data-testid="call-camera"][aria-pressed="true"]');
       await page.locator('[data-testid="call-share"]').click();
       await page.waitForSelector('[data-testid="call-video-local"][data-kind="screen"]');
       await page.waitForTimeout(400);
-      await shot(`${out}-send-on-light.png`, '[data-testid="call-bar"]');
+      await shot(`${out}-send-on-light.png`, '[data-testid="call-stage"] header');
       await shot(`${out}-sending-light.png`, '[data-testid="call-video"]');
+      await shot(`${out}-sending-page-light.png`);
+      // Folded, with a screen on the wire: the window carries the picture rather than the
+      // avatar, which is what makes it worth 208 pixels of somebody's screen.
+      await page.locator('[data-testid="call-stage-minimize"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="mini"]');
+      await page.waitForTimeout(600);
+      await shot(`${out}-mini-video-light.png`, '[data-testid="call-stage"]');
       await setTheme("dark");
-      await shot(`${out}-sending-dark.png`, '[data-testid="call-video"]');
+      await shot(`${out}-sending-dark.png`, '[data-testid="call-stage"]');
       await setTheme("light");
-      await page.locator('[data-testid="call-hangup"]').click();
+
+      // 8. And what the app SAYS when one of those is refused. It is a transient notice
+      //    (web/src/lib/notice.ts), so the page shot is the one that matters: it shows the
+      //    notice clear of the header every control sits in. The refusal is armed through the
+      //    mock's own hook — the simulated camera never refuses, and the service that would
+      //    is a real tenant.
+      await page.locator('[data-testid="call-stage-expand"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="full"]');
+      await page.waitForTimeout(600);
+      await emit({ kind: "call_media", refuse: true });
+      await page.locator('[data-testid="call-camera"]').click();
+      await page.waitForSelector('[data-testid="call-notice"]');
+      await page.waitForTimeout(500);
+      await shot(`${out}-notice-light.png`);
+      await shot(`${out}-notice-card-light.png`, '[data-testid="call-notice"]');
+      await setTheme("dark");
+      await shot(`${out}-notice-card-dark.png`, '[data-testid="call-notice"]');
+      await setTheme("light");
+      await page.locator('[data-testid="call-hangup"]').first().click();
 
       console.log(
-        `[preview] wrote ${out}-off-light.png, ${out}-settings-{light,on-light,on-dark}.png, ` +
-          `${out}-button-light.png, ${out}-ringing-{light,card-light,card-dark}.png and ` +
-          `${out}-{connected-card-light,muted-card-light,connected-card-dark}.png and ` +
-          `${out}-meeting-{actions-light,lobby-light,card-light,card-dark}.png and ` +
+        `[preview] wrote ${out}-button-light.png, ${out}-off-light.png, ` +
+          `${out}-ringing-{light,card-light,card-dark}.png and ` +
+          `${out}-stage-{light,header-light,muted-light,dark}.png and ` +
+          `${out}-mini-{light,page-light,dragged-light,dark,video-light}.png and ` +
+          `${out}-group-{button-light,dialing-light,stage-light}.png and ` +
+          `${out}-meeting-chat-{light,dark,icon,stage-light}.png and ` +
+          `${out}-{people-light,people-panel-light,chat-light,chat-panel-light,chat-dark}.png and ` +
+          `${out}-meeting-{actions-light,lobby-light,stage-light}.png and ` +
           `${out}-video-{light,page-light,dark}.png and ` +
-          `${out}-send-{off-light,on-light}.png and ${out}-sending-{light,dark}.png`,
+          `${out}-send-{off-light,on-light}.png and ` +
+          `${out}-sending-{light,page-light,dark}.png and ` +
+          `${out}-notice-{light,card-light,card-dark}.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // Recording a call: teams-lite's own file, made in the page and kept in this browser —
+  // the control that says nobody on the call is told, the state while it runs, the card it
+  // leaves in the conversation, and the list in Settings
+  // (web/src/lib/call-recording.ts, call-recorder.ts, recording-store.ts).
+  //
+  // The mock has no tenant, no camera and no microphone: `simulatedCallMedia` hands the
+  // recorder canvases and one silent voice, so what is captured here is a REAL webm written
+  // by a real `MediaRecorder`, with nothing leaving the machine.
+  if (args.includes("--call-recording")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      // Calling needs no step: this app is a device the user's calls ring on from startup.
+      //
+      // 1. A live call, with the control in its header. The tooltip is the whole promise, so
+      //    the crop is the header the control sits in.
+      await openConversation(page, "Ava Thompson");
+      await page.locator('[data-testid="call-button"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
+      await page.waitForTimeout(900);
+      await shot(`${out}-control-light.png`, '[data-testid="call-stage"] header');
+      await setTheme("dark");
+      await shot(`${out}-control-dark.png`, '[data-testid="call-stage"] header');
+      await setTheme("light");
+
+      // 2. Recording. The control becomes the state: a red pill counting its own time, which
+      //    is not the call's — a recording begun ten minutes in is ten minutes shorter.
+      await page.locator('[data-testid="call-record"]').click();
+      await page.waitForSelector('[data-testid="call-record"][data-recording="true"]');
+      await page.waitForTimeout(1200);
+      await shot(`${out}-recording-light.png`, '[data-testid="call-stage"] header');
+      await shot(`${out}-recording-page-light.png`);
+
+      // 2a. Folded, where the stop is the ONE control the window gains: a recording the user
+      //     cannot end without unfolding the call would be the microphone mistake again.
+      await page.locator('[data-testid="call-stage-minimize"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="mini"]');
+      await page.waitForTimeout(700);
+      await shot(`${out}-recording-mini-light.png`, '[data-testid="call-stage"]');
+      await page.locator('[data-testid="call-stage-expand"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-mode="full"]');
+      await page.waitForTimeout(700);
+
+      // 3. Stopped: the file is written, and the app says where it went.
+      await page.locator('[data-testid="call-record"]').click();
+      await page.waitForSelector('[data-testid="call-recording-notice"]');
+      await shot(`${out}-kept-light.png`, '[data-testid="call-recording-notice"]');
+
+      await page.locator('[data-testid="call-hangup"]').first().click();
+      await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
+
+      // 3a. And one recording made while there are PICTURES on the call, which is what the
+      //     compositor is really for: every stream drawn into one frame, each tile named. A
+      //     MEETING is where several arrive — the mock renegotiates after the roster with a
+      //     colleague's camera and screen — and the user's own camera goes on top of them.
+      //     Every one is a canvas, so the frame is dark: what these shots are for is the
+      //     LAYOUT and the labels the recorder draws into the file.
+      await openConversation(page, "Design Sync");
+      await page.locator('[data-testid="meeting-join-here"]').click();
+      await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
+      await page.waitForSelector('[data-testid="call-video-frame"]', { timeout: 30_000 });
+      await page.locator('[data-testid="call-camera"]').click();
+      await page.waitForSelector('[data-testid="call-video-local"]');
+      await page.locator('[data-testid="call-record"]').click();
+      await page.waitForSelector('[data-testid="call-record"][data-recording="true"]');
+      await page.waitForTimeout(1500);
+      await shot(`${out}-recording-video-light.png`);
+      await page.locator('[data-testid="call-record"]').click();
+
+      // 4. The card in the conversation, which is the whole point of the feature. The call is
+      //    ended first, because a live call is a page over the app — which is also when the
+      //    user reaches for the recording.
+      await page.locator('[data-testid="call-hangup"]').first().click();
+      await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
+      // The meeting's recording, in the meeting's own thread. Its first frame is the composite
+      // the recorder drew — the shared screen with the faces under it — which is the one place
+      // the layout inside the FILE can be reviewed.
+      await page.waitForSelector('[data-testid="call-recording"]');
+      await page.waitForTimeout(800);
+      await shot(`${out}-meeting-card-light.png`, '[data-testid="call-recording"]');
+      await openConversation(page, "Ava Thompson");
+      await page.waitForSelector('[data-testid="call-recording"]');
+      await page.waitForTimeout(600);
+      // The one from the 1:1 call, in the conversation that call was in. The meeting's own
+      // recording is in the meeting's thread — a recording belongs where the call was.
+      await shot(`${out}-card-light.png`, '[data-testid="call-recording"]');
+      await shot(`${out}-card-page-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-card-dark.png`, '[data-testid="call-recording"]');
+      await setTheme("light");
+
+      // 4a. Armed for deletion, which is asked twice: there is nothing upstream to take a
+      //     deletion back from.
+      await page.locator('[data-testid="call-recording-delete"]').click();
+      await page.waitForSelector('[data-testid="call-recording-delete-confirm"]');
+      await shot(`${out}-card-confirm-light.png`, '[data-testid="call-recording"]');
+      await page.locator('[data-testid="call-recording-delete-cancel"]').click();
+
+      // 5. And the list in Settings — how a recording made in a link-joined meeting, or one
+      //    made months ago, is reachable at all.
+      await openSettings(page);
+      await page.waitForSelector('[data-testid="call-recording-row"]');
+      await shot(`${out}-settings-light.png`, '[data-testid="call-recordings-settings"]');
+      await setTheme("dark");
+      await shot(`${out}-settings-dark.png`, '[data-testid="call-recordings-settings"]');
+      await setTheme("light");
+
+      console.log(
+        `[preview] wrote ${out}-control-{light,dark}.png, ` +
+          `${out}-recording-{light,page-light,mini-light,video-light}.png, ${out}-kept-light.png, ` +
+          `${out}-card-{light,page-light,dark,confirm-light}.png, ${out}-meeting-card-light.png and ` +
+          `${out}-settings-{light,dark}.png`,
       );
     });
     process.exit(0);
@@ -1513,6 +1814,150 @@ if (import.meta.main) {
           `and ${out}-dark.png`,
       );
     });
+    process.exit(0);
+  }
+
+  // The merge-request page: the sidebar's list, one merge request in full with its live
+  // pipeline, the merge asking twice, and the comment box — in both themes.
+  //
+  // Nothing here reaches GitLab. The mock holds the merge requests, advances one pipeline a
+  // step per read and answers the four writes in memory (see the `gitlab_mr_*` fixtures in
+  // web/mock/server.ts), which is what makes an irreversible action reviewable at all.
+  if (args.includes("--gitlab")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        // The tab STRIP first, in both of its states: the tanuki is GitLab's line while the
+        // section is at rest — one weight across five icons — and GitLab's own colours once it
+        // is the current one. Pass `--dpr 4`: the mark is 17px, so the two spellings are only
+        // really readable enlarged (see `GitLabLogoOutline`).
+        const strip = '[role="tablist"]';
+        await shot(`${out}-tabs-rest-light.png`, strip);
+        await setTheme("dark");
+        await shot(`${out}-tabs-rest-dark.png`, strip);
+        await setTheme("light");
+
+        await openGitLabTab(page);
+        await shot(`${out}-tabs-current-light.png`, strip);
+        await setTheme("dark");
+        await shot(`${out}-tabs-current-dark.png`, strip);
+        await setTheme("light");
+        await shot(`${out}-list-light.png`, element);
+
+        // The first fixture is the interesting one: it can merge, its pipeline is running,
+        // and it carries a thread with a code comment on it.
+        await openMergeRequestAt(page, 0);
+        await shot(`${out}-light.png`);
+
+        // The merge ARMED — the second click is the one that lands the branch, and the
+        // sentence under it is what says so before anybody presses it.
+        await page.locator('[data-testid="gitlab-merge"]').click();
+        await page.locator('[data-testid="gitlab-merge-confirm"]').waitFor();
+        await shot(`${out}-merge-armed-light.png`);
+        await page.locator('[data-testid="gitlab-merge-cancel"]').click();
+
+        // The conversation: a standalone comment, a thread with a code comment on it and the
+        // user's own reply in it, and the box that posts under their name.
+        await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
+        await shot(`${out}-comments-light.png`);
+
+        // The DESCRIPTION on a phone, which is the width its markdown has to survive: the
+        // fixture's 3-column table and its fenced command lines are both wider than 390px, so
+        // this says whether they scroll inside the description or widen the page and take the
+        // Merge button off screen (see `gitlab-markdown.ts`, and the renderer's own `table`
+        // and `pre` cases).
+        await page.locator('[data-testid="gitlab-description"]').scrollIntoViewIfNeeded();
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(400);
+        await shot(`${out}-description-mobile-light.png`);
+        await page.setViewportSize(VIEWPORT);
+        await page.waitForTimeout(400);
+
+        // A merge request GitLab will not merge: the button is disabled and the reason is on
+        // it, rather than a refusal arriving after the click.
+        await openMergeRequestAt(page, 1);
+        await shot(`${out}-blocked-light.png`);
+
+        await setTheme("dark");
+        await shot(`${out}-blocked-dark.png`);
+        await openMergeRequestAt(page, 0);
+        await shot(`${out}-dark.png`);
+        console.log(
+          `[preview] wrote ${out}-tabs-{rest,current}-{light,dark}.png, ` +
+            `${out}-list-light.png, ${out}-light.png, ` +
+            `${out}-merge-armed-light.png, ${out}-comments-light.png, ` +
+            `${out}-description-mobile-light.png, ${out}-blocked-{light,dark}.png and ` +
+            `${out}-dark.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
+  // The DIFF: the Changes section, which is the one part of this page drawn by somebody
+  // else's renderer (`@pierre/trees` and `@pierre/diffs`, behind a lazy import — see
+  // web/src/components/gitlab-diff-view.tsx). Every state a real answer holds is in the
+  // mock's fixture: a patch, a pure rename, a binary file, a file GitLab collapsed and a
+  // generated one, over several languages so the highlighter really resolves more than one
+  // grammar.
+  if (args.includes("--diff")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        await openGitLabTab(page);
+        await openMergeRequestAt(page, 0);
+        const changes = '[data-testid="gitlab-changes"]';
+        await openChanges(page);
+
+        // The section whole: the tree beside the patch, in both themes. This is where the CSS
+        // seam is checked — both renderers live in a shadow root and follow the app's own
+        // `color-scheme` rather than the OS's (see app.css § the merge-request DIFF).
+        await shot(`${out}-light.png`, changes);
+        await setTheme("dark");
+        await shot(`${out}-dark.png`, changes);
+        await setTheme("light");
+
+        // SPLIT, which is the layout the section only offers where it fits.
+        await page.locator('[data-testid="gitlab-diff-layout-split"]').click();
+        await page.waitForTimeout(500);
+        await shot(`${out}-split-light.png`, changes);
+        await page.locator('[data-testid="gitlab-diff-layout-unified"]').click();
+        await page.waitForTimeout(300);
+
+        // The three files with NO patch, each of which says something different. Picked by
+        // path out of the tree rather than by clicking a row: the row is inside a shadow
+        // root, and the point of these three shots is the SENTENCE under the file.
+        for (const [name, path] of [
+          ["rename", "src/server/drain.ts"],
+          ["binary", "docs/diagrams/rollout.png"],
+          ["collapsed", "bun.lock"],
+        ] as const) {
+          await pickDiffFile(page, path);
+          await shot(`${out}-${name}-light.png`, changes);
+        }
+
+        // The expanded read: the control names the count and what it costs, and pressing it
+        // hands over the patches GitLab withheld.
+        await shot(`${out}-expand-light.png`, '[data-testid="gitlab-changes-expand"]');
+        await page.locator('[data-testid="gitlab-changes-expand"]').click();
+        await page.waitForSelector('[data-testid="gitlab-diff-patch"]', { timeout: 15_000 });
+        await page.waitForTimeout(600);
+        await shot(`${out}-expanded-light.png`, changes);
+
+        // And on a PHONE, where the tree sits above the diff and split cannot apply at all.
+        await pickDiffFile(page, "src/server/health.ts");
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(500);
+        await shot(`${out}-mobile-light.png`);
+        await page.setViewportSize(VIEWPORT);
+
+        console.log(
+          `[preview] wrote ${out}-{light,dark}.png, ${out}-split-light.png, ` +
+            `${out}-{rename,binary,collapsed}-light.png, ${out}-expand-light.png, ` +
+            `${out}-expanded-light.png and ${out}-mobile-light.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
     process.exit(0);
   }
 
@@ -1700,6 +2145,36 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // The composer holding several pictures at once: the row of thumbnails above the
+  // field, each with its own size and its own remove button, and the sentence an
+  // eleventh earns. The files are this app's own icons, so nothing is fetched and the
+  // three pixel sizes under them differ — which is the part a reviewer reads.
+  if (args.includes("--compose-images")) {
+    const icons = [
+      "public/icons/icon-192.png",
+      "public/icons/apple-touch-icon-180.png",
+      "public/icons/icon-512.png",
+    ];
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openFirstConversation(page);
+      const input = page.locator('[data-testid="composer-image-input"]');
+      await input.setInputFiles(icons);
+      const previews = page.locator('[data-testid="composer-image-preview"]');
+      await previews.nth(icons.length - 1).waitFor();
+      await typeInComposer(page, "Three shots of the same icon");
+      await shot(`${out}-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-dark.png`);
+      await setTheme("light");
+      // The ceiling, stated where the pictures are. The batch keeps the ten that fit.
+      await input.setInputFiles(Array.from({ length: 8 }, () => icons[0]!));
+      await page.locator('[data-testid="composer-image-error"]').waitFor();
+      await shot(`${out}-full-light.png`);
+      console.log(`[preview] wrote ${out}-{light,dark}.png and ${out}-full-light.png`);
+    });
+    process.exit(0);
+  }
+
   // The chat list's own sections and the "…" menu that fills them: Teams' settings
   // for one chat (pin, mute, hide, mark read), and what each one does to the list.
   //
@@ -1776,8 +2251,27 @@ if (import.meta.main) {
       await page.waitForSelector('[data-testid="linear-link-card"]');
       await page.waitForTimeout(600);
       await shot(`${out}-linear-dark.png`);
+      // A PHONE, which is where these are usually read, and the width every line of
+      // a card has to shrink to: the seeded long-shape link — a deep group path, a
+      // branch named after its ticket — is the one that says whether it does. The
+      // thread is opened FIRST and the viewport narrowed after, because below `md`
+      // the chat list is the page and the conversation covers it.
+      await setTheme("light");
+      for (const provider of ["linear", "gitlab"] as const) {
+        await page.setViewportSize(VIEWPORT);
+        await page.waitForTimeout(300);
+        await openConversation(page, provider === "linear" ? "Linear Links" : "GitLab Links");
+        await page.waitForSelector(`[data-testid="${provider}-link-card"]`);
+        await page.waitForTimeout(600);
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(400);
+        await shot(`${out}-${provider}-mobile-light.png`);
+      }
+      await page.setViewportSize(VIEWPORT);
+      await page.waitForTimeout(400);
       console.log(
-        `[preview] wrote ${out}-{linear,gitlab}-light.png and ${out}-{gitlab,linear}-dark.png`,
+        `[preview] wrote ${out}-{linear,gitlab}-light.png, ${out}-{gitlab,linear}-dark.png and ` +
+          `${out}-{linear,gitlab}-mobile-light.png`,
       );
     });
     process.exit(0);
@@ -1819,8 +2313,17 @@ if (import.meta.main) {
       await page.setViewportSize({ width: 390, height: 844 });
       await page.waitForTimeout(400);
       await shot(`${out}-mobile-light.png`);
-      await openFirstEvent(page);
+      // A MEETING, by name. It is the event that carries both ways out of the app and a
+      // real invitation body, and it is the width the footer is hardest at — the two are
+      // the same fixture, and `.first()` is a Focus block that shows neither.
+      await openEvent(page, "ev-overlap-a");
       await shot(`${out}-mobile-details-light.png`);
+      // And its "Open in", open: the two destinations that used to be two more buttons.
+      await page.locator('[data-testid="calendar-event-open-in"]').click();
+      await page.waitForSelector('[data-testid="calendar-event-outlook"]');
+      await page.waitForTimeout(200);
+      await shot(`${out}-mobile-open-in-light.png`);
+      await page.keyboard.press("Escape");
       await page.keyboard.press("Escape");
       await page.setViewportSize(VIEWPORT);
       await page.waitForTimeout(400);
@@ -1830,7 +2333,7 @@ if (import.meta.main) {
       await shot(`${out}-week-dark.png`);
       console.log(
         `[preview] wrote ${out}-{week,week-all,details,month,day,agenda,weekends,mobile,` +
-          `mobile-details}-light.png and ${out}-{month,week}-dark.png`,
+          `mobile-details,mobile-open-in}-light.png and ${out}-{month,week}-dark.png`,
       );
     });
     process.exit(0);
@@ -2096,6 +2599,45 @@ if (import.meta.main) {
         await setTheme("dark");
         await shot(`${out}-dark.png`, element);
         console.log(`[preview] wrote ${out}-light.png and ${out}-dark.png`);
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
+  // Settings › This app: the two rows, and the three answers that are worth looking at
+  // rather than trusting — because each one is a sentence appearing in a row of controls,
+  // which is what the column below it moves for (web/src/components/maintenance-settings.tsx).
+  if (args.includes("--maintenance")) {
+    await withPreview(
+      async ({ page, shot, setTheme, emit }) => {
+        await openSettings(page);
+        const section = '[data-testid="maintenance-settings"]';
+        await page.locator(section).scrollIntoViewIfNeeded();
+        await shot(`${out}-light.png`, element ?? section);
+        await setTheme("dark");
+        await shot(`${out}-dark.png`, element ?? section);
+        await setTheme("light");
+
+        // The check's own answer. The mock holds no release out of the box, so this is the
+        // reassuring one — and the commonest, which is the reason the row exists at all.
+        await page.locator('[data-testid="update-check-button"]').click();
+        await page.waitForSelector('[data-testid="update-check-message"]');
+        await shot(`${out}-checked-light.png`, element ?? section);
+
+        // And the restart ARMED: a local agent is mid-reply, so the second press is the
+        // user answering for it. The colour and the sentence are the whole of that state.
+        await emit({ kind: "maintenance", runs: 1 });
+        await page.locator('[data-testid="restart-backend-button"]').click();
+        await page.waitForSelector('[data-testid="restart-backend-message"]');
+        await shot(`${out}-armed-light.png`, element ?? section);
+        await setTheme("dark");
+        await shot(`${out}-armed-dark.png`, element ?? section);
+        await setTheme("light");
+        await emit({ kind: "maintenance", reset: true });
+        console.log(
+          `[preview] wrote ${out}-{light,dark,checked-light,armed-light,armed-dark}.png`,
+        );
       },
       { deviceScaleFactor: dpr },
     );

@@ -361,6 +361,13 @@ impl Links {
         self.get(&["mediaRenegotiation"])
     }
 
+    /// Where a MODALITY is added to a live conversation — a group modality on a 1:1, and the
+    /// content-sharing session a screen share needs (see [`content_sharing_payload`]). It is
+    /// not the second half of a JOIN, which is what reading it as one cost a debugging round.
+    pub fn add_modality(&self) -> Option<&str> {
+        self.get(&["addModality"])
+    }
+
     pub fn keep_alive(&self) -> Option<&str> {
         self.get(&["keepAlive"])
     }
@@ -549,6 +556,92 @@ pub fn call_ended_from_frame(frame: &Value) -> Option<CallEnded> {
     Some(CallEnded { call_id, code, phrase })
 }
 
+/// The name this app gives an ending the service reported as "no callee endpoints were
+/// found": the person has no client signed in, so nothing could ring and the call was over
+/// before it began.
+///
+/// It follows the `CallEndReason…` spelling every other explained ending uses, because the
+/// page maps a NAME to a sentence — the service's own phrase is prose, and a sentence keyed
+/// on prose breaks the day it is reworded.
+pub const END_REASON_UNREACHABLE: &str = "CallEndReasonNobodyReachable";
+
+/// The service could not ring anybody it was asked to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteFailed {
+    /// The service's own sentence, kept verbatim for the journal.
+    pub phrase: String,
+    /// Whether it says the callee has no endpoint at all — nothing of theirs to ring, as
+    /// opposed to a device that rang and refused.
+    pub no_endpoints: bool,
+}
+
+/// Sub-codes the service uses for "there was nothing to ring". Measured on this tenant, on a
+/// one-to-one call to somebody with no client signed in.
+const NO_ENDPOINT_SUB_CODES: [i64; 2] = [10037, 5205];
+
+/// Read an `addParticipantFailure` frame — the service saying the invitation reached nobody.
+///
+/// **It is the only frame that names the CAUSE.** Measured, in order, on a call to somebody
+/// with no client signed in:
+///
+/// ```text
+/// /conversation/addParticipantFailure/  code 480 subCode 10037 "No callee endpoints were found."
+///                                      code 580 subCode 5205  "Audio-video modality controller …"
+/// /call/end/                            code 0   subCode 5003  "Removing modality controller …"
+/// /conversation/conversationEnd/        code 0   subCode 5013  "This conversation has ended as
+///                                                              no one else has joined …"
+/// ```
+///
+/// `call_ended_from_frame` reads the third of those, whose phrase names the SYMPTOM. So this
+/// is read first and remembered, or the only thing the user is ever told about an unreachable
+/// colleague is "The call ended." — which is what happened, and it read as this app dropping
+/// the call two seconds in.
+///
+/// The frame is recognised by the callback path it was POSTed to, because its body carries no
+/// wrapper naming it; the reason is then found wherever it sits, since the service nests one
+/// per participant and one for the modality controller.
+pub fn invite_failed(url: &str, body: &Value) -> Option<InviteFailed> {
+    if !url.contains("addParticipantFailure") {
+        return None;
+    }
+    let mut phrase = String::new();
+    let mut no_endpoints = false;
+    walk_failure(body, &mut phrase, &mut no_endpoints);
+    Some(InviteFailed { phrase, no_endpoints })
+}
+
+/// The first `phrase` at any depth, and whether any sub-code (or any phrase) says there was
+/// nothing to ring. Both halves are read, because a sub-code is a stable key and a phrase is
+/// what a reader of the journal understands.
+fn walk_failure(value: &Value, phrase: &mut String, no_endpoints: &mut bool) {
+    match value {
+        Value::Object(map) => {
+            if let Some(text) = map.get("phrase").and_then(Value::as_str) {
+                if phrase.is_empty() {
+                    *phrase = text.to_string();
+                }
+                if text.to_lowercase().contains("no callee endpoints") {
+                    *no_endpoints = true;
+                }
+            }
+            if let Some(code) = map.get("subCode").and_then(Value::as_i64) {
+                if NO_ENDPOINT_SUB_CODES.contains(&code) {
+                    *no_endpoints = true;
+                }
+            }
+            for child in map.values() {
+                walk_failure(child, phrase, no_endpoints);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                walk_failure(item, phrase, no_endpoints);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Read the far side's SDP answer out of a `mediaAnswer` frame, or `None` when the
 /// frame is something else. This is what turns a ringing outgoing call into audio.
 pub fn media_answer_from_frame(frame: &Value) -> Option<MediaContent> {
@@ -568,6 +661,222 @@ pub fn media_answer_from_frame(frame: &Value) -> Option<MediaContent> {
     .find_map(|p| frame.pointer(p))
     .and_then(|answer| answer.get("mediaContent"))
     .and_then(MediaContent::parse)
+}
+
+/// One line per media SECTION of an SDP: its kind, whether the far side accepted it, its mid
+/// and the label that says what it carries.
+///
+/// **It exists because a screen share failed live and left nothing on this machine to read.**
+/// The user shared their screen, the service answered by REJECTING the section, and the
+/// journal said only that an offer had gone out — so which section was refused, and whether
+/// the answer carried the audio at all, were unanswerable after the fact. The modalities were
+/// logged and they are a claim about what we asked for; this is what came back.
+///
+/// It prints the SHAPE and never the content, which is the rule `web/scripts/join-live.ts`
+/// already follows for the same job: no candidate, no fingerprint, no ICE credential and no
+/// key ever reaches a log line here. A port is stated only as accepted or rejected, because
+/// zero is the whole fact and the number is a relay's address.
+pub fn media_sections(sdp: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut section: Option<(String, bool)> = None;
+    let mut mid: Option<String> = None;
+    let mut label: Option<String> = None;
+    let mut flush = |section: &Option<(String, bool)>, mid: &Option<String>, label: &Option<String>, out: &mut Vec<String>| {
+        let Some((kind, rejected)) = section else {
+            return;
+        };
+        let mut line = kind.clone();
+        if let Some(mid) = mid {
+            line.push_str(&format!(" mid={mid}"));
+        }
+        if let Some(label) = label {
+            line.push_str(&format!(" label={label}"));
+        }
+        line.push_str(if *rejected { " REJECTED" } else { " accepted" });
+        out.push(line);
+    };
+    for line in sdp.lines().map(str::trim_end) {
+        if let Some(rest) = line.strip_prefix("m=") {
+            flush(&section, &mid, &label, &mut out);
+            mid = None;
+            label = None;
+            let mut fields = rest.split(' ');
+            let kind = fields.next().unwrap_or("?").to_string();
+            // `m=<kind> <port> …` — a zero port is how either side says the section is gone.
+            let rejected = fields.next() == Some("0");
+            section = Some((kind, rejected));
+        } else if let Some(rest) = line.strip_prefix("a=mid:") {
+            mid = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("a=label:") {
+            label = Some(rest.trim().to_string());
+        }
+    }
+    flush(&section, &mid, &label, &mut out);
+    out
+}
+
+/// The content-sharing SESSION a meeting grants, and the links it hands back.
+///
+/// **A meeting has ONE screen at a time, so sharing one is a session rather than a track.**
+/// Measured on 2026-08-06: a meeting answered an `applicationsharing-video` section of ours
+/// by rejecting it outright — no mid, no label, just a zeroed port — with the section
+/// negotiated correctly, labelled correctly and offering the codecs a client offers. What
+/// this app never did is ASK to be the presenter, which the client does first
+/// (`startContentSharingAsync` → the session's `start`, POSTing a `contentSharing` blob to
+/// the `addModality` link and setting `isPresenter` on the answer).
+///
+/// The links come back on that answer, and they are kept APART from the call's own
+/// ([`Links::collect`] takes the deepest of a name, and this answer carries a `leave` of its
+/// own — merged in, it would overwrite the link this app hangs a CALL up on).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContentSharing {
+    /// The correlation id this app minted for the session, which every later call to it
+    /// carries — in a header on the way out, and in the frames the service sends back.
+    pub correlation_id: String,
+    /// The service's own id for the session, once it names one.
+    pub session_id: Option<String>,
+    /// Where to give the session up. Without it a share could be started and never stopped,
+    /// which is the shape this project refuses on principle.
+    pub leave: Option<String>,
+}
+
+impl ContentSharing {
+    /// Read the session out of the `addModalitySuccess` FRAME, which is where it really
+    /// arrives.
+    ///
+    /// Measured 2026-08-06 with `bun run join-live -- --share`: the POST answers `{}` with no
+    /// links at all, and the service then POSTs to our own `addModalitySuccess` callback
+    /// carrying the session's six — `contentSharingController`, `leave`, `notificationLinks`,
+    /// `sync`, `takeControl`, `updateSessionState`. The client's own `start` says the same
+    /// thing in its shape: it returns a deferred that the frame resolves, so it WAITS for this
+    /// before it offers anything.
+    pub fn from_frame(correlation_id: &str, frame: &Value) -> Option<Self> {
+        // Collected at every DEPTH rather than read off a pointer. The service names the
+        // frame's own body after its type and wraps it differently on different paths — the
+        // shape was guessed twice and missed twice — and the collector is the reader this crate
+        // already trusts for exactly that reason. It is safe HERE because nothing is merged
+        // into the call's links: one value is taken out, and the session keeps it.
+        let leave = Links::collect(frame).get(&["leave"])?.to_string();
+        Some(Self {
+            correlation_id: correlation_id.to_string(),
+            session_id: session_id_in(frame),
+            leave: Some(leave),
+        })
+    }
+
+    /// Read the session out of the answer to the `addModality` POST.
+    ///
+    /// Only two things are taken: the id the service named it, and the way out. The other
+    /// four links it offers — `contentSharingController`, `takeControl`, `updateSessionState`,
+    /// `sync` — belong to features this app does not have, and a link nothing posts to is a
+    /// link that goes stale in a struct.
+    pub fn from_answer(correlation_id: &str, answer: &Value) -> Self {
+        let sharing = ["/_decoded/contentSharing", "/contentSharing"]
+            .iter()
+            .find_map(|p| answer.pointer(p));
+        Self {
+            correlation_id: correlation_id.to_string(),
+            session_id: sharing
+                .and_then(|s| s.get("sessionId"))
+                .and_then(Value::as_str)
+                .map(String::from),
+            leave: sharing
+                .and_then(|s| s.get("links"))
+                .and_then(|l| l.get("leave").or_else(|| l.get("contentSharingLeave")))
+                .and_then(Value::as_str)
+                .map(String::from),
+        }
+    }
+}
+
+/// Find `contentSharingSessionId` at any depth, which is where the service really puts it:
+/// on the grant's own frame, and on the roster's `contentSharing.sessionInformation`.
+fn session_id_in(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(id) = map.get("contentSharingSessionId").and_then(Value::as_str) {
+                return Some(id.to_string());
+            }
+            map.values().find_map(session_id_in)
+        }
+        Value::Array(items) => items.iter().find_map(session_id_in),
+        _ => None,
+    }
+}
+
+/// Ask a meeting to make this endpoint the presenter of a content-sharing session.
+///
+/// The client's own `j2`, field for field: the local participant, an empty `to`, the
+/// `contentSharing` blob and the two callbacks the service reports the session's own changes
+/// on. `subject` and `sessionState` are NULL because the client's builder passes
+/// `i || null` / `t || null` and this app has neither to state — a screen has no subject and
+/// the state is the service's to decide. `sequenceNumber` is 1, which is the literal the
+/// client sends on a start.
+///
+/// It carries no `payload` envelope, for the reason § Joining a meeting gives: every builder
+/// in the client's bundle returns one and its transport strips it, so a wrapped body is
+/// refused `400` with `{}` and names nothing.
+pub fn content_sharing_payload(
+    local: &LocalParticipant,
+    callbacks: &CallbackBase,
+    identifier: &str,
+) -> Value {
+    json!({
+        "participants": { "from": local.json(), "to": [] },
+        "contentSharing": {
+            "identifier": identifier,
+            "subject": Value::Null,
+            "sessionState": Value::Null,
+            "sequenceNumber": 1,
+            "links": {
+                "sessionUpdate": callbacks.link(paths::CONVERSATION_CONTENT_SHARING_UPDATE),
+                "sessionEnd": callbacks.link(paths::CONVERSATION_CONTENT_SHARING_END),
+            },
+        },
+        "links": {
+            "addModalitySuccess": callbacks.link(paths::CONVERSATION_ADD_MODALITY_SUCCESS),
+            "addModalityFailure": callbacks.link(paths::CONVERSATION_ADD_MODALITY_FAILURE),
+        },
+    })
+}
+
+/// Give the session up: the body the client's own `K2` sends, which names the same two
+/// callbacks and nothing else.
+pub fn content_sharing_leave_payload(local: &LocalParticipant, callbacks: &CallbackBase) -> Value {
+    json!({
+        "participants": { "from": local.json() },
+        "contentSharing": {
+            "links": {
+                "sessionUpdate": callbacks.link(paths::CONVERSATION_CONTENT_SHARING_UPDATE),
+                "sessionEnd": callbacks.link(paths::CONVERSATION_CONTENT_SHARING_END),
+            },
+        },
+    })
+}
+
+/// Every line of an SDP that is not a key, an address or a candidate — for a refusal that
+/// names no line.
+///
+/// The service answers `SdpParsingFailure` and says nothing else, so the only way forward is
+/// to read what was really posted. It prints the STRUCTURE: `v=`, `o=` reduced to its shape,
+/// the session attributes, and each section's own lines — with every candidate, fingerprint,
+/// ICE credential and SSRC dropped, which is the discipline `web/scripts/join-live.ts` follows
+/// for the same reason.
+pub fn sdp_structure(sdp: &str) -> Vec<String> {
+    const SECRET: [&str; 7] = [
+        "a=candidate:",
+        "a=fingerprint:",
+        "a=ice-pwd:",
+        "a=ice-ufrag:",
+        "a=ssrc:",
+        "a=x-candidate-ipv6:",
+        "o=",
+    ];
+    sdp.lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty() && !SECRET.iter().any(|p| line.starts_with(p)))
+        .map(String::from)
+        .collect()
 }
 
 /// A media OFFER the service made mid-call, and where to answer it.
@@ -749,6 +1058,13 @@ pub fn call_accepted_in_frame(frame: &Value) -> bool {
 ///
 /// `to` is one mri per person to ring; `thread_id` is the chat the call belongs to,
 /// so the call shows up in that thread for everybody in it. Audio only.
+///
+/// **Several recipients is a GROUP call**, and it is the same POST: the service rings every
+/// mri in `to`, the thread they share is the conversation the call belongs to, and
+/// `properties.enableGroupCallEventMessages` — already here, because the capture carried it
+/// — is what posts the call line into that thread for all of them. So the shape a group
+/// chat's call button needs is the shape a 1:1 already sends; what a group adds is the
+/// roster the answer starts reporting, which [`CallSession::others`] already reads.
 pub fn invitation_payload(
     local: &LocalParticipant,
     to: &[String],
@@ -1050,6 +1366,41 @@ impl MeetingJoin {
             meeting_code: None,
             passcode: None,
             join_url: url.to_string(),
+        })
+    }
+
+    /// The address of a meeting reached from the CHAT it already has here, rather than
+    /// from a calendar link.
+    ///
+    /// Teams mints one thread per meeting and puts it in the chat list, so the meeting the
+    /// user is looking at is addressable without finding a link at all: the thread IS what
+    /// a long join link carries in its own first segment, and the `meetingInfo` beside it is
+    /// what the service PREFERS rather than what it requires (a long link with no context
+    /// joins by its thread — see `a_meeting_link_with_no_context_still_joins_by_its_thread`).
+    /// That matters on this tenant, whose own invitations carry the SHORT link shape: the
+    /// code lives in the calendar event and nowhere in the conversation, so a chat with no
+    /// matching event could otherwise offer nothing.
+    ///
+    /// `None` for anything but a meeting thread. A plain group chat has no meeting to join —
+    /// it is CALLED instead — and a channel meeting hangs off a message id a thread alone
+    /// cannot name, so guessing `"0"` there would address the channel and not the meeting
+    /// inside it.
+    pub fn from_thread_id(thread_id: &str) -> Option<Self> {
+        if !thread_id.starts_with("19:meeting_") {
+            return None;
+        }
+        Some(Self {
+            thread_id: Some(thread_id.to_string()),
+            // The same string the captured request sends for a meeting that hangs off no
+            // message, and a calendar meeting's own long link carries.
+            message_id: "0".into(),
+            tenant_id: None,
+            organizer_mri: None,
+            meeting_code: None,
+            passcode: None,
+            // No link was involved, and nothing may invent one: `meetingData.meetingUrl` is
+            // only ever the url the user's own invitation carried.
+            join_url: String::new(),
         })
     }
 
@@ -1963,6 +2314,56 @@ mod tests {
         assert!(call_ended_from_frame(&json!({ "callNotification": {} })).is_none());
     }
 
+    /// The frame that names the CAUSE of a call that ends two seconds in, in the shape the
+    /// tenant really sends it (`web/scripts/call-live.ts` measured this one).
+    #[test]
+    fn an_invitation_that_reached_nobody_is_read_and_told_apart() {
+        let url = "https://pub.trouter.example/v4/f/x/callAgent/a/b/conversation/\
+                   addParticipantFailure/";
+        let failed = invite_failed(
+            url,
+            &json!({
+                "participantInfos": [{
+                    "code": 480,
+                    "subCode": 10037,
+                    "reason": "clientError",
+                    "phrase": "No callee endpoints were found."
+                }],
+                "participants": { "8:orgid:x": { "code": 580, "subCode": 5205 } }
+            }),
+        )
+        .expect("a failed invitation");
+        assert!(failed.no_endpoints);
+        assert_eq!(failed.phrase, "No callee endpoints were found.");
+
+        // A device that rang and refused is NOT this: somebody was reachable, and the
+        // ending's own phrase is the honest thing to report.
+        let refused = invite_failed(
+            url,
+            &json!({ "participantInfos": [{ "code": 486, "subCode": 10004, "phrase": "Busy here." }] }),
+        )
+        .expect("a failed invitation");
+        assert!(!refused.no_endpoints);
+        assert_eq!(refused.phrase, "Busy here.");
+
+        // And it is recognised by its own callback path, never by a body shape another
+        // frame could share.
+        assert!(invite_failed("…/conversation/rosterUpdate/", &json!({ "phrase": "x" })).is_none());
+    }
+
+    /// The name of that ending is a CONTRACT with the page: the backend states it and
+    /// `web/src/lib/call.ts` turns it into the sentence the user reads. Two spellings of one
+    /// name would leave the user with "The call ended." and no way to notice why.
+    #[test]
+    fn the_page_knows_the_name_of_an_unreachable_ending() {
+        let call_ts = include_str!("../web/src/lib/call.ts");
+        assert!(
+            call_ts.contains(END_REASON_UNREACHABLE),
+            "web/src/lib/call.ts must name {END_REASON_UNREACHABLE}, or an unreachable \
+             colleague is reported as \"The call ended.\""
+        );
+    }
+
     #[test]
     fn an_answer_sdp_is_read_out_of_a_media_answer_frame() {
         let answer = media_answer_from_frame(&json!({
@@ -1973,6 +2374,135 @@ mod tests {
         .expect("an answer");
         assert_eq!(answer.blob, "v=0 answer");
         assert!(media_answer_from_frame(&json!({ "callEnd": {} })).is_none());
+    }
+
+    /// What an answer GRANTED, stated for a journal — and never anything a journal must
+    /// not hold.
+    ///
+    /// The measurement that asked for it: a screen share was offered live, the service
+    /// answered by rejecting the section, and this machine's own log said only that an
+    /// offer had gone out. Which section came back refused was unanswerable afterwards.
+    #[test]
+    fn an_answers_sections_are_stated_as_accepted_or_rejected() {
+        let answer = [
+            "v=0",
+            "o=- 0 0 IN IP4 127.0.0.1",
+            "a=fingerprint:sha-256 AA:BB:CC",
+            "m=audio 3478 RTP/SAVP 111",
+            "a=mid:0",
+            "a=label:main-audio",
+            "a=candidate:1 1 udp 2130706431 10.1.2.3 51234 typ host",
+            "m=video 0 RTP/SAVP 107",
+            "a=mid:5",
+            "a=label:applicationsharing-video",
+            "",
+        ]
+        .join("\r\n");
+        let sections = media_sections(&answer);
+        assert_eq!(
+            sections,
+            vec![
+                "audio mid=0 label=main-audio accepted",
+                "video mid=5 label=applicationsharing-video REJECTED",
+            ]
+        );
+
+        // The rule that keeps this loggable at all: the shape travels and the content does
+        // not. A candidate is an address of the user's, a fingerprint is a key, and a port
+        // is a relay's — so a zero port is stated as the fact it is and nothing else.
+        let printed = sections.join(" | ");
+        for secret in ["10.1.2.3", "51234", "AA:BB:CC", "3478", "candidate"] {
+            assert!(!printed.contains(secret), "{secret} must never reach a log line");
+        }
+
+        assert!(media_sections("").is_empty());
+    }
+
+    /// The content-sharing session a screen share needs, field for field against the
+    /// client's own `j2` — and never carrying a link that would overwrite the call's.
+    #[test]
+    fn a_content_sharing_modality_asks_to_present_and_names_its_own_callbacks() {
+        let payload = content_sharing_payload(&local(), &callbacks(), "session-guid");
+        assert_eq!(payload.pointer("/contentSharing/identifier").unwrap(), "session-guid");
+        // The client's builder passes `i || null` / `t || null`, and this app has neither: a
+        // screen has no subject, and the state is the service's to decide.
+        assert_eq!(payload.pointer("/contentSharing/subject").unwrap(), &Value::Null);
+        assert_eq!(payload.pointer("/contentSharing/sessionState").unwrap(), &Value::Null);
+        // The literal the client sends on a start.
+        assert_eq!(payload.pointer("/contentSharing/sequenceNumber").unwrap(), 1);
+        // It reaches nobody: a session is asked of the SERVICE, not offered to a person.
+        assert_eq!(payload.pointer("/participants/to").unwrap(), &json!([]));
+        // Two callbacks for the session's own changes, and two for the modality itself.
+        for pointer in [
+            "/contentSharing/links/sessionUpdate",
+            "/contentSharing/links/sessionEnd",
+            "/links/addModalitySuccess",
+            "/links/addModalityFailure",
+        ] {
+            let link = payload.pointer(pointer).and_then(Value::as_str).expect(pointer);
+            assert!(link.starts_with("https://"), "{pointer} must be a callback of ours");
+        }
+        // And no envelope. A wrapped body is refused `400` with `{}` and names nothing —
+        // the failure § Joining a meeting cost days to.
+        assert!(payload.get("payload").is_none());
+    }
+
+    /// The session's links are read APART from the call's, because it carries a `leave` of its
+    /// own and `Links::collect` takes the deepest of a name. Merged in, giving a SHARE up
+    /// would have hung the call up instead.
+    #[test]
+    fn a_sharing_sessions_leave_never_becomes_the_calls_own() {
+        let answer = json!({
+            "contentSharing": {
+                "sessionId": "cs-1",
+                "links": { "leave": "https://x/content-sharing-leave", "takeControl": "https://x/tc" }
+            },
+            // What the call already holds, in the same answer.
+            "links": { "leave": "https://x/hang-up" }
+        });
+        let session = ContentSharing::from_answer("corr-1", &answer);
+        assert_eq!(session.correlation_id, "corr-1");
+        assert_eq!(session.session_id.as_deref(), Some("cs-1"));
+        assert_eq!(session.leave.as_deref(), Some("https://x/content-sharing-leave"));
+        // The one that must never be confused for it.
+        assert_ne!(session.leave.as_deref(), Some("https://x/hang-up"));
+
+        // An answer that names no way out is read as one: a session this app could not give
+        // back is reported rather than remembered.
+        let bare = ContentSharing::from_answer("corr-2", &json!({ "contentSharing": {} }));
+        assert!(bare.leave.is_none());
+    }
+
+    /// The GRANT arrives on a frame, and its shape is not the one a pointer would guess.
+    ///
+    /// Measured 2026-08-06: the `addModality` POST answers `{}`, and the service POSTs
+    /// `addModalitySuccess` with the session's six links. A first reading looked for `/links`
+    /// at the top and found nothing, so the app offered its section with no presenter and the
+    /// service rejected it — which is why this reads at every depth instead.
+    #[test]
+    fn the_grant_is_read_out_of_its_frame_at_whatever_depth_it_arrives() {
+        // Named after its type, the way `mediaAnswer` is.
+        let named = json!({
+            "addModalitySuccess": {
+                "contentSharingSessionId": "cs-42",
+                "links": { "leave": "https://x/cs-leave", "takeControl": "https://x/tc" }
+            }
+        });
+        let session = ContentSharing::from_frame("corr", &named).expect("the grant");
+        assert_eq!(session.leave.as_deref(), Some("https://x/cs-leave"));
+        assert_eq!(session.session_id.as_deref(), Some("cs-42"));
+
+        // And at the top, which is the shape `contentSharingEnd` really has.
+        let flat = json!({ "links": { "leave": "https://x/flat" } });
+        assert_eq!(
+            ContentSharing::from_frame("corr", &flat).and_then(|s| s.leave).as_deref(),
+            Some("https://x/flat")
+        );
+
+        // A frame that names no way out is not the grant: this app never holds a session it
+        // could not give back.
+        assert!(ContentSharing::from_frame("corr", &json!({ "links": {} })).is_none());
+        assert!(ContentSharing::from_frame("corr", &json!({})).is_none());
     }
 
     /// A content type we cannot hand a browser must be refused rather than passed
@@ -2021,6 +2551,37 @@ mod tests {
             payload.pointer("/groupChat/threadId").unwrap(),
             "19:thread@thread.v2"
         );
+    }
+
+    /// A GROUP call is the same POST with more people in it: every mri is rung, they share
+    /// one thread, and the group-call event messages that put the call line in that thread
+    /// are on. Nothing about the body is per-person.
+    #[test]
+    fn an_invitation_rings_every_person_it_names() {
+        let payload = invitation_payload(
+            &local(),
+            &["8:orgid:her".to_string(), "8:orgid:him".to_string(), "8:orgid:them".to_string()],
+            Some("19:group@thread.v2"),
+            &MediaContent::sdp("v=0 offer"),
+            &callbacks(),
+        );
+        let to = payload.pointer("/participants/to").unwrap().as_array().unwrap();
+        assert_eq!(to.len(), 3);
+        assert_eq!(to[2]["id"], "8:orgid:them");
+        assert_eq!(payload.pointer("/groupChat/threadId").unwrap(), "19:group@thread.v2");
+        // What posts the call line into the thread everybody in it reads.
+        assert_eq!(
+            payload.pointer("/conversationRequest/properties/enableGroupCallEventMessages").unwrap(),
+            &json!(true)
+        );
+        // And the roster subscription, which is the only way "who is in this call" is ever
+        // answered once there is more than one person to answer it for.
+        assert!(payload
+            .pointer("/conversationRequest/roster/rosterUpdate")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .ends_with("/conversation/rosterUpdate/"));
     }
 
     /// Audio only, everywhere, in every direction. A video m-line would be
@@ -2131,6 +2692,51 @@ mod tests {
         assert_eq!(join.thread_id.as_deref(), Some("19:meeting_x@thread.v2"));
         assert_eq!(join.tenant_id, None);
         assert_eq!(join.meeting_info(), None);
+    }
+
+    /// A meeting reached from its own CHAT: the thread is the whole address, and the body
+    /// is the one a context-free long link builds — the same `groupChat` and the same
+    /// `"0"`, with nothing invented beside it.
+    #[test]
+    fn a_meeting_thread_is_a_join_address_on_its_own() {
+        let join = MeetingJoin::from_thread_id("19:meeting_abc@thread.v2").expect("a meeting");
+        assert_eq!(join.thread_id.as_deref(), Some("19:meeting_abc@thread.v2"));
+        assert_eq!(join.message_id, "0");
+        assert!(!join.is_channel_meeting());
+        // No link was involved, so neither of the two things a link carries is claimed.
+        assert_eq!(join.meeting_info(), None);
+        assert_eq!(join.meeting_data(), None);
+        assert_eq!(join.join_url, "");
+
+        let payload = join_payload(&local(), &join, &callbacks(), None);
+        assert_eq!(
+            payload.pointer("/groupChat/threadId").unwrap(),
+            "19:meeting_abc@thread.v2"
+        );
+        assert_eq!(payload.pointer("/groupChat/messageId").unwrap(), "0");
+        assert!(payload.pointer("/meetingData").is_none());
+        assert!(payload.pointer("/meetingInfo").is_none());
+        // A join rings nobody, whichever way it was addressed.
+        assert!(payload.pointer("/participants/to").is_none());
+    }
+
+    /// Only a MEETING thread is a join address. A plain group chat is called instead, and
+    /// a channel's thread would address the channel rather than the meeting inside it —
+    /// so both read as "nothing to join" rather than as a join to the wrong place.
+    #[test]
+    fn a_thread_that_is_not_a_meeting_is_no_join_address() {
+        for thread in [
+            "",
+            // An ordinary group chat: 32 hex digits, no `meeting_`.
+            "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2",
+            // A channel.
+            "19:abc@thread.tacv2",
+            // A one-to-one chat.
+            "19:oid1_oid2@unq.gbl.spaces",
+            "48:notes",
+        ] {
+            assert_eq!(MeetingJoin::from_thread_id(thread), None, "thread: {thread}");
+        }
     }
 
     /// The shape the user's OWN meetings have: a meeting code and a passcode, and no

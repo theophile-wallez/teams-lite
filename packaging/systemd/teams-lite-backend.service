@@ -44,17 +44,27 @@ Environment=TEAMS_NO_IDLE_EXIT=1
 # Stated explicitly so a stray TEAMS_LITE_READ_ONLY in the environment cannot move
 # the listener to the read-only port and leave the web unit talking to nothing.
 Environment=TEAMS_LITE_PORT=@BACKEND_PORT@
+# This unit starts the backend again when it exits (Restart=always, below), and that is
+# what lets the app offer Settings › This app › Restart the backend: the backend restarts
+# by EXITING here, and there is nothing for it to ask. It is declared rather than detected
+# because a process cannot read its own unit's Restart=, and an INVOCATION_ID inherited
+# from a parent unit would make a hand-started backend look supervised — see
+# src/restart.rs, whose test pins this line against the Restart= below. Move one, move
+# the other.
+Environment=TEAMS_LITE_RESTART_ON_EXIT=1
 # The local agent spawns its CLI by name (`claude`, `opencode`), and the systemd user
 # manager's PATH holds neither ~/.local/bin nor ~/.bun/bin — the same gap the web unit
 # works around with an absolute @BUN@. Without this the trigger is dropped with one
 # journal line and the thread stays silent, which reads as a broken feature.
 Environment=PATH=@AGENT_PATH@
 
-# Local overrides, e.g. TEAMS_LITE_CALLING=1. The "-" makes a missing file harmless.
-# Deliberately NOT set here: TEAMS_LITE_CALLING (it re-routes how the user's real
-# calls ring across their endpoints), TEAMS_LITE_CALL_DEBUG and
-# TEAMS_LITE_CALL_CAPTURE (they write call identities, SDP and session keys, and this
-# host keeps the journal for weeks).
+# Local overrides. The "-" makes a missing file harmless. Calling is NOT among them and
+# has no environment value at all: every backend but a read-only one registers as a device
+# the user's calls ring on, like every other client they are signed in on, and two on one
+# machine are two devices (each holds an endpoint id keyed by its port).
+# Deliberately NOT set here: TEAMS_LITE_CALL_DEBUG and TEAMS_LITE_CALL_CAPTURE
+# (they write call identities, SDP and session keys, and this host keeps the journal for
+# weeks).
 EnvironmentFile=-@CONFIG_DIR@/backend.env
 
 Restart=always

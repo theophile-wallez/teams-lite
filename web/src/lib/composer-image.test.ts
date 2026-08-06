@@ -24,8 +24,11 @@ describe("composer image validation", () => {
     );
   });
 
+  // The id is the pending list's own identity and the preview is a local data URL:
+  // neither is anything Teams is told about.
   it("removes display-only fields from the send payload", () => {
     const image: ComposerImage = {
+      id: 7,
       name: "capture.png",
       contentType: "image/png",
       width: 80,

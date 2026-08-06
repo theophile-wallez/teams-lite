@@ -9,12 +9,14 @@ import { spawn } from "bun";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
+  backendPort,
   backendUrl,
   ensureBackend,
   isCompiledBinary,
   repoRoot,
   WRITE_TOKEN_ENV,
 } from "./backend";
+import { handleBackendRestartEvent } from "./backend-restart";
 import { handleBackendEvent, spawnDetached } from "./update";
 import { readWriteLock, serveWriteToken, writeLockWarning } from "./write-lock";
 
@@ -232,7 +234,17 @@ export async function launch(options: LaunchOptions): Promise<void> {
   // 2. Dev mode: hand off to Vite (HMR) instead of the built SSR server. Never
   //    returns — it runs until the Vite process exits.
   if (options.dev) {
-    startKeepalive(backendUrl());
+    // The backend is still ours here, so a requested restart still works — it is the
+    // in-app UPDATE that a source run has nothing to install for. The web server is
+    // Vite's in this mode and is untouched either way, which is the whole point of the
+    // narrow restart.
+    startKeepalive(backendUrl(), (raw) =>
+      handleBackendRestartEvent(raw, {
+        restart: () => backend.restart(),
+        port: backendPort(),
+        log: (message) => console.error(message),
+      }),
+    );
     reportWriteLock(options);
     await runViteDev(options);
   }
@@ -255,9 +267,11 @@ export async function launch(options: LaunchOptions): Promise<void> {
     server?: { stop: (closeActiveConnections?: boolean) => void };
   };
 
-  // 3b. Now that both halves are ours to stop, listen for the backend asking us to
-  //     restart onto a build it just installed.
-  startKeepalive(backendUrl(), (raw) =>
+  // 3b. Now that both halves are ours to stop, listen for the two things the backend can
+  //     ask of us — and they are two, because they cost different amounts: an UPDATE puts
+  //     the whole app back up on a new build, while a plain RESTART replaces the backend
+  //     child and leaves this web server serving the page (see src/backend-restart.ts).
+  startKeepalive(backendUrl(), (raw) => {
     handleBackendEvent(raw, {
       stopWeb: () => web.server?.stop(true),
       stopBackend: async () => {
@@ -269,8 +283,13 @@ export async function launch(options: LaunchOptions): Promise<void> {
       start: spawnDetached,
       exit: () => process.exit(0),
       log: (message) => console.error(message),
-    }),
-  );
+    });
+    handleBackendRestartEvent(raw, {
+      restart: () => backend.restart(),
+      port: backendPort(),
+      log: (message) => console.error(message),
+    });
+  });
 
   const url = `http://${options.host}:${options.port}`;
   console.error(`\n  teams-lite ready at ${url}\n`);

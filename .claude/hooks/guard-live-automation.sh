@@ -50,10 +50,12 @@
 #      `set_chat_pinned` / `set_chat_muted` / `set_chat_hidden` RPCs — the "…" menu on
 #      a chat row — are the only way that may happen;
 #   2g. a WRITE to one of the TRACKERS straight to GitLab or Linear
-#      (`POST …/merge_requests/<iid>/approve` | `/unapprove`, or a GraphQL mutation).
-#      Both are read-only here save one deliberate exception — the approval the user
-#      gives from a message and takes back the same way, through the gated
-#      `gitlab_set_approval` RPC — and there is no sandbox project to aim a test at;
+#      (`…/merge_requests/<iid>/approve` | `/unapprove` | `/merge` | `/notes`, a
+#      `state_event`, or a GraphQL mutation). Both are read-only here save what the USER
+#      clicks in the app — the approval, and the merge-request page's merge, comment,
+#      comment deletion and close, each through its own gated `gitlab_*` RPC — and there
+#      is no sandbox project to aim a test at. The MERGE is the sharpest of them: it
+#      lands somebody's branch in a shared repository and no later call takes it back;
 #   5. anything that would send MAIL. The mailbox is read-only here and has no
 #      sandbox equivalent (see AGENTS.md § Mail is READ-ONLY): the broker token
 #      already carries `Mail.Send`, so the only thing standing between this
@@ -205,11 +207,12 @@ at_command_start='(^|[;&|])[[:space:]]*(([A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|]*
 # What earns a live driver its place is not that it is tracked: it is that its target is a
 # CONSTANT in it and re-read from the app's own state immediately before the outward
 # action. `sandbox-live.ts` does that with the sandbox chat's conversation id;
-# `join-live.ts` does it with the authorized meeting's `data-join-url`. A new one must do
-# the same before it is added here.
+# `join-live.ts` does it with the authorized meeting's `data-join-url`; `call-live.ts` does
+# it with the authorized one-to-one's `data-conversation-id`, read twice — off the composer
+# and off the call button. A new one must do the same before it is added here.
 sanctioned_automation() {
   printf '%s' "$command_line" |
-    grep -qE 'scripts/preview\.ts|bun run preview|test:e2e|playwright test|playwright install|scripts/sandbox-live\.ts|bun run sandbox|scripts/join-live\.ts|bun run join-live'
+    grep -qE 'scripts/preview\.ts|bun run preview|test:e2e|playwright test|playwright install|scripts/sandbox-live\.ts|bun run sandbox|scripts/join-live\.ts|bun run join-live|scripts/call-live\.ts|bun run call-live'
 }
 
 # A script file the command RUNS counts as part of the command. The incident's
@@ -344,15 +347,19 @@ writes_chat_settings() {
 }
 
 # Does this file WRITE to one of the trackers? Everything this app knows about GitLab
-# and Linear reads, with ONE exception — a merge request's approval, given and taken
-# back through src/gitlab_approval.rs behind the gated `gitlab_set_approval` RPC. A
-# GitLab token carries whatever scopes the user granted it and a Linear key has full
-# write access, so the endpoints and the mutation keyword are matched wherever a file
-# names them. Reading a tracker is the whole point of the preview cards and is not
-# matched: only the two approval endpoints, a GraphQL mutation, and this crate's own
-# write function are.
+# and Linear READS, save what the USER clicks in the app: a merge request's approval
+# (src/gitlab_approval.rs, the gated `gitlab_set_approval` RPC) and the merge-request
+# PAGE's four writes — the merge, a comment, that comment's deletion and the close
+# (src/gitlab_mr_write.rs, the gated `gitlab_mr_*` RPCs; see AGENTS.md § The GitLab page).
+#
+# A GitLab token carries whatever scopes the user granted it and a Linear key has full
+# write access, so every one of those endpoints is matched wherever a file names them —
+# the MERGE most of all, since it is the one action in this app that no later call takes
+# back. Reading a tracker is the whole point of the page and the preview cards and is not
+# matched: only the write endpoints, `state_event`, a GraphQL mutation and this crate's
+# own write functions are.
 writes_to_a_tracker() {
-  grep -qiE 'merge_requests/[^ "'\'']*/(un)?approve|/(un)?approve"|gitlab_approval::set|gitlab_set_approval|"mutation |mutation *\{' "$1"
+  grep -qiE 'merge_requests/[^ "'\'']*/((un)?approve|merge|notes)|/(un)?approve"|gitlab_approval::set|gitlab_set_approval|gitlab_mr_write::|gitlab_mr_(merge|comment|delete_comment|set_state)|state_event|"mutation |mutation *\{' "$1"
 }
 
 # Cargo examples that would post to Teams somewhere other than the sandbox channel,
@@ -488,17 +495,25 @@ if ! sanctioned_automation; then
     # tooling would also cut a live `@claude` reply in half — the same failure
     # `teams-lite-service.sh update --now` is blocked for.
     #
-    # The `call_*` methods and `set_calling` are the sharpest entries in this list: a
-    # call RINGS a person. `call_place` starts a device buzzing in somebody's pocket,
-    # `call_accept` opens the user's own microphone to whoever is on the other end,
-    # `call_join` walks the user into a meeting, where everybody present sees them arrive,
-    # `call_hangup` ends the call for both of them, and `call_mute` states whether they
-    # can be heard. `set_calling` registers this machine with Teams as a device their
-    # calls ring on — so a script naming it could route the user's real calls to a
-    # client nobody is watching — and `call_prepare` reserves the one call slot and
-    # hands out the relay credentials the backend holds (OUTWARD_METHODS and
-    # MACHINE_METHODS in src/bin/server.rs). Reading `call_status` is not a write and is
-    # not listed.
+    # `restart_backend` is the update's sibling minus the new binary (MACHINE_METHODS in
+    # src/bin/server.rs): it takes down the process the user's own pages are talking to, and
+    # it cuts off a local agent that is writing a reply — so tooling must not be able to
+    # restart the app somebody is reading, for the same reason it must not apply an update.
+    #
+    # The `call_*` methods are the sharpest entries in this list: a call RINGS a person.
+    # `call_place` starts a device buzzing in somebody's pocket, `call_accept` opens the
+    # user's own microphone to whoever is on the other end, `call_join` walks the user into
+    # a meeting, where everybody present sees them arrive, `call_hangup` ends the call for
+    # both of them, and `call_mute` states whether they can be heard. `call_prepare`
+    # reserves the one call slot and hands out the relay credentials the backend holds
+    # (OUTWARD_METHODS and MACHINE_METHODS in src/bin/server.rs). Reading `call_status` is
+    # not a write and is not listed.
+    #
+    # `set_calling` is KEPT here although this app no longer has that method: calling is on
+    # by default now and no client turns it on or off (`calling_available`). A backend
+    # staged before that change is still listening on 19420 for weeks at a time, and it
+    # would still answer — so a script naming it could unregister the device the user's
+    # calls ring on, on the very install they are using.
     #
     # `set_person_name` and `set_person_avatar` write only to the local store too, and
     # are in the list because of WHAT they write: the name and the face this app puts on
@@ -511,7 +526,7 @@ if ! sanctioned_automation; then
     # pack: a script that could plant art in the pack could post a picture under the
     # user's name on the next send (MACHINE_METHODS in src/bin/server.rs).
     if grep -qE '(127\.0\.0\.1|localhost):(1942[0-2]|1944[0-2])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|update_download|update_apply|set_calling|call_prepare|call_place|call_join|call_accept|call_hangup|call_mute|gitlab_set_approval)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that
@@ -695,28 +710,30 @@ fi
 # project and no pre-authorized merge request. An approval is an act by the user's GitLab
 # account, everybody watching the merge request is told, and a project rule may act on it.
 if printf '%s' "$command_line" |
-  grep -qiE '(curl|wget|xh|httpie|http)[^;&|]*merge_requests/[^ "'\'']*/(un)?approve' ||
+  grep -qiE '(curl|wget|xh|httpie|http)[^;&|]*(merge_requests/[^ "'\'']*/((un)?approve|merge|notes)|state_event)' ||
   [ -n "$scripts_writing_to_a_tracker" ] || [ -n "$examples_writing_to_a_tracker" ]; then
   [ -n "$scripts_writing_to_a_tracker" ] &&
     printf 'note: a tracker write was found inside%s\n' "$scripts_writing_to_a_tracker" >&2
   [ -n "$examples_writing_to_a_tracker" ] &&
     printf 'note: a tracker write was found inside%s\n' "$examples_writing_to_a_tracker" >&2
   block "This command would WRITE to one of the user's trackers
-(POST …/merge_requests/<iid>/approve | /unapprove, or a Linear GraphQL mutation).
+(…/merge_requests/<iid>/approve | /unapprove | /merge | /notes, a state_event, or a
+Linear GraphQL mutation).
 
-The trackers are read-only here with ONE exception: a merge request's approval, which
-the user gives from the message that carries it and takes back the same way (AGENTS.md
-§ The trackers). Everything else — a comment, an assignment, a label, a merge — reaches
-everybody watching the issue under the user's name and has no undo at all.
+The trackers are read-only here save what the USER clicks in the app: a merge request's
+approval, and the merge-request page's merge, comment, comment deletion and close
+(AGENTS.md § The trackers, § The GitLab page). Each reaches everybody watching the merge
+request under the user's name — and the MERGE lands somebody's branch in a shared
+repository, which no later call takes back.
 
-Going direct also bypasses every gate the one write has: the write token, read-only
-mode, and the menu that asks the user first. And pinning a target cannot make it safe
-the way it can for a send — there is no sandbox project.
+Going direct also bypasses every gate those writes have: the write token, read-only
+mode, and the second confirmation the page asks for. And pinning a target cannot make it
+safe the way it can for a send — there is no sandbox project.
 
-READING a tracker is fine and is what the preview cards are built on — a GET of an
-issue, a merge request or a project is untouched by this rule. To exercise the write,
-use the mock: cd web && bun run preview. Against the real account it goes through the
-app's own gated gitlab_set_approval RPC, from the user's own click."
+READING a tracker is fine and is what the page and the preview cards are built on — a
+GET of an issue, a merge request, its pipeline or its comments is untouched by this rule.
+To exercise a write, use the mock: cd web && bun run preview -- --gitlab. Against the
+real account it goes through the app's own gated RPCs, from the user's own click."
 fi
 
 # --- 1e. our own presence is published by the gated RPC, or not at all ----------

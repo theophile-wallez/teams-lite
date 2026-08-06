@@ -39,6 +39,7 @@
 // Usage:
 //
 //   cd web && bun run join-live            # join, watch, hang up, print the timeline
+//   cd web && bun run join-live -- --from-chat  # the same meeting, from its own chat header
 //   cd web && bun run join-live -- --local # the same meeting through this machine's front
 //   cd web && bun run join-live -- --hold 45   # stay 45s before hanging up
 //   cd web && bun run join-live -- --tone  # capture Chrome's beep instead of silence
@@ -48,7 +49,7 @@ import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { findChromium, openCalendarView } from "./preview";
-import { LOCAL_ORIGIN, TAILNET_ORIGIN } from "./sandbox-live";
+import { LOCAL_ORIGIN, RELEASED_ORIGIN, TAILNET_ORIGIN } from "./sandbox-live";
 
 /**
  * The one meeting this script may ever join: the user's own, authorized out loud for
@@ -122,7 +123,7 @@ const SILENCE_SECONDS = 10;
  * in `getStats` — that is what the beep was for, and it is still there when that is the
  * question being asked.
  */
-function fakeAudioArgs(tone: boolean): string[] {
+export function fakeAudioArgs(tone: boolean): string[] {
   if (tone) return [];
   const path = joinPath(tmpdir(), `teams-lite-silence-${SILENCE_SECONDS}s.wav`);
   writeFileSync(path, silentWav(SILENCE_SECONDS));
@@ -150,31 +151,112 @@ function silentWav(seconds: number): Buffer {
   return buffer;
 }
 
-/** One reading of the call bar, as the app itself renders it. */
+/**
+ * Keep a handle on the app's own peer connection, from BEFORE its code runs.
+ *
+ * The alternative was a `data-media-state` attribute on the call bar, i.e. production code
+ * carrying a diagnostic. This is instrumentation, so it belongs to the driver: nothing the
+ * user runs is changed by it, and it cannot drift from what the app does because it wraps the
+ * browser's own constructor. Shared with `call-live.ts`, which drives the other outward
+ * action on the same rig — one spelling of a diagnostic, like everything else here.
+ */
+export const PEER_CONNECTION_PROBE = `(() => {
+  const Native = window.RTCPeerConnection;
+  if (!Native) return;
+  window.__tlOffers = [];
+  const Wrapped = function (...args) {
+    const pc = new Native(...args);
+    window.__tlPc = pc;
+    // Every description this side APPLIES, kept at the moment it is applied. Reading
+    // \`localDescription\` afterwards reads the LAST one, and a section the far side rejected
+    // has been taken down by then — which made a rejected offer look like a rejected section
+    // and cost two runs. Held as raw SDP; the driver digests it into shapes.
+    const setLocal = pc.setLocalDescription.bind(pc);
+    pc.setLocalDescription = function (description) {
+      return setLocal(description).then((result) => {
+        const applied = pc.localDescription;
+        if (applied) window.__tlOffers.push({ type: applied.type, sdp: applied.sdp });
+        return result;
+      });
+    };
+    return pc;
+  };
+  Wrapped.prototype = Native.prototype;
+  window.RTCPeerConnection = Wrapped;
+})()`;
+
+/**
+ * And a handle on what the BACKEND says, for the same reason and by the same means.
+ *
+ * `call_signal` carries every raw calling frame to every client, and the `call_join` reply
+ * names every link the answer held — so both are already on this socket and neither is
+ * rendered. Wrapping the socket keeps the reading in the driver, where a diagnostic belongs:
+ * the app the user runs is unchanged, and this cannot drift from what the app receives
+ * because it IS what the app receives.
+ */
+export const SIGNAL_PROBE = `(() => {
+  const Native = window.WebSocket;
+  if (!Native) return;
+  window.__tlSignals = [];
+  window.WebSocket = class extends Native {
+    constructor(...args) {
+      super(...args);
+      this.addEventListener("message", (event) => {
+        if (typeof event.data !== "string") return;
+        if (!/"call_signal"|"links"/.test(event.data)) return;
+        // Bounded: a long meeting sends a roster frame every few seconds, and an
+        // unbounded array in a page under test is its own kind of failure.
+        if (window.__tlSignals.length > 600) window.__tlSignals.shift();
+        window.__tlSignals.push(event.data);
+      });
+    }
+  };
+})()`;
+
+/** One reading of the live call, as the app itself renders it. */
 export type CallBarState = {
-  /** `dialing` | `connecting` | `connected` | `ended`, from the bar's own attribute. */
+  /** `dialing` | `connecting` | `connected` | `ended`, from the surface's own attribute. */
   phase: string | null;
-  /** What the bar says under the title — "Joining…", "Waiting to be let in…", a timer. */
+  /** What it says under the title — "Joining…", "Waiting to be let in…", a timer. */
   detail: string;
-  /** The notice that replaces the bar when a call ends, when there is one. */
+  /** The notice that is left behind when a call ends, when there is one. */
   notice: string;
 };
 
 export type JoinLiveSession = {
   meeting: string;
   url: string;
-  /** Read the call bar now. */
+  /** Read what the app says about the call now. */
   callBar: () => Promise<CallBarState>;
-  /** Wait until the bar reaches one of `phases`, or the timeout expires. */
+  /** Wait until it reaches one of `phases`, or the timeout expires. */
   waitForPhase: (phases: string[], timeoutMs?: number) => Promise<CallBarState>;
-  /** Every distinct bar state seen since the click, in order. */
+  /** Every distinct state seen since the click, in order. */
   timeline: () => CallBarState[];
   /** Screenshot the page or one element. */
   shot: (path: string, selector?: string) => Promise<void>;
-  /** What the MEDIA is actually doing — the half the call bar cannot show. */
+  /** What the MEDIA is actually doing — the half no surface can show. */
   mediaStats: () => Promise<MediaStats | null>;
-  /** What the SERVICE said, digested — the half neither the bar nor `getStats` shows. */
+  /** What the SERVICE said, digested — the half neither the page nor `getStats` shows. */
   signals: () => Promise<SignalDigest>;
+  /**
+   * Share the screen in the meeting this session already joined, and stop again.
+   *
+   * It takes no argument, for the reason nothing here does: the meeting is the pinned one
+   * and the button is the one the app drew on its own stage. What it exercises is the pair
+   * a screen share really is — the content-sharing session, then the media section — which
+   * cannot be reached from the mock (there is no service to grant one) and cannot be read
+   * from the app (the answer's rejection is drawn nowhere).
+   *
+   * The screen it captures is a HEADLESS browser's own, so nothing of the user's is shown
+   * to the meeting: `--auto-select-desktop-capture-source` picks that blank surface and
+   * `--use-fake-ui-for-media-stream` accepts it with no picker.
+   */
+  share: (holdMs?: number) => Promise<{ pressed: boolean; sending: string[] }>;
+  /** OUR OWN offer, section by section — see {@link readLocalOffer}. */
+  localOffer: () => Promise<string[]>;
+  /** Every description this side APPLIED, whole. For reading a refusal that names no line:
+   *  the caller strips what must not be printed. */
+  rawDescriptions: () => Promise<Array<{ type: string; sdp: string }>>;
 };
 
 /**
@@ -238,6 +320,10 @@ const SKELETON_VALUES = new Set([
   "label",
   "isSharing",
   "capabilities",
+  // Whether this endpoint is the meeting's PRESENTER, which is the fact a screen share turns
+  // on. It is a state name (`presenter`, `viewer`) and never a person.
+  "role",
+  "modalityJoined",
 ]);
 
 /**
@@ -299,9 +385,18 @@ export type MediaStats = {
  */
 export async function withJoinLive<T>(
   body: (session: JoinLiveSession) => Promise<T>,
-  opts: { front?: "tailnet" | "local"; tone?: boolean } = {},
+  opts: {
+    front?: "tailnet" | "local" | "released";
+    tone?: boolean;
+    from?: "calendar" | "chat";
+  } = {},
 ): Promise<T> {
-  const origin = opts.front === "local" ? LOCAL_ORIGIN : TAILNET_ORIGIN;
+  const origin =
+    opts.front === "local"
+      ? LOCAL_ORIGIN
+      : opts.front === "released"
+        ? RELEASED_ORIGIN
+        : TAILNET_ORIGIN;
   const url = origin;
   await assertFrontIsServing(origin);
 
@@ -321,6 +416,11 @@ export async function withJoinLive<T>(
         "--use-fake-device-for-media-stream",
         "--use-fake-ui-for-media-stream",
         "--autoplay-policy=no-user-gesture-required",
+        // A SCREEN to share that is not the user's: this browser is headless, so its
+        // "entire screen" is the blank surface it renders into. Both flags together are
+        // what makes `getDisplayMedia` answer with no picker and no human in the loop.
+        "--auto-select-desktop-capture-source=Entire screen",
+        "--auto-accept-this-tab-capture",
         // Silence, unless the caller asked for the tone. See `fakeAudioArgs`.
         ...fakeAudioArgs(opts.tone === true),
       ],
@@ -330,52 +430,8 @@ export async function withJoinLive<T>(
       permissions: ["microphone"],
       ignoreHTTPSErrors: true,
     });
-    // Keep a handle on the app's own peer connection, from BEFORE its code runs.
-    //
-    // The alternative was a `data-media-state` attribute on the call bar, i.e. production
-    // code carrying a diagnostic. This is instrumentation, so it belongs to the driver:
-    // nothing the user runs is changed by it, and it cannot drift from what the app does
-    // because it wraps the browser's own constructor.
-    await context.addInitScript({
-      content: `(() => {
-        const Native = window.RTCPeerConnection;
-        if (!Native) return;
-        const Wrapped = function (...args) {
-          const pc = new Native(...args);
-          window.__tlPc = pc;
-          return pc;
-        };
-        Wrapped.prototype = Native.prototype;
-        window.RTCPeerConnection = Wrapped;
-      })()`,
-    });
-    // And a handle on what the BACKEND says, for the same reason and by the same means.
-    //
-    // `call_signal` carries every raw calling frame to every client, and the `call_join`
-    // reply names every link the answer held — so both are already on this socket and
-    // neither is rendered. Wrapping the socket keeps the reading in the driver, where a
-    // diagnostic belongs: the app the user runs is unchanged, and this cannot drift from
-    // what the app receives because it IS what the app receives.
-    await context.addInitScript({
-      content: `(() => {
-        const Native = window.WebSocket;
-        if (!Native) return;
-        window.__tlSignals = [];
-        window.WebSocket = class extends Native {
-          constructor(...args) {
-            super(...args);
-            this.addEventListener("message", (event) => {
-              if (typeof event.data !== "string") return;
-              if (!/"call_signal"|"links"/.test(event.data)) return;
-              // Bounded: a long meeting sends a roster frame every few seconds, and an
-              // unbounded array in a page under test is its own kind of failure.
-              if (window.__tlSignals.length > 600) window.__tlSignals.shift();
-              window.__tlSignals.push(event.data);
-            });
-          }
-        };
-      })()`,
-    });
+    await context.addInitScript({ content: PEER_CONNECTION_PROBE });
+    await context.addInitScript({ content: SIGNAL_PROBE });
     page = await context.newPage();
     // The page's own voice. Everything that can go wrong in the MEDIA half is reported
     // here and nowhere else: the backend sees a clean join, and the browser sees
@@ -392,9 +448,18 @@ export async function withJoinLive<T>(
     const seen: CallBarState[] = [];
     await page.goto(url, { waitUntil: "domcontentloaded" });
 
-    const button = await findPinnedJoinButton(page);
+    // The two ways into the same meeting, and each proves the same target its own way:
+    // the CALENDAR event's button states the join link, the CHAT header's states the
+    // thread. Both are read off the page immediately before the click.
+    const button =
+      opts.from === "chat"
+        ? await findPinnedJoinButtonInChat(page, origin)
+        : await findPinnedJoinButton(page);
     await assertPinnedMeeting(button, page);
-    console.log(`  joining ${AUTHORIZED_MEETING_CODE} — the pinned meeting`);
+    console.log(
+      `  joining ${AUTHORIZED_MEETING_CODE} — the pinned meeting, from ` +
+        `${opts.from === "chat" ? "its own chat" : "the calendar"}`,
+    );
     await button.click();
 
     const session: JoinLiveSession = {
@@ -410,6 +475,12 @@ export async function withJoinLive<T>(
       },
       mediaStats: () => readMediaStats(page as Page),
       signals: () => readSignals(page as Page),
+      share: (holdMs = SHARE_HOLD_MS) => shareTheScreen(page as Page, holdMs),
+      localOffer: () => readLocalOffer(page as Page),
+      rawDescriptions: () =>
+        (page as Page).evaluate("window.__tlOffers || []") as Promise<
+          Array<{ type: string; sdp: string }>
+        >,
     };
     return await body(session);
   } finally {
@@ -479,9 +550,10 @@ async function findPinnedJoinButton(page: Page) {
   throw new Error(
     `No event in the last ${AGENDA_WINDOWS_BACK + 1} agenda windows offers a join for ` +
       `meeting ${AUTHORIZED_MEETING_CODE} (${AUTHORIZED_MEETING_DAY}), which is the only ` +
-      `one this script may join. Either it is further back than that, or calling is off ` +
-      `in Settings — the button is disabled then, and this script will not click a ` +
-      `disabled one. It joins that meeting and no other; do not point it elsewhere.`,
+      `one this script may join. Either it is further back than that, or this backend is a ` +
+      `read-only one, which takes no calls — the button ` +
+      `is disabled then, and this script will not click a disabled one. It joins that ` +
+      `meeting and no other; do not point it elsewhere.`,
   );
 }
 
@@ -500,8 +572,37 @@ async function findInThisWindow(page: Page) {
 }
 
 /**
- * The gate. Reads the button's own `data-join-url` and throws unless it names the
- * pinned meeting.
+ * The Join button in the pinned meeting's own CHAT — the other half of the feature, and
+ * the only way to exercise it live.
+ *
+ * A meeting-backed thread is a join ADDRESS on its own (`MeetingJoin::from_thread_id`), so
+ * this path never involves a link at all: the calendar is not opened, and nothing is
+ * searched for. The conversation is opened by its own id — the pinned thread, a constant in
+ * this file — exactly as `sandbox-live.ts` opens the sandbox chat, because clicking through
+ * the sidebar of a live app cannot prove which thread was opened.
+ *
+ * Two proofs before the click, both out of the app's own state: the composer says which
+ * conversation is open, and the button says which meeting it joins.
+ */
+async function findPinnedJoinButtonInChat(page: Page, origin: string) {
+  await page.goto(`${origin}/c/${encodeURIComponent(AUTHORIZED_MEETING_THREAD)}`, {
+    waitUntil: "domcontentloaded",
+  });
+  const composer = page.locator('[data-testid="composer-shell"]');
+  await composer.waitFor({ timeout: APP_READY_TIMEOUT_MS });
+  const open = await composer.getAttribute("data-conversation-id");
+  if (open !== AUTHORIZED_MEETING_THREAD) {
+    throw new Error(
+      `REFUSING TO JOIN: the open conversation is ${open ?? "unknown"}, not the pinned ` +
+        `meeting's thread ${AUTHORIZED_MEETING_THREAD}.\n  now at: ${page.url()}`,
+    );
+  }
+  return page.locator('[data-testid="meeting-join-here"]').first();
+}
+
+/**
+ * The gate. Reads the button's OWN address — the join link, or the meeting thread — and
+ * throws unless it names the pinned meeting.
  *
  * Re-read immediately before the click for the same reason `sandbox-live.ts` re-reads
  * its conversation id: "it was the right event a moment ago" is not proof that the
@@ -511,14 +612,20 @@ async function assertPinnedMeeting(
   button: ReturnType<Page["locator"]>,
   page: Page,
 ): Promise<void> {
-  const link = await button.getAttribute("data-join-url", { timeout: JOIN_BUTTON_TIMEOUT_MS });
+  await button.waitFor({ timeout: JOIN_BUTTON_TIMEOUT_MS });
+  const link = await button.getAttribute("data-join-url");
+  const thread = await button.getAttribute("data-meeting-thread");
+  // A thread is compared WHOLE, and to one constant: it is an exact id, so there is no
+  // reason to match a fragment of it the way a percent-encoded url needs.
+  if (thread !== null && thread === AUTHORIZED_MEETING_THREAD) return;
   if (namesPinnedMeeting(link)) return;
   const shown =
-    link === null
-      ? "unknown: the button carries no `data-join-url`. If the app otherwise works, the " +
-        "service is probably serving a bundle staged before that attribute existed — " +
-        "check `bin/teams-lite-service.sh status` and re-stage with `update`"
-      : `"${link}"`;
+    link === null && thread === null
+      ? "unknown: the button states neither `data-join-url` nor `data-meeting-thread`. If " +
+        "the app otherwise works, the service is probably serving a bundle staged before " +
+        "that attribute existed — check `bin/teams-lite-service.sh status` and re-stage " +
+        "with `update`"
+      : `"${thread ?? link}"`;
   throw new Error(
     `REFUSING TO JOIN: this app is talking to the real Teams account, and the button on ` +
       `screen joins ${shown}, not the pinned meeting ${AUTHORIZED_MEETING_CODE}.\n` +
@@ -528,9 +635,18 @@ async function assertPinnedMeeting(
   );
 }
 
-/** Read the call bar as the app renders it. */
-async function readCallBar(page: Page): Promise<CallBarState> {
-  const bar = page.locator('[data-testid="call-bar"]').first();
+/**
+ * Read the live call as the app renders it.
+ *
+ * TWO surfaces carry the state, and this reads whichever is up: the PAGE a live call takes
+ * over (`call-stage`, which is every phase of a join) and the card a RINGING call is offered
+ * on (`call-bar`, which a join never reaches). Both state the phase in the same attribute,
+ * so this asks for the stage first and falls back — a driver that knew only one of them
+ * would report `phase: null` through a whole working join.
+ */
+export async function readCallBar(page: Page): Promise<CallBarState> {
+  const stage = page.locator('[data-testid="call-stage"]').first();
+  const bar = (await stage.count()) ? stage : page.locator('[data-testid="call-bar"]').first();
   if (!(await bar.count())) {
     const notice = await page
       .locator('[data-testid="call-notice"]')
@@ -548,8 +664,8 @@ async function readCallBar(page: Page): Promise<CallBarState> {
   return { phase, detail: oneLine(detail), notice: "" };
 }
 
-/** Poll the bar until it reaches one of `phases`, recording every change on the way. */
-async function waitForPhase(
+/** Poll until the call reaches one of `phases`, recording every change on the way. */
+export async function waitForPhase(
   page: Page,
   phases: string[],
   timeoutMs: number,
@@ -575,7 +691,65 @@ async function waitForPhase(
 }
 
 /** Ask the peer connection what the media is really doing. */
-async function readMediaStats(page: Page): Promise<MediaStats | null> {
+/**
+ * OUR OWN offer, section by section — the one artefact none of this ever looked at.
+ *
+ * Every measurement so far read what the SERVICE sent. When a section is rejected with no word
+ * about why, the next question is what was actually offered, and that lives in the browser's
+ * own `localDescription`.
+ *
+ * It prints the SHAPE, under the discipline the rest of this file follows: the m-line, the mid,
+ * the label, the direction, the codec names and whether an SSRC range is stated. No candidate,
+ * no fingerprint, no ICE credential.
+ */
+export async function readLocalOffer(page: Page): Promise<string[]> {
+  return (await page.evaluate(`(() => {
+    const applied = window.__tlOffers || [];
+    const out = [];
+    for (let i = 0; i < applied.length; i += 1) {
+      out.push("--- our " + applied[i].type + " #" + (i + 1));
+      out.push.apply(out, sections(applied[i].sdp));
+    }
+    return out;
+
+    function sections(sdp) {
+    const out = [];
+    let section = null;
+    const flush = () => { if (section) out.push(section); section = null; };
+    const DIRECTIONS = ["a=sendonly", "a=recvonly", "a=sendrecv", "a=inactive"];
+    // Split on the newline's CODE, never on an escape: this whole function is injected as the
+    // text of a template literal, so a "\\n" in it would arrive as a real newline inside a
+    // string literal and the injected source would not parse. It cost two runs.
+    for (const raw of sdp.split(String.fromCharCode(10))) {
+      const line = raw.trim();
+      if (line.startsWith("m=")) {
+        flush();
+        const parts = line.slice(2).split(" ");
+        section = parts[0] + " port=" + parts[1] + " " + parts[2];
+      } else if (!section) {
+        continue;
+      } else if (line.startsWith("a=mid:")) {
+        section += " mid=" + line.slice(6).trim();
+      } else if (line.startsWith("a=label:")) {
+        section += " label=" + line.slice(8).trim();
+      } else if (DIRECTIONS.indexOf(line) >= 0) {
+        section += " " + line.slice(2);
+      } else if (line.startsWith("a=rtpmap:")) {
+        const codec = (line.split(" ")[1] || "").split("/")[0];
+        if (codec && !section.includes(" " + codec)) section += " " + codec;
+      } else if (line.startsWith("a=x-ssrc-range:")) {
+        section += " x-ssrc-range";
+      } else if (line.startsWith("a=ssrc:")) {
+        if (!section.includes(" ssrc")) section += " ssrc";
+      }
+    }
+    flush();
+    return out;
+    }
+  })()`)) as string[];
+}
+
+export async function readMediaStats(page: Page): Promise<MediaStats | null> {
   // Source text rather than a closure, for the same reason as the init script above: this
   // file is typed for node, and `RTCPeerConnection` does not exist here.
   return page.evaluate(`(async () => {
@@ -626,7 +800,7 @@ const SOURCE_REQUEST_LINKS = ["controlVideoStreaming", "applyChannelParameters"]
  * it received, so a reading that turns out to be wrong can be corrected without joining
  * the meeting again.
  */
-async function readSignals(page: Page): Promise<SignalDigest> {
+export async function readSignals(page: Page): Promise<SignalDigest> {
   const raw = (await page.evaluate("window.__tlSignals || []")) as string[];
   const digest: SignalDigest = {
     joinLinks: [],
@@ -845,7 +1019,58 @@ function personName(person: Record<string, unknown>): string {
 }
 
 /** Leave the call, if one is up. Idempotent: nothing to do is not an error. */
-async function hangUp(page: Page): Promise<void> {
+/** How long to hold a share before stopping it, so the service has time to answer and to
+ *  POST whatever it POSTs about the session. */
+const SHARE_HOLD_MS = 12_000;
+
+/**
+ * Press the stage's own Share control, hold, and press it again.
+ *
+ * The button is READ from the app's own stage rather than assumed, and the state it reports
+ * afterwards is the BACKEND's (`data-sending` on the stage, which is `call.sending`) — so
+ * "the meeting accepted it" is the service's answer travelling back rather than this
+ * script's opinion of a click.
+ *
+ * It stops the share on the way out. A meeting left with a presenter who is showing a blank
+ * headless screen is exactly the silent participant this file exists not to be.
+ */
+async function shareTheScreen(
+  page: Page,
+  holdMs: number,
+): Promise<{ pressed: boolean; sending: string[] }> {
+  const share = page.locator('[data-testid="call-share"]').first();
+  if ((await share.count()) === 0) {
+    console.log("  no Share control on the stage — the call is not carrying media yet");
+    return { pressed: false, sending: [] };
+  }
+  console.log("  pressing Share…");
+  await share.click();
+  await page.waitForTimeout(holdMs);
+  const sending = await readSending(page);
+  console.log(`  the backend says this endpoint sends: ${sending.join(", ") || "(nothing)"}`);
+  // What WE offered, which is the half every earlier run was blind to.
+  console.log("  our own offer, section by section:");
+  for (const line of await readLocalOffer(page)) console.log(`      ${line}`);
+  // And off again, through the app's own control, so the session is given back the way a
+  // user's own press gives it back.
+  if ((await share.getAttribute("aria-pressed")) === "true") {
+    await share.click();
+    await page.waitForTimeout(2_000);
+  }
+  return { pressed: true, sending };
+}
+
+/** What the BACKEND says this endpoint is sending, read off the stage's own attribute. */
+async function readSending(page: Page): Promise<string[]> {
+  const raw = await page
+    .locator('[data-testid="call-stage"]')
+    .first()
+    .getAttribute("data-sending")
+    .catch(() => null);
+  return raw ? raw.split(",").filter(Boolean) : [];
+}
+
+export async function hangUp(page: Page): Promise<void> {
   const button = page.locator('[data-testid="call-hangup"]').first();
   if (!(await button.count())) return;
   console.log("  hanging up");
@@ -854,7 +1079,7 @@ async function hangUp(page: Page): Promise<void> {
 }
 
 /** Refuse to launch at a front that is not answering, so the failure names its cause. */
-async function assertFrontIsServing(origin: string): Promise<void> {
+export async function assertFrontIsServing(origin: string): Promise<void> {
   const reachable = await fetch(origin, { redirect: "manual" })
     .then(() => true)
     .catch(() => false);
@@ -868,23 +1093,43 @@ async function assertFrontIsServing(origin: string): Promise<void> {
   );
 }
 
-function oneLine(text: string): string {
+export function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
 if (import.meta.main) {
   const argv = process.argv.slice(2);
-  const front = argv.includes("--local") ? "local" : "tailnet";
+  // WHICH INSTALL drives, never which meeting. `--released` is the second install on this
+  // machine (AGENTS.md § Running the released build beside the staged one): it holds a calling
+  // endpoint of its own, so running it beside `--local` puts TWO devices in the meeting — which
+  // is what the service needs before it offers anybody's video at all (§ 10.3a), and the only
+  // second participant this machine can produce.
+  const front = argv.includes("--released")
+    ? "released"
+    : argv.includes("--local")
+      ? "local"
+      : "tailnet";
   const tone = argv.includes("--tone");
+  // WHERE the join is started from. The same meeting either way — the flag chooses which
+  // surface's button is proved and pressed, never which meeting.
+  const from = argv.includes("--from-chat") ? "chat" : "calendar";
   const holdAt = argv.indexOf("--hold");
   const hold = holdAt >= 0 ? Number(argv[holdAt + 1]) : DEFAULT_HOLD_SECONDS;
+  // Whether to SHARE the screen once the meeting is up. It is a step this run takes, never a
+  // target it aims at: the meeting is the same constant either way.
+  const share = argv.includes("--share");
 
   await withJoinLive(
-    async ({ waitForPhase: wait, timeline, mediaStats: stats, signals }) => {
+    async (session) => {
+      const { waitForPhase: wait, timeline, mediaStats: stats, signals } = session;
       // First: does it get past "joining" at all? That is the acceptance and its answer.
       const state = await wait(["connected", "ended"], 45_000);
       if (state.phase === "connected") {
         console.log(`\n  CONNECTED. Holding ${hold}s to see whether it stays up.`);
+        // The SCREEN, if this run asked for one: pressed here rather than after the hold,
+        // because what is under test is the pair — the session, then the section — and both
+        // answers arrive within seconds.
+        if (share) await session.share();
         await wait(["ended"], hold * 1_000);
       }
       // What the MEDIA did, which is the half the bar cannot show. Bytes SENT prove our
@@ -940,6 +1185,6 @@ if (import.meta.main) {
           "  The backend journal has the frames: journalctl --user -u teams-lite-backend -n 60\n",
       );
     },
-    { front, tone },
+    { front, tone, from },
   );
 }

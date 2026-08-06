@@ -2,16 +2,17 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type
 import type { Editor } from "@tiptap/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  ArrowUp01Icon,
   Cancel01Icon,
   ImageAdd01Icon,
   Loading02Icon,
+  SentIcon,
   TextFontIcon,
 } from "@hugeicons/core-free-icons";
 import type { AgentAnswer } from "~/lib/agent-answer";
 import { COMPOSER_FIELD_CLASS } from "~/lib/composer-field";
 import {
   composerImageAccept,
+  COMPOSER_IMAGE_MAX_COUNT,
   loadComposerImage,
   sendImage,
   type ComposerImage,
@@ -45,14 +46,17 @@ function draftToHtml(text: string): string {
   return `<p>${escaped}</p>`;
 }
 
-/** The first image file on the clipboard, or null when the paste carries none —
+/** Every image file on the clipboard, in the order it carries them — a paste of three
+ *  screenshots is three pictures, not the first one. Empty when the paste carries none,
  *  which is what keeps an ordinary text paste an ordinary text paste. */
-function clipboardImage(event: ClipboardEvent): File | null {
+function clipboardImages(event: ClipboardEvent): File[] {
+  const files: File[] = [];
   for (const item of event.clipboardData.items) {
     if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
-    return item.getAsFile();
+    const file = item.getAsFile();
+    if (file) files.push(file);
   }
-  return null;
+  return files;
 }
 
 /**
@@ -72,11 +76,14 @@ function clipboardImage(event: ClipboardEvent): File | null {
  * same tag arrives from the other end when the reader picks "Answer with <agent>" on a
  * message: the draft is written for them, and the send stays their own Enter.
  *
- * One image can ride along with the message — picked with the image button or
- * pasted from the clipboard, previewed above the field, and uploaded to Teams by
- * the backend as part of the same `send` (see src/teams_send.rs). The submitted
- * snapshot stays on screen while the request is in flight and after a failure, so
- * a rejected send never loses the image or the caption.
+ * Up to `COMPOSER_IMAGE_MAX_COUNT` images ride along with the message — picked with the
+ * image button or pasted from the clipboard, previewed above the field in the order they
+ * were added, and uploaded to Teams by the backend as part of the same `send` (see
+ * src/teams_send.rs). Each one is removed on its own. The submitted snapshot stays on
+ * screen while the request is in flight and after a failure, so a rejected send never
+ * loses the pictures or the caption; a successful one takes back exactly the pictures
+ * that left, so a screenshot pasted while the request was travelling is not thrown away
+ * and the one that went out is not sent twice.
  */
 export function Composer(props: {
   focusToken: unknown;
@@ -112,10 +119,14 @@ export function Composer(props: {
   const [richEmpty, setRichEmpty] = useState(true);
   const richFocusRef = useRef<(() => void) | null>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
-  const [image, setImage] = useState<ComposerImage | null>(null);
-  const imageRef = useRef<ComposerImage | null>(null);
+  const [images, setImages] = useState<ComposerImage[]>([]);
+  const imagesRef = useRef<ComposerImage[]>([]);
   const [imageError, setImageError] = useState<string | null>(null);
-  const [imageLoading, setImageLoading] = useState(false);
+  // How many pictures are still being decoded. A count rather than a flag: a paste and a
+  // pick can overlap, and a flag cleared by whichever finished first would enable Send
+  // while the other picture is not in the message yet.
+  const [loadingImages, setLoadingImages] = useState(0);
+  const imageLoading = loadingImages > 0;
   const [sending, setSending] = useState(false);
   // A ref as well as state: `send` must see the current values synchronously, so a
   // second Enter during a pending request cannot start a duplicate send.
@@ -145,17 +156,17 @@ export function Composer(props: {
     return controller.onCustomEmojiChange(loadPack);
   }, [controller, loadPack]);
 
-  imageRef.current = image;
+  imagesRef.current = images;
 
   // An image belongs to the conversation it was picked in, so switching away drops
   // it rather than carrying it into somebody else's chat.
   useEffect(() => {
     selectionVersion.current += 1;
     sendVersion.current += 1;
-    imageRef.current = null;
-    setImage(null);
+    imagesRef.current = [];
+    setImages([]);
     setImageError(null);
-    setImageLoading(false);
+    setLoadingImages(0);
     sendingRef.current = false;
     setSending(false);
   }, [openId]);
@@ -174,49 +185,64 @@ export function Composer(props: {
     });
   };
 
-  /** Read, validate and preview one picked or pasted image. Decoding is async, so a
-   *  newer selection (or a removal) makes this result stale and it is dropped. */
-  const selectImage = async (file: File) => {
-    const version = ++selectionVersion.current;
+  /** Read, validate and preview picked or pasted images, appending them in the order they
+   *  were given. Decoding is async and one at a time, so the previews arrive in that same
+   *  order; a conversation change makes the whole batch stale and drops it — a removal
+   *  does not, because the others are separate pictures.
+   *
+   *  The ceiling is stated here as well as at the backend, so an eleventh picture is
+   *  refused before a send rather than by one — and a batch that crosses it keeps the
+   *  pictures that fit, which is most of what the user asked for. */
+  const addImages = async (files: File[]) => {
+    if (files.length === 0) return;
+    const version = selectionVersion.current;
     setImageError(null);
-    setImageLoading(true);
+    setLoadingImages((count) => count + 1);
     try {
-      const next = await loadComposerImage(file);
-      if (selectionVersion.current !== version) return;
-      imageRef.current = next;
-      setImage(next);
-    } catch (error) {
-      if (selectionVersion.current !== version) return;
-      setImageError(error instanceof Error ? error.message : "Could not add the image.");
+      for (const file of files) {
+        if (selectionVersion.current !== version) return;
+        if (imagesRef.current.length >= COMPOSER_IMAGE_MAX_COUNT) {
+          setImageError(`A message carries at most ${COMPOSER_IMAGE_MAX_COUNT} images.`);
+          return;
+        }
+        try {
+          const next = await loadComposerImage(file);
+          if (selectionVersion.current !== version) return;
+          imagesRef.current = [...imagesRef.current, next];
+          setImages(imagesRef.current);
+        } catch (error) {
+          if (selectionVersion.current !== version) return;
+          setImageError(error instanceof Error ? error.message : "Could not add the image.");
+        }
+      }
     } finally {
-      if (selectionVersion.current === version) setImageLoading(false);
+      setLoadingImages((count) => Math.max(0, count - 1));
     }
   };
 
-  const removeImage = () => {
-    selectionVersion.current += 1;
-    imageRef.current = null;
-    setImage(null);
+  /** Drop one picture. The others, and anything still decoding, are untouched. */
+  const removeImage = (id: number) => {
+    imagesRef.current = imagesRef.current.filter((image) => image.id !== id);
+    setImages(imagesRef.current);
     setImageError(null);
-    setImageLoading(false);
     if (fileInputRef.current) fileInputRef.current.value = "";
     focusField();
   };
 
   const handlePaste = (event: ClipboardEvent) => {
-    const file = clipboardImage(event);
-    if (!file) return;
+    const files = clipboardImages(event);
+    if (files.length === 0) return;
     event.preventDefault();
-    void selectImage(file);
+    void addImages(files);
   };
 
   /**
    * Send one snapshot of the composer: the text (or rich HTML) plus the pending
-   * image. Returns whether the backend accepted it, which is what tells the rich
+   * images. Returns whether the backend accepted it, which is what tells the rich
    * editor whether it may clear itself.
    *
-   * Only the exact submitted image is cleared, and only on success — a failure
-   * leaves the whole snapshot on screen to retry, and a picture picked while the
+   * Only the exact submitted pictures are cleared, and only on success — a failure
+   * leaves the whole snapshot on screen to retry, and a picture pasted while the
    * request was in flight is never thrown away.
    */
   const send = async (
@@ -227,29 +253,25 @@ export function Composer(props: {
     if (sendingRef.current || imageLoading) return false;
     const clean = text.trim();
     const richHtml = html?.trim() || undefined;
-    const submittedImage = imageRef.current;
-    if (!clean && !richHtml && !submittedImage) return false;
+    const submitted = imagesRef.current;
+    if (!clean && !richHtml && submitted.length === 0) return false;
 
     const version = ++sendVersion.current;
     sendingRef.current = true;
     setSending(true);
-    const sent = await controller.sendDraft(
-      text,
-      richHtml,
-      submittedImage ? sendImage(submittedImage) : undefined,
-      mentions,
-    );
+    const sent = await controller.sendDraft(text, richHtml, submitted.map(sendImage), mentions);
     if (sendVersion.current !== version) return sent;
     sendingRef.current = false;
     setSending(false);
-    if (sent && imageRef.current === submittedImage) {
-      imageRef.current = null;
-      setImage(null);
+    if (sent) {
+      const gone = new Set(submitted.map((image) => image.id));
+      imagesRef.current = imagesRef.current.filter((image) => !gone.has(image.id));
+      setImages(imagesRef.current);
     }
     return sent;
   };
 
-  const canSend = !sending && !imageLoading && (image !== null || !richEmpty);
+  const canSend = !sending && !imageLoading && (images.length > 0 || !richEmpty);
 
   const submit = () => {
     if (!canSend) return;
@@ -340,29 +362,45 @@ export function Composer(props: {
             </div>
           )}
 
-          {/* The pending image, above the field like Teams: a thumbnail with its pixel
-              size and a remove button. It is a local preview (a data URL), so nothing
-              is uploaded until the message is actually sent. */}
-          {image && (
-            <div data-testid="composer-image-preview" className="relative w-fit max-w-full">
-              <img
-                src={image.previewUrl}
-                alt={image.name}
-                className="max-h-40 max-w-full rounded-xl border border-border-subtle object-contain"
-              />
-              <button
-                type="button"
-                aria-label="Remove image"
-                title="Remove image"
-                data-testid="composer-image-remove"
-                onClick={removeImage}
-                className="absolute -right-2 -top-2 grid size-7 place-items-center rounded-full bg-popover text-foreground shadow-pop hover:bg-accent"
-              >
-                <HugeiconsIcon icon={Cancel01Icon} className="size-4" strokeWidth={1.8} />
-              </button>
-              <div className="mt-1 text-xs text-text-faint">
-                {image.width} × {image.height}
-              </div>
+          {/* The pending pictures, above the field like Teams: a thumbnail each, with its
+              pixel size and its own remove button, in the order they were added. They are
+              local previews (data URLs), so nothing is uploaded until the message is
+              actually sent. Several of them wrap onto their own rows rather than widening
+              the box — the composer's width belongs to the conversation, not to a paste —
+              and they are drawn SMALLER than a single one, because ten pictures at the
+              height one gets is a composer that has eaten the conversation. */}
+          {images.length > 0 && (
+            <div data-testid="composer-images" className="flex flex-wrap items-start gap-3 pt-1">
+              {images.map((image) => (
+                <div
+                  key={image.id}
+                  data-testid="composer-image-preview"
+                  data-image-name={image.name}
+                  className="relative w-fit max-w-full"
+                >
+                  <img
+                    src={image.previewUrl}
+                    alt={image.name}
+                    className={cn(
+                      "max-w-full rounded-xl border border-border-subtle object-contain",
+                      images.length > 1 ? "max-h-24" : "max-h-40",
+                    )}
+                  />
+                  <button
+                    type="button"
+                    aria-label={`Remove ${image.name}`}
+                    title="Remove image"
+                    data-testid="composer-image-remove"
+                    onClick={() => removeImage(image.id)}
+                    className="absolute -right-2 -top-2 grid size-7 place-items-center rounded-full bg-popover text-foreground shadow-pop hover:bg-accent"
+                  >
+                    <HugeiconsIcon icon={Cancel01Icon} className="size-4" strokeWidth={1.8} />
+                  </button>
+                  <div className="mt-1 text-xs text-text-faint">
+                    {image.width} × {image.height}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
           {imageError && (
@@ -434,24 +472,26 @@ export function Composer(props: {
               >
                 <HugeiconsIcon icon={TextFontIcon} className="size-4" strokeWidth={1.6} />
               </button>
-              {/* The picker itself: hidden, opened by the button beside it. Its value is
-                  cleared on every change so re-picking the same file still fires. */}
+              {/* The picker itself: hidden, opened by the button beside it. It takes several
+                  files at once, as the clipboard does. Its value is cleared on every change
+                  so re-picking the same file still fires. */}
               <input
                 ref={fileInputRef}
                 type="file"
+                multiple
                 accept={composerImageAccept()}
                 data-testid="composer-image-input"
                 className="sr-only"
                 onChange={(event) => {
-                  const file = event.target.files?.[0];
+                  const files = Array.from(event.target.files ?? []);
                   event.target.value = "";
-                  if (file) void selectImage(file);
+                  void addImages(files);
                 }}
               />
               <button
                 type="button"
-                aria-label={image ? "Replace image" : "Add image"}
-                title={image ? "Replace image" : "Add image"}
+                aria-label={images.length > 0 ? "Add another image" : "Add image"}
+                title={images.length > 0 ? "Add another image" : "Add image"}
                 data-testid="composer-image-button"
                 disabled={imageLoading || sending}
                 onClick={() => fileInputRef.current?.click()}
@@ -490,7 +530,7 @@ export function Composer(props: {
                   strokeWidth={1.8}
                 />
               ) : (
-                <HugeiconsIcon icon={ArrowUp01Icon} className="size-4" strokeWidth={2} />
+                <HugeiconsIcon icon={SentIcon} className="size-4" strokeWidth={1.8} />
               )}
             </button>
           </div>

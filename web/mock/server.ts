@@ -220,7 +220,7 @@ type ReplyTo = {
   after: string;
 };
 
-/** The optional single image accepted by `send`. The shape mirrors the web and
+/** One image of the `images` list accepted by `send`. The shape mirrors the web and
  *  Rust protocol. The mock validates it instead of accepting a partial object,
  *  so protocol drift fails a test instead of producing a misleading echo. */
 type SendImage = {
@@ -231,12 +231,17 @@ type SendImage = {
   height?: number;
 };
 
+/** How many pictures one message carries — `teams_send::MAX_IMAGES`. Mirrored so the
+ *  refusal is reachable with no tenant. */
+const MAX_SEND_IMAGES = 10;
+
 type CapturedSend = {
   conversation: string;
   text: string;
   reply_to?: ReplyTo;
   content_html?: string;
-  image?: SendImage;
+  /** Every picture the message carries, in the order the composer sent them. */
+  images?: SendImage[];
   /** Who the body's mention spans name, by the itemid each span carries. What a spec
    *  asserts on to prove a mention actually left the composer. */
   mentions?: OutboundMention[];
@@ -1739,6 +1744,20 @@ function seedGitLabSamples(): void {
     },
     180_000,
   );
+  // The same shape again, at the length real merge requests reach (see
+  // LONG_GITLAB_PATH): the card has to fit a phone, so every line of it must be
+  // free to shrink.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        `<a href="https://gitlab.com/${LONG_GITLAB_PATH}/-/merge_requests/6">` +
+        `https://gitlab.com/${LONG_GITLAB_PATH}/-/merge_requests/6</a>`,
+      is_self: false,
+    },
+    240_000,
+  );
 
   const conv: Conversation = {
     id: convId,
@@ -1824,6 +1843,19 @@ function seedLinearSamples(): void {
       is_self: true,
     },
     180_000,
+  );
+  // The same shape at the length a real workspace reaches (see LONG_LINEAR_ISSUE):
+  // this card shares its frame with GitLab's, so it has to fit a phone the same way.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content:
+        `<a href="https://linear.app/acme/issue/${LONG_LINEAR_ISSUE}/freeze-every-action-on-an-archived-trace">` +
+        `https://linear.app/acme/issue/${LONG_LINEAR_ISSUE}/freeze-every-action-on-an-archived-trace</a>`,
+      is_self: false,
+    },
+    240_000,
   );
 
   const conv: Conversation = {
@@ -3292,12 +3324,12 @@ function agentStatusView(): {
 type MockCall = {
   id: string;
   direction: "incoming" | "outgoing";
-  kind: "call" | "meeting";
+  kind: "call" | "group" | "meeting";
   phase: "ringing" | "dialing" | "connecting" | "connected" | "ended";
   conversation_id: string | null;
   peer: string;
   peer_mri: string;
-  /** Everybody else in a meeting, the way a roster frame names them. */
+  /** Everybody else in a meeting or a group call, the way a roster frame names them. */
   others: string[];
   other_mris: string[];
   in_lobby: boolean;
@@ -3335,6 +3367,11 @@ type MockPublishing = {
 /** The people the mock puts in a meeting once the join is answered — a roster arriving
  *  after the fact, which is what the real service sends. */
 const MOCK_MEETING_ROSTER = ["Ava Thompson", "Liam Nguyen", "Priya Raman"];
+
+/** How many people one call may ring, mirroring `MAX_GROUP_CALL_PEOPLE` in
+ *  src/bin/server.rs: every one of them is a device buzzing in somebody's pocket, and a
+ *  mis-click on a 60-person thread cannot be taken back. */
+const MOCK_MAX_GROUP_CALL_PEOPLE = 20;
 
 /** One audio stream per person, plus a CAMERA for the first and a SHARED SCREEN for the
  *  second. The source ids are small integers like the real ones, and they are the addresses
@@ -3414,19 +3451,94 @@ const MOCK_RENEGOTIATION_OFFER = [
   "",
 ].join("\r\n");
 
-/** Off, exactly like a fresh Rust store: turning it on is the consent, so a spec has to
- *  perform that step rather than find it already done. */
-let mockCallingEnabled = false;
+/**
+ * A description that REJECTS one of the sections this page is sending — the section still
+ * written down, its port zeroed, which is how the far side says a section is gone. Against a
+ * real tenant the browser reads that and stops the transceiver; the simulated media has none
+ * and reads the label instead.
+ *
+ * It is sent as either half of a negotiation, because WHICH half it is is the whole
+ * difference between the two endings the app has to tell apart:
+ *
+ * * as an OFFER (`{kind:"call_media", drop:…}`) it takes away a capture the meeting had
+ *   accepted, so the picture stopped and turning it on again is worth doing;
+ * * as an ANSWER to our own offer (`{kind:"call_media", reject:…}`) it says the meeting never
+ *   accepted the capture at all — the state a screen share really met on this tenant, where
+ *   turning it on again meets the same refusal in the same second.
+ *
+ * Both are reachable nowhere else: the page's own simulated camera is never rejected, and the
+ * service that rejects one is a real tenant.
+ */
+function mockSectionRejection(label: string): string {
+  return [
+    "v=0",
+    "o=- 0 0 IN IP4 127.0.0.1",
+    "s=teams-lite-mock-drop",
+    "t=0 0",
+    "m=audio 3478 RTP/SAVP 111",
+    "c=IN IP4 0.0.0.0",
+    "a=rtpmap:111 opus/48000/2",
+    "a=mid:0",
+    "a=label:main-audio",
+    "a=sendrecv",
+    // Port 0: the rejection. The mid is the one the page's own section was given.
+    "m=video 0 RTP/SAVP 107",
+    "c=IN IP4 0.0.0.0",
+    "a=rtpmap:107 H264/90000",
+    "a=mid:2",
+    `a=label:${label}`,
+    "a=inactive",
+    "",
+  ].join("\r\n");
+}
+
+/** ON, exactly like every Rust backend the user launches: each registers as a device their
+ *  calls ring on at startup, and there is no switch to find. The
+ *  `{kind:"calling", enabled:false}` test hook is the only way back, and it reproduces the
+ *  ONE backend that really answers `false` — a read-only one, which is the install the user
+ *  never opened. */
+let mockCallingEnabled = true;
 let mockCall: MockCall | null = null;
 /** Timers of a simulated call, cleared on every ending so a reused mock cannot let an
  *  old call finish connecting inside a later spec. */
 let mockCallTimers: ReturnType<typeof setTimeout>[] = [];
+/** Armed by the `{kind:"call_media", refuse:true}` test hook: the NEXT `call_offer_media`
+ *  is refused, and only that one. It is what makes a mid-call failure reviewable — the
+ *  page's simulated camera never refuses, and the service that would is a real tenant. */
+let mockRefusesNextMedia = false;
+/** The content-sharing session this mock has granted, if any. A share asks for one before it
+ *  offers a section, and asking twice is refused exactly as the Rust backend refuses it —
+ *  which is what makes "the session is given back on every ending" a rule a spec can hold the
+ *  app to rather than a sentence in a comment. */
+let mockSharingSession: string | null = null;
+/** The ORDER the sharing calls arrived in, for the one rule a spec cannot read off the screen:
+ *  the modality is asked for BEFORE the section is offered. A meeting rejects a section from an
+ *  endpoint that never asked, so an app that offered first would look right and share nothing. */
+let mockSharingOrder: string[] = [];
+/** Armed by the `{kind:"call_start", hold:"prepare"|"place"}` test hook: that ONE step of
+ *  the next start answers late, and only that one.
+ *
+ *  It is what makes a CANCELLED start reviewable. A real start waits on a microphone and
+ *  on ICE gathering (up to `GATHER_TIMEOUT_MS`), then on a POST to Teams, so a call the
+ *  user stops a second after placing it lands inside one of those waits — while the mock's
+ *  own media is instant, which left the whole case unreachable from a spec. Which step is
+ *  held decides which half is exercised: the offer that must never go out, or the invite
+ *  that went out and has to be taken back. */
+let mockCallStartHold: { at: "prepare" | "place"; ms: number } | null = null;
+
+/** Wait out the hold armed for `step`, once. */
+async function holdMockCallStart(step: "prepare" | "place"): Promise<void> {
+  const hold = mockCallStartHold;
+  if (!hold || hold.at !== step) return;
+  mockCallStartHold = null;
+  await new Promise((resolve) => setTimeout(resolve, hold.ms));
+}
 
 function mockCallStatus(): { enabled: boolean; ready: boolean; call: MockCall | null } {
   return {
     enabled: mockCallingEnabled,
-    // Ready the moment it is on: the mock has no connection to wait for, and a switch
-    // stuck on "connecting…" would be a state the real backend leaves in seconds.
+    // Ready as soon as it calls at all: the mock has no connection to wait for, and a
+    // state stuck on "connecting…" is one the real backend leaves in seconds.
     ready: mockCallingEnabled,
     call: mockCall,
   };
@@ -3445,6 +3557,10 @@ function clearMockCallTimers(): void {
  *  the Rust backend emits, so the page releases its (simulated) microphone. */
 function endMockCall(reason: string): void {
   clearMockCallTimers();
+  // The session goes with the call: the meeting's presenter cannot outlive the meeting, and a
+  // session left behind would refuse the first share of the NEXT call in a shared mock.
+  mockSharingSession = null;
+  mockSharingOrder = [];
   if (!mockCall) return;
   mockCall = { ...mockCall, phase: "ended", end_reason: reason, can_accept: false, can_hangup: false };
   broadcastMockCall();
@@ -3464,6 +3580,17 @@ const MOCK_ANSWER_SDP = [
   "a=sendrecv",
   "",
 ].join("\r\n");
+
+/**
+ * An answer no browser can read, sent by the `{kind:"call_media", unreadable:true}` hook.
+ *
+ * It reproduces what a screen share really met on this tenant: the offer went out, the service
+ * answered, and the answer was thrown out by the browser — after which this app hung up, so
+ * the user lost the person they were talking to a few seconds after they shared. The blob is
+ * not a session description at all, because WHY the browser refuses one is not the point: what
+ * is pinned is that a mid-call answer it cannot read costs the picture and never the call.
+ */
+const UNREADABLE_ANSWER_SDP = "this is not a session description";
 
 /** Ring this machine, the way an invite on the calling socket does. Used by the gated
  *  test hook and by the preview script. */
@@ -3493,9 +3620,9 @@ function injectMockCallInvite(conversation: string): MockCall | null {
     can_hangup: true,
     can_send_media: false,
   };
-  // Calling has to be on for a real invite to reach this machine at all, so an invite
-  // implies it: a spec that rings without flipping the switch is testing a state the
-  // backend cannot be in.
+  // A backend that does not call is a backend no invite reaches, so an invite implies
+  // one that does: a spec ringing a window that reported `enabled:false` would be
+  // testing a state no backend can be in.
   mockCallingEnabled = true;
   broadcastMockCall();
   return mockCall;
@@ -3568,12 +3695,19 @@ function parseGitLabUrl(url: string, host: string): ParsedGitLab | null {
   return { kind: "project", project_path: segments.join("/") };
 }
 
+/** The one seeded project whose every field is as long as a real one's: a deeply
+ *  nested group path, a branch named after its ticket, a sentence for a title. The
+ *  other fixtures are short enough to fit any width, so they said nothing about a
+ *  phone — and a card whose text cannot shrink is what ran off the side of one. */
+const LONG_GITLAB_PATH = "acme/platform/infrastructure/dlq-to-dynamodb-lambda";
+
 /** Deterministic metadata for a parsed GitLab URL — canned, but varied by iid so
  *  the UI shows realistic, distinct cards without any tenant. */
 function mockGitLabMetadata(url: string): Record<string, unknown> | null {
   const parsed = parseGitLabUrl(url, mockSettings.gitlab_host || "gitlab.com");
   if (!parsed) return null;
   const { project_path } = parsed;
+  const long = project_path === LONG_GITLAB_PATH;
 
   if (parsed.kind === "merge_request") {
     const iid = parsed.iid!;
@@ -3585,14 +3719,21 @@ function mockGitLabMetadata(url: string): Record<string, unknown> | null {
       provider: "gitlab",
       kind: "merge_request",
       url,
-      title: `Add rich link previews for GitLab (!${iid})`,
+      title: long
+        ? `feat: add better testing and error handling to the replay lambda (!${iid})`
+        : `Add rich link previews for GitLab (!${iid})`,
       project_path,
       reference: `!${iid}`,
       state,
       draft: iid % 5 === 0,
-      author_name: "Ada Lovelace",
-      source_branch: "feat/gitlab-rich-links",
-      target_branch: "main",
+      // Colleagues this mock's Teams also knows, so a card is reviewable with a real face on
+      // it — while the ISSUE card below keeps somebody only GitLab knows, which is the other
+      // shape (see `withMockTeamsPeople`).
+      author: long
+        ? { name: "Charlotte Dubois", username: "charlotte.dubois" }
+        : { name: "Mia Chen", username: "mia.chen" },
+      source_branch: long ? "feature/error-handling-and-test" : "feat/gitlab-rich-links",
+      target_branch: long ? "master" : "main",
       labels: ["frontend", "enhancement"],
       milestone: "v1.0",
       description: "Render GitLab links in chat as rich cards with title, state, and author.",
@@ -3609,7 +3750,7 @@ function mockGitLabMetadata(url: string): Record<string, unknown> | null {
       project_path,
       reference: `#${iid}`,
       state: iid % 2 === 0 ? "closed" : "opened",
-      author_name: "Grace Hopper",
+      author: { name: "Grace Hopper", username: "grace" },
       labels: ["bug"],
       description: "A bare URL is hard to scan; show the target's title and status inline.",
     };
@@ -3677,8 +3818,12 @@ function mockApprovalResult(url: string): {
   const state = mockApprovalFor(url);
   if (!state) return { approval: null, token_set: true };
   const parsed = parseGitLabUrl(url, mockSettings.gitlab_host || "gitlab.com");
-  const approved_by = [...state.others, ...(state.mine ? ["Théophile WALLEZ"] : [])];
-  return {
+  // People, not bare names — the shape the Rust `Approval` carries, so the same walk that
+  // names a merge request's author names whoever approved it (`withMockTeamsPeople`).
+  const approved_by = [...state.others, ...(state.mine ? [MOCK_GITLAB_ME.name] : [])].map(
+    (name) => ({ name, username: name.toLowerCase().replace(/[^a-z]+/g, ".") }),
+  );
+  return withMockTeamsPeople({
     approval: {
       reference: `!${parsed?.iid ?? 1}`,
       approved: approved_by.length > 0,
@@ -3688,7 +3833,807 @@ function mockApprovalResult(url: string): {
       mine: state.mine,
     },
     token_set: true,
+  });
+}
+
+// ---- the merge-request page (`gitlab_mr_*`) ---------------------------------
+//
+// The whole surface with no GitLab and no token: a list of merge requests that are not
+// merged, one of them in full, its comments and its LIVE pipeline — plus the four writes
+// (merge, comment, delete a comment, close/reopen), which move this in-memory state and
+// nothing else. That is what makes the page reviewable: `bun run preview -- --gitlab`
+// walks it, and web/e2e/gitlab.spec.ts holds the app to every rule it is built on.
+//
+// Two fixtures are deliberate and load-bearing:
+//
+//   - **The list rows carry NO pipeline**, exactly as the real endpoint answers (measured
+//     against the tenant — see src/gitlab_mr.rs). A mock that helpfully added one would hide
+//     the reason the sidebar shows `detailed_merge_status` instead.
+//   - **One pipeline is genuinely LIVE**: its jobs advance one step per read, so the poll,
+//     the "following" mark and a job turning green are all things a spec can watch happen
+//     rather than assert about a still picture.
+
+type MockGitLabPerson = { name: string; username: string };
+
+type MockJob = {
+  id: number;
+  name: string;
+  stage: string;
+  status: string;
+  allow_failure: boolean;
+  duration?: number;
+};
+
+type MockPipeline = {
+  id: number;
+  status: string;
+  jobs: MockJob[];
+  live?: boolean;
+  /** How many times this pipeline has been read. The FIRST read never advances it, so the
+   *  first paint shows the seeded state and every POLL after it shows something happening —
+   *  which is what makes "the panel follows the run" a thing a spec can watch. */
+  reads?: number;
+};
+
+type MockNote = {
+  id: number;
+  author: MockGitLabPerson;
+  body: string;
+  system: boolean;
+  created_at: string;
+  resolvable: boolean;
+  resolved: boolean;
+  mine: boolean;
+  position?: { new_path?: string; new_line?: number };
+};
+
+type MockDiscussion = { id: string; individual_note: boolean; notes: MockNote[] };
+
+type MockMergeRequest = {
+  project_path: string;
+  iid: number;
+  title: string;
+  description?: string;
+  state: "opened" | "closed" | "merged";
+  draft: boolean;
+  author: MockGitLabPerson;
+  reviewers: MockGitLabPerson[];
+  assignees: MockGitLabPerson[];
+  labels: string[];
+  source_branch: string;
+  target_branch: string;
+  detailed_merge_status: string;
+  sha: string;
+  changes_count: string;
+  upvotes: number;
+  updated_at: string;
+  created_at: string;
+  pipeline: MockPipeline | null;
+  discussions: MockDiscussion[];
+  merged_at?: string;
+  closed_at?: string;
+};
+
+/** The account this mock acts as, in GitLab's own shape. The same person the approval
+ *  fixtures name, so one identity runs through the whole surface. */
+const MOCK_GITLAB_ME: MockGitLabPerson = { name: "Théophile WALLEZ", username: "theophile" };
+const MOCK_GITLAB_ADA: MockGitLabPerson = { name: "Ada Lovelace", username: "ada" };
+const MOCK_GITLAB_GRACE: MockGitLabPerson = { name: "Grace Hopper", username: "grace" };
+const MOCK_GITLAB_BOT: MockGitLabPerson = { name: "review-bot", username: "review-bot" };
+/** Two colleagues who are in this mock's TEAMS as well as on its GitLab, under the same real
+ *  name — so the page draws them as those colleagues: their Teams face, and the name the user
+ *  gave them if they gave one (see `mockTeamsPersonFor`). Mia HAS a photo in this mock and
+ *  Lucas does not, which is the whole range of the feature on one merge request: a real face,
+ *  a Teams name over tinted initials, and — in Ada, Grace and the bot, who are on GitLab only
+ *  — GitLab's own words untouched. */
+const MOCK_GITLAB_MIA: MockGitLabPerson = { name: "Mia Chen", username: "mia.chen" };
+const MOCK_GITLAB_LUCAS: MockGitLabPerson = { name: "Lucas Silva", username: "lucas.silva" };
+
+// ---- who a GitLab user is in TEAMS -----------------------------------------
+//
+// The mock's half of `src/tracker_people.rs`: the people on a merge request — or on a Linear
+// issue — are matched to the people this app knows by their REAL NAME, and the answer travels
+// as one more field on each person. It is done at the answer boundary, exactly where the
+// backend does it — never baked into the fixtures — because that is what makes a rename show up
+// here at once, and what keeps the tracker's own words the thing the fixtures hold.
+
+/** The comparison key two systems' record of one person has to agree on: case folded and
+ *  whitespace collapsed. A port of `tracker_people::name_key`, whose own doc says why accents
+ *  are NOT folded (it was measured, and it changes nothing). */
+function mockNameKey(name: string): string {
+  return name.trim().toLowerCase().split(/\s+/).join(" ");
+}
+
+/** Everybody this mock's Teams can name, by that key — the stand-in for
+ *  `Store::named_people`. It holds the user themselves under the name TEAMS has for them,
+ *  which is not the "You" this mock's own messages carry: the real store holds a real name
+ *  there too, and it is what a GitLab account of theirs matches. */
+const mockTeamsPeopleByName = new Map<string, Person>([
+  ...PEOPLE.map((person) => [mockNameKey(person.name), person] as const),
+  [mockNameKey(MOCK_GITLAB_ME.name), { name: SELF_NAME, mri: SELF_MRI }],
+]);
+
+/** The Teams person one GitLab display name is, or `undefined` when this app knows nobody by
+ *  it. The NAME that comes back is the user's own nickname when they set one, like every
+ *  other name this mock answers with (`nickname`). */
+function mockTeamsPersonFor(name: string): { mri: string; name: string } | undefined {
+  const person = mockTeamsPeopleByName.get(mockNameKey(name));
+  if (!person) return undefined;
+  return { mri: person.mri, name: nickname(person.mri) || person.name };
+}
+
+/** Name every person in one tracker payload — the walk `tracker_people::annotate` does, under
+ *  the same rule: a person is an object carrying both a `name` and a `username`, so one pass
+ *  reaches a row's author, a merge request's reviewers, every comment's author and a Linear
+ *  issue's assignee, and never a CI job (which has a name and no handle).
+ *
+ *  It answers a COPY. The fixtures above are shared by every read — a row hands out the very
+ *  object a detail and a note hand out — so writing an identity into them would be this mock
+ *  remembering something a real GitLab never said. */
+function withMockTeamsPeople<T>(payload: T): T {
+  payload = structuredClone(payload);
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const map = value as Record<string, unknown>;
+    if (typeof map.name === "string" && typeof map.username === "string") {
+      const teams = mockTeamsPersonFor(map.name);
+      if (teams) map.teams = teams;
+      else delete map.teams;
+    }
+    for (const child of Object.values(map)) walk(child);
   };
+  walk(payload);
+  return payload;
+}
+
+/** Minutes ago as an ISO timestamp, so the fixtures read as recent work. */
+function agoIso(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
+
+let mockNoteId = 90_000;
+
+/** The seeded merge requests, newest activity first — the order GitLab answers in. */
+const mockMergeRequests: MockMergeRequest[] = [
+  {
+    project_path: "acme/webapp",
+    iid: 596,
+    title: "✨ HA replicas + PodDisruptionBudgets for the user-facing APIs",
+    // Real GitLab markdown, in the shape the authors on the tenant actually write it —
+    // measured by `examples/merge_request_markdown_recon.rs`: a heading in 32 of 36
+    // descriptions, a table in 24, a fenced block in 19, a task list in 18, a nested bullet
+    // in 10. It is deliberately every one of those at once, because this fixture is what
+    // makes `parseGitLabMarkdown` reviewable with no GitLab and no token.
+    description:
+      "## What changes\n\n" +
+      "Adds **two replicas** and a PodDisruptionBudget to every user-facing API,\n" +
+      "so a node drain can never take the last pod of one.\n\n" +
+      "| Service  | Replicas | Budget |\n" +
+      "| -------- | -------- | ------ |\n" +
+      "| `web`    | 2        | 1      |\n" +
+      "| `api`    | 2        | 1      |\n" +
+      "| `worker` | 2        | 1      |\n\n" +
+      "### How to roll it out\n\n" +
+      "```sh\n" +
+      "helmfile -e staging apply --selector name=web\n" +
+      "kubectl get pdb -n user-facing\n" +
+      "```\n\n" +
+      "- a `preStop` hook drains connections\n" +
+      "  - 10s for `web`, which holds websockets\n" +
+      "  - 2s everywhere else\n\n" +
+      "---\n\n" +
+      "- [x] staging\n" +
+      "- [ ] production, one cluster at a time",
+    state: "opened",
+    draft: false,
+    author: MOCK_GITLAB_ADA,
+    // One person the app's own Teams knows (Lucas) beside one it does not (Ada), on one
+    // merge request: both shapes of a person are on screen at once.
+    reviewers: [MOCK_GITLAB_ME, MOCK_GITLAB_LUCAS],
+    assignees: [MOCK_GITLAB_ADA],
+    labels: ["infra", "needs-review"],
+    source_branch: "feature/ha-replicas",
+    target_branch: "main",
+    // The one that CAN merge, so the merge flow is reviewable end to end.
+    detailed_merge_status: "mergeable",
+    sha: "e2607442e33693652508637a6a02eb9997d496ff",
+    changes_count: "11",
+    upvotes: 2,
+    updated_at: agoIso(4),
+    created_at: agoIso(2 * 24 * 60),
+    pipeline: {
+      id: 190_933,
+      status: "running",
+      live: true,
+      jobs: [
+        { id: 1, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 42.5 },
+        { id: 2, name: "🧪 unit", stage: "test", status: "running", allow_failure: false },
+        { id: 3, name: "🧪 e2e", stage: "test", status: "created", allow_failure: false },
+        { id: 4, name: "🤖 opencode review", stage: "test", status: "created", allow_failure: true },
+        { id: 5, name: "🚀 deploy staging", stage: "deploy", status: "manual", allow_failure: false },
+      ],
+    },
+    discussions: [
+      {
+        id: "d-596-1",
+        individual_note: true,
+        notes: [
+          {
+            id: 69_848,
+            // A colleague this app's Teams also knows, so the comment carries her real face
+            // and the name the user calls her — beside the bot below, which stays what
+            // GitLab called it.
+            author: MOCK_GITLAB_MIA,
+            body: "Two replicas is right, but please check the `preStop` timing against the load balancer.",
+            system: false,
+            created_at: agoIso(90),
+            resolvable: false,
+            resolved: false,
+            mine: false,
+          },
+        ],
+      },
+      {
+        id: "d-596-2",
+        individual_note: false,
+        notes: [
+          {
+            id: 69_852,
+            author: MOCK_GITLAB_BOT,
+            // A review comment quotes code as often as a description does, so the same
+            // markdown runs on both surfaces.
+            body:
+              "🟡 **MEDIUM**: the `preStop` command interpolates a Helm value into a shell string.\n\n" +
+              "```yaml\n" +
+              "preStop:\n" +
+              "  exec:\n" +
+              "    command: [\"sh\", \"-c\", \"sleep {{ .Values.drain }}\"]\n" +
+              "```",
+            system: false,
+            created_at: agoIso(70),
+            resolvable: true,
+            resolved: false,
+            mine: false,
+            position: { new_path: "charts/app/templates/deployment.yaml", new_line: 42 },
+          },
+          {
+            id: 69_853,
+            author: MOCK_GITLAB_ME,
+            body: "Quoted it in `2f91ac0`.",
+            system: false,
+            created_at: agoIso(65),
+            resolvable: true,
+            resolved: false,
+            mine: true,
+          },
+        ],
+      },
+      {
+        id: "d-596-3",
+        individual_note: true,
+        notes: [
+          {
+            id: 69_849,
+            author: MOCK_GITLAB_BOT,
+            body: "changed the description",
+            system: true,
+            created_at: agoIso(120),
+            resolvable: false,
+            resolved: false,
+            mine: false,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    project_path: "acme/webapp",
+    iid: 595,
+    title: "🔒 ci(helm): assert live image tags after helmfile apply",
+    description: "Checks the tags that are actually running after a deploy.",
+    state: "opened",
+    draft: false,
+    author: MOCK_GITLAB_ME,
+    reviewers: [MOCK_GITLAB_GRACE],
+    assignees: [MOCK_GITLAB_ME],
+    labels: ["ci"],
+    source_branch: "ci/assert-image-tags",
+    target_branch: "main",
+    detailed_merge_status: "not_approved",
+    sha: "8b1f0c6d2a7e4b5c9d3f1a2b3c4d5e6f70819234",
+    changes_count: "3",
+    upvotes: 0,
+    updated_at: agoIso(35),
+    created_at: agoIso(26 * 60),
+    pipeline: {
+      id: 190_901,
+      status: "failed",
+      jobs: [
+        { id: 11, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 38 },
+        { id: 12, name: "🧪 unit", stage: "test", status: "failed", allow_failure: false, duration: 121.4 },
+        { id: 13, name: "🤖 opencode review", stage: "test", status: "failed", allow_failure: true, duration: 300.8 },
+      ],
+    },
+    discussions: [],
+  },
+  {
+    project_path: "acme/infrastructure",
+    iid: 297,
+    title: "feat: lambda policy update",
+    description: "Widens the forwarder's policy to the new bucket.",
+    state: "opened",
+    draft: true,
+    // A colleague the app's own Teams knows, on a merge request no spec ever merges or
+    // closes — which is what lets one pin that a rename reaches this page.
+    author: MOCK_GITLAB_MIA,
+    reviewers: [],
+    assignees: [],
+    labels: [],
+    source_branch: "feat/lambda-policy",
+    target_branch: "main",
+    detailed_merge_status: "draft_status",
+    sha: "cc11aa22bb33dd44ee55ff6677889900aabbccdd",
+    changes_count: "1",
+    upvotes: 0,
+    updated_at: agoIso(2 * 60),
+    created_at: agoIso(3 * 24 * 60),
+    pipeline: null,
+    discussions: [],
+  },
+  {
+    project_path: "acme/design-system",
+    iid: 63,
+    title: "Conflicting rename of the token scale",
+    state: "opened",
+    draft: false,
+    author: MOCK_GITLAB_ADA,
+    reviewers: [MOCK_GITLAB_ME],
+    assignees: [],
+    labels: ["design"],
+    source_branch: "refactor/token-scale",
+    target_branch: "main",
+    detailed_merge_status: "conflict",
+    sha: "1122334455667788990011223344556677889900",
+    changes_count: "24",
+    upvotes: 1,
+    updated_at: agoIso(6 * 60),
+    created_at: agoIso(5 * 24 * 60),
+    pipeline: {
+      id: 190_500,
+      status: "success",
+      jobs: [
+        { id: 21, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 30 },
+        { id: 22, name: "🧪 unit", stage: "test", status: "success", allow_failure: false, duration: 88 },
+      ],
+    },
+    discussions: [],
+  },
+  {
+    project_path: "acme/webapp",
+    iid: 594,
+    title: "🧰 ci(helm): assert live image tags after helmfile apply",
+    description: "Superseded by !595.",
+    state: "closed",
+    draft: false,
+    author: MOCK_GITLAB_ME,
+    reviewers: [],
+    assignees: [],
+    labels: ["ci"],
+    source_branch: "ci/assert-tags-first-try",
+    target_branch: "main",
+    detailed_merge_status: "not_open",
+    sha: "aa00bb11cc22dd33ee44ff5566778899aabbccdd",
+    changes_count: "3",
+    upvotes: 0,
+    updated_at: agoIso(20 * 60),
+    created_at: agoIso(30 * 60),
+    closed_at: agoIso(20 * 60),
+    pipeline: null,
+    discussions: [],
+  },
+];
+
+/** The live pipeline as it is SEEDED, so the test hook can put it back. One mock process
+ *  serves the whole run and every read of it moves it on, so without this the second spec to
+ *  look at a running pipeline would find it finished. */
+const MOCK_LIVE_PIPELINE_JOBS: MockJob[] = [
+  { id: 1, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 42.5 },
+  { id: 2, name: "🧪 unit", stage: "test", status: "running", allow_failure: false },
+  { id: 3, name: "🧪 e2e", stage: "test", status: "created", allow_failure: false },
+  { id: 4, name: "🤖 opencode review", stage: "test", status: "created", allow_failure: true },
+  { id: 5, name: "🚀 deploy staging", stage: "deploy", status: "manual", allow_failure: false },
+];
+
+/** Put the live pipeline back where it started. */
+function resetMockLivePipeline(): void {
+  const mr = mockMergeRequestFor("acme/webapp", 596);
+  if (!mr) return;
+  mr.pipeline = {
+    id: 190_933,
+    status: "running",
+    live: true,
+    reads: 0,
+    jobs: MOCK_LIVE_PIPELINE_JOBS.map((job) => ({ ...job })),
+  };
+}
+
+/** When set, every `gitlab_mr_*` WRITE fails with this sentence — the shape GitLab's own
+ *  refusal takes. Armed and cleared by the `{kind:"gitlab_mr"}` test hook, because the half
+ *  a page owns is that an outward action which failed is reported rather than swallowed. */
+let mockGitLabWriteRefusal: string | null = null;
+
+/** When true, the machine holds no GitLab token: the list answers empty and says so, which
+ *  is what the page's own notice is drawn from. Same hook. */
+let mockGitLabTokenMissing = false;
+
+/** When set, the DIFF read fails with this sentence. Its own switch rather than a share of
+ *  `mockGitLabWriteRefusal`, because the two prove opposite halves: a refused write must be
+ *  reported beside the button, and a refused diff must cost the Changes panel and nothing
+ *  else — the page's other four panels have to stay drawn. Same hook, same contract: a spec
+ *  that arms it MUST clear it. */
+let mockGitLabDiffRefusal: string | null = null;
+
+function mockMergeRequestFor(projectPath: string, iid: number): MockMergeRequest | undefined {
+  return mockMergeRequests.find((mr) => mr.project_path === projectPath && mr.iid === iid);
+}
+
+/** GitLab's own `web_url` for one of these, on the configured host — so the page's approval
+ *  read (which is addressed by URL) lands on the same merge request. */
+function mockMergeRequestUrl(mr: MockMergeRequest): string {
+  const host = mockSettings.gitlab_host.trim() || "gitlab.com";
+  return `https://${host}/${mr.project_path}/-/merge_requests/${mr.iid}`;
+}
+
+/** One sidebar row. Deliberately WITHOUT a pipeline, like the real list endpoint. */
+function mockMergeRequestRow(mr: MockMergeRequest): Record<string, unknown> {
+  return {
+    project_path: mr.project_path,
+    iid: mr.iid,
+    reference: `!${mr.iid}`,
+    title: mr.title,
+    state: mr.state,
+    draft: mr.draft,
+    web_url: mockMergeRequestUrl(mr),
+    source_branch: mr.source_branch,
+    target_branch: mr.target_branch,
+    author: mr.author,
+    detailed_merge_status: mr.detailed_merge_status,
+    labels: mr.labels,
+    user_notes_count: mr.discussions.flatMap((d) => d.notes).filter((n) => !n.system).length,
+    upvotes: mr.upvotes,
+    downvotes: 0,
+    updated_at: mr.updated_at,
+    created_at: mr.created_at,
+  };
+}
+
+function mockMergeRequestDetail(mr: MockMergeRequest): Record<string, unknown> {
+  return {
+    ...mockMergeRequestRow(mr),
+    description: mr.description,
+    assignees: mr.assignees,
+    reviewers: mr.reviewers,
+    sha: mr.sha,
+    merge_status: mr.detailed_merge_status === "mergeable" ? "can_be_merged" : "cannot_be_merged",
+    has_conflicts: mr.detailed_merge_status === "conflict",
+    blocking_discussions_resolved: !mr.discussions.some((d) =>
+      d.notes.some((n) => n.resolvable && !n.resolved),
+    ),
+    squash: false,
+    should_remove_source_branch: true,
+    changes_count: mr.changes_count,
+    merged_at: mr.merged_at,
+    closed_at: mr.closed_at,
+    pipeline: mr.pipeline
+      ? { id: mr.pipeline.id, status: mr.pipeline.status, web_url: `${mockMergeRequestUrl(mr)}/pipelines` }
+      : undefined,
+  };
+}
+
+/** Advance a LIVE pipeline by one step, so a poll shows something happening: the first job
+ *  still in flight finishes, the next one starts, and the pipeline settles when none is
+ *  left. Called on every pipeline read of that merge request. */
+function advanceMockPipeline(pipeline: MockPipeline): void {
+  if (!pipeline.live) return;
+  const running = pipeline.jobs.find((job) => job.status === "running");
+  if (running) {
+    running.status = "success";
+    running.duration = 30 + running.id * 7;
+    const next = pipeline.jobs.find((job) => job.status === "created");
+    if (next) next.status = "running";
+    else {
+      pipeline.status = "success";
+      pipeline.live = false;
+    }
+    return;
+  }
+  const created = pipeline.jobs.find((job) => job.status === "created");
+  if (created) created.status = "running";
+  else {
+    pipeline.status = "success";
+    pipeline.live = false;
+  }
+}
+
+function mockPipelineView(mr: MockMergeRequest): Record<string, unknown> {
+  if (!mr.pipeline) return { jobs: [] };
+  const reads = mr.pipeline.reads ?? 0;
+  mr.pipeline.reads = reads + 1;
+  if (reads > 0) advanceMockPipeline(mr.pipeline);
+  return {
+    pipeline: {
+      id: mr.pipeline.id,
+      status: mr.pipeline.status,
+      web_url: `${mockMergeRequestUrl(mr)}/pipelines`,
+    },
+    jobs: mr.pipeline.jobs.map((job) => ({
+      ...job,
+      web_url: `${mockMergeRequestUrl(mr)}/jobs/${job.id}`,
+    })),
+  };
+}
+
+function mockDiscussionList(mr: MockMergeRequest): Record<string, unknown> {
+  return { discussions: mr.discussions, truncated: false };
+}
+
+// ---- the diff ---------------------------------------------------------------
+//
+// The Changes section reads what a merge request changed, and the mock has to reproduce every
+// state a real answer holds — because four of the five are files with NO patch, and each says
+// something different (see `diffFileState` in web/src/lib/gitlab-diff.ts). Measured on the
+// real instance by `examples/merge_request_diff_recon.rs`: of 508 files over 25 merge
+// requests, 356 carried a patch, 18 were pure renames, 4 were binary and 148 were collapsed
+// by GitLab. So the fixture below holds one of each, plus a generated file and a directory
+// deep enough for the tree to have something to fold.
+//
+// The PATCH is a complete unified diff, header and all — the shape `gitlab_mr::unified_patch`
+// writes, never GitLab's bare hunks, because the page's renderer parses the header to learn
+// what happened to the file.
+
+/** One file of a mock diff, in the shape the backend answers with. */
+type MockDiffFile = {
+  path: string;
+  old_path?: string;
+  change: "new" | "deleted" | "renamed" | "changed";
+  patch?: string;
+  additions: number;
+  deletions: number;
+  binary?: boolean;
+  /** Whether GitLab would refuse to expand it. Its patch is dropped by `mockDiffFor` unless
+   *  the reader asks for the expanded read, which is the whole flow this reproduces. */
+  collapsed?: boolean;
+  generated?: boolean;
+};
+
+/** The files each mock merge request changed, keyed the way the reads address it.
+ *
+ *  Deliberately several languages: the renderer resolves a Shiki grammar per extension, so a
+ *  fixture of one language would never exercise a second load. */
+const mockDiffFiles = new Map<string, MockDiffFile[]>([
+  [
+    "acme/webapp!596",
+    [
+      {
+        path: "charts/user-facing/values.yaml",
+        change: "changed",
+        additions: 6,
+        deletions: 2,
+        patch:
+          "diff --git a/charts/user-facing/values.yaml b/charts/user-facing/values.yaml\n" +
+          "--- a/charts/user-facing/values.yaml\n" +
+          "+++ b/charts/user-facing/values.yaml\n" +
+          "@@ -12,8 +12,12 @@ web:\n" +
+          "   image:\n" +
+          "     repository: registry.acme.dev/web\n" +
+          '     tag: "1.42.0"\n' +
+          "-  replicaCount: 1\n" +
+          "+  replicaCount: 2\n" +
+          "+  podDisruptionBudget:\n" +
+          "+    minAvailable: 1\n" +
+          "   resources:\n" +
+          "     requests:\n" +
+          "-      cpu: 100m\n" +
+          "+      cpu: 250m\n" +
+          "+      memory: 256Mi\n" +
+          "+  terminationGracePeriodSeconds: 30\n" +
+          " \n" +
+          " api:\n",
+      },
+      {
+        path: "charts/user-facing/templates/pdb.yaml",
+        change: "new",
+        additions: 12,
+        deletions: 0,
+        patch:
+          "diff --git a/charts/user-facing/templates/pdb.yaml b/charts/user-facing/templates/pdb.yaml\n" +
+          "new file mode 100644\n" +
+          "--- /dev/null\n" +
+          "+++ b/charts/user-facing/templates/pdb.yaml\n" +
+          "@@ -0,0 +1,12 @@\n" +
+          "+{{- range $name, $svc := .Values.services }}\n" +
+          "+{{- if $svc.podDisruptionBudget }}\n" +
+          "+apiVersion: policy/v1\n" +
+          "+kind: PodDisruptionBudget\n" +
+          "+metadata:\n" +
+          "+  name: {{ $name }}\n" +
+          "+spec:\n" +
+          "+  minAvailable: {{ $svc.podDisruptionBudget.minAvailable }}\n" +
+          "+  selector:\n" +
+          "+    matchLabels:\n" +
+          "+      app: {{ $name }}\n" +
+          "+{{- end }}\n" +
+          "+{{- end }}\n",
+      },
+      {
+        path: "src/server/health.ts",
+        change: "changed",
+        additions: 9,
+        deletions: 3,
+        patch:
+          "diff --git a/src/server/health.ts b/src/server/health.ts\n" +
+          "--- a/src/server/health.ts\n" +
+          "+++ b/src/server/health.ts\n" +
+          "@@ -1,10 +1,16 @@\n" +
+          'import type { Server } from "./types";\n' +
+          " \n" +
+          "-export function health(server: Server) {\n" +
+          "-  return server.ready ? 200 : 503;\n" +
+          "+/** Whether this replica may take traffic.\n" +
+          "+ *\n" +
+          "+ * A draining replica answers 503 while it finishes the connections it holds, so the\n" +
+          "+ * load balancer stops sending it new ones before the pod goes. */\n" +
+          "+export function health(server: Server): number {\n" +
+          "+  if (server.draining) return 503;\n" +
+          "+  if (!server.ready) return 503;\n" +
+          "+  return 200;\n" +
+          " }\n" +
+          " \n" +
+          "-export const READY_PATH = \"/ready\";\n" +
+          "+export const READY_PATH = \"/readyz\";\n" +
+          "+export const LIVE_PATH = \"/livez\";\n",
+      },
+      // A pure RENAME: no hunks at all, so the header IS the change. Measured on 18 of 508
+      // files, several of which GitLab also flagged `collapsed` — which is exactly what the
+      // page must not read as an elision.
+      {
+        path: "src/server/drain.ts",
+        old_path: "src/server/shutdown.ts",
+        change: "renamed",
+        additions: 0,
+        deletions: 0,
+        patch:
+          "diff --git a/src/server/shutdown.ts b/src/server/drain.ts\n" +
+          "similarity index 100%\n" +
+          "rename from src/server/shutdown.ts\n" +
+          "rename to src/server/drain.ts\n",
+      },
+      // A BINARY file: GitLab describes it with one sentence rather than hunks, and this page
+      // states that rather than running its prose through a code renderer.
+      {
+        path: "docs/diagrams/rollout.png",
+        change: "new",
+        additions: 0,
+        deletions: 0,
+        binary: true,
+      },
+      // A file GitLab COLLAPSED. Its patch exists here and is withheld until the reader asks
+      // for the expanded read — which is the flow `canExpandDiff` gates.
+      {
+        path: "bun.lock",
+        change: "changed",
+        additions: 4,
+        deletions: 4,
+        collapsed: true,
+        generated: true,
+        patch:
+          "diff --git a/bun.lock b/bun.lock\n" +
+          "--- a/bun.lock\n" +
+          "+++ b/bun.lock\n" +
+          "@@ -204,8 +204,8 @@\n" +
+          '     "@types/node": {\n' +
+          '-      "version": "22.9.0",\n' +
+          '-      "resolved": "https://registry.npmjs.org/@types/node/-/node-22.9.0.tgz",\n' +
+          '+      "version": "22.10.2",\n' +
+          '+      "resolved": "https://registry.npmjs.org/@types/node/-/node-22.10.2.tgz",\n' +
+          '     },\n' +
+          '     "typescript": {\n' +
+          '-      "version": "5.6.3",\n' +
+          '+      "version": "5.7.2",\n' +
+          '     },\n',
+      },
+      {
+        path: "docs/runbooks/old-drain.md",
+        change: "deleted",
+        additions: 0,
+        deletions: 5,
+        patch:
+          "diff --git a/docs/runbooks/old-drain.md b/docs/runbooks/old-drain.md\n" +
+          "deleted file mode 100644\n" +
+          "--- a/docs/runbooks/old-drain.md\n" +
+          "+++ /dev/null\n" +
+          "@@ -1,5 +0,0 @@\n" +
+          "-# Draining a node by hand\n" +
+          "-\n" +
+          "-1. `kubectl drain <node>`\n" +
+          "-2. wait for the last pod to go\n" +
+          "-3. hope\n",
+      },
+    ],
+  ],
+  [
+    "acme/infra!297",
+    [
+      {
+        path: "terraform/lambda/policy.tf",
+        change: "changed",
+        additions: 5,
+        deletions: 1,
+        patch:
+          "diff --git a/terraform/lambda/policy.tf b/terraform/lambda/policy.tf\n" +
+          "--- a/terraform/lambda/policy.tf\n" +
+          "+++ b/terraform/lambda/policy.tf\n" +
+          '@@ -8,7 +8,11 @@ data "aws_iam_policy_document" "lambda" {\n' +
+          "   statement {\n" +
+          '     effect  = "Allow"\n' +
+          '-    actions = ["s3:GetObject"]\n' +
+          '+    actions = [\n' +
+          '+      "s3:GetObject",\n' +
+          '+      "s3:ListBucket",\n' +
+          "+    ]\n" +
+          '+    resources = [aws_s3_bucket.uploads.arn]\n' +
+          "   }\n" +
+          " }\n",
+      },
+    ],
+  ],
+]);
+
+/** What one merge request changed, at one depth.
+ *
+ *  The COLLAPSE is reproduced the way GitLab really behaves: the plain read withholds the
+ *  patch of every collapsed file and counts them, and the expanded read hands them over. That
+ *  is the whole reason this mock has a diff at all — the flow behind `canExpandDiff` cannot be
+ *  seen from a fixture where every file has its patch. */
+function mockDiffFor(mr: MockMergeRequest, depth: "listed" | "raw"): Record<string, unknown> {
+  const source = mockDiffFiles.get(`${mr.project_path}!${mr.iid}`) ?? [];
+  const expanded = depth === "raw";
+  const files = source.map((file) => {
+    const withheld = file.collapsed === true && !expanded;
+    return {
+      path: file.path,
+      ...(file.old_path ? { old_path: file.old_path } : {}),
+      change: file.change,
+      // A binary file never has a patch at either depth: GitLab will not diff one.
+      ...(file.binary || withheld || !file.patch ? {} : { patch: file.patch }),
+      additions: withheld ? 0 : file.additions,
+      deletions: withheld ? 0 : file.deletions,
+      binary: file.binary === true,
+      collapsed: withheld,
+      generated: file.generated === true,
+    };
+  });
+  return {
+    files,
+    total: files.length,
+    truncated: false,
+    collapsed: files.filter((file) => file.collapsed).length,
+    expanded,
+  };
+}
+
+/** Tell every open page that one merge request moved — the same `stale` frame the real
+ *  backend broadcasts after a write, which is what makes a second page follow. */
+function broadcastMockMergeRequest(mr: MockMergeRequest): void {
+  broadcast("gitlab_mr_updated", {
+    project_path: mr.project_path,
+    iid: mr.iid,
+    kind: "stale",
+  });
 }
 
 type LinearKind = "issue" | "project" | "document";
@@ -3715,6 +4660,11 @@ function parseLinearUrl(url: string): ParsedLinear | null {
   return /^[0-9a-f]{8,36}$/.test(slugId) ? { kind, id: slugId } : null;
 }
 
+/** The Linear twin of LONG_GITLAB_PATH: the one seeded issue whose title, team and
+ *  project are as long as a real workspace's, since that context line is what a
+ *  phone-width card has to shrink. */
+const LONG_LINEAR_ISSUE = "ENG-247";
+
 /** Deterministic metadata for a parsed Linear URL — canned, but varied by the
  *  issue number so the UI shows realistic, distinct cards without any workspace.
  *  Returns null when no key is configured, matching the real module: Linear has no
@@ -3725,6 +4675,7 @@ function mockLinearMetadata(url: string): Record<string, unknown> | null {
 
   if (parsed.kind === "issue") {
     const number = Number(parsed.id.split("-").pop());
+    const long = parsed.id === LONG_LINEAR_ISSUE;
     // One issue per state category, so every icon and tint is exercised.
     const states = [
       { name: "Backlog", type: "backlog", color: "#bec2c8" },
@@ -3739,16 +4690,23 @@ function mockLinearMetadata(url: string): Record<string, unknown> | null {
       kind: "issue",
       url,
       identifier: parsed.id,
-      title: `Show Linear links as rich cards (${parsed.id})`,
-      team: "Engineering",
+      title: long
+        ? `Freeze every action on an archived trace, replay included (${parsed.id})`
+        : `Show Linear links as rich cards (${parsed.id})`,
+      team: long ? "Platform infrastructure" : "Engineering",
       state: state.name,
       state_type: state.type,
       state_color: state.color,
-      assignee_name: "Ada Lovelace",
+      // People, not bare names, exactly as the Rust `LinkMetadata` carries them — and one of
+      // them is somebody this mock's own Teams knows, so a Linear card is reviewable with a
+      // real face on it (see `withMockTeamsPeople`).
+      assignee: long
+        ? { name: "Charlotte Dubois", username: "charlotte.dubois" }
+        : { name: "Mia Chen", username: "mia.chen" },
       // ENG-1 is urgent, ENG-2 high, the rest unbadged — see `badgedPriority`.
       priority: number % 5,
       priority_label: ["No priority", "Urgent", "High", "Medium", "Low"][number % 5],
-      project: "Chat integrations",
+      project: long ? "Dead-letter queue replay pipeline" : "Chat integrations",
       ...(number % 3 === 0 ? { parent: "ENG-100" } : {}),
       labels: [
         { name: "frontend", color: "#bb87fc" },
@@ -3770,7 +4728,8 @@ function mockLinearMetadata(url: string): Record<string, unknown> | null {
       state: "In Progress",
       state_type: "started",
       state_color: "#f2c94c",
-      lead_name: "Grace Hopper",
+      // Somebody only Linear knows: the other shape, on the card beside it.
+      lead: { name: "Grace Hopper", username: "grace" },
       progress: 0.42,
       target_date: "2026-10-02",
       description: "Bring the trackers the team lives in into the chat itself.",
@@ -3782,7 +4741,7 @@ function mockLinearMetadata(url: string): Record<string, unknown> | null {
     url,
     identifier: "",
     title: "Link previews — system design",
-    creator_name: "Ada Lovelace",
+    creator: { name: "Ada Lovelace", username: "ada" },
     project: "Chat integrations",
     description: "How a link in a message becomes a card, and what each provider knows.",
   };
@@ -3849,9 +4808,18 @@ function parseReplyTo(value: unknown): ReplyTo | undefined {
   };
 }
 
-/** Parse the optional image payload strictly. Images are one-at-a-time by design. */
-function parseSendImage(value: unknown): SendImage | undefined {
-  if (value === undefined || value === null) return undefined;
+/** Parse the optional `images` list the way the real backend does: every entry a whole
+ *  image, and at most `MAX_SEND_IMAGES` of them (`teams_send::MAX_IMAGES`). */
+function parseSendImages(value: unknown): SendImage[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error("invalid images param");
+  if (value.length > MAX_SEND_IMAGES) throw new Error("too many images in one message");
+  return value.map(parseSendImage);
+}
+
+/** Parse one image of that list strictly, so protocol drift fails a test instead of
+ *  producing a misleading echo. */
+function parseSendImage(value: unknown): SendImage {
   const o = asObject(value);
   if (typeof o.name !== "string" || o.name.length === 0) {
     throw new Error("invalid image param: name");
@@ -4141,6 +5109,40 @@ let mockUpdateFailsOnce = false;
  *  the mock exercises the message the app really has to fit in that row. */
 const MOCK_REPLACED_RELEASE_ERROR =
   "the release was replaced while it was being fetched (134092928 bytes, not 134088832)";
+
+/** What Settings › This app is armed to answer (the `{kind: "maintenance"}` test hook).
+ *
+ *  `check` overrides what `update_check` reports — every outcome but "available"/"current"
+ *  needs arming, because those two are the only ones the mock can be genuinely in. `runs` is
+ *  how many agent replies the pretend backend is writing, which is what makes the armed
+ *  "Restart anyway" reachable; `refuse` is the shape with no launcher and no supervisor, the
+ *  one refusal the user cannot press through.
+ *
+ *  A spec MUST reset it (`{kind: "maintenance", reset: true}`): one mock process serves the
+ *  whole run, and a backend armed to refuse a restart is one every later spec inherits. */
+let mockMaintenance: {
+  check: string | null;
+  runs: number;
+  refuse: boolean;
+} = { check: null, runs: 0, refuse: false };
+
+/** The refusal a hand-started backend really gives, word for word from
+ *  `restart::NOTHING_WOULD_RESTART_IT` — with the RPC name the socket prefixes it with, so
+ *  the mock exercises the stripping `lib/maintenance.ts` does. */
+const MOCK_NO_RESTARTER_ERROR =
+  "restart_backend: refused: nothing here would start this backend again — it was started " +
+  "by hand, so restart it the way it was started";
+
+/** Why a check could not be made, for the `failed` outcome. The transport's own words, since
+ *  that is what `update::fetch_release` propagates. */
+const GITHUB_UNREACHABLE = "error sending request for url (https://api.github.com/…)";
+
+/** How long the mock waits before it drops the sockets on an accepted restart.
+ *
+ *  The answer to the RPC travels on the socket the restart takes down, exactly as it does in
+ *  the real backend (`RESTART_ANSWER_GRACE` in src/bin/server.rs) — so a mock that closed
+ *  them inside the handler would swallow the reply and the page would never leave "asking". */
+const MOCK_RESTART_ANSWER_MS = 150;
 
 /** Put the update back to "nothing has been asked of it", timers included. One mock
  *  process serves a whole E2E run, so a download left in flight would report progress
@@ -4837,7 +5839,7 @@ function injectMail(input: {
   return mail;
 }
 
-function dispatch(method: string, params: unknown): unknown {
+async function dispatch(method: string, params: unknown): Promise<unknown> {
   switch (method) {
     case "ping":
       return "pong";
@@ -4940,7 +5942,7 @@ function dispatch(method: string, params: unknown): unknown {
       const replyTo = parseReplyTo(input.reply_to);
       const rawHtml = input.content_html;
       const contentHtml = typeof rawHtml === "string" && rawHtml.length > 0 ? rawHtml : undefined;
-      const image = parseSendImage(input.image);
+      const images = parseSendImages(input.images);
       const mentions = parseSendMentions(input.mentions);
       if (TEST_HOOKS) {
         capturedSends.push({
@@ -4948,20 +5950,20 @@ function dispatch(method: string, params: unknown): unknown {
           text,
           ...(replyTo ? { reply_to: replyTo } : {}),
           ...(contentHtml ? { content_html: contentHtml } : {}),
-          ...(image ? { image } : {}),
+          ...(images.length > 0 ? { images } : {}),
           ...(mentions.length > 0 ? { mentions } : {}),
         });
         if (testSendError) throw new Error(testSendError);
         if (testSendDelayMs > 0) {
           return new Promise((resolve) => {
             setTimeout(() => {
-              scheduleSendEcho(id, text, replyTo, contentHtml, image, mentions);
+              scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions);
               resolve({ sent: true });
             }, testSendDelayMs);
           });
         }
       }
-      scheduleSendEcho(id, text, replyTo, contentHtml, image, mentions);
+      scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions);
       return { sent: true };
     }
 
@@ -5048,6 +6050,38 @@ function dispatch(method: string, params: unknown): unknown {
         }, 500);
       }
       return { started: true };
+    }
+
+    // Settings › This app, first row: ask "now" whether a newer build exists. There is no
+    // GitHub here, so the answer is what this mock is currently holding — armed, and
+    // otherwise the honest "you are on the newest build", which is the answer the row exists
+    // to be able to give at all.
+    case "update_check": {
+      if (mockMaintenance.check) return { outcome: mockMaintenance.check, error: GITHUB_UNREACHABLE };
+      if (mockUpdateProgress.phase !== "idle") return { outcome: "busy" };
+      // A release the mock holds is announced the way a real pass announces one, so the
+      // sidebar's row appears from the press rather than from the test hook.
+      if (mockUpdate) {
+        broadcast("update_available", { ...mockUpdate });
+        return { outcome: "available" };
+      }
+      return { outcome: "current" };
+    }
+
+    // Second row: restart the backend. Nothing is spawned here — what a page can be shown is
+    // the answer and then the socket going, which is the whole of what it reacts to.
+    case "restart_backend": {
+      if (mockMaintenance.refuse) throw new Error(MOCK_NO_RESTARTER_ERROR);
+      // The arming is the backend's, driven by `force` and never by a counter, exactly as in
+      // `Ctx::restart_backend`: the first press is answered with the runs it would cut off,
+      // and the second one carries the user's answer to that.
+      if (mockMaintenance.runs > 0 && asObject(params).force !== true) {
+        return { restarted: false, blocked: "agent", runs: mockMaintenance.runs };
+      }
+      setTimeout(() => {
+        for (const ws of sockets) ws.close();
+      }, MOCK_RESTART_ANSWER_MS);
+      return { restarted: true, via: "launcher" };
     }
 
     // The update's first click: fetch the new build. Reports progress on a timer the way
@@ -5478,15 +6512,6 @@ function dispatch(method: string, params: unknown): unknown {
     case "call_status":
       return mockCallStatus();
 
-    case "set_calling": {
-      const o = asObject(params);
-      if (typeof o.enabled !== "boolean") throw new Error("`enabled` must be true or false");
-      mockCallingEnabled = o.enabled;
-      if (!o.enabled) endMockCall("CallEndReasonCallingTurnedOff");
-      broadcastMockCall();
-      return mockCallStatus();
-    }
-
     case "call_prepare": {
       const o = asObject(params);
       if (!mockCallingEnabled) throw new Error("call_prepare: calling is not connected yet");
@@ -5501,24 +6526,36 @@ function dispatch(method: string, params: unknown): unknown {
           ice_servers: [{ urls: ["stun:mock.invalid:3478"] }],
         };
       }
-      // Joining a meeting: reserve it from the link, exactly like the Rust one. The
-      // mock checks the link shape too, so a spec can prove the refusal.
-      if (typeof o.join_url === "string") {
-        if (!/\/meetup-join\/(19%3a|19:)/i.test(o.join_url)) {
+      // Joining a meeting: reserve it from the address the caller named, exactly like the
+      // Rust one — the link a calendar event carries, or the meeting's own thread out of
+      // the chat list. The mock checks both shapes, so a spec can prove either refusal.
+      if (typeof o.join_url === "string" || typeof o.meeting_thread === "string") {
+        const thread = typeof o.meeting_thread === "string" ? o.meeting_thread : null;
+        if (thread !== null && !thread.startsWith("19:meeting_")) {
+          throw new Error("call_prepare: that conversation is not a meeting");
+        }
+        if (thread === null && !/\/meetup-join\/(19%3a|19:)/i.test(String(o.join_url))) {
           throw new Error("call_prepare: that is not a Teams meeting link");
         }
         if (mockCall && mockCall.phase !== "ended") {
           throw new Error("call_prepare: this machine is already in a call — leave it first");
         }
         clearMockCallTimers();
+        // The title: from the caller when a calendar event supplied one, and otherwise
+        // from the thread's own name, which is what the Rust backend reads out of its
+        // store rather than minting a second spelling of it.
+        const subject =
+          typeof o.subject === "string" && o.subject.trim()
+            ? o.subject.trim()
+            : (thread && store.get(thread)?.conv.name) || "Meeting";
         mockCall = {
           id: `mock-meeting-${Date.now()}`,
           direction: "outgoing",
           kind: "meeting",
           // Joining, not ringing: nobody has to pick up.
           phase: "connecting",
-          conversation_id: null,
-          peer: typeof o.subject === "string" && o.subject.trim() ? o.subject.trim() : "Meeting",
+          conversation_id: thread,
+          peer: subject,
           peer_mri: "",
           others: [],
           other_mris: [],
@@ -5542,16 +6579,30 @@ function dispatch(method: string, params: unknown): unknown {
       if (mockCall && mockCall.phase !== "ended") {
         throw new Error("call_prepare: this machine is already in a call — hang up first");
       }
-      const person = thread.participants[0];
+      // One person is a 1:1 call; several is a GROUP call, which rings every one of them
+      // at once and names the CONVERSATION rather than a person — the same split the Rust
+      // backend makes from the roster it fetches, and the same cap.
+      const ring = thread.participants;
+      if (ring.length === 0) {
+        throw new Error(`call_prepare: nobody to ring in ${conversation}`);
+      }
+      if (ring.length > MOCK_MAX_GROUP_CALL_PEOPLE) {
+        throw new Error(
+          `call_prepare: ${conversation} has ${ring.length} other people — this app rings ` +
+            `at most ${MOCK_MAX_GROUP_CALL_PEOPLE} at once`,
+        );
+      }
+      const group = ring.length > 1;
+      const person = ring[0];
       clearMockCallTimers();
       mockCall = {
         id: `mock-call-${Date.now()}`,
         direction: "outgoing",
-        kind: "call",
+        kind: group ? "group" : "call",
         phase: "dialing",
         conversation_id: conversation,
-        peer: person?.name ?? "Someone",
-        peer_mri: person?.mri ?? "8:orgid:someone",
+        peer: group ? (store.get(conversation)?.conv.name ?? "Group call") : (person?.name ?? "Someone"),
+        peer_mri: group ? "" : (person?.mri ?? "8:orgid:someone"),
         others: [],
         other_mris: [],
         in_lobby: false,
@@ -5566,9 +6617,16 @@ function dispatch(method: string, params: unknown): unknown {
         can_send_media: false,
       };
       broadcastMockCall();
+      const reserved = mockCall.id;
+      // The frame above is out, so the page is already dialling: a hold here is the wait a
+      // real start spends on the microphone, with the stage — and its Hang up — on screen.
+      await holdMockCallStart("prepare");
       return {
-        call_id: mockCall.id,
+        call_id: reserved,
         ice_servers: [{ urls: ["stun:mock.invalid:3478"] }],
+        // The same split the Rust backend publishes: a 1:1 negotiates the camera and the
+        // screen up front, a group adds them when somebody turns one on.
+        one_to_one: !group,
       };
     }
 
@@ -5576,6 +6634,15 @@ function dispatch(method: string, params: unknown): unknown {
       const callId = requireString(params, "call_id");
       requireString(params, "sdp");
       if (!mockCall || mockCall.id !== callId) throw new Error("call_place: no such call");
+      // A hold here is the POST itself: the invite is on the wire, and a hang-up in this
+      // window is the one the Rust backend has to take back (`hang_up_orphan`).
+      await holdMockCallStart("place");
+      if (!mockCall || mockCall.id !== callId) {
+        // The user hung up while the invite was going out. The real backend hangs the
+        // placed call up on the links the answer carried; there is nothing to hang up
+        // here, and the page must be told this call is not going to connect.
+        return { call_id: callId, cancelled: true };
+      }
       // The far side picks up, then their SDP arrives — the two frames the real
       // service sends, in the real order.
       mockCallTimers.push(
@@ -5589,7 +6656,19 @@ function dispatch(method: string, params: unknown): unknown {
       mockCallTimers.push(
         setTimeout(() => {
           if (!mockCall || mockCall.id !== callId) return;
-          mockCall = { ...mockCall, phase: "connected", connected_at_ms: Date.now() };
+          // A GROUP call answers "who is in it" from the roster the service reports, the
+          // way a meeting does — so the people who picked up arrive here and not before.
+          const roster =
+            mockCall.kind === "group"
+              ? (store.get(mockCall.conversation_id ?? "")?.participants ?? [])
+              : [];
+          mockCall = {
+            ...mockCall,
+            phase: "connected",
+            connected_at_ms: Date.now(),
+            others: roster.map((p) => p.name),
+            other_mris: roster.map((p) => p.mri),
+          };
           broadcastMockCall();
         }, MOCK_CALL_CONNECT_MS),
       );
@@ -5599,7 +6678,12 @@ function dispatch(method: string, params: unknown): unknown {
     case "call_join": {
       const callId = requireString(params, "call_id");
       requireString(params, "sdp");
-      requireString(params, "join_url");
+      const address = asObject(params);
+      // The same address the reservation named, in whichever shape it came — and exactly
+      // one of the two, which is what the client sends (`meetingParams`).
+      if (typeof address.join_url !== "string" && typeof address.meeting_thread !== "string") {
+        throw new Error("call_join: no meeting named — pass join_url or meeting_thread");
+      }
       if (!mockCall || mockCall.id !== callId) throw new Error("call_join: no such meeting");
       // The lobby first, then somebody lets us in, then the roster arrives. Three
       // frames, in the order the real service sends them — which is what makes the
@@ -5700,6 +6784,17 @@ function dispatch(method: string, params: unknown): unknown {
         }
       }
       if (!mockCall || mockCall.id !== callId) throw new Error("call_offer_media: no such call");
+      // The ORDER, for the rule no screen can show: the session is asked for before the
+      // section is offered.
+      if (Array.isArray(o.sending) && o.sending.includes("screen")) {
+        mockSharingOrder.push("offer_media");
+      }
+      // Armed by the `{kind:"call_media", refuse:true}` test hook, and spent here: one
+      // refusal, so the click after it works and the surface is seen recovering.
+      if (mockRefusesNextMedia) {
+        mockRefusesNextMedia = false;
+        throw new Error("call_offer_media: the service refused this media offer");
+      }
       if (mockCall.phase !== "connected") {
         throw new Error(
           "call_offer_media: this call is not connected yet — the service refuses new media " +
@@ -5725,6 +6820,29 @@ function dispatch(method: string, params: unknown): unknown {
       if (typeof o.source_id !== "number") throw new Error("call_subscribe: source_id is required");
       if (!mockCall || mockCall.id !== callId) throw new Error("call_subscribe: no such call");
       return { call_id: callId, source_id: o.source_id };
+    }
+
+    // The meeting's content-sharing session: a screen share asks for one before it offers a
+    // section, because a meeting shows ONE screen at a time and the service rejects a section
+    // from an endpoint that never asked. Reproduced so the ORDER is reviewable — the modality
+    // first, the media after it — with no tenant and no presenter.
+    case "call_start_sharing": {
+      const callId = requireString(params, "call_id");
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_start_sharing: no such call");
+      if (mockSharingSession) {
+        throw new Error("call_start_sharing: this call already holds a sharing session");
+      }
+      mockSharingSession = `mock-sharing-${callId}`;
+      mockSharingOrder.push("start_sharing");
+      return { call_id: callId, can_stop: true };
+    }
+
+    case "call_stop_sharing": {
+      const callId = requireString(params, "call_id");
+      if (!mockCall || mockCall.id !== callId) throw new Error("call_stop_sharing: no such call");
+      const told = mockSharingSession !== null;
+      mockSharingSession = null;
+      return { call_id: callId, told_service: told };
     }
 
     case "call_hangup": {
@@ -5771,7 +6889,10 @@ function dispatch(method: string, params: unknown): unknown {
     // Each provider claims its own host, exactly as `link_preview::enrich` does.
     case "enrich_link": {
       const url = requireString(params, "url");
-      return { metadata: mockGitLabMetadata(url) ?? mockLinearMetadata(url) };
+      // EITHER card names people, so both go through the same walk the page's answers do.
+      return withMockTeamsPeople({
+        metadata: mockGitLabMetadata(url) ?? mockLinearMetadata(url),
+      });
     }
 
     // Who has approved a merge request. A read, ungated like `enrich_link`.
@@ -5799,6 +6920,199 @@ function dispatch(method: string, params: unknown): unknown {
       // from it in `mockApprovalResult`, the way GitLab derives them.
       state.mine = o.approved;
       return mockApprovalResult(url);
+    }
+
+    // ---- the merge-request page --------------------------------------------
+    //
+    // Four reads, then four writes. The reads answer from the fixtures above; the writes
+    // move them and broadcast, so a second page follows exactly as it would against the
+    // real backend. Nothing here contacts GitLab, which is what makes the merge — the one
+    // irreversible action in this app — reviewable at all.
+
+    case "gitlab_mr_list": {
+      const o = asObject(params);
+      const scope = typeof o.scope === "string" ? o.scope : "all";
+      const state = typeof o.state === "string" ? o.state : "opened";
+      // The two closed sets the backend enforces. A mock that accepted anything would let
+      // a bug through that the real backend refuses.
+      if (!["all", "assigned", "mine", "reviewing"].includes(scope)) {
+        throw new Error(`unknown scope: ${scope}`);
+      }
+      if (!["opened", "closed"].includes(state)) {
+        throw new Error(`a merge-request list is opened or closed, not ${state}`);
+      }
+      if (mockGitLabTokenMissing) {
+        return { scope, state, items: [], truncated: false, token_set: false };
+      }
+      const items = mockMergeRequests
+        .filter((mr) => mr.state === state)
+        .filter((mr) => {
+          if (scope === "mine") return mr.author.username === MOCK_GITLAB_ME.username;
+          if (scope === "assigned") {
+            return mr.assignees.some((p) => p.username === MOCK_GITLAB_ME.username);
+          }
+          if (scope === "reviewing") {
+            return mr.reviewers.some((p) => p.username === MOCK_GITLAB_ME.username);
+          }
+          return true;
+        })
+        .map(mockMergeRequestRow);
+      // Every answer this page gets says who its people are in Teams, exactly as the
+      // backend's does — see `withMockTeamsPeople`.
+      return withMockTeamsPeople({
+        scope,
+        state,
+        items,
+        total: items.length,
+        truncated: false,
+        token_set: true,
+      });
+    }
+
+    case "gitlab_mr_detail": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      return withMockTeamsPeople(mockMergeRequestDetail(mr));
+    }
+
+    case "gitlab_mr_notes": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      return withMockTeamsPeople(mockDiscussionList(mr));
+    }
+
+    case "gitlab_mr_pipeline": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      return mockPipelineView(mr);
+    }
+
+    // What the merge request CHANGED. `depth` is the closed set the backend keeps, so an
+    // unknown name is refused here too rather than quietly read as the cheap one — a page
+    // served the plain diff for the expanded read it asked for would report the files GitLab
+    // withheld as files GitLab withheld twice.
+    case "gitlab_mr_diff": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const depth = asObject(params).depth ?? "listed";
+      if (depth !== "listed" && depth !== "raw") {
+        throw new Error(`a diff is listed or raw, not ${String(depth)}`);
+      }
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabDiffRefusal) throw new Error(mockGitLabDiffRefusal);
+      return mockDiffFor(mr, depth);
+    }
+
+    // MERGE. The one write in this app that no later call takes back — and the `sha` is
+    // what stands between it and landing a commit nobody read, so this mock checks it the
+    // way GitLab does: a mismatch is the 409 the page has to report.
+    case "gitlab_mr_merge": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const sha = requireString(params, "sha");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabWriteRefusal) throw new Error(mockGitLabWriteRefusal);
+      if (sha !== mr.sha) {
+        throw new Error(
+          "GitLab refused: the branch moved since this page read it, so nothing was merged — reload and look again",
+        );
+      }
+      if (mr.detailed_merge_status !== "mergeable") {
+        throw new Error(
+          "GitLab refused: it will not merge it yet — a pipeline, an approval, a conflict or an unresolved thread is in the way (405)",
+        );
+      }
+      mr.state = "merged";
+      mr.detailed_merge_status = "not_open";
+      mr.merged_at = new Date().toISOString();
+      mr.updated_at = mr.merged_at;
+      broadcastMockMergeRequest(mr);
+      return { merge: { state: "merged", merge_commit_sha: `merge-${mr.sha.slice(0, 8)}`, merged_at: mr.merged_at } };
+    }
+
+    // COMMENT — a new one, or a reply into a thread.
+    case "gitlab_mr_comment": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const body = requireString(params, "body");
+      const o = asObject(params);
+      const discussionId = typeof o.discussion_id === "string" ? o.discussion_id : null;
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabWriteRefusal) throw new Error(mockGitLabWriteRefusal);
+      if (body.trim() === "") throw new Error("an empty comment says nothing, so it is not posted");
+
+      const note: MockNote = {
+        id: ++mockNoteId,
+        author: MOCK_GITLAB_ME,
+        body: body.trim(),
+        system: false,
+        created_at: new Date().toISOString(),
+        resolvable: discussionId !== null,
+        resolved: false,
+        mine: true,
+      };
+      const thread = discussionId ? mr.discussions.find((d) => d.id === discussionId) : undefined;
+      if (discussionId && !thread) throw new Error("that thread is not on this merge request");
+      if (thread) thread.notes.push(note);
+      else mr.discussions.push({ id: `d-${mr.iid}-${note.id}`, individual_note: true, notes: [note] });
+      mr.updated_at = note.created_at;
+      broadcastMockMergeRequest(mr);
+      return withMockTeamsPeople({ note: { ...note, discussion_id: thread?.id } });
+    }
+
+    // DELETE one of the user's OWN comments. The real backend re-reads whose it is before
+    // it deletes, and refuses a colleague's; this mock refuses the same way, so the rail is
+    // exercised rather than assumed.
+    case "gitlab_mr_delete_comment": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const noteId = requireNumber(params, "note_id");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabWriteRefusal) throw new Error(mockGitLabWriteRefusal);
+      const owner = mr.discussions
+        .flatMap((d) => d.notes)
+        .find((note) => note.id === noteId);
+      if (!owner) throw new Error("that comment is no longer on the merge request");
+      if (!owner.mine) {
+        throw new Error(
+          "that comment is somebody else's — this app only deletes what the user wrote themselves",
+        );
+      }
+      for (const discussion of mr.discussions) {
+        discussion.notes = discussion.notes.filter((note) => note.id !== noteId);
+      }
+      mr.discussions = mr.discussions.filter((discussion) => discussion.notes.length > 0);
+      broadcastMockMergeRequest(mr);
+      return { deleted: noteId };
+    }
+
+    // CLOSE or REOPEN — each other's undo.
+    case "gitlab_mr_set_state": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const change = requireString(params, "change");
+      if (change !== "close" && change !== "reopen") {
+        throw new Error('`change` must be "close" or "reopen"');
+      }
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabWriteRefusal) throw new Error(mockGitLabWriteRefusal);
+      mr.state = change === "close" ? "closed" : "opened";
+      mr.detailed_merge_status = change === "close" ? "not_open" : "not_approved";
+      mr.closed_at = change === "close" ? new Date().toISOString() : undefined;
+      mr.updated_at = new Date().toISOString();
+      broadcastMockMergeRequest(mr);
+      return { state: mr.state };
     }
 
     // ---- mail (read-only) --------------------------------------------------
@@ -6070,16 +7384,15 @@ function scheduleSendEcho(
   text: string,
   replyTo: ReplyTo | undefined,
   contentHtml?: string,
-  image?: SendImage,
+  images: SendImage[] = [],
   mentions?: OutboundMention[],
 ): void {
   setTimeout(() => {
     const t = threadFor(convId);
     if (!t) return;
     const seq = nextSeq(t.messages);
-    let body = composeContent(text, replyTo, contentHtml);
-    body = substituteCustomEmoji(body);
-    const imageHtml = image ? sentImageContent(image) : "";
+    const body = substituteCustomEmoji(composeContent(text, replyTo, contentHtml));
+    const imageHtml = images.map(sentImageContent).join("");
     const msg: ChatMessage = {
       id: `${convId}#${seq}`,
       conversation_id: convId,
@@ -6484,6 +7797,10 @@ function injectMessage(input: {
   senderMri?: string;
   isSelf?: boolean;
   reply?: boolean;
+  /** The body VERBATIM, for a spec that is about the markup rather than the words — an
+   *  agent's own signature line, say, which is what tells this app a reply is still being
+   *  written. `content` is escaped, so it cannot carry one. */
+  html?: string;
 }): ChatMessage | null {
   const t = threadFor(input.conversation);
   if (!t) return null;
@@ -6495,7 +7812,8 @@ function injectMessage(input: {
   const seq = nextSeq(t.messages);
   const last = t.messages.at(-1);
   const content =
-    input.reply && last ? replyContent(last, input.content) : escapeHtml(input.content);
+    input.html ??
+    (input.reply && last ? replyContent(last, input.content) : escapeHtml(input.content));
   const msg: ChatMessage = {
     id: `${input.conversation}#${seq}`,
     conversation_id: input.conversation,
@@ -6561,10 +7879,100 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // `call_invite`, not `call`: that kind is the AWARENESS signal below (the
     // after-the-fact chat event), and the two are different things — one is a call this
     // machine can answer, the other is a note that a call happened.
+    // Make the next capture the user asks for FAIL, once — the service refusing new media
+    // mid-call. It is the only way to see what a mid-call failure does to this surface: the
+    // page's simulated media never refuses, and a real refusal needs a real tenant. A spec
+    // MUST reset afterwards (`call_invite {reset:true}` clears it), since one mock process
+    // serves the whole run.
+    if (body.kind === "call_media" && body.refuse === true) {
+      mockRefusesNextMedia = true;
+      return Response.json({ ok: true, refuse: true }, { status: 200 });
+    }
+    // End the live call the way the SERVICE does, with a reason of its own choosing — the
+    // one this exists for being `CallEndReasonNobodyReachable`, a call that rang nothing
+    // because the callee has no client signed in. Measured against the tenant by
+    // `web/scripts/call-live.ts`, and reachable nowhere else: the mock rings no devices, so
+    // the only way to review what the app SAYS about it is to say it here.
+    if (body.kind === "call_end" && typeof body.reason === "string") {
+      if (!mockCall) return Response.json({ ok: false, error: "no call" }, { status: 409 });
+      endMockCall(body.reason);
+      return Response.json({ ok: true, reason: body.reason }, { status: 200 });
+    }
+    // Answer an offer of the page's in a way no browser can read — the third way a capture
+    // ends without a click, after a refusal and a drop, and the one that used to cost the
+    // whole call. Nothing is armed: the answer goes out now, on the live call.
+    // What ORDER the sharing calls arrived in. It is the one rule of this feature a spec
+    // cannot read off the screen: a meeting rejects a section from an endpoint that never
+    // asked to present, so an app that offered the media first would look right on screen and
+    // share nothing at all.
+    if (body.kind === "call_sharing_order") {
+      return Response.json({ ok: true, order: mockSharingOrder }, { status: 200 });
+    }
+    if (body.kind === "call_media" && body.unreadable === true) {
+      if (!mockCall) return Response.json({ ok: false, error: "no call" }, { status: 409 });
+      broadcast("call_media", {
+        call_id: mockCall.id,
+        sdp: UNREADABLE_ANSWER_SDP,
+        kind: "answer",
+      });
+      return Response.json({ ok: true, unreadable: true }, { status: 200 });
+    }
+    // REFUSE a capture the page just turned on, the way the service really did: the answer to
+    // our own offer, with the section rejected. It is the state a screen share met on this
+    // tenant, and the one the app used to describe as a DROP — so the user was told to share
+    // again and met the same refusal. Nothing is armed: it happens now, on the live call.
+    if (body.kind === "call_media" && typeof body.reject === "string") {
+      if (!mockCall) return Response.json({ ok: false, error: "no call" }, { status: 409 });
+      const label = body.reject === "screen" ? "applicationsharing-video" : "main-video";
+      broadcast("call_media", {
+        call_id: mockCall.id,
+        sdp: mockSectionRejection(label),
+        kind: "answer",
+      });
+      return Response.json({ ok: true, reject: body.reject }, { status: 200 });
+    }
+    // Take a capture AWAY from the page, the way the service does it: one offer that rejects
+    // the section. Nothing is armed — the drop happens now, on the live call — so there is
+    // nothing for a later spec to inherit.
+    if (body.kind === "call_media" && typeof body.drop === "string") {
+      if (!mockCall) return Response.json({ ok: false, error: "no call" }, { status: 409 });
+      const label = body.drop === "screen" ? "applicationsharing-video" : "main-video";
+      broadcast("call_media", {
+        call_id: mockCall.id,
+        sdp: mockSectionRejection(label),
+        kind: "offer",
+      });
+      return Response.json({ ok: true, drop: body.drop }, { status: 200 });
+    }
+    // A backend that does not take calls at all, which is a read-only one and nothing
+    // else. The app itself has no switch, so this hook is
+    // the only way to reach that state — and it is the state the disabled call button and
+    // the disabled Join button say their reason in. A spec MUST reset afterwards
+    // (`call_invite {reset:true}` puts it back), since one mock process serves the run.
+    if (body.kind === "calling" && body.enabled === false) {
+      endMockCall("CallEndReasonCallingTurnedOff");
+      mockCallingEnabled = false;
+      broadcastMockCall();
+      return Response.json({ ok: true, enabled: false }, { status: 200 });
+    }
+    // Hold ONE step of the next start, so a spec can hang up inside it — the window a real
+    // call spends on a microphone, and the one it spends posting the invite. Nothing is
+    // armed for later than that next step (`holdMockCallStart` disarms as it fires), and
+    // `call_invite {reset:true}` clears it with the rest.
+    if (body.kind === "call_start") {
+      const at = body.hold === "place" ? "place" : "prepare";
+      const ms = typeof body.hold_ms === "number" ? body.hold_ms : 1500;
+      mockCallStartHold = { at, ms };
+      return Response.json({ ok: true, hold: at, hold_ms: ms }, { status: 200 });
+    }
     if (body.kind === "call_invite") {
       if (body.reset === true) {
         endMockCall("CallEndReasonHangup");
-        mockCallingEnabled = false;
+        // Back to what a real backend reports: it calls. The hook above is the only way
+        // out of that, and it must not leak into the next spec.
+        mockCallingEnabled = true;
+        mockRefusesNextMedia = false;
+        mockCallStartHold = null;
         broadcastMockCall();
         return Response.json({ ok: true, reset: true }, { status: 200 });
       }
@@ -6720,6 +8128,22 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         { status: 200 },
       );
     }
+    // Arm what Settings › This app answers: the outcome of a check, how many agent replies a
+    // restart would cut off, and the machine that has nothing to restart it. A spec MUST
+    // reset it — one mock process serves the whole run, and a backend armed to refuse would
+    // refuse for every later spec.
+    if (body.kind === "maintenance") {
+      if (body.reset === true) {
+        mockMaintenance = { check: null, runs: 0, refuse: false };
+        return Response.json({ ok: true, maintenance: mockMaintenance }, { status: 200 });
+      }
+      mockMaintenance = {
+        check: typeof body.check === "string" ? body.check : null,
+        runs: typeof body.runs === "number" ? body.runs : 0,
+        refuse: body.refuse === true,
+      };
+      return Response.json({ ok: true, maintenance: mockMaintenance }, { status: 200 });
+    }
     // Arm (or clear) a pending update, and say whether this pretend install can replace
     // itself — the difference between the button and the plain link (`can_install` in
     // src/update.rs). A spec MUST clear it afterwards: one mock process serves the whole
@@ -6806,6 +8230,34 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         { status: 200 },
       );
     }
+    // Arm what GitLab says about the merge-request PAGE's writes: a refusal sentence
+    // (`refuse`), a machine with no token at all (`no_token`), or a clean slate. The same
+    // contract the approval hook carries, and for the same reason — one mock process serves
+    // the whole run, so a spec MUST clear whatever it armed, or every later merge on this
+    // surface fails for no reason anybody can see.
+    if (body.kind === "gitlab_mr") {
+      if (body.clear === true) {
+        mockGitLabWriteRefusal = null;
+        mockGitLabTokenMissing = false;
+        mockGitLabDiffRefusal = null;
+        // The live pipeline goes back to its first frame too: every read moves it on, so a
+        // spec that wants to WATCH it move has to start from a known one.
+        resetMockLivePipeline();
+        return Response.json({ ok: true, cleared: true }, { status: 200 });
+      }
+      mockGitLabWriteRefusal = typeof body.refuse === "string" ? body.refuse : null;
+      mockGitLabTokenMissing = body.no_token === true;
+      mockGitLabDiffRefusal = typeof body.refuse_diff === "string" ? body.refuse_diff : null;
+      return Response.json(
+        {
+          ok: true,
+          refuse: mockGitLabWriteRefusal,
+          no_token: mockGitLabTokenMissing,
+          refuse_diff: mockGitLabDiffRefusal,
+        },
+        { status: 200 },
+      );
+    }
     if (body.kind === "person_overrides" && body.clear === true) {
       const affected = [...personOverrides.keys()];
       personOverrides.clear();
@@ -6886,6 +8338,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       senderMri: typeof body.sender_mri === "string" ? body.sender_mri : undefined,
       isSelf: Boolean(body.is_self),
       reply: Boolean(body.reply),
+      html: typeof body.html === "string" ? body.html : undefined,
     });
     return Response.json({ ok: msg !== null, message: msg }, { status: msg ? 200 : 404 });
   }
@@ -7156,11 +8609,34 @@ function seedCalendar(): void {
     });
   }
 
+  // Three quarter-hour meetings back to back this morning: the case where the grid must
+  // NOT overlap anything. A short block is grown so its title fits, and the growth stops
+  // at the next meeting's start — without that, each of these covered the one after it.
+  for (const [index, minute] of [0, 15, 30].entries()) {
+    addMockEvent({
+      id: `ev-quarter-${index}`,
+      subject: ["Triage", "Standby handover", "Metrics check"][index]!,
+      start: mockAt(0, 11, minute),
+      end: mockAt(0, 11, minute + 15),
+      join_url: index === 1 ? teamsJoin : "",
+    });
+  }
+
   // Three overlapping meetings this afternoon: the case the column layout exists for.
   addMockEvent({
     id: "ev-overlap-a",
     subject: "Architecture guild",
-    preview: "Agenda: local-first storage, the write lock, and what we do about calling.",
+    // The body an invitation really carries: the organizer's own words, then the block
+    // Outlook writes under them — a rule of 80 underscores and a join link, each ONE
+    // unbreakable word. That is the fixture's whole point. Unbroken, the longest of them
+    // decides how wide the details panel is, which pushed the footer's last control off
+    // the panel's clip on a phone; the mock's short one-liners hid the case entirely.
+    preview:
+      "Agenda: local-first storage, the write lock, and what we do about calling.\n" +
+      "________________________________________________________________________________\n" +
+      "Microsoft Teams Need help? Join the meeting now " +
+      "https://teams.microsoft.com/meet/4155248391045?p=Xk7QvNbLd2RsTfWy " +
+      "Meeting ID: 415 524 839 1045 Passcode: q7Ldn2Rs",
     start: mockAt(0, 14, 0),
     end: mockAt(0, 15, 0),
     join_url: teamsJoin,

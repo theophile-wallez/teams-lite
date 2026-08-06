@@ -1,5 +1,13 @@
 import { expect } from "@playwright/test";
-import { test, fetchAgentModes, fillComposer, gotoApp, openConversationNamed } from "./helpers";
+import {
+  test,
+  emitLive,
+  fetchAgentModes,
+  fillComposer,
+  gotoApp,
+  openConversationAt,
+  openConversationNamed,
+} from "./helpers";
 
 // The per-conversation switch that lets the local agent answer an `@claude` message
 // (see web/src/components/agent-menu.tsx, src/agent_policy.rs), and how the answer is
@@ -206,6 +214,31 @@ test.describe("The local agent's answer", () => {
     });
     await expect(bubble).toHaveAttribute("data-mine", "false");
 
+    // The bubble's own edge catches the light while the run writes into it. It is inside
+    // the bubble and takes its radius, so it is the message's own hairline rather than a
+    // box around it — and its box is measured against the bubble's, because a shine that
+    // laid out at any other size would be a second, misaligned ring.
+    const shine = bubble.locator('[data-testid="agent-shine"]');
+    await expect(shine).toHaveCount(1);
+    const rings = await page.evaluate(`(() => {
+      const el = document.querySelector('[data-testid="agent-shine"]');
+      const box = (n) => { const r = n.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; };
+      return JSON.stringify({
+        shine: box(el),
+        bubble: box(el.closest('[data-testid="message"]')),
+        radius: getComputedStyle(el).borderTopLeftRadius,
+        parentRadius: getComputedStyle(el.closest('[data-testid="message"]')).borderTopLeftRadius,
+      });
+    })()`);
+    const ring = JSON.parse(rings) as {
+      shine: number[];
+      bubble: number[];
+      radius: string;
+      parentRadius: string;
+    };
+    expect(ring.shine).toEqual(ring.bubble);
+    expect(ring.radius).toBe(ring.parentRadius);
+
     // A tool call is named while it runs, which is the whole point of streaming the run
     // rather than only the text. `.first()` is the run's FIRST call: every call keeps its
     // row (see the transcript test below), so the list only ever grows.
@@ -242,6 +275,9 @@ test.describe("The local agent's answer", () => {
     await expect(page.locator('[data-testid="agent-status"]')).toHaveCount(0, {
       timeout: 20_000,
     });
+    // And the light goes with it: nothing is arriving into that bubble any more, and an
+    // edge that kept moving would promise a word that is never coming.
+    await expect(page.locator('[data-testid="agent-shine"]')).toHaveCount(0);
     // The signature names both halves of the authorship: the CLI that wrote the words,
     // and the account they went out under.
     const signature = page.locator('[data-testid="agent-signature"]');
@@ -367,5 +403,46 @@ test.describe("The local agent's answer", () => {
     );
     await page.waitForTimeout(1_500);
     await expect(page.locator('[data-testid="agent-stream"]')).toHaveCount(0);
+  });
+
+  // The common shape of this feature: the user asked from their phone, and this page holds
+  // the message without ever having watched the run. There is no run object here — the
+  // message's own signature line says the answer is unfinished, and that is the whole of
+  // what this app knows.
+  test("lights the edge of a reply it never watched being written", async ({ page }) => {
+    await gotoApp(page);
+    const conversation = await openConversationAt(page, 0);
+    await emitLive(page, {
+      conversation,
+      content: "",
+      is_self: true,
+      // `agent_policy::reply_html` mid-run: an answer, then the line that says it is still
+      // being written. That line is the only thing that marks a reply (see
+      // web/src/lib/agent-message.ts), so it is what the spec has to inject.
+      html: "<p>The backend listens on 19420</p><p><em>claude is writing…</em></p>",
+    });
+
+    const bubble = page.locator('[data-testid="message"]', {
+      has: page.locator('[data-testid="agent-signature"]'),
+    });
+    await expect(bubble).toBeVisible();
+    // Nothing is streaming into this page, so the bubble says so in words…
+    await expect(page.locator('[data-testid="agent-stream"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="agent-stalled"]')).toBeVisible();
+    // …and the edge says it too, because a run this app cannot see is still a run. It is
+    // the CLI's own colour, so the edge and the mark inside the bubble name one vendor.
+    const shine = bubble.locator('[data-testid="agent-shine"]');
+    await expect(shine).toHaveCount(1);
+    await expect(shine).toHaveAttribute("data-backend", "claude");
+    await expect(shine).toHaveCSS("animation-iteration-count", "infinite");
+
+    // Held still, the sweep is a smear of colour over one corner rather than a light
+    // going round an edge — so a reader who asked for less motion gets none of it, and
+    // the bubble keeps the static ring it already wears.
+    // The gate is CSS, so the OS query takes it away with no render in between.
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(shine).toBeHidden();
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await expect(shine).toBeVisible();
   });
 });

@@ -51,6 +51,7 @@ import { AgentLogo } from "./agent-logo";
 import { GitLabLogo } from "./gitlab-logo";
 import { CustomEmoji, PackEmoji } from "./custom-emoji";
 import {
+  AgentBubbleShine,
   AgentSignature,
   AgentStoredStatus,
   AgentStoredTranscript,
@@ -473,6 +474,17 @@ function MessageBubbleImpl(props: {
   // answer.
   const bare = !isDeleted && !agent && (linkOnly || imageOnly || recordingOnly || cardOnly);
 
+  // An answer is being written into this message. Two ways to know, and both count:
+  // this app is watching the run (`agentRun`), or the message itself says its answer is
+  // unfinished — no signature line yet (`agent.pending`), which is the reply asked for
+  // from a phone and the reply this page loaded in the middle of. That second one is a
+  // run this app cannot see rather than no run, and it is the common case.
+  //
+  // A run that DIED is in neither: whichever backend comes up rewrites its message with
+  // the failure body (`repair_abandoned_agent_runs`), so a body still pending is one
+  // nobody has closed.
+  const streaming = props.agentRun ? agentRunIsLive(props.agentRun) : !!agent?.pending;
+
   // Only label the first message of a same-author run; continuations are clearly
   // from the same person. A message with no sender (e.g. a meeting recording,
   // whose only author hint is a bare contacts URL the backend drops) shows no
@@ -582,8 +594,8 @@ function MessageBubbleImpl(props: {
       <div
         data-testid="message-quote"
         className={cn(
-          "my-1 rounded-lg border-l-2 px-2.5 py-1.5",
-          mine ? "border-sender-name-mine bg-quote-mine" : "border-sender-name bg-quote-incoming",
+          "my-1 rounded-lg px-2.5 py-1.5",
+          mine ? "bg-quote-mine" : "bg-quote-incoming",
         )}
       >
         {/* A forward carries no author at all — Teams sends the forwarded content
@@ -719,7 +731,14 @@ function MessageBubbleImpl(props: {
         style={{ x: messageGestures.x, touchAction: "pan-y" }}
         {...messageGestures.handlers}
         className={cn(
-          "relative text-sm leading-relaxed",
+          // `min-w-0` is what keeps a bubble inside the row it sits in. Every width
+          // below is a MAXIMUM, so a bubble is otherwise sized by its content — and a
+          // flex item's automatic minimum is its content's min-content width, which
+          // for a tracker card is the longest group path or branch it holds. On a
+          // phone that floor was above the screen: the card kept its 28rem and its
+          // state and pipeline badges were cut off at the edge. With the floor gone
+          // the bubble shrinks to the row and the card's own lines shrink with it.
+          "relative min-w-0 text-sm leading-relaxed",
           // Media- and link-only messages drop the standard bubble chrome; the
           // link card / atelier mat / recording card (below) becomes the surface.
           // A link card gets a tighter max width; the mat is capped at the usual
@@ -762,6 +781,10 @@ function MessageBubbleImpl(props: {
           setMenuOpen(true);
         }}
       >
+        {/* The bubble's own hairline catches the light for as long as the answer is being
+            written into it (see {@link AgentBubbleShine}). */}
+        {agent && streaming ? <AgentBubbleShine backend={agent.backend} /> : null}
+
         {!props.editing && !inert ? (
           <motion.span
             aria-hidden

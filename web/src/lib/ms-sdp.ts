@@ -75,6 +75,34 @@ export function labelsByMid(sdp: string): Map<string, string> {
 }
 
 /**
+ * The labels of the sections an SDP REJECTS — the ones whose `m=` line carries port 0.
+ *
+ * That is how the far side says a section is gone: it answers, or offers, with the section
+ * still written down and its port zeroed. The browser reads it and STOPS the transceiver, so
+ * the live path never needs this (it asks the transceiver, which is the authoritative
+ * answer). What needs it is the simulated media, which has no transceivers at all and is the
+ * only place that failure can be reviewed with nothing leaving the machine.
+ */
+export function rejectedLabels(sdp: string): Set<string> {
+  const out = new Set<string>();
+  let rejected = false;
+  let label: string | null = null;
+  const flush = () => {
+    if (rejected && label) out.add(label);
+    label = null;
+  };
+  for (const line of splitLines(sdp).lines) {
+    if (line.startsWith("m=")) {
+      flush();
+      // `m=<kind> <port> <profile> …` — a zero port is the rejection.
+      rejected = line.split(" ")[1] === "0";
+    } else if (line.startsWith("a=label:")) label = line.slice("a=label:".length).trim();
+  }
+  flush();
+  return out;
+}
+
+/**
  * How the two sides spell an ICE-TCP candidate's role — the client's own
  * `tcpTypeMapping`, verbatim.
  *
@@ -151,6 +179,75 @@ const ENCODED_EXTENSIONS = [
   "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
 ].map((uri) => ({ jsep: uri, ms: uri.replace(/\//g, "\\") }));
 
+/**
+ * The id and URI an `a=extmap:` line declares — `a=extmap:<id>[/<direction>] <uri>`.
+ *
+ * The direction suffix travels with the id and is kept: `3/sendonly` is id 3, and reading it as
+ * a different one would let the very clash below straight through.
+ */
+function readExtmap(line: string): { id: string; direction: string; uri: string } | null {
+  const rest = line.slice("a=extmap:".length);
+  const at = rest.indexOf(" ");
+  if (at <= 0) return null;
+  const [id, direction] = rest.slice(0, at).split("/");
+  const uri = rest.slice(at + 1).trim();
+  if (!id || !uri) return null;
+  return { id, direction: direction ? `/${direction}` : "", uri };
+}
+
+/**
+ * One id per header EXTENSION, for the whole bundle.
+ *
+ * **Chrome refuses a description whose bundled sections give one id two meanings**, and this
+ * service sends exactly that on the renegotiation carrying a colleague's shared screen:
+ *
+ *     InvalidAccessError: Failed to set remote offer sdp: A BUNDLE group contains a codec
+ *     collision for header extension id=3. The id must be the same across all bundled media
+ *     descriptions
+ *
+ * Dropping the clashing line was the first fix and it moved the problem rather than solving it:
+ * with the extension gone from one section, Chrome numbered it freely in its ANSWER — id 2 on
+ * the audio section and id 1 on the video one — and the service refused that with
+ * `SdpParsingFailure`. Both measured against the tenant, 2026-08-06.
+ *
+ * So the offer is made CONSISTENT instead: every URI keeps the first id it was given, and a URI
+ * whose id is already taken by another moves to the lowest free one. Nothing is lost, and both
+ * sides read the same map.
+ */
+function canonicalExtensionIds(lines: string[]): Map<string, string> {
+  const byUri = new Map<string, string>();
+  const taken = new Set<string>();
+  const declared = lines
+    .filter((line) => line.startsWith("a=extmap:"))
+    .map((line) => readExtmap(extmap(line, "jsep")))
+    .filter((one): one is NonNullable<typeof one> => one !== null);
+  // The ids each URI asks for, in the order they appear: first come, first served.
+  for (const { id, uri } of declared) {
+    if (byUri.has(uri) || taken.has(id)) continue;
+    byUri.set(uri, id);
+    taken.add(id);
+  }
+  // Whatever is left wants an id somebody else has. The lowest free one, so the numbering
+  // stays inside the 1..14 range a one-byte header extension can carry.
+  for (const { uri } of declared) {
+    if (byUri.has(uri)) continue;
+    let next = 1;
+    while (taken.has(String(next))) next += 1;
+    byUri.set(uri, String(next));
+    taken.add(String(next));
+  }
+  return byUri;
+}
+
+/** Rewrite one restored `a=extmap:` line onto the id its URI holds for the whole bundle. */
+function withCanonicalId(line: string, ids: Map<string, string>): string {
+  const declared = readExtmap(line);
+  if (!declared) return line;
+  const id = ids.get(declared.uri);
+  if (id === undefined || id === declared.id) return line;
+  return `a=extmap:${id}${declared.direction} ${declared.uri}`;
+}
+
 /** Rewrite one `a=extmap:` line in either direction. */
 function extmap(line: string, to: "ms" | "jsep"): string {
   for (const { jsep, ms } of ENCODED_EXTENSIONS) {
@@ -174,8 +271,57 @@ function withoutExtras(fields: string[]): string[] {
   return out;
 }
 
+/**
+ * The payload list a REJECTED section goes out with: `34`, which is what the client's own
+ * transform writes for one (`i.payloads = "34"`). It is H.263 and it means nothing here — a
+ * stub has to name a payload and this is the one a working client names.
+ */
+const STUB_PAYLOAD = "34";
+
+/** The session bandwidth the captured client offer states (`b=CT:4000`, § 2.5). */
+const SESSION_BANDWIDTH_KBPS = 4000;
+
+/**
+ * The port and `c=` line the BUNDLE really runs on: the first section that carries candidates.
+ *
+ * A browser writes the real address on that section alone and `9` / `IN IP4 0.0.0.0` on every
+ * other one; the client copies the real pair onto each, so a service reading a section's own
+ * transport finds one. Nothing is returned when no section carries a candidate — there is then
+ * nothing truer to copy, and a placeholder is better than an invention.
+ */
+function bundleTransport(lines: string[]): { port: string; connection: string } | null {
+  let port: string | null = null;
+  let connection: string | null = null;
+  let candidates = false;
+  for (const line of lines) {
+    const media = readMediaLine(line);
+    if (media) {
+      if (candidates && port && connection) break;
+      port = media.port;
+      connection = null;
+      candidates = false;
+      continue;
+    }
+    if (line.startsWith("c=")) connection = line.slice(2).trim();
+    if (line.startsWith("a=candidate:")) candidates = true;
+  }
+  if (!candidates || !port || !connection || port === "0" || port === "9") return null;
+  return { port, connection };
+}
+
+/**
+ * Whether this description is an ANSWER, which is what decides `a=rtcp:`.
+ *
+ * An answer states the setup role it TOOK — `active` or `passive` — while an offer offers
+ * `actpass`. It is the one signal inside the blob itself, and this module is only ever handed
+ * the blob.
+ */
+function isAnswer(lines: string[]): boolean {
+  return lines.some((line) => line === "a=setup:active" || line === "a=setup:passive");
+}
+
 /** One `m=` line, split into the pieces this module cares about. */
-type MediaLine = { kind: string; head: string; profile: string; tail: string };
+type MediaLine = { kind: string; head: string; port: string; profile: string; tail: string };
 
 /** Read an `m=` line, or nothing when the line is not one. */
 function readMediaLine(line: string): MediaLine | null {
@@ -185,12 +331,17 @@ function readMediaLine(line: string): MediaLine | null {
   const match = /^m=(\S+) (\S+) (\S+)(.*)$/.exec(line);
   const [, kind, port, profile, tail] = match ?? [];
   if (!kind || !port || !profile) return null;
-  return { kind, head: `m=${kind} ${port}`, profile, tail: tail ?? "" };
+  return { kind, head: `m=${kind} ${port}`, port, profile, tail: tail ?? "" };
 }
 
 /** Write an `m=` line back with a different profile. */
 function withProfile(media: MediaLine, profile: string): string {
   return `${media.head} ${profile}${media.tail}`;
+}
+
+/** Write it back with the service's profile and the port the bundle really runs on. */
+function withPort(media: MediaLine, port: string): string {
+  return `m=${media.kind} ${port} ${MS_PROFILE}${media.tail}`;
 }
 
 /** Split an SDP into its lines, keeping the line ending the sender used.
@@ -206,11 +357,17 @@ function splitLines(sdp: string): { lines: string[]; ending: string } {
 /**
  * Rewrite a browser's offer or answer into what the calling service reads.
  *
- * Two changes, both of them the client's own: every media line's profile becomes
- * `RTP/SAVP`, and a media line with no `a=label:` gets one — from `labels` when the caller
- * has an offer to echo, and from the section's kind otherwise. Everything else — the codecs,
- * the fingerprint, the candidates, the ICE credentials — travels exactly as the browser
- * wrote it.
+ * Three changes, all of them the client's own: every media line's profile becomes
+ * `RTP/SAVP`, a media line with no `a=label:` gets one — from `labels` when the caller has an
+ * offer to echo, and from the section's kind otherwise — and each section states the SSRCs it
+ * carries as `a=x-ssrc-range`. Everything else — the codecs, the fingerprint, the candidates,
+ * the ICE credentials — travels exactly as the browser wrote it.
+ *
+ * The range is ADDED beside `a=ssrc:` rather than replacing it, which is what the captured
+ * client offer shows (§ 2.5: "ADDED (the `a=ssrc:` line stays too)"). Audio is accepted
+ * without it, so it is not what makes a section work — but the service declares one on every
+ * section of its OWN offers, and a send section it must allocate a channel for is the place
+ * that would notice. It costs one line per section.
  *
  * `labels` is what makes a shared screen possible at all: it and a camera are both
  * `m=video`, so an answer built from kinds alone labels somebody's screen `main-video` and
@@ -219,11 +376,32 @@ function splitLines(sdp: string): { lines: string[]; ending: string } {
 export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
   const { lines, ending } = splitLines(sdp);
   const out: string[] = [];
+  // The session's own fingerprint, and the transport the BUNDLE really runs on. A browser
+  // writes candidates on the first section only and gives every other one the placeholder
+  // `9` / `IN IP4 0.0.0.0`; the client copies the real port and `c=` line onto each
+  // (`transformBundle`) and copies the session fingerprint onto every live section. Both are
+  // read before anything is written, because they live above the sections that need them.
+  const fingerprint = lines.find((line) => line.startsWith("a=fingerprint:"));
+  const transport = bundleTransport(lines);
+  const answering = isAnswer(lines);
+  /** Whether the section being read had its transport lines rewritten. */
+  let placed = false;
   // The section being read, so a label can be added at its end rather than guessed at
   // its start: `a=label` may already be there, and stating it twice is not the same SDP.
   // Its mid is read on the way through, because the override is keyed by mid and an
   // `a=mid:` line comes after the `m=` line it belongs to.
-  let section: { kind: string; hasLabel: boolean; mid: string | null } | null = null;
+  let section: {
+    kind: string;
+    hasLabel: boolean;
+    mid: string | null;
+    /** Every SSRC the section declares, for the range below. */
+    ssrcs: number[];
+    hasSsrcRange: boolean;
+    /** True when the section's own port is zero, so it is written as a STUB. */
+    rejected: boolean;
+    /** The section's lines, held until it closes: a rejected one is replaced whole. */
+    lines: string[];
+  } | null = null;
 
   const closeSection = () => {
     if (!section) return;
@@ -231,7 +409,29 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
     // and a shared screen is an `m=video` whose kind cannot tell us.
     const label =
       (section.mid ? labels?.get(section.mid) : undefined) ?? MEDIA_LABELS[section.kind];
+    // A REJECTED section is a STUB, and nothing else: the client's own transform deletes every
+    // key but the kind, the port, the profile, the payloads, the mid and the label, and sets the
+    // payload list to `34` (`Kn(e) = e.port === 0` in its bundle). Sending Chrome's whole
+    // description for a section the browser had rejected earned `SdpParsingFailure`, which ended
+    // the call a second after the answer went out — measured 2026-08-06.
+    if (section.rejected) {
+      out.push(`m=${section.kind} 0 ${MS_PROFILE} ${STUB_PAYLOAD}`);
+      if (section.mid) out.push(`a=mid:${section.mid}`);
+      if (label) out.push(`a=label:${label}`);
+      section = null;
+      return;
+    }
+    out.push(...section.lines);
     if (label && !section.hasLabel) out.push(`a=label:${label}`);
+    // The SSRCs the section carries, stated the service's own way. `a=ssrc:` stays exactly
+    // where the browser wrote it — the client ADDS this line rather than replacing them.
+    if (section.ssrcs.length > 0 && !section.hasSsrcRange) {
+      const low = Math.min(...section.ssrcs);
+      const high = Math.max(...section.ssrcs);
+      out.push(`a=x-ssrc-range:${low}-${high}`);
+    }
+    section = null;
+    return;
     section = null;
   };
 
@@ -239,10 +439,37 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
     const media = readMediaLine(line);
     if (media) {
       closeSection();
-      section = { kind: media.kind, hasLabel: false, mid: null };
-      out.push(withProfile(media, MS_PROFILE));
+      section = {
+        kind: media.kind,
+        hasLabel: false,
+        mid: null,
+        ssrcs: [],
+        hasSsrcRange: false,
+        rejected: false,
+        lines: [],
+      };
+      // A REJECTED section keeps its own port: zero is the whole statement, and the client
+      // describes no transport for one either.
+      const rejected = media.port === "0";
+      section.rejected = rejected;
+      // A rejected section is written from nothing at close (see `closeSection`), so it needs
+      // none of this. A live one takes the transport the BUNDLE really runs on.
+      placed = !rejected && transport !== null;
+      if (rejected) continue;
+      section.lines.push(placed ? withPort(media, transport!.port) : withProfile(media, MS_PROFILE));
+      if (placed && transport) {
+        section.lines.push(`c=${transport.connection}`);
+        // `a=rtcp:<port>` on an OFFER and nothing on an answer — the client's own
+        // `rtcpTransform`. A browser writes `a=rtcp:9 IN IP4 0.0.0.0`, which names a
+        // placeholder rather than the port the section really runs on.
+        if (!answering) section.lines.push(`a=rtcp:${transport.port}`);
+      }
+      if (fingerprint) section.lines.push(fingerprint);
       continue;
     }
+    // The lines just replaced, and ONLY where a replacement was really written.
+    if (section && placed && (line.startsWith("c=") || line.startsWith("a=rtcp:"))) continue;
+    if (section && fingerprint && line.startsWith("a=fingerprint:")) continue;
     // A trailing empty line ends the last section without belonging to it.
     if (line === "") {
       closeSection();
@@ -251,15 +478,41 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
     }
     if (section && line.startsWith("a=mid:")) section.mid = line.slice("a=mid:".length).trim();
     if (section && line.startsWith("a=label:")) section.hasLabel = true;
+    if (section && line.startsWith("a=x-ssrc-range:")) section.hasSsrcRange = true;
+    if (section && line.startsWith("a=ssrc:")) {
+      // `a=ssrc:<id> <attribute>` — one id, repeated once per attribute it carries.
+      const id = Number.parseInt(line.slice("a=ssrc:".length), 10);
+      if (Number.isFinite(id) && !section.ssrcs.includes(id)) section.ssrcs.push(id);
+    }
+    // The session's own two lines, in the client's spelling. `WMS *` is what it writes where
+    // a browser writes `WMS` with no token, and `b=CT` is the session bandwidth it adds — a
+    // video section the service must allocate for is where an absence would tell.
+    if (!section && line.startsWith("a=msid-semantic:")) {
+      out.push("a=msid-semantic: WMS *");
+      continue;
+    }
+    // BEFORE `t=`, which is where the grammar puts a session bandwidth and where the captured
+    // client offer has it. After it, the service refuses the whole description by name:
+    // `SdpParsingError … Unexpected field 'b' found. The field may be undefined or in the wrong
+    // order.` — measured 2026-08-06, and the first thing this service ever explained.
+    if (!section && line.startsWith("t=")) {
+      out.push(`b=CT:${SESSION_BANDWIDTH_KBPS}`);
+      out.push(line);
+      continue;
+    }
+    if (!section && line.startsWith("b=")) continue;
+    // A rejected section keeps nothing of its own.
+    if (section?.rejected) continue;
+    const push = (text: string) => (section ? section.lines.push(text) : out.push(text));
     if (line.startsWith("a=candidate:")) {
-      out.push(candidateToMs(line));
+      push(candidateToMs(line));
       continue;
     }
     if (line.startsWith("a=extmap:")) {
-      out.push(extmap(line, "ms"));
+      push(extmap(line, "ms"));
       continue;
     }
-    out.push(line);
+    push(line);
   }
   closeSection();
   return out.join(ending);
@@ -298,6 +551,9 @@ export function fromMsSdp(sdp: string): string {
     return false;
   };
 
+  // ONE id per header extension, across the whole bundle. See {@link extensionIds}.
+  const extensionIds = canonicalExtensionIds(lines);
+
   lines.forEach((line, index) => {
     if (line.startsWith("a=candidate:")) {
       out.push(candidateFromMs(line));
@@ -313,7 +569,7 @@ export function fromMsSdp(sdp: string): string {
       return;
     }
     if (line.startsWith("a=extmap:")) {
-      out.push(extmap(line, "jsep"));
+      out.push(withCanonicalId(extmap(line, "jsep"), extensionIds));
       return;
     }
     const media = readMediaLine(line);

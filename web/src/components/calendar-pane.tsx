@@ -157,10 +157,20 @@ export function CalendarPane(props: { onBack?: () => void }) {
       className="flex min-w-0 flex-1 flex-col bg-background"
       // A click on the grid's background (not on an event) puts the panel away, the
       // way it does in every calendar.
+      //
+      // "The grid's background" is this pane's own DOM subtree, and the details panel is
+      // NOT in it: it is portaled to the body, and so is anything it opens in turn. A
+      // React event bubbles out of a portal to its React parent all the same, so this
+      // handler sees those clicks — and the earlier test, which only asked whether the
+      // click was on an event chip, closed the panel from a control INSIDE the panel. It
+      // cost the footer's "Open in" its menu: the trigger opened it, this closed the
+      // panel under it, and the menu went with the subtree.
       onClick={(e) => {
-        if (openEventId && !(e.target as HTMLElement).closest('[data-testid="calendar-event"]')) {
-          onCloseEvent();
-        }
+        if (!openEventId) return;
+        const target = e.target as HTMLElement;
+        if (!paneRef.current?.contains(target)) return;
+        if (target.closest('[data-testid="calendar-event"]')) return;
+        onCloseEvent();
       }}
     >
       <header className="flex min-h-16 shrink-0 flex-wrap items-center gap-2 border-b border-border-subtle px-3 pt-[env(safe-area-inset-top)] md:gap-3 md:px-5">

@@ -1,4 +1,4 @@
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, expect, type Locator, type Page } from "@playwright/test";
 
 // A test fixture that tracks browser console errors and page errors, so specs
 // can assert the app runs clean. Favicon 404s and the React devtools notice are
@@ -63,6 +63,21 @@ export async function fillComposer(page: Page, text: string): Promise<void> {
   const field = composerField(page);
   await field.click();
   await field.fill(text);
+}
+
+/** Empty the composer, and leave nothing focused.
+ *
+ *  `fill("")` does not clear a contenteditable — it inserts nothing — and a draft is
+ *  persisted per conversation, so one spec's leftovers are the next spec's opening state,
+ *  across a reload and across a new page. The blur is what lets a spec assert who takes
+ *  the caret next. */
+export async function clearComposer(page: Page): Promise<void> {
+  const field = composerField(page);
+  await field.click();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.press("Backspace");
+  await expect(field).toHaveText("");
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 }
 
 /** Write `text` in the composer and send it with Enter. */
@@ -131,13 +146,14 @@ export type CapturedSend = {
   /** Who the body's mention spans name, by the itemid each span carries. Present only
    *  when the message @mentions somebody. */
   mentions?: { itemid: number; mri: string; display_name: string }[];
-  image?: {
+  /** Every picture the message carried, in the order the composer sent them. */
+  images?: {
     name: string;
     content_type: string;
     data_base64: string;
     width?: number;
     height?: number;
-  };
+  }[];
 };
 
 /** Configure the mock's next sends. Always reset the control after a failure test,
@@ -163,7 +179,15 @@ export async function fetchCapturedSends(page: Page): Promise<CapturedSend[]> {
 /** Inject a live message through the mock's gated test hook. */
 export async function emitLive(
   page: Page,
-  body: { conversation: string; content: string; sender?: string; is_self?: boolean; reply?: boolean },
+  body: {
+    conversation: string;
+    content: string;
+    sender?: string;
+    is_self?: boolean;
+    reply?: boolean;
+    /** The body verbatim, when the spec is about the markup — `content` is escaped. */
+    html?: string;
+  },
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, { data: body });
   expect(res.ok()).toBeTruthy();
@@ -237,10 +261,142 @@ export async function emitCallInvite(page: Page, conversation: string): Promise<
   expect(res.ok()).toBeTruthy();
 }
 
-/** End any mock call and turn calling back off — the state a fresh backend is in. */
+/**
+ * Make this window's backend one that does not take calls at all.
+ *
+ * There is no switch in the app — every backend the user launches registers as a device
+ * their calls ring on at startup — so this hook is the only way to that state, and it is
+ * the state ONE real backend reports: a read-only one, which is the install they never
+ * opened. What it exercises is that the call and Join controls stay, disabled, saying so.
+ * Always finish with `resetCall`.
+ */
+export async function disableCalling(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "calling", enabled: false },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Make ONE step of the next start answer late, so a spec can hang up inside it.
+ *
+ * A real start waits on a microphone and on ICE gathering, then on the POST that rings the
+ * far side; the mock's own media is instant, so without this the window a user cancels in
+ * does not exist here at all. `"prepare"` holds the reservation — the stage is up, the
+ * offer has not gone out — and `"place"` holds the invite on the wire, which is the half
+ * the backend has to take back. Always finish with `resetCall`.
+ */
+export async function holdCallStart(
+  page: Page,
+  hold: "prepare" | "place",
+  holdMs = 1500,
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_start", hold, hold_ms: holdMs },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** End any mock call and put calling back to what a real backend reports — it calls. It
+ *  also clears an armed media refusal, an armed `disableCalling` and an armed start hold,
+ *  so none of them needs a separate undo. */
 export async function resetCall(page: Page): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "call_invite", reset: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Make the next camera or screen the user turns on FAIL, once — the service refusing new
+ * media on a live call.
+ *
+ * It is the only reachable mid-call failure: `simulatedCallMedia` never refuses a capture,
+ * and the service that would is a real tenant. What it exercises is that the reason is
+ * SAID (it used to be swallowed — the card that carried it was drawn only while no call was
+ * live) and said clear of the card holding Hang up. Always finish with `resetCall`.
+ */
+export async function refuseNextCallMedia(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_media", refuse: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * End the live call the way the SERVICE ends one, with its own reason.
+ *
+ * The reason this exists for is a call that rang NOTHING — the callee has no client signed in
+ * — because the mock rings no devices and a real one needs a colleague who is offline. What it
+ * exercises is the sentence: an ending the user did not choose has to say why, or a call that
+ * stops two seconds after they pressed call reads as this app dropping it.
+ */
+export async function endCallWithReason(page: Page, reason: string): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_end", reason },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Have the MEETING drop a capture the page is sending, the way the service does it: one
+ * offer that rejects the section.
+ *
+ * It arms nothing — the drop happens on the live call at once — so there is nothing for a
+ * later spec to inherit. What it exercises is the state the page is left in: the capture
+ * released, the button off, and one sentence saying why, because nothing else on the page
+ * would tell the user their camera stopped.
+ */
+export async function dropCallCapture(page: Page, kind: "camera" | "screen"): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_media", drop: kind },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Have the meeting REFUSE a capture the page just turned on: the answer to our own offer,
+ * with the section rejected.
+ *
+ * It is the state a screen share really met on this tenant, and it is not a drop — nothing
+ * was ever shown. The app used to say it was, so the user was told to share again and met the
+ * same refusal in the same second, which is what this pins.
+ */
+export async function rejectCallCapture(page: Page, kind: "camera" | "screen"): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_media", reject: kind },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * The ORDER the sharing calls reached the mock in.
+ *
+ * The one rule of a screen share that no screen shows: a meeting grants ONE screen at a time,
+ * so the content-sharing session is asked for BEFORE the section is offered — an app that
+ * offered first looks right and shares nothing, which is what the tenant answered on
+ * 2026-08-06. Reset with the call, like everything else about it.
+ */
+export async function callSharingOrder(page: Page): Promise<string[]> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_sharing_order" },
+  });
+  expect(res.ok()).toBeTruthy();
+  return ((await res.json()) as { order: string[] }).order;
+}
+
+/**
+ * Answer an offer of the page's in a way no browser can read — the third way a capture ends
+ * with no click behind it, and the one that used to cost the whole call.
+ *
+ * It arms nothing: the answer goes out on the live call at once. What it exercises is the
+ * reaction that was WRONG — this app hung up, so a user who shared their screen lost the
+ * person they were talking to seconds later — against the rule the surface is built on: a
+ * failure in a renegotiation costs one picture and never the call.
+ */
+export async function answerCallMediaUnreadably(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_media", unreadable: true },
   });
   expect(res.ok()).toBeTruthy();
 }
@@ -279,6 +435,34 @@ export async function emitUpdate(
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "update", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Arm what Settings › This app is answered with, through the mock's gated test hook: the
+ *  outcome of an update check, how many agent replies a restart would cut off, and the
+ *  machine that has nothing to restart its backend at all.
+ *
+ *  ALWAYS reset it with `{ reset: true }` before the spec ends. The mock is a shared process
+ *  and `reuseExistingServer` adopts it across runs, so a backend armed to refuse a restart
+ *  would refuse for every later spec. */
+export async function emitMaintenance(
+  page: Page,
+  body: {
+    /** Override what `update_check` answers. Only the outcomes the mock cannot genuinely be
+     *  in need arming — "available" and "current" come from the release it holds. */
+    check?: "available" | "current" | "busy" | "unknown" | "unsupported" | "failed";
+    /** How many agent replies this backend is writing: what makes the armed "Restart
+     *  anyway" reachable. */
+    runs?: number;
+    /** The install nothing would restart — no launcher, no supervisor. The one refusal the
+     *  user cannot press through. */
+    refuse?: boolean;
+    reset?: boolean;
+  } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "maintenance", ...body },
   });
   expect(res.ok()).toBeTruthy();
 }
@@ -372,6 +556,22 @@ export async function setApprovalControl(
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "gitlab_approval", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Arm what GitLab says about the merge-request PAGE's writes, through the mock's gated
+ *  test hook: a refusal sentence (`refuse`), a machine with no token (`no_token`), or a
+ *  clean slate (`clear`).
+ *
+ *  A spec MUST clear whatever it arms. One mock process serves the whole run, so a refusal
+ *  left behind turns every later merge on that surface into an error nobody armed. */
+export async function setMergeRequestControl(
+  page: Page,
+  body: { refuse?: string; no_token?: boolean; refuse_diff?: string; clear?: boolean },
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "gitlab_mr", ...body },
   });
   expect(res.ok()).toBeTruthy();
 }
@@ -617,6 +817,26 @@ export async function fetchTestCalendar(page: Page): Promise<{
   const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/calendar`);
   expect(res.ok()).toBeTruthy();
   return res.json();
+}
+
+/**
+ * Assert a tracker preview card fits the width it was given, in both directions:
+ * its own box stays inside the conversation pane, and its text stays inside its box.
+ * The two are independent failures — a card wider than the pane runs off the side of
+ * a phone, and one whose lines cannot shrink spills its badges past its own edge —
+ * and a long project path, branch or team name is what provokes either.
+ */
+export async function expectCardFitsItsPane(card: Locator, pane: Locator): Promise<void> {
+  const cardBox = await card.boundingBox();
+  const paneBox = await pane.boundingBox();
+  expect(cardBox).not.toBeNull();
+  expect(paneBox).not.toBeNull();
+  // A hair of tolerance for sub-pixel layout, and none for a real overflow.
+  expect(cardBox!.x + cardBox!.width).toBeLessThanOrEqual(paneBox!.x + paneBox!.width + 1);
+  expect(cardBox!.x).toBeGreaterThanOrEqual(paneBox!.x - 1);
+
+  const overflow = await card.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
 }
 
 /** Filter out benign console noise so `consoleErrors` only holds real problems. */

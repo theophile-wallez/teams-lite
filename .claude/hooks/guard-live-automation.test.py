@@ -41,6 +41,13 @@ FIXTURES = {
         "const page = await (await chromium.launch()).newPage();\n"
         "await page.click('[data-testid=\"meeting-join-here\"]');\n"
     ),
+    # And the same for the driver that RINGS somebody, which is the sharpest of the three.
+    "call-live-copy.ts": (
+        "// A copy of web/scripts/call-live.ts, moved somewhere nobody reviews.\n"
+        "import { chromium } from 'playwright-core';\n"
+        "const page = await (await chromium.launch()).newPage();\n"
+        "await page.click('[data-testid=\"call-button\"]');\n"
+    ),
     "backend-writer.ts": (
         "// Calls a write method on the real backend.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
@@ -136,6 +143,48 @@ FIXTURES = {
         "// Reads who approved a merge request through the live backend.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'gitlab_approvals', params: { url } }));\n"
+    ),
+    # THE merge: it lands somebody's branch in a shared repository and no later call takes
+    # it back. There is no sandbox project to aim one at, so nothing but the user's own
+    # click in the app may make it.
+    "mr-merge-writer.ts": (
+        "// Merges a real merge request straight through GitLab.\n"
+        "await fetch('https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/merge',\n"
+        "  { method: 'PUT', headers: { 'PRIVATE-TOKEN': token } });\n"
+    ),
+    # A comment reaches everybody watching the merge request, under the user's name.
+    "mr-comment-writer.ts": (
+        "// Comments on a real merge request straight through GitLab.\n"
+        "await fetch('https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/notes',\n"
+        "  { method: 'POST', body: JSON.stringify({ body: 'looks good' }) });\n"
+    ),
+    # Closing one is a write too, whatever the verb it rides on.
+    "mr-close-writer.ts": (
+        "// Closes a real merge request straight through GitLab.\n"
+        "await fetch('https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42',\n"
+        "  { method: 'PUT', body: JSON.stringify({ state_event: 'close' }) });\n"
+    ),
+    # And the same four through the backend's gated RPCs, which are still writes.
+    "mr-merge-rpc-writer.ts": (
+        "// Merges a real merge request through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_merge' }));\n"
+    ),
+    "mr-comment-rpc-writer.ts": (
+        "// Comments on a real merge request through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_comment' }));\n"
+    ),
+    # Reading the PAGE is a read, all four of them: the list, the detail, the comments and
+    # the pipeline. A guard that blocked those would make the surface unscreenshotable and
+    # teach its next reader to phrase around it.
+    "mr-page-reader.ts": (
+        "// Reads the merge-request page through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19430');\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_list' }));\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_detail' }));\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_notes' }));\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_pipeline' }));\n"
     ),
     # A Linear write is a mutation, and the key that reaches it has full write access.
     "linear-mutation-writer.ts": (
@@ -318,6 +367,20 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'update_apply' }));\n"
     ),
+    # Restarting the backend: the process the user's own pages talk to, and a local agent's
+    # half-written reply with it (MACHINE_METHODS in src/bin/server.rs).
+    "backend-restarter.ts": (
+        "// Restarts the backend the user's own app is talking to.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'restart_backend' }));\n"
+    ),
+    # Asking whether a newer build exists changes nothing on the machine and is the same
+    # request the backend already makes every two minutes: a read, and allowed.
+    "update-checker.ts": (
+        "// Asks the backend whether a release is newer, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'update_check' }));\n"
+    ),
     "person-override-reader.ts": (
         "// Reads back what the user themselves chose, which is allowed.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
@@ -482,6 +545,7 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/emoji-adder.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/emoji-importer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/self-updater.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/backend-restarter.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-backend-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-relay-writer.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/released-backend-reader.ts"),
@@ -552,6 +616,50 @@ def cases(tmp: Path):
             "curl -X POST 'https://gitlab.com/api/v4/projects/x%2Fy/"
             "merge_requests/42/approve'",
         ),
+        # The merge-request PAGE's four writes, in every shape: the gated RPCs, GitLab's own
+        # endpoints, and a curl. The MERGE is the sharpest — it lands somebody's branch in a
+        # shared repository and no later call takes it back — and there is no sandbox
+        # project, so nothing but the user's own click in the app may make any of them.
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-merge-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-comment-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-close-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-merge-rpc-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-comment-rpc-writer.ts"),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X PUT 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/merge'",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X POST 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/notes' "
+            "-d 'body=looks good'",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X PUT 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42' "
+            "-d 'state_event=close'",
+        ),
+        # But READING the page is ordinary work, all four reads of it — otherwise the
+        # surface could not be screenshotted, and a guard that blocks that teaches its next
+        # reader to phrase around it.
+        ("ALLOW", PROJECT, f"bun run {tmp}/mr-page-reader.ts"),
+        (
+            "ALLOW",
+            PROJECT,
+            "curl -s 'https://gitlab.com/api/v4/merge_requests?scope=all&state=opened'",
+        ),
+        (
+            "ALLOW",
+            PROJECT,
+            "curl -s 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/discussions'",
+        ),
+        # And so is searching the code that implements them.
+        ("ALLOW", PROJECT, "grep -rn 'merge_requests/42/merge' src"),
+        ("ALLOW", PROJECT, "grep -rn state_event src"),
+        ("ALLOW", PROJECT, "cargo test --lib gitlab_mr_write"),
         # The write token is the capability itself — never ours to fetch.
         ("BLOCK", PROJECT, f"bun run {tmp}/token-thief.ts"),
         ("BLOCK", PROJECT, "curl -s http://127.0.0.1:19440/__write-token"),
@@ -652,6 +760,7 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/person-override-reader.ts"),
         # …and so is reading back the emoji pack the user built themselves.
         ("ALLOW", PROJECT, f"bun run {tmp}/emoji-reader.ts"),
+        ("ALLOW", PROJECT, f"bun run {tmp}/update-checker.ts"),
         # Reading the call state names no write and reaches nobody.
         ("ALLOW", PROJECT, f"bun run {tmp}/call-status-reader.ts"),
         # An example pinned to the pre-authorized channel is the sanctioned shape,
@@ -688,9 +797,18 @@ def cases(tmp: Path):
         ("ALLOW", WEB, "bun run join-live"),
         ("ALLOW", WEB, "bun run join-live -- --local --hold 45"),
         ("ALLOW", WEB, "bun run scripts/join-live.ts"),
-        # Neither exemption is a licence for a driver that merely mentions them: what is
+        # The third one: it PLACES a call to the one person the user authorized, and proves
+        # that target twice out of the app's own state — the composer's conversation id and
+        # the call button's own — immediately before the click. A call that the service ends
+        # after two seconds can be diagnosed nowhere else: the mock has no tenant, and the
+        # reason arrives on frames the page receives and renders nowhere.
+        ("ALLOW", WEB, "bun run call-live"),
+        ("ALLOW", WEB, "bun run call-live -- --local --hold 20"),
+        ("ALLOW", WEB, "bun run scripts/call-live.ts"),
+        # No exemption is a licence for a driver that merely mentions them: what is
         # allowed is running THOSE files, not borrowing their names.
         ("BLOCK", WEB, f"bun run {tmp}/join-live-copy.ts"),
+        ("BLOCK", WEB, f"bun run {tmp}/call-live-copy.ts"),
         ("ALLOW", WEB, "bun run dev:mock"),
         ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 cargo run --bin server"),
         ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 target/release/server"),

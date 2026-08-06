@@ -16,7 +16,7 @@
  * controller, and nothing in this file reaches the network.
  */
 
-import type { ConversationKind } from "./protocol";
+import type { Conversation, ConversationKind } from "./protocol";
 
 /** How far along a call is, as the backend states it. */
 export type CallPhase = "ringing" | "dialing" | "connecting" | "connected" | "ended";
@@ -24,9 +24,11 @@ export type CallPhase = "ringing" | "dialing" | "connecting" | "connected" | "en
 /** Which way it was set up. */
 export type CallDirection = "incoming" | "outgoing";
 
-/** A one-to-one call, or a meeting this machine joined. It changes what the UI says and
- *  what the roster means — the signaling is the same either way. */
-export type CallKind = "call" | "meeting";
+/** A one-to-one call, a call that rang a whole group chat, or a meeting this machine
+ *  joined. It changes what the UI says and what the roster means — the signaling is the
+ *  same in all three. A `group` and a `meeting` both name the CONVERSATION where a 1:1
+ *  names the person, because several people have no one name. */
+export type CallKind = "call" | "group" | "meeting";
 
 /** The one call this machine is in, as every client is shown it.
  *
@@ -111,11 +113,13 @@ export type PublishedStream = {
 
 /** Everything `call_status` reports, and the payload of every `call_state` event. */
 export type CallStatus = {
-  /** Whether the user turned calling on. False on a read-only backend whatever the
-   *  store says. */
+  /** Whether this window's backend takes calls at all. True on every install the user
+   *  can open — each registers as a device their calls ring on, like every other Teams
+   *  client they are signed in on, and two on one machine are two devices. False on the
+   *  ONE backend they never opened: a read-only one. There is no switch. */
   enabled: boolean;
   /** Whether a call could start right now: the calling connection is up and
-   *  registered. A switch that is on while this is false is honest about a connection
+   *  registered. A backend that calls while this is false is honest about a connection
    *  that has not come back yet. */
   ready: boolean;
   call: ActiveCall | null;
@@ -129,6 +133,15 @@ export type CallPreparation = {
   ice_servers: RTCIceServer[];
   /** The caller's SDP offer. Present only when answering. */
   offer_sdp?: string;
+  /**
+   * Whether this call is between exactly two people.
+   *
+   * It decides how a camera and a screen are negotiated, and the difference is the real
+   * client's own: it reserves both sections in the FIRST offer of a one-to-one and adds them
+   * mid-call in a conference. A backend too old to say it reads as `false`, which is the
+   * behaviour this app already had.
+   */
+  one_to_one?: boolean;
 };
 
 /** The `call_media` event: the far side's SDP, which is the frame that turns a call
@@ -141,13 +154,13 @@ export type CallMediaSignal = {
 
 /** The status a client holds before the backend has answered.
  *
- *  Both flags are false on purpose. `enabled` false is what the backend defaults to,
- *  and `ready` false means no call can start — a hopeful `true` on either would tell
- *  the user their calls ring here while nothing is registered. */
+ *  Both flags are false on purpose: no call can start through a backend that has not
+ *  spoken yet, and a hopeful `true` on either would tell the user their calls ring here
+ *  while nothing is registered. The backend says otherwise within one round trip. */
 export const UNKNOWN_CALL_STATUS: CallStatus = { enabled: false, ready: false, call: null };
 
-/** Whether this app could place a call at all: the user turned it on, the connection is
- *  up, and no call is in flight (one at a time — one microphone). */
+/** Whether this app could place a call at all: this backend takes calls, the connection
+ *  is up, and no call is in flight (one at a time — one microphone). */
 export function canPlaceCall(status: CallStatus): boolean {
   return status.enabled && status.ready && !isLive(status.call);
 }
@@ -163,14 +176,78 @@ export function holdsMicrophone(call: ActiveCall | null): boolean {
   return !!call && call.phase !== "ended" && call.phase !== "ringing";
 }
 
-/** Whether a conversation is one this app can call: a one-to-one chat, and nothing
- *  else. A group call needs a roster, a mixer and more than one audio element, so it is
- *  refused up front rather than half-offered.
+/** Whether a conversation is one this app can call: a chat with people in it to ring.
+ *
+ *  A one-to-one rings the one person; a GROUP chat rings every member at once, which is
+ *  the same POST (`calling::invitation_payload`) and the same call this UI already draws —
+ *  the service mixes the voices, the page keeps one `<audio>` per remote stream, and "who
+ *  is in it" is the roster a meeting already answers from. The backend still decides how
+ *  many is too many (`MAX_GROUP_CALL_PEOPLE`), because that is a fact about the thread it
+ *  has to fetch and this is a pure function.
+ *
+ *  Notes — the chat with oneself — is the one chat with nobody to ring. A CHANNEL is not a
+ *  conversation here at all (it has no row in this list), and a MEETING chat is joined
+ *  rather than rung: see {@link conversationCallAction}.
  *
  *  The value is the backend's own (`ConversationKind::OneOnOne` → `"one_on_one"`), never
  *  a guess: a spelling that matches nothing would silently hide the button everywhere. */
 export function conversationIsCallable(kind: ConversationKind | undefined): boolean {
-  return kind === "one_on_one";
+  return kind === "one_on_one" || kind === "group" || kind === "unknown";
+}
+
+/** What a conversation's header offers: nothing, a call it places, or a meeting it joins.
+ *
+ *  One control per conversation, and the conversation's own origin decides which. A thread
+ *  Teams minted FOR a meeting is joined — that meeting is the thing the thread is about, and
+ *  it is reachable from here without going to the calendar for a link, which is what this
+ *  pair of buttons exists for. Every other chat with somebody in it is called.
+ *
+ *  A meeting chat therefore does not offer a ring. Both would fit, but they answer the same
+ *  question twice ("talk to these people now") and only one of them is what the thread is
+ *  for — and the person who wants the other one still has the 1:1s and real Teams. */
+export type ConversationCallAction = "none" | "call" | "join";
+
+export function conversationCallAction(
+  conversation: Conversation | undefined,
+): ConversationCallAction {
+  if (!conversation) return "none";
+  // The ADDRESS decides, never a flag about the thread's origin: CSA also calls a thread a
+  // meeting through `thread_type`, and a row flagged that way whose id names no meeting has
+  // nothing to JOIN. Deciding on the flag would leave that row with no control at all,
+  // where deciding on the address leaves it the call every other group chat gets.
+  if (meetingAddressOf(conversation)) return "join";
+  return conversationIsCallable(conversation.kind) ? "call" : "none";
+}
+
+/**
+ * How a meeting is ADDRESSED, in the two ways the user can reach one.
+ *
+ * `link` is what a calendar event carries (`onlineMeeting.joinUrl`), in either shape Teams
+ * writes one. `thread` is the meeting's own conversation out of the chat list, which is an
+ * address on its own — `calling::MeetingJoin::from_thread_id`. Both exist because each
+ * covers what the other cannot: this tenant's invitations carry the short `/meet/{code}`
+ * link, whose code lives in the calendar event and nowhere in the conversation, while a
+ * meeting whose event has rolled out of the synced window still has its chat.
+ */
+export type MeetingAddress = { kind: "link"; joinUrl: string } | { kind: "thread"; thread: string };
+
+/** The meeting address of a THREAD id, or null when it names no meeting.
+ *
+ *  A port of the same `19:meeting_` rule the backend applies (`MeetingJoin::from_thread_id`),
+ *  so a button is offered only where the backend would agree — and the backend parses it
+ *  again, so the worst a disagreement costs is a button that reports a refusal.
+ *
+ *  It takes the bare id, because a call is reached from two states that hold two different
+ *  things: a chat header has the whole {@link Conversation}, and the incoming-call banner has
+ *  only the id the awareness event named. One spelling of the rule, for both. */
+export function meetingAddressOfThread(id: string | undefined | null): MeetingAddress | null {
+  if (!id?.startsWith("19:meeting_")) return null;
+  return { kind: "thread", thread: id };
+}
+
+/** The meeting address of a conversation, or null when it names no meeting. */
+export function meetingAddressOf(conversation: Conversation | undefined): MeetingAddress | null {
+  return meetingAddressOfThread(conversation?.id);
 }
 
 /** What the call is doing, in the words the UI shows. Written for somebody glancing at
@@ -182,8 +259,15 @@ export function callPhaseLabel(call: ActiveCall): string {
   if (call.kind === "meeting") {
     if (call.phase === "ended") return "Meeting left";
     if (call.in_lobby) return "Waiting to be let in…";
-    if (call.phase === "connected") return meetingPresenceLabel(call);
+    if (call.phase === "connected") return callPresenceLabel(call);
     return "Joining…";
+  }
+  // A GROUP call rang several phones, so who is in it is a fact that CHANGES while it runs
+  // and the roster is the only thing that knows: one person may pick up while two never do.
+  // Until it is connected it says the same words a 1:1 does — the bar names the conversation
+  // beside this, so "Calling…" over a group's title is already the whole sentence.
+  if (call.kind === "group" && call.phase === "connected") {
+    return callPresenceLabel(call);
   }
   switch (call.phase) {
     case "ringing":
@@ -199,14 +283,14 @@ export function callPhaseLabel(call: ActiveCall): string {
   }
 }
 
-/** Who else is in the meeting, in the fewest words that are true.
+/** Who else is in this meeting or group call, in the fewest words that are true.
  *
  *  One or two people are NAMED — that is what somebody glancing at the bar wants to
  *  know — and a crowd is counted, because six names do not fit and would not be read.
  *  A roster that has not arrived says nothing about it rather than "0 others". */
-export function meetingPresenceLabel(call: ActiveCall): string {
+export function callPresenceLabel(call: ActiveCall): string {
   const others = call.others.filter((name) => name.trim().length > 0);
-  if (others.length === 0) return "In the meeting";
+  if (others.length === 0) return call.kind === "meeting" ? "In the meeting" : "In the call";
   if (others.length <= 2) return `With ${others.join(" and ")}`;
   return `With ${others.length} others`;
 }
@@ -214,6 +298,17 @@ export function meetingPresenceLabel(call: ActiveCall): string {
 /** Whether this call is a meeting the user joined. */
 export function isMeeting(call: ActiveCall | null): boolean {
   return call?.kind === "meeting";
+}
+
+/** Whether this call is about a CONVERSATION rather than one person — a meeting, or a
+ *  call that rang a whole group chat.
+ *
+ *  It is what the UI reads before drawing a face: `peer_mri` is empty on both, so an
+ *  avatar seeded from it would be a tinted circle standing in for a group of five. And
+ *  it is what makes the roster worth stating, because in both there is more than one
+ *  person the answer could be. */
+export function callNamesAConversation(call: ActiveCall | null): boolean {
+  return call?.kind === "meeting" || call?.kind === "group";
 }
 
 /** A running call duration as "0:07" / "12:45" / "1:02:03", from the backend's own
@@ -229,6 +324,15 @@ export function callDurationLabel(call: ActiveCall | null, nowMs: number): strin
   return hours > 0 ? `${hours}:${pad(minutes)}:${pad(rest)}` : `${minutes}:${pad(rest)}`;
 }
 
+/**
+ * The backend's name for a call that rang nothing, because the callee has no client signed
+ * in — `calling::END_REASON_UNREACHABLE`, spelled once here.
+ *
+ * The pair is pinned from the Rust side (`the_page_knows_the_name_of_an_unreachable_ending`),
+ * because two spellings of it would silently put the user back in front of "The call ended."
+ */
+export const CALL_END_UNREACHABLE = "CallEndReasonNobodyReachable";
+
 /** Why the call is over, in one short line — or "" when there is nothing worth saying.
  *
  *  The service's own phrases are machine words ("CallEndReasonHangup"), and the ordinary
@@ -241,6 +345,15 @@ export function callEndLabel(call: ActiveCall | null): string {
     case "CallEndReasonHangup":
     case "CallEndReasonDeclined":
       return "";
+    // The service could not ring anybody: nothing of theirs is signed in (`calling::
+    // END_REASON_UNREACHABLE`, and `calling::invite_failed` for how it is known). It reads
+    // exactly like this app dropping the call after two seconds, which is what it looked
+    // like to the user until the reason was carried this far — so it names the person and
+    // it names the cause, and it never says a device rang.
+    case CALL_END_UNREACHABLE:
+      return call.kind === "group" || call.kind === "meeting"
+        ? "Nobody could be reached: none of their devices is signed in."
+        : `${call.peer || "They"} could not be reached: no device of theirs is signed in.`;
     case "CallEndReasonPlaceFailed":
       return "The call could not be placed.";
     case "CallEndReasonAcceptFailed":
@@ -252,7 +365,9 @@ export function callEndLabel(call: ActiveCall | null): string {
     case "CallEndReasonReconnected":
       return "The connection moved, so the call ended.";
     case "CallEndReasonCallingTurnedOff":
-      return "Calling was turned off.";
+      // No switch says this any more: this machine stopped being a device calls ring on,
+      // which is what the app does as it shuts down.
+      return "This machine stopped taking calls.";
     default:
       return "The call ended.";
   }
@@ -288,8 +403,8 @@ function decodeURIComponentSafe(value: string): string {
   }
 }
 
-/** Whether a meeting could be joined right now: calling is on, the connection is up, and
- *  this machine is not already in a call.
+/** Whether a meeting could be joined right now: this backend takes calls, the connection
+ *  is up, and this machine is not already in a call.
  *
  *  The one-to-one rule does NOT apply — a meeting is many people by definition, and it is
  *  the service that mixes them. What still applies is one call at a time. */
@@ -298,20 +413,27 @@ export function canJoinMeeting(status: CallStatus): boolean {
 }
 
 /** Why a meeting cannot be joined right now, for the tooltip on a disabled Join button.
- *  Empty when it can. */
+ *  Empty when it can.
+ *
+ *  `enabled` false is no longer something the user can fix — there is no switch, so it
+ *  says what this window IS rather than what to go and turn on. It is a read-only backend
+ *  or a second install, and the app they launched is the one that joins. */
 export function meetingUnavailableReason(status: CallStatus): string {
-  if (!status.enabled) return "Turn calling on in Settings to join a meeting here.";
+  if (!status.enabled) return "This window cannot take calls, so it cannot join a meeting.";
   if (!status.ready) return "This machine is not registered for calls yet.";
   if (isLive(status.call)) return "This app holds one call at a time.";
   return "";
 }
 
 /** Why calling cannot be used right now, for the tooltip on a disabled call button.
- *  Empty when it can. */
-export function callUnavailableReason(status: CallStatus, callable: boolean): string {
-  if (!status.enabled) return "Turn calling on in Settings to call from here.";
+ *  Empty when it can.
+ *
+ *  It names only the three things about this MACHINE, because the button is drawn where a
+ *  call is possible in the first place ({@link conversationCallAction}) — a conversation
+ *  nothing can be done with has no control to hang a reason off. */
+export function callUnavailableReason(status: CallStatus): string {
+  if (!status.enabled) return "This window cannot take calls, so it cannot place one.";
   if (!status.ready) return "This machine is not registered for calls yet.";
   if (isLive(status.call)) return "This app holds one call at a time.";
-  if (!callable) return "Only a one-to-one chat can be called.";
   return "";
 }

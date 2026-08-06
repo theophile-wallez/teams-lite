@@ -6,6 +6,8 @@ import {
   emitUpdate,
   gotoApp,
   openConversationAt,
+  openConversationNamed,
+  resetCall,
 } from "./helpers";
 
 // The mobile, single-pane layout. Emulate an Android Chrome phone (narrow
@@ -246,5 +248,35 @@ test.describe("mobile single-pane layout", () => {
     await touchGesture(page, message, [{ x: 2, y: -25 }, { x: 3, y: -70 }]);
 
     await expect(page.locator('[data-testid="reply-banner"]')).toHaveCount(0);
+  });
+
+  /**
+   * A CALL folded away on a phone has to leave the phone usable, which is the whole reason
+   * folding exists. The window is a share of a narrow viewport rather than its own desktop
+   * width — 320px over 412px is not a call folded away, it is the app with a hole punched in
+   * it (`miniSize` in web/src/lib/call-stage.ts).
+   */
+  test("a folded call leaves most of a phone's screen to the conversation", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationNamed(page, "Design Sync");
+    await page.locator('[data-testid="meeting-join-here"]').click();
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+
+    // Full first: on a phone the call takes the whole screen, exactly as it does anywhere.
+    const viewport = page.viewportSize()!;
+    const full = (await stage.boundingBox())!;
+    expect(Math.round(full.width)).toBe(viewport.width);
+
+    await page.locator('[data-testid="call-stage-minimize"]').click();
+    await expect(stage).toHaveAttribute("data-mode", "mini");
+    // The morph is one animated element, so the geometry is read once it has settled.
+    await page.waitForTimeout(700);
+    const mini = (await stage.boundingBox())!;
+    expect(mini.width).toBeLessThan(viewport.width * 0.65);
+    expect(mini.x + mini.width).toBeLessThanOrEqual(viewport.width - 8);
+    expect(mini.y + mini.height).toBeLessThanOrEqual(viewport.height - 8);
+
+    await resetCall(page);
   });
 });

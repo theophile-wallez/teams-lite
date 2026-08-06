@@ -9,12 +9,25 @@
 
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import { BACKEND_WS_ROUTE } from "./backend-route";
-import type { CallPreparation, CallStatus } from "./call";
+import type { CallPreparation, CallStatus, MeetingAddress } from "./call";
 import type { SendImage } from "./composer-image";
+import type { DiffDepth, GitLabDiff } from "./gitlab-diff";
+import type {
+  GitLabDiscussionList,
+  GitLabPipelineView,
+  MergeOutcome,
+  MergeRequestDetail,
+  MergeRequestKey,
+  MergeRequestList,
+  MergeRequestScope,
+  MergeRequestState,
+  PostedNote,
+} from "./gitlab-mr";
 import type { OutboundMention } from "./mentions";
 import type {
   AddressPeopleResult,
   AppSettings,
+  BackendRestartResult,
   CalendarInfo,
   CalendarViewResult,
   Channel,
@@ -35,6 +48,7 @@ import type {
   ReadReceiptsResult,
   ReplyTo,
   SettingsPatch,
+  UpdateCheckResult,
   UpdateProgress,
   WriteLock,
 } from "./protocol";
@@ -160,6 +174,18 @@ export function defaultWsUrl(): string {
 export function isWriteTokenRefusal(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? "");
   return message.includes("needs the write token");
+}
+
+/** How a meeting travels to `call_prepare` and `call_join` (`meeting_address` in
+ *  src/bin/server.rs): the link a calendar event carried, or the meeting's own thread.
+ *
+ *  Exactly ONE of the two names is ever sent. The backend reads the link first, so a body
+ *  carrying both would silently pick one — and the one it picked would not always be the
+ *  one the button the user pressed was drawn from. */
+function meetingParams(meeting: MeetingAddress): Record<string, string> {
+  return meeting.kind === "link"
+    ? { join_url: meeting.joinUrl }
+    : { meeting_thread: meeting.thread };
 }
 
 const RECONNECT_GIVE_UP_MS = 30_000;
@@ -514,7 +540,7 @@ export class Backend {
     text: string,
     replyTo?: ReplyTo,
     contentHtml?: string,
-    image?: SendImage,
+    images: SendImage[] = [],
     mentions?: OutboundMention[],
   ): Promise<{ sent: boolean }> {
     return this.writeRequest<{ sent: boolean }>("send", {
@@ -525,15 +551,18 @@ export class Backend {
       // Who the message @mentions. The body's mention spans carry only an index; this
       // list is what tells Teams whom each index names, so they are notified.
       mentions: mentions && mentions.length > 0 ? mentions : undefined,
-      image: image
-        ? {
-            name: image.name,
-            content_type: image.contentType,
-            width: image.width,
-            height: image.height,
-            data_base64: image.dataBase64,
-          }
-        : undefined,
+      // The pictures the message carries, in the order the composer holds them: that is
+      // the order the backend uploads them in, and the order they appear in the body.
+      images:
+        images.length > 0
+          ? images.map((image) => ({
+              name: image.name,
+              content_type: image.contentType,
+              width: image.width,
+              height: image.height,
+              data_base64: image.dataBase64,
+            }))
+          : undefined,
     });
   }
   edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {
@@ -610,6 +639,28 @@ export class Backend {
     return this.writeRequest<{ started: boolean; reason?: string }>("repair_broker", {});
   }
 
+  /** Ask GitHub, now, whether a newer build than this one has been published — Settings ›
+   *  This app, rather than waiting up to two minutes for the poll.
+   *
+   *  An ordinary READ: it changes nothing on this machine and publishes nothing about the
+   *  user, and it is the same request the backend already makes on a timer. The update ROW
+   *  follows the `update_available` event this may publish; the answer here is what the
+   *  BUTTON says, including the two the events cannot carry — that there is nothing new, and
+   *  that GitHub could not be reached. */
+  updateCheck(): Promise<UpdateCheckResult> {
+    return this.request<UpdateCheckResult>("update_check", {});
+  }
+  /** Restart the backend, through whatever runs it.
+   *
+   *  A WRITE request, though it posts nothing to Teams: it takes the process every open page
+   *  is talking to down (a `MACHINE_METHODS` entry in src/bin/server.rs). It answers
+   *  `restarted: false` with a count while a local agent is mid-reply — the user's second
+   *  press passes `force` — and this socket goes down a moment after an accepted one, so the
+   *  page's own reconnect is what says the restart really happened. */
+  restartBackend(force = false): Promise<BackendRestartResult> {
+    return this.writeRequest<BackendRestartResult>("restart_backend", { force });
+  }
+
   /** Start downloading the new build. Answers with the phase this leaves us in, and
    *  the progress then arrives as `update_progress` events (see {@link UpdateProgress}).
    *
@@ -655,22 +706,16 @@ export class Backend {
     );
   }
   // ---- audio calling ------------------------------------------------------
-  // Seven methods, and the split between them is the consent design: reading state
-  // is open, and every step that rings a person, opens the microphone or hands out
-  // the media credentials is a write request. See `./call.ts` and NATIVE-CALLING.md.
+  // Six methods, and the split between them is the consent design: reading state is
+  // open, and every step that rings a person, opens the microphone or hands out the
+  // media credentials is a write request. There is nothing here that turns calling on:
+  // the backend registers as a device the user's calls ring on at startup, the way every
+  // other Teams client they signed in on does. See `./call.ts` and NATIVE-CALLING.md.
 
   /** Whether this machine can take calls, and what call it is in. A read: it carries
    *  no SDP and no credentials. */
   callStatus(): Promise<CallStatus> {
     return this.request<CallStatus>("call_status", {});
-  }
-  /** Turn calling on or off.
-   *
-   *  A WRITE request, and the consent gate for the whole feature: ON registers this
-   *  machine with Teams as a device the user's calls ring on, OFF unregisters it so they
-   *  stop being offered here (a `MACHINE_METHODS` entry, refused read-only). */
-  setCalling(enabled: boolean): Promise<CallStatus> {
-    return this.writeRequest<CallStatus>("set_calling", { enabled });
   }
   /** Reserve the one call this machine holds, and get what one `RTCPeerConnection`
    *  needs.
@@ -682,13 +727,13 @@ export class Backend {
     target:
       | { conversation: string }
       | { callId: string }
-      | { joinUrl: string; subject?: string },
+      | { meeting: MeetingAddress; subject?: string },
   ): Promise<CallPreparation> {
     const params =
       "conversation" in target
         ? { conversation: target.conversation }
-        : "joinUrl" in target
-          ? { join_url: target.joinUrl, subject: target.subject }
+        : "meeting" in target
+          ? { ...meetingParams(target.meeting), subject: target.subject }
           : { call_id: target.callId };
     return this.writeRequest<CallPreparation>("call_prepare", params);
   }
@@ -699,11 +744,18 @@ export class Backend {
   }
   /** Join a meeting: the same one POST, with the meeting's own thread instead of
    *  somebody to ring. Outward, because everybody already in the meeting sees the user
-   *  arrive and their microphone is opened to all of them. */
-  callJoin(callId: string, joinUrl: string, sdp: string): Promise<{ call_id: string }> {
+   *  arrive and their microphone is opened to all of them.
+   *
+   *  The meeting travels in whichever shape the user reached it by — a calendar link, or the
+   *  thread out of the chat list — and the backend parses it again. */
+  callJoin(
+    callId: string,
+    meeting: MeetingAddress,
+    sdp: string,
+  ): Promise<{ call_id: string }> {
     return this.writeRequest<{ call_id: string }>("call_join", {
       call_id: callId,
-      join_url: joinUrl,
+      ...meetingParams(meeting),
       sdp,
     });
   }
@@ -775,6 +827,26 @@ export class Backend {
       sdp,
       modalities,
       sending,
+    });
+  }
+  /**
+   * Ask the meeting to make this endpoint the presenter of its content-sharing session.
+   *
+   * A meeting shows ONE screen at a time, so a share is a session before it is a track: the
+   * service rejects an `applicationsharing-video` section from an endpoint that never asked
+   * for one (measured 2026-08-06). Outward, because everybody in the meeting is told that
+   * this endpoint is about to show them something.
+   */
+  callStartSharing(callId: string): Promise<{ call_id: string; can_stop: boolean }> {
+    return this.writeRequest<{ call_id: string; can_stop: boolean }>("call_start_sharing", {
+      call_id: callId,
+    });
+  }
+  /** Give the sharing session back. Outward for the same reason, and never skipped: a share
+   *  this app could start and not stop is one it would not make. */
+  callStopSharing(callId: string): Promise<{ call_id: string; told_service: boolean }> {
+    return this.writeRequest<{ call_id: string; told_service: boolean }>("call_stop_sharing", {
+      call_id: callId,
     });
   }
   /** End the call, or decline it while it is still ringing. Outward either way: the
@@ -1170,6 +1242,148 @@ export class Backend {
    *  GitLab reports afterwards, so the menu shows what really happened. */
   gitlabSetApproval(url: string, approved: boolean): Promise<GitLabApprovalResult> {
     return this.writeRequest<GitLabApprovalResult>("gitlab_set_approval", { url, approved });
+  }
+
+  // ---- the merge-request page ---------------------------------------------
+  //
+  // Five reads and four writes, and the split is the whole safety story of the page:
+  // reading a tracker is what it is for, and writing to one is the user's own click.
+  //
+  // Every read answers from the backend's durable cache first and refreshes behind the
+  // page (see `gitlab_cached` in src/bin/server.rs), so none of these is slow twice — and
+  // the fresh copy arrives as a `gitlab_list_updated` / `gitlab_mr_updated` event rather
+  // than by asking again. `refresh: true` is the user's own Reload: it waits for GitLab.
+
+  /** The merge requests that are NOT merged. `scope` and `state` are closed sets on the
+   *  backend, which is what stops this page ever asking for merged ones. */
+  gitlabMergeRequests(
+    scope: MergeRequestScope,
+    state: MergeRequestState,
+    refresh = false,
+  ): Promise<MergeRequestList> {
+    return this.request<MergeRequestList>("gitlab_mr_list", { scope, state, refresh });
+  }
+
+  /** One merge request in full. */
+  gitlabMergeRequest(
+    key: MergeRequestKey,
+    refresh = false,
+  ): Promise<MergeRequestDetail> {
+    return this.request<MergeRequestDetail>("gitlab_mr_detail", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      refresh,
+    });
+  }
+
+  /** Its comment thread — discussions in GitLab's own order, each note saying whether the
+   *  user themselves wrote it. */
+  gitlabMergeRequestNotes(
+    key: MergeRequestKey,
+    refresh = false,
+  ): Promise<GitLabDiscussionList> {
+    return this.request<GitLabDiscussionList>("gitlab_mr_notes", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      refresh,
+    });
+  }
+
+  /** Its head pipeline and jobs. THE live read: the page repeats it while CI runs, and the
+   *  backend's own window is seconds, so two open pages cost one request between them. */
+  gitlabMergeRequestPipeline(
+    key: MergeRequestKey,
+    refresh = false,
+  ): Promise<GitLabPipelineView> {
+    return this.request<GitLabPipelineView>("gitlab_mr_pipeline", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      refresh,
+    });
+  }
+
+  /** What the merge request CHANGED, for the Changes section.
+   *
+   *  `depth` picks between the two reads GitLab offers, and the difference is measured
+   *  (`examples/merge_request_diff_recon.rs`): `listed` is one page of the modern `/diffs`
+   *  endpoint and carries whatever GitLab chose to expand, `raw` is the older
+   *  `/changes?access_raw_diffs=true` and expands everything at half a megabyte on a large
+   *  merge request. So `listed` is what opening the section costs and `raw` is the reader's
+   *  own ask — see `canExpandDiff` in lib/gitlab-diff.ts. Both are closed names on the
+   *  backend, so this can never widen into a third endpoint. */
+  gitlabMergeRequestDiff(
+    key: MergeRequestKey,
+    depth: DiffDepth = "listed",
+    refresh = false,
+  ): Promise<GitLabDiff> {
+    return this.request<GitLabDiff>("gitlab_mr_diff", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      depth,
+      refresh,
+    });
+  }
+
+  /** MERGE the branch.
+   *
+   *  The one write in this app that no later call takes back, which is why `sha` is
+   *  required: it is the head commit the PAGE drew, and GitLab refuses a merge whose sha is
+   *  not the branch's head — so a merge request that moved since the reader looked is
+   *  refused rather than landed. Gated like a send (OUTWARD_METHODS in src/bin/server.rs),
+   *  and the UI asks for a second explicit confirmation before it calls. */
+  gitlabMerge(
+    key: MergeRequestKey,
+    options: { sha: string; squash: boolean; removeSourceBranch?: boolean },
+  ): Promise<{ merge: MergeOutcome }> {
+    return this.writeRequest<{ merge: MergeOutcome }>("gitlab_mr_merge", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      sha: options.sha,
+      squash: options.squash,
+      ...(options.removeSourceBranch === undefined
+        ? {}
+        : { remove_source_branch: options.removeSourceBranch }),
+    });
+  }
+
+  /** Comment on it — a new comment, or a reply into the thread `discussionId` names.
+   *
+   *  Everybody watching the merge request is told, under the user's own name, so it is
+   *  gated like a send and only ever called from their own Enter. */
+  gitlabComment(
+    key: MergeRequestKey,
+    body: string,
+    discussionId?: string,
+  ): Promise<{ note: PostedNote }> {
+    return this.writeRequest<{ note: PostedNote }>("gitlab_mr_comment", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      body,
+      ...(discussionId ? { discussion_id: discussionId } : {}),
+    });
+  }
+
+  /** Delete one of the user's OWN comments — the undo that makes the comment above
+   *  acceptable. The backend re-reads whose note it is before it deletes, so a colleague's
+   *  comment is refused there rather than trusted from here. */
+  gitlabDeleteComment(key: MergeRequestKey, noteId: number): Promise<{ deleted: number }> {
+    return this.writeRequest<{ deleted: number }>("gitlab_mr_delete_comment", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      note_id: noteId,
+    });
+  }
+
+  /** Close it, or reopen it. Each direction is the other's undo. */
+  gitlabSetMergeRequestState(
+    key: MergeRequestKey,
+    change: "close" | "reopen",
+  ): Promise<{ state: string }> {
+    return this.writeRequest<{ state: string }>("gitlab_mr_set_state", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      change,
+    });
   }
 
   // ---- events -------------------------------------------------------------

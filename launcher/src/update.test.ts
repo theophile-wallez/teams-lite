@@ -5,6 +5,7 @@ import {
   backendEnv,
   isCompiledBinary,
   LAUNCHER_BIN_ENV,
+  LAUNCHER_ENV,
   mintWriteToken,
   WRITE_TOKEN_ENV,
 } from "./backend";
@@ -129,9 +130,17 @@ describe("backendEnv", () => {
     }
   });
 
-  test("keepAlive is the only other thing it adds", () => {
+  test("keepAlive is asked for, or absent", () => {
     expect(backendEnv(true).TEAMS_NO_IDLE_EXIT).toBe("1");
     expect(backendEnv(false).TEAMS_NO_IDLE_EXIT).toBeUndefined();
+  });
+
+  // Unconditional, unlike the binary above: a `bun run` launcher owns its backend child
+  // just as a compiled one does, so Settings › This app can restart it in both. Without
+  // this the backend would refuse — nothing else tells it a launcher is there.
+  test("always says a launcher owns this backend", () => {
+    expect(backendEnv(false)[LAUNCHER_ENV]).toBe("1");
+    expect(backendEnv(true, "tok")[LAUNCHER_ENV]).toBe("1");
   });
 
   // The token is PINNED so the backend we spawn publishes nothing — one file per machine
